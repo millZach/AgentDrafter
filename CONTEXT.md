@@ -44,6 +44,18 @@ _Avoid_: entity, element, shape
 What the judge counts when it compares AutoCAD's reading of an original with its reading of a revision: the records in the drawing's ENTITIES and BLOCKS sections, such as lines, text, block inserts, attributes, hatches and dimensions. One is identical when AutoCAD reads it with the same handle and the same content before and after.
 _Avoid_: entity count, geometry
 
+**Layer**:
+A named group of objects in a drawing, as in AutoCAD. An object sits on one layer and draws with the layer's colour, linetype and lineweight.
+_Avoid_: level, class
+
+**Linetype**:
+A named pattern of dashes, gaps and dots that a layer draws its objects with, such as `HIDDEN`. Every linetype but `Continuous` comes from a definition in the sheet description.
+_Avoid_: line style, dash pattern
+
+**Lineweight**:
+The pen width a layer plots with, one of AutoCAD's standard widths in millimetres. It is a width on paper, so it is not in the declared unit.
+_Avoid_: line width, pen size, thickness (a thickness is AutoCAD's extrusion of an object)
+
 **Block**:
 A named group of objects defined once and inserted many times, as in AutoCAD.
 _Avoid_: symbol, component, cell
@@ -121,7 +133,7 @@ Operations sent together as one request. Each sheet takes its part of a change s
 _Avoid_: batch, transaction, commit
 
 **Journal**:
-The on-disk record of every change set and every failed attempt. A later session reads it to see what was done and to undo it.
+The on-disk record of every change set and every failed attempt. A later session reads it to see what was done and to undo it. Undo is a stack: undoing a change set also undoes every later one that is not issued.
 _Avoid_: history, log, undo stack
 
 **Inconsistent set**:
@@ -132,7 +144,7 @@ The state an agent's changes land on at once. It is not issued.
 _Avoid_: draft, staging
 
 **Issued**:
-Accepted by the reviewer. Nothing is issued until the reviewer accepts the working revision.
+Accepted by the reviewer. Nothing is issued until the reviewer accepts the working revision. The reviewer cannot accept while the set is inconsistent, and an issued change set cannot be undone.
 _Avoid_: released, approved, final
 
 **Check**:

@@ -3,22 +3,29 @@
 //! A sheet description is a strict subset of YAML, written down in
 //! `docs/sheet-description.md`. [`strict_yaml`] reads the subset into a tree
 //! of text; this module gives the text its meaning and refuses anything the
-//! sheet description does not know. Every error names the field it is about.
+//! sheet description does not know. Every error names the field it is about,
+//! and an error about a choice lists the valid choices.
+//!
+//! [`layers`] reads linetypes and layers, [`objects`] reads the objects, and
+//! [`schema`] states the same keys as a JSON Schema for agents to read.
 
+mod layers;
+mod objects;
+pub(crate) mod schema;
 mod strict_yaml;
 
 use strict_yaml::{index_path, key_path, Entry, Kind, Node, Pos};
 
 use crate::error::{Error, ErrorCode};
-use crate::model::{Line, Object, Point3, Sheet};
+use crate::model::{Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
-/// The object types a sheet description can hold.
-const OBJECT_TYPES: [&str; 1] = ["line"];
+/// The keys at the top of a sheet description.
+pub(crate) const SHEET_KEYS: [&str; 4] = ["units", "linetypes", "layers", "objects"];
 
 /// Reads the text of a sheet description into a [`Sheet`].
 ///
-/// Every coordinate comes back in the sheet's declared unit; a number that
+/// Every length comes back in the sheet's declared unit; a number that
 /// carries its own unit is converted to it.
 pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
     let Some(root) = strict_yaml::read(text)? else {
@@ -27,7 +34,7 @@ pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
             "the sheet description is empty; it needs `units` and `objects`",
         ));
     };
-    let fields = Fields::of(&root, "", &["units", "objects"], "a sheet description")?;
+    let fields = Fields::of(&root, "", &SHEET_KEYS, "a sheet description")?;
     let units = match fields.get("units") {
         Some(node) => unit(node, "units")?,
         None => {
@@ -42,46 +49,26 @@ pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
             .at_position(root.at.line, root.at.column))
         }
     };
+    let linetypes = match fields.get("linetypes") {
+        Some(node) => layers::linetypes(node, units)?,
+        None => Vec::new(),
+    };
+    let layers = match fields.get("layers") {
+        Some(node) => layers::layers(node, &linetypes)?,
+        None => Vec::new(),
+    };
     let list = sequence(fields.require("objects")?, "objects", "a list of objects")?;
     let objects = list
         .iter()
         .enumerate()
-        .map(|(i, node)| object(node, &index_path("objects", i), units))
+        .map(|(i, node)| objects::object(node, &index_path("objects", i), units, &layers))
         .collect::<Result<_, _>>()?;
-    Ok(Sheet { units, objects })
-}
-
-fn object(node: &Node, path: &str, units: Unit) -> Result<Object, Error> {
-    const SHAPE: &str = "a mapping with one key naming the object's type, such as `line:`";
-    let Kind::Mapping(entries) = &node.kind else {
-        return Err(wrong_type(node, path, SHAPE));
-    };
-    if let Some(entry) = entries
-        .iter()
-        .find(|e| !OBJECT_TYPES.contains(&e.key.as_str()))
-    {
-        return Err(unknown_key(
-            entry,
-            path,
-            &format!("unknown object type `{}`", entry.key),
-            &format!("known types: {}", OBJECT_TYPES.join(", ")),
-        ));
-    }
-    let [entry] = entries.as_slice() else {
-        return Err(wrong_type(node, path, SHAPE));
-    };
-    let path = key_path(path, &entry.key);
-    match entry.key.as_str() {
-        "line" => line(&entry.value, &path, units).map(Object::Line),
-        other => unreachable!("object type `{other}` is listed but not read"),
-    }
-}
-
-fn line(node: &Node, path: &str, units: Unit) -> Result<Line, Error> {
-    let fields = Fields::of(node, path, &["from", "to"], "a line")?;
-    let from = point(fields.require("from")?, &key_path(path, "from"), units)?;
-    let to = point(fields.require("to")?, &key_path(path, "to"), units)?;
-    Ok(Line { from, to })
+    Ok(Sheet {
+        units,
+        linetypes,
+        layers,
+        objects,
+    })
 }
 
 fn point(node: &Node, path: &str, units: Unit) -> Result<Point3, Error> {
@@ -107,12 +94,30 @@ fn point(node: &Node, path: &str, units: Unit) -> Result<Point3, Error> {
     ))
 }
 
+/// A list of at least `fewest` points.
+fn points(node: &Node, path: &str, units: Unit, fewest: usize) -> Result<Vec<Point3>, Error> {
+    let items = sequence(node, path, "a list of points")?;
+    if items.len() < fewest {
+        return Err(at(
+            Error::new(
+                ErrorCode::WrongType,
+                format!("expected at least {fewest} points, found {}", items.len()),
+            ),
+            path,
+            node.at,
+        ));
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| point(item, &index_path(path, i), units))
+        .collect()
+}
+
 /// A length in the declared unit. A number that carries its own unit is converted.
 fn length(node: &Node, path: &str, declared: Unit) -> Result<f64, Error> {
     const SHAPE: &str = "a length such as `100` or `4 in`";
-    let Kind::Scalar(text) = &node.kind else {
-        return Err(wrong_type(node, path, SHAPE));
-    };
+    let text = scalar(node, path, SHAPE)?;
     let error = match parse_length(text) {
         Ok((value, None)) => return Ok(value),
         Ok((value, Some(own))) => match own.convert(value, declared) {
@@ -134,10 +139,83 @@ fn length(node: &Node, path: &str, declared: Unit) -> Result<f64, Error> {
     Err(at(error, path, node.at))
 }
 
-fn unit(node: &Node, path: &str) -> Result<Unit, Error> {
-    let Kind::Scalar(text) = &node.kind else {
-        return Err(wrong_type(node, path, "a unit"));
+/// A number with no unit, such as an angle or a ratio. `shape` says what
+/// is expected, such as "an angle in degrees, a number such as `90`".
+fn plain_number(node: &Node, path: &str, shape: &str) -> Result<f64, Error> {
+    let text = scalar(node, path, shape)?;
+    let error = match parse_length(text) {
+        Ok((value, None)) => return Ok(value),
+        Err(LengthError::OutOfRange) => {
+            Error::new(ErrorCode::BadNumber, format!("`{text}` is too large"))
+        }
+        Ok((_, Some(_))) | Err(LengthError::NotANumber | LengthError::UnknownUnit(_)) => {
+            Error::new(
+                ErrorCode::BadNumber,
+                format!("expected {shape}, with no unit, found {}", describe(node)),
+            )
+        }
     };
+    Err(at(error, path, node.at))
+}
+
+/// An angle in degrees, anticlockwise, brought into `[0, 360)`.
+fn angle(node: &Node, path: &str) -> Result<f64, Error> {
+    let degrees = plain_number(node, path, "an angle in degrees, a number such as `90`")?;
+    Ok(normalize_degrees(degrees))
+}
+
+/// `degrees` brought into `[0, 360)`, so that 360, -90 and 450 read as 0,
+/// 270 and 90.
+pub(crate) fn normalize_degrees(degrees: f64) -> f64 {
+    let turned = degrees.rem_euclid(360.0);
+    // Rounding can land a tiny negative angle on 360; adding 0 turns -0 into 0.
+    if turned >= 360.0 {
+        0.0
+    } else {
+        turned + 0.0
+    }
+}
+
+fn boolean(node: &Node, path: &str) -> Result<bool, Error> {
+    match scalar(node, path, "`true` or `false`")? {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(wrong_type(node, path, "`true` or `false`")),
+    }
+}
+
+/// A scalar's text. `expected` names what belongs there, for the error.
+fn scalar<'a>(node: &'a Node, path: &str, expected: &str) -> Result<&'a str, Error> {
+    match &node.kind {
+        Kind::Scalar(text) => Ok(text),
+        _ => Err(wrong_type(node, path, expected)),
+    }
+}
+
+/// A scalar's text where one of a set of choices belongs. A value of
+/// another shape is an error that lists `choices`, as the error for a wrong
+/// choice does.
+fn choice<'a>(node: &'a Node, path: &str, expected: &str, choices: &str) -> Result<&'a str, Error> {
+    match &node.kind {
+        Kind::Scalar(text) => Ok(text),
+        _ => Err(at(
+            Error::new(
+                ErrorCode::WrongType,
+                format!("expected {expected}, found {}; {choices}", describe(node)),
+            ),
+            path,
+            node.at,
+        )),
+    }
+}
+
+fn unit(node: &Node, path: &str) -> Result<Unit, Error> {
+    let text = choice(
+        node,
+        path,
+        "a unit",
+        &format!("known units: {}", Unit::symbols()),
+    )?;
     let error = if text.is_empty() {
         Error::new(
             ErrorCode::MissingUnit,
@@ -208,6 +286,11 @@ impl<'a> Fields<'a> {
                 .at_position(self.at.line, self.at.column)
         })
     }
+
+    /// The path of the value under `key`.
+    fn path_of(&self, key: &str) -> String {
+        key_path(self.path, key)
+    }
 }
 
 fn unknown_key(entry: &Entry, path: &str, what: &str, known: &str) -> Error {
@@ -225,6 +308,11 @@ fn wrong_type(node: &Node, path: &str, expected: &str) -> Error {
         path,
         node.at,
     )
+}
+
+/// A value of the right shape that is not allowed.
+fn bad_value(node: &Node, path: &str, message: impl Into<String>) -> Error {
+    at(Error::new(ErrorCode::BadValue, message), path, node.at)
 }
 
 /// Places an error at a field and position. The top level has no field name.
@@ -248,3 +336,6 @@ fn describe(node: &Node) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod geometry_tests;

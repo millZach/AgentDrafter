@@ -32,9 +32,12 @@ fn reads_one_line() {
         parse_sheet_description(ONE_LINE).unwrap(),
         Sheet {
             units: Unit::Mm,
+            linetypes: Vec::new(),
+            layers: Vec::new(),
             objects: vec![Object::Line(Line {
                 from: Point3::new(0.0, 0.0, 0.0),
                 to: Point3::new(100.0, 50.0, 0.0),
+                layer: "0".to_owned(),
             })],
         }
     );
@@ -69,6 +72,7 @@ fn a_number_with_its_own_unit_is_converted_to_the_declared_unit() {
         vec![Object::Line(Line {
             from: Point3::new(25.4, 500.0, 0.0),
             to: Point3::new(20.0, -304.8, 3.0),
+            layer: "0".to_owned(),
         })]
     );
 }
@@ -126,15 +130,21 @@ fn an_unknown_key_is_named() {
         4,
     );
     let e = error("units: mm\nobjects:\n  - line:\n      form: [0, 0, 0]\n");
-    assert_eq!(e.message, "unknown key `form`; a line takes from, to");
+    assert_eq!(
+        e.message,
+        "unknown key `form`; a line takes from, to, layer"
+    );
 }
 
 #[test]
 fn an_unknown_object_type_is_named() {
-    let e = error("units: mm\nobjects:\n  - circle: {centre: [0, 0, 0]}\n");
+    let e = error("units: mm\nobjects:\n  - hexagon: {center: [0, 0, 0]}\n");
     assert_eq!(e.code, ErrorCode::UnknownKey);
-    assert_eq!(e.field.as_deref(), Some("objects[0].circle"));
-    assert_eq!(e.message, "unknown object type `circle`; known types: line");
+    assert_eq!(e.field.as_deref(), Some("objects[0].hexagon"));
+    assert_eq!(
+        e.message,
+        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline"
+    );
 }
 
 #[test]
