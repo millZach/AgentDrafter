@@ -1,0 +1,7 @@
+# The smallest sheet description: one line, in millimetres.
+# Build it with: agentdrafter build examples/one-line.yaml
+units: mm
+objects:
+  - line:
+      from: [0, 0, 0]
+      to: [100, 50, 0]

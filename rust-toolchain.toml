@@ -1,0 +1,6 @@
+# One toolchain for every machine and every CI runner, so formatting and lints
+# agree everywhere. Move it on purpose, in its own pull request.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

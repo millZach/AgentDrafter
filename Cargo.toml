@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/agentdrafter-core", "crates/agentdrafter-cli"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/millZach/AgentDrafter"
+publish = false
+
+[workspace.dependencies]
+# acadrust is pinned to the commit the DWG bake-off judged (ADR-0009).
+# Moving this pin means running the judge again.
+acadrust = { git = "https://github.com/hakanaktt/acadrust", rev = "4d07b528552ff06b7ddeafdd745d21dddb019ef2" }
