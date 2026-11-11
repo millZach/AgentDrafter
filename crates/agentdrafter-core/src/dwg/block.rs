@@ -380,6 +380,7 @@ mod tests {
                 crate::model::Object::AttributeDefinition(definition("TAG", Justify::MiddleCenter)),
                 crate::model::Object::AttributeDefinition(definition("NOTE", Justify::Left)),
             ],
+            cells: Vec::new(),
         }
     }
 

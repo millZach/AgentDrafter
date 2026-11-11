@@ -867,6 +867,8 @@ pub(crate) mod tests {
     fn characters_get_codes_256_to_a_font_in_the_order_first_used() {
         let run = |text: &str| TextRun {
             object: 0,
+            part: None,
+            drawn: None,
             origin: [0.0, 0.0],
             across: [1.0, 0.0],
             up: [0.0, 1.0],

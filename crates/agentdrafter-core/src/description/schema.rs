@@ -49,7 +49,7 @@ pub(super) const SUBSET: &str =
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, objects_key] =
+    let [units_key, block_library_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, objects_key, paper_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -75,6 +75,7 @@ pub fn sheet_description_schema() -> Value {
                 "type": "array",
                 "items": { "oneOf": object_choices(&OBJECT_TYPES) },
             },
+            paper_key: super::paper::paper_property(),
         },
         "$defs": sheet_defs(),
     })
@@ -179,8 +180,17 @@ pub fn block_library_schema() -> Value {
                 "additionalProperties": { "$ref": "#/$defs/block" },
             },
         },
-        "$defs": defs(),
+        "$defs": library_defs(),
     })
+}
+
+/// Every definition the block library's schema refers to: the definitions
+/// both schemas share, with the cell a block's text and attribute
+/// definitions take. A sheet's text takes none.
+fn library_defs() -> Map<String, Value> {
+    let mut defs = defs();
+    block_schema::add_cells(&mut defs);
+    defs
 }
 
 /// One choice of object for each of `types`: a mapping with that one key.

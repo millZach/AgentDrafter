@@ -20,6 +20,7 @@ use agentdrafter_core::{
     BUILT_IN_PLOT_STYLE, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SET_SETTINGS_FILE,
 };
 use agentdrafter_core::{change_set_schema, change_with, operations, ChangeRequest};
+use agentdrafter_core::{check_with, CheckRequest};
 use agentdrafter_core::{journal, undo, JournalRequest, UndoRequest};
 use agentdrafter_core::{query_with, End, Matching, Measure, Query, QueryRequest, Selection};
 use serde::Serialize;
@@ -38,6 +39,7 @@ const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--ou
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]...";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
+const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...";
 const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find and attributes: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [extents: --fonts <folder>...]";
 
 fn main() -> ExitCode {
@@ -52,7 +54,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
         return reply::<()>(Err(Error::usage(format!(
-            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE} | {JOURNAL_USAGE} | {UNDO_USAGE}"
+            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE} | {JOURNAL_USAGE} | {UNDO_USAGE} | {CHECK_USAGE}"
         ))));
     };
     match command.to_str() {
@@ -101,6 +103,10 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
             Ok(request) => send(undo(&request)),
             Err(error) => reply::<()>(Err(error)),
         },
+        Some("check") => match parse_check(args) {
+            Ok((request, settings)) => reply(check_with(&request, &settings)),
+            Err(error) => reply::<()>(Err(error)),
+        },
         Some("schema") => {
             let which = args.next();
             match (which.as_ref().map(|a| a.to_str()), args.next()) {
@@ -125,7 +131,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         Some("help" | "--help" | "-h") => reply(Ok(help())),
         Some("--version" | "-V") => reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") }))),
         _ => reply::<()>(Err(Error::usage(format!(
-            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE} | {JOURNAL_USAGE} | {UNDO_USAGE}",
+            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE} | {JOURNAL_USAGE} | {UNDO_USAGE} | {CHECK_USAGE}",
             command.to_string_lossy()
         )))),
     }
@@ -551,6 +557,43 @@ fn parse_query(
     ))
 }
 
+fn parse_check(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(CheckRequest, Settings), Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {CHECK_USAGE}"));
+    let mut source: Option<PathBuf> = None;
+    let mut sheets = Vec::new();
+    let mut fonts = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some(flag @ ("--sheet" | "--fonts")) => {
+                let Some(value) = args.next() else {
+                    return Err(usage(format!("{flag} needs a value")));
+                };
+                if flag == "--sheet" {
+                    sheets.push(value.to_string_lossy().into_owned());
+                } else {
+                    fonts.push(PathBuf::from(value));
+                }
+            }
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("check takes no option `{flag}`")))
+            }
+            _ => {
+                if source.replace(arg.into()).is_some() {
+                    return Err(usage(
+                        "check takes one drawing set's folder or sheet description".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    let source = source.ok_or_else(|| {
+        usage("check needs a drawing set's folder or a sheet description".to_owned())
+    })?;
+    Ok((CheckRequest { source, sheets }, settings(fonts)))
+}
+
 /// The settings for one command: the font folders `--fonts` names, then
 /// those the environment names, and the plot style folders the environment
 /// names.
@@ -814,7 +857,24 @@ fn help() -> serde_json::Value {
                          lands on some sheets and fails on others marks the set inconsistent \
                          until a later change set names them under fixes. --dry-run reports \
                          what it would do and writes nothing. The reply is not ok when a sheet \
-                         failed.",
+                         failed. Once it has landed, the reply's checks are the checker's \
+                         reply on the sheets it landed on, read back from their saved files; a \
+                         failed check does not stop it.",
+            },
+            "check": {
+                "usage": CHECK_USAGE,
+                "does": "Checks a drawing set, or one sheet description, from its saved files, \
+                         against the default checks: paper_size, the sheet's extents are its \
+                         declared paper's size; off_sheet, every object draws on the paper, \
+                         from [0, 0]; text_overflow, every text and attribute of an insert \
+                         draws within the cell its block declares for it; and text_on_text, \
+                         no two texts' drawn boxes overlap. A sheet that declares no paper \
+                         gets one paper_size finding that says so. Each sheet is drawn through \
+                         the drawing pipeline, so text is measured as its font draws it. Each \
+                         finding names the sheet, the rule and the object, by ID and name, and \
+                         says what is wrong in numbers in the declared unit, within a \
+                         tolerance of 0.01 mm on paper. A failed check is ok and listed under \
+                         findings; --sheet checks only the sheets it names.",
             },
             "journal": {
                 "usage": JOURNAL_USAGE,

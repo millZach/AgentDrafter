@@ -250,12 +250,16 @@ impl Placement {
         // text.
         let run_from = |pen: (f64, f64)| TextRun {
             object: 0,
+            part: None,
+            drawn: None,
             origin: place(pen, [0.0, 0.0]),
             across: [along * cos, along * sin],
             up: [-up * sin, up * cos],
             characters: Vec::new(),
         };
         let mut run = run_from(pen);
+        // Where the run's pen started, for the box round what it draws.
+        let mut run_pen = pen;
         // A glyph is enlarged by its height up and by `along` across, so
         // its tolerance is divided by the larger to stay within the drawing
         // units' tolerance both ways.
@@ -269,12 +273,24 @@ impl Placement {
                 out.fills
                     .push(contour.iter().map(|&p| place(pen, p)).collect());
             }
+            let inked = glyph.strokes.iter().chain(&glyph.fills).flatten();
+            for &p in inked {
+                let at = [pen.0 + p[0] - run_pen.0, pen.1 + p[1] - run_pen.1];
+                run.drawn = Some(match run.drawn {
+                    None => [at, at],
+                    Some([lo, hi]) => [
+                        [lo[0].min(at[0]), lo[1].min(at[1])],
+                        [hi[0].max(at[0]), hi[1].max(at[1])],
+                    ],
+                });
+            }
             run.characters.push((glyph.character, glyph.advance.0));
             pen = (pen.0 + glyph.advance.0, pen.1 + glyph.advance.1);
             // An SHX character can move the pen off the line; the characters
             // after it run along a baseline of their own.
             if glyph.advance.1 != 0.0 {
                 out.runs.push(std::mem::replace(&mut run, run_from(pen)));
+                run_pen = pen;
             }
         }
         out.runs.push(run);

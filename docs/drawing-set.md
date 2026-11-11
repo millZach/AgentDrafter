@@ -39,6 +39,7 @@ rows:
 ```yaml
 # templates/ansi-b.yaml, in part
 units: in
+paper: ANSI B landscape
 block_library: ../blocks.yaml
 objects:
   - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, layer: trim}
@@ -118,7 +119,7 @@ A value from the row stands for the whole value; it is not spliced into other te
 
 - **Units.** A template states `units`, as every sheet description does, and it must be the set's. A block library it names must be in the same unit.
 - **Block library.** A template names its block library under `block_library`, relative to the template's own folder, as a sheet description does.
-- **Paper size.** There is no paper setting. A sheet is as large as what its template draws: the demo set's template draws its trim line at 17 by 11 inches, and the usual case is one DWG per sheet, drawn in model space with its border.
+- **Paper size.** A template declares its sheet's paper under `paper`, as a sheet description does ([Paper](sheet-description.md#paper)), and [the checker](check.md) holds each sheet to it; the set's settings take none. A sheet is still as large as what its template draws, and a build, a render and a plot are the same with `paper` or without it: the demo set's template declares `paper: ANSI B landscape` and draws its trim line at 17 by 11 inches from the origin, and the usual case is one DWG per sheet, drawn in model space with its border.
 - **A sheet drawn by hand.** A template that writes no `{row: NAME}` is a sheet description. A set can build one as a row with no values.
 - **IDs.** A template's objects are on every sheet built from it, so each sheet's object's [ID](sheet-description.md#ids-and-names) is the sheet's name joined to the `id` the template gives the object, or to its place in the template: the demo set's border is `DEMO-001/border` on its first sheet and `DEMO-002/border` on its second, and its trim line, which has no `id`, is `DEMO-001/objects[0]`. Each sheet's name is given once in a set and each `id` once in its template, so every ID is unique in the set.
 
@@ -175,5 +176,4 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 - A value from the row spliced into other text, such as `SHEET {n} OF {m}`, or put anywhere but an attribute's value or a text's contents, such as a position or a layer; and a default for a value a row leaves out.
 - More than one rows file in a set.
 - One block library enforced for the whole set: each template names its own, in the set's unit.
-- Checking a set without building it.
 - Rendering a sheet from its template and row to PNG. A set's sheet renders as any DWG does, with `agentdrafter render <output>/<sheet>.dwg` ([Rendering](render.md)), and its PNG's stamp names the DWG; `render` refuses a template, since it holds values from a row.

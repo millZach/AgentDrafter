@@ -10,9 +10,14 @@
 use std::path::{Path, PathBuf};
 
 use super::ids::{object_id, ObjectRecord};
-use super::{library_beside, on_its_own_with_records, read_file};
+use super::{
+    library_beside, on_its_own_with_records, read_file, read_rows, read_set_settings,
+    read_template, template_path, Row,
+};
 use crate::error::Error;
 use crate::model::Sheet;
+use crate::set::SET_SETTINGS_FILE;
+use crate::units::Unit;
 
 /// One sheet as its record states it, with the ID of each of its objects.
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +51,45 @@ impl SheetRecord {
             Some(rows) if self.objects[index].in_row => rows,
             _ => &self.file,
         }
+    }
+}
+
+/// A drawing set's settings and rows as they are saved, ready to read its
+/// sheets from their records: what a query and the checker read.
+pub(crate) struct SavedSet {
+    folder: PathBuf,
+    /// The set's declared unit.
+    pub units: Unit,
+    rows_file: PathBuf,
+    /// The set's rows, in its order.
+    pub rows: Vec<Row>,
+}
+
+impl SavedSet {
+    /// Reads the settings and the rows of the drawing set whose folder is
+    /// `folder`.
+    pub(crate) fn read(folder: &Path) -> Result<SavedSet, Error> {
+        let settings = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
+        let rows_file = folder.join(&settings.rows);
+        let rows = read_rows(&rows_file)?;
+        Ok(SavedSet {
+            folder: folder.to_owned(),
+            units: settings.units,
+            rows_file,
+            rows,
+        })
+    }
+
+    /// The set's sheets, by name, in its order.
+    pub(crate) fn names(&self) -> Vec<&str> {
+        self.rows.iter().map(|row| row.sheet.as_str()).collect()
+    }
+
+    /// Reads the sheet `row` names from its template, filled in from the
+    /// row, with the block library the template names.
+    pub(crate) fn sheet(&self, row: &Row) -> Result<SheetRecord, Error> {
+        let template = template_path(&self.folder, row);
+        read_template(&template, row, &self.rows_file, self.units, &mut Vec::new())
     }
 }
 

@@ -27,13 +27,10 @@ use std::path::{Path, PathBuf};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::description::{
-    read_rows, read_set_settings, read_sheet_record, read_template, template_path, SheetRecord,
-};
-use crate::draw::{self, MOST_HATCH_DASHES};
+use crate::description::{read_sheet_record, SavedSet, SheetRecord};
+use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
-use crate::model::{Attribute, Object, Point3, CONTINUOUS};
-use crate::set::SET_SETTINGS_FILE;
+use crate::model::{Attribute, Object, Point3, Sheet, CONTINUOUS};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -400,27 +397,21 @@ fn load(source: &Path, sheet: Option<&str>) -> Result<(Unit, Vec<SheetRecord>), 
         }
         return Ok((record.sheet.units, vec![record]));
     }
-    let set = read_set_settings(&source.join(SET_SETTINGS_FILE))?;
-    let rows_file = source.join(&set.rows);
-    let rows = read_rows(&rows_file)?;
-    let looked_at: Vec<_> = rows.iter().filter(|row| named(&row.sheet)).collect();
+    let set = SavedSet::read(source)?;
+    let looked_at: Vec<_> = set.rows.iter().filter(|row| named(&row.sheet)).collect();
     if looked_at.is_empty() {
-        let names: Vec<&str> = rows.iter().map(|row| row.sheet.as_str()).collect();
-        return Err(no_such_sheet(sheet, &names));
+        return Err(no_such_sheet(sheet, &set.names()));
     }
     let records = looked_at
         .into_iter()
         .map(|row| {
-            let template = template_path(source, row);
-            read_template(&template, row, &rows_file, set.units, &mut Vec::new()).map_err(|e| {
-                Error {
-                    message: format!(
-                        "sheet `{}` cannot be read, and a query answers for every sheet it \
-                         looks at: {}",
-                        row.sheet, e.message
-                    ),
-                    ..e
-                }
+            set.sheet(row).map_err(|e| Error {
+                message: format!(
+                    "sheet `{}` cannot be read, and a query answers for every sheet it looks \
+                     at: {}",
+                    row.sheet, e.message
+                ),
+                ..e
             })
         })
         .collect::<Result<_, _>>()?;
@@ -653,7 +644,8 @@ fn matched<'a>(
     })
 }
 
-fn written_at(record: &SheetRecord, index: usize) -> WrittenAt {
+/// Where the object at `index` of `record`'s sheet is written.
+pub(crate) fn written_at(record: &SheetRecord, index: usize) -> WrittenAt {
     let object = &record.objects[index].object;
     WrittenAt {
         file: record.file_of(index).display().to_string(),
@@ -1059,25 +1051,45 @@ fn extents(
 /// linetype lays along it: the sheet is drawn through the one pipeline with
 /// every layer continuous. Text still draws as its font draws it.
 fn sheet_extents(record: &SheetRecord, fonts: &SheetFonts) -> Option<Extents> {
-    let mut sheet = record.sheet.clone();
+    measuring_drawing(&record.sheet, fonts)
+        .extents()
+        .map(|fine| Extents::of(&fine))
+}
+
+/// The sheet drawn to measure it: through the one pipeline with every
+/// layer continuous, so that what it draws follows the geometry, not the
+/// dashes a linetype lays along it, with its curves drawn within
+/// [`EXTENTS_TOLERANCE`] of its larger side. Text draws as its font draws
+/// it. Empty when the sheet draws nothing.
+pub(crate) fn measuring_drawing(sheet: &Sheet, fonts: &SheetFonts) -> DisplayList {
+    let mut sheet = sheet.clone();
     for layer in &mut sheet.layers {
         CONTINUOUS.clone_into(&mut layer.linetype);
     }
     let sheet = &sheet;
     // A coarse drawing, curves to within a unit, for the sheet's size; then
     // one fine enough to measure it by.
-    let coarse = draw::draw_sheet(sheet, fonts, 1.0, MOST_HATCH_DASHES).extents()?;
-    let size = coarse.width().max(coarse.height());
+    let coarse = draw::draw_sheet(sheet, fonts, 1.0, MOST_HATCH_DASHES);
+    let Some(bounds) = coarse.extents() else {
+        return coarse;
+    };
+    let size = bounds.width().max(bounds.height());
     let tolerance = if size > 0.0 {
         size * EXTENTS_TOLERANCE
     } else {
         EXTENTS_TOLERANCE
     };
-    let fine = draw::draw_sheet(sheet, fonts, tolerance, MOST_HATCH_DASHES).extents()?;
-    Some(Extents {
-        min: fine.min,
-        max: fine.max,
-        width: fine.width(),
-        height: fine.height(),
-    })
+    draw::draw_sheet(sheet, fonts, tolerance, MOST_HATCH_DASHES)
+}
+
+impl Extents {
+    /// The box `bounds` draws within.
+    pub(crate) fn of(bounds: &Bounds) -> Extents {
+        Extents {
+            min: bounds.min,
+            max: bounds.max,
+            width: bounds.width(),
+            height: bounds.height(),
+        }
+    }
 }

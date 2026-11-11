@@ -554,6 +554,7 @@ pub(super) fn apply(
             .map(|(path, _)| path.display().to_string())
             .collect(),
         inconsistent: (!failures.is_empty()).then(|| mark_report(&files.folder, &failures)),
+        checks: None,
     })
 }
 

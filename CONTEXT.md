@@ -211,6 +211,18 @@ _Avoid_: lint, validation rule
 The part of AgentDrafter that re-reads saved files and reports failed checks. It is separate from whatever made the change.
 _Avoid_: validator, linter
 
+**Finding**:
+One failed check: the sheet, the rule, the object by ID and name, and what is wrong in numbers in the declared unit.
+_Avoid_: violation, error (an error stops a request; a finding does not), issue
+
+**Paper**:
+What a sheet is drawn on, as its template or sheet description declares it: a width and a height, or a standard size such as `ANSI B landscape`, with its lower left corner at the origin. The checker holds the sheet to it.
+_Avoid_: page, sheet size, limits (AutoCAD's limits are a setting of its own)
+
+**Cell**:
+The box in a block that one of its texts or attributes draws within, such as a title-block cell, declared in the block library in the block's own coordinates and placed with each insert. The checker holds the text to it.
+_Avoid_: field, box (a cell is not a block)
+
 **Output**:
 A PDF, PNG or DWG produced from a revision and stamped with the revision it came from. An output whose revision has moved on is stale.
 _Avoid_: export, artifact, plot

@@ -9,7 +9,7 @@
 
 use serde_json::{json, Map, Value};
 
-use super::blocks::{BLOCK_KEYS, FORBIDDEN_IN_PATHS, LONGEST_TAG};
+use super::blocks::{BLOCK_KEYS, CELL_KEY, FORBIDDEN_IN_PATHS, LONGEST_TAG};
 use super::ids::LONGEST_NAME;
 use super::schema::{object_def, NUMBER};
 use crate::model::LAYER_ZERO;
@@ -40,6 +40,35 @@ pub(super) fn relative_path_property(description: String) -> Value {
             { "type": ["number", "boolean", "null"] },
         ],
     })
+}
+
+/// Adds to `defs` the cell a block's text and attribute definitions take,
+/// for the block library's schema: a sheet's text takes none.
+pub(super) fn add_cells(defs: &mut Map<String, Value>) {
+    defs.insert(
+        "cell".into(),
+        json!({
+            "description": "The box the text draws within, such as its title-block cell: two \
+                            opposite corners [[x, y, z], [x, y, z]], in the block's own \
+                            coordinates, which differ in x and in y. On each insert it is moved, \
+                            scaled and turned with the insert, and the checker reports text that \
+                            draws past it. It is seen from above, so z is not used. Only the \
+                            checker reads it: a DWG is the same with it or without it. Without \
+                            it, the text is not checked against a cell.",
+            "type": "array",
+            "items": { "$ref": "#/$defs/point" },
+            "minItems": 2,
+            "maxItems": 2,
+        }),
+    );
+    for kind in ["text", "attdef"] {
+        if let Some(properties) = defs
+            .get_mut(kind)
+            .and_then(|def| def["properties"].as_object_mut())
+        {
+            properties.insert(CELL_KEY.into(), json!({ "$ref": "#/$defs/cell" }));
+        }
+    }
 }
 
 /// Adds the definitions blocks, attribute definitions and inserts use to `defs`.

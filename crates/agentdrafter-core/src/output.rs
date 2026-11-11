@@ -104,6 +104,7 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
             text_styles: drawing.text_styles,
             blocks: drawing.blocks,
             objects: drawing.objects,
+            paper: None,
         };
         return Ok(Record {
             sheet,

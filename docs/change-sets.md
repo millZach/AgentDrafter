@@ -122,6 +122,7 @@ failures:
 | `operations` | Each operation, in the order sent: whether it landed, what it does in words, the sheets it reaches, the record it writes, the object's ID, the object as its record writes it `before` and `after`, the row value it sets (`row_value`), the IDs it wrote (`ids_written`), and why it did not land (`error`). |
 | `records` | The records written, or that a dry run would write. |
 | `inconsistent` | The set's mark as it stands after the change set, or would after a dry run; absent when the set is consistent. |
+| `checks` | The [checker](check.md)'s reply on the sheets the change set landed on, read back from their saved files once they were written: `{"ok": true, "result": {...}}`, with each failed check under `findings`. A failed check does not stop a change set from landing, and does not make its reply not `ok`. Absent for a dry run, which saves nothing to read back, and when no sheet took its part. |
 
 When some sheets failed, the reply is not `ok`, carries the same `result`, and adds a `sheets_failed` error; the command exits with 1:
 
@@ -155,7 +156,7 @@ Only what an operation touched is rewritten. Each record is read into the strict
 
 ## What is not offered yet
 
-- The checker ([#13](https://github.com/millZach/AgentDrafter/issues/13)): a change set reports what the reader and the build refuse, not failed checks such as text off the sheet.
+- Failed checks in a dry run: the [checker](check.md) reads saved files, and a dry run saves none.
 - Revising an existing DWG: a change set edits a drawing set's records, not an original.
 - Change sets on a sheet description outside a drawing set.
 - Operations on the set's other parts: layers, linetypes, text styles, hatch patterns, blocks, rows and their values directly, and a sheet's template.

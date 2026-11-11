@@ -41,7 +41,7 @@ A block's name follows the rules for a layer's name: 1 to 255 characters, not st
 | Key | Required | What it is |
 |---|---|---|
 | `base_point` | no | The point of the block that sits at an insert's position, in the block's own coordinates: a point. Without it, `[0, 0, 0]`. |
-| `objects` | yes | The block's objects, in drawing order: at least one. Each is a mapping with one key, its type: any [object a sheet holds](sheet-description.md#objects) but `insert`, or `attdef`. An object names a layer, text style or hatch pattern of the library's. It takes no `id` and no `name`: an insert of the block is the object on a sheet, with an [ID and a name](sheet-description.md#ids-and-names) of its own. |
+| `objects` | yes | The block's objects, in drawing order: at least one. Each is a mapping with one key, its type: any [object a sheet holds](sheet-description.md#objects) but `insert`, or `attdef`. An object names a layer, text style or hatch pattern of the library's. It takes no `id` and no `name`: an insert of the block is the object on a sheet, with an [ID and a name](sheet-description.md#ids-and-names) of its own. A `text` takes a [`cell`](#cells) as well. |
 
 An object on layer `0` in a block draws with the layer of the insert it is drawn by, as in AutoCAD; an object on any other layer draws with that layer.
 
@@ -62,6 +62,17 @@ An `attdef` is AutoCAD's ATTDEF: a labelled text field each insert of the block 
 | `justify` | no | Where the text sits against its position: one of a `text`'s justifications. Without it, `left`. |
 | `invisible` | no | `true` to hide the attribute on every insert, as AutoCAD's Invisible mode hides it. Without it, `false`. |
 | `layer` | no | The layer, as for every object. An attribute defined on layer `0` sits on the layer of each insert; one defined on any other layer sits on that layer. |
+| `cell` | no | The box the attribute draws within on each insert, such as its title-block cell. See [Cells](#cells). |
+
+### Cells
+
+```yaml
+      - line: {from: [-6.5, 0.6, 0], to: [0, 0.6, 0]}
+      - text: {contents: DWG NO., position: [-6.45, 0.52, 0], height: 0.08, justify: top_left, cell: [[-6.5, 0, 0], [-4, 0.6, 0]]}
+      - attdef: {tag: DWG_NO, position: [-5.25, 0.22, 0], height: 0.14, justify: middle_center, cell: [[-6.5, 0, 0], [-4, 0.6, 0]]}
+```
+
+Zach decided on 2026-11-11 that a title-block cell is declared in the block library. An attribute definition, or a `text` of a block, may give under `cell` the box it draws within: two opposite corners, `[[x, y, z], [x, y, z]]`, in the block's own coordinates, which differ in x and in y. It is seen from above, so z is not used. On each insert the cell is moved, scaled and turned with the insert, and [the checker](check.md) reports text that draws past it, measured as its font draws it. A text or an attribute with no cell is not checked for overflow; an `mtext` and the objects of a sheet take no cell. Only the checker reads it: a DWG is the same with it or without it. The demo set's title block declares a cell for each of its texts and attributes.
 
 ## What a sheet takes from the library
 

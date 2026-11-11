@@ -5,7 +5,7 @@
 //! inserts of blocks, and a block also holds attribute definitions;
 //! `blocks.rs` reads both.
 
-use super::blocks::{attribute_definition, insert, ATTDEF_KEYS, INSERT_KEYS};
+use super::blocks::{attribute_definition, insert, ATTDEF_KEYS, BLOCK_TEXT_KEYS, INSERT_KEYS};
 use super::hatch::{self, HATCH_KEYS};
 use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
 use super::layers::layer_name;
@@ -56,7 +56,32 @@ pub(crate) const OBJECT_TYPES: [ObjectType; 10] = drawn_and(("insert", &INSERT_K
 
 /// Every object type a block in a block library can hold, and the keys
 /// each takes: the drawn objects a sheet holds, and attribute definitions.
-pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 10] = drawn_and(("attdef", &ATTDEF_KEYS));
+/// A text in a block takes its cell as well.
+pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 10] = {
+    let mut types = drawn_and(("attdef", &ATTDEF_KEYS));
+    types[TEXT_TYPE] = ("text", &BLOCK_TEXT_KEYS);
+    types
+};
+
+/// The place of `text` among [`DRAWN_OBJECT_TYPES`].
+const TEXT_TYPE: usize = 7;
+const _: () = assert!(same_name(DRAWN_OBJECT_TYPES[TEXT_TYPE].0, "text"));
+
+/// Whether two names are the same, where a constant needs to know.
+const fn same_name(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 
 /// What the objects of one sheet or one block may name: the declared unit
 /// and the layers, hatch patterns and text styles defined beside them.
