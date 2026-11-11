@@ -7,7 +7,9 @@ use super::{
     wrong_type, Fields,
 };
 use crate::error::{Error, ErrorCode};
-use crate::model::{Arc, Circle, Ellipse, Layer, Line, Object, Polyline, Spline, LAYER_ZERO};
+use crate::model::{
+    Arc, Circle, Ellipse, Layer, Line, Object, Polyline, Spline, FIT_DEGREE, LAYER_ZERO,
+};
 use crate::units::Unit;
 
 /// Every object type a sheet description can hold, and the keys each takes.
@@ -22,10 +24,10 @@ pub(crate) const OBJECT_TYPES: [(&str, &[&str]); 6] = [
 
 const LINE_KEYS: [&str; 3] = ["from", "to", "layer"];
 const POLYLINE_KEYS: [&str; 3] = ["points", "closed", "layer"];
-const ARC_KEYS: [&str; 5] = ["centre", "radius", "start_angle", "end_angle", "layer"];
-const CIRCLE_KEYS: [&str; 3] = ["centre", "radius", "layer"];
+const ARC_KEYS: [&str; 5] = ["center", "radius", "start_angle", "end_angle", "layer"];
+const CIRCLE_KEYS: [&str; 3] = ["center", "radius", "layer"];
 const ELLIPSE_KEYS: [&str; 6] = [
-    "centre",
+    "center",
     "major_axis",
     "ratio",
     "start_angle",
@@ -36,9 +38,6 @@ const SPLINE_KEYS: [&str; 4] = ["fit_points", "control_points", "degree", "layer
 
 /// The highest degree a spline by control points can have, as in AutoCAD.
 pub(crate) const HIGHEST_DEGREE: u8 = 10;
-
-/// The degree of a spline through fit points: AutoCAD always fits a cubic.
-pub(crate) const FIT_DEGREE: u8 = 3;
 
 /// The fewest fit points a spline takes. Through two points it would be a line.
 pub(crate) const FEWEST_FIT_POINTS: usize = 3;
@@ -131,7 +130,7 @@ fn polyline(fields: &Fields, units: Unit, layer: String) -> Result<Polyline, Err
 }
 
 fn arc(fields: &Fields, units: Unit, layer: String) -> Result<Arc, Error> {
-    let centre = point(fields.require("centre")?, &fields.path_of("centre"), units)?;
+    let center = point(fields.require("center")?, &fields.path_of("center"), units)?;
     let radius = radius(fields, units)?;
     let start_angle = angle(
         fields.require("start_angle")?,
@@ -147,7 +146,7 @@ fn arc(fields: &Fields, units: Unit, layer: String) -> Result<Arc, Error> {
         ));
     }
     Ok(Arc {
-        centre,
+        center,
         radius,
         start_angle,
         end_angle,
@@ -157,7 +156,7 @@ fn arc(fields: &Fields, units: Unit, layer: String) -> Result<Arc, Error> {
 
 fn circle(fields: &Fields, units: Unit, layer: String) -> Result<Circle, Error> {
     Ok(Circle {
-        centre: point(fields.require("centre")?, &fields.path_of("centre"), units)?,
+        center: point(fields.require("center")?, &fields.path_of("center"), units)?,
         radius: radius(fields, units)?,
         layer,
     })
@@ -176,7 +175,7 @@ fn radius(fields: &Fields, units: Unit) -> Result<f64, Error> {
 }
 
 fn ellipse(fields: &Fields, units: Unit, layer: String) -> Result<Ellipse, Error> {
-    let centre = point(fields.require("centre")?, &fields.path_of("centre"), units)?;
+    let center = point(fields.require("center")?, &fields.path_of("center"), units)?;
     let axis_node = fields.require("major_axis")?;
     let axis_path = fields.path_of("major_axis");
     let major_axis = point(axis_node, &axis_path, units)?;
@@ -226,7 +225,7 @@ fn ellipse(fields: &Fields, units: Unit, layer: String) -> Result<Ellipse, Error
         (None, Some(_)) => return Err(missing_partner(fields, "start_angle", "end_angle")),
     };
     Ok(Ellipse {
-        centre,
+        center,
         major_axis,
         ratio,
         start_angle,

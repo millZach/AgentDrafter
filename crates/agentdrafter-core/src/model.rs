@@ -20,6 +20,13 @@ pub const LAYER_ZERO: &str = "0";
 /// The solid linetype every drawing has. A layer draws with it unless it names another.
 pub const CONTINUOUS: &str = "Continuous";
 
+/// The linetypes every drawing has. They are AutoCAD's own, not a sheet's,
+/// and a sheet cannot define them again.
+pub(crate) const BUILT_IN_LINETYPES: [&str; 3] = ["ByLayer", "ByBlock", CONTINUOUS];
+
+/// The degree of a spline through fit points: AutoCAD always fits a cubic.
+pub(crate) const FIT_DEGREE: u8 = 3;
+
 /// The colour a layer has unless it states one: 7, white on a dark
 /// background and black on paper.
 pub const WHITE: u8 = 7;
@@ -84,7 +91,7 @@ pub struct Polyline {
 /// It lies in the plane parallel to XY at its centre's `z`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Arc {
-    pub centre: Point3,
+    pub center: Point3,
     pub radius: f64,
     /// Degrees anticlockwise from the X axis, in `[0, 360)`.
     pub start_angle: f64,
@@ -97,7 +104,7 @@ pub struct Arc {
 /// A circle in the plane parallel to XY at its centre's `z`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Circle {
-    pub centre: Point3,
+    pub center: Point3,
     pub radius: f64,
     #[serde(default = "layer_zero")]
     pub layer: String,
@@ -106,7 +113,7 @@ pub struct Circle {
 /// An ellipse, or part of one, in the plane parallel to XY at its centre's `z`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Ellipse {
-    pub centre: Point3,
+    pub center: Point3,
     /// From the centre to one end of the major axis, as `[dx, dy, dz]`;
     /// `dz` is 0.
     pub major_axis: Point3,
@@ -205,7 +212,7 @@ pub struct Linetype {
 pub struct Layer {
     pub name: String,
     /// The AutoCAD colour index, 1 to 255.
-    pub colour: u8,
+    pub color: u8,
     /// `Continuous` or the name of one of the sheet's linetypes.
     pub linetype: String,
     /// The pen width objects on the layer plot with; none for AutoCAD's default.
@@ -218,7 +225,7 @@ impl Layer {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            colour: WHITE,
+            color: WHITE,
             linetype: CONTINUOUS.to_owned(),
             lineweight: None,
         }

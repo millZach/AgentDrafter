@@ -228,7 +228,7 @@ fn an_unknown_layer_is_reported_with_the_choices() {
     let dir = scratch("unknown-layer");
     fs::write(
         dir.join("sheet.yaml"),
-        "units: mm\nlayers: {outline: {}}\nobjects:\n  - circle: {centre: [0, 0, 0], radius: 5, layer: hidden}\n",
+        "units: mm\nlayers: {outline: {}}\nobjects:\n  - circle: {center: [0, 0, 0], radius: 5, layer: hidden}\n",
     )
     .unwrap();
 

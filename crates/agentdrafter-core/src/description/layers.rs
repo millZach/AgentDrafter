@@ -5,16 +5,16 @@
 //! in case are refused as well.
 
 use super::strict_yaml::{index_path, key_path, Entry, Kind, Node};
-use super::{at, bad_value, length, scalar, sequence, wrong_type, Fields};
+use super::{at, bad_value, choice, length, scalar, sequence, wrong_type, Fields};
 use crate::error::{Error, ErrorCode};
-use crate::model::{Layer, Linetype, Lineweight, CONTINUOUS, LAYER_ZERO};
+use crate::model::{Layer, Linetype, Lineweight, BUILT_IN_LINETYPES, CONTINUOUS, LAYER_ZERO};
 use crate::units::{parse_length, LengthError, Unit};
 
 /// The keys a linetype takes.
 pub(crate) const LINETYPE_KEYS: [&str; 2] = ["description", "pattern"];
 
 /// The keys a layer takes.
-pub(crate) const LAYER_KEYS: [&str; 3] = ["colour", "linetype", "lineweight"];
+pub(crate) const LAYER_KEYS: [&str; 3] = ["color", "linetype", "lineweight"];
 
 /// The colours that have a name: AutoCAD colour indexes 1 to 7.
 pub(crate) const COLOUR_NAMES: [(&str, u8); 7] = [
@@ -26,9 +26,6 @@ pub(crate) const COLOUR_NAMES: [(&str, u8); 7] = [
     ("magenta", 6),
     ("white", 7),
 ];
-
-/// Linetypes every drawing has, whose names a sheet cannot define again.
-const BUILT_IN_LINETYPES: [&str; 3] = ["ByLayer", "ByBlock", CONTINUOUS];
 
 /// Characters AutoCAD does not allow in a layer or linetype name.
 pub(crate) const FORBIDDEN_IN_NAMES: &str = "<>/\\\":;?*|=,`";
@@ -83,8 +80,8 @@ pub(super) fn layers(node: &Node, linetypes: &[Linetype]) -> Result<Vec<Layer>, 
         let path = key_path("layers", &entry.key);
         let fields = Fields::of(&entry.value, &path, &LAYER_KEYS, "a layer")?;
         let mut layer = Layer::new(entry.key.clone());
-        if let Some(node) = fields.get("colour") {
-            layer.colour = colour(node, &fields.path_of("colour"))?;
+        if let Some(node) = fields.get("color") {
+            layer.color = colour(node, &fields.path_of("color"))?;
         }
         if let Some(node) = fields.get("linetype") {
             layer.linetype = linetype_name(node, &fields.path_of("linetype"), linetypes)?;
@@ -99,10 +96,6 @@ pub(super) fn layers(node: &Node, linetypes: &[Linetype]) -> Result<Vec<Layer>, 
 
 /// The name of a layer an object sits on: `0` or one of the sheet's layers.
 pub(super) fn layer_name(node: &Node, path: &str, layers: &[Layer]) -> Result<String, Error> {
-    let text = scalar(node, path, "the name of a layer")?;
-    if text == LAYER_ZERO || layers.iter().any(|l| l.name == text) {
-        return Ok(text.to_owned());
-    }
     let mut choices = vec![LAYER_ZERO];
     choices.extend(
         layers
@@ -110,7 +103,7 @@ pub(super) fn layer_name(node: &Node, path: &str, layers: &[Layer]) -> Result<St
             .map(|l| l.name.as_str())
             .filter(|n| *n != LAYER_ZERO),
     );
-    Err(unknown_name(node, path, "layer", text, &choices))
+    named(node, path, "layer", &choices)
 }
 
 /// The entries of a mapping from names to definitions, each name checked.
@@ -207,7 +200,11 @@ fn pattern(node: &Node, path: &str, units: Unit) -> Result<Vec<f64>, Error> {
 }
 
 fn colour(node: &Node, path: &str) -> Result<u8, Error> {
-    let text = scalar(node, path, "a colour")?;
+    let choices = format!(
+        "a colour is an AutoCAD colour index from 1 to 255, or one of {}",
+        colour_names()
+    );
+    let text = choice(node, path, "a colour", &choices)?;
     if let Some((_, index)) = COLOUR_NAMES.iter().find(|(name, _)| *name == text) {
         return Ok(*index);
     }
@@ -216,10 +213,7 @@ fn colour(node: &Node, path: &str) -> Result<u8, Error> {
         _ => Err(bad_value(
             node,
             path,
-            format!(
-                "`{text}` is not a colour; a colour is an AutoCAD colour index from 1 to 255, or one of {}",
-                colour_names()
-            ),
+            format!("`{text}` is not a colour; {choices}"),
         )),
     }
 }
@@ -228,19 +222,31 @@ pub(crate) fn colour_names() -> String {
     COLOUR_NAMES.map(|(name, _)| name).join(", ")
 }
 
-/// A lineweight: a pen width in millimetres, whatever the declared unit.
+/// A lineweight: a pen width in millimetres, whatever the declared unit,
+/// written out as one of the standard widths.
 fn lineweight(node: &Node, path: &str) -> Result<Lineweight, Error> {
-    let text = scalar(node, path, "a lineweight")?;
     let choices = Lineweight::choices();
+    let text = choice(
+        node,
+        path,
+        "a lineweight",
+        &format!("one of {choices} (millimetres)"),
+    )?;
     let error = match parse_length(text) {
-        Ok((millimetres, None | Some(Unit::Mm))) => match Lineweight::from_millimetres(millimetres)
-        {
-            Some(weight) => return Ok(weight),
-            None => Error::new(
-                ErrorCode::BadValue,
-                format!("`{text}` is not a standard lineweight; one of {choices} (millimetres)"),
-            ),
-        },
+        Ok((_, None | Some(Unit::Mm))) => {
+            let number = text
+                .strip_suffix("mm")
+                .map_or(text, |n| n.strip_suffix(' ').unwrap_or(n));
+            match written_lineweight(number) {
+                Some(weight) => return Ok(weight),
+                None => Error::new(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`{text}` is not a standard lineweight written out; one of {choices} (millimetres)"
+                    ),
+                ),
+            }
+        }
         Ok((_, Some(other))) => Error::new(
             ErrorCode::BadValue,
             format!("a lineweight is a pen width in millimetres, not {other}; one of {choices}"),
@@ -257,26 +263,49 @@ fn lineweight(node: &Node, path: &str) -> Result<Lineweight, Error> {
     Err(at(error, path, node.at))
 }
 
-fn linetype_name(node: &Node, path: &str, linetypes: &[Linetype]) -> Result<String, Error> {
-    let text = scalar(node, path, "the name of a linetype")?;
-    if text == CONTINUOUS || linetypes.iter().any(|l| l.name == text) {
-        return Ok(text.to_owned());
+/// The standard lineweight that `number` writes out in millimetres: digits,
+/// then a `.` and digits if any, with any zeros before or after, such as
+/// `0.35`, `0.350` or `1.0`. A sign or an exponent is not written out.
+/// `schema.rs` states the same spellings as a pattern.
+fn written_lineweight(number: &str) -> Option<Lineweight> {
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+    if whole.is_empty() || !digits(whole) || !digits(fraction) {
+        return None;
     }
-    let mut choices = vec![CONTINUOUS];
-    choices.extend(linetypes.iter().map(|l| l.name.as_str()));
-    Err(unknown_name(node, path, "linetype", text, &choices))
+    let whole = match whole.trim_start_matches('0') {
+        "" => "0",
+        whole => whole,
+    };
+    let spelled = match fraction.trim_end_matches('0') {
+        "" => whole.to_owned(),
+        fraction => format!("{whole}.{fraction}"),
+    };
+    Lineweight::ALL
+        .into_iter()
+        .find(|weight| weight.to_string() == spelled)
 }
 
-fn unknown_name(node: &Node, path: &str, what: &str, name: &str, choices: &[&str]) -> Error {
-    at(
+fn linetype_name(node: &Node, path: &str, linetypes: &[Linetype]) -> Result<String, Error> {
+    let mut choices = vec![CONTINUOUS];
+    choices.extend(linetypes.iter().map(|l| l.name.as_str()));
+    named(node, path, "linetype", &choices)
+}
+
+/// The name of a `what`, a layer or a linetype, that must be one of
+/// `choices`. Any other value is an error that lists them.
+fn named(node: &Node, path: &str, what: &str, choices: &[&str]) -> Result<String, Error> {
+    let listed = format!("the sheet's {what}s: {}", choices.join(", "));
+    let text = choice(node, path, &format!("the name of a {what}"), &listed)?;
+    if choices.contains(&text) {
+        return Ok(text.to_owned());
+    }
+    Err(at(
         Error::new(
             ErrorCode::UnknownName,
-            format!(
-                "unknown {what} `{name}`; the sheet's {what}s: {}",
-                choices.join(", ")
-            ),
+            format!("unknown {what} `{text}`; {listed}"),
         ),
         path,
         node.at,
-    )
+    ))
 }

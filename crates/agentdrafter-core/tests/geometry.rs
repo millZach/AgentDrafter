@@ -64,14 +64,14 @@ fn assert_same_objects(sheet: &Sheet, read: &DrawingContents) {
     for (i, (wrote, came_back)) in sheet.objects.iter().zip(&read.objects).enumerate() {
         let same = match (wrote, came_back) {
             (Object::Arc(w), Object::Arc(r)) => {
-                w.centre == r.centre
+                w.center == r.center
                     && w.radius == r.radius
                     && w.layer == r.layer
                     && close(w.start_angle, r.start_angle)
                     && close(w.end_angle, r.end_angle)
             }
             (Object::Ellipse(w), Object::Ellipse(r)) => {
-                w.centre == r.centre
+                w.center == r.center
                     && w.major_axis == r.major_axis
                     && w.ratio == r.ratio
                     && w.layer == r.layer
@@ -155,9 +155,9 @@ fn arcs_read_back_with_their_angles() {
         "arcs",
         "units: mm
 objects:
-  - arc: {centre: [0, 0, 0], radius: 10, start_angle: 0, end_angle: 90}
-  - arc: {centre: [5, -5, 2], radius: 2.5, start_angle: 270, end_angle: 45}
-  - arc: {centre: [0, 0, 0], radius: 1, start_angle: 33.3, end_angle: 300.7}
+  - arc: {center: [0, 0, 0], radius: 10, start_angle: 0, end_angle: 90}
+  - arc: {center: [5, -5, 2], radius: 2.5, start_angle: 270, end_angle: 45}
+  - arc: {center: [0, 0, 0], radius: 1, start_angle: 33.3, end_angle: 300.7}
 ",
     );
     assert_same_objects(&sheet, &read);
@@ -169,8 +169,8 @@ fn circles_read_back() {
         "circles",
         "units: mm
 objects:
-  - circle: {centre: [0, 0, 0], radius: 10}
-  - circle: {centre: [-7.5, 3, 12], radius: 0.001}
+  - circle: {center: [0, 0, 0], radius: 10}
+  - circle: {center: [-7.5, 3, 12], radius: 0.001}
 ",
     );
     assert_same_objects(&sheet, &read);
@@ -182,10 +182,10 @@ fn ellipses_read_back_whole_or_in_part() {
         "ellipses",
         "units: mm
 objects:
-  - ellipse: {centre: [0, 0, 0], major_axis: [10, 0, 0], ratio: 0.5}
-  - ellipse: {centre: [1, 2, 3], major_axis: [-3, 4, 0], ratio: 1}
-  - ellipse: {centre: [0, 0, 0], major_axis: [10, 10, 0], ratio: 0.25, start_angle: 20, end_angle: 200}
-  - ellipse: {centre: [0, 0, 0], major_axis: [0, 8, 0], ratio: 0.75, start_angle: 300, end_angle: 60}
+  - ellipse: {center: [0, 0, 0], major_axis: [10, 0, 0], ratio: 0.5}
+  - ellipse: {center: [1, 2, 3], major_axis: [-3, 4, 0], ratio: 1}
+  - ellipse: {center: [0, 0, 0], major_axis: [10, 10, 0], ratio: 0.25, start_angle: 20, end_angle: 200}
+  - ellipse: {center: [0, 0, 0], major_axis: [0, 8, 0], ratio: 0.75, start_angle: 300, end_angle: 60}
 ",
     );
     assert_same_objects(&sheet, &read);
@@ -217,19 +217,19 @@ linetypes:
   PHANTOM: {description: Phantom ___ _ _ ___, pattern: [1.25, -0.25, 0.25, -0.25, 0.25, -0.25]}
   dots: {pattern: [0, -2 mm]}
 layers:
-  '0': {colour: 2, linetype: dots}
-  heavy: {colour: 250, lineweight: 2.11}
-  light: {colour: blue, linetype: PHANTOM, lineweight: 0}
+  '0': {color: 2, linetype: dots}
+  heavy: {color: 250, lineweight: 2.11}
+  light: {color: blue, linetype: PHANTOM, lineweight: 0}
 objects:
-  - circle: {centre: [0, 0, 0], radius: 1, layer: heavy}
-  - circle: {centre: [0, 0, 0], radius: 2, layer: light}
-  - circle: {centre: [0, 0, 0], radius: 3}
+  - circle: {center: [0, 0, 0], radius: 1, layer: heavy}
+  - circle: {center: [0, 0, 0], radius: 2, layer: light}
+  - circle: {center: [0, 0, 0], radius: 3}
 ",
     );
     assert_eq!(read.linetypes, sheet.linetypes);
     assert_eq!(read.linetypes[1].pattern, vec![0.0, -2.0 / 25.4]);
     assert_eq!(read.layers, layers_in_the_dwg(&sheet));
-    assert_eq!(read.layers[0].colour, 2);
+    assert_eq!(read.layers[0].color, 2);
     assert_same_objects(&sheet, &read);
 }
 
@@ -239,13 +239,13 @@ fn lengths_with_their_own_unit_reach_the_dwg_converted() {
         "converted",
         "units: in
 objects:
-  - circle: {centre: [25.4 mm, 0, 0], radius: 1 ft}
+  - circle: {center: [25.4 mm, 0, 0], radius: 1 ft}
 ",
     );
     let [Object::Circle(circle)] = read.objects.as_slice() else {
         panic!("{:?}", read.objects)
     };
-    assert_eq!(circle.centre, Point3::new(1.0, 0.0, 0.0));
+    assert_eq!(circle.center, Point3::new(1.0, 0.0, 0.0));
     assert_eq!(circle.radius, 12.0);
     assert_eq!(read.units, Some(Unit::In));
 }

@@ -192,8 +192,30 @@ fn scalar<'a>(node: &'a Node, path: &str, expected: &str) -> Result<&'a str, Err
     }
 }
 
+/// A scalar's text where one of a set of choices belongs. A value of
+/// another shape is an error that lists `choices`, as the error for a wrong
+/// choice does.
+fn choice<'a>(node: &'a Node, path: &str, expected: &str, choices: &str) -> Result<&'a str, Error> {
+    match &node.kind {
+        Kind::Scalar(text) => Ok(text),
+        _ => Err(at(
+            Error::new(
+                ErrorCode::WrongType,
+                format!("expected {expected}, found {}; {choices}", describe(node)),
+            ),
+            path,
+            node.at,
+        )),
+    }
+}
+
 fn unit(node: &Node, path: &str) -> Result<Unit, Error> {
-    let text = scalar(node, path, "a unit")?;
+    let text = choice(
+        node,
+        path,
+        "a unit",
+        &format!("known units: {}", Unit::symbols()),
+    )?;
     let error = if text.is_empty() {
         Error::new(
             ErrorCode::MissingUnit,

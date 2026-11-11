@@ -26,7 +26,7 @@ use crate::description::normalize_degrees;
 use crate::error::{Error, ErrorCode};
 use crate::model::{
     Arc, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object, Point3,
-    Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
+    Polyline, Sheet, Spline, BUILT_IN_LINETYPES, FIT_DEGREE, LAYER_ZERO,
 };
 use crate::units::Unit;
 
@@ -38,9 +38,6 @@ const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;
 /// existing DWG only when it carries this property with this value.
 const BUILD_MARK: (&str, &str) = ("AgentDrafter", "build");
 
-/// The degree of a spline through fit points, as AutoCAD fits it.
-const FIT_DEGREE: u8 = 3;
-
 /// AutoCAD's own knot spacing for a curve through fit points: by the chord
 /// length between them.
 const CHORD_KNOTS: i32 = 0;
@@ -48,9 +45,6 @@ const CHORD_KNOTS: i32 = 0;
 /// How far a knot or an ellipse's end parameter may sit from where it
 /// belongs and still be read as there.
 const TOLERANCE: f64 = 1e-12;
-
-/// Linetypes every drawing has. They are not the sheet's own.
-const BUILT_IN_LINETYPES: [&str; 3] = ["ByLayer", "ByBlock", CONTINUOUS];
 
 /// The DWG version a new sheet is written in, as the DWG names it.
 pub(crate) fn new_sheet_version() -> String {
@@ -140,7 +134,7 @@ fn dwg_linetype(linetype: &Linetype) -> LineType {
 }
 
 fn set_layer_properties(dwg_layer: &mut DwgLayer, layer: &Layer) {
-    dwg_layer.color = Color::Index(layer.colour);
+    dwg_layer.color = Color::Index(layer.color);
     dwg_layer.line_type = layer.linetype.clone();
     dwg_layer.line_weight = match layer.lineweight {
         Some(weight) => LineWeight::Value(weight.hundredths()),
@@ -158,13 +152,13 @@ fn dwg_object(object: &Object) -> EntityType {
         }
         Object::Polyline(polyline) => dwg_polyline(polyline),
         Object::Arc(arc) => EntityType::Arc(DwgArc::from_center_radius_angles(
-            vector(arc.centre),
+            vector(arc.center),
             arc.radius,
             arc.start_angle.to_radians(),
             arc.end_angle.to_radians(),
         )),
         Object::Circle(circle) => EntityType::Circle(DwgCircle::from_center_radius(
-            vector(circle.centre),
+            vector(circle.center),
             circle.radius,
         )),
         Object::Ellipse(ellipse) => EntityType::Ellipse(dwg_ellipse(ellipse)),
@@ -201,7 +195,7 @@ fn dwg_polyline(polyline: &Polyline) -> EntityType {
 
 fn dwg_ellipse(ellipse: &Ellipse) -> DwgEllipse {
     let mut dwg_ellipse = DwgEllipse::from_center_axes(
-        vector(ellipse.centre),
+        vector(ellipse.center),
         vector(ellipse.major_axis),
         ellipse.ratio,
     );
@@ -307,7 +301,7 @@ fn read_linetype(dwg_linetype: &LineType) -> Option<Linetype> {
 
 /// A layer with an index colour and a standard or default lineweight.
 fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
-    let Color::Index(colour) = dwg_layer.color else {
+    let Color::Index(color) = dwg_layer.color else {
         return None;
     };
     let lineweight = match dwg_layer.line_weight {
@@ -317,7 +311,7 @@ fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
     };
     Some(Layer {
         name: dwg_layer.name.clone(),
-        colour,
+        color,
         linetype: dwg_layer.line_type.clone(),
         lineweight,
     })
@@ -368,14 +362,14 @@ fn read_object(dwg_object: &EntityType) -> Option<Object> {
             })
         }
         EntityType::Arc(arc) if arc.normal == Vector3::UNIT_Z => Object::Arc(Arc {
-            centre: point(arc.center),
+            center: point(arc.center),
             radius: arc.radius,
             start_angle: normalize_degrees(arc.start_angle.to_degrees()),
             end_angle: normalize_degrees(arc.end_angle.to_degrees()),
             layer,
         }),
         EntityType::Circle(circle) if circle.normal == Vector3::UNIT_Z => Object::Circle(Circle {
-            centre: point(circle.center),
+            center: point(circle.center),
             radius: circle.radius,
             layer,
         }),
@@ -393,7 +387,7 @@ fn read_object(dwg_object: &EntityType) -> Option<Object> {
                 )
             };
             Object::Ellipse(Ellipse {
-                centre: point(ellipse.center),
+                center: point(ellipse.center),
                 major_axis: point(ellipse.major_axis),
                 ratio: ellipse.minor_axis_ratio,
                 start_angle,
@@ -617,7 +611,7 @@ mod tests {
     fn an_elliptical_arc_across_the_major_axis_ends_past_two_pi() {
         let arc = |start_angle, end_angle| {
             dwg_ellipse(&Ellipse {
-                centre: Point3::new(0.0, 0.0, 0.0),
+                center: Point3::new(0.0, 0.0, 0.0),
                 major_axis: Point3::new(0.0, 8.0, 0.0),
                 ratio: 0.75,
                 start_angle,

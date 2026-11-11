@@ -8,9 +8,15 @@
 //!
 //! JSON Schema describes JSON values, and a YAML reader that guesses types
 //! turns `100` into a number and `4 in` into a string, so a length here is a
-//! number or a string that reads as one. The rules of the strict YAML subset
-//! (no anchors, tags or directives, every key once) are not JSON Schema; the
-//! top-level description states them.
+//! number or a string that reads as one. Quoted and plain scalars mean the
+//! same in a sheet description, so every value the reader takes quoted, such
+//! as `'42'` for a colour or `'true'` for `closed`, the schema takes as a
+//! string; `tests/schema.rs` feeds the same values to both. What JSON Schema
+//! cannot see it leaves to the reader: a type-guessing reader turns `+5` and
+//! `5` into one number, and a radius above 0 or a degree below the number of
+//! control points compares one value with another. The rules of the strict
+//! YAML subset (no anchors, tags or directives, every key once) are not JSON
+//! Schema either; the top-level description states them.
 
 use serde_json::{json, Map, Value};
 
@@ -18,9 +24,9 @@ use super::layers::{
     colour_names, COLOUR_NAMES, FORBIDDEN_IN_NAMES, LONGEST_DESCRIPTION, LONGEST_NAME,
     LONGEST_PATTERN,
 };
-use super::objects::{FEWEST_FIT_POINTS, FIT_DEGREE, HIGHEST_DEGREE, OBJECT_TYPES};
+use super::objects::{FEWEST_FIT_POINTS, HIGHEST_DEGREE, OBJECT_TYPES};
 use super::SHEET_KEYS;
-use crate::model::{Lineweight, CONTINUOUS, LAYER_ZERO, WHITE};
+use crate::model::{Lineweight, CONTINUOUS, FIT_DEGREE, LAYER_ZERO, WHITE};
 use crate::units::Unit;
 
 /// A plain decimal number, as `docs/sheet-description.md` defines it.
@@ -31,8 +37,17 @@ pub fn sheet_description_schema() -> Value {
     let units = Unit::ALL.map(Unit::symbol);
     let unit_pattern = units.join("|");
     let lineweights: Vec<f64> = Lineweight::ALL.iter().map(|w| w.millimetres()).collect();
+    // A lineweight written out, as the reader takes it: any zeros before
+    // the whole number and after the fraction, such as 0.50 or 1.0.
     let lineweight_pattern = Lineweight::ALL
-        .map(|w| w.to_string().replace('.', "\\."))
+        .map(|w| match w.to_string().split_once('.') {
+            Some((whole, fraction)) => format!("0*{whole}\\.{fraction}0*"),
+            None => format!("0*{w}(\\.0+)?"),
+        })
+        .join("|");
+    let degrees = (1..=HIGHEST_DEGREE)
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
         .join("|");
     let colours = COLOUR_NAMES.map(|(name, _)| name);
     let objects: Vec<Value> = OBJECT_TYPES
@@ -109,7 +124,7 @@ pub fn sheet_description_schema() -> Value {
                  name under `layers`, written exactly as it is there. Without it the object \
                  sits on layer `{LAYER_ZERO}`."
             ),
-            "type": ["string", "number"],
+            "type": ["string", "number", "boolean", "null"],
         }),
     );
     defs.insert(
@@ -148,7 +163,7 @@ pub fn sheet_description_schema() -> Value {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-                "colour": {
+                "color": {
                     "description": format!(
                         "An AutoCAD colour index from 1 to 255, or one of {} (1 to 7). \
                          Without it, {WHITE} (white).",
@@ -156,6 +171,10 @@ pub fn sheet_description_schema() -> Value {
                     ),
                     "anyOf": [
                         { "type": "integer", "minimum": 1, "maximum": 255 },
+                        {
+                            "type": "string",
+                            "pattern": "^0*([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$",
+                        },
                         { "enum": colours },
                     ],
                 },
@@ -164,7 +183,7 @@ pub fn sheet_description_schema() -> Value {
                         "`{CONTINUOUS}`, the solid line every drawing has, or a name under \
                          `linetypes`, written exactly as it is there. Without it, `{CONTINUOUS}`."
                     ),
-                    "type": ["string", "number"],
+                    "type": ["string", "number", "boolean", "null"],
                 },
                 "lineweight": {
                     "description": format!(
@@ -209,7 +228,7 @@ pub fn sheet_description_schema() -> Value {
                 "closed": {
                     "description": "Whether a last segment joins the last point back to the \
                                     first. Without it, false.",
-                    "type": "boolean",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
                 },
             }),
         ),
@@ -219,9 +238,9 @@ pub fn sheet_description_schema() -> Value {
         object_def(
             "Part of a circle, drawn anticlockwise from its start angle to its end angle, in the \
              plane parallel to XY at its centre's z.",
-            &["centre", "radius", "start_angle", "end_angle"],
+            &["center", "radius", "start_angle", "end_angle"],
             json!({
-                "centre": { "$ref": "#/$defs/point" },
+                "center": { "$ref": "#/$defs/point" },
                 "radius": { "$ref": "#/$defs/length", "description": "A length more than 0." },
                 "start_angle": {
                     "$ref": "#/$defs/angle",
@@ -239,9 +258,9 @@ pub fn sheet_description_schema() -> Value {
         "circle".into(),
         object_def(
             "A circle in the plane parallel to XY at its centre's z.",
-            &["centre", "radius"],
+            &["center", "radius"],
             json!({
-                "centre": { "$ref": "#/$defs/point" },
+                "center": { "$ref": "#/$defs/point" },
                 "radius": { "$ref": "#/$defs/length", "description": "A length more than 0." },
             }),
         ),
@@ -251,9 +270,9 @@ pub fn sheet_description_schema() -> Value {
         object_def(
             "An ellipse in the plane parallel to XY at its centre's z. With start_angle and \
              end_angle, only the part from one to the other, anticlockwise.",
-            &["centre", "major_axis", "ratio"],
+            &["center", "major_axis", "ratio"],
             json!({
-                "centre": { "$ref": "#/$defs/point" },
+                "center": { "$ref": "#/$defs/point" },
                 "major_axis": {
                     "$ref": "#/$defs/point",
                     "description": "From the centre to one end of the major axis, as [dx, dy, dz]; \
@@ -309,9 +328,10 @@ pub fn sheet_description_schema() -> Value {
                             "The degree of a curve by control points, 1 to {HIGHEST_DEGREE}. \
                              Without it, {FIT_DEGREE}. Not given with fit_points."
                         ),
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": HIGHEST_DEGREE,
+                        "anyOf": [
+                            { "type": "integer", "minimum": 1, "maximum": HIGHEST_DEGREE },
+                            { "type": "string", "pattern": format!("^0*({degrees})$") },
+                        ],
                     },
                 }),
             );

@@ -30,14 +30,16 @@ linetypes:
     description: Hidden __ __ __ __
     pattern: [6.35, -3.175]
 layers:
-  outline: {colour: white, lineweight: 0.5}
-  hidden: {colour: yellow, linetype: HIDDEN, lineweight: 0.25}
+  outline: {color: white, lineweight: 0.5}
+  hidden: {color: yellow, linetype: HIDDEN, lineweight: 0.25}
 objects:
-  - circle: {centre: [60, 40, 0], radius: 20, layer: outline}
+  - circle: {center: [60, 40, 0], radius: 20, layer: outline}
   - line: {from: [40, 0, 0], to: [40, 80, 0], layer: hidden}
 ```
 
 ## What it holds
+
+Keys are spelled as AutoCAD spells them: `color`, `center`.
 
 | Key | Required | What it is |
 |---|---|---|
@@ -61,9 +63,9 @@ A layer is a named group of objects that draw with its colour, linetype and line
 
 | Key | Required | What it is |
 |---|---|---|
-| `colour` | no | An AutoCAD colour index from 1 to 255, or one of `red` (1), `yellow` (2), `green` (3), `cyan` (4), `blue` (5), `magenta` (6) or `white` (7). Without it, 7. |
+| `color` | no | An AutoCAD colour index from 1 to 255, or one of `red` (1), `yellow` (2), `green` (3), `cyan` (4), `blue` (5), `magenta` (6) or `white` (7). Without it, 7. |
 | `linetype` | no | `Continuous`, or a name under `linetypes` written exactly as it is there. Without it, `Continuous`. |
-| `lineweight` | no | The pen width the layer plots with, in millimetres, with or without `mm`: one of AutoCAD's standard lineweights, 0, 0.05, 0.09, 0.13, 0.15, 0.18, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.53, 0.6, 0.7, 0.8, 0.9, 1, 1.06, 1.2, 1.4, 1.58, 2 or 2.11. Without it, AutoCAD's default lineweight. |
+| `lineweight` | no | The pen width the layer plots with, in millimetres, with or without `mm`, written out as digits with a `.` and digits if any, such as `0.35` or `0.50`, with no sign or exponent: one of AutoCAD's standard lineweights, 0, 0.05, 0.09, 0.13, 0.15, 0.18, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.53, 0.6, 0.7, 0.8, 0.9, 1, 1.06, 1.2, 1.4, 1.58, 2 or 2.11. Without it, AutoCAD's default lineweight. |
 
 A lineweight is the one number on a sheet that is not in the declared unit. It is a width on paper, not a length on the drawing: a 0.35 mm pen is 0.35 mm on a sheet drawn in inches. Written in any unit but `mm`, it is an error.
 
@@ -77,9 +79,9 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 |---|---|---|
 | `line` | `from`, `to` | A straight line between two points. |
 | `polyline` | `points`; `closed` | Straight segments joined end to end through the points, in order: at least 2, or 3 when closed. `closed: true` adds a segment from the last point back to the first; without it, `false`. When every point has the same `z`, it is AutoCAD's lightweight polyline at that elevation; otherwise it is a 3D polyline. |
-| `arc` | `centre`, `radius`, `start_angle`, `end_angle` | Part of a circle, drawn anticlockwise from its start angle to its end angle. The angles must differ once whole turns are taken off; a whole circle is a `circle`. |
-| `circle` | `centre`, `radius` | A circle. |
-| `ellipse` | `centre`, `major_axis`, `ratio`; `start_angle`, `end_angle` | An ellipse. `major_axis` runs from the centre to one end of the major axis, as `[dx, dy, dz]`, with `dz` 0. `ratio` is the minor axis over the major axis, more than 0 and at most 1. With `start_angle` and `end_angle`, measured anticlockwise from the major axis, only the part from one to the other is drawn; give both or neither. |
+| `arc` | `center`, `radius`, `start_angle`, `end_angle` | Part of a circle, drawn anticlockwise from its start angle to its end angle. The angles must differ once whole turns are taken off; a whole circle is a `circle`. |
+| `circle` | `center`, `radius` | A circle. |
+| `ellipse` | `center`, `major_axis`, `ratio`; `start_angle`, `end_angle` | An ellipse. `major_axis` runs from the centre to one end of the major axis, as `[dx, dy, dz]`, with `dz` 0. `ratio` is the minor axis over the major axis, more than 0 and at most 1. With `start_angle` and `end_angle`, measured anticlockwise from the major axis, only the part from one to the other is drawn; give both or neither. |
 | `spline` | `fit_points` or `control_points`; `degree` | A smooth curve. With `fit_points`, at least 3 points it passes through, no two in a row the same; AutoCAD fits a cubic through them, as its SPLINE command does by default. With `control_points`, the control points of a B-spline that starts at the first and ends at the last, of `degree` 1 to 10 (without it, 3), with more control points than its degree. Not both. |
 
 Keys before the semicolon are required; keys after it are not. A `radius` is a length more than 0.
@@ -122,7 +124,7 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 
 ## The schema
 
-`agentdrafter schema` prints one line of JSON, `{"ok":true,"result":{...}}`, whose result is a JSON Schema of the sheet description. JSON Schema describes JSON, and a YAML reader that guesses types turns `100` into a number and `4 in` into a string, so in the schema a length is a number or a string that reads as one. The rules of the YAML subset are not JSON Schema; the schema's top-level description states them. The schema is built from the same tables the reader checks keys against, and a test keeps the two in step.
+`agentdrafter schema` prints one line of JSON, `{"ok":true,"result":{...}}`, whose result is a JSON Schema of the sheet description. JSON Schema describes JSON, and a YAML reader that guesses types turns `100` into a number and `4 in` into a string, so in the schema a length is a number or a string that reads as one. Quoted and plain scalars mean the same here, so the schema takes every value the reader takes in either form: `color: '42'`, `lineweight: '0.50 mm'`, `closed: 'true'` and `degree: '2'` pass both. What JSON Schema cannot see is left to the reader: such a YAML reader turns `+5` and `5` into one number, and some checks compare one value with another, such as a degree with the number of control points. The rules of the YAML subset are not JSON Schema either; the schema's top-level description states them. The schema is built from the same tables the reader checks keys against, and tests keep the two in step.
 
 ## Errors
 

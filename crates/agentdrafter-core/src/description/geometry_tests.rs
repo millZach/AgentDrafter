@@ -61,9 +61,9 @@ fn every_object_type_reads() {
         })
     );
     assert_eq!(
-        one("arc: {centre: [1, 2, 3], radius: 4, start_angle: 30, end_angle: 120}"),
+        one("arc: {center: [1, 2, 3], radius: 4, start_angle: 30, end_angle: 120}"),
         Object::Arc(Arc {
-            centre: Point3::new(1.0, 2.0, 3.0),
+            center: Point3::new(1.0, 2.0, 3.0),
             radius: 4.0,
             start_angle: 30.0,
             end_angle: 120.0,
@@ -71,17 +71,17 @@ fn every_object_type_reads() {
         })
     );
     assert_eq!(
-        one("circle: {centre: [1, 2, 3], radius: 4}"),
+        one("circle: {center: [1, 2, 3], radius: 4}"),
         Object::Circle(Circle {
-            centre: Point3::new(1.0, 2.0, 3.0),
+            center: Point3::new(1.0, 2.0, 3.0),
             radius: 4.0,
             layer: on_zero(),
         })
     );
     assert_eq!(
-        one("ellipse: {centre: [0, 0, 0], major_axis: [10, 0, 0], ratio: 0.5}"),
+        one("ellipse: {center: [0, 0, 0], major_axis: [10, 0, 0], ratio: 0.5}"),
         Object::Ellipse(Ellipse {
-            centre: P0,
+            center: P0,
             major_axis: Point3::new(10.0, 0.0, 0.0),
             ratio: 0.5,
             start_angle: 0.0,
@@ -127,13 +127,13 @@ fn defaults_are_an_open_polyline_a_cubic_spline_and_layer_zero() {
 #[test]
 fn angles_lose_whole_turns() {
     let Object::Arc(arc) =
-        one("arc: {centre: [0, 0, 0], radius: 1, start_angle: -90, end_angle: 450}")
+        one("arc: {center: [0, 0, 0], radius: 1, start_angle: -90, end_angle: 450}")
     else {
         panic!()
     };
     assert_eq!((arc.start_angle, arc.end_angle), (270.0, 90.0));
     let Object::Ellipse(ellipse) = one(
-        "ellipse: {centre: [0, 0, 0], major_axis: [0, 3, 0], ratio: 1, start_angle: 360, end_angle: 180}",
+        "ellipse: {center: [0, 0, 0], major_axis: [0, 3, 0], ratio: 1, start_angle: 360, end_angle: 180}",
     ) else {
         panic!()
     };
@@ -148,8 +148,8 @@ fn lengths_with_their_own_unit_are_converted_everywhere() {
 linetypes:
   DASHED: {pattern: [0.5 in, -2.5mm]}
 objects:
-  - circle: {centre: [1 in, 0, 0], radius: 1 cm}
-  - ellipse: {centre: [0, 0, 0], major_axis: [1 m, 0, 0], ratio: 0.25}
+  - circle: {center: [1 in, 0, 0], radius: 1 cm}
+  - ellipse: {center: [0, 0, 0], major_axis: [1 m, 0, 0], ratio: 0.25}
 ",
     );
     assert_eq!(sheet.linetypes[0].pattern, vec![12.7, -2.5]);
@@ -157,12 +157,12 @@ objects:
         sheet.objects,
         vec![
             Object::Circle(Circle {
-                centre: Point3::new(25.4, 0.0, 0.0),
+                center: Point3::new(25.4, 0.0, 0.0),
                 radius: 10.0,
                 layer: on_zero(),
             }),
             Object::Ellipse(Ellipse {
-                centre: P0,
+                center: P0,
                 major_axis: Point3::new(1000.0, 0.0, 0.0),
                 ratio: 0.25,
                 start_angle: 0.0,
@@ -181,9 +181,9 @@ linetypes:
     pattern: [12.7, -6.35]
   dot: {pattern: [0, -2]}
 layers:
-  outline: {colour: 7, lineweight: 0.5}
-  hidden: {colour: red, linetype: DASHED, lineweight: 0.25 mm}
-  \"0\": {colour: 3}
+  outline: {color: 7, lineweight: 0.5}
+  hidden: {color: red, linetype: DASHED, lineweight: 0.25 mm}
+  \"0\": {color: 3}
   notes: {}
 objects:
   - line: {from: [0, 0, 0], to: [10, 0, 0], layer: hidden}
@@ -217,19 +217,19 @@ fn layers_carry_colour_linetype_and_lineweight_from_a_linetype_definition() {
                 ..Layer::new("outline")
             },
             Layer {
-                colour: 1,
+                color: 1,
                 linetype: "DASHED".into(),
                 lineweight: weight(0.25),
                 ..Layer::new("hidden")
             },
             Layer {
-                colour: 3,
+                color: 3,
                 ..Layer::new("0")
             },
             Layer::new("notes"),
         ]
     );
-    assert_eq!(Layer::new("notes").colour, 7);
+    assert_eq!(Layer::new("notes").color, 7);
     assert_eq!(Layer::new("notes").linetype, "Continuous");
     assert_eq!(
         sheet.objects[0],
@@ -257,9 +257,9 @@ fn every_colour_name_and_index_reads() {
         ("'42'", 42),
     ] {
         let sheet = sheet(&format!(
-            "units: mm\nlayers: {{a: {{colour: {name}}}}}\nobjects: []\n"
+            "units: mm\nlayers: {{a: {{color: {name}}}}}\nobjects: []\n"
         ));
-        assert_eq!(sheet.layers[0].colour, index, "{name}");
+        assert_eq!(sheet.layers[0].color, index, "{name}");
     }
 }
 
@@ -282,7 +282,7 @@ fn every_standard_lineweight_reads_in_millimetres_whatever_the_unit() {
 #[test]
 fn an_unknown_layer_lists_the_sheets_layers() {
     let e = error(
-        "units: mm\nlayers: {outline: {}, hidden: {}}\nobjects:\n  - circle: {centre: [0, 0, 0], radius: 1, layer: Outline}\n",
+        "units: mm\nlayers: {outline: {}, hidden: {}}\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1, layer: Outline}\n",
     );
     assert_names(
         &e,
@@ -322,14 +322,14 @@ fn a_colour_outside_the_index_is_refused_with_the_choices() {
         "[1, 2, 3]",
     ] {
         let e = error(&format!(
-            "units: mm\nlayers:\n  a: {{colour: {bad}}}\nobjects: []\n"
+            "units: mm\nlayers:\n  a: {{color: {bad}}}\nobjects: []\n"
         ));
         let code = if bad.starts_with('[') {
             ErrorCode::WrongType
         } else {
             ErrorCode::BadValue
         };
-        assert_names(&e, code, "layers.a.colour", &[]);
+        assert_names(&e, code, "layers.a.color", &[]);
         if code == ErrorCode::BadValue {
             assert!(e.message.contains("1 to 255"), "{bad}: {}", e.message);
             assert!(
@@ -455,12 +455,12 @@ fn a_linetype_pattern_follows_autocads_rules() {
 
 #[test]
 fn unknown_keys_in_layers_linetypes_and_objects_list_the_allowed_keys() {
-    let e = error("units: mm\nlayers:\n  a: {color: red}\nobjects: []\n");
+    let e = error("units: mm\nlayers:\n  a: {fill: red}\nobjects: []\n");
     assert_names(
         &e,
         ErrorCode::UnknownKey,
-        "layers.a.color",
-        &["a layer takes colour, linetype, lineweight"],
+        "layers.a.fill",
+        &["a layer takes color, linetype, lineweight"],
     );
     let e = error("units: mm\nlinetypes:\n  a: {dashes: [1, -1]}\nobjects: []\n");
     assert_names(
@@ -476,19 +476,19 @@ fn unknown_keys_in_layers_linetypes_and_objects_list_the_allowed_keys() {
             "a polyline takes points, closed, layer",
         ),
         (
-            "arc: {center: [0, 0, 0]}",
-            "center",
-            "an arc takes centre, radius, start_angle, end_angle, layer",
+            "arc: {middle: [0, 0, 0]}",
+            "middle",
+            "an arc takes center, radius, start_angle, end_angle, layer",
         ),
         (
             "circle: {diameter: 2}",
             "diameter",
-            "a circle takes centre, radius, layer",
+            "a circle takes center, radius, layer",
         ),
         (
             "ellipse: {minor_axis: 2}",
             "minor_axis",
-            "an ellipse takes centre, major_axis, ratio, start_angle, end_angle, layer",
+            "an ellipse takes center, major_axis, ratio, start_angle, end_angle, layer",
         ),
         (
             "spline: {points: []}",
@@ -505,6 +505,95 @@ fn unknown_keys_in_layers_linetypes_and_objects_list_the_allowed_keys() {
             &[allowed],
         );
     }
+}
+
+/// Keys are spelled as AutoCAD spells them. The British spelling is an
+/// unknown key, not an alias.
+#[test]
+fn keys_are_spelled_as_autocad_spells_them() {
+    let read = sheet(
+        "units: mm\nlayers: {a: {color: red}}\nobjects:\n  - circle: {center: [1, 2, 3], radius: 1, layer: a}\n",
+    );
+    // The model's JSON names its keys the same way.
+    let json = serde_json::to_value(&read).unwrap();
+    assert_eq!(json["layers"][0]["color"], 1, "{json}");
+    assert_eq!(
+        json["objects"][0]["center"],
+        serde_json::json!([1.0, 2.0, 3.0]),
+        "{json}"
+    );
+
+    let e = error("units: mm\nlayers:\n  a: {colour: red}\nobjects: []\n");
+    assert_names(
+        &e,
+        ErrorCode::UnknownKey,
+        "layers.a.colour",
+        &["unknown key `colour`; a layer takes color, linetype, lineweight"],
+    );
+    for (object, type_name, allowed) in [
+        (
+            "circle: {centre: [0, 0, 0], radius: 1}",
+            "circle",
+            "a circle takes center, radius, layer",
+        ),
+        (
+            "arc: {centre: [0, 0, 0], radius: 1, start_angle: 0, end_angle: 90}",
+            "arc",
+            "an arc takes center, radius, start_angle, end_angle, layer",
+        ),
+        (
+            "ellipse: {centre: [0, 0, 0], major_axis: [1, 0, 0], ratio: 0.5}",
+            "ellipse",
+            "an ellipse takes center, major_axis, ratio, start_angle, end_angle, layer",
+        ),
+    ] {
+        assert_names(
+            &object_error(object),
+            ErrorCode::UnknownKey,
+            &format!("objects[0].{type_name}.centre"),
+            &["unknown key `centre`", allowed],
+        );
+    }
+}
+
+/// A value of the wrong shape where a choice belongs lists the choices,
+/// as every other error about a choice does.
+#[test]
+fn a_wrong_shaped_choice_lists_the_choices() {
+    let e = error(
+        "units: mm\nlinetypes: {DASHED: {pattern: [1, -1]}}\nlayers:\n  a: {linetype: []}\nobjects: []\n",
+    );
+    assert_names(
+        &e,
+        ErrorCode::WrongType,
+        "layers.a.linetype",
+        &["found a list", "Continuous, DASHED"],
+    );
+    let e = error(
+        "units: mm\nlayers: {outline: {}}\nobjects:\n  - line: {from: [0, 0, 0], to: [1, 0, 0], layer: [outline]}\n",
+    );
+    assert_names(
+        &e,
+        ErrorCode::WrongType,
+        "objects[0].line.layer",
+        &["found a list", "0, outline"],
+    );
+    let e = error("units: mm\nlayers:\n  a: {color: [1, 2, 3]}\nobjects: []\n");
+    assert_names(
+        &e,
+        ErrorCode::WrongType,
+        "layers.a.color",
+        &["1 to 255", "red, yellow, green, cyan, blue, magenta, white"],
+    );
+    let e = error("units: mm\nlayers:\n  a: {lineweight: {mm: 0.35}}\nobjects: []\n");
+    assert_names(
+        &e,
+        ErrorCode::WrongType,
+        "layers.a.lineweight",
+        &["found a mapping", "0.35, 0.4, 0.5"],
+    );
+    let e = error("units: [mm]\nobjects: []\n");
+    assert_names(&e, ErrorCode::WrongType, "units", &["mm, cm, m, in, ft"]);
 }
 
 #[test]
@@ -539,11 +628,11 @@ fn a_polyline_needs_two_points_or_three_when_closed() {
 fn a_radius_is_more_than_zero() {
     for (object, field) in [
         (
-            "circle: {centre: [0, 0, 0], radius: 0}",
+            "circle: {center: [0, 0, 0], radius: 0}",
             "objects[0].circle.radius",
         ),
         (
-            "arc: {centre: [0, 0, 0], radius: -1, start_angle: 0, end_angle: 90}",
+            "arc: {center: [0, 0, 0], radius: -1, start_angle: 0, end_angle: 90}",
             "objects[0].arc.radius",
         ),
     ] {
@@ -555,7 +644,7 @@ fn a_radius_is_more_than_zero() {
         );
     }
     assert_names(
-        &object_error("circle: {centre: [0, 0, 0]}"),
+        &object_error("circle: {center: [0, 0, 0]}"),
         ErrorCode::MissingKey,
         "objects[0].circle.radius",
         &[],
@@ -565,13 +654,13 @@ fn a_radius_is_more_than_zero() {
 #[test]
 fn an_arc_and_an_angle_are_checked() {
     assert_names(
-        &object_error("arc: {centre: [0, 0, 0], radius: 1, start_angle: 10, end_angle: 370}"),
+        &object_error("arc: {center: [0, 0, 0], radius: 1, start_angle: 10, end_angle: 370}"),
         ErrorCode::BadValue,
         "objects[0].arc.end_angle",
         &["`circle`"],
     );
     assert_names(
-        &object_error("arc: {centre: [0, 0, 0], radius: 1, start_angle: 90 deg, end_angle: 0}"),
+        &object_error("arc: {center: [0, 0, 0], radius: 1, start_angle: 90 deg, end_angle: 0}"),
         ErrorCode::BadNumber,
         "objects[0].arc.start_angle",
         &["degrees", "no unit"],
@@ -580,7 +669,7 @@ fn an_arc_and_an_angle_are_checked() {
 
 #[test]
 fn an_ellipse_is_checked() {
-    let ellipse = |rest: &str| object_error(&format!("ellipse: {{centre: [0, 0, 0], {rest}}}"));
+    let ellipse = |rest: &str| object_error(&format!("ellipse: {{center: [0, 0, 0], {rest}}}"));
     assert_names(
         &ellipse("major_axis: [1, 0, 1], ratio: 0.5"),
         ErrorCode::BadValue,

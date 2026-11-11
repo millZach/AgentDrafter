@@ -138,7 +138,7 @@ fn an_unknown_key_is_named() {
 
 #[test]
 fn an_unknown_object_type_is_named() {
-    let e = error("units: mm\nobjects:\n  - hexagon: {centre: [0, 0, 0]}\n");
+    let e = error("units: mm\nobjects:\n  - hexagon: {center: [0, 0, 0]}\n");
     assert_eq!(e.code, ErrorCode::UnknownKey);
     assert_eq!(e.field.as_deref(), Some("objects[0].hexagon"));
     assert_eq!(
