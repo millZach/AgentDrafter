@@ -16,7 +16,7 @@
 //! its standard input closes. Nothing but MCP messages goes to standard
 //! output.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::process::ExitCode;
 
 use agentdrafter_core::{commands, find_command, Error, Reply, Settings};
@@ -68,29 +68,84 @@ pub fn serve(mut args: Args) -> ExitCode {
         return code;
     }
     let settings = Settings::from_env();
-    let mut server = Server::default();
     let stdin = std::io::stdin();
-    let mut input = stdin.lock();
     let stdout = std::io::stdout();
-    let mut output = stdout.lock();
+    answer_lines(
+        &mut stdin.lock(),
+        &mut stdout.lock(),
+        &settings,
+        MOST_MESSAGE,
+    );
+    ExitCode::SUCCESS
+}
+
+/// The most one message may hold, as the HTTP API's body may.
+const MOST_MESSAGE: usize = 64 * 1024 * 1024;
+
+/// Answers each message on `input`, one to a line and each of `most`
+/// bytes at most, on `output`, until `input` ends or `output` closes. A
+/// longer message is not read into memory: it is answered with an error and
+/// passed over to the end of its line.
+fn answer_lines(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    settings: &Settings,
+    most: usize,
+) {
+    let mut server = Server::default();
     let mut line = Vec::new();
     loop {
         line.clear();
-        match input.read_until(b'\n', &mut line) {
+        // One byte more than a message may hold tells a long one apart.
+        let limit = u64::try_from(most).unwrap_or(u64::MAX).saturating_add(1);
+        match input.by_ref().take(limit).read_until(b'\n', &mut line) {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        if let Some(answer) = server.handle(&line, &settings) {
+        let answer = if line.len() > most && line.last() != Some(&b'\n') {
+            if pass_line(input).is_err() {
+                break;
+            }
+            Some(failure(
+                Value::Null,
+                (
+                    -32600,
+                    format!("Invalid Request: a message holds at most {most} bytes"),
+                ),
+            ))
+        } else if line.iter().all(u8::is_ascii_whitespace) {
+            None
+        } else {
+            server.handle(&line, settings)
+        };
+        if let Some(answer) = answer {
             let sent = writeln!(output, "{answer}").and_then(|()| output.flush());
             if sent.is_err() {
                 break;
             }
         }
     }
-    ExitCode::SUCCESS
+}
+
+/// Passes over what is left of a line on `input`, its newline too, holding
+/// none of it.
+fn pass_line(input: &mut impl BufRead) -> std::io::Result<()> {
+    loop {
+        let buffer = input.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok(());
+        }
+        match buffer.iter().position(|&b| b == b'\n') {
+            Some(end) => {
+                input.consume(end + 1);
+                return Ok(());
+            }
+            None => {
+                let length = buffer.len();
+                input.consume(length);
+            }
+        }
+    }
 }
 
 /// The server's state: the handshake revision a client chose, if one did.
@@ -286,6 +341,50 @@ mod tests {
 
     fn ask(server: &mut Server, message: Value) -> Option<Value> {
         server.handle(message.to_string().as_bytes(), &Settings::default())
+    }
+
+    /// The answers `answer_lines` writes for `input`, with messages of
+    /// `most` bytes at most.
+    fn answers(input: impl std::io::Read, most: usize) -> Vec<Value> {
+        let mut output = Vec::new();
+        let mut input = std::io::BufReader::new(input);
+        answer_lines(&mut input, &mut output, &Settings::default(), most);
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    const PING: &str = r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#;
+
+    #[test]
+    fn a_message_over_the_cap_is_refused_and_the_next_one_answered() {
+        // A line of more than 64 MiB, then a ping.
+        let long = std::io::repeat(b'x').take(MOST_MESSAGE as u64 + 1000);
+        let rest = std::io::Cursor::new(format!("\n{PING}\n"));
+        let got = answers(long.chain(rest), MOST_MESSAGE);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0]["error"]["code"], -32600);
+        assert_eq!(got[0]["id"], Value::Null);
+        assert!(got[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&MOST_MESSAGE.to_string()));
+        assert_eq!(got[1], json!({"jsonrpc": "2.0", "id": 7, "result": {}}));
+
+        // A message of the cap is taken; one byte more is not.
+        let most = PING.len() + 4;
+        let fits = format!("{PING}    \n");
+        let over = format!("{PING}     \n{PING}\n");
+        assert_eq!(answers(fits.as_bytes(), most)[0]["result"], json!({}));
+        let got = answers(over.as_bytes(), most);
+        assert_eq!(got[0]["error"]["code"], -32600);
+        assert_eq!(got[1]["result"], json!({}));
+        // A long last line with no newline ends the input.
+        let got = answers(format!("{PING}{}", " ".repeat(100)).as_bytes(), most);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["error"]["code"], -32600);
     }
 
     #[test]

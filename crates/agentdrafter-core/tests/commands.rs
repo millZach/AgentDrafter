@@ -8,6 +8,11 @@ use agentdrafter_core::{
 };
 use serde_json::{json, Value};
 
+#[path = "support/demo_set.rs"]
+mod demo_set;
+#[path = "support/snapshot.rs"]
+mod snapshot;
+
 /// A reply as plain JSON.
 fn plain(reply: &JsonReply) -> Value {
     serde_json::to_value(reply).unwrap()
@@ -136,6 +141,74 @@ fn each_schema_accepts_what_its_command_reads_and_refuses_what_it_refuses() {
             );
         }
     }
+}
+
+#[test]
+fn a_key_the_schema_does_not_name_is_refused_in_every_kind_of_query() {
+    let validator =
+        jsonschema::validator_for(&find_command("query").unwrap().input_schema()).unwrap();
+    let end = json!({"id": "DEMO-001/border"});
+    for (query, key) in [
+        (json!({"kind": "find", "name": "title-block"}), "colour"),
+        (json!({"kind": "blocks"}), "name"),
+        (
+            json!({"kind": "attributes", "block": "TITLE_BLOCK"}),
+            "colour",
+        ),
+        (json!({"kind": "measure", "from": end, "to": end}), "colour"),
+        (json!({"kind": "extents"}), "typo"),
+    ] {
+        let taken = json!({"source": "missing", "query": query});
+        assert!(validator.is_valid(&taken), "{taken}");
+        assert_ne!(
+            run("query", taken.clone())["error"]["code"],
+            "usage",
+            "{taken}"
+        );
+
+        let mut refused = taken.clone();
+        refused["query"][key] = json!("x");
+        assert!(!validator.is_valid(&refused), "{refused}");
+        let reply = run("query", refused.clone());
+        assert_eq!(reply["error"]["code"], "usage", "{refused}: {reply}");
+        assert!(reply["error"]["message"].as_str().unwrap().contains(key));
+    }
+    // And in an end of a distance.
+    let refused = json!({"source": "missing", "query": {
+        "kind": "measure", "from": {"id": "DEMO-001/border", "colour": 1}, "to": end}});
+    assert!(!validator.is_valid(&refused));
+    assert_eq!(run("query", refused)["error"]["code"], "usage");
+}
+
+#[test]
+fn a_key_the_schema_does_not_name_is_refused_in_a_change_set_and_changes_nothing() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("commands-unknown-key");
+    let _ = std::fs::remove_dir_all(&dir);
+    let set = dir.join("demo-set");
+    demo_set::copy_demo_set(&set);
+    let before = snapshot::snapshot(&set);
+    let validator =
+        jsonschema::validator_for(&find_command("change").unwrap().input_schema()).unwrap();
+    let operation = json!({"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]});
+    let mut in_operation = operation.clone();
+    in_operation["colour"] = json!(1);
+    for change_set in [
+        json!({"operations": [operation], "colour": 1}),
+        json!({"operations": [in_operation]}),
+    ] {
+        let input = json!({"set": set, "change_set": change_set, "dry_run": false});
+        assert!(!validator.is_valid(&input), "{input}");
+        let reply = run("change", input.clone());
+        assert_eq!(reply["ok"], false, "{input}: {reply}");
+        assert!(
+            ["unknown_key", "usage"].contains(&reply["error"]["code"].as_str().unwrap()),
+            "{reply}"
+        );
+    }
+    // Every record as it was, and no DWG built; only the journal says the
+    // attempts were made.
+    assert_eq!(snapshot::snapshot(&set), before);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

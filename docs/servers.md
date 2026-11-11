@@ -58,7 +58,7 @@ The status says what the command line's exit code says, and every response, a re
 | 400 | The request is wrong (`usage`): the body is not JSON, or does not fit the command's input. |
 | 401, 403 | The request was refused before it reached a command (`unauthorized`). |
 | 404, 405 | No such route or command, or the wrong method. |
-| 411, 413, 415, 431 | A chunked body, a body over 64 MiB, a body that is not sent as JSON, or headers over 64 KiB. |
+| 408, 411, 413, 415, 431 | A request that did not arrive within 30 seconds, a chunked body, a body over 64 MiB, a body that is not sent as JSON, or headers over 64 KiB. |
 | 422 | The core reported an error, such as a file it could not read or a sheet that failed. |
 
 ### Guarding the port
@@ -70,7 +70,7 @@ The HTTP API is an open port to guard (ADR-0007). Zach decided on 2026-11-11 tha
 
 ### How HTTP is read
 
-Plainly. Each connection carries one request and is closed after its response. A body is sized by `Content-Length`; a chunked body is refused, so no request can be read as part of another. Requests are taken one at a time, in the order they come, so two change sets never run on a drawing set at once; a long plot keeps the next request waiting. A connection that sends nothing for 30 seconds is closed.
+Plainly. Each connection carries one request and is closed after its response. A body is sized by `Content-Length`; a chunked body is refused, so no request can be read as part of another. Requests are taken one at a time, in the order they come, so two change sets never run on a drawing set at once; a long plot keeps the next request waiting. A connection has 30 seconds to send its whole request, however slowly it sends it, and 30 seconds to take its reply; then it is closed. A request that is refused is closed at once, its body unread. So no client can hold the server.
 
 ## The MCP server
 
@@ -91,7 +91,7 @@ Messages are JSON-RPC 2.0, one to a line, and nothing else goes to standard outp
 - a client that opens with `initialize`, the handshake of revisions 2025-11-25, 2025-06-18, 2025-03-26 and 2024-11-05, is answered in the revision it asks for, or else 2025-11-25; revisions before 2025-06-18 get no `structuredContent`;
 - a request that names revision 2026-07-28 under `_meta`, `io.modelcontextprotocol/protocolVersion`, is served as that revision says, with no handshake, and `server/discover` answers it. A request that names another revision is refused with `-32022` and the revisions the server speaks.
 
-It takes requests one at a time, in order, and stops when its standard input closes.
+A message holds at most 64 MiB, as the HTTP API's body may. A longer one is not read into memory: it is answered with `-32600` and passed over to the end of its line. The server takes requests one at a time, in order, and stops when its standard input closes.
 
 ## Errors the servers add
 

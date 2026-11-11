@@ -16,7 +16,7 @@
 //! folders an input names come before those the interface's settings name,
 //! as `--fonts` and `--plot-styles` come before the environment's.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -240,14 +240,7 @@ fn run_build(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply
         output,
         overwrite,
     } = parse("build", input)?;
-    // A folder is a drawing set, whose settings say where its DWGs go.
-    if source.is_dir() {
-        if output.is_some() {
-            return Err(Error::usage(format!(
-                "a drawing set's DWGs go to the folder its settings ({SET_SETTINGS_FILE}) name \
-                 under `output`; an output path (--output) is for one sheet description"
-            )));
-        }
+    if is_set(&source, output.as_deref(), "DWGs", "one sheet description")? {
         let request = SetBuildRequest {
             set: source,
             overwrite,
@@ -439,14 +432,12 @@ fn run_plot(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply,
         overwrite,
         plot_style,
     } = parse("plot", input)?;
-    // A folder is a drawing set, whose settings say where its outputs go.
-    if source.is_dir() {
-        if output.is_some() {
-            return Err(Error::usage(format!(
-                "a drawing set's PDFs go to the folder its settings ({SET_SETTINGS_FILE}) name \
-                 under `output`; an output path (--output) is for one sheet description or DWG"
-            )));
-        }
+    if is_set(
+        &source,
+        output.as_deref(),
+        "PDFs",
+        "one sheet description or DWG",
+    )? {
         let request = PlotSetRequest {
             set: source,
             overwrite,
@@ -753,6 +744,22 @@ fn run_check(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply
 }
 
 // What every command shares.
+
+/// Whether `source` is a drawing set: a folder, whose settings say where
+/// its `outputs` go, so an `output` path, which is for `one` source, is
+/// refused with it. `build` and `plot` both ask.
+fn is_set(source: &Path, output: Option<&Path>, outputs: &str, one: &str) -> Result<bool, Error> {
+    if !source.is_dir() {
+        return Ok(false);
+    }
+    if output.is_some() {
+        return Err(Error::usage(format!(
+            "a drawing set's {outputs} go to the folder its settings ({SET_SETTINGS_FILE}) name \
+             under `output`; an output path (--output) is for {one}"
+        )));
+    }
+    Ok(true)
+}
 
 /// The settings for one command: the font folders the input's `fonts`
 /// names, then those of `base`; and, when the command plots, the plot

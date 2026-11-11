@@ -25,13 +25,15 @@
 //!
 //! HTTP is read plainly: one request on each connection, its body sized by
 //! `Content-Length` and no chunked body, so no request can be read as part
-//! of another. Requests are taken one at a time, so two change sets never
-//! run on a set at once.
+//! of another. A connection has 30 seconds to send its whole request and
+//! 30 to take its reply, however slowly it sends, and a refused request is
+//! closed unread, so no client can hold the server. Requests are taken one
+//! at a time, so two change sets never run on a set at once.
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agentdrafter_core::{commands, find_command, Error, ErrorCode, Reply, Settings};
 use serde_json::{json, Value};
@@ -64,8 +66,70 @@ const MOST_HEAD: usize = 64 * 1024;
 /// The most a request's body may hold.
 const MOST_BODY: usize = 64 * 1024 * 1024;
 
-/// How long a connection may wait between reads or writes.
-const WAIT: Duration = Duration::from_secs(30);
+/// How long a connection has to send its whole request, and then to take
+/// its whole reply. However slowly a client sends, it is cut off then.
+const DEADLINE: Duration = Duration::from_secs(30);
+
+/// The time by which a connection must have sent its request, or taken
+/// its reply.
+#[derive(Clone, Copy)]
+struct Deadline {
+    by: Instant,
+    limit: Duration,
+}
+
+impl Deadline {
+    fn after(limit: Duration) -> Self {
+        Self {
+            by: Instant::now() + limit,
+            limit,
+        }
+    }
+
+    /// How long is left, or an error once the time is up.
+    fn left(&self) -> io::Result<Duration> {
+        let left = self.by.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                format!("a connection has {:?} for its request", self.limit),
+            ));
+        }
+        Ok(left)
+    }
+
+    /// Reads what has come on `stream`, waiting no later than the deadline.
+    fn read(&self, stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result<usize> {
+        stream.set_read_timeout(Some(self.left()?))?;
+        stream.read(buffer)
+    }
+
+    /// Writes all of `bytes` on `stream`, waiting no later than the
+    /// deadline.
+    fn write(&self, stream: &mut TcpStream, mut bytes: &[u8]) -> io::Result<()> {
+        while !bytes.is_empty() {
+            stream.set_write_timeout(Some(self.left()?))?;
+            match stream.write(bytes) {
+                Ok(0) => return Err(ErrorKind::WriteZero.into()),
+                Ok(written) => bytes = &bytes[written..],
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        stream.flush()
+    }
+
+    /// The response to a request that did not arrive in time.
+    fn late(&self) -> Response {
+        Response::usage(
+            408,
+            format!(
+                "a connection has {:?} to send its request, and this one's did not arrive in time",
+                self.limit
+            ),
+        )
+    }
+}
 
 /// Runs `agentdrafter serve`: listens, prints the line it starts with, and
 /// serves until it is stopped.
@@ -87,7 +151,7 @@ pub fn serve(args: Args) -> ExitCode {
     let settings = Settings::from_env();
     // A connection that failed to open is passed over.
     for stream in listener.incoming().flatten() {
-        handle(stream, &guard, &settings);
+        handle(stream, &guard, &settings, DEADLINE);
     }
     ExitCode::SUCCESS
 }
@@ -206,32 +270,27 @@ fn started(address: SocketAddr, guard: &Guard) -> Value {
     started
 }
 
-/// Takes one request on `stream`, answers it, and closes it.
-fn handle(mut stream: TcpStream, guard: &Guard, settings: &Settings) {
-    let _ = stream.set_read_timeout(Some(WAIT));
-    let _ = stream.set_write_timeout(Some(WAIT));
-    if let Some(response) = respond(&mut stream, guard, settings) {
-        let _ = stream.write_all(&response.bytes());
-        let _ = stream.flush();
+/// Takes one request on `stream`, answers it, and closes it. The request
+/// must arrive within `limit`, and the reply be taken within it.
+fn handle(mut stream: TcpStream, guard: &Guard, settings: &Settings, limit: Duration) {
+    let arrive_by = Deadline::after(limit);
+    if let Some(response) = respond(&mut stream, guard, settings, arrive_by) {
+        let _ = Deadline::after(limit).write(&mut stream, &response.bytes());
     }
-    // Read what the client may still be sending, such as a body that was
-    // refused unread, so the close does not cut off the response.
+    // A refused request's body is not read: the connection is closed with
+    // whatever the client is still sending.
     let _ = stream.shutdown(Shutdown::Write);
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-    let mut sink = [0u8; 8192];
-    let mut left = MOST_BODY;
-    while left > 0 {
-        match stream.read(&mut sink) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => left = left.saturating_sub(n),
-        }
-    }
 }
 
 /// The response to the request on `stream`, or none when the connection
-/// closed before a request came.
-fn respond(stream: &mut TcpStream, guard: &Guard, settings: &Settings) -> Option<Response> {
-    let head = match read_head(stream) {
+/// closed, or fell silent, before a request came.
+fn respond(
+    stream: &mut TcpStream,
+    guard: &Guard,
+    settings: &Settings,
+    arrive_by: Deadline,
+) -> Option<Response> {
+    let head = match read_head(stream, arrive_by) {
         Ok(Some(head)) => head,
         Ok(None) => return None,
         Err(response) => return Some(response),
@@ -239,7 +298,7 @@ fn respond(stream: &mut TcpStream, guard: &Guard, settings: &Settings) -> Option
     if let Err(response) = admit(&head, guard) {
         return Some(response);
     }
-    Some(route(stream, head, settings).unwrap_or_else(|response| response))
+    Some(route(stream, head, settings, arrive_by).unwrap_or_else(|response| response))
 }
 
 /// A request's line and headers, and what was read of its body with them.
@@ -261,8 +320,8 @@ impl Head {
 }
 
 /// Reads a request's line and headers, or nothing when the connection
-/// closes first.
-fn read_head(stream: &mut TcpStream) -> Result<Option<Head>, Response> {
+/// closes, or sends nothing by the deadline.
+fn read_head(stream: &mut TcpStream, arrive_by: Deadline) -> Result<Option<Head>, Response> {
     let mut read = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     loop {
@@ -312,7 +371,7 @@ fn read_head(stream: &mut TcpStream) -> Result<Option<Head>, Response> {
                 format!("a request's line and headers hold at most {MOST_HEAD} bytes"),
             ));
         }
-        match stream.read(&mut chunk) {
+        match arrive_by.read(stream, &mut chunk) {
             Ok(0) if read.is_empty() => return Ok(None),
             Ok(0) => {
                 return Err(Response::usage(
@@ -323,12 +382,7 @@ fn read_head(stream: &mut TcpStream) -> Result<Option<Head>, Response> {
             Ok(n) => read.extend_from_slice(&chunk[..n]),
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
             Err(_) if read.is_empty() => return Ok(None),
-            Err(e) => {
-                return Err(Response::usage(
-                    408,
-                    format!("the request's headers did not arrive: {e}"),
-                ))
-            }
+            Err(_) => return Err(arrive_by.late()),
         }
     }
 }
@@ -407,7 +461,12 @@ fn is_local_name(name: &str) -> bool {
 }
 
 /// Answers a request that was let in.
-fn route(stream: &mut TcpStream, head: Head, settings: &Settings) -> Result<Response, Response> {
+fn route(
+    stream: &mut TcpStream,
+    head: Head,
+    settings: &Settings,
+    arrive_by: Deadline,
+) -> Result<Response, Response> {
     let path = head.path.split('?').next().unwrap_or_default();
     if path == "/commands" {
         if head.method != "GET" {
@@ -442,7 +501,7 @@ fn route(stream: &mut TcpStream, head: Head, settings: &Settings) -> Result<Resp
         )
         .allow("POST"));
     }
-    let body = read_body(stream, head)?;
+    let body = read_body(stream, head, arrive_by)?;
     let input = if body.is_empty() {
         json!({})
     } else {
@@ -459,7 +518,7 @@ fn route(stream: &mut TcpStream, head: Head, settings: &Settings) -> Result<Resp
 }
 
 /// Reads a command's body, which is JSON and sized by `Content-Length`.
-fn read_body(stream: &mut TcpStream, head: Head) -> Result<Vec<u8>, Response> {
+fn read_body(stream: &mut TcpStream, head: Head, arrive_by: Deadline) -> Result<Vec<u8>, Response> {
     if head.header("transfer-encoding").is_some() {
         return Err(Response::usage(
             411,
@@ -501,14 +560,21 @@ fn read_body(stream: &mut TcpStream, head: Head) -> Result<Vec<u8>, Response> {
     }
     let mut body = head.body_start;
     body.truncate(length);
-    let mut rest = vec![0u8; length - body.len()];
-    stream.read_exact(&mut rest).map_err(|e| {
-        Response::usage(
-            400,
-            format!("the body ended before its Content-Length of {length} bytes: {e}"),
-        )
-    })?;
-    body.extend_from_slice(&rest);
+    let mut chunk = vec![0u8; 64 * 1024];
+    while body.len() < length {
+        let wanted = (length - body.len()).min(chunk.len());
+        match arrive_by.read(stream, &mut chunk[..wanted]) {
+            Ok(0) => {
+                return Err(Response::usage(
+                    400,
+                    format!("the body ended before its Content-Length of {length} bytes"),
+                ))
+            }
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return Err(arrive_by.late()),
+        }
+    }
     Ok(body)
 }
 
@@ -661,7 +727,7 @@ mod tests {
             let settings = Settings::default();
             for _ in 0..count {
                 let (stream, _) = listener.accept().unwrap();
-                handle(stream, &guard, &settings);
+                handle(stream, &guard, &settings, DEADLINE);
             }
         });
         let responses = requests
@@ -793,6 +859,86 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("the commands are build, schema"));
+    }
+
+    /// Sends `start` on a new connection, then a byte every 50 ms for up to
+    /// 10 seconds, and returns how long the server held the connection
+    /// open and what it answered, if its answer was not lost to the close.
+    fn trickle(address: SocketAddr, start: &[u8]) -> (Duration, Vec<u8>) {
+        let mut stream = TcpStream::connect(address).unwrap();
+        let began = Instant::now();
+        stream.write_all(start).unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let sender = thread::spawn(move || {
+            for _ in 0..200 {
+                thread::sleep(Duration::from_millis(50));
+                if writer.write_all(b"a").is_err() {
+                    break;
+                }
+            }
+        });
+        let mut answer = Vec::new();
+        let _ = stream.read_to_end(&mut answer);
+        let held = began.elapsed();
+        let _ = stream.shutdown(Shutdown::Both);
+        sender.join().unwrap();
+        (held, answer)
+    }
+
+    #[test]
+    fn a_slow_client_is_cut_off_at_the_deadline_and_the_next_request_is_served() {
+        let limit = Duration::from_secs(1);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let token = "a".repeat(64);
+        let guard = Guard::Token(token.clone());
+        let server = thread::spawn(move || {
+            let settings = Settings::default();
+            for _ in 0..4 {
+                let (stream, _) = listener.accept().unwrap();
+                handle(stream, &guard, &settings, limit);
+            }
+        });
+        let head = "POST /commands/operations HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        let auth = format!("Authorization: Bearer {token}\r\n");
+        for (start, status, most) in [
+            // Headers that never end, and a body that never does.
+            (
+                format!("{head}{auth}X-Slow: "),
+                "408",
+                limit + Duration::from_millis(1500),
+            ),
+            (
+                format!("{head}{auth}{JSON}Content-Length: 100000\r\n\r\n"),
+                "408",
+                limit + Duration::from_millis(1500),
+            ),
+            // A refused request is closed at once, its body unread.
+            (
+                format!("{head}{JSON}Content-Length: 100000000\r\n\r\n"),
+                "401",
+                limit / 2,
+            ),
+        ] {
+            let (held, answer) = trickle(address, start.as_bytes());
+            assert!(held < most, "held {held:?} by {start:?}");
+            let answer = String::from_utf8_lossy(&answer);
+            assert!(
+                answer.is_empty() || answer.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{answer}"
+            );
+        }
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .write_all(&post("operations", &format!("{JSON}{auth}"), "{}"))
+            .unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).unwrap();
+        assert!(
+            answer.starts_with("HTTP/1.1 200 "),
+            "the next request is served: {answer}"
+        );
+        server.join().unwrap();
     }
 
     #[test]

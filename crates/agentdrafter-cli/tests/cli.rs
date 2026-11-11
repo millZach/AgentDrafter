@@ -136,6 +136,56 @@ fn a_missing_file_is_reported_as_json() {
 }
 
 #[test]
+fn a_number_that_is_not_finite_is_refused() {
+    // JSON cannot hold NaN or an infinity, so one must not reach the core
+    // as no number at all, passing the checks a number is held to.
+    let dir = scratch("not-finite");
+    copy_example(&dir);
+    for args in [
+        &["render", "one-line.yaml", "--scale", "NaN"][..],
+        &[
+            "render",
+            "one-line.yaml",
+            "--scale",
+            "inf",
+            "--width",
+            "300",
+        ],
+        &["render", "one-line.yaml", "--dpi", "-inf"],
+        &["render", "one-line.yaml", "--margin", "nan"],
+        &[
+            "measure-text",
+            "PUMP 101",
+            "--font",
+            "romans.shx",
+            "--height",
+            "NaN",
+        ],
+        &[
+            "measure-text",
+            "PUMP 101",
+            "--font",
+            "romans.shx",
+            "--height",
+            "2.5",
+            "--width-factor",
+            "infinity",
+        ],
+    ] {
+        let (code, json) = agentdrafter(args, &dir);
+        assert_eq!(code, 1, "{args:?}: {json}");
+        assert_eq!(json["error"]["code"], "bad_number", "{args:?}: {json}");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("finite number"));
+    }
+    assert!(!dir.join("one-line.png").exists(), "nothing was rendered");
+    let (code, json) = agentdrafter(&["render", "one-line.yaml", "--scale", "1"], &dir);
+    assert_eq!(code, 0, "a finite scale still renders: {json}");
+}
+
+#[test]
 fn wrong_arguments_are_reported_as_json() {
     let dir = scratch("usage");
     for args in [

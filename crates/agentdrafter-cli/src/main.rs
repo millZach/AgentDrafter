@@ -146,6 +146,19 @@ fn input_of(request: impl Serialize, fonts: Vec<PathBuf>) -> Result<Value, Error
     Ok(input)
 }
 
+/// A number an option gave, which is finite. JSON has no way to write NaN
+/// or an infinity, so one would reach the core as no number at all, and
+/// pass the checks a number is held to; it is refused here instead.
+fn float(flag: &str, number: f64) -> Result<f64, Error> {
+    if number.is_finite() {
+        return Ok(number);
+    }
+    Err(Error::new(
+        ErrorCode::BadNumber,
+        format!("{flag} takes a finite number, not `{number}`"),
+    ))
+}
+
 fn parse_schema(mut args: Args) -> Result<Value, Error> {
     let kind = args.next();
     if let Some(extra) = args.next() {
@@ -191,6 +204,7 @@ fn parse_render(mut args: Args) -> Result<Value, Error> {
             ))
         })
     }
+    let finite = |flag: &str, text: OsString| float(flag, number(flag, text)?);
     let once = |flag: &str| Error::usage(format!("{flag} is given twice"));
     let (mut dpi, mut margin) = (None, None);
     while let Some(arg) = args.next() {
@@ -205,20 +219,20 @@ fn parse_render(mut args: Args) -> Result<Value, Error> {
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
             Some("--dpi") => {
                 if dpi
-                    .replace(number("--dpi", value("--dpi", args.next())?)?)
+                    .replace(finite("--dpi", value("--dpi", args.next())?)?)
                     .is_some()
                 {
                     return Err(once("--dpi"));
                 }
             }
             Some("--margin") => {
-                let mm = number("--margin", value("--margin", args.next())?)?;
+                let mm = finite("--margin", value("--margin", args.next())?)?;
                 if margin.replace(mm).is_some() {
                     return Err(once("--margin"));
                 }
             }
             Some("--scale") => {
-                let scale = number("--scale", value("--scale", args.next())?)?;
+                let scale = finite("--scale", value("--scale", args.next())?)?;
                 if request.scale.replace(scale).is_some() {
                     return Err(once("--scale"));
                 }
@@ -678,11 +692,12 @@ fn parse_measure(mut args: Args) -> Result<Value, Error> {
             .ok_or_else(|| Error::usage(format!("{flag} needs a value; usage: {MEASURE_USAGE}")))
     };
     let number = |flag: &str, text: String| -> Result<f64, Error> {
-        text.parse().map_err(|_| {
+        let number = text.parse().map_err(|_| {
             Error::usage(format!(
                 "{flag} takes a number, found `{text}`; usage: {MEASURE_USAGE}"
             ))
-        })
+        })?;
+        float(flag, number)
     };
     let once = |flag: &str| Error::usage(format!("{flag} is given twice"));
     while let Some(arg) = args.next() {

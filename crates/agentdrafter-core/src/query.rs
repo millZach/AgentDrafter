@@ -55,9 +55,10 @@ pub struct QueryRequest {
     pub query: Query,
 }
 
-/// What a query asks. Written as `{"kind": "find", ...}` in JSON.
+/// What a query asks. Written as `{"kind": "find", ...}` in JSON, and read
+/// refusing any key its kind does not take.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", from = "QueryInput")]
 pub enum Query {
     /// The objects that match every part of the selection.
     Find(Selection),
@@ -70,6 +71,32 @@ pub enum Query {
     Measure(Measure),
     /// The box round everything each sheet draws.
     Extents,
+}
+
+/// A [`Query`] as it is read. A kind that takes nothing is an empty struct
+/// here, not a unit variant, because serde lets a unit variant of a tagged
+/// enum take any key without a word: `{"kind": "blocks", "name": "x"}`
+/// would be answered as if `name` were not there, where it is refused.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum QueryInput {
+    Find(Selection),
+    Blocks {},
+    Attributes(Selection),
+    Measure(Measure),
+    Extents {},
+}
+
+impl From<QueryInput> for Query {
+    fn from(input: QueryInput) -> Self {
+        match input {
+            QueryInput::Find(selection) => Self::Find(selection),
+            QueryInput::Blocks {} => Self::Blocks,
+            QueryInput::Attributes(selection) => Self::Attributes(selection),
+            QueryInput::Measure(measure) => Self::Measure(measure),
+            QueryInput::Extents {} => Self::Extents,
+        }
+    }
 }
 
 /// Which objects a find or an attributes query selects: those that match

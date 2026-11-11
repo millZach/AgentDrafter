@@ -480,6 +480,14 @@ fn serve_listens_on_the_local_machine_and_needs_no_token_there() {
         let (status, json) = http.run("schema", &json!({"kind": "set"}));
         assert_eq!(status, 200, "{json}");
         assert_eq!(json["result"]["title"], "AgentDrafter drawing set settings");
+        // A key the schema does not name is refused, as the command line
+        // refuses it.
+        let (status, json) = http.run(
+            "query",
+            &json!({"source": ".", "query": {"kind": "extents", "typo": 1}}),
+        );
+        assert_eq!(status, 400, "{json}");
+        assert_eq!(json["error"]["code"], "usage");
     }
 
     // A wrong address, or a port another program holds, is a JSON error.
@@ -553,6 +561,13 @@ fn the_mcp_handshake_works_and_tools_are_listed_and_called() {
         result["structuredContent"]["result"]["sheets"],
         json!(["DEMO-002"])
     );
+    // A key the query's kind does not take is refused, not passed over.
+    let result = mcp.call(
+        "query",
+        &json!({"source": "demo-set", "query": {"kind": "blocks", "name": "x"}}),
+    );
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(result["structuredContent"]["error"]["code"], "usage");
 
     // A command's own error is the tool's, for the agent to read and fix.
     let result = mcp.call("journal", &json!({"set": "demo-set", "folder": "x"}));
