@@ -40,6 +40,10 @@ _Avoid_: project, package, workspace
 Any single thing in a drawing: a line, a piece of text, a block insert.
 _Avoid_: entity, element, shape
 
+**Drawn object**:
+What the judge counts when it compares AutoCAD's reading of an original with its reading of a revision: the records in the drawing's entity and block sections, such as lines, text, block inserts, attributes, hatches and dimensions. One is identical when AutoCAD reads it with the same handle and the same content before and after.
+_Avoid_: entity count, geometry
+
 **Block**:
 A named group of objects defined once and inserted many times, as in AutoCAD.
 _Avoid_: symbol, component, cell
