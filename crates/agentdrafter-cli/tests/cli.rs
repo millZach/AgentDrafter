@@ -6,6 +6,9 @@ use std::process::Command;
 
 use serde_json::Value;
 
+#[path = "../../agentdrafter-core/tests/support/demo_set.rs"]
+mod demo_set;
+
 /// An empty folder for one test, under Cargo's scratch folder in `target/`.
 fn scratch(test: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -233,17 +236,8 @@ fn schema_prints_the_sheet_descriptions_json_schema() {
 
 /// A copy of the demo plant's drawing set in `dir`, as `demo-set`.
 fn copy_demo_set(dir: &Path) -> PathBuf {
-    let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/demo-set");
     let to = dir.join("demo-set");
-    fs::create_dir_all(to.join("templates")).unwrap();
-    for file in [
-        "set.yaml",
-        "rows.yaml",
-        "blocks.yaml",
-        "templates/ansi-b.yaml",
-    ] {
-        fs::copy(from.join(file), to.join(file)).unwrap();
-    }
+    demo_set::copy_demo_set(&to);
     to
 }
 

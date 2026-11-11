@@ -1,10 +1,10 @@
 //! Build: producing a DWG from a sheet description.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -178,14 +178,20 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
 
 /// Writes `bytes` to a temporary file beside `path`, then moves it onto
 /// `path`, so a reader never sees a half-written DWG.
+///
+/// The temporary file's name is short and does not hold the DWG's own, so
+/// a DWG whose name is as long as the system allows can still be written.
+/// It holds the process ID and a count, so no two writes share one.
 fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let Some(name) = path.file_name() else {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    if path.file_name().is_none() {
         return Err(Error::usage("the output path does not name a file").in_file(path));
-    };
-    let mut temporary_name = OsString::from(".");
-    temporary_name.push(name);
-    temporary_name.push(format!(".{}.tmp", std::process::id()));
-    let temporary = path.with_file_name(temporary_name);
+    }
+    let temporary = path.with_file_name(format!(
+        ".agentdrafter-{}-{}.tmp",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
     let written = File::create(&temporary)
         .and_then(|mut file| {
             file.write_all(bytes)?;

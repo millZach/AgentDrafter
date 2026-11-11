@@ -36,7 +36,7 @@ pub(super) fn relative_path_property(description: String) -> Value {
         "description": description,
         "anyOf": [
             { "type": "string", "pattern": format!("^{part}(/{part})*$") },
-            { "type": ["number", "boolean"] },
+            { "type": ["number", "boolean", "null"] },
         ],
     })
 }

@@ -141,7 +141,8 @@ fn sheet_name_def() -> Value {
              starting or ending with a space, not ending with ., holding none of \
              {FORBIDDEN_IN_SHEET_NAMES} and no control characters, and not, up to its first ., \
              one of the names Windows keeps for devices: {}, in any case. Each name is given once \
-             in a set; names that differ only in case are one name.",
+             in a set; names that differ only in case are one name. A plain number, true, false \
+             or null is read as its text.",
             DEVICE_NAMES.join(", ")
         ),
         "anyOf": [
@@ -157,7 +158,7 @@ fn sheet_name_def() -> Value {
                     ],
                 },
             },
-            { "type": ["number", "boolean"] },
+            { "type": ["number", "boolean", "null"] },
         ],
     })
 }
@@ -194,11 +195,11 @@ pub(crate) fn template_schema() -> Value {
     });
     defs["value_name"] = json!({
         "description": "The name of one of the row's values: ASCII letters, digits, _ and -, \
-                        such as TITLE or dwg-no. A plain whole number such as 100 is read as its \
-                        digits.",
+                        such as TITLE or dwg-no. A plain whole number such as 100, true, false or \
+                        null is read as its text, as every scalar is.",
         "anyOf": [
             { "type": "string", "pattern": VALUE_NAME },
-            { "type": ["integer", "boolean"] },
+            { "type": ["integer", "boolean", "null"] },
         ],
     });
     let attributes = &mut defs["insert"]["properties"]["attributes"];

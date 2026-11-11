@@ -440,6 +440,8 @@ fn the_set_schema_accepts_exactly_the_settings_the_reader_accepts() {
         (&OUTPUT, "../issued/dwg", json!("../issued/dwg"), true),
         (&OUTPUT, ".", json!("."), true),
         (&OUTPUT, "2026", json!(2026), true),
+        (&OUTPUT, "null", json!(null), true),
+        (&OUTPUT, "~", json!(null), true),
         (&OUTPUT, "/dwg", json!("/dwg"), false),
         (&OUTPUT, "'a//b'", json!("a//b"), false),
         (&OUTPUT, "'a\\b'", json!("a\\b"), false),
@@ -448,6 +450,7 @@ fn the_set_schema_accepts_exactly_the_settings_the_reader_accepts() {
         (&OUTPUT, "[dwg]", json!(["dwg"]), false),
         (&ROWS, "rows.yaml", json!("rows.yaml"), true),
         (&ROWS, "data/rows.yaml", json!("data/rows.yaml"), true),
+        (&ROWS, "null", json!(null), true),
         (&ROWS, "'c:rows.yaml'", json!("c:rows.yaml"), false),
     ];
     assert_reader_and_schema_agree(&set_schema(), cases, |yaml| {
@@ -490,6 +493,8 @@ fn the_rows_schema_accepts_exactly_the_rows_the_reader_accepts() {
         (&SHEET, "'Sheet 1 of 3'", json!("Sheet 1 of 3"), true),
         (&SHEET, "101", json!(101), true),
         (&SHEET, "true", json!(true), true),
+        (&SHEET, "null", json!(null), true),
+        (&SHEET, "~", json!(null), true),
         (&SHEET, "CONSOLE", json!("CONSOLE"), true),
         (&SHEET, "COM10", json!("COM10"), true),
         (&SHEET, "'.hidden'", json!(".hidden"), true),
@@ -515,6 +520,7 @@ fn the_rows_schema_accepts_exactly_the_rows_the_reader_accepts() {
             true,
         ),
         (&TEMPLATE_PATH, "../t.yaml", json!("../t.yaml"), true),
+        (&TEMPLATE_PATH, "null", json!(null), true),
         (&TEMPLATE_PATH, "/t.yaml", json!("/t.yaml"), false),
         (&TEMPLATE_PATH, "''", json!(""), false),
         (
@@ -592,6 +598,7 @@ fn the_template_schema_accepts_exactly_the_templates_the_reader_accepts() {
             (place, "{row: '7'}", json!({"row": "7"}), true),
             (place, "{row: 7}", json!({"row": 7}), true),
             (place, "{row: true}", json!({"row": true}), true),
+            (place, "{row: null}", json!({"row": null}), true),
             (place, "{row: 'DWG NO'}", json!({"row": "DWG NO"}), false),
             (place, "{row: ''}", json!({"row": ""}), false),
             (place, "{row: [A]}", json!({"row": ["A"]}), false),

@@ -12,6 +12,9 @@ use agentdrafter_core::{
     SetReport, Settings, Unit,
 };
 
+#[path = "support/demo_set.rs"]
+mod demo_set;
+
 /// An empty folder for one test, under Cargo's scratch folder in `target/`.
 fn scratch(test: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -22,21 +25,10 @@ fn scratch(test: &str) -> PathBuf {
     dir
 }
 
-const DEMO_SET_FILES: [&str; 4] = [
-    "set.yaml",
-    "rows.yaml",
-    "blocks.yaml",
-    "templates/ansi-b.yaml",
-];
-
 /// A copy of the demo plant's drawing set in a folder of its own.
 fn demo_set(test: &str) -> PathBuf {
     let set = scratch(test).join("demo-set");
-    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/demo-set");
-    fs::create_dir_all(set.join("templates")).unwrap();
-    for file in DEMO_SET_FILES {
-        fs::copy(examples.join(file), set.join(file)).unwrap();
-    }
+    demo_set::copy_demo_set(&set);
     set
 }
 
@@ -204,6 +196,26 @@ fn the_sets_unit_and_output_folder_are_honoured() {
     );
     assert!(error.message.contains("drawing set in mm"), "{error:?}");
     assert!(files_in(&root.join("issued").join("mm")).is_empty());
+}
+
+#[test]
+fn a_sheet_whose_name_is_as_long_as_allowed_is_built() {
+    // 251 characters, so its DWG's file name is 255, the most systems allow.
+    let set = scratch("longest").join("set");
+    let name = "L".repeat(251);
+    small_set(
+        &set,
+        "units: cm\noutput: dwg\nrows: rows.yaml\n",
+        &format!("rows:\n  - {{sheet: {name}, template: sheet.yaml, values: {{TITLE: LONG}}}}\n"),
+    );
+
+    build_all(&set);
+
+    let file = format!("{name}.dwg");
+    assert_eq!(file.len(), 255);
+    assert_eq!(files_in(&set.join("dwg")), std::slice::from_ref(&file));
+    let read = read_dwg(&set.join("dwg").join(file)).unwrap();
+    assert_eq!(attributes(&read, "tb"), pairs(&[("TITLE", "LONG")]));
 }
 
 #[test]
