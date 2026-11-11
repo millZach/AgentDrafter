@@ -3,15 +3,18 @@
 //! every file comes back byte for byte, DWGs included; and none of it needs
 //! git, or the set's folder to be a repository.
 
-use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::Value;
 
 #[path = "../../agentdrafter-core/tests/support/demo_set.rs"]
 mod demo_set;
+#[path = "../../agentdrafter-core/tests/support/snapshot.rs"]
+mod snapshot;
+
+use snapshot::snapshot;
 
 /// Runs `agentdrafter` in `cwd` as a process of its own, with `PATH` set to
 /// `path` when given, and returns its exit code and the JSON it printed.
@@ -33,31 +36,6 @@ fn agentdrafter(args: &[&str], cwd: &Path, path: Option<&Path>) -> (i32, Value) 
         out.status.code().unwrap(),
         serde_json::from_str(&stdout).unwrap(),
     )
-}
-
-/// Every file and folder of the set, each file with its bytes, but the
-/// journal's own: its file, the undo states and the folder they are in.
-fn snapshot(set: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
-    let own = set.join(".agentdrafter");
-    let mut found = BTreeMap::new();
-    let mut stack = vec![set.to_owned()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path == own.join("journal.jsonl") || path.starts_with(own.join("undo-states")) {
-                continue;
-            }
-            if path.is_dir() {
-                if path != own {
-                    found.insert(path.clone(), None);
-                }
-                stack.push(path);
-            } else {
-                found.insert(path.clone(), Some(fs::read(&path).unwrap()));
-            }
-        }
-    }
-    found
 }
 
 const MOVE: &str =

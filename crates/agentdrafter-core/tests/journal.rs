@@ -5,7 +5,6 @@
 //! newest change sets keep theirs; and an undo that would lose a change made
 //! by hand is refused, naming the file.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +17,10 @@ use serde_json::{json, Value};
 
 #[path = "support/demo_set.rs"]
 mod demo_set;
+#[path = "support/snapshot.rs"]
+mod snapshot;
+
+use snapshot::snapshot;
 
 /// A copy of the demo set in a folder of its own, under Cargo's scratch
 /// folder in `target/`, built when `built` says so.
@@ -80,33 +83,6 @@ fn read_journal(set: &Path) -> JournalReport {
     });
     assert!(reply.ok, "{:#?}", reply.error);
     reply.result.unwrap()
-}
-
-/// Every file and folder of the set, each file with its bytes, but the
-/// journal's own: its file, the undo states and the folder they are in.
-fn snapshot(set: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
-    let own = set.join(".agentdrafter");
-    let journal = set.join(JOURNAL_FILE);
-    let states = set.join(UNDO_STATES_FOLDER);
-    let mut found = BTreeMap::new();
-    let mut stack = vec![set.to_owned()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path == journal || path.starts_with(&states) {
-                continue;
-            }
-            if path.is_dir() {
-                if path != own {
-                    found.insert(path.clone(), None);
-                }
-                stack.push(path);
-            } else {
-                found.insert(path.clone(), Some(fs::read(&path).unwrap()));
-            }
-        }
-    }
-    found
 }
 
 fn add_circle(sheet: &str, id: &str) -> Value {
