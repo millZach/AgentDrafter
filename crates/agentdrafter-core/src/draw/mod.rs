@@ -76,6 +76,11 @@ pub struct DisplayList {
     /// short of them, and the boxes of inserts' blocks. AutoCAD's extents
     /// take in both.
     pub reach: Option<Bounds>,
+    /// The box round each patterned hatch's boundary, which counts towards
+    /// the extents though the hatch's lines may stop short of it, with the
+    /// sheet's object that draws the hatch: its place in the sheet's
+    /// objects, counted from 0. An insert whose block holds a hatch draws it.
+    pub boundaries: Vec<(usize, Bounds)>,
     /// The hatches whose pattern needed more lines or dashes than one hatch
     /// draws, and so are not drawn in full.
     pub hatches_cut_short: Vec<HatchCutShort>,
@@ -110,6 +115,15 @@ pub struct TextRun {
     /// Which object of the sheet draws it: its place in the sheet's
     /// objects, counted from 0.
     pub object: usize,
+    /// When an insert draws it, which object of the insert's block, as for
+    /// an [`Item`]. None for an object of the sheet's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<usize>,
+    /// The box round what its characters draw, in the line's frame: its
+    /// lower left and upper right corners `(u, v)`. None when they draw
+    /// nothing, as spaces do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawn: Option<[Point2; 2]>,
     /// Where the first character's pen starts, on the baseline.
     pub origin: Point2,
     /// One unit of the font's advances along the baseline: the text's
@@ -365,7 +379,7 @@ impl<'a> Drawer<'a> {
                 .push(self.cut_short(index, object, None));
         }
         list.add(index, None, pen.color, drawn.shapes, drawn.reach);
-        list.add_text(index, drawn.runs);
+        list.add_text(index, None, drawn.runs);
     }
 
     /// Adds what an insert draws to `list`: its block's objects moved,
@@ -403,7 +417,7 @@ impl<'a> Drawer<'a> {
             let had = own.into_iter().flat_map(|b| [b.min, b.max]);
             own = Bounds::of(had.chain(points.map(|p| placed.back(p))));
             list.add(index, Some(part), pen.color, drawn.shapes, drawn.reach);
-            list.add_text(index, drawn.runs);
+            list.add_text(index, Some(part), drawn.runs);
         }
         // AutoCAD's extents take in an insert's block box: the box round the
         // block's objects in its own coordinates, placed whole. Turned, it
@@ -428,7 +442,7 @@ impl<'a> Drawer<'a> {
             let pen = self.pen(&text.layer);
             let lettering = text::draw_text(&text, self.fonts, pen.lineweight, tolerance);
             list.add(index, Some(part), pen.color, lettering.shapes, Vec::new());
-            list.add_text(index, lettering.runs);
+            list.add_text(index, Some(part), lettering.runs);
         }
     }
 
@@ -581,7 +595,8 @@ impl<'a> Drawer<'a> {
 
 impl DisplayList {
     /// Adds what the sheet's object at `index` draws in `color`: the
-    /// object of its block at `part`, when it is an insert.
+    /// object of its block at `part`, when it is an insert. `reach` is a
+    /// patterned hatch's boundary, which draws nothing of its own.
     fn add(
         &mut self,
         index: usize,
@@ -590,6 +605,9 @@ impl DisplayList {
         shapes: Vec<Shape>,
         reach: Vec<Point2>,
     ) {
+        if let Some(boundary) = Bounds::of(reach.iter().copied()) {
+            self.boundaries.push((index, boundary));
+        }
         self.take_in(reach);
         self.items.extend(shapes.into_iter().map(|shape| Item {
             object: index,
@@ -600,10 +618,11 @@ impl DisplayList {
     }
 
     /// Adds the lines of text the sheet's object at `index` draws, as they
-    /// read.
-    fn add_text(&mut self, index: usize, runs: Vec<TextRun>) {
+    /// read: the object of its block at `part`, when it is an insert.
+    fn add_text(&mut self, index: usize, part: Option<usize>, runs: Vec<TextRun>) {
         self.text.extend(runs.into_iter().map(|run| TextRun {
             object: index,
+            part,
             ..run
         }));
     }

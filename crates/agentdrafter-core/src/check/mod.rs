@@ -21,13 +21,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::description::{
-    read_rows, read_set_settings, read_sheet_record, read_template, template_path, SheetRecord,
-};
+use crate::description::{read_sheet_record, SavedSet, SheetRecord};
 use crate::error::{Error, ErrorCode};
 use crate::model::Paper;
 use crate::query::{Extents, WrittenAt};
-use crate::set::SET_SETTINGS_FILE;
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -129,11 +126,12 @@ pub struct Finding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub other: Option<CheckedObject>,
     /// The box round what is drawn: the sheet's extents for `paper_size`,
-    /// the object's for `off_sheet` and `text_on_text`, and the text's in
-    /// its block's own coordinates for `text_overflow`.
+    /// the object's for `off_sheet`, its hatches' boundaries among it, the
+    /// text's in its block's own coordinates for `text_overflow`, and for
+    /// `text_on_text` the line's that sits deepest on the other text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drawn: Option<Extents>,
-    /// For `text_on_text`, the box round what the other text draws.
+    /// For `text_on_text`, the box round what the other text's line draws.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub other_drawn: Option<Extents>,
     /// The paper declared, for `paper_size` and `off_sheet`.
@@ -273,27 +271,22 @@ fn load(source: &Path, wanted: &[String]) -> Result<(Unit, Vec<SheetRecord>), Er
         }
         return Ok((record.sheet.units, vec![record]));
     }
-    let set = read_set_settings(&source.join(SET_SETTINGS_FILE))?;
-    let rows_file = source.join(&set.rows);
-    let rows = read_rows(&rows_file)?;
-    let names: Vec<&str> = rows.iter().map(|row| row.sheet.as_str()).collect();
-    if let Some(error) = missing(&names) {
+    let set = SavedSet::read(source)?;
+    if let Some(error) = missing(&set.names()) {
         return Err(error);
     }
-    let records = rows
+    let records = set
+        .rows
         .iter()
         .filter(|row| named(&row.sheet))
         .map(|row| {
-            let template = template_path(source, row);
-            read_template(&template, row, &rows_file, set.units, &mut Vec::new()).map_err(|e| {
-                Error {
-                    message: format!(
-                        "sheet `{}` cannot be read, and the checker checks every sheet it is \
-                         asked to: {}",
-                        row.sheet, e.message
-                    ),
-                    ..e
-                }
+            set.sheet(row).map_err(|e| Error {
+                message: format!(
+                    "sheet `{}` cannot be read, and the checker checks every sheet it is asked \
+                     to: {}",
+                    row.sheet, e.message
+                ),
+                ..e
             })
         })
         .collect::<Result<_, _>>()?;

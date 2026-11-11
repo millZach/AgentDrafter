@@ -27,13 +27,10 @@ use std::path::{Path, PathBuf};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::description::{
-    read_rows, read_set_settings, read_sheet_record, read_template, template_path, SheetRecord,
-};
+use crate::description::{read_sheet_record, SavedSet, SheetRecord};
 use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
 use crate::model::{Attribute, Object, Point3, Sheet, CONTINUOUS};
-use crate::set::SET_SETTINGS_FILE;
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -400,27 +397,21 @@ fn load(source: &Path, sheet: Option<&str>) -> Result<(Unit, Vec<SheetRecord>), 
         }
         return Ok((record.sheet.units, vec![record]));
     }
-    let set = read_set_settings(&source.join(SET_SETTINGS_FILE))?;
-    let rows_file = source.join(&set.rows);
-    let rows = read_rows(&rows_file)?;
-    let looked_at: Vec<_> = rows.iter().filter(|row| named(&row.sheet)).collect();
+    let set = SavedSet::read(source)?;
+    let looked_at: Vec<_> = set.rows.iter().filter(|row| named(&row.sheet)).collect();
     if looked_at.is_empty() {
-        let names: Vec<&str> = rows.iter().map(|row| row.sheet.as_str()).collect();
-        return Err(no_such_sheet(sheet, &names));
+        return Err(no_such_sheet(sheet, &set.names()));
     }
     let records = looked_at
         .into_iter()
         .map(|row| {
-            let template = template_path(source, row);
-            read_template(&template, row, &rows_file, set.units, &mut Vec::new()).map_err(|e| {
-                Error {
-                    message: format!(
-                        "sheet `{}` cannot be read, and a query answers for every sheet it \
-                         looks at: {}",
-                        row.sheet, e.message
-                    ),
-                    ..e
-                }
+            set.sheet(row).map_err(|e| Error {
+                message: format!(
+                    "sheet `{}` cannot be read, and a query answers for every sheet it looks \
+                     at: {}",
+                    row.sheet, e.message
+                ),
+                ..e
             })
         })
         .collect::<Result<_, _>>()?;

@@ -13,26 +13,28 @@
 //! - **`off_sheet`**: what each of the sheet's objects draws keeps within
 //!   the paper, from `[0, 0]` to its width and height, within the
 //!   tolerance. An insert is one object, what its block draws and its
-//!   attributes together.
+//!   attributes together. A patterned hatch's boundary counts, as it does
+//!   towards the extents, though its lines may stop short of it.
 //! - **`text_overflow`**: each text and attribute an insert draws whose
 //!   block declares its cell draws within the cell, placed by the insert's
 //!   position, scale and rotation: what it draws is taken back into the
 //!   block's own coordinates and held to the cell there, and how far it
 //!   reaches past, enlarged by the insert's scale, is held to the
 //!   tolerance on the sheet. Text with no cell is not checked.
-//! - **`text_on_text`**: the box round what each text draws, seen in the
-//!   text's own direction, overlaps no other text's by more than the
-//!   tolerance: how far one would move to clear the other, the least
-//!   overlap along the two boxes' sides. Every text on the sheet counts,
-//!   each multiline text as one box round all its lines, and each text and
-//!   visible attribute an insert draws, against those of the same insert
-//!   too.
+//! - **`text_on_text`**: the box round what each line of text draws, seen
+//!   in the line's own direction, as the pipeline draws the line, overlaps
+//!   no other text's by more than the tolerance: how far one would move to
+//!   clear the other, the least along the sides of either box. A box with
+//!   no breadth, round a single upright stroke such as `I`, counts too.
+//!   Every text on the sheet counts, each line of a multiline text on its
+//!   own, and each text and visible attribute an insert draws, against
+//!   those of the same insert too.
 
 use std::collections::BTreeMap;
 
 use super::{BlockPart, CheckedObject, Finding, Rule, Sides};
 use crate::description::SheetRecord;
-use crate::draw::{Bounds, DisplayList, Item, Point2};
+use crate::draw::{Bounds, DisplayList, Item, Point2, TextRun};
 use crate::model::block::Placement;
 use crate::model::{Block, Insert, Object, Paper};
 use crate::query::{measuring_drawing, written_at, Extents};
@@ -191,9 +193,17 @@ impl Sheet<'_> {
     fn off_sheet(&self, paper: &Paper) -> Vec<Finding> {
         let u = self.units;
         let mut boxes: Vec<Option<Bounds>> = vec![None; self.record.sheet.objects.len()];
-        for item in &self.list.items {
-            let had = boxes[item.object].into_iter().flat_map(|b| [b.min, b.max]);
-            boxes[item.object] = Bounds::of(had.chain(item.points()));
+        let drawn = self
+            .list
+            .items
+            .iter()
+            .filter_map(|item| Some((item.object, Bounds::of(item.points())?)));
+        // A patterned hatch's boundary counts, as it does towards the
+        // extents, though the hatch's lines may stop short of it.
+        let boundaries = self.list.boundaries.iter().copied();
+        for (object, b) in drawn.chain(boundaries) {
+            let had = boxes[object].into_iter().flat_map(|had| [had.min, had.max]);
+            boxes[object] = Bounds::of(had.chain([b.min, b.max]));
         }
         let mut findings = Vec::new();
         for (i, drawn) in boxes.iter().enumerate() {
@@ -280,7 +290,7 @@ impl Sheet<'_> {
                     format!(
                         "{} draws {} its cell: in the block {}'s own coordinates it draws from {} \
                          to {}, and its cell runs from {} to {} {u}{scaled}",
-                        self.text_words(i, Some(cell.object)),
+                        self.text_words(i, Some(cell.object), ""),
                         past.words(self.tolerance, insert.scale, u, "side"),
                         block.name,
                         point(b.min),
@@ -306,43 +316,41 @@ impl Sheet<'_> {
     /// the tolerance, naming the one drawn later as sitting on the other.
     fn text_on_text(&self) -> Vec<Finding> {
         let u = self.units;
-        let mut points: BTreeMap<(usize, Option<usize>), (f64, Vec<Point2>)> = BTreeMap::new();
-        for item in &self.list.items {
-            if let Some(rotation) = self.text_rotation(item.object, item.part) {
-                let entry = points
-                    .entry((item.object, item.part))
-                    .or_insert_with(|| (rotation, Vec::new()));
-                entry.1.extend(item.points());
-            }
-        }
-        let boxes: Vec<TextBox> = points
-            .into_iter()
-            .filter_map(|(key, (rotation, points))| TextBox::of(key, rotation, &points))
-            .collect();
-        // Sweep across: two boxes that overlap across by no more than the
-        // tolerance overlap no more than that in any direction.
+        // Each line of text as the pipeline draws it, in its own box.
+        let boxes: Vec<TextBox> = self.list.text.iter().filter_map(TextBox::of).collect();
+        // Sweep across: two boxes apart across by more than the tolerance
+        // are apart.
         let mut order: Vec<usize> = (0..boxes.len()).collect();
         order.sort_by(|&a, &b| boxes[a].seen.min[0].total_cmp(&boxes[b].seen.min[0]));
-        let mut pairs: Vec<(usize, usize, f64)> = Vec::new();
+        // Each two texts once, by the deepest overlap of their lines: the
+        // one drawn later, then the one it sits on.
+        let mut pairs: BTreeMap<(Key, Key), (usize, usize, f64)> = BTreeMap::new();
         for (k, &a) in order.iter().enumerate() {
             for &b in &order[k + 1..] {
-                if boxes[b].seen.min[0] >= boxes[a].seen.max[0] - self.tolerance {
+                if boxes[b].seen.min[0] > boxes[a].seen.max[0] + self.tolerance {
                     break;
                 }
-                let depth = boxes[a].overlap(&boxes[b]);
-                if depth > self.tolerance {
-                    let (earlier, later) = if boxes[a].key < boxes[b].key {
-                        (a, b)
-                    } else {
-                        (b, a)
-                    };
-                    pairs.push((later, earlier, depth));
+                if boxes[a].key == boxes[b].key {
+                    continue;
+                }
+                let Some(depth) = boxes[a].sits_on(&boxes[b], self.tolerance) else {
+                    continue;
+                };
+                let (earlier, later) = if boxes[a].key < boxes[b].key {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                let deepest = pairs
+                    .entry((boxes[later].key, boxes[earlier].key))
+                    .or_insert((later, earlier, depth));
+                if depth > deepest.2 {
+                    *deepest = (later, earlier, depth);
                 }
             }
         }
-        pairs.sort_by_key(|&(later, earlier, _)| (boxes[later].key, boxes[earlier].key));
         pairs
-            .into_iter()
+            .into_values()
             .map(|(later, earlier, depth)| {
                 let (later, earlier) = (&boxes[later], &boxes[earlier]);
                 let mut finding = self.finding(
@@ -350,8 +358,8 @@ impl Sheet<'_> {
                     format!(
                         "{} sits on {}: their drawn boxes overlap by {} {u}; it draws from {} to \
                          {}, and the other from {} to {}",
-                        self.text_words(later.key.0, later.key.1),
-                        self.text_words(earlier.key.0, earlier.key.1),
+                        self.text_words(later.key.0, later.key.1, &later.says),
+                        self.text_words(earlier.key.0, earlier.key.1, &earlier.says),
                         num(depth),
                         point(later.seen.min),
                         point(later.seen.max),
@@ -378,25 +386,20 @@ impl Sheet<'_> {
             .find(|b| b.name == insert.block)
     }
 
-    /// The direction the text the sheet's object `i` draws runs in, in
-    /// degrees, when it is text: a text or an mtext of the sheet's own, or
-    /// for an insert the text, mtext or attribute of its block at `part`.
-    /// None for anything else.
-    fn text_rotation(&self, i: usize, part: Option<usize>) -> Option<f64> {
-        match (&self.record.sheet.objects[i], part) {
-            (Object::Text(t), None) => Some(t.rotation),
-            (Object::MText(t), None) => Some(t.rotation),
-            (Object::Insert(insert), Some(j)) => {
-                let own = match self.block(insert)?.objects.get(j)? {
-                    Object::Text(t) => t.rotation,
-                    Object::MText(t) => t.rotation,
-                    Object::AttributeDefinition(d) => d.rotation,
-                    _ => return None,
-                };
-                Some(own + insert.rotation)
-            }
-            _ => None,
-        }
+    /// The object of an insert's block at `part` that the sheet's object
+    /// `i` draws, when `i` is an insert.
+    fn in_block(&self, i: usize, part: Option<usize>) -> Option<InBlock<'_>> {
+        let Object::Insert(insert) = &self.record.sheet.objects[i] else {
+            return None;
+        };
+        let block = self.block(insert)?;
+        let index = part?;
+        Some(InBlock {
+            insert,
+            block,
+            index,
+            object: block.objects.get(index)?,
+        })
     }
 
     /// The sheet's object `i`, as a finding names it: by its ID, its name
@@ -405,32 +408,23 @@ impl Sheet<'_> {
     fn checked(&self, i: usize, part: Option<usize>) -> CheckedObject {
         let record = self.record;
         let object = &record.sheet.objects[i];
-        let mut in_block = None;
-        let mut text = None;
-        match (object, part) {
-            (Object::Text(t), None) => text = Some(t.contents.clone()),
-            (Object::MText(t), None) => text = Some(t.contents.clone()),
-            (Object::Insert(insert), Some(j)) => {
-                if let Some((block, inner)) = self
-                    .block(insert)
-                    .and_then(|block| block.objects.get(j).map(|o| (block, o)))
-                {
-                    let tag = match inner {
-                        Object::AttributeDefinition(d) => Some(d.tag.clone()),
-                        _ => None,
-                    };
-                    text = self.says(insert, inner);
-                    in_block = Some(BlockPart {
-                        block: block.name.clone(),
-                        file: self.library_file(),
-                        field: format!("blocks.{}.objects[{j}]", block.name),
-                        kind: inner.type_name().to_owned(),
-                        tag,
-                    });
-                }
+        let (in_block, text) = match self.in_block(i, part) {
+            Some(inner) => {
+                let tag = match inner.object {
+                    Object::AttributeDefinition(d) => Some(d.tag.clone()),
+                    _ => None,
+                };
+                let part = BlockPart {
+                    block: inner.block.name.clone(),
+                    file: self.library_file(),
+                    field: inner.field(),
+                    kind: inner.object.type_name().to_owned(),
+                    tag,
+                };
+                (Some(part), inner.says())
             }
-            _ => {}
-        }
+            None => (None, says(object)),
+        };
         CheckedObject {
             id: record.id(i),
             name: record.objects[i].name.clone(),
@@ -438,23 +432,6 @@ impl Sheet<'_> {
             written_at: written_at(record, i),
             in_block,
             text,
-        }
-    }
-
-    /// What a text, an mtext or an attribute of an insert's block says on
-    /// the insert.
-    fn says(&self, insert: &Insert, inner: &Object) -> Option<String> {
-        match inner {
-            Object::Text(t) => Some(t.contents.clone()),
-            Object::MText(t) => Some(t.contents.clone()),
-            Object::AttributeDefinition(d) => Some(
-                insert
-                    .attributes
-                    .iter()
-                    .find(|a| a.tag == d.tag)
-                    .map_or(d.default.clone(), |a| a.value.clone()),
-            ),
-            _ => None,
         }
     }
 
@@ -494,101 +471,165 @@ impl Sheet<'_> {
 
     /// The text the sheet's object `i` draws, at `part` of an insert's
     /// block, in words, such as "the attribute TITLE of the insert
-    /// `DEMO-001/objects[2]`".
-    fn text_words(&self, i: usize, part: Option<usize>) -> String {
-        let object = &self.record.sheet.objects[i];
-        let insert_words = self.object_words(i);
-        match (object, part) {
-            (Object::Text(t), None) => format!("{insert_words} saying `{}`", t.contents),
-            (Object::Insert(insert), Some(j)) => {
-                let Some(block) = self.block(insert) else {
-                    return insert_words;
-                };
-                match block.objects.get(j) {
-                    Some(Object::AttributeDefinition(d)) => format!(
-                        "the attribute {} of {insert_words} saying `{}`",
-                        d.tag,
-                        self.says(insert, &block.objects[j]).unwrap_or_default()
-                    ),
-                    Some(Object::Text(t)) => format!(
-                        "the text `{}` of the block {} that {insert_words} inserts",
-                        t.contents, block.name
-                    ),
-                    Some(Object::MText(_)) => format!(
-                        "the mtext at `blocks.{}.objects[{j}]` that {insert_words} inserts",
-                        block.name
-                    ),
-                    _ => insert_words,
-                }
-            }
-            _ => insert_words,
+    /// `DEMO-001/objects[2]`". `line` is the line of an mtext meant.
+    fn text_words(&self, i: usize, part: Option<usize>, line: &str) -> String {
+        let words = self.object_words(i);
+        let on_line = format!(" on its line `{line}`");
+        let Some(inner) = self.in_block(i, part) else {
+            return match &self.record.sheet.objects[i] {
+                Object::Text(t) => format!("{words} saying `{}`", t.contents),
+                Object::MText(_) => format!("{words}{on_line}"),
+                _ => words,
+            };
+        };
+        match inner.object {
+            Object::AttributeDefinition(d) => format!(
+                "the attribute {} of {words} saying `{}`",
+                d.tag,
+                inner.says().unwrap_or_default()
+            ),
+            Object::Text(t) => format!(
+                "the text `{}` of the block {} that {words} inserts",
+                t.contents, inner.block.name
+            ),
+            Object::MText(_) => format!(
+                "the mtext at `{}`{on_line}, that {words} inserts",
+                inner.field()
+            ),
+            _ => words,
         }
     }
 }
 
-/// The box round what one text draws, in its own direction.
+/// One object of an insert's block, as the insert draws it.
+struct InBlock<'a> {
+    insert: &'a Insert,
+    block: &'a Block,
+    /// Its place in the block's objects.
+    index: usize,
+    object: &'a Object,
+}
+
+impl InBlock<'_> {
+    /// Its place in the block library, such as
+    /// `blocks.TITLE_BLOCK.objects[13]`.
+    fn field(&self) -> String {
+        format!("blocks.{}.objects[{}]", self.block.name, self.index)
+    }
+
+    /// What it says on the insert, when it is text: a text's or an mtext's
+    /// contents, or the insert's value of an attribute.
+    fn says(&self) -> Option<String> {
+        match self.object {
+            Object::AttributeDefinition(d) => Some(
+                self.insert
+                    .attributes
+                    .iter()
+                    .find(|a| a.tag == d.tag)
+                    .map_or(d.default.clone(), |a| a.value.clone()),
+            ),
+            object => says(object),
+        }
+    }
+}
+
+/// What a text or an mtext says.
+fn says(object: &Object) -> Option<String> {
+    match object {
+        Object::Text(t) => Some(t.contents.clone()),
+        Object::MText(t) => Some(t.contents.clone()),
+        _ => None,
+    }
+}
+
+/// Which text draws a line: the sheet's object, and the object of its block
+/// when it is an insert's.
+type Key = (usize, Option<usize>);
+
+/// The box round what one line of text draws, in the line's own direction.
 struct TextBox {
-    /// The sheet's object that draws it, and the object of its block when
-    /// it is an insert's.
-    key: (usize, Option<usize>),
-    /// The text's direction: along it, and up from it.
+    key: Key,
+    /// What the line says.
+    says: String,
+    /// The line's direction: along it, and up from it, each of length 1.
     along: Point2,
     up: Point2,
     /// The box's corners on the sheet.
     corners: [Point2; 4],
-    /// The box round what it draws, seen from above, square to the sheet.
+    /// The box round its corners, square to the sheet.
     seen: Bounds,
 }
 
 impl TextBox {
-    /// The box round `points`, drawn by `key` running at `rotation`
-    /// degrees; none when it draws nothing.
-    fn of(key: (usize, Option<usize>), rotation: f64, points: &[Point2]) -> Option<TextBox> {
-        let seen = Bounds::of(points.iter().copied())?;
-        let (sin, cos) = rotation.to_radians().sin_cos();
-        let along = [cos, sin];
-        let up = [-sin, cos];
-        let own = Bounds::of(points.iter().map(|&p| [dot(p, along), dot(p, up)]))?;
-        let corner = |a: f64, b: f64| [a * along[0] + b * up[0], a * along[1] + b * up[1]];
+    /// The box round what `run` draws, as the pipeline draws it; none when
+    /// it draws nothing.
+    fn of(run: &TextRun) -> Option<TextBox> {
+        let [lo, hi] = run.drawn?;
+        let at = |u: f64, v: f64| {
+            [
+                run.origin[0] + u * run.across[0] + v * run.up[0],
+                run.origin[1] + u * run.across[1] + v * run.up[1],
+            ]
+        };
+        let corners = [
+            at(lo[0], lo[1]),
+            at(hi[0], lo[1]),
+            at(hi[0], hi[1]),
+            at(lo[0], hi[1]),
+        ];
+        let unit = |v: Point2| {
+            let length = v[0].hypot(v[1]);
+            (length > 0.0).then(|| [v[0] / length, v[1] / length])
+        };
         Some(TextBox {
-            key,
-            along,
-            up,
-            corners: [
-                corner(own.min[0], own.min[1]),
-                corner(own.max[0], own.min[1]),
-                corner(own.max[0], own.max[1]),
-                corner(own.min[0], own.max[1]),
-            ],
-            seen,
+            key: (run.object, run.part),
+            says: run.characters.iter().map(|&(c, _)| c).collect(),
+            along: unit(run.across)?,
+            up: unit(run.up)?,
+            corners,
+            seen: Bounds::of(corners.into_iter())?,
         })
     }
 
-    /// How far this box and `other` overlap: the least overlap along the
-    /// sides of either, which is how far one would move to clear the
-    /// other. 0 or less when they do not overlap.
-    fn overlap(&self, other: &TextBox) -> f64 {
-        [self.along, self.up, other.along, other.up]
-            .iter()
-            .map(|&axis| {
-                let span = |corners: &[Point2; 4]| {
-                    corners
-                        .iter()
-                        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &c| {
-                            let d = dot(c, axis);
-                            (lo.min(d), hi.max(d))
-                        })
-                };
-                let (a_lo, a_hi) = span(&self.corners);
-                let (b_lo, b_hi) = span(&other.corners);
-                a_hi.min(b_hi) - a_lo.max(b_lo)
-            })
-            .fold(f64::INFINITY, f64::min)
+    /// How far this box and `other` overlap, when they sit on each other:
+    /// how far one would move to clear the other, the least along the sides
+    /// of either. None when they are apart, or overlap by no more than
+    /// `tolerance`.
+    ///
+    /// A box with no breadth along one of those sides, such as the box
+    /// round a single upright stroke like `I`, is cleared along it only by
+    /// moving it off the other box's breadth there; and two such boxes on
+    /// one line along it, such as two `I`s at one place, lie on each other
+    /// whichever way that side would part them, so it does not.
+    fn sits_on(&self, other: &TextBox, tolerance: f64) -> Option<f64> {
+        let mut depth = f64::INFINITY;
+        for axis in [self.along, self.up, other.along, other.up] {
+            let (a_lo, a_hi) = span(&self.corners, axis);
+            let (b_lo, b_hi) = span(&other.corners, axis);
+            let clear = (a_hi - b_lo).min(b_hi - a_lo);
+            if a_hi - a_lo <= tolerance && b_hi - b_lo <= tolerance {
+                if clear < -tolerance {
+                    return None;
+                }
+                continue;
+            }
+            if clear <= tolerance {
+                return None;
+            }
+            depth = depth.min(clear);
+        }
+        Some(if depth.is_finite() { depth } else { 0.0 })
     }
 }
 
-fn dot(p: Point2, axis: Point2) -> f64 {
-    p[0] * axis[0] + p[1] * axis[1]
+/// Where `corners` reach along `axis`: from the least to the most.
+fn span(corners: &[Point2; 4], axis: Point2) -> (f64, f64) {
+    corners
+        .iter()
+        .map(|c| c[0] * axis[0] + c[1] * axis[1])
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), d| {
+            (lo.min(d), hi.max(d))
+        })
 }
 
 impl Sides {

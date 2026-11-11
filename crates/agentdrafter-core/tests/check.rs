@@ -669,3 +669,98 @@ fn a_change_sets_reply_carries_the_failed_checks_for_the_sheets_it_landed_on() {
     assert_eq!(written["object"]["field"], "rows[1].objects[0]");
     assert!(written["past"]["right"].as_f64().unwrap() > 0.0);
 }
+
+#[test]
+fn text_lying_wholly_on_other_text_is_found_though_its_box_has_no_width() {
+    let dir = scratch("no-width");
+    // `I` draws one upright stroke, so the box round it has no width.
+    let sheet = |second: &str, contents: &str| {
+        format!(
+            "units: mm
+paper: [200, 100]
+objects:
+{TRIM}  - text: {{contents: {contents}, position: [30, 30, 0], height: 5, id: first}}
+  - text: {{contents: I, position: {second}, height: 5, id: second}}
+"
+        )
+    };
+    let twins = check_sheet(&dir, &sheet("[30, 30, 0]", "I"));
+    assert_eq!(twins.count, 1, "{:#?}", twins.findings);
+    let finding = &twins.findings[0];
+    assert_eq!(finding.rule, Rule::TextOnText);
+    assert_eq!(finding.object.as_ref().unwrap().id, "sheet/second");
+    assert_eq!(finding.other.as_ref().unwrap().id, "sheet/first");
+    assert_eq!(finding.drawn.unwrap().width, 0.0, "a box with no width");
+    close(finding.overlap.unwrap(), 5.0);
+
+    // An `I` in the middle of a wider word sits on it too.
+    let inside = check_sheet(&dir, &sheet("[40, 30, 0]", "HHHHHH"));
+    assert_eq!(
+        of(&inside, Rule::TextOnText).len(),
+        1,
+        "{:#?}",
+        inside.findings
+    );
+
+    // Two `I`s side by side are apart.
+    passes(&check_sheet(&dir, &sheet("[32, 30, 0]", "I")));
+}
+
+#[test]
+fn multiline_text_is_held_to_each_line_it_draws() {
+    let dir = scratch("mtext-lines");
+    let sheet = |note: &str| {
+        format!(
+            "units: mm
+paper: [200, 100]
+objects:
+{TRIM}  - mtext: {{contents: \"LONG FIRST LINE\\nX\", position: [10, 70, 0], height: 5, id: note}}
+  - text: {{contents: CLEAR, position: {note}, height: 3, id: clear}}
+"
+        )
+    };
+    // Beside the short second line and below the long first one: clear of
+    // both, though inside the box round the two together.
+    passes(&check_sheet(&dir, &sheet("[30, 57, 0]")));
+
+    // On the first line, it sits on it, and the finding says which line.
+    let on = check_sheet(&dir, &sheet("[30, 66, 0]"));
+    let found = of(&on, Rule::TextOnText);
+    assert_eq!(found.len(), 1, "{:#?}", on.findings);
+    assert_eq!(found[0].object.as_ref().unwrap().id, "sheet/clear");
+    assert_eq!(found[0].other.as_ref().unwrap().id, "sheet/note");
+    assert!(
+        found[0]
+            .message
+            .contains("sits on the mtext `sheet/note` on its line `LONG FIRST LINE`"),
+        "{}",
+        found[0].message
+    );
+}
+
+#[test]
+fn a_hatch_whose_boundary_runs_off_the_paper_is_off_the_sheet() {
+    let dir = scratch("hatch-boundary");
+    // The pattern's upright lines are 10 mm apart, so only the one at
+    // X = 0 falls inside the boundary from X = -1 to 1: what the hatch
+    // draws stays on the paper, but its boundary reaches 1 mm past it, and
+    // the sheet still draws 200 by 100 mm.
+    let report = check_sheet(
+        &dir,
+        "units: mm
+paper: [200, 100]
+hatch_patterns:
+  RULE: {lines: [{angle: 90, delta: [0, 10]}]}
+objects:
+  - polyline: {points: [[0, 0, 0], [199, 0, 0], [199, 100, 0], [0, 100, 0]], closed: true}
+  - hatch: {pattern: RULE, boundary: [{polyline: {points: [[-1, 10, 0], [1, 10, 0], [1, 20, 0], [-1, 20, 0]]}}], id: fill}
+",
+    );
+    assert_eq!(report.count, 1, "{:#?}", report.findings);
+    let finding = &report.findings[0];
+    assert_eq!(finding.rule, Rule::OffSheet);
+    let object = finding.object.as_ref().unwrap();
+    assert_eq!(object.id, "sheet/fill");
+    assert_eq!(object.kind, "hatch");
+    close(finding.past.unwrap().left, 1.0);
+}
