@@ -22,8 +22,11 @@ use crate::model::{
 use crate::text::TextStyle;
 use crate::units::Unit;
 
-/// Every object type a sheet description can hold, and the keys each takes.
-pub(crate) const OBJECT_TYPES: [(&str, &[&str]); 10] = [
+/// An object type and the keys it takes.
+type ObjectType = (&'static str, &'static [&'static str]);
+
+/// The drawn objects both a sheet and a block hold, and the keys each takes.
+const DRAWN_OBJECT_TYPES: [ObjectType; 9] = [
     ("line", &LINE_KEYS),
     ("polyline", &POLYLINE_KEYS),
     ("arc", &ARC_KEYS),
@@ -33,23 +36,26 @@ pub(crate) const OBJECT_TYPES: [(&str, &[&str]); 10] = [
     ("hatch", &HATCH_KEYS),
     ("text", &TEXT_KEYS),
     ("mtext", &MTEXT_KEYS),
-    ("insert", &INSERT_KEYS),
 ];
+
+/// The drawn objects followed by one more object type.
+const fn drawn_and(last: ObjectType) -> [ObjectType; 10] {
+    let mut types = [last; 10];
+    let mut i = 0;
+    while i < DRAWN_OBJECT_TYPES.len() {
+        types[i] = DRAWN_OBJECT_TYPES[i];
+        i += 1;
+    }
+    types
+}
+
+/// Every object type a sheet description can hold, and the keys each takes:
+/// the drawn objects, and inserts.
+pub(crate) const OBJECT_TYPES: [ObjectType; 10] = drawn_and(("insert", &INSERT_KEYS));
 
 /// Every object type a block in a block library can hold, and the keys
 /// each takes: the drawn objects a sheet holds, and attribute definitions.
-pub(crate) const BLOCK_OBJECT_TYPES: [(&str, &[&str]); 10] = [
-    ("line", &LINE_KEYS),
-    ("polyline", &POLYLINE_KEYS),
-    ("arc", &ARC_KEYS),
-    ("circle", &CIRCLE_KEYS),
-    ("ellipse", &ELLIPSE_KEYS),
-    ("spline", &SPLINE_KEYS),
-    ("hatch", &HATCH_KEYS),
-    ("text", &TEXT_KEYS),
-    ("mtext", &MTEXT_KEYS),
-    ("attdef", &ATTDEF_KEYS),
-];
+pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 10] = drawn_and(("attdef", &ATTDEF_KEYS));
 
 /// What the objects of one sheet or one block may name: the declared unit
 /// and the layers, hatch patterns and text styles defined beside them.

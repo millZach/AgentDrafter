@@ -43,12 +43,17 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
             "description": format!(
                 "An attribute tag: the label an insert fills an attribute in by. 1 to \
                  {LONGEST_TAG} characters in capitals, as AutoCAD keeps it, with no spaces and no \
-                 control characters."
+                 control characters. A plain number such as `100` is read as its digits."
             ),
-            "type": "string",
-            "minLength": 1,
-            "maxLength": LONGEST_TAG,
-            "pattern": format!("^[^\\s\\p{{Lowercase}}{CONTROL}]+$"),
+            "anyOf": [
+                {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": LONGEST_TAG,
+                    "pattern": format!("^[^\\s\\p{{Lowercase}}{CONTROL}]+$"),
+                },
+                { "type": ["number", "boolean", "null"] },
+            ],
         }),
     );
     defs.insert(

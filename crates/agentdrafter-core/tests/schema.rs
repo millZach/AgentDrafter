@@ -430,32 +430,7 @@ fn read_sheet(yaml: &str) -> Result<(), Error> {
 
 #[test]
 fn the_schema_accepts_exactly_the_values_the_reader_accepts() {
-    let schema = sheet_description_schema();
-    let validator = jsonschema::validator_for(&schema).expect("the schema is a valid JSON Schema");
-    let mut disagreements = Vec::new();
-    for (place, yaml_value, json_value, accepted) in cases() {
-        let yaml = place.yaml.replace('V', yaml_value);
-        let json: Value = serde_json::from_str(&place.json.replace('V', &json_value.to_string()))
-            .expect("the JSON case is JSON");
-        let reader = read_sheet(&yaml);
-        let by_schema = validator.is_valid(&json);
-        if reader.is_ok() != accepted || by_schema != accepted {
-            disagreements.push(format!(
-                "{} {yaml_value}: expected {}, the reader {} ({}), the schema {}",
-                place.name,
-                if accepted { "accepted" } else { "refused" },
-                if reader.is_ok() { "accepts" } else { "refuses" },
-                reader.err().map(|e| e.message).unwrap_or_default(),
-                if by_schema { "accepts" } else { "refuses" },
-            ));
-        }
-    }
-    assert!(
-        disagreements.is_empty(),
-        "{} disagreements:\n{}",
-        disagreements.len(),
-        disagreements.join("\n")
-    );
+    assert_reader_and_schema_agree(&sheet_description_schema(), cases(), read_sheet);
 }
 
 const TAG: Place = Place {
@@ -509,6 +484,8 @@ fn library_cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
         (&TAG, "'TAG_2'", json!("TAG_2"), true),
         (&TAG, "ÉTAT", json!("ÉTAT"), true),
         (&TAG, "'100'", json!("100"), true),
+        (&TAG, "100", json!(100), true),
+        (&TAG, "TRUE", json!(true), true),
         (&TAG, "Tag", json!("Tag"), false),
         (&TAG, "état", json!("état"), false),
         (&TAG, "'A B'", json!("A B"), false),
@@ -556,14 +533,25 @@ fn library_cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
 
 #[test]
 fn the_block_library_schema_accepts_exactly_the_values_the_reader_accepts() {
-    let schema = block_library_schema();
-    let validator = jsonschema::validator_for(&schema).expect("the schema is a valid JSON Schema");
+    assert_reader_and_schema_agree(&block_library_schema(), library_cases(), |yaml| {
+        parse_block_library(yaml).map(|_| ())
+    });
+}
+
+/// Asserts that the reader and the schema both accept exactly the cases
+/// marked accepted, and lists every case where either disagrees.
+fn assert_reader_and_schema_agree(
+    schema: &Value,
+    cases: Vec<(&'static Place, &'static str, Value, bool)>,
+    read: impl Fn(&str) -> Result<(), Error>,
+) {
+    let validator = jsonschema::validator_for(schema).expect("the schema is a valid JSON Schema");
     let mut disagreements = Vec::new();
-    for (place, yaml_value, json_value, accepted) in library_cases() {
+    for (place, yaml_value, json_value, accepted) in cases {
         let yaml = place.yaml.replace('V', yaml_value);
         let json: Value = serde_json::from_str(&place.json.replace('V', &json_value.to_string()))
             .expect("the JSON case is JSON");
-        let reader = parse_block_library(&yaml);
+        let reader = read(&yaml);
         let by_schema = validator.is_valid(&json);
         if reader.is_ok() != accepted || by_schema != accepted {
             disagreements.push(format!(
