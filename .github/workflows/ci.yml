@@ -42,3 +42,11 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --locked
+
+      # The judge drives AutoCAD and never runs here; only its reading and scoring are tested, on made-up data.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Judge tests (made-up data, no AutoCAD)
+        run: python -m unittest discover -s tools/judge/tests
