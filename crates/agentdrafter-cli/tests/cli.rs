@@ -230,8 +230,71 @@ fn schema_prints_the_sheet_descriptions_json_schema() {
     let (_, json) = agentdrafter(&["--help"], &dir);
     assert_eq!(
         json["result"]["commands"]["schema"]["usage"],
-        "agentdrafter schema [sheet-description | block-library | template | set | rows]"
+        "agentdrafter schema [sheet-description | block-library | template | set | rows | change-set]"
     );
+}
+
+#[test]
+fn operations_are_listed_and_a_change_set_is_applied_from_a_file() {
+    let dir = scratch("change");
+    let set = copy_demo_set(&dir);
+    let (code, json) = agentdrafter(&["operations"], &dir);
+    assert_eq!(code, 0, "{json}");
+    let listed = json["result"]["operations"].as_array().unwrap();
+    assert_eq!(listed.len(), 14);
+    assert_eq!(listed[11]["name"], "move");
+    assert_eq!(listed[11]["alias"], "MOVE");
+    assert!(listed[11]["schema"]["$defs"]["point"].is_object());
+    let (code, json) = agentdrafter(&["schema", "change-set"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["title"], "AgentDrafter change set");
+
+    let (code, json) = agentdrafter(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{json}");
+    fs::write(
+        dir.join("move.json"),
+        r#"{"operations": [{"op": "MOVE", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]}"#,
+    )
+    .unwrap();
+    let rows = fs::read(set.join("templates/ansi-b.yaml")).unwrap();
+    let (code, json) = agentdrafter(&["change", "demo-set", "move.json", "--dry-run"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["dry_run"], true);
+    assert_eq!(fs::read(set.join("templates/ansi-b.yaml")).unwrap(), rows);
+    let (code, json) = agentdrafter(&["change", "demo-set", "move.json"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["landed"], 3);
+    assert_ne!(fs::read(set.join("templates/ansi-b.yaml")).unwrap(), rows);
+
+    fs::write(
+        dir.join("bad.json"),
+        r#"{"operations": [{"op": "add_circle", "sheet": "DEMO-001", "center": [1, 1, 0], "radius": 1}, {"op": "add_circle", "sheet": "DEMO-002", "center": [1, 1, 0], "radius": 1, "layer": "nope"}]}"#,
+    )
+    .unwrap();
+    let (code, json) = agentdrafter(&["change", "demo-set", "bad.json"], &dir);
+    assert_eq!(code, 1, "{json}");
+    assert_eq!(json["error"]["code"], "sheets_failed");
+    assert_eq!(
+        json["result"]["inconsistent"]["failures"][0]["sheet"],
+        "DEMO-002"
+    );
+
+    for args in [
+        &["change", "demo-set"][..],
+        &["change", "demo-set", "move.json", "--nope"],
+        &["operations", "extra"],
+    ] {
+        let (code, json) = agentdrafter(args, &dir);
+        assert_eq!(code, 2, "{json}");
+        assert_eq!(json["error"]["code"], "usage");
+    }
+    fs::write(dir.join("not.json"), "operations: []").unwrap();
+    let (code, json) = agentdrafter(&["change", "demo-set", "not.json"], &dir);
+    assert_eq!(code, 1, "{json}");
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not JSON"));
 }
 
 /// A copy of the demo plant's drawing set in `dir`, as `demo-set`.
@@ -365,4 +428,43 @@ fn an_unknown_hatch_pattern_is_reported_with_the_choices() {
         "unknown hatch pattern `ANSI31`; the sheet's hatch patterns: SOLID, GRID"
     );
     assert!(!dir.join("sheet.dwg").exists());
+}
+
+#[test]
+fn templates_are_grouped_by_the_file_their_path_names() {
+    // Two rows whose templates are two files, `../t.yaml` and
+    // `../../../t.yaml`, with the set named from the folder it is in. A
+    // change to one template reaches only the sheet built from it.
+    let root = scratch("template-files");
+    let cwd = root.join("a").join("b");
+    let set = cwd.join("set");
+    fs::create_dir_all(&set).unwrap();
+    let template = "units: mm\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1, id: c}\n";
+    fs::write(cwd.join("t.yaml"), template).unwrap();
+    fs::write(root.join("t.yaml"), template).unwrap();
+    fs::write(
+        set.join("set.yaml"),
+        "units: mm\noutput: dwg\nrows: rows.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        set.join("rows.yaml"),
+        "rows:\n  - sheet: S-1\n    template: ../t.yaml\n  - sheet: S-2\n    template: ../../../t.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        cwd.join("change.json"),
+        r#"{"operations": [{"op": "change", "target": {"id": "S-2/c"}, "set": {"radius": 2}}]}"#,
+    )
+    .unwrap();
+    let (code, json) = agentdrafter(&["change", "set", "change.json"], &cwd);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(
+        json["result"]["operations"][0]["sheets"],
+        serde_json::json!(["S-2"])
+    );
+    assert_eq!(fs::read_to_string(cwd.join("t.yaml")).unwrap(), template);
+    assert!(fs::read_to_string(root.join("t.yaml"))
+        .unwrap()
+        .contains("radius: 2"));
 }

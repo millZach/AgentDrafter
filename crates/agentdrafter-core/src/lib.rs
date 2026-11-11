@@ -29,6 +29,10 @@
 //! - [`query`] asks a drawing set, or one sheet description, what is on its
 //!   sheets: objects by ID, name, block, attribute or text, the blocks
 //!   inserted, inserts' attributes, a distance and a sheet's extents.
+//! - [`change`] applies a change set of typed operations to a drawing set's
+//!   working revision, its own files, or reports what it would do in a dry
+//!   run; [`operations`] lists the operations with their AutoCAD aliases
+//!   and schemas, and [`change_set_schema`] states what a change set holds.
 //!
 //! [`Settings`] say where the machine keeps its fonts and plot styles;
 //! [`build`], [`measure_text`], [`render`] and [`plot`] read them from the
@@ -41,6 +45,7 @@
 //! from (ADR-0011).
 
 mod build;
+mod change;
 mod description;
 mod draw;
 mod dwg;
@@ -63,6 +68,11 @@ mod units;
 use std::path::Path;
 
 pub use build::{build, build_with, BuildReport, BuildRequest};
+pub use change::{
+    change, change_set_schema, change_with, operations, ChangeReport, ChangeRequest, Failure, Fill,
+    Inconsistent, OperationInfo, OperationList, OperationOutcome, RowValueSet, SheetChange,
+    MARK_FILE,
+};
 pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
 pub use error::{Error, ErrorCode};
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};

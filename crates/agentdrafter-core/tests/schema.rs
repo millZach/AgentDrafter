@@ -307,7 +307,14 @@ fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
         (&OBJECT_ID, "''", json!(""), false),
         (&OBJECT_ID, "'a b'", json!("a b"), false),
         (&OBJECT_ID, "'DEMO-001/a'", json!("DEMO-001/a"), false),
-        (&OBJECT_ID, "'objects[3]'", json!("objects[3]"), false),
+        // A place written whole as an `id`, as an operation writes it when
+        // it deletes an object before it, keeps the object's ID.
+        (&OBJECT_ID, "'objects[3]'", json!("objects[3]"), true),
+        (&OBJECT_ID, "'rows[1].objects[0]'", json!("rows[1].objects[0]"), true),
+        (&OBJECT_ID, "'objects[03]'", json!("objects[03]"), false),
+        (&OBJECT_ID, "'objects[3'", json!("objects[3"), false),
+        (&OBJECT_ID, "'Objects[3]'", json!("Objects[3]"), false),
+        (&OBJECT_ID, "'rows[1].objects'", json!("rows[1].objects"), false),
         (&OBJECT_ID, "'état'", json!("état"), false),
         (&OBJECT_ID, "[a]", json!(["a"]), false),
         (&OBJECT_ID, "{a: b}", json!({"a": "b"}), false),

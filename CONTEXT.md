@@ -105,7 +105,7 @@ A sheet's border, title block and fixed content, waiting for data.
 _Avoid_: prototype, master
 
 **Row**:
-One sheet's data in a drawing set: the sheet's name, the template it is drawn from, and the values that template takes from it. A sheet can be a template plus one row.
+One sheet's data in a drawing set: the sheet's name, the template it is drawn from, the values that template takes from it, and any objects of the sheet's own, which are on that sheet alone. A sheet can be a template plus one row.
 _Avoid_: record (a record is the file that is the truth for a sheet), entry, line
 
 **Set settings**:
@@ -165,7 +165,7 @@ _Avoid_: round-trip safe, lossless
 ### Changing and checking
 
 **Operation**:
-A named, typed action on a drawing, such as `insert_block`. Where AutoCAD has the same command, the operation carries the AutoCAD name as an alias.
+A named, typed action on a drawing, such as `insert_block`. Where AutoCAD has the same command, the operation carries the AutoCAD name as an alias. An operation names the object it edits, its target, by ID or name.
 _Avoid_: command (the word for what a person types), tool, call
 
 **Change set**:
@@ -177,10 +177,10 @@ The on-disk record of every change set and every failed attempt. A later session
 _Avoid_: history, log, undo stack
 
 **Inconsistent set**:
-A drawing set in which a change set landed on some sheets and failed on others. It stays marked until the failed sheets are fixed or the change set is undone as one.
+A drawing set in which a change set landed on some sheets and failed on others. It stays marked, in a file in the set's folder, until the failed sheets are fixed or the change set is undone as one.
 
 **Working revision**:
-The state an agent's changes land on at once. It is not issued.
+The state an agent's changes land on at once: the drawing set's own files, edited in place. It is not issued.
 _Avoid_: draft, staging
 
 **Issued**:

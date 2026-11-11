@@ -3,11 +3,12 @@
 //! A drawing set is a folder. Its settings, in `set.yaml` at the top of the
 //! folder, declare the set's unit, the folder its DWGs go to and the file
 //! its rows are in. Each row names one sheet, the template it is drawn from
-//! and the values the template takes from it. Both files are written in the
-//! same strict YAML as a sheet description, and `docs/drawing-set.md` sets
-//! them out.
+//! and the values the template takes from it, and may hold objects of its
+//! own, which are on that sheet alone. Both files are written in the same
+//! strict YAML as a sheet description, and `docs/drawing-set.md` sets them
+//! out.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::blocks::{relative_path, RelativePath};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
@@ -22,7 +23,10 @@ pub(crate) const SETTINGS_KEYS: [&str; 3] = ["units", "output", "rows"];
 pub(crate) const ROWS_FILE_KEYS: [&str; 1] = ["rows"];
 
 /// The keys a row takes.
-pub(crate) const ROW_KEYS: [&str; 3] = ["sheet", "template", "values"];
+pub(crate) const ROW_KEYS: [&str; 4] = ["sheet", "template", "values", ROW_OBJECTS_KEY];
+
+/// The key of a row's own objects, which are on its sheet alone.
+pub(crate) const ROW_OBJECTS_KEY: &str = "objects";
 
 /// The longest sheet name, in characters: with `.dwg` after it, its file
 /// name is at most 255 characters, as Windows allows.
@@ -68,6 +72,10 @@ pub(crate) struct Row {
     pub(super) at: Pos,
     /// The row's values, in the order it writes them.
     pub(super) values: Vec<RowValue>,
+    /// The row's own objects, as the rows file writes them: they are on
+    /// this sheet alone, after its template's objects. They are read with
+    /// the sheet, since what they may name is in its template.
+    pub(super) objects: Vec<Node>,
 }
 
 /// One value of a row: the text a template's `{row: NAME}` stands for.
@@ -89,6 +97,19 @@ impl Row {
     pub(super) fn value_path(&self, name: &str) -> String {
         key_path(&key_path(&index_path("rows", self.index), "values"), name)
     }
+
+    /// The path of the row's objects in the rows file, such as
+    /// `rows[2].objects`.
+    pub(super) fn objects_path(&self) -> String {
+        key_path(&index_path("rows", self.index), ROW_OBJECTS_KEY)
+    }
+}
+
+/// The file `row`'s template is in, for a set whose folder is `folder`:
+/// the path the row writes, relative to the set's folder. Every reader of a
+/// set finds a sheet's template here.
+pub(crate) fn template_path(folder: &Path, row: &Row) -> PathBuf {
+    folder.join(&row.template)
 }
 
 /// Reads the drawing set's settings in the file at `path`.
@@ -196,12 +217,22 @@ fn row(node: &Node, index: usize, sheets: &mut Vec<(String, Pos)>) -> Result<Row
         Some(values) => (row_values(values, &fields.path_of("values"))?, values.at),
         None => (Vec::new(), node.at),
     };
+    let objects = match fields.get(ROW_OBJECTS_KEY) {
+        Some(list) => sequence(
+            list,
+            &fields.path_of(ROW_OBJECTS_KEY),
+            "a list of objects, which are on this sheet alone",
+        )?
+        .to_vec(),
+        None => Vec::new(),
+    };
     Ok(Row {
         sheet,
         template: template.to_owned(),
         index,
         at,
         values,
+        objects,
     })
 }
 

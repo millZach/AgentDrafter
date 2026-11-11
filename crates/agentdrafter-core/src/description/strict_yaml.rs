@@ -5,8 +5,12 @@
 //! than one document, keys that are not plain text, and a key given twice
 //! in the same mapping. It gives scalars no type: every scalar is text, and
 //! the schema in the parent module decides what the text means.
+//!
+//! Each node also keeps where it is written in the text and in what style,
+//! so that an operation can rewrite one object of a record and leave every
+//! other byte of the file as it was (`edit.rs`).
 
-use saphyr_parser::{Event, Parser, Span};
+use saphyr_parser::{Event, Parser, ScalarStyle, Span};
 
 use crate::error::{Error, ErrorCode};
 
@@ -26,24 +30,91 @@ impl Pos {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Node {
     pub kind: Kind,
     pub at: Pos,
+    /// Where the node is written in the text it was read from, and how.
+    /// `None` for a node an edit made, which is written out afresh.
+    pub source: Option<Source>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum Kind {
     Scalar(String),
     Sequence(Vec<Node>),
     Mapping(Vec<Entry>),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Entry {
     pub key: String,
     pub key_at: Pos,
+    /// The byte just after the key in the text, or 0 for an entry an edit
+    /// made.
+    pub key_end: usize,
     pub value: Node,
+}
+
+/// Where a node is written: byte offsets in the text, without a leading
+/// byte-order mark, from its first character to just after its last one.
+/// A block scalar starts at its first line of contents, after its `|` or
+/// `>`; a block collection ends where its last item or value ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Source {
+    pub start: usize,
+    pub end: usize,
+    pub style: Style,
+}
+
+/// How a node is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Style {
+    /// A plain scalar, such as `100` or `4 in`.
+    Plain,
+    /// A scalar in single or double quotes.
+    Quoted,
+    /// A literal (`|`) or folded (`>`) block scalar.
+    BlockScalar,
+    /// A list or mapping in brackets or braces.
+    Flow,
+    /// A list or mapping written one item or key to a line.
+    Block,
+}
+
+impl Node {
+    /// A node an edit made, which has no place in a text yet.
+    pub(super) fn new(kind: Kind) -> Self {
+        Self {
+            kind,
+            at: Pos { line: 0, column: 0 },
+            source: None,
+        }
+    }
+
+    /// A scalar an edit made.
+    pub(super) fn scalar(text: impl Into<String>) -> Self {
+        Self::new(Kind::Scalar(text.into()))
+    }
+
+    /// Whether `self` and `other` hold the same scalars, lists and
+    /// mappings, keys in the same order, wherever and however each is
+    /// written.
+    pub(super) fn same_as(&self, other: &Node) -> bool {
+        match (&self.kind, &other.kind) {
+            (Kind::Scalar(a), Kind::Scalar(b)) => a == b,
+            (Kind::Sequence(a), Kind::Sequence(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.same_as(b))
+            }
+            (Kind::Mapping(a), Kind::Mapping(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b)
+                        .all(|(a, b)| a.key == b.key && a.value.same_as(&b.value))
+            }
+            _ => false,
+        }
+    }
 }
 
 /// The path to a child of the field at `parent`: `objects[0]` and `line` give `objects[0].line`.
@@ -64,13 +135,38 @@ pub(super) fn index_path(parent: &str, index: usize) -> String {
 enum Frame {
     Sequence {
         at: Pos,
+        opened: Opened,
         items: Vec<Node>,
     },
     Mapping {
         at: Pos,
+        opened: Opened,
         entries: Vec<Entry>,
-        key: Option<(String, Pos)>,
+        key: Option<(String, Pos, usize)>,
     },
+}
+
+/// Where a list or mapping opened, and whether in brackets or braces.
+#[derive(Clone, Copy)]
+struct Opened {
+    start: usize,
+    flow: bool,
+}
+
+/// Byte offsets of a text's characters: saphyr counts its places in
+/// characters, and an edit splices bytes.
+struct Offsets(Vec<usize>);
+
+impl Offsets {
+    fn of(text: &str) -> Self {
+        let mut offsets: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+        offsets.push(text.len());
+        Self(offsets)
+    }
+
+    fn byte(&self, character: usize) -> usize {
+        self.0[character.min(self.0.len() - 1)]
+    }
 }
 
 /// Reads `text` as the strict YAML subset. Returns `None` for a document
@@ -81,6 +177,7 @@ enum Frame {
 pub(super) fn read(text: &str) -> Result<Option<Node>, Error> {
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     refuse_directives(text)?;
+    let offsets = Offsets::of(text);
     let mut stack: Vec<Frame> = Vec::new();
     let mut root: Option<Node> = None;
     let mut documents = 0;
@@ -112,11 +209,24 @@ pub(super) fn read(text: &str) -> Result<Option<Node>, Error> {
                     "aliases (`*name`) are not allowed in a sheet description; write the value out",
                 ))
             }
-            Event::Scalar(value, _style, anchor, tag) => {
+            Event::Scalar(value, style, anchor, tag) => {
                 plain_node(anchor, tag.is_some()).map_err(refuse)?;
+                let start = offsets.byte(span.start.index());
+                let mut end = offsets.byte(span.end.index());
+                let style = match style {
+                    ScalarStyle::Plain => Style::Plain,
+                    ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted => Style::Quoted,
+                    ScalarStyle::Literal | ScalarStyle::Folded => {
+                        // A block scalar's span runs on to the next token;
+                        // it ends where its last line of contents does.
+                        end = start + text[start..end].trim_end().len();
+                        Style::BlockScalar
+                    }
+                };
                 let node = Node {
                     kind: Kind::Scalar(value.into_owned()),
                     at,
+                    source: Some(Source { start, end, style }),
                 };
                 place(node, &mut stack, &mut root)?;
             }
@@ -125,6 +235,7 @@ pub(super) fn read(text: &str) -> Result<Option<Node>, Error> {
                 open_collection(&stack).map_err(refuse)?;
                 stack.push(Frame::Sequence {
                     at,
+                    opened: opened(&span, &offsets),
                     items: Vec::new(),
                 });
             }
@@ -133,20 +244,37 @@ pub(super) fn read(text: &str) -> Result<Option<Node>, Error> {
                 open_collection(&stack).map_err(refuse)?;
                 stack.push(Frame::Mapping {
                     at,
+                    opened: opened(&span, &offsets),
                     entries: Vec::new(),
                     key: None,
                 });
             }
             Event::SequenceEnd | Event::MappingEnd => {
+                // A flow collection ends just after its bracket or brace:
+                // the parser's span runs on over a comment after it.
+                let closed = offsets.byte(span.start.index()) + 1;
                 let node = match stack.pop() {
-                    Some(Frame::Sequence { at, items }) => Node {
-                        kind: Kind::Sequence(items),
+                    Some(Frame::Sequence { at, opened, items }) => {
+                        let last = items.last().and_then(|i| i.source).map(|s| s.end);
+                        Node {
+                            source: Some(closed_source(opened, closed, last)),
+                            kind: Kind::Sequence(items),
+                            at,
+                        }
+                    }
+                    Some(Frame::Mapping {
                         at,
-                    },
-                    Some(Frame::Mapping { at, entries, .. }) => Node {
-                        kind: Kind::Mapping(entries),
-                        at,
-                    },
+                        opened,
+                        entries,
+                        ..
+                    }) => {
+                        let last = entries.last().and_then(|e| e.value.source).map(|s| s.end);
+                        Node {
+                            source: Some(closed_source(opened, closed, last)),
+                            kind: Kind::Mapping(entries),
+                            at,
+                        }
+                    }
                     None => unreachable!("the YAML parser closed a collection it never opened"),
                 };
                 place(node, &mut stack, &mut root)?;
@@ -154,6 +282,35 @@ pub(super) fn read(text: &str) -> Result<Option<Node>, Error> {
         }
     }
     Ok(root)
+}
+
+/// Where a list or mapping opens: a flow one opens with its bracket or
+/// brace, which its span covers; a block one's span is empty.
+fn opened(span: &Span, offsets: &Offsets) -> Opened {
+    Opened {
+        start: offsets.byte(span.start.index()),
+        flow: span.end.index() > span.start.index(),
+    }
+}
+
+/// Where a list or mapping is written, once it has closed: a flow one ends
+/// at `closed`, just after its closing bracket or brace, and a block one
+/// where its last item or value ends, at `last`, not where the next token
+/// starts.
+fn closed_source(opened: Opened, closed: usize, last: Option<usize>) -> Source {
+    if opened.flow {
+        Source {
+            start: opened.start,
+            end: closed,
+            style: Style::Flow,
+        }
+    } else {
+        Source {
+            start: opened.start,
+            end: last.unwrap_or(opened.start),
+            style: Style::Block,
+        }
+    }
 }
 
 /// Refuses a node that carries an anchor or a tag.
@@ -187,9 +344,10 @@ fn place(node: Node, stack: &mut [Frame], root: &mut Option<Node>) -> Result<(),
         None => *root = Some(node),
         Some(Frame::Sequence { items, .. }) => items.push(node),
         Some(Frame::Mapping { entries, key, .. }) => match key.take() {
-            Some((name, key_at)) => entries.push(Entry {
+            Some((name, key_at, key_end)) => entries.push(Entry {
                 key: name,
                 key_at,
+                key_end,
                 value: node,
             }),
             None => {
@@ -207,7 +365,8 @@ fn place(node: Node, stack: &mut [Frame], root: &mut Option<Node>) -> Result<(),
                     .at_field(key_path(&path, &name))
                     .at_position(node.at.line, node.at.column));
                 }
-                *key = Some((name, node.at));
+                let key_end = node.source.map_or(0, |s| s.end);
+                *key = Some((name, node.at, key_end));
             }
         },
     }
@@ -221,7 +380,7 @@ fn path_of(stack: &[Frame]) -> String {
         match frame {
             Frame::Sequence { items, .. } => path = index_path(&path, items.len()),
             Frame::Mapping {
-                key: Some((name, _)),
+                key: Some((name, _, _)),
                 ..
             } => path = key_path(&path, name),
             Frame::Mapping { key: None, .. } => {}

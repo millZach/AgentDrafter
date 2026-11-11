@@ -19,6 +19,7 @@ use agentdrafter_core::{
     PlotSetRequest, RenderRequest, Reply, SetBuildRequest, Settings, StaleRequest,
     BUILT_IN_PLOT_STYLE, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SET_SETTINGS_FILE,
 };
+use agentdrafter_core::{change_set_schema, change_with, operations, ChangeRequest};
 use agentdrafter_core::{query_with, End, Matching, Measure, Query, QueryRequest, Selection};
 use serde::Serialize;
 use serde_json::json;
@@ -26,7 +27,9 @@ use serde_json::json;
 const BUILD_USAGE: &str =
     "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg>] [--overwrite] [--fonts <folder>]...";
 const SCHEMA_USAGE: &str =
-    "agentdrafter schema [sheet-description | block-library | template | set | rows]";
+    "agentdrafter schema [sheet-description | block-library | template | set | rows | change-set]";
+const OPERATIONS_USAGE: &str = "agentdrafter operations";
+const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder> <change-set.json | -> [--dry-run] [--fonts <folder>]...";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...";
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]...";
@@ -46,7 +49,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
         return reply::<()>(Err(Error::usage(format!(
-            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE}"
+            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE}"
         ))));
     };
     match command.to_str() {
@@ -76,6 +79,17 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
             Ok((request, settings)) => reply(query_with(&request, &settings)),
             Err(error) => reply::<()>(Err(error)),
         },
+        Some("operations") => match args.next() {
+            None => reply(Ok(operations())),
+            Some(extra) => reply::<()>(Err(Error::usage(format!(
+                "operations takes no argument, found `{}`; usage: {OPERATIONS_USAGE}",
+                extra.to_string_lossy()
+            )))),
+        },
+        Some("change") => match parse_change(args) {
+            Ok((request, settings)) => send(change_with(&request, &settings)),
+            Err(error) => reply::<()>(Err(error)),
+        },
         Some("schema") => {
             let which = args.next();
             match (which.as_ref().map(|a| a.to_str()), args.next()) {
@@ -86,12 +100,13 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
                 (Some(Some("template")), None) => reply(Ok(template_schema())),
                 (Some(Some("set")), None) => reply(Ok(set_schema())),
                 (Some(Some("rows")), None) => reply(Ok(rows_schema())),
+                (Some(Some("change-set")), None) => reply(Ok(change_set_schema())),
                 (_, Some(extra)) => reply::<()>(Err(Error::usage(format!(
                     "schema takes at most one argument, found `{}` as well; usage: {SCHEMA_USAGE}",
                     extra.to_string_lossy()
                 )))),
                 (Some(_), None) => reply::<()>(Err(Error::usage(format!(
-                    "schema prints the schema of a sheet description, a block library, a template, a drawing set's settings or its rows, not `{}`; usage: {SCHEMA_USAGE}",
+                    "schema prints the schema of a sheet description, a block library, a template, a drawing set's settings, its rows or a change set, not `{}`; usage: {SCHEMA_USAGE}",
                     which.unwrap_or_default().to_string_lossy()
                 )))),
             }
@@ -99,7 +114,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         Some("help" | "--help" | "-h") => reply(Ok(help())),
         Some("--version" | "-V") => reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") }))),
         _ => reply::<()>(Err(Error::usage(format!(
-            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE}",
+            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE}",
             command.to_string_lossy()
         )))),
     }
@@ -308,6 +323,68 @@ fn parse_stale(mut args: impl Iterator<Item = OsString>) -> Result<StaleRequest,
         ))
     })?;
     Ok(StaleRequest { output, source })
+}
+
+/// Reads `change`'s arguments: the set's folder, the change set's JSON file
+/// or `-` for standard input, and the options.
+fn parse_change(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(ChangeRequest, Settings), Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {CHANGE_USAGE}"));
+    let mut given: Vec<OsString> = Vec::new();
+    let mut dry_run = false;
+    let mut fonts = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--dry-run") => dry_run = true,
+            Some("--fonts") => match args.next() {
+                Some(folder) => fonts.push(PathBuf::from(folder)),
+                None => return Err(usage("--fonts needs a value".to_owned())),
+            },
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("change takes no option `{flag}`")))
+            }
+            _ => given.push(arg),
+        }
+    }
+    let [set, change_set] = <[OsString; 2]>::try_from(given).map_err(|given| {
+        usage(format!(
+            "change takes a drawing set's folder and a change set, found {} arguments",
+            given.len()
+        ))
+    })?;
+    let text = if change_set == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|e| {
+            Error::new(
+                ErrorCode::ReadFailed,
+                format!("could not read the change set from standard input: {e}"),
+            )
+        })?;
+        text
+    } else {
+        let path = PathBuf::from(&change_set);
+        std::fs::read_to_string(&path).map_err(|e| {
+            Error::new(
+                ErrorCode::ReadFailed,
+                format!("could not read the change set `{}`: {e}", path.display()),
+            )
+        })?
+    };
+    let change_set = serde_json::from_str(&text).map_err(|e| {
+        Error::new(
+            ErrorCode::WrongType,
+            format!("the change set is not JSON: {e}"),
+        )
+    })?;
+    Ok((
+        ChangeRequest {
+            set: PathBuf::from(set),
+            change_set,
+            dry_run,
+        },
+        settings(fonts),
+    ))
 }
 
 fn parse_query(
@@ -645,6 +722,27 @@ fn help() -> serde_json::Value {
                          and all; with --contains, each matches what holds it, in any case. A \
                          query that matches nothing is ok and says so; --sheet looks at one \
                          sheet only.",
+            },
+            "operations": {
+                "usage": OPERATIONS_USAGE,
+                "does": "Lists every operation a change set can hold: its name, its AutoCAD \
+                         alias, what it does and its JSON Schema. `schema change-set` gives the \
+                         schema of a whole change set.",
+            },
+            "change": {
+                "usage": CHANGE_USAGE,
+                "does": "Applies a change set, a JSON file such as {\"operations\": [{\"op\": \
+                         \"move\", \"target\": {\"id\": \"DEMO-001/border\"}, \"by\": [0.1, \
+                         0, 0]}]}, to a drawing set's own files at once, and builds again the \
+                         DWGs of the sheets it touched. Objects are named by ID or name, never \
+                         by coordinates. An edit to a template's object edits the template, so \
+                         every sheet built from it follows; an object added to a sheet goes in \
+                         its row. Each sheet takes its part fully or not at all, a template edit \
+                         lands only if every sheet of its template does, and a change set that \
+                         lands on some sheets and fails on others marks the set inconsistent \
+                         until a later change set names them under fixes. --dry-run reports \
+                         what it would do and writes nothing. The reply is not ok when a sheet \
+                         failed.",
             },
         },
         "fonts": format!(

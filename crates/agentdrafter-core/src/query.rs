@@ -28,7 +28,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::description::{
-    read_rows, read_set_settings, read_sheet_record, read_template, SheetRecord,
+    read_rows, read_set_settings, read_sheet_record, read_template, template_path, SheetRecord,
 };
 use crate::draw::{self, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
@@ -166,6 +166,11 @@ pub struct QueryReport {
     pub message: String,
     #[serde(flatten)]
     pub answer: Answer,
+    /// The drawing set's inconsistent mark, when a change set landed on
+    /// some of its sheets and failed on others: the answer reads the
+    /// records as they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inconsistent: Option<crate::change::Inconsistent>,
 }
 
 /// The answer to each kind of query. Written with the query's `kind`.
@@ -374,6 +379,11 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
         sheets: looked_at.iter().map(|r| r.name.clone()).collect(),
         message,
         answer,
+        inconsistent: if source.is_dir() {
+            crate::change::inconsistent(source)
+        } else {
+            None
+        },
     })
 }
 
@@ -401,7 +411,7 @@ fn load(source: &Path, sheet: Option<&str>) -> Result<(Unit, Vec<SheetRecord>), 
     let records = looked_at
         .into_iter()
         .map(|row| {
-            let template = source.join(&row.template);
+            let template = template_path(source, row);
             read_template(&template, row, &rows_file, set.units, &mut Vec::new()).map_err(|e| {
                 Error {
                     message: format!(
@@ -646,7 +656,7 @@ fn matched<'a>(
 fn written_at(record: &SheetRecord, index: usize) -> WrittenAt {
     let object = &record.objects[index].object;
     WrittenAt {
-        file: record.file.display().to_string(),
+        file: record.file_of(index).display().to_string(),
         field: object.field.clone(),
         line: object.line,
         column: object.column,
