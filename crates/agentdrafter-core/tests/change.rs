@@ -1006,9 +1006,10 @@ fn a_partial_change_whose_mark_cannot_be_written_does_not_land() {
 #[test]
 fn two_spellings_of_one_template_file_are_one_template() {
     // On a file system that ignores case, as Windows' and macOS's do,
-    // `templates/t.yaml` and `templates/T.yaml` are one file, so an edit to
-    // it reaches both sheets. Where case counts, as on Linux, they are two
-    // paths and there is nothing to show.
+    // `templates/t.yaml` and `templates/T.yaml` are one file, so one
+    // template: an edit to it is refused, naming both, since it would be
+    // written through one of them only. Where case counts, as on Linux,
+    // they are two paths and there is nothing to show.
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("core-change")
         .join("template-case");
@@ -1032,18 +1033,98 @@ fn two_spellings_of_one_template_file_are_one_template() {
         "rows:\n  - sheet: S-1\n    template: templates/t.yaml\n  - sheet: S-2\n    template: templates/T.yaml\n",
     )
     .unwrap();
-    let report = lands(
+    let before = snapshot(&dir);
+    let reply = apply(
         &dir,
         json!({"operations": [{"op": "change", "target": {"id": "S-1/c"}, "set": {"radius": 2}}]}),
     );
-    assert_eq!(report.operations[0].sheets, ["S-1", "S-2"]);
-    assert_eq!(report.landed, 2);
-    for sheet in ["S-1", "S-2"] {
-        let Object::Circle(c) = &built(&dir, sheet)[&format!("{sheet}/c")] else {
-            panic!()
-        };
-        close(c.radius, 2.0);
+    assert!(reply.result.is_none());
+    let e = reply.error.unwrap();
+    assert!(
+        e.message
+            .contains("`templates/t.yaml` (sheet `S-1`), `templates/T.yaml` (sheet `S-2`)"),
+        "{}",
+        e.message
+    );
+    assert_eq!(snapshot(&dir), before);
+}
+
+/// A template one row names through a link and another by its own path:
+/// only Unix makes such a link without asking for rights.
+#[cfg(unix)]
+#[test]
+fn an_edit_to_a_template_reached_by_two_paths_is_refused_whole() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("core-change")
+        .join("template-link");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("templates")).unwrap();
+    fs::write(
+        dir.join("templates/t.yaml"),
+        "units: mm\nlayers:\n  notes: {}\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1, id: c}\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("t.yaml", dir.join("templates/alias.yaml")).unwrap();
+    fs::write(
+        dir.join("set.yaml"),
+        "units: mm\noutput: dwg\nrows: rows.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("rows.yaml"),
+        "rows:\n  - sheet: S-1\n    template: templates/alias.yaml\n  - sheet: S-2\n    template: templates/t.yaml\n",
+    )
+    .unwrap();
+    let built = build_set_with(
+        &SetBuildRequest {
+            set: dir.clone(),
+            overwrite: false,
+        },
+        &Settings::default(),
+    );
+    assert!(built.ok, "{:#?}", built.error);
+    let before = snapshot(&dir);
+    for (operation, field) in [
+        (
+            json!({"op": "change", "target": {"id": "S-2/c"}, "set": {"radius": 2}}),
+            "operations[0].target",
+        ),
+        (
+            json!({"op": "move", "target": {"id": "S-1/c"}, "by": [1, 0, 0]}),
+            "operations[0].target",
+        ),
+        (
+            json!({"op": "delete", "target": {"id": "S-2/c"}}),
+            "operations[0].target",
+        ),
+        (
+            json!({"op": "add_line", "template": "templates/t.yaml", "from": [0, 0, 0], "to": [1, 1, 0]}),
+            "operations[0].template",
+        ),
+    ] {
+        let reply = apply(&dir, json!({"operations": [operation]}));
+        assert!(reply.result.is_none(), "the whole change set is refused");
+        let e = reply.error.unwrap();
+        assert_eq!(e.code, ErrorCode::BadValue);
+        assert_eq!(e.field.as_deref(), Some(field));
+        assert!(
+            e.message
+                .contains("`templates/alias.yaml` (sheet `S-1`), `templates/t.yaml` (sheet `S-2`)"),
+            "{}",
+            e.message
+        );
+        assert_eq!(snapshot(&dir), before);
+        assert!(fs::symlink_metadata(dir.join("templates/alias.yaml"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
+    // An edit to one sheet's row is no edit to the template, and lands.
+    let report = lands(
+        &dir,
+        json!({"operations": [{"op": "add_circle", "sheet": "S-1", "center": [1, 1, 0], "radius": 0.5, "layer": "notes"}]}),
+    );
+    assert_eq!(report.landed, 1);
 }
 
 #[test]

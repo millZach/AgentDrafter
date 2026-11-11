@@ -53,6 +53,10 @@ struct SetFiles {
 struct TemplateFile {
     /// Its path as the first row that names it writes it.
     written: String,
+    /// Every path the rows reach it by, as they write them, each with the
+    /// first sheet that writes it. More than one when rows name one file by
+    /// different paths, such as a link and the file it links to.
+    paths: Vec<(String, usize)>,
     path: PathBuf,
     text: Result<String, Error>,
     /// The rows of the sheets built from it.
@@ -71,10 +75,16 @@ impl SetFiles {
             let path = template_path(folder, row);
             let same = templates.iter().position(|t| one_file(&t.path, &path));
             let t = match same {
-                Some(t) => t,
+                Some(t) => {
+                    if !templates[t].paths.iter().any(|(p, _)| *p == row.template) {
+                        templates[t].paths.push((row.template.clone(), k));
+                    }
+                    t
+                }
                 None => {
                     templates.push(TemplateFile {
                         written: row.template.clone(),
+                        paths: vec![(row.template.clone(), k)],
                         text: read_file(&path, "the template"),
                         path,
                         sheets: Vec::new(),
@@ -655,6 +665,9 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 (FileRef::Template(t), ObjectList::Template, sheets, first)
             }
         };
+        if let Some(refusal) = many_paths(files, file, op, "template") {
+            return refusal;
+        }
         let mut keys = keys.clone();
         if !keys.contains_key("id") {
             let mut taken: BTreeSet<String> = BTreeSet::new();
@@ -753,6 +766,13 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
     };
     let mut sheets = reach.clone();
     let mut from_row: Option<(String, String)> = None;
+    // A move or a delete always edits the object's file; a change and an
+    // attribute are checked once it is known whether they did.
+    if matches!(op.body, Body::Move { .. } | Body::Delete { .. }) {
+        if let Some(refusal) = many_paths(files, file, op, "target") {
+            return refusal;
+        }
+    }
     match &op.body {
         Body::Change { set, .. } => match record.change(list, index, set, op.index) {
             Ok(changed) => {
@@ -760,6 +780,8 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 done.message = format!("sets {} of `{id}`{template_note}", keys.join(", "));
                 if !changed.edited {
                     sheets = vec![k];
+                } else if let Some(refusal) = many_paths(files, file, op, "target") {
+                    return refusal;
                 }
                 from_row = changed.from_row;
             }
@@ -798,6 +820,9 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         Body::SetAttribute { tag, value, .. } => {
             match record.set_attribute(list, index, tag, value, op.index) {
                 Ok(AttributeSet::Written) => {
+                    if let Some(refusal) = many_paths(files, file, op, "target") {
+                        return refusal;
+                    }
                     done.message =
                         format!("sets the attribute {tag} of `{id}` to `{value}`{template_note}");
                 }
@@ -881,6 +906,44 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         outcome: Ok(done),
         refuse: false,
     }
+}
+
+/// The refusal of operation `op`, which edits `file`, when `file` is a
+/// template the rows reach by more than one path. A change set writes a
+/// template through one path, so a sheet that reaches it by another, such
+/// as a link to it, would keep its old record beside a rebuilt DWG; the
+/// whole change set is refused instead, before anything is written. `field`
+/// is the operation's key that names the template or its object.
+fn many_paths(files: &SetFiles, file: FileRef, op: &Operation, field: &str) -> Option<Applied> {
+    let FileRef::Template(t) = file else {
+        return None;
+    };
+    let paths = &files.templates[t].paths;
+    if paths.len() < 2 {
+        return None;
+    }
+    let listed: Vec<String> = paths
+        .iter()
+        .map(|(path, k)| format!("`{path}` (sheet `{}`)", files.name(*k)))
+        .collect();
+    let error = op_error(
+        op.index,
+        op.spec.name,
+        ErrorCode::BadValue,
+        format!(
+            "it edits a template the rows reach by more than one path to one file: {}. A change \
+             set writes a template through one path, so a sheet that reaches it by another \
+             would not follow; write one path to the template in every row that names it, then \
+             send the change set again",
+            listed.join(", ")
+        ),
+        field,
+    );
+    Some(Applied {
+        sheets: Vec::new(),
+        outcome: Err(error),
+        refuse: true,
+    })
 }
 
 /// The object `target` names, as the records in memory hold it now.

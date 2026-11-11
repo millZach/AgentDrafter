@@ -14,7 +14,7 @@ Zach decided on 2026-11-11:
 4. **A template edit is all or nothing across its sheets.** It lands only if every sheet built from that template takes its whole part. Otherwise the template, those sheets' rows and their DWGs stay as they were, byte for byte. Sheets built from other templates still land. ADR-0005 stands.
 5. **A value the template takes from the row is set in that sheet's row.** Setting an attribute, or a text's contents, whose template value is `{row: NAME}` writes that sheet's row value `NAME`, on that sheet alone, and the reply names every place on the sheet the value fills.
 
-A sheet's template is the file its row's path names, as the file system resolves it, so rows that reach one file by different paths, such as `templates/t.yaml` and `templates/T.yaml` where the file system ignores case, share one template, and rows whose paths name two files, such as `../t.yaml` and `../../../t.yaml`, do not.
+A sheet's template is the file its row's path names, as the file system resolves it, so rows that reach one file by different paths, such as `templates/t.yaml` and `templates/T.yaml` where the file system ignores case, or a link and the file it links to, share one template, and rows whose paths name two files, such as `../t.yaml` and `../../../t.yaml`, do not. A change set writes a template through one path, so it does not edit a template the rows reach by more than one: such an edit refuses the change set, naming the paths, until every row writes one path to it. An edit to one sheet's row is no edit to its template, and lands.
 
 ## A change set
 
@@ -80,7 +80,7 @@ The operations are applied in order to the records in memory. Every sheet an ope
 
 A sheet that fails is left as it was, byte for byte: its row's text in the rows file, its template, and its DWG. The rows file holds every sheet's row, so its other rows can change while a failed sheet's row does not. A DWG that is there but cannot be written, such as one open in AutoCAD on Windows, fails its sheet before anything is written. A sheet whose rebuilt DWG is byte for byte the one already there is not written again.
 
-**A change set that is wrong in itself is refused whole**, and nothing is done: an operation that does not exist, a sheet or a template the set does not hold, a key an operation does not take, an operation that leaves out a key it requires, such as an `add_line` with no `to`, a name with no sheet that is on no sheet or on more than one. Each operation is checked for these before any is applied. There is no sheet to fail.
+**A change set that is wrong in itself is refused whole**, and nothing is done: an operation that does not exist, a sheet or a template the set does not hold, a key an operation does not take, an operation that leaves out a key it requires, such as an `add_line` with no `to`, a name with no sheet that is on no sheet or on more than one, an edit to a template the rows reach by more than one path. Each operation is checked for these before any is applied. There is no sheet to fail.
 
 ## An inconsistent set
 
