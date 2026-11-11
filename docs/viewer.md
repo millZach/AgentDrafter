@@ -110,11 +110,13 @@ What still differs: anti-aliasing. tiny-skia covers each edge pixel by the area 
 
 ### Smooth on a phone
 
-The `frames` check opens the demo plant's `DP-LD-101` (5,582 segments) at phone size with touch and the CPU throttled four times (Chrome's `Emulation.setCPUThrottlingRate`), then pinches out with two fingers, drags with one and lets go moving, and pinches in, through Chrome's own touch events, while every animation frame's time is kept. It holds 95% of frames within 20 ms, 99% within 34 ms (one refresh late at most) and none over 100 ms, and the point under the fingers under them. On forge, while other work kept its load average near 9:
+The `frames` check opens the demo plant's `DP-LD-101` (5,582 segments) at phone size with touch and the CPU throttled four times (Chrome's `Emulation.setCPUThrottlingRate`), then pinches out with two fingers, drags with one and lets go moving, and pinches in, through Chrome's own touch events, while every animation frame's time is kept. It holds the page's own draw per frame to a median of 1 ms and 95% within 4 ms, the point under the fingers under them, and 95% of frames within 20 ms, 99% within 34 ms (one refresh late at most) and none over 100 ms. On forge, while other work kept its load average near 9:
 
 | WebGL | Runs | Frames a run | Median | 95% within | 99% within | Longest | Over 33.3 ms | The page's draw per frame (median, 95%) | Drift under the fingers |
 |---|---|---|---|---|---|---|---|---|---|
 | Software (SwiftShader), as CI's runners have | 6 | 342 to 355 | 16.7 ms | 16.8 ms | 33.3 to 33.4 ms | 33.4 ms in four runs, 66.7 and 66.8 ms in two | 1 to 5 | 0.1 to 0.3 ms, 0.8 to 0.9 ms | 0 px |
 | forge's GPU (RTX 4060, through Vulkan) | 2 | 355 and 356 | 16.7 ms | 16.8 ms | 16.8 ms | 16.8 ms | 0 | 0.1 ms, 0.7 to 0.8 ms | 0 px |
+
+CI's runner, four cores with no GPU, fills the phone's 1170 by 2532 canvas in software slower than the display's pace: there the frames came at a median of 16.7 ms but 95% within 50 ms, while the page's own draw took 0.1 ms (median) and 1.5 ms (95%). That is the runner's software WebGL, not the page, so CI's job runs the check with `--smooth draw`, which holds the page's own draw and reports the frame times.
 
 A frame of 16.7 ms is the display's 60 a second. Drawing each segment as an instance of one quad cost software WebGL about 33 ms a frame, which drawing the quads as plain triangles brought under a frame. A real phone has a GPU of its own; how it feels in the hand is the reviewer's to judge.

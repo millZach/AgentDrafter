@@ -3,6 +3,7 @@
 // stops them before it ends.
 //
 //   node e2e/run.mjs [--bin <agentdrafter>] [--chrome <chromium>] [--out <folder>] [--only <check>,...]
+//                    [--gl software|gpu] [--throttle <rate>] [--smooth frames|draw]
 //
 // - png:     the canvas, drawn at a render's view and size, against the PNG
 //            `agentdrafter render` draws of the same sheet at scale 1;
@@ -59,6 +60,9 @@ const BROWSER_ARGS = [
     : ['--use-angle=swiftshader', '--enable-unsafe-swiftshader']),
 ];
 const THROTTLE = Number(option('--throttle') ?? 4);
+// What the `frames` check holds: `frames`, the frame times (the default),
+// or `draw`, the page's own draw per frame alone.
+const SMOOTH = option('--smooth') ?? 'frames';
 const PHONE = { viewport: { width: 390, height: 844 }, deviceScaleFactor: Number(process.env.E2E_RATIO ?? 3), isMobile: true, hasTouch: true };
 const LAPTOP = { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 };
 
@@ -366,11 +370,21 @@ const checks = {
         draw_call_per_frame: stats(draws),
         pinch_drift_px: round(drift),
       };
+      // The page's own work each frame, under the throttle, is a sliver of
+      // a frame, whatever draws the pixels.
+      const draw = result.draw_call_per_frame;
+      assert(draw.median_ms <= 1 && draw.p95_ms <= 4, `the page's draw per frame is not small: ${JSON.stringify(result)}`);
       // Smooth: 95% of frames come at the display's pace (60 a second), 99%
-      // within one refresh of it, and none stalls for 100 ms.
-      const { p95_ms, p99_ms, max_ms } = result.frame_intervals;
-      const smooth = p95_ms <= 20 && p99_ms <= 34 && max_ms <= 100;
-      assert(smooth, `frames are not smooth: ${JSON.stringify(result)}`);
+      // within one refresh of it, and none stalls for 100 ms. `--smooth draw`
+      // holds the page's own draw alone, where software WebGL on a small
+      // machine with no GPU, such as CI's runner, is slower than any phone's
+      // GPU to fill the canvas; the frame times are still reported.
+      result.held_to = SMOOTH === 'draw' ? "the page's draw per frame" : 'the frame times';
+      if (SMOOTH !== 'draw') {
+        const { p95_ms, p99_ms, max_ms } = result.frame_intervals;
+        const smooth = p95_ms <= 20 && p99_ms <= 34 && max_ms <= 100;
+        assert(smooth, `frames are not smooth: ${JSON.stringify(result)}`);
+      }
       return result;
     } finally {
       await b.close();

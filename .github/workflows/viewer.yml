@@ -73,10 +73,13 @@ jobs:
 
       # The PNG match, the token beyond the local machine, frame times at phone
       # size with the CPU throttled 4x, WebGL2 with no WebGPU, mouse and tabs,
-      # and screenshots; software WebGL, as the runner has no GPU.
+      # and screenshots; software WebGL, as the runner has no GPU. With four
+      # cores and no GPU, the runner fills the phone's canvas slower than a
+      # phone's GPU does, so the frames check holds the page's own draw per
+      # frame and reports the frame times (docs/viewer.md).
       - name: The page in headless Chrome
         working-directory: viewer
-        run: node e2e/run.mjs --chrome "$(command -v google-chrome)"
+        run: node e2e/run.mjs --chrome "$(command -v google-chrome)" --smooth draw
 
       - name: Keep the numbers, the screenshots and the compared images
         if: always()
