@@ -23,7 +23,7 @@ The drafting app for people, where someone uses AgentDrafter the way they use Au
 - read and compare text: sheet descriptions in a strict subset of YAML (ADR-0003);
 - work in the reviewer's live session.
 
-**The viewer:** a browser window that opens on the laptop, on forge and on a phone over the tailnet. The reviewer pans, zooms, picks and inspects, watches each change land, steps through the journal, and accepts or undoes. It has no drawing tools. Changes land at once on a working revision; nothing is issued until the reviewer accepts.
+**The viewer:** a browser window that opens on the laptop, on forge and on a phone over the tailnet. Its look was picked from a prototype: the drawing fills the screen and updates as change sets land, sheets are tabs across the top, the journal drags up from the bottom, and undo and accept are always in reach. The reviewer pans, zooms, picks and inspects, watches each change land, steps through the journal, and accepts or undoes. It has no drawing tools. Changes land at once on a working revision; nothing is issued until the reviewer accepts.
 
 **Outputs:** DWG in the 2018 format, which is what a new sheet is written in (ADR-0006), and PDF at issue quality: same sheet size, lineweights, monochrome plot style and text widths as AutoCAD's plot of the same DWG, with searchable text.
 
@@ -55,6 +55,8 @@ Later, order not yet set: carrying part of an old sheet into a generated one; ba
 | The drawing set is the unit of work | A change set can span sheets and is undone as one. Search and consistency run across the set. |
 | Each sheet all-or-nothing | A sheet takes its part of a change set fully or not at all. If some sheets fail, the set is marked inconsistent until they are fixed or the change set is undone. |
 | Journal and undo across sessions | Every change set and failed attempt is recorded in the set's folder. A later session can read it and undo from it. Old undo states are pruned. Git is optional. |
+| Undo is a stack | Undoing a change set also undoes every later one that is not issued. A failed attempt stays in the journal. An issued change set cannot be undone. |
+| Accept is blocked on an inconsistent set | The reviewer cannot accept while the set is inconsistent. Failed checks do not block: the reviewer can accept after a warning that lists them. |
 | Stable IDs and names | An object keeps one ID for life and can carry a name agents select by. Nothing is selected by coordinates. |
 | Outputs are stamped | Every PDF, PNG and DWG says which revision produced it. A stale output is flagged. |
 | Sheet-aware checks by default | Exact paper sizes, nothing off the sheet, no text overflowing its cell or sitting on other text, reported after every change. |

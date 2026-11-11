@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use crate::text::{MText, Text, TextStyle};
 use crate::units::Unit;
 
+pub(crate) mod hatch;
+pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
+
 /// The layer every drawing has, and the one an object sits on unless it names another.
 pub const LAYER_ZERO: &str = "0";
 
@@ -168,6 +171,7 @@ pub enum Object {
     Circle(Circle),
     Ellipse(Ellipse),
     Spline(Spline),
+    Hatch(Hatch),
     Text(Text),
     #[serde(rename = "mtext")]
     MText(MText),
@@ -183,6 +187,7 @@ impl Object {
             Object::Circle(_) => "circle",
             Object::Ellipse(_) => "ellipse",
             Object::Spline(_) => "spline",
+            Object::Hatch(_) => "hatch",
             Object::Text(_) => "text",
             Object::MText(_) => "mtext",
         }
@@ -197,6 +202,7 @@ impl Object {
             Object::Circle(o) => &o.layer,
             Object::Ellipse(o) => &o.layer,
             Object::Spline(o) => &o.layer,
+            Object::Hatch(o) => &o.layer,
             Object::Text(o) => &o.layer,
             Object::MText(o) => &o.layer,
         }

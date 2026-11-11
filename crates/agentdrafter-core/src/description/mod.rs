@@ -7,9 +7,12 @@
 //! and an error about a choice lists the valid choices.
 //!
 //! [`layers`] reads linetypes and layers, [`objects`] reads the objects,
-//! [`text`] reads text styles and text, and [`schema`] states the same keys
-//! as a JSON Schema for agents to read.
+//! [`hatch`] reads hatch patterns and hatches, [`text`] reads text styles
+//! and text, and [`schema`] states the same keys as a JSON Schema for
+//! agents to read.
 
+mod hatch;
+mod hatch_schema;
 mod layers;
 mod objects;
 pub(crate) mod schema;
@@ -23,7 +26,14 @@ use crate::model::{Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 5] = ["units", "linetypes", "layers", "text_styles", "objects"];
+pub(crate) const SHEET_KEYS: [&str; 6] = [
+    "units",
+    "linetypes",
+    "layers",
+    "hatch_patterns",
+    "text_styles",
+    "objects",
+];
 
 /// Reads the text of a sheet description into a [`Sheet`].
 ///
@@ -59,6 +69,10 @@ pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
         Some(node) => layers::layers(node, &linetypes)?,
         None => Vec::new(),
     };
+    let hatch_patterns = match fields.get("hatch_patterns") {
+        Some(node) => hatch::hatch_patterns(node, units)?,
+        None => Vec::new(),
+    };
     let text_styles = match fields.get("text_styles") {
         Some(node) => text::text_styles(node)?,
         None => Vec::new(),
@@ -73,6 +87,7 @@ pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
                 &index_path("objects", i),
                 units,
                 &layers,
+                &hatch_patterns,
                 &text_styles,
             )
         })
@@ -354,6 +369,9 @@ mod tests;
 
 #[cfg(test)]
 mod geometry_tests;
+
+#[cfg(test)]
+mod hatch_tests;
 
 #[cfg(test)]
 mod text_tests;

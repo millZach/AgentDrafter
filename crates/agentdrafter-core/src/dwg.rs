@@ -1,12 +1,11 @@
 //! The seam between AgentDrafter and its DWG library.
 //!
-//! This is the only module that names acadrust (ADR-0009). Everything else in
-//! the core works on its own model ([`crate::model`]), so moving the acadrust
-//! pin, or the library itself, changes this file and `Cargo.toml` only.
-//! Moving the pin means running the judge again.
-//!
-//! Text styles and text are in the submodule `dwg/text.rs`, part of the
-//! same seam.
+//! This module, with its submodules under `dwg/`, is the only code that
+//! names acadrust (ADR-0009). Everything else in the core works on its own
+//! model ([`crate::model`]), so moving the acadrust pin, or the library
+//! itself, changes these files and `Cargo.toml` only. Moving the pin means
+//! running the judge again. [`hatch`] carries hatches through the seam, and
+//! [`text`] text styles and text.
 //!
 //! Our own names here follow `CONTEXT.md`: a DWG file's contents are a
 //! drawing and the things in it are objects. acadrust's names, such as
@@ -34,6 +33,7 @@ use crate::model::{
 use crate::text::Text as TextObject;
 use crate::units::Unit;
 
+mod hatch;
 mod text;
 
 /// The DWG version a new sheet is written in: the 2018 format, AC1032 (ADR-0006).
@@ -177,6 +177,7 @@ fn dwg_object(object: &Object, start_of: &dyn Fn(&TextObject) -> Point3) -> Enti
         )),
         Object::Ellipse(ellipse) => EntityType::Ellipse(dwg_ellipse(ellipse)),
         Object::Spline(spline) => EntityType::Spline(dwg_spline(spline)),
+        Object::Hatch(hatch) => EntityType::Hatch(Box::new(hatch::dwg_hatch(hatch))),
         Object::Text(t) => EntityType::Text(text::dwg_text(t, start_of(t))),
         Object::MText(t) => EntityType::MText(Box::new(text::dwg_mtext(t))),
     };
@@ -415,6 +416,7 @@ fn read_object(dwg_object: &EntityType) -> Option<Object> {
             })
         }
         EntityType::Spline(spline) => Object::Spline(read_spline(spline, layer)?),
+        EntityType::Hatch(dwg_hatch) => Object::Hatch(hatch::read_hatch(dwg_hatch, layer)?),
         EntityType::Text(t) => Object::Text(text::read_text(t, layer)?),
         EntityType::MText(t) => Object::MText(text::read_mtext(t, layer)?),
         _ => return None,
@@ -683,7 +685,12 @@ mod tests {
     /// say document and entity, are allowed; ours are not.
     #[test]
     fn our_names_in_the_seam_say_drawing_and_object() {
-        let source = include_str!("dwg.rs");
+        for source in [include_str!("dwg.rs"), include_str!("dwg/hatch.rs")] {
+            assert_our_names_say_drawing_and_object(source);
+        }
+    }
+
+    fn assert_our_names_say_drawing_and_object(source: &str) {
         let (code, _tests) = source.split_once("#[cfg(test)]").unwrap();
         let mut ours = code.to_owned();
         for acadrust_name in [

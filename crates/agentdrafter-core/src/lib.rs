@@ -40,6 +40,7 @@ pub use model::{
     Arc, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object, Point3,
     Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
 };
+pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use reply::Reply;
 pub use settings::{Settings, FONTS_VARIABLE};
 pub use text::fonts::{FontSubstitution, FontUsed};
