@@ -1,30 +1,33 @@
 //! `agentdrafter`: the command line over AgentDrafter's core.
 //!
-//! This is a thin layer (ADR-0007). It turns arguments into a core request,
-//! calls the core, and prints the core's reply as one line of JSON on
-//! standard output, on success and on failure. Drawing logic here is a bug.
+//! This is a thin layer (ADR-0007). It turns arguments into a command's
+//! input, hands it to the core's registry of commands, and prints the
+//! core's reply as one line of JSON on standard output, on success and on
+//! failure. Drawing logic here is a bug.
+//!
+//! `agentdrafter serve` and `agentdrafter mcp` start the HTTP API and the
+//! MCP server, which take their commands from the same registry
+//! (`http.rs`, `mcp.rs`).
 //!
 //! Exit codes: 0 when the reply is `ok`, 1 when the core reports an error,
 //! such as a sheet of a drawing set that failed, 2 when the arguments are
 //! wrong.
 
+mod http;
+mod mcp;
+
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use agentdrafter_core::{commands, find_command, Error, ErrorCode, Reply, Settings};
 use agentdrafter_core::{
-    block_library_schema, build_set_with, build_with, check_stale, measure_text_with,
-    plot_set_with, plot_with, render_with, rows_schema, set_schema, sheet_description_schema,
-    template_schema, BuildRequest, Error, ErrorCode, MeasureTextRequest, PlotRequest,
-    PlotSetRequest, RenderRequest, Reply, SetBuildRequest, Settings, StaleRequest,
-    BUILT_IN_PLOT_STYLE, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SET_SETTINGS_FILE,
+    ChangeRequest, CheckRequest, JournalRequest, MeasureTextRequest, RenderRequest, StaleRequest,
+    UndoRequest, FONTS_VARIABLE, PLOT_STYLES_VARIABLE,
 };
-use agentdrafter_core::{change_set_schema, change_with, operations, ChangeRequest};
-use agentdrafter_core::{check_with, CheckRequest};
-use agentdrafter_core::{journal, undo, JournalRequest, UndoRequest};
-use agentdrafter_core::{query_with, End, Matching, Measure, Query, QueryRequest, Selection};
+use agentdrafter_core::{End, Matching, Measure, Query, QueryRequest, Selection};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
 const BUILD_USAGE: &str =
     "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg>] [--overwrite] [--fonts <folder>]...";
@@ -43,103 +46,137 @@ const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-descri
 const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find and attributes: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [extents: --fonts <folder>...]";
 
 fn main() -> ExitCode {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let (line, code) = run(args);
+    let mut args = std::env::args_os().skip(1).peekable();
+    // The servers run until they are stopped, and print as their protocols
+    // say; every other command prints one line.
+    match args.peek().and_then(|a| a.to_str()) {
+        Some("serve") => return http::serve(args.skip(1).collect::<Vec<_>>().into_iter()),
+        Some("mcp") => return mcp::serve(args.skip(1).collect::<Vec<_>>().into_iter()),
+        _ => {}
+    }
+    let (line, code) = run(args.collect());
     println!("{line}");
     code
+}
+
+/// The arguments after a command's name.
+type Args = std::vec::IntoIter<OsString>;
+
+/// Turns a command's arguments into its input, as the HTTP API and the MCP
+/// server take it.
+type Parse = fn(Args) -> Result<Value, Error>;
+
+/// The command line's form of a registry command: its usage and how its
+/// arguments become its input. Every command of the registry has one, which
+/// a test holds it to.
+fn cli_form(command: &str) -> Option<(&'static str, Parse)> {
+    Some(match command {
+        "build" => (BUILD_USAGE, parse_build),
+        "schema" => (SCHEMA_USAGE, parse_schema),
+        "measure-text" => (MEASURE_USAGE, parse_measure),
+        "render" => (RENDER_USAGE, parse_render),
+        "plot" => (PLOT_USAGE, parse_plot),
+        "stale" => (STALE_USAGE, parse_stale),
+        "query" => (QUERY_USAGE, parse_query),
+        "operations" => (OPERATIONS_USAGE, parse_operations),
+        "change" => (CHANGE_USAGE, parse_change),
+        "journal" => (JOURNAL_USAGE, parse_journal),
+        "undo" => (UNDO_USAGE, parse_undo),
+        "check" => (CHECK_USAGE, parse_check),
+        _ => return None,
+    })
+}
+
+/// Every command's usage, the servers' last.
+fn usages() -> String {
+    commands()
+        .iter()
+        .filter_map(|command| cli_form(command.name()).map(|(usage, _)| usage))
+        .chain([http::SERVE_USAGE, mcp::MCP_USAGE])
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 /// Runs one command and returns the JSON line to print and the exit code.
 fn run(args: Vec<OsString>) -> (String, ExitCode) {
     let mut args = args.into_iter();
-    let Some(command) = args.next() else {
+    let Some(name) = args.next() else {
         return reply::<()>(Err(Error::usage(format!(
-            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE} | {JOURNAL_USAGE} | {UNDO_USAGE} | {CHECK_USAGE}"
+            "no command given; usage: {}",
+            usages()
         ))));
     };
-    match command.to_str() {
-        Some("build") => match parse_build(args) {
-            Ok((Build::Sheet(request), settings)) => reply(build_with(&request, &settings)),
-            Ok((Build::Set(request), settings)) => send(build_set_with(&request, &settings)),
-            Err(error) => reply::<()>(Err(error)),
-        },
-        Some("measure-text") => match parse_measure(args) {
-            Ok((request, settings)) => reply(measure_text_with(&request, &settings)),
-            Err(error) => reply::<()>(Err(error)),
-        },
-        Some("render") => match parse_render(args) {
-            Ok((request, settings)) => reply(render_with(&request, &settings)),
-            Err(error) => reply::<()>(Err(error)),
-        },
-        Some("plot") => match parse_plot(args) {
-            Ok((Plot::Sheet(request), settings)) => reply(plot_with(&request, &settings)),
-            Ok((Plot::Set(request), settings)) => send(plot_set_with(&request, &settings)),
-            Err(error) => reply::<()>(Err(error)),
-        },
-        Some("stale") => match parse_stale(args) {
-            Ok(request) => reply(check_stale(&request)),
-            Err(error) => reply::<()>(Err(error)),
-        },
-        Some("query") => match parse_query(args) {
-            Ok((request, settings)) => reply(query_with(&request, &settings)),
-            Err(error) => reply::<()>(Err(error)),
-        },
-        Some("operations") => match args.next() {
-            None => reply(Ok(operations())),
-            Some(extra) => reply::<()>(Err(Error::usage(format!(
-                "operations takes no argument, found `{}`; usage: {OPERATIONS_USAGE}",
-                extra.to_string_lossy()
-            )))),
-        },
-        Some("change") => match parse_change(args) {
-            Ok((request, settings)) => send(change_with(&request, &settings)),
-            Err(error) => reply::<()>(Err(error)),
-        },
-        Some("journal") => match parse_journal(args) {
-            Ok(request) => send(journal(&request)),
-            Err(error) => reply::<()>(Err(error)),
-        },
-        Some("undo") => match parse_undo(args) {
-            Ok(request) => send(undo(&request)),
-            Err(error) => reply::<()>(Err(error)),
-        },
-        Some("check") => match parse_check(args) {
-            Ok((request, settings)) => reply(check_with(&request, &settings)),
-            Err(error) => reply::<()>(Err(error)),
-        },
-        Some("schema") => {
-            let which = args.next();
-            match (which.as_ref().map(|a| a.to_str()), args.next()) {
-                (None | Some(Some("sheet-description")), None) => {
-                    reply(Ok(sheet_description_schema()))
-                }
-                (Some(Some("block-library")), None) => reply(Ok(block_library_schema())),
-                (Some(Some("template")), None) => reply(Ok(template_schema())),
-                (Some(Some("set")), None) => reply(Ok(set_schema())),
-                (Some(Some("rows")), None) => reply(Ok(rows_schema())),
-                (Some(Some("change-set")), None) => reply(Ok(change_set_schema())),
-                (_, Some(extra)) => reply::<()>(Err(Error::usage(format!(
-                    "schema takes at most one argument, found `{}` as well; usage: {SCHEMA_USAGE}",
-                    extra.to_string_lossy()
-                )))),
-                (Some(_), None) => reply::<()>(Err(Error::usage(format!(
-                    "schema prints the schema of a sheet description, a block library, a template, a drawing set's settings, its rows or a change set, not `{}`; usage: {SCHEMA_USAGE}",
-                    which.unwrap_or_default().to_string_lossy()
-                )))),
-            }
+    match name.to_str() {
+        Some("help" | "--help" | "-h") => return reply(Ok(help())),
+        Some("--version" | "-V") => {
+            return reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") })))
         }
-        Some("help" | "--help" | "-h") => reply(Ok(help())),
-        Some("--version" | "-V") => reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") }))),
-        _ => reply::<()>(Err(Error::usage(format!(
-            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE} | {JOURNAL_USAGE} | {UNDO_USAGE} | {CHECK_USAGE}",
-            command.to_string_lossy()
-        )))),
+        _ => {}
+    }
+    let Some((command, (_, parse))) = name
+        .to_str()
+        .and_then(find_command)
+        .and_then(|command| Some((command, cli_form(command.name())?)))
+    else {
+        return reply::<()>(Err(Error::usage(format!(
+            "unknown command `{}`; usage: {}",
+            name.to_string_lossy(),
+            usages()
+        ))));
+    };
+    match parse(args) {
+        Ok(input) => send(command.run(input, &Settings::from_env())),
+        Err(error) => reply::<()>(Err(error)),
     }
 }
 
-fn parse_render(
-    mut args: impl Iterator<Item = OsString>,
-) -> Result<(RenderRequest, Settings), Error> {
+/// The input a core request gives as plain data, with the font folders
+/// `--fonts` names. A path that is not valid text cannot be sent as JSON,
+/// through any interface.
+fn input_of(request: impl Serialize, fonts: Vec<PathBuf>) -> Result<Value, Error> {
+    let not_text = |e: serde_json::Error| {
+        Error::usage(format!(
+            "every interface takes paths and values as text (UTF-8), and one given is not: {e}"
+        ))
+    };
+    let mut input = serde_json::to_value(request).map_err(not_text)?;
+    if !fonts.is_empty() {
+        input["fonts"] = serde_json::to_value(fonts).map_err(not_text)?;
+    }
+    Ok(input)
+}
+
+fn parse_schema(mut args: Args) -> Result<Value, Error> {
+    let kind = args.next();
+    if let Some(extra) = args.next() {
+        return Err(Error::usage(format!(
+            "schema takes at most one argument, found `{}` as well; usage: {SCHEMA_USAGE}",
+            extra.to_string_lossy()
+        )));
+    }
+    match kind {
+        None => Ok(json!({})),
+        Some(kind) => match kind.into_string() {
+            Ok(kind) => Ok(json!({ "kind": kind })),
+            Err(kind) => Err(Error::usage(format!(
+                "schema prints the schema of a sheet description, a block library, a template, a drawing set's settings, its rows or a change set, not `{}`; usage: {SCHEMA_USAGE}",
+                kind.to_string_lossy()
+            ))),
+        },
+    }
+}
+
+fn parse_operations(mut args: Args) -> Result<Value, Error> {
+    match args.next() {
+        None => Ok(json!({})),
+        Some(extra) => Err(Error::usage(format!(
+            "operations takes no argument, found `{}`; usage: {OPERATIONS_USAGE}",
+            extra.to_string_lossy()
+        ))),
+    }
+}
+
+fn parse_render(mut args: Args) -> Result<Value, Error> {
     let mut source: Option<PathBuf> = None;
     let mut request = RenderRequest::new(PathBuf::new());
     let mut fonts = Vec::new();
@@ -223,17 +260,24 @@ fn parse_render(
     if let Some(margin) = margin {
         request.margin = margin;
     }
-    Ok((request, settings(fonts)))
+    input_of(request, fonts)
 }
 
-/// What `plot` plots: one sheet description or DWG, or every sheet of a
-/// drawing set, whose folder it is given.
-enum Plot {
-    Sheet(PlotRequest),
-    Set(PlotSetRequest),
+/// The input of `build` and `plot`: one sheet description, DWG or drawing
+/// set's folder, which the core tells apart.
+#[derive(Serialize)]
+struct SourceArgs {
+    source: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<PathBuf>,
+    overwrite: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plot_style: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    plot_styles: Vec<PathBuf>,
 }
 
-fn parse_plot(mut args: impl Iterator<Item = OsString>) -> Result<(Plot, Settings), Error> {
+fn parse_plot(mut args: Args) -> Result<Value, Error> {
     let mut source: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut overwrite = false;
@@ -281,33 +325,17 @@ fn parse_plot(mut args: impl Iterator<Item = OsString>) -> Result<(Plot, Setting
             "plot needs a sheet description, a DWG or a drawing set's folder; usage: {PLOT_USAGE}"
         ))
     })?;
-    let mut settings = settings(fonts);
-    settings.plot_style_folders.splice(0..0, plot_styles);
-    // A folder is a drawing set, whose settings say where its outputs go.
-    if source.is_dir() {
-        if output.is_some() {
-            return Err(Error::usage(format!(
-                "a drawing set's PDFs go to the folder its settings ({SET_SETTINGS_FILE}) name \
-                 under `output`; --output is for one sheet description or DWG"
-            )));
-        }
-        let request = PlotSetRequest {
-            set: source,
-            overwrite,
-            plot_style,
-        };
-        return Ok((Plot::Set(request), settings));
-    }
-    let request = PlotRequest {
+    let request = SourceArgs {
         source,
         output,
         overwrite,
         plot_style,
+        plot_styles,
     };
-    Ok((Plot::Sheet(request), settings))
+    input_of(request, fonts)
 }
 
-fn parse_stale(mut args: impl Iterator<Item = OsString>) -> Result<StaleRequest, Error> {
+fn parse_stale(mut args: Args) -> Result<Value, Error> {
     let mut output: Option<PathBuf> = None;
     let mut source: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
@@ -339,14 +367,12 @@ fn parse_stale(mut args: impl Iterator<Item = OsString>) -> Result<StaleRequest,
             "stale needs the output to check; usage: {STALE_USAGE}"
         ))
     })?;
-    Ok(StaleRequest { output, source })
+    input_of(StaleRequest { output, source }, Vec::new())
 }
 
 /// Reads `change`'s arguments: the set's folder, the change set's JSON file
 /// or `-` for standard input, and the options.
-fn parse_change(
-    mut args: impl Iterator<Item = OsString>,
-) -> Result<(ChangeRequest, Settings), Error> {
+fn parse_change(mut args: Args) -> Result<Value, Error> {
     let usage = |message: String| Error::usage(format!("{message}; usage: {CHANGE_USAGE}"));
     let mut given: Vec<OsString> = Vec::new();
     let mut dry_run = false;
@@ -394,18 +420,16 @@ fn parse_change(
             format!("the change set is not JSON: {e}"),
         )
     })?;
-    Ok((
-        ChangeRequest {
-            set: PathBuf::from(set),
-            change_set,
-            dry_run,
-        },
-        settings(fonts),
-    ))
+    let request = ChangeRequest {
+        set: PathBuf::from(set),
+        change_set,
+        dry_run,
+    };
+    input_of(request, fonts)
 }
 
 /// Reads `journal`'s argument: the set's folder.
-fn parse_journal(args: impl Iterator<Item = OsString>) -> Result<JournalRequest, Error> {
+fn parse_journal(args: Args) -> Result<Value, Error> {
     let given: Vec<OsString> = args.collect();
     if let Some(flag) = given
         .iter()
@@ -422,14 +446,15 @@ fn parse_journal(args: impl Iterator<Item = OsString>) -> Result<JournalRequest,
             given.len()
         ))
     })?;
-    Ok(JournalRequest {
+    let request = JournalRequest {
         set: PathBuf::from(set),
-    })
+    };
+    input_of(request, Vec::new())
 }
 
 /// Reads `undo`'s arguments: the set's folder, the change set's entry in
 /// the journal, and the options.
-fn parse_undo(args: impl Iterator<Item = OsString>) -> Result<UndoRequest, Error> {
+fn parse_undo(args: Args) -> Result<Value, Error> {
     let usage = |message: String| Error::usage(format!("{message}; usage: {UNDO_USAGE}"));
     let mut given: Vec<OsString> = Vec::new();
     let mut dry_run = false;
@@ -458,16 +483,15 @@ fn parse_undo(args: impl Iterator<Item = OsString>) -> Result<UndoRequest, Error
                 change_set.to_string_lossy()
             ))
         })?;
-    Ok(UndoRequest {
+    let request = UndoRequest {
         set: PathBuf::from(set),
         change_set,
         dry_run,
-    })
+    };
+    input_of(request, Vec::new())
 }
 
-fn parse_query(
-    mut args: impl Iterator<Item = OsString>,
-) -> Result<(QueryRequest, Settings), Error> {
+fn parse_query(mut args: Args) -> Result<Value, Error> {
     let usage = |message: String| Error::usage(format!("{message}; usage: {QUERY_USAGE}"));
     let kind = match args.next().as_ref().map(|a| a.to_string_lossy()) {
         Some(kind) => kind.into_owned(),
@@ -547,19 +571,15 @@ fn parse_query(
         "extents" => Query::Extents,
         _ => Query::Measure(Measure { from, to }),
     };
-    Ok((
-        QueryRequest {
-            source,
-            sheet,
-            query,
-        },
-        settings(fonts),
-    ))
+    let request = QueryRequest {
+        source,
+        sheet,
+        query,
+    };
+    input_of(request, fonts)
 }
 
-fn parse_check(
-    mut args: impl Iterator<Item = OsString>,
-) -> Result<(CheckRequest, Settings), Error> {
+fn parse_check(mut args: Args) -> Result<Value, Error> {
     let usage = |message: String| Error::usage(format!("{message}; usage: {CHECK_USAGE}"));
     let mut source: Option<PathBuf> = None;
     let mut sheets = Vec::new();
@@ -591,26 +611,10 @@ fn parse_check(
     let source = source.ok_or_else(|| {
         usage("check needs a drawing set's folder or a sheet description".to_owned())
     })?;
-    Ok((CheckRequest { source, sheets }, settings(fonts)))
+    input_of(CheckRequest { source, sheets }, fonts)
 }
 
-/// The settings for one command: the font folders `--fonts` names, then
-/// those the environment names, and the plot style folders the environment
-/// names.
-fn settings(fonts: Vec<PathBuf>) -> Settings {
-    let mut settings = Settings::from_env();
-    settings.font_folders.splice(0..0, fonts);
-    settings
-}
-
-/// What `build` builds: one sheet description, or every sheet of a drawing
-/// set, whose folder it is given.
-enum Build {
-    Sheet(BuildRequest),
-    Set(SetBuildRequest),
-}
-
-fn parse_build(mut args: impl Iterator<Item = OsString>) -> Result<(Build, Settings), Error> {
+fn parse_build(mut args: Args) -> Result<Value, Error> {
     let mut description: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut overwrite = false;
@@ -647,36 +651,22 @@ fn parse_build(mut args: impl Iterator<Item = OsString>) -> Result<(Build, Setti
             }
         }
     }
-    let description = description.ok_or_else(|| {
+    let source = description.ok_or_else(|| {
         Error::usage(format!(
             "build needs a sheet description or a drawing set's folder; usage: {BUILD_USAGE}"
         ))
     })?;
-    // A folder is a drawing set, whose settings say where its DWGs go.
-    if Path::new(&description).is_dir() {
-        if output.is_some() {
-            return Err(Error::usage(format!(
-                "a drawing set's DWGs go to the folder its settings ({SET_SETTINGS_FILE}) name \
-                 under `output`; --output is for one sheet description"
-            )));
-        }
-        let request = SetBuildRequest {
-            set: description,
-            overwrite,
-        };
-        return Ok((Build::Set(request), settings(fonts)));
-    }
-    let request = BuildRequest {
-        description,
+    let request = SourceArgs {
+        source,
         output,
         overwrite,
+        plot_style: None,
+        plot_styles: Vec::new(),
     };
-    Ok((Build::Sheet(request), settings(fonts)))
+    input_of(request, fonts)
 }
 
-fn parse_measure(
-    mut args: impl Iterator<Item = OsString>,
-) -> Result<(MeasureTextRequest, Settings), Error> {
+fn parse_measure(mut args: Args) -> Result<Value, Error> {
     let mut contents: Option<String> = None;
     let mut font: Option<String> = None;
     let mut height: Option<f64> = None;
@@ -734,168 +724,43 @@ fn parse_measure(
     }
     let missing =
         |what: &str| Error::usage(format!("measure-text needs {what}; usage: {MEASURE_USAGE}"));
-    Ok((
-        MeasureTextRequest {
-            contents: contents.ok_or_else(|| missing("the contents to measure"))?,
-            font: font.ok_or_else(|| missing("--font"))?,
-            height: height.ok_or_else(|| missing("--height"))?,
-            width_factor: width_factor.unwrap_or(1.0),
-        },
-        settings(fonts),
-    ))
+    let request = MeasureTextRequest {
+        contents: contents.ok_or_else(|| missing("the contents to measure"))?,
+        font: font.ok_or_else(|| missing("--font"))?,
+        height: height.ok_or_else(|| missing("--height"))?,
+        width_factor: width_factor.unwrap_or(1.0),
+    };
+    input_of(request, fonts)
 }
 
-fn help() -> serde_json::Value {
+/// The command line's help: each command's usage and what it does, from
+/// the registry, and the servers'.
+fn help() -> Value {
+    let mut listed = Map::new();
+    for command in commands() {
+        let usage = cli_form(command.name()).map(|(usage, _)| usage);
+        listed.insert(
+            command.name().to_owned(),
+            json!({ "usage": usage, "does": command.does() }),
+        );
+    }
+    listed.insert(
+        "serve".to_owned(),
+        json!({ "usage": http::SERVE_USAGE, "does": http::serve_does() }),
+    );
+    listed.insert(
+        "mcp".to_owned(),
+        json!({ "usage": mcp::MCP_USAGE, "does": mcp::MCP_DOES }),
+    );
     json!({
         "name": "agentdrafter",
         "version": env!("CARGO_PKG_VERSION"),
-        "commands": {
-            "build": {
-                "usage": BUILD_USAGE,
-                "does": "Builds a sheet description into a DWG in the 2018 format (AC1032), \
-                         with the blocks it inserts from the block library it names. The DWG \
-                         goes beside the sheet description with a .dwg extension unless --output \
-                         names another path. An existing file is never replaced without \
-                         --overwrite, and --overwrite replaces only a DWG AgentDrafter built. The \
-                         reply lists the blocks the DWG defines, and each text style whose font \
-                         is not in the font folders, with the look-alike measured in its place.",
-                "drawing_set": format!(
-                    "Given a folder, builds the drawing set in it: one DWG per row of its rows, \
-                     each its template filled in from the row, into the output folder its \
-                     settings ({SET_SETTINGS_FILE}) name. A sheet that fails writes nothing and \
-                     the others are still built; the reply gives each sheet's outcome under \
-                     sheets, and is not ok when any sheet failed."
-                ),
-            },
-            "schema": {
-                "usage": SCHEMA_USAGE,
-                "does": "Prints the sheet description's schema, or the block library's, a \
-                         template's, a drawing set's settings' or its rows': a JSON Schema \
-                         (draft 2020-12) of every key it may hold, with what each means.",
-            },
-            "measure-text": {
-                "usage": MEASURE_USAGE,
-                "does": "Measures how wide one line of text draws in a font at a height, as \
-                         AutoCAD measures a text object: from the left edge of what it draws to \
-                         the right edge. Reports the font used, and the look-alike when the font \
-                         is not in the font folders.",
-            },
-            "render": {
-                "usage": RENDER_USAGE,
-                "does": "Draws a sheet description, or a DWG, to a PNG as AutoCAD plots it: layer \
-                         colours on white paper, lineweights as widths on paper at --dpi (150), \
-                         linetypes, text in its fonts and hatches. The PNG covers the drawing's \
-                         extents with a --margin (5 mm of paper), at a plot --scale (1 for 1:1, \
-                         0.02 for 1:50) or fitted to --width and --height pixels; without either, \
-                         its longer side is 2000 pixels. It goes beside the source with a .png \
-                         extension unless --output names another path, and is stamped with the \
-                         source's fingerprint. An existing file is never replaced without \
-                         --overwrite, and --overwrite replaces only a PNG AgentDrafter rendered.",
-            },
-            "plot": {
-                "usage": PLOT_USAGE,
-                "does": format!(
-                    "Plots a sheet description, or a DWG, to a PDF as AutoCAD plots it to PDF: \
-                     the page is the sheet's size, its extents at 1:1 (a sheet drawn 17 by 11 \
-                     inches plots on a page of exactly 431.8 by 279.4 mm); each pen's colour \
-                     and lineweight come from the CTB plot style --plot-style names, found in \
-                     the plot style folders, or with none from the {BUILT_IN_PLOT_STYLE} style, \
-                     every pen black at its object's own lineweight; text draws as AutoCAD \
-                     draws it and can be searched and copied. It goes beside the source with a \
-                     .pdf extension unless --output names another path, and is stamped with \
-                     every file it was drawn from. An existing file is never replaced without \
-                     --overwrite, and --overwrite replaces only a PDF AgentDrafter plotted."
-                ),
-                "drawing_set": format!(
-                    "Given a folder, plots every sheet of the drawing set in it, each its \
-                     template filled in from its row, into the output folder its settings \
-                     ({SET_SETTINGS_FILE}) name, as <sheet>.pdf. A sheet that fails writes \
-                     nothing and the others are still plotted; the reply gives each sheet's \
-                     outcome under sheets, and is not ok when any sheet failed."
-                ),
-            },
-            "stale": {
-                "usage": STALE_USAGE,
-                "does": "Says whether a PNG AgentDrafter rendered or a PDF it plotted is stale: \
-                         whether any file its stamp names (the sheet description, DWG or \
-                         template, and the files it draws on) has changed since, or is gone. \
-                         The files are found from the output's folder; --source says where the \
-                         first, the record, is now.",
-            },
-            "query": {
-                "usage": QUERY_USAGE,
-                "does": "Asks a drawing set, or one sheet description, what is on its sheets, \
-                         from the records, with nothing selected by coordinates. find lists the \
-                         objects matching every option given, each with its ID and where it is \
-                         written; attributes gives each matching insert's attributes as JSON \
-                         from tag to value; blocks lists the blocks each sheet inserts; measure \
-                         gives the distance between a point of two objects on one sheet, each \
-                         named by ID or name, by default an insert's or a text's position, a \
-                         line's from, a circle's centre; extents gives the box round what each \
-                         sheet draws. Lengths are in the declared unit. --id, --name, --block \
-                         and --tag match whole, in any case, and --value and --text whole, case \
-                         and all; with --contains, each matches what holds it, in any case. A \
-                         query that matches nothing is ok and says so; --sheet looks at one \
-                         sheet only.",
-            },
-            "operations": {
-                "usage": OPERATIONS_USAGE,
-                "does": "Lists every operation a change set can hold: its name, its AutoCAD \
-                         alias, what it does and its JSON Schema. `schema change-set` gives the \
-                         schema of a whole change set.",
-            },
-            "change": {
-                "usage": CHANGE_USAGE,
-                "does": "Applies a change set, a JSON file such as {\"operations\": [{\"op\": \
-                         \"move\", \"target\": {\"id\": \"DEMO-001/border\"}, \"by\": [0.1, \
-                         0, 0]}]}, to a drawing set's own files at once, and builds again the \
-                         DWGs of the sheets it touched. Objects are named by ID or name, never \
-                         by coordinates. An edit to a template's object edits the template, so \
-                         every sheet built from it follows; an object added to a sheet goes in \
-                         its row. Each sheet takes its part fully or not at all, a template edit \
-                         lands only if every sheet of its template does, and a change set that \
-                         lands on some sheets and fails on others marks the set inconsistent \
-                         until a later change set names them under fixes. --dry-run reports \
-                         what it would do and writes nothing. The reply is not ok when a sheet \
-                         failed. Once it has landed, the reply's checks are the checker's \
-                         reply on the sheets it landed on, read back from their saved files; a \
-                         failed check does not stop it.",
-            },
-            "check": {
-                "usage": CHECK_USAGE,
-                "does": "Checks a drawing set, or one sheet description, from its saved files, \
-                         against the default checks: paper_size, the sheet's extents are its \
-                         declared paper's size; off_sheet, every object draws on the paper, \
-                         from [0, 0]; text_overflow, every text and attribute of an insert \
-                         draws within the cell its block declares for it; and text_on_text, \
-                         no two texts' drawn boxes overlap. A sheet that declares no paper \
-                         gets one paper_size finding that says so. Each sheet is drawn through \
-                         the drawing pipeline, so text is measured as its font draws it. Each \
-                         finding names the sheet, the rule and the object, by ID and name, and \
-                         says what is wrong in numbers in the declared unit, within a \
-                         tolerance of 0.01 mm on paper. A failed check is ok and listed under \
-                         findings; --sheet checks only the sheets it names.",
-            },
-            "journal": {
-                "usage": JOURNAL_USAGE,
-                "does": "Lists a drawing set's journal, kept in its folder whether or not it is \
-                         a git repository: every change set, with its operations, the sheets it \
-                         landed and failed on and the files it wrote; every failed attempt, \
-                         which changed nothing; and every undo. It says which change sets can \
-                         still be undone: the undo states of the 50 newest change sets are \
-                         kept, and an older one's are pruned.",
-            },
-            "undo": {
-                "usage": UNDO_USAGE,
-                "does": "Undoes a change set, named by its entry's number in the journal, and \
-                         every later change set with it, the newest first: every file they \
-                         wrote, records, DWGs and the inconsistent mark, goes back byte for \
-                         byte as it was before, and a file they made is taken away. It refuses, \
-                         changing nothing and naming the files, when a file was changed since \
-                         by hand, and when a change set's undo state was pruned. --dry-run \
-                         reports what it would do and writes nothing.",
-            },
-        },
+        "commands": listed,
+        "options": "Each command's options give its input, which the HTTP API and the MCP server \
+                    take as a JSON object of the same names, - written _: --dry-run is dry_run, \
+                    --plot-style plot_style, and an option given more than once, such as \
+                    --fonts, a list. The input's schema is listed by `agentdrafter serve` at GET \
+                    /commands and by `agentdrafter mcp` as each tool's input schema.",
         "fonts": format!(
             "Fonts are read from the folders --fonts names, then from those the {FONTS_VARIABLE} \
              environment variable lists (separated as the system separates paths). There is no \
@@ -932,4 +797,30 @@ fn send<T: Serialize>(reply: Reply<T>) -> (String, ExitCode) {
     // always serialize.
     let line = serde_json::to_string(&reply).expect("a reply serializes to JSON");
     (line, code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_command_of_the_registry_has_a_command_line_form() {
+        assert!(!commands().is_empty());
+        for command in commands() {
+            let (usage, _) = cli_form(command.name()).unwrap_or_else(|| {
+                panic!(
+                    "`{}` is in the registry but has no command-line form",
+                    command.name()
+                )
+            });
+            assert!(
+                usage.starts_with(&format!("agentdrafter {} ", command.name()))
+                    || usage == format!("agentdrafter {}", command.name()),
+                "{usage}"
+            );
+            let help = help();
+            assert_eq!(help["commands"][command.name()]["usage"], usage);
+            assert_eq!(help["commands"][command.name()]["does"], command.does());
+        }
+    }
 }

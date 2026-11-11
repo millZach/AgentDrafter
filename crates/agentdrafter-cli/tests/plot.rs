@@ -98,7 +98,7 @@ fn plot_takes_a_plot_style_from_the_folders_it_is_given() {
     assert!(json["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("--output is for one sheet"));
+        .contains("an output path (--output) is for one sheet"));
 }
 
 #[test]
