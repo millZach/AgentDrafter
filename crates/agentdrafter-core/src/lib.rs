@@ -8,7 +8,9 @@
 //!
 //! - [`build`] turns a sheet description into a DWG in the 2018 format.
 //! - [`parse_sheet_description`] reads a sheet description into a [`Sheet`].
-//! - [`read_dwg`] reads the objects in a DWG's model space.
+//! - [`sheet_description_schema`] states what a sheet description may hold,
+//!   as a JSON Schema.
+//! - [`read_dwg`] reads a DWG's linetypes, layers and model-space objects.
 //!
 //! DWG is read and written through acadrust, behind one seam in the `dwg`
 //! module. Every coordinate in the core is 3D.
@@ -26,11 +28,20 @@ use std::path::Path;
 pub use build::{build, BuildReport, BuildRequest};
 pub use description::parse_sheet_description;
 pub use error::{Error, ErrorCode};
-pub use model::{DrawingContents, Line, Object, Point3, Sheet};
+pub use model::{
+    Arc, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object, Point3,
+    Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
+};
 pub use reply::Reply;
 pub use units::Unit;
 
-/// Reads the objects in the model space of the DWG at `path`.
+/// Reads the linetypes, the layers and the model-space objects of the DWG at `path`.
 pub fn read_dwg(path: &Path) -> Result<DrawingContents, Error> {
     dwg::read(path)
+}
+
+/// The sheet description's schema: a JSON Schema (draft 2020-12) of every
+/// key a sheet description may hold, with what each means.
+pub fn sheet_description_schema() -> serde_json::Value {
+    description::schema::sheet_description_schema()
 }
