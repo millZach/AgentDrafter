@@ -19,14 +19,15 @@ use std::path::{Component, Path, PathBuf};
 
 use super::commit::{commit, Replacement};
 use super::operations::{op_error, read_change_set, AddTo, Body, Kind, Operation, Target};
+use super::MARK_FILE;
 use super::{
-    mark_report, quoted_list, read_mark, write_mark, ChangeReport, ChangeRequest, Fill,
-    OperationOutcome, RowValueSet, SheetChange,
+    mark_report, quoted_list, read_mark, ChangeReport, ChangeRequest, Fill, OperationOutcome,
+    RowValueSet, SheetChange,
 };
 use crate::build::{prepare_sheet, PreparedSheet};
 use crate::description::{
-    read_file, read_set_settings, rows_at, template_at, AttributeSet, Listed, MarkFailure,
-    ObjectList, RecordFile, Row,
+    mark_text, read_file, read_set_settings, rows_at, template_at, AttributeSet, Listed,
+    MarkFailure, ObjectList, RecordFile, Row,
 };
 use crate::error::{Error, ErrorCode};
 use crate::set::{Notice, SET_SETTINGS_FILE};
@@ -426,24 +427,31 @@ pub(super) fn apply(request: &ChangeRequest, settings: &Settings) -> Result<Chan
         }
     }
 
-    if !request.dry_run && !landed.is_empty() {
+    // The records, the DWGs and the mark land together, or nothing does.
+    if !request.dry_run {
         let mut replacements: Vec<Replacement> = records
             .iter()
             .map(|(path, text)| Replacement {
                 path: path.clone(),
-                bytes: text.as_bytes().to_vec(),
+                bytes: Some(text.as_bytes().to_vec()),
                 what: "the record",
             })
             .collect();
         replacements.extend(dwgs.iter().map(|(k, path)| Replacement {
             path: path.clone(),
-            bytes: prepared[k].bytes.clone(),
+            bytes: Some(prepared[k].bytes.clone()),
             what: "the DWG",
         }));
-        commit(&replacements)?;
-    }
-    if !request.dry_run && failures != mark {
-        write_mark(&files.folder, &failures)?;
+        if failures != mark {
+            replacements.push(Replacement {
+                path: files.folder.join(MARK_FILE),
+                bytes: (!failures.is_empty()).then(|| mark_text(&failures).into_bytes()),
+                what: "the set's inconsistent mark",
+            });
+        }
+        if !replacements.is_empty() {
+            commit(&replacements)?;
+        }
     }
 
     let written: BTreeSet<usize> = if request.dry_run {

@@ -106,7 +106,8 @@ fn every_failed_step_puts_everything_back(set: &Path, change_set: Value, steps: 
         );
     }
     let reply = apply(set, &change_set, None);
-    assert!(reply.ok, "{:#?}", reply.error);
+    let report = reply.result.unwrap_or_else(|| panic!("{:#?}", reply.error));
+    assert!(report.landed > 0);
     assert!(snapshot(set) != before);
 }
 
@@ -136,4 +137,29 @@ fn a_failed_step_takes_away_a_dwg_and_a_folder_the_change_set_made() {
         2,
     );
     assert!(set.join("dwg/DEMO-001.dwg").is_file());
+}
+
+#[test]
+fn a_partial_change_lands_with_its_mark_or_not_at_all() {
+    // The rows, DEMO-001's DWG, then the new mark.
+    let set = demo_set("partial", true);
+    every_failed_step_puts_everything_back(
+        &set,
+        json!({"operations": [
+            {"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5},
+            {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "nope"},
+        ]}),
+        3,
+    );
+    assert!(set.join(super::MARK_FILE).is_file());
+    // A fix: the rows, DEMO-002's DWG, then the mark taken away. A failed
+    // step keeps the mark with the sheet it marks.
+    every_failed_step_puts_everything_back(
+        &set,
+        json!({"operations": [
+            {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "notes"},
+        ], "fixes": ["DEMO-002"]}),
+        3,
+    );
+    assert!(!set.join(".agentdrafter").exists());
 }

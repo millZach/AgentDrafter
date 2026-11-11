@@ -1,5 +1,6 @@
-//! Puts a change set's files in place together: the records it edited and
-//! the DWGs of the sheets it landed on.
+//! Puts a change set's files in place together: the records it edited, the
+//! DWGs of the sheets it landed on, and the set's inconsistent mark, written
+//! or taken away.
 //!
 //! Every new file is first written whole beside its place. Then, one file
 //! at a time, the file already there is moved aside and the new one moved
@@ -7,7 +8,9 @@
 //! as it was and every new file taken away, so on disk too a change set
 //! lands whole or not at all: no sheet is left with new records beside its
 //! old DWG, and no record two sheets share changes for one of them only
-//! (ADR-0005). The files moved aside are taken away once all are in place.
+//! (ADR-0005), and the mark never lags the sheets: a change set that lands
+//! on some sheets and fails on others either lands with its mark or not at
+//! all. The files moved aside are taken away once all are in place.
 
 use std::fs;
 use std::io;
@@ -16,11 +19,11 @@ use std::path::{Path, PathBuf};
 use crate::build::{beside, write_beside};
 use crate::error::{Error, ErrorCode};
 
-/// One file a change set puts in place.
+/// One file a change set puts in place, or takes away.
 pub(super) struct Replacement {
     pub path: PathBuf,
-    /// The file's new bytes.
-    pub bytes: Vec<u8>,
+    /// The file's new bytes, or `None` to take the file away.
+    pub bytes: Option<Vec<u8>>,
     /// What the file is, for an error, such as "the DWG".
     pub what: &'static str,
 }
@@ -35,7 +38,7 @@ struct Placed {
 /// the error says so, and every file is as it was before.
 pub(super) fn commit(replacements: &[Replacement]) -> Result<(), Error> {
     let mut made: Vec<PathBuf> = Vec::new();
-    let mut staged: Vec<PathBuf> = Vec::new();
+    let mut staged: Vec<Option<PathBuf>> = Vec::new();
     if let Err(e) = stage(replacements, &mut made, &mut staged) {
         clean(&staged, &made);
         return Err(Error {
@@ -45,7 +48,7 @@ pub(super) fn commit(replacements: &[Replacement]) -> Result<(), Error> {
     }
     let mut placed: Vec<Placed> = Vec::with_capacity(replacements.len());
     for (i, (replacement, temporary)) in replacements.iter().zip(&staged).enumerate() {
-        match place(i, &replacement.path, temporary) {
+        match place(i, &replacement.path, temporary.as_deref()) {
             Ok(done) => placed.push(done),
             Err(e) => {
                 let not_back = roll_back(&replacements[..placed.len()], &placed);
@@ -68,9 +71,15 @@ pub(super) fn commit(replacements: &[Replacement]) -> Result<(), Error> {
             }
         }
     }
-    for done in &placed {
+    for (replacement, done) in replacements.iter().zip(&placed) {
         if let Some(aside) = &done.aside {
             let _ = fs::remove_file(aside);
+        }
+        // A folder a file taken away leaves empty goes too.
+        if replacement.bytes.is_none() {
+            if let Some(parent) = replacement.path.parent() {
+                let _ = fs::remove_dir(parent);
+            }
         }
     }
     Ok(())
@@ -80,10 +89,14 @@ pub(super) fn commit(replacements: &[Replacement]) -> Result<(), Error> {
 fn stage(
     replacements: &[Replacement],
     made: &mut Vec<PathBuf>,
-    staged: &mut Vec<PathBuf>,
+    staged: &mut Vec<Option<PathBuf>>,
 ) -> Result<(), Error> {
     for replacement in replacements {
         let path = &replacement.path;
+        let Some(bytes) = &replacement.bytes else {
+            staged.push(None);
+            continue;
+        };
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             let missing: Vec<&Path> = parent.ancestors().take_while(|a| !a.exists()).collect();
             fs::create_dir_all(parent).map_err(|e| {
@@ -98,15 +111,15 @@ fn stage(
             })?;
             made.extend(missing.into_iter().map(Path::to_owned));
         }
-        staged.push(write_beside(path, &replacement.bytes, replacement.what)?);
+        staged.push(Some(write_beside(path, bytes, replacement.what)?));
     }
     Ok(())
 }
 
 /// Moves the file at `path`, if there is one, aside, and the new one from
-/// `temporary` into its place. When the new one cannot be moved, the old
-/// one is put back before the error is given.
-fn place(index: usize, path: &Path, temporary: &Path) -> io::Result<Placed> {
+/// `temporary`, if there is one, into its place. When the new one cannot be
+/// moved, the old one is put back before the error is given.
+fn place(index: usize, path: &Path, temporary: Option<&Path>) -> io::Result<Placed> {
     fail_here(index)?;
     let aside = if fs::symlink_metadata(path).is_ok() {
         let aside = beside(path, "old");
@@ -115,11 +128,13 @@ fn place(index: usize, path: &Path, temporary: &Path) -> io::Result<Placed> {
     } else {
         None
     };
-    if let Err(e) = fs::rename(temporary, path) {
-        if let Some(aside) = &aside {
-            let _ = fs::rename(aside, path);
+    if let Some(temporary) = temporary {
+        if let Err(e) = fs::rename(temporary, path) {
+            if let Some(aside) = &aside {
+                let _ = fs::rename(aside, path);
+            }
+            return Err(e);
         }
-        return Err(e);
     }
     Ok(Placed { aside })
 }
@@ -130,9 +145,10 @@ fn roll_back(replacements: &[Replacement], placed: &[Placed]) -> Vec<String> {
     let mut not_back = Vec::new();
     for (replacement, done) in replacements.iter().zip(placed).rev() {
         let path = &replacement.path;
-        let back = match &done.aside {
-            Some(aside) => fs::rename(aside, path),
-            None => fs::remove_file(path),
+        let back = match (&done.aside, &replacement.bytes) {
+            (Some(aside), _) => fs::rename(aside, path),
+            (None, Some(_)) => fs::remove_file(path),
+            (None, None) => Ok(()),
         };
         if back.is_err() {
             not_back.push(path.display().to_string());
@@ -143,8 +159,8 @@ fn roll_back(replacements: &[Replacement], placed: &[Placed]) -> Vec<String> {
 
 /// Takes away the new files not moved into place and the folders made for
 /// them, deepest first, each only when it is empty.
-fn clean(staged: &[PathBuf], made: &[PathBuf]) {
-    for temporary in staged {
+fn clean(staged: &[Option<PathBuf>], made: &[PathBuf]) {
+    for temporary in staged.iter().flatten() {
         let _ = fs::remove_file(temporary);
     }
     for folder in made {

@@ -82,7 +82,7 @@ A sheet that fails is left as it was, byte for byte: its row's text in the rows 
 
 ## An inconsistent set
 
-When a change set lands on some sheets and fails on others, the set is inconsistent: the failed sheets did not take what the others did. It is marked in the file `.agentdrafter/inconsistent.yaml` in the set's folder, so the mark travels with the set and a later session sees it. A change set that fails on every sheet it touches changes nothing and marks nothing.
+When a change set lands on some sheets and fails on others, the set is inconsistent: the failed sheets did not take what the others did. It is marked in the file `.agentdrafter/inconsistent.yaml` in the set's folder, so the mark travels with the set and a later session sees it. The mark is written, or taken away when the last failure is fixed, in the same all-or-nothing step as the records and the DWGs: a change set whose mark cannot be written does not land at all. A change set that fails on every sheet it touches changes nothing and marks nothing.
 
 The mark lists each failure: the sheet, the error's code and message, the sheets the change set landed on, and the operations that were the failed sheet's part, each as the JSON it was sent as, so an agent can send them again once it has fixed what failed. It is written in the same strict YAML as every file of a set:
 

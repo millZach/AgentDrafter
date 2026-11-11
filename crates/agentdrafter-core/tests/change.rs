@@ -940,3 +940,58 @@ fn a_file_at_a_sheets_path_that_agentdrafter_did_not_build_is_never_touched() {
     assert_eq!(row_text(&set, "DEMO-002"), row);
     assert!(report.sheets[0].ok);
 }
+
+#[test]
+fn a_partial_change_whose_mark_cannot_be_read_does_not_land() {
+    let set = demo_set("mark-unreadable");
+    // A file where the mark's folder would go.
+    fs::write(set.join(".agentdrafter"), b"in the way").unwrap();
+    let before = snapshot(&set);
+    let reply = apply(
+        &set,
+        json!({"operations": [
+            {"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5},
+            {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "nope"},
+        ]}),
+    );
+    assert!(reply.result.is_none(), "nothing landed");
+    assert_eq!(reply.error.unwrap().code, ErrorCode::ReadFailed);
+    assert_eq!(snapshot(&set), before);
+}
+
+/// A folder no one may write in holds the mark: only Unix keeps a folder
+/// from being written in this way. The commit's own tests fail the mark's
+/// step on every system.
+#[cfg(unix)]
+#[test]
+fn a_partial_change_whose_mark_cannot_be_written_does_not_land() {
+    use std::os::unix::fs::PermissionsExt;
+    let set = demo_set("mark-unwritable");
+    let folder = set.join(".agentdrafter");
+    fs::create_dir(&folder).unwrap();
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+    let before = snapshot(&set);
+    let reply = apply(
+        &set,
+        json!({"operations": [
+            {"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5},
+            {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "nope"},
+        ]}),
+    );
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(reply.result.is_none(), "nothing landed");
+    let error = reply.error.unwrap();
+    assert_eq!(error.code, ErrorCode::WriteFailed);
+    assert!(
+        error.message.contains("inconsistent mark"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("nothing was changed"),
+        "{}",
+        error.message
+    );
+    assert_eq!(snapshot(&set), before);
+    assert!(fs::read_dir(&folder).unwrap().next().is_none());
+}

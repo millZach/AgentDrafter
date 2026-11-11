@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::build::BuildReport;
-use crate::description::{mark_text, parse_mark, MarkFailure};
+use crate::description::{parse_mark, MarkFailure};
 use crate::error::{Error, ErrorCode};
 use crate::reply::Reply;
 use crate::set::Notice;
@@ -291,40 +291,6 @@ fn mark_report(folder: &Path, failures: &[MarkFailure]) -> Inconsistent {
             })
             .collect(),
     }
-}
-
-/// Writes the mark holding `failures`, or takes it away when there are
-/// none.
-fn write_mark(folder: &Path, failures: &[MarkFailure]) -> Result<(), Error> {
-    let path = folder.join(MARK_FILE);
-    let failed = |e: std::io::Error| {
-        Error::new(
-            ErrorCode::WriteFailed,
-            format!("could not write the set's inconsistent mark: {e}"),
-        )
-        .in_file(&path)
-    };
-    if failures.is_empty() {
-        return match fs::remove_file(&path) {
-            Ok(()) => {
-                if let Some(parent) = path.parent() {
-                    // The folder goes too when nothing else is in it.
-                    let _ = fs::remove_dir(parent);
-                }
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(failed(e)),
-        };
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(failed)?;
-    }
-    let temporary = crate::build::write_beside(&path, mark_text(failures).as_bytes(), "the mark")?;
-    fs::rename(&temporary, &path).map_err(|e| {
-        let _ = fs::remove_file(&temporary);
-        failed(e)
-    })
 }
 
 /// `items` in backquotes, joined with commas and `and`.
