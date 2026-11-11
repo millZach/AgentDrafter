@@ -18,8 +18,9 @@ use crate::model::{Hatch, HatchEdge, HatchLoop};
 /// allows by default. A pattern that would need more draws only the first.
 const MOST_LINES: usize = 1_000_000;
 
-/// The most dashes one hatch draws. A pattern that would need more draws
-/// its lines continuous, as a linetype too fine to see does.
+/// The most dashes one hatch draws: a pattern that would need more stops
+/// there. A line whose own dashes would be more draws continuous, as a
+/// linetype too fine to see does.
 const MOST_DASHES: usize = 2_000_000;
 
 /// The shapes a hatch draws, a fill or one stroke of all its pattern lines,
@@ -85,7 +86,7 @@ fn shapes(hatch: &Hatch, loops: Vec<Vec<Point2>>, lineweight: f64) -> Vec<Shape>
         let (first, last) = ((low / across).floor(), (high / across).ceil());
         let (first, last) = (first.min(last), first.max(last));
         for k in first as i64..=last as i64 {
-            if lines >= MOST_LINES {
+            if lines >= MOST_LINES || runs.len() >= MOST_DASHES {
                 break;
             }
             lines += 1;
@@ -99,9 +100,6 @@ fn shapes(hatch: &Hatch, loops: Vec<Vec<Point2>>, lineweight: f64) -> Vec<Shape>
                 }
             }
         }
-    }
-    if runs.len() > MOST_DASHES {
-        runs.truncate(MOST_DASHES);
     }
     if runs.is_empty() {
         Vec::new()
