@@ -6,7 +6,7 @@
 //! loops of polylines, lines and arcs.
 
 use super::layers::named_entries;
-use super::objects::radius;
+use super::objects::{arc_angles, radius};
 use super::strict_yaml::{index_path, key_path, Entry, Kind, Node};
 use super::{
     angle, at, bad_value, choice, length, plain_number, point, sequence, unknown_key, wrong_type,
@@ -38,7 +38,7 @@ pub(crate) const EDGE_TYPES: [(&str, &[&str]); 2] = [
     ("arc", &["center", "radius", "start_angle", "end_angle"]),
 ];
 
-/// The names AutoCAD keeps for its own hatches: its solid fill, and its
+/// The names AutoCAD keeps for its own hatches: its solid hatch, and its
 /// user-defined hatch of parallel lines.
 pub(crate) const RESERVED_PATTERN_NAMES: [&str; 2] = [SOLID, "_USER"];
 
@@ -65,7 +65,7 @@ pub(super) fn hatch_patterns(node: &Node, units: Unit) -> Result<Vec<HatchPatter
             return Err(at(
                 Error::new(
                     ErrorCode::WrongType,
-                    "a hatch pattern has at least one line; for a solid fill use `SOLID`",
+                    "a hatch pattern has at least one line; for a solid hatch use `SOLID`",
                 ),
                 &lines_path,
                 lines_node.at,
@@ -422,19 +422,8 @@ fn edge(node: &Node, path: &str, units: Unit, plane: &mut Plane) -> Result<Hatch
         let fields = Fields::of(&entry.value, &path, keys, "an arc in a boundary")?;
         let center = plane.point(fields.require("center")?, &fields.path_of("center"), units)?;
         let radius = radius(&fields, units)?;
-        let start_angle = angle(
-            fields.require("start_angle")?,
-            &fields.path_of("start_angle"),
-        )?;
-        let end_node = fields.require("end_angle")?;
-        let end_angle = angle(end_node, &fields.path_of("end_angle"))?;
-        if start_angle == end_angle {
-            return Err(bad_value(
-                end_node,
-                &fields.path_of("end_angle"),
-                "an arc's end angle must differ from its start angle, counting whole turns as none",
-            ));
-        }
+        let (start_angle, end_angle) =
+            arc_angles(&fields, "a whole circle in a boundary is two arcs")?;
         Ok(HatchEdge::Arc {
             center,
             radius,

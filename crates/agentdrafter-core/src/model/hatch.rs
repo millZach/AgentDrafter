@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{layer_zero, Point3};
 
-/// The name of AutoCAD's solid fill. A hatch with this pattern fills its
-/// area solid and has no pattern lines, scale or angle.
+/// The pattern name of AutoCAD's solid hatch. A hatch with this pattern
+/// fills its area solid and has no pattern lines, scale or angle.
 pub const SOLID: &str = "SOLID";
 
 /// An area filled solid or with a pattern, inside a boundary. It lies in
@@ -51,7 +51,7 @@ pub struct HatchPattern {
 }
 
 impl HatchPattern {
-    /// AutoCAD's solid fill.
+    /// The pattern of AutoCAD's solid hatch.
     pub fn solid() -> Self {
         Self {
             name: SOLID.to_owned(),
@@ -59,7 +59,7 @@ impl HatchPattern {
         }
     }
 
-    /// Whether this is AutoCAD's solid fill.
+    /// Whether this is the pattern of AutoCAD's solid hatch.
     pub fn is_solid(&self) -> bool {
         self.name == SOLID
     }
@@ -142,11 +142,15 @@ impl HatchEdge {
         }
     }
 
-    fn radius(&self) -> f64 {
-        match *self {
-            HatchEdge::Arc { radius, .. } => radius,
-            HatchEdge::Line { .. } => 0.0,
+    /// Every coordinate and radius that states the edge: a line's ends, or
+    /// an arc's centre, radius and ends. A loop's size is the largest of them.
+    fn sizes(&self) -> Vec<f64> {
+        let (a, b) = self.ends();
+        let mut sizes = vec![a.x, a.y, b.x, b.y];
+        if let HatchEdge::Arc { center, radius, .. } = *self {
+            sizes.extend([center.x, center.y, radius]);
         }
+        sizes
     }
 }
 
@@ -177,8 +181,7 @@ pub(crate) fn walk(edges: &[HatchEdge]) -> Result<Vec<bool>, Break> {
     let ends: Vec<(Point3, Point3)> = edges.iter().map(HatchEdge::ends).collect();
     let size = edges
         .iter()
-        .zip(&ends)
-        .flat_map(|(edge, (a, b))| [a.x, a.y, b.x, b.y, edge.radius()])
+        .flat_map(HatchEdge::sizes)
         .fold(1.0, |size: f64, value| size.max(value.abs()));
     let tolerance = size * JOIN_TOLERANCE;
     let meets =
@@ -303,5 +306,24 @@ mod tests {
             line([1000.0, 5e-7], [0.0, 0.0]),
         ];
         assert!(walk(&within).is_ok());
+    }
+
+    /// The tolerance scales with the largest coordinate or radius in the
+    /// loop, an arc's centre among them: here the centre, at x 2000, is
+    /// larger than any end or radius, so a gap of 1.5e-6 still joins.
+    #[test]
+    fn an_arcs_centre_counts_in_the_size_of_its_loop() {
+        let sliver = arc([2000.0, 0.0], 1000.0, 170.0, 190.0);
+        let (start, end) = sliver.ends();
+        let closing = HatchEdge::Line {
+            from: end,
+            to: Point3::new(start.x, start.y + 1.5e-6, 0.0),
+        };
+        assert_eq!(walk(&[sliver.clone(), closing]), Ok(vec![false, false]));
+        let too_far = HatchEdge::Line {
+            from: end,
+            to: Point3::new(start.x, start.y + 2.5e-6, 0.0),
+        };
+        assert!(matches!(walk(&[sliver, too_far]), Err(Break::Open { .. })));
     }
 }

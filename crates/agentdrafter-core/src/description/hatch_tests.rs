@@ -617,7 +617,10 @@ fn the_edges_of_a_loop_are_checked() {
         &e,
         ErrorCode::BadValue,
         "objects[0].hatch.boundary[0].edges[0].arc.end_angle",
-        &["must differ from its start angle"],
+        &[
+            "must differ from its start angle",
+            "a whole circle in a boundary is two arcs",
+        ],
     );
     let e = edges_error(
         "{arc: {center: [0, 0, 0], start_angle: 0, end_angle: 180}}, {line: {from: [-1, 0, 0], to: [1, 0, 0]}}",

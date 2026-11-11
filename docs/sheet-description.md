@@ -74,7 +74,7 @@ A layer or linetype name is 1 to 255 characters, does not start or end with a sp
 
 ### Hatch patterns
 
-A hatch pattern is one or more families of parallel lines that a hatch fills its area with, defined the way an AutoCAD `.pat` file defines one. `SOLID`, AutoCAD's solid fill, needs no definition; every other pattern a hatch names is defined here. AutoCAD's own pattern files are not copied into AgentDrafter, so a pattern such as `ANSI31` is defined here too if a sheet wants it.
+A hatch pattern is one or more families of parallel lines that a hatch fills its area with, defined the way an AutoCAD `.pat` file defines one. `SOLID`, AutoCAD's solid hatch, needs no definition; every other pattern a hatch names is defined here. AutoCAD's own pattern files are not copied into AgentDrafter, so a pattern such as `ANSI31` is defined here too if a sheet wants it.
 
 ```yaml
 hatch_patterns:
@@ -135,7 +135,7 @@ Arcs, circles and ellipses lie in the plane parallel to XY at their centre's `z`
 
 | Key | Required | What it is |
 |---|---|---|
-| `pattern` | yes | `SOLID` for a solid fill, or the name of a pattern under `hatch_patterns`, written exactly as it is there. |
+| `pattern` | yes | `SOLID` for a solid hatch, or the name of a pattern under `hatch_patterns`, written exactly as it is there. |
 | `scale` | no | How much the pattern is enlarged: a number more than 0, with no unit. Without it, 1. Not given with `SOLID`. |
 | `angle` | no | How far the pattern is turned, an angle. Without it, 0. Not given with `SOLID`. |
 | `boundary` | yes | The closed loops that bound the area: a list of at least one. |

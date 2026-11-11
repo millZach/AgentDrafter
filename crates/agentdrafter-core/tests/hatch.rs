@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
     build, parse_sheet_description, read_dwg, BuildRequest, DrawingContents, Hatch, HatchEdge,
-    HatchLoop, Object, Point3, Sheet, Unit,
+    HatchLoop, Object, Sheet, Unit,
 };
 
 /// How far a number read back may be from the one written. A DWG holds
@@ -53,10 +53,6 @@ fn close(a: f64, b: f64) -> bool {
     (a - b).abs() <= TOLERANCE
 }
 
-fn same_point(a: Point3, b: Point3) -> bool {
-    a == b
-}
-
 /// Whether two hatches are the same: the pattern's name, its lines' angles
 /// and lengths, the scale and angle and the arcs' angles to [`TOLERANCE`];
 /// every boundary point and radius bit for bit.
@@ -98,13 +94,7 @@ fn same_hatch(wrote: &Hatch, read: &Hatch) -> bool {
 
 fn same_edge(wrote: &HatchEdge, read: &HatchEdge) -> bool {
     match (wrote, read) {
-        (
-            HatchEdge::Line { from, to },
-            HatchEdge::Line {
-                from: read_from,
-                to: read_to,
-            },
-        ) => same_point(*from, *read_from) && same_point(*to, *read_to),
+        (HatchEdge::Line { .. }, HatchEdge::Line { .. }) => wrote == read,
         (
             HatchEdge::Arc {
                 center,
@@ -119,7 +109,7 @@ fn same_edge(wrote: &HatchEdge, read: &HatchEdge) -> bool {
                 end_angle: read_end,
             },
         ) => {
-            same_point(*center, *read_center)
+            center == read_center
                 && radius == read_radius
                 && close(*start_angle, *read_start)
                 && close(*end_angle, *read_end)

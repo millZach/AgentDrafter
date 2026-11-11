@@ -20,7 +20,7 @@ use crate::model::SOLID;
 pub(super) fn hatch_patterns_property() -> Value {
     json!({
         "description": format!(
-            "The sheet's hatch patterns, from name to pattern. `{SOLID}`, AutoCAD's solid fill, \
+            "The sheet's hatch patterns, from name to pattern. `{SOLID}`, AutoCAD's solid hatch, \
              needs no definition, and neither it nor `_USER` can be defined."
         ),
         "type": "object",
@@ -137,7 +137,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
         json!({
             "pattern": {
                 "description": format!(
-                    "`{SOLID}` for a solid fill, or the name of a pattern under `hatch_patterns`, \
+                    "`{SOLID}` for a solid hatch, or the name of a pattern under `hatch_patterns`, \
                      written exactly as it is there."
                 ),
                 "type": ["string", "number", "boolean", "null"],

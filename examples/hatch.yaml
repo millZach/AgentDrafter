@@ -61,7 +61,7 @@ objects:
   - arc: {center: [35, 10, 0], radius: 5, start_angle: 90, end_angle: 270, layer: outline}
   - circle: {center: [10, 45, 0], radius: 5, layer: outline}
 
-  # Solid fills: a triangle, and a half disc of a line and an arc.
+  # Solid hatches: a triangle, and a half disc of a line and an arc.
   - hatch:
       pattern: SOLID
       boundary:

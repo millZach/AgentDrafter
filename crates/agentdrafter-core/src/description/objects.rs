@@ -137,6 +137,20 @@ fn polyline(fields: &Fields, units: Unit, layer: String) -> Result<Polyline, Err
 fn arc(fields: &Fields, units: Unit, layer: String) -> Result<Arc, Error> {
     let center = point(fields.require("center")?, &fields.path_of("center"), units)?;
     let radius = radius(fields, units)?;
+    let (start_angle, end_angle) = arc_angles(fields, "for a whole circle use `circle`")?;
+    Ok(Arc {
+        center,
+        radius,
+        start_angle,
+        end_angle,
+        layer,
+    })
+}
+
+/// An arc's `start_angle` and `end_angle`, both required, which must differ
+/// once whole turns are taken off. `whole_circle` says what to write for a
+/// whole circle instead.
+pub(super) fn arc_angles(fields: &Fields, whole_circle: &str) -> Result<(f64, f64), Error> {
     let start_angle = angle(
         fields.require("start_angle")?,
         &fields.path_of("start_angle"),
@@ -147,16 +161,10 @@ fn arc(fields: &Fields, units: Unit, layer: String) -> Result<Arc, Error> {
         return Err(bad_value(
             end_node,
             &fields.path_of("end_angle"),
-            "an arc's end angle must differ from its start angle, counting whole turns as none; for a whole circle use `circle`",
+            format!("an arc's end angle must differ from its start angle, counting whole turns as none; {whole_circle}"),
         ));
     }
-    Ok(Arc {
-        center,
-        radius,
-        start_angle,
-        end_angle,
-        layer,
-    })
+    Ok((start_angle, end_angle))
 }
 
 fn circle(fields: &Fields, units: Unit, layer: String) -> Result<Circle, Error> {
