@@ -164,8 +164,16 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
             let dwg = output.join(format!("{}.dwg", row.sheet));
             let mut notices = Vec::new();
             let built = read_template(&template, row, &rows_file, set.units, &mut notices)
-                .and_then(|sheet| {
-                    build_sheet(&sheet, &template, &dwg, request.overwrite, settings)
+                .and_then(|record| {
+                    let ids = record.ids();
+                    build_sheet(
+                        &record.sheet,
+                        &ids,
+                        &template,
+                        &dwg,
+                        request.overwrite,
+                        settings,
+                    )
                 });
             let (result, error) = match built {
                 Ok(report) => (Some(report), None),

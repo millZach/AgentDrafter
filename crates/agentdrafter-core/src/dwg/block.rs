@@ -32,8 +32,9 @@ use crate::model::{
 };
 use crate::text::{Justify, Text};
 
-/// The registered application whose extended data on an insert holds its
-/// name, as `name` followed by the name.
+/// The registered application whose extended data on an object holds its
+/// ID, and on an insert its name as well, each as a key followed by its
+/// value ([`super::ids`]).
 pub(super) const APPLICATION: &str = "AGENTDRAFTER";
 
 /// The key of an insert's name in its extended data.
@@ -63,8 +64,8 @@ const JUSTIFICATIONS: [(Justify, Horizontal, Vertical); 13] = [
 /// a little off in degrees, and so do its attributes' places.
 const TOLERANCE: f64 = 1e-9;
 
-/// Registers AgentDrafter's application, whose extended data holds the
-/// names of inserts, when some insert on the sheet has one.
+/// Registers AgentDrafter's application, whose extended data holds the IDs
+/// of objects and the names of inserts.
 pub(super) fn register_application(drawing: &mut CadDocument) -> Result<(), Error> {
     if drawing.app_ids.get(APPLICATION).is_some() {
         return Ok(());
@@ -328,18 +329,7 @@ fn read_attribute(
 
 /// The insert's name, from AgentDrafter's extended data on it.
 fn name(dwg: &DwgInsert) -> Option<String> {
-    let record = dwg
-        .common
-        .extended_data
-        .records()
-        .iter()
-        .find(|r| r.application_name.eq_ignore_ascii_case(APPLICATION))?;
-    match record.values.as_slice() {
-        [XDataValue::String(key), XDataValue::String(name)] if key == NAME_KEY => {
-            Some(name.clone())
-        }
-        _ => None,
-    }
+    super::ids::value_of(&dwg.common.extended_data, NAME_KEY)
 }
 
 /// Whether an attribute's modes are those the core models: none, or

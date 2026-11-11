@@ -135,7 +135,7 @@ fn an_unknown_key_is_named() {
     let e = error("units: mm\nobjects:\n  - line:\n      form: [0, 0, 0]\n");
     assert_eq!(
         e.message,
-        "unknown key `form`; a line takes from, to, layer"
+        "unknown key `form`; a line takes from, to, layer, id"
     );
 }
 

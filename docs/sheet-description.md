@@ -113,7 +113,7 @@ The DWG names the font, and AutoCAD finds it on the machine that opens the drawi
 
 ### Objects
 
-Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight; it has none of its own.
+Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight; it has none of its own. Every object may also take an `id` key, its ID in the record; see [IDs](#ids).
 
 | Type | Keys | What it is |
 |---|---|---|
@@ -239,6 +239,25 @@ A block that is not in the library, or an attribute tag the block does not defin
 
 A built sheet holds the blocks it inserts, as the library defines them, and the library's layers, linetypes and text styles those blocks use. A layer, linetype or text style the sheet defines too must be defined the same in both, or the build stops with an error at the sheet's definition: otherwise a block would not draw on the sheet as the library defines it. Layer `0`, `Continuous` and `Standard`, when the library does not list them, are the sheet's own, as they are in AutoCAD. The sheet's own objects, an insert among them, sit on the sheet's layers, so an insert on a layer the library defines lists that layer under `layers` as well.
 
+### IDs
+
+```yaml
+units: mm
+objects:
+  - polyline: {points: [[0, 0, 0], [100, 0, 0], [100, 60, 0], [0, 60, 0]], closed: true, id: frame}
+  - circle: {center: [50, 30, 0], radius: 10}
+```
+
+Every object has an ID, fixed for its life, and agents select objects by ID or by name, never by coordinates. Zach decided on 2026-11-11 that an object's ID lives in its record: the sheet description, or the template a sheet of a drawing set is built from, is the one truth for it.
+
+- **`id`**, which every object may take, is the object's ID in its file: 1 to 255 ASCII letters, digits, `_`, `-`, `.` and `:`, such as `frame` or `loop:FT-101.3`. A generator can write its own. Each `id` is given once in a file, and two that differ only in case are one ID: the second is the `duplicate_id` error, which names the line and place of the first.
+- **An object without an `id`** takes its place in the file, such as `objects[1]`. It holds while the file is unchanged, and moves when an object is added or taken away before it; an object that must keep its ID through such an edit carries an `id`. The operations of a later ticket will write an `id` in as they edit. A build never writes into a sheet description.
+- **The object's ID** is its sheet's name, `/`, and that, such as `frame-plate/frame` or `frame-plate/objects[1]`. A sheet description built on its own is named by its file, without the extension (`frame-plate.yaml` above); a sheet of a drawing set by its row's `sheet`. A template's objects are on every sheet built from it, and each sheet's name is given once in a set, so `DEMO-001/border` and `DEMO-002/border` are two objects and every ID is unique in the set.
+- **The DWG carries it.** A build writes every object's ID into the DWG with the object, as extended data under the registered application `AGENTDRAFTER`, as a named insert's name is ([The block library](block-library.md#how-it-is-written)): the text `sheet` and the sheet's name, then `id` and the object's `id` or place. A DWG's extended data holds strings of at most 255 characters, so the two parts are kept apart. AutoCAD keeps extended data through a save, so a revision can find the object again. Building the same set twice gives every object the same ID.
+- **A block's objects take no `id`**: an insert is the object on the sheet, and its block's objects are shared by every insert of it.
+
+A name is not an ID. A name, which an insert may carry, is a label an agent selects by, given once on a sheet; it is never a tag. [Queries](query.md) find objects by either.
+
 ### Fonts
 
 AutoCAD's SHX fonts are Autodesk's files and are never in this repository (ADR-0008). AgentDrafter reads fonts from the font folders a setting names: the folders `--fonts` gives, then those the environment variable `AGENTDRAFTER_FONTS` lists, separated as the system separates paths (`;` on Windows, `:` elsewhere). On a machine that has AutoCAD, name its `Fonts` folder for the SHX fonts and the system's fonts folder for the TrueType ones. There is no default folder. A font is found by its file name, ignoring case.
@@ -298,7 +317,7 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 `agentdrafter build` prints one line of JSON on standard output. On failure it is:
 
 ```json
-{"ok":false,"error":{"code":"unknown_key","message":"unknown key `too`; a line takes from, to, layer","field":"objects[0].line.too","line":5,"column":7,"file":"bad.yaml"}}
+{"ok":false,"error":{"code":"unknown_key","message":"unknown key `too`; a line takes from, to, layer, id","field":"objects[0].line.too","line":5,"column":7,"file":"bad.yaml"}}
 ```
 
 `field` is the path to the value in the sheet description: keys joined with `.`, list items as `[index]` counted from 0, such as `layers.hidden.linetype` or `objects[2].arc.radius`. `line` and `column` count from 1. `field`, `line`, `column` and `file` appear when they are known. An error in the block library a sheet names gives the library's file and a path in the library, such as `blocks.MARKER.objects[1].attdef.tag`. An error about a choice, such as a key, a unit, a layer, a linetype, a text style, a colour, a lineweight, a justification, a block or an attribute tag, lists the valid choices in its message.
@@ -311,6 +330,7 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 | `not_in_subset` | An anchor, alias, tag, directive, second document or key that is not text. |
 | `duplicate_key` | A key appears twice in one mapping, two layer, linetype, hatch pattern or block names differ only in case, or a block defines one attribute tag twice. The message gives the line of the first. |
 | `duplicate_name` | Two objects on a sheet carry the same name, or names that differ only in case. The message gives the line of the first. |
+| `duplicate_id` | Two objects in one sheet description or template carry the same `id`, or IDs that differ only in case. The message gives the line and place of the first. |
 | `unknown_key` | A key the sheet description does not define, including an unknown object type, an attribute definition on a sheet or an insert in a block. |
 | `missing_key` | A required key is missing, or the file is empty. |
 | `missing_unit` | The sheet declares no unit. |
@@ -326,7 +346,8 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 | `dwg_read` | The DWG library could not read a drawing. |
 | `missing_value` | A row of a drawing set lacks a value its template needs. See [the drawing set](drawing-set.md#errors). |
 | `sheets_failed` | Some sheets of a drawing set failed and were not written; the others were built. |
+| `no_such_object` | A query measures from or to an ID or a name that no object carries where it looks. See [Queries](query.md#errors). |
 
 ## How it is read
 
-The YAML is read by [saphyr-parser](https://crates.io/crates/saphyr-parser) (MIT or Apache-2.0), a YAML 1.2 parser that reports each node with its anchor, tag and position. AgentDrafter builds its own tree from those events, refusing anything outside the subset as it goes, so a duplicate key or an anchor is caught where it is written rather than lost in a parsed value. The code is `crates/agentdrafter-core/src/description/`: `mod.rs` reads the top level and the values, `layers.rs` the linetypes and layers, `objects.rs` the objects, `hatch.rs` the hatch patterns and hatches, `text.rs` the text styles and text, `blocks.rs` the block library, its blocks and inserts of them, and `schema.rs` writes both schemas, with `hatch_schema.rs` and `block_schema.rs` writing their hatch and block parts. Fonts and measuring are in `crates/agentdrafter-core/src/text/`, text's side of the DWG in `src/dwg/text.rs`, and blocks' in `src/dwg/block.rs`.
+The YAML is read by [saphyr-parser](https://crates.io/crates/saphyr-parser) (MIT or Apache-2.0), a YAML 1.2 parser that reports each node with its anchor, tag and position. AgentDrafter builds its own tree from those events, refusing anything outside the subset as it goes, so a duplicate key or an anchor is caught where it is written rather than lost in a parsed value. The code is `crates/agentdrafter-core/src/description/`: `mod.rs` reads the top level and the values, `layers.rs` the linetypes and layers, `objects.rs` the objects, `hatch.rs` the hatch patterns and hatches, `text.rs` the text styles and text, `blocks.rs` the block library, its blocks and inserts of them, `ids.rs` each object's `id`, `records.rs` a sheet with its objects' IDs, and `schema.rs` writes both schemas, with `hatch_schema.rs` and `block_schema.rs` writing their hatch and block parts. Fonts and measuring are in `crates/agentdrafter-core/src/text/`, text's side of the DWG in `src/dwg/text.rs`, and blocks' in `src/dwg/block.rs`.

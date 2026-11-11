@@ -402,6 +402,11 @@ pub struct DrawingContents {
     pub blocks_not_read: usize,
     /// The model-space objects the core has a model for, in drawing order.
     pub objects: Vec<Object>,
+    /// The ID each of `objects` carries in AgentDrafter's extended data, in
+    /// the same order: none for an object that carries none, such as one
+    /// AgentDrafter did not build.
+    #[serde(default)]
+    pub ids: Vec<Option<String>>,
     /// How many model-space objects the core has no model for yet, including
     /// those that set their own colour, linetype or lineweight rather than
     /// taking their layer's.

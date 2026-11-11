@@ -113,7 +113,7 @@ The file at the top of a drawing set's folder, `set.yaml`, that declares the set
 _Avoid_: project file, config
 
 **ID**:
-An object's identifier, fixed for the object's life.
+An object's identifier, fixed for the object's life. It lives in the object's record: the sheet's name joined to the `id` the sheet description or template gives the object, such as `DEMO-001/border`, or to the object's place in the file when it gives none. It is unique in the drawing set, and the DWG carries it with the object.
 _Avoid_: handle (a handle is the DWG's own identifier), index
 
 **Name**:
@@ -186,6 +186,14 @@ _Avoid_: draft, staging
 **Issued**:
 Accepted by the reviewer. Nothing is issued until the reviewer accepts the working revision. The reviewer cannot accept while the set is inconsistent, and an issued change set cannot be undone.
 _Avoid_: released, approved, final
+
+**Query**:
+A question an agent asks a drawing set about what is on its sheets, such as which objects carry a tag, which blocks a sheet inserts, or how far apart two objects are. It reads the records, changes nothing, and selects objects by ID, name, block, attribute or text, never by coordinates. A query that matches nothing says so.
+_Avoid_: search, lookup, select
+
+**Extents**:
+The box round everything a sheet draws, seen from above, as AutoCAD's extents are: the geometry itself, not the width of its pens.
+_Avoid_: bounds, bounding box, limits (AutoCAD's limits are a setting, not what is drawn)
 
 **Check**:
 A rule a sheet is tested against, such as nothing off the sheet or no text overflowing its title-block cell.

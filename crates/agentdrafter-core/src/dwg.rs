@@ -5,8 +5,8 @@
 //! model ([`crate::model`]), so moving the acadrust pin, or the library
 //! itself, changes these files and `Cargo.toml` only. Moving the pin means
 //! running the judge again. [`hatch`] carries hatches through the seam,
-//! [`text`] text styles and text, and [`block`] blocks, attribute
-//! definitions and inserts.
+//! [`text`] text styles and text, [`block`] blocks, attribute
+//! definitions and inserts, and [`ids`] each object's ID.
 //!
 //! Our own names here follow `CONTEXT.md`: a DWG file's contents are a
 //! drawing and the things in it are objects. acadrust's names, such as
@@ -36,6 +36,7 @@ use crate::units::Unit;
 
 mod block;
 mod hatch;
+mod ids;
 mod text;
 
 /// The DWG version a new sheet is written in: the 2018 format, AC1032 (ADR-0006).
@@ -60,10 +61,13 @@ pub(crate) fn new_sheet_version() -> String {
 }
 
 /// Writes a new sheet as the bytes of a DWG in the 2018 format, carrying the
-/// build mark. `start_of` gives where each single line of text starts,
-/// which the DWG records beside the point it is justified at.
+/// build mark. Each of the sheet's objects carries its ID from `ids`, which
+/// holds one for each object in order, or none. `start_of` gives where each
+/// single line of text starts, which the DWG records beside the point it is
+/// justified at.
 pub(crate) fn write_new_sheet(
     sheet: &Sheet,
+    ids: &[String],
     start_of: &dyn Fn(&TextObject) -> Point3,
 ) -> Result<Vec<u8>, Error> {
     let mut drawing = CadDocument::with_version(NEW_SHEET_VERSION);
@@ -109,7 +113,7 @@ pub(crate) fn write_new_sheet(
         .objects
         .iter()
         .any(|o| matches!(o, Object::Insert(insert) if insert.name.is_some()));
-    if named {
+    if named || !ids.is_empty() {
         block::register_application(&mut drawing)?;
     }
     // Layers, linetypes, text styles and applications take their handles
@@ -133,15 +137,17 @@ pub(crate) fn write_new_sheet(
             })?;
         }
     }
-    for object in &sheet.objects {
-        drawing
-            .add_entity(dwg_object(object, start_of, &sheet.blocks)?)
-            .map_err(|e| {
-                Error::new(
-                    ErrorCode::DwgWrite,
-                    format!("could not add a {} to the drawing: {e}", object.type_name()),
-                )
-            })?;
+    for (index, object) in sheet.objects.iter().enumerate() {
+        let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
+        if let Some(id) = ids.get(index) {
+            self::ids::write_id(dwg_object.common_mut(), id);
+        }
+        drawing.add_entity(dwg_object).map_err(|e| {
+            Error::new(
+                ErrorCode::DwgWrite,
+                format!("could not add a {} to the drawing: {e}", object.type_name()),
+            )
+        })?;
     }
     match catch_unwind(AssertUnwindSafe(|| DwgWriter::write_to_vec(&drawing))) {
         Ok(Ok(bytes)) => Ok(bytes),
@@ -342,10 +348,14 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         }
     }
     let mut objects = Vec::new();
+    let mut ids = Vec::new();
     let mut objects_not_read = 0;
     for dwg_object in drawing.model_space_entities() {
         match read_object(dwg_object, &blocks) {
-            Some(object) => objects.push(object),
+            Some(object) => {
+                objects.push(object);
+                ids.push(self::ids::read_id(dwg_object.common()));
+            }
             None => objects_not_read += 1,
         }
     }
@@ -361,6 +371,7 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         blocks,
         blocks_not_read,
         objects,
+        ids,
         objects_not_read,
     })
 }
@@ -674,7 +685,7 @@ mod tests {
         let dwg = dir.join("sheet.dwg");
         fs::write(
             &dwg,
-            write_new_sheet(&empty_sheet(), &|t| t.position).unwrap(),
+            write_new_sheet(&empty_sheet(), &[], &|t| t.position).unwrap(),
         )
         .unwrap();
         assert_eq!(carries_build_mark(&dwg), Ok(true));

@@ -23,6 +23,9 @@
 //! - [`render`] draws a sheet description or a DWG to a PNG, stamped with
 //!   every file it was drawn from, and [`check_stale`] says whether any of
 //!   them has moved on.
+//! - [`query`] asks a drawing set, or one sheet description, what is on its
+//!   sheets: objects by ID, name, block, attribute or text, the blocks
+//!   inserted, inserts' attributes, a distance and a sheet's extents.
 //!
 //! [`Settings`] say where the machine keeps its fonts; [`build`],
 //! [`measure_text`] and [`render`] read them from the environment, and
@@ -40,6 +43,7 @@ mod draw;
 mod dwg;
 mod error;
 mod model;
+mod query;
 mod raster;
 mod render;
 mod reply;
@@ -60,6 +64,11 @@ pub use model::{
     Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
 };
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
+pub use query::{
+    query, query_with, Answer, AttributeValues, BlockInserts, End, Extents, FoundObject,
+    InsertAttributes, Matching, Measure, MeasuredPoint, Query, QueryReport, QueryRequest,
+    Selection, SheetBlocks, SheetExtents, WrittenAt, EXTENTS_TOLERANCE,
+};
 pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;
 pub use set::{
