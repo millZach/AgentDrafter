@@ -9,7 +9,7 @@ publish.workspace = true
 
 [[bin]]
 name = "agentdrafter"
-path = "src/main.rs"
+path = "src/bin/agentdrafter.rs"
 
 [dependencies]
 agentdrafter-core = { path = "../agentdrafter-core" }

@@ -1,0 +1,43 @@
+# The pip package: one wheel per system carries the Rust core, the
+# `agentdrafter` command with both servers, and the Python library bound to
+# the core (docs/python.md). Nothing is published until Zach says so at the
+# first release.
+
+[build-system]
+# The build backend that builds the extension into a wheel (MIT or Apache-2.0).
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "agentdrafter"
+description = "An open-source CAD engine built for agents first: the agentdrafter command, its HTTP API and MCP server, and a Python library, over one Rust core."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+# The extension is built against Python's stable ABI as Python 3.11 has it,
+# so the one wheel serves 3.11 and every later version (pyo3's abi3-py311).
+requires-python = ">=3.11"
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.urls]
+Repository = "https://github.com/millZach/AgentDrafter"
+
+[project.scripts]
+# The command runs the command line's own code inside the extension.
+agentdrafter = "agentdrafter.__main__:main"
+
+[tool.maturin]
+manifest-path = "crates/agentdrafter-py/Cargo.toml"
+python-source = "python"
+module-name = "agentdrafter._native"
+locked = true
+# The extension without its symbol table, which only a debugger reads.
+strip = true

@@ -226,9 +226,23 @@ fn without_times(value: &Value) -> Value {
     }
 }
 
-const MOVE: &str =
-    r#"{"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]}"#;
-const PARTIAL: &str = r#"{"operations": [{"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5}, {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "nope"}]}"#;
+/// The calls the interfaces' tests make, shared with the Python library's
+/// (`python/tests/test_interfaces.py`), so every interface is held to the
+/// same ones: the change sets they apply, by file name, and one call of each
+/// command, as the command line's arguments and as the input the other
+/// interfaces take.
+const CALLS: &str = include_str!("calls.json");
+
+fn shared() -> Value {
+    serde_json::from_str(CALLS).unwrap()
+}
+
+/// The shared change set of this file name.
+fn change_set(file: &str) -> Value {
+    let change_set = shared()["change_sets"][file].clone();
+    assert!(change_set.is_object(), "no change set {file} in calls.json");
+    change_set
+}
 
 /// A folder for one interface, holding a copy of the demo set as
 /// `demo-set` and the change sets as files, so every interface is given
@@ -236,97 +250,25 @@ const PARTIAL: &str = r#"{"operations": [{"op": "add_circle", "sheet": "DEMO-001
 fn interface_folder(test: &str, interface: &str) -> PathBuf {
     let dir = scratch(&format!("{test}/{interface}"));
     demo_set::copy_demo_set(&dir.join("demo-set"));
-    fs::write(dir.join("move.json"), MOVE).unwrap();
-    fs::write(dir.join("partial.json"), PARTIAL).unwrap();
+    for (file, change_set) in shared()["change_sets"].as_object().unwrap() {
+        fs::write(dir.join(file), change_set.to_string()).unwrap();
+    }
     dir
 }
 
 /// One call of each command, as the command line's arguments and as the
 /// input the servers take. Run in the registry's order on a fresh copy of
 /// the demo set, each finds what the ones before it made.
-fn calls() -> BTreeMap<&'static str, (Vec<&'static str>, Value)> {
-    BTreeMap::from([
-        (
-            "build",
-            (vec!["build", "demo-set"], json!({"source": "demo-set"})),
-        ),
-        (
-            "schema",
-            (vec!["schema", "template"], json!({"kind": "template"})),
-        ),
-        (
-            "measure-text",
-            (
-                vec![
-                    "measure-text",
-                    "PUMP 101",
-                    "--font",
-                    "romans.shx",
-                    "--height",
-                    "2.5",
-                ],
-                json!({"contents": "PUMP 101", "font": "romans.shx", "height": 2.5}),
-            ),
-        ),
-        (
-            "render",
-            (
-                vec![
-                    "render",
-                    "demo-set/dwg/DEMO-001.dwg",
-                    "--width",
-                    "320",
-                    "--height",
-                    "200",
-                ],
-                json!({"source": "demo-set/dwg/DEMO-001.dwg", "width": 320, "height": 200}),
-            ),
-        ),
-        (
-            "plot",
-            (vec!["plot", "demo-set"], json!({"source": "demo-set"})),
-        ),
-        (
-            "stale",
-            (
-                vec!["stale", "demo-set/dwg/DEMO-001.png"],
-                json!({"output": "demo-set/dwg/DEMO-001.png"}),
-            ),
-        ),
-        (
-            "query",
-            (
-                vec!["query", "find", "demo-set", "--name", "title-block"],
-                json!({"source": "demo-set", "query": {"kind": "find", "name": "title-block"}}),
-            ),
-        ),
-        ("operations", (vec!["operations"], json!({}))),
-        (
-            "change",
-            (
-                vec!["change", "demo-set", "move.json"],
-                json!({"set": "demo-set", "change_set": serde_json::from_str::<Value>(MOVE).unwrap()}),
-            ),
-        ),
-        (
-            "journal",
-            (vec!["journal", "demo-set"], json!({"set": "demo-set"})),
-        ),
-        (
-            "undo",
-            (
-                vec!["undo", "demo-set", "1"],
-                json!({"set": "demo-set", "change_set": 1}),
-            ),
-        ),
-        (
-            "check",
-            (
-                vec!["check", "demo-set", "--sheet", "DEMO-002"],
-                json!({"source": "demo-set", "sheets": ["DEMO-002"]}),
-            ),
-        ),
-    ])
+fn calls() -> BTreeMap<String, (Vec<String>, Value)> {
+    shared()["calls"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(name, call)| {
+            let args = serde_json::from_value(call["args"].clone()).unwrap();
+            (name.clone(), (args, call["input"].clone()))
+        })
+        .collect()
 }
 
 #[test]
@@ -365,9 +307,10 @@ fn every_command_of_the_registry_is_reachable_through_every_interface_with_the_s
     for command in registry {
         let name = command.name();
         let Some((args, input)) = calls.get(name) else {
-            panic!("`{name}` is in the registry: add a call of it to this test");
+            panic!("`{name}` is in the registry: add a call of it to tests/calls.json");
         };
-        let (code, by_cli) = cli(args, &cli_dir);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (code, by_cli) = cli(&args, &cli_dir);
         let (status, by_http) = http.run(name, input);
         let by_mcp = mcp.call(name, input)["structuredContent"].clone();
         assert_eq!(by_cli["ok"], true, "{name}: {by_cli}");
@@ -419,8 +362,8 @@ fn the_same_change_set_gives_the_same_reply_and_journal_entry_through_every_inte
 
     // A template edit, which lands on every sheet, then a change set that
     // lands on one sheet and fails on another.
-    for (file, change_set, ok) in [("move.json", MOVE, true), ("partial.json", PARTIAL, false)] {
-        let input = json!({"set": "demo-set", "change_set": serde_json::from_str::<Value>(change_set).unwrap()});
+    for (file, ok) in [("move.json", true), ("partial.json", false)] {
+        let input = json!({"set": "demo-set", "change_set": change_set(file)});
         let (code, by_cli) = cli(&["change", "demo-set", file], &cli_dir);
         let (status, by_http) = http.run("change", &input);
         let result = mcp.call("change", &input);
