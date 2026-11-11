@@ -3,8 +3,8 @@
 //! When a font is not in the font folders, text is measured with a
 //! look-alike (see [`super::fonts`]). This one is built in, so measuring
 //! never stops for want of a font. It is a single-stroke font, as AutoCAD's
-//! SHX text fonts are, and AutoCAD's `romans.shx` draws its letters with the
-//! same advances, apart from the space.
+//! SHX text fonts are, and AutoCAD's `romans.shx` gives its letters and
+//! digits the same advances (its space and a few punctuation marks differ).
 //!
 //! The Hershey fonts were created by Dr. A. V. Hershey while working at the
 //! U.S. National Bureau of Standards, as a work of the United States
