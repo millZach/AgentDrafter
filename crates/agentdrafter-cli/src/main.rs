@@ -13,10 +13,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use agentdrafter_core::{
-    block_library_schema, build_set_with, build_with, check_stale, measure_text_with, render_with,
-    rows_schema, set_schema, sheet_description_schema, template_schema, BuildRequest, Error,
-    ErrorCode, MeasureTextRequest, RenderRequest, Reply, SetBuildRequest, Settings, StaleRequest,
-    FONTS_VARIABLE, SET_SETTINGS_FILE,
+    block_library_schema, build_set_with, build_with, check_stale, measure_text_with,
+    plot_set_with, plot_with, render_with, rows_schema, set_schema, sheet_description_schema,
+    template_schema, BuildRequest, Error, ErrorCode, MeasureTextRequest, PlotRequest,
+    PlotSetRequest, RenderRequest, Reply, SetBuildRequest, Settings, StaleRequest,
+    BUILT_IN_PLOT_STYLE, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SET_SETTINGS_FILE,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -27,7 +28,9 @@ const SCHEMA_USAGE: &str =
     "agentdrafter schema [sheet-description | block-library | template | set | rows]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...";
-const STALE_USAGE: &str = "agentdrafter stale <png> [--source <sheet-description-or-dwg>]";
+const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]...";
+const STALE_USAGE: &str =
+    "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -41,7 +44,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
         return reply::<()>(Err(Error::usage(format!(
-            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {STALE_USAGE}"
+            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE}"
         ))));
     };
     match command.to_str() {
@@ -56,6 +59,11 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         },
         Some("render") => match parse_render(args) {
             Ok((request, settings)) => reply(render_with(&request, &settings)),
+            Err(error) => reply::<()>(Err(error)),
+        },
+        Some("plot") => match parse_plot(args) {
+            Ok((Plot::Sheet(request), settings)) => reply(plot_with(&request, &settings)),
+            Ok((Plot::Set(request), settings)) => send(plot_set_with(&request, &settings)),
             Err(error) => reply::<()>(Err(error)),
         },
         Some("stale") => match parse_stale(args) {
@@ -85,7 +93,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         Some("help" | "--help" | "-h") => reply(Ok(help())),
         Some("--version" | "-V") => reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") }))),
         _ => reply::<()>(Err(Error::usage(format!(
-            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {STALE_USAGE}",
+            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE}",
             command.to_string_lossy()
         )))),
     }
@@ -180,6 +188,87 @@ fn parse_render(
     Ok((request, settings(fonts)))
 }
 
+/// What `plot` plots: one sheet description or DWG, or every sheet of a
+/// drawing set, whose folder it is given.
+enum Plot {
+    Sheet(PlotRequest),
+    Set(PlotSetRequest),
+}
+
+fn parse_plot(mut args: impl Iterator<Item = OsString>) -> Result<(Plot, Settings), Error> {
+    let mut source: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut overwrite = false;
+    let mut plot_style: Option<String> = None;
+    let mut fonts = Vec::new();
+    let mut plot_styles = Vec::new();
+    let value = |flag: &str, value: Option<OsString>| -> Result<OsString, Error> {
+        value.ok_or_else(|| Error::usage(format!("{flag} needs a value; usage: {PLOT_USAGE}")))
+    };
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--output" | "-o") => {
+                let path = value("--output", args.next())?;
+                if output.replace(path.into()).is_some() {
+                    return Err(Error::usage("--output is given twice"));
+                }
+            }
+            Some("--overwrite") => overwrite = true,
+            Some("--plot-style") => {
+                let name = value("--plot-style", args.next())?
+                    .into_string()
+                    .map_err(|_| Error::usage("the plot style's name is not valid text"))?;
+                if plot_style.replace(name).is_some() {
+                    return Err(Error::usage("--plot-style is given twice"));
+                }
+            }
+            Some("--plot-styles") => plot_styles.push(value("--plot-styles", args.next())?.into()),
+            Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(Error::usage(format!(
+                    "unknown option `{flag}`; usage: {PLOT_USAGE}"
+                )))
+            }
+            _ => {
+                if source.replace(arg.into()).is_some() {
+                    return Err(Error::usage(format!(
+                        "plot takes one sheet description, DWG or drawing set; usage: {PLOT_USAGE}"
+                    )));
+                }
+            }
+        }
+    }
+    let source = source.ok_or_else(|| {
+        Error::usage(format!(
+            "plot needs a sheet description, a DWG or a drawing set's folder; usage: {PLOT_USAGE}"
+        ))
+    })?;
+    let mut settings = settings(fonts);
+    settings.plot_style_folders.splice(0..0, plot_styles);
+    // A folder is a drawing set, whose settings say where its outputs go.
+    if source.is_dir() {
+        if output.is_some() {
+            return Err(Error::usage(format!(
+                "a drawing set's PDFs go to the folder its settings ({SET_SETTINGS_FILE}) name \
+                 under `output`; --output is for one sheet description or DWG"
+            )));
+        }
+        let request = PlotSetRequest {
+            set: source,
+            overwrite,
+            plot_style,
+        };
+        return Ok((Plot::Set(request), settings));
+    }
+    let request = PlotRequest {
+        source,
+        output,
+        overwrite,
+        plot_style,
+    };
+    Ok((Plot::Sheet(request), settings))
+}
+
 fn parse_stale(mut args: impl Iterator<Item = OsString>) -> Result<StaleRequest, Error> {
     let mut output: Option<PathBuf> = None;
     let mut source: Option<PathBuf> = None;
@@ -216,7 +305,8 @@ fn parse_stale(mut args: impl Iterator<Item = OsString>) -> Result<StaleRequest,
 }
 
 /// The settings for one command: the font folders `--fonts` names, then
-/// those the environment names.
+/// those the environment names, and the plot style folders the environment
+/// names.
 fn settings(fonts: Vec<PathBuf>) -> Settings {
     let mut settings = Settings::from_env();
     settings.font_folders.splice(0..0, fonts);
@@ -412,11 +502,35 @@ fn help() -> serde_json::Value {
                          source's fingerprint. An existing file is never replaced without \
                          --overwrite, and --overwrite replaces only a PNG AgentDrafter rendered.",
             },
+            "plot": {
+                "usage": PLOT_USAGE,
+                "does": format!(
+                    "Plots a sheet description, or a DWG, to a PDF as AutoCAD plots it to PDF: \
+                     the page is the sheet's size, its extents at 1:1 (a sheet drawn 17 by 11 \
+                     inches plots on a page of exactly 431.8 by 279.4 mm); each pen's colour \
+                     and lineweight come from the CTB plot style --plot-style names, found in \
+                     the plot style folders, or with none from the {BUILT_IN_PLOT_STYLE} style, \
+                     every pen black at its object's own lineweight; text draws as AutoCAD \
+                     draws it and can be searched and copied. It goes beside the source with a \
+                     .pdf extension unless --output names another path, and is stamped with \
+                     every file it was drawn from. An existing file is never replaced without \
+                     --overwrite, and --overwrite replaces only a PDF AgentDrafter plotted."
+                ),
+                "drawing_set": format!(
+                    "Given a folder, plots every sheet of the drawing set in it, each its \
+                     template filled in from its row, into the output folder its settings \
+                     ({SET_SETTINGS_FILE}) name, as <sheet>.pdf. A sheet that fails writes \
+                     nothing and the others are still plotted; the reply gives each sheet's \
+                     outcome under sheets, and is not ok when any sheet failed."
+                ),
+            },
             "stale": {
                 "usage": STALE_USAGE,
-                "does": "Says whether a PNG AgentDrafter rendered is stale: whether the sheet \
-                         description or DWG its stamp names has changed since, or is gone. The \
-                         source is found from the PNG's folder unless --source names it.",
+                "does": "Says whether a PNG AgentDrafter rendered or a PDF it plotted is stale: \
+                         whether any file its stamp names (the sheet description, DWG or \
+                         template, and the files it draws on) has changed since, or is gone. \
+                         The files are found from the output's folder; --source says where the \
+                         first, the record, is now.",
             },
         },
         "fonts": format!(
@@ -424,6 +538,11 @@ fn help() -> serde_json::Value {
              environment variable lists (separated as the system separates paths). There is no \
              default folder. A font in none of them is replaced by a look-alike, and the reply \
              says which."
+        ),
+        "plot_styles": format!(
+            "CTB plot styles are read from the folders --plot-styles names, then from those the \
+             {PLOT_STYLES_VARIABLE} environment variable lists, such as AutoCAD's Plot Styles \
+             folder. There is no default folder."
         ),
         "output": "One line of JSON on standard output: {\"ok\": true, \"result\": ...} or \
                    {\"ok\": false, \"error\": {\"code\", \"message\", \"field\", \"line\", \

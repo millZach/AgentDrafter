@@ -189,6 +189,7 @@ fn a_truetype_font_draws_filled_outlines() {
     .unwrap();
     let settings = Settings {
         font_folders: vec![PathBuf::from(&dir)],
+        ..Settings::default()
     };
     let fonts = SheetFonts::find(&sheet, &settings);
     let list = draw_sheet(&sheet, &fonts, 0.001, MOST_HATCH_DASHES);
@@ -258,6 +259,7 @@ fn stretched_text_keeps_within_the_tolerance_both_ways() {
     .unwrap();
     let settings = Settings {
         font_folders: vec![PathBuf::from(&dir)],
+        ..Settings::default()
     };
     let fonts = SheetFonts::find(&sheet, &settings);
     let tolerance = 0.01;
@@ -437,6 +439,60 @@ fn an_object_on_layer_zero_in_a_block_takes_the_inserts_layer() {
     assert_eq!(list.items[1].color, Color(5));
 }
 
+/// Each line of text gives a run of its characters along its baseline, in
+/// the frame the text is set in: from the start of its baseline, one unit
+/// of the font's advances along it and the capitals' height up.
+#[test]
+fn each_line_of_text_reads_as_a_run_along_its_baseline() {
+    let list = draw(
+        "units: mm\ntext_styles:\n  narrow: {font: romans.shx, width_factor: 0.8}\nobjects:\n  - text: {contents: AB C, position: [10, 20, 0], height: 2.5, style: narrow, rotation: 90}\n  - mtext: {contents: \"ONE\\nTWO\", position: [0, 0, 0], height: 3}\n",
+    );
+    let read: Vec<(usize, String)> = list
+        .text
+        .iter()
+        .map(|r| (r.object, r.characters.iter().map(|&(c, _)| c).collect()))
+        .collect();
+    assert_eq!(
+        read,
+        [(0, "AB C".into()), (1, "ONE".into()), (1, "TWO".into())]
+    );
+    let turned = &list.text[0];
+    near(turned.origin, [10.0, 20.0]);
+    near(turned.across, [0.0, 2.0]);
+    near(turned.up, [-2.5, 0.0]);
+    // The lines of multiline text sit five thirds of the height apart.
+    near(list.text[1].up, [0.0, 3.0]);
+    assert!((list.text[1].origin[1] - list.text[2].origin[1] - 5.0).abs() < 1e-9);
+}
+
+/// An attribute's run is where the insert puts its text, and a text in a
+/// block runs where the insert places it, enlarged and turned with it.
+#[test]
+fn an_inserts_text_reads_where_the_insert_puts_it() {
+    let library = LIBRARY.replace(
+        "      - attdef: {tag: TAG,",
+        "      - text: {contents: FIXED, position: [0, 2, 0], height: 1}\n      - attdef: {tag: TAG,",
+    );
+    let list = draw_with_library("insert-text", &library, INSERTS);
+    let read: Vec<String> = list
+        .text
+        .iter()
+        .map(|r| r.characters.iter().map(|&(c, _)| c).collect())
+        .collect();
+    assert_eq!(read, ["FIXED", "X"]);
+    assert!(list.text.iter().all(|r| r.object == 0));
+    // The block's text from (0, 2), doubled about the base point (10, 0)
+    // and turned a quarter round the insert's position (100, 50): 2 high,
+    // running up the page.
+    let fixed = &list.text[0];
+    near(fixed.origin, [96.0, 30.0]);
+    near(fixed.up, [-2.0, 0.0]);
+    assert!(fixed.across[0].abs() < 1e-9 && fixed.across[1] > 0.0);
+    // The attribute, 4 high, starts at (90, 30), as it draws.
+    near(list.text[1].origin, [90.0, 30.0]);
+    near(list.text[1].up, [-4.0, 0.0]);
+}
+
 #[test]
 fn the_extents_take_in_a_hatchs_boundary() {
     let list = draw(
@@ -459,6 +515,8 @@ fn the_pipeline_needs_no_file_system_thread_or_clock() {
         ("draw/linetype.rs", include_str!("linetype.rs")),
         ("draw/text.rs", include_str!("text.rs")),
         ("raster.rs", include_str!("../raster.rs")),
+        ("pdf.rs", include_str!("../pdf.rs")),
+        ("plot_style.rs", include_str!("../plot_style.rs")),
         ("text/outline.rs", include_str!("../text/outline.rs")),
     ];
     for (name, source) in sources {

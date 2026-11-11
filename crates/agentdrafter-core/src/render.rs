@@ -7,29 +7,23 @@
 //! a sheet description names ([`crate::stamp`]). Nothing here needs a
 //! window or a GPU.
 //!
-//! Until drawing sets and their paper sizes arrive (ticket #7), a render
-//! covers the drawing's extents with a margin, at a plot scale or an image
-//! size the caller gives. Lineweights are widths on paper, so they draw at
+//! A render covers the drawing's extents with a margin, at a plot scale or
+//! an image size the caller gives. Lineweights are widths on paper, so they draw at
 //! the render's dots per inch whatever its scale, as AutoCAD's plot fitted
 //! to paper keeps them.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::description::sheet_description_at;
 pub use crate::draw::HatchCutShort;
 use crate::draw::{self, Bounds};
-use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::Sheet;
+use crate::output::{object_counts, read_record, refuse_to_replace, write_whole, OutputKind};
 use crate::raster::{self, View};
 use crate::settings::Settings;
-use crate::stamp::{self, SourceKind, Stamp};
+use crate::stamp::Stamp;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
@@ -178,55 +172,16 @@ fn render_within(
 ) -> Result<RenderReport, Error> {
     check(request)?;
     let source = request.source.as_path();
-    let bytes = fs::read(source).map_err(|e| {
-        Error::new(
-            ErrorCode::ReadFailed,
-            format!("could not read the {}: {e}", SourceKind::of(source).words()),
-        )
-        .in_file(source)
-    })?;
-    let kind = SourceKind::of(source);
-    let (sheet, units, objects_not_drawn, library) = if kind == SourceKind::Dwg {
-        let drawing = dwg::read(source)?;
-        let sheet = Sheet {
-            units: drawing.units.unwrap_or(Unit::Mm),
-            block_library: None,
-            linetypes: drawing.linetypes,
-            layers: drawing.layers,
-            text_styles: drawing.text_styles,
-            blocks: drawing.blocks,
-            objects: drawing.objects,
-        };
-        (sheet, drawing.units, drawing.objects_not_read, None)
-    } else {
-        let text = String::from_utf8(bytes.clone()).map_err(|_| {
-            Error::new(
-                ErrorCode::ReadFailed,
-                "could not read the sheet description: it is not UTF-8 text",
-            )
-            .in_file(source)
-        })?;
-        let (sheet, library) = sheet_description_at(&text, source)?;
-        let units = Some(sheet.units);
-        (sheet, units, 0, library)
-    };
-    // Every file read to draw the sheet, the record first.
-    let mut read = vec![(kind, source, bytes.as_slice())];
-    if let Some(library) = &library {
-        read.push((
-            SourceKind::BlockLibrary,
-            library.path.as_path(),
-            library.bytes.as_slice(),
-        ));
-    }
+    let record = read_record(source)?;
+    let sheet = &record.sheet;
 
     let output = request
         .output
         .clone()
         .unwrap_or_else(|| source.with_extension("png"));
-    refuse_to_replace(request, &output)?;
+    refuse_to_replace(source, &output, request.overwrite, OutputKind::Png)?;
 
-    let fonts = SheetFonts::find(&sheet, settings);
+    let fonts = SheetFonts::find(sheet, settings);
     let pixels_per_millimetre = request.dpi / 25.4;
     let margin = request.margin * pixels_per_millimetre;
     let millimetres_per_unit = sheet.units.convert(1.0, Unit::Mm);
@@ -239,7 +194,7 @@ fn render_within(
     // A coarse list first, curves to within a drawing unit, for the scale;
     // then the list drawn to a quarter of a pixel, finer than the eye sees,
     // whose extents the image covers.
-    let coarse = draw::draw_sheet(&sheet, &fonts, 1.0, most_dashes);
+    let coarse = draw::draw_sheet(sheet, &fonts, 1.0, most_dashes);
     let (rough, _) = fit(
         request,
         area(&coarse),
@@ -247,7 +202,7 @@ fn render_within(
         millimetres_per_unit,
         margin,
     )?;
-    let list = draw::draw_sheet(&sheet, &fonts, 0.25 / rough, most_dashes);
+    let list = draw::draw_sheet(sheet, &fonts, 0.25 / rough, most_dashes);
     let extents = list.extents();
     let (pixels_per_unit, size) = fit(
         request,
@@ -274,7 +229,7 @@ fn render_within(
             ),
         )
     })?;
-    let stamp = Stamp::new(&read, &output);
+    let stamp = Stamp::new(&record.read(), &output);
     let png = raster::png(&pixmap, &stamp.to_json(), pixels_per_millimetre).map_err(|e| {
         Error::new(
             ErrorCode::WriteFailed,
@@ -282,12 +237,8 @@ fn render_within(
         )
         .in_file(&output)
     })?;
-    write_whole(&output, &png)?;
+    write_whole(&output, &png, OutputKind::Png)?;
 
-    let mut objects = BTreeMap::new();
-    for object in &sheet.objects {
-        *objects.entry(object.type_name().to_owned()).or_insert(0) += 1;
-    }
     Ok(RenderReport {
         source: source.display().to_string(),
         png: output.display().to_string(),
@@ -297,10 +248,10 @@ fn render_within(
         scale: pixels_per_unit / pixels_per_millimetre / millimetres_per_unit,
         pixels_per_unit,
         top_left: view.top_left,
-        units,
+        units: record.units,
         extents,
-        objects,
-        objects_not_drawn,
+        objects: object_counts(sheet),
+        objects_not_drawn: record.objects_not_drawn,
         bytes: png.len(),
         font_substitutions: fonts.substitutions(),
         hatches_cut_short: list.hatches_cut_short.clone(),
@@ -437,69 +388,10 @@ fn check_size(width: u32, height: u32) -> Result<(), Error> {
     Ok(())
 }
 
-/// Refuses to write over the file at `output` unless asked to and it is a
-/// PNG AgentDrafter rendered, as its stamp shows. Anything else may be
-/// someone's own file, and is never overwritten.
-fn refuse_to_replace(request: &RenderRequest, output: &Path) -> Result<(), Error> {
-    if fs::symlink_metadata(output).is_err() {
-        return Ok(());
-    }
-    if let (Ok(a), Ok(b)) = (fs::canonicalize(&request.source), fs::canonicalize(output)) {
-        if a == b {
-            return Err(Error::usage(
-                "the output path is the source itself; choose another path for the PNG",
-            )
-            .in_file(output));
-        }
-    }
-    if !request.overwrite {
-        return Err(Error::new(
-            ErrorCode::OutputExists,
-            "a file is already at the output path; ask to overwrite it to replace a previous render",
-        )
-        .in_file(output));
-    }
-    match fs::read(output).map_err(|e| e.to_string()).and_then(|b| stamp::stamp_of(&b)) {
-        Ok(_) => Ok(()),
-        Err(why) => Err(Error::new(
-            ErrorCode::NotAnOutput,
-            format!(
-                "{why}; it may be someone's own file, which is never overwritten, so choose another \
-                 output path"
-            ),
-        )
-        .in_file(output)),
-    }
-}
-
-/// Writes `bytes` to a temporary file beside `path`, then moves it onto
-/// `path`, so a reader never sees a half-written PNG.
-fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let Some(name) = path.file_name() else {
-        return Err(Error::usage("the output path does not name a file").in_file(path));
-    };
-    let mut temporary_name = OsString::from(".");
-    temporary_name.push(name);
-    temporary_name.push(format!(".{}.tmp", std::process::id()));
-    let temporary: PathBuf = path.with_file_name(temporary_name);
-    let written = File::create(&temporary)
-        .and_then(|mut file| {
-            file.write_all(bytes)?;
-            file.sync_all()
-        })
-        .and_then(|()| fs::rename(&temporary, path));
-    written.map_err(|e| {
-        let _ = fs::remove_file(&temporary);
-        Error::new(
-            ErrorCode::WriteFailed,
-            format!("could not write the PNG: {e}"),
-        )
-        .in_file(path)
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     /// A hatch that reaches its budget of dashes partway is named in the

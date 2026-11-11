@@ -1,10 +1,11 @@
 //! Settings: what a machine tells the core about itself, apart from any
 //! one request.
 //!
-//! So far the only setting is where fonts are. AutoCAD's SHX fonts are
-//! Autodesk's files and are never in this repository (ADR-0008); on a
-//! machine that has AutoCAD they are read from its `Fonts` folder, which a
-//! setting names. There is no default folder.
+//! The settings say where fonts and plot styles are. AutoCAD's SHX fonts
+//! and its CTB plot styles are Autodesk's files and are never in this
+//! repository (ADR-0008); on a machine that has AutoCAD they are read from
+//! its `Fonts` and `Plot Styles` folders, which settings name. There is no
+//! default folder.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -17,6 +18,11 @@ use serde::{Deserialize, Serialize};
 /// folder.
 pub const FONTS_VARIABLE: &str = "AGENTDRAFTER_FONTS";
 
+/// The environment variable that names the plot style folders: a list of
+/// folders separated as the system separates paths, such as AutoCAD's
+/// `Plot Styles` folder.
+pub const PLOT_STYLES_VARIABLE: &str = "AGENTDRAFTER_PLOT_STYLES";
+
 /// What the core needs to know about the machine it runs on.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,27 +32,42 @@ pub struct Settings {
     /// with a look-alike, and the result says so.
     #[serde(default)]
     pub font_folders: Vec<PathBuf>,
+    /// The folders CTB plot styles are read from, searched in order. A plot
+    /// style is found by its file name, ignoring case.
+    #[serde(default)]
+    pub plot_style_folders: Vec<PathBuf>,
 }
 
 impl Settings {
     /// The settings the environment gives: the font folders that
-    /// [`FONTS_VARIABLE`] names, or none.
+    /// [`FONTS_VARIABLE`] names and the plot style folders that
+    /// [`PLOT_STYLES_VARIABLE`] names, or none.
     pub fn from_env() -> Self {
-        Self::from_variable(std::env::var_os(FONTS_VARIABLE).as_deref())
+        Self {
+            plot_style_folders: folders(std::env::var_os(PLOT_STYLES_VARIABLE).as_deref()),
+            ..Self::from_variable(std::env::var_os(FONTS_VARIABLE).as_deref())
+        }
     }
 
     /// The settings `value` gives when it is the value of
     /// [`FONTS_VARIABLE`]. Empty entries are left out.
     pub fn from_variable(value: Option<&OsStr>) -> Self {
-        let font_folders = value
-            .map(|v| {
-                std::env::split_paths(v)
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self { font_folders }
+        Self {
+            font_folders: folders(value),
+            plot_style_folders: Vec::new(),
+        }
     }
+}
+
+/// The folders a variable's value lists, empty entries left out.
+fn folders(value: Option<&OsStr>) -> Vec<PathBuf> {
+    value
+        .map(|v| {
+            std::env::split_paths(v)
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

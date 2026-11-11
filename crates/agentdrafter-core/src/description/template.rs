@@ -16,7 +16,7 @@ use std::path::Path;
 
 use super::set::{value_name_problem, Row};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
-use super::{bad_value, library_beside, read_file, scalar, sheet, Fields};
+use super::{bad_value, library_beside, read_file, scalar, sheet, Fields, LibraryFile};
 use crate::error::{Error, ErrorCode};
 use crate::model::{BlockLibrary, Sheet};
 use crate::set::{Notice, NoticeCode};
@@ -63,6 +63,31 @@ pub(crate) fn read_template(
         notices,
     );
     sheet.map_err(|e| e.or_in_file(path))
+}
+
+/// Reads `text`, the template in the file at `path`, as [`read_template`]
+/// reads it, and gives the block library's file as it was read, if the
+/// template names one, so that an output can be stamped with the bytes it
+/// was drawn from.
+pub(crate) fn template_at(
+    text: &str,
+    path: &Path,
+    row: &Row,
+    rows_file: &Path,
+    set_units: Unit,
+    notices: &mut Vec<Notice>,
+) -> Result<(Sheet, Option<LibraryFile>), Error> {
+    let mut library = None;
+    let sheet = fill(
+        text,
+        row,
+        rows_file,
+        set_units,
+        &mut library_beside(path, &mut library),
+        notices,
+    )
+    .map_err(|e| e.or_in_file(path))?;
+    Ok((sheet, library))
 }
 
 /// Reads the text of a template as the sheet `row` names, filled in with

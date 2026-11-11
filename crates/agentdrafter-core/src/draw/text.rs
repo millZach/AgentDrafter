@@ -17,8 +17,12 @@
 //! - Each line is aligned by what it draws: its left edge on the box's left
 //!   side, its middle on the box's middle, or its right edge on the box's
 //!   right side, as the text is attached on the left, centre or right.
+//!
+//! Each line drawn also gives a [`TextRun`]: the characters it draws, laid
+//! along its baseline, so an output such as the PDF can keep the text
+//! searchable where it draws. The run draws nothing itself.
 
-use super::{Point2, Shape};
+use super::{Point2, Shape, TextRun};
 use crate::text::fonts::{Font, Rect};
 use crate::text::placement::SheetFonts;
 use crate::text::{Attachment, MText, Text};
@@ -27,13 +31,21 @@ use crate::text::{Attachment, MText, Text};
 /// AutoCAD's single line spacing.
 const LINE_SPACING: f64 = 5.0 / 3.0;
 
-/// The shapes a single line of text draws.
+/// What a piece of text draws: its shapes, and each line it draws as a run
+/// of characters along its baseline.
+#[derive(Default)]
+pub(super) struct Lettering {
+    pub shapes: Vec<Shape>,
+    pub runs: Vec<TextRun>,
+}
+
+/// What a single line of text draws.
 pub(super) fn draw_text(
     text: &Text,
     fonts: &SheetFonts,
     lineweight: f64,
     tolerance: f64,
-) -> Vec<Shape> {
+) -> Lettering {
     let (font, _) = fonts.style(&text.style);
     let start = fonts.start(text);
     let place = Placement {
@@ -44,16 +56,16 @@ pub(super) fn draw_text(
     };
     let mut out = Drawn::default();
     place.line(font, &text.contents, [0.0, 0.0], tolerance, &mut out);
-    out.shapes(lineweight)
+    out.lettering(lineweight)
 }
 
-/// The shapes multiline text draws.
+/// What multiline text draws.
 pub(super) fn draw_mtext(
     text: &MText,
     fonts: &SheetFonts,
     lineweight: f64,
     tolerance: f64,
-) -> Vec<Shape> {
+) -> Lettering {
     let (font, style_width) = fonts.style(&text.style);
     let width_factor = text.width_factor.unwrap_or(style_width);
     let place = Placement {
@@ -120,7 +132,7 @@ pub(super) fn draw_mtext(
         let x = left + box_width * across - (ink_left + (ink_right - ink_left) * across);
         place.line(font, line, [x, top + baseline], tolerance, &mut out);
     }
-    out.shapes(lineweight)
+    out.lettering(lineweight)
 }
 
 /// How far across and up from the box's left side and top the position
@@ -187,15 +199,16 @@ struct Placement {
     width_factor: f64,
 }
 
-/// What text draws so far: strokes and filled outlines.
+/// What text draws so far: strokes, filled outlines and runs of characters.
 #[derive(Default)]
 struct Drawn {
     strokes: Vec<Vec<Point2>>,
     fills: Vec<Vec<Point2>>,
+    runs: Vec<TextRun>,
 }
 
 impl Drawn {
-    fn shapes(self, lineweight: f64) -> Vec<Shape> {
+    fn lettering(self, lineweight: f64) -> Lettering {
         let mut shapes = Vec::new();
         if !self.strokes.is_empty() {
             shapes.push(Shape::Stroke {
@@ -209,7 +222,10 @@ impl Drawn {
                 contours: self.fills,
             });
         }
-        shapes
+        Lettering {
+            shapes,
+            runs: self.runs,
+        }
     }
 }
 
@@ -229,6 +245,17 @@ impl Placement {
             ]
         };
         let mut pen = (0.0, 0.0);
+        // The run of characters along the baseline: one unit of the font's
+        // advances across, the capitals' height up, both turned with the
+        // text.
+        let run_from = |pen: (f64, f64)| TextRun {
+            object: 0,
+            origin: place(pen, [0.0, 0.0]),
+            across: [along * cos, along * sin],
+            up: [-up * sin, up * cos],
+            characters: Vec::new(),
+        };
+        let mut run = run_from(pen);
         // A glyph is enlarged by its height up and by `along` across, so
         // its tolerance is divided by the larger to stay within the drawing
         // units' tolerance both ways.
@@ -242,8 +269,16 @@ impl Placement {
                 out.fills
                     .push(contour.iter().map(|&p| place(pen, p)).collect());
             }
+            run.characters.push((glyph.character, glyph.advance.0));
             pen = (pen.0 + glyph.advance.0, pen.1 + glyph.advance.1);
+            // An SHX character can move the pen off the line; the characters
+            // after it run along a baseline of their own.
+            if glyph.advance.1 != 0.0 {
+                out.runs.push(std::mem::replace(&mut run, run_from(pen)));
+            }
         }
+        out.runs.push(run);
+        out.runs.retain(|run| !run.characters.is_empty());
     }
 }
 

@@ -38,9 +38,9 @@ use crate::model::{BlockLibrary, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 pub use blocks::parse_block_library;
-pub(crate) use set::{read_rows, read_set_settings};
+pub(crate) use set::{read_rows, read_set_settings, rows_at};
 pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
-pub(crate) use template::read_template;
+pub(crate) use template::{read_template, template_at};
 
 /// The keys at the top of a sheet description.
 pub(crate) const SHEET_KEYS: [&str; 7] = [

@@ -153,6 +153,13 @@ pub(crate) fn read_rows(path: &Path) -> Result<Vec<Row>, Error> {
     parse_rows(&text).map_err(|e| e.or_in_file(path))
 }
 
+/// Reads `text`, the rows in the file at `path`, as [`read_rows`] reads
+/// them, from bytes the caller has read, so that an output can be stamped
+/// with them.
+pub(crate) fn rows_at(text: &str, path: &Path) -> Result<Vec<Row>, Error> {
+    parse_rows(text).map_err(|e| e.or_in_file(path))
+}
+
 /// Reads the text of a drawing set's rows file.
 pub(super) fn parse_rows(text: &str) -> Result<Vec<Row>, Error> {
     let Some(root) = strict_yaml::read(text)? else {

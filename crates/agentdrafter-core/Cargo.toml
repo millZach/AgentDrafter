@@ -18,6 +18,10 @@ tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "
 png = "0.18.1"
 # The fingerprint of the record an output is stamped with.
 sha2 = "0.11.1"
+# The PDF a plot writes (MIT or Apache-2.0), and the deflate that packs its
+# drawing and unpacks a CTB plot style (MIT, Zlib or Apache-2.0).
+pdf-writer = "0.15.0"
+miniz_oxide = "0.8.9"
 
 [dev-dependencies]
 jsonschema = { version = "0.61.1", default-features = false }

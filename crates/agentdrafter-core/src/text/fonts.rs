@@ -281,7 +281,7 @@ fn read(name: &str, folders: &[PathBuf]) -> Result<Font, String> {
 }
 
 /// The file in `folder` named `name`, ignoring case.
-fn file_in(folder: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn file_in(folder: &Path, name: &str) -> Option<PathBuf> {
     let exact = folder.join(name);
     if exact.is_file() {
         return Some(exact);
@@ -317,6 +317,7 @@ mod tests {
     fn settings(folders: &[&Path]) -> Settings {
         Settings {
             font_folders: folders.iter().map(|f| f.to_path_buf()).collect(),
+            ..Settings::default()
         }
     }
 

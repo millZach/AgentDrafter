@@ -1,11 +1,11 @@
 # Rendering a sheet to PNG
 
-`agentdrafter render` draws a sheet to a PNG so that an agent can look at its own work. It draws through the one drawing pipeline that the PDF and the viewer will also draw through (ADR-0011): the sheet becomes a display list, and the display list becomes pixels. The PNG is stamped with every file it was drawn from, and `agentdrafter stale` says whether any of them has moved on since.
+`agentdrafter render` draws a sheet to a PNG so that an agent can look at its own work. It draws through the one drawing pipeline that the PDF ([plotting](plot.md)) and the viewer also draw through (ADR-0011): the sheet becomes a display list, and the display list becomes pixels. The PNG is stamped with every file it was drawn from, and `agentdrafter stale` says whether any of them has moved on since.
 
 ```
 agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>]
                     [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...
-agentdrafter stale <png> [--source <sheet-description-or-dwg>]
+agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]
 ```
 
 Both print one line of JSON, as `build` does. Rendering needs no window and no GPU.
@@ -43,25 +43,25 @@ The PNG goes beside the source with a `.png` extension unless `--output` names a
 
 ## The stamp
 
-Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of JSON. It lists the drawing set's files the sheet is drawn from: the record first, then the files it draws on. Fonts are not in it: they belong to the machine that renders (AutoCAD's `Fonts` folder on one, a look-alike on another), not to the drawing set, so the same PNG checked on another machine is not stale for that.
+Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of JSON; a PDF carries the same stamp in its document information ([plotting](plot.md#the-stamp)). It lists the drawing set's files the sheet is drawn from: the record first, then the files it draws on. Fonts are not in it: they belong to the machine that renders (AutoCAD's `Fonts` folder on one, a look-alike on another), not to the drawing set, so the same PNG checked on another machine is not stale for that.
 
 ```json
 {"stamp":1,"produced_by":"agentdrafter 0.0.0","sources":[{"kind":"sheet_description","path":"sheet-1.yaml","sha256":"…"},{"kind":"block_library","path":"blocks.yaml","sha256":"…"}]}
 ```
 
-- `sources` holds a sheet description and the block library it names, when it names one, or a DWG alone.
-- Each entry's `kind` is `sheet_description`, `dwg` or `block_library`.
+- `sources` holds a sheet description and the block library it names, when it names one, or a DWG alone; a PDF of a drawing set's sheet holds its template, the rows file and the block library.
+- Each entry's `kind` is `sheet_description`, `dwg`, `block_library`, `template` or `rows`.
 - `path` is where the file was, from the PNG's folder when the two share a folder above them, with `/` between folders, so a PNG and its files moved together still find each other and the stamp names no folder above them. Otherwise it is the path in full.
 - `sha256` is the SHA-256 of the file's bytes, as the render read them.
 
-`agentdrafter stale <png>` reads the stamp, finds each file it lists from the PNG's folder, and reports `stale: true` when any file's bytes no longer have their fingerprint or it cannot be read. `--source` says where the record, the first file, is now; the others are found as the stamp names them. The reply's `why` names each file that moved on, and `sources` gives each file as it was checked: its kind, where it was looked for, whether it is stale and why. A file with no stamp is `not_stamped`.
+`agentdrafter stale <png>` (or `<pdf>`) reads the stamp, finds each file it lists from the output's folder, and reports `stale: true` when any file's bytes no longer have their fingerprint or it cannot be read. `--source` says where the record, the first file, is now; the others are found as the stamp names them. The reply's `why` names each file that moved on, and `sources` gives each file as it was checked: its kind, where it was looked for, whether it is stale and why. A file with no stamp is `not_stamped`.
 
-`stamp` is the stamp's format. The list is open: templates and data rows (ticket #7) and the working revision (ticket #9) add entries of their own kinds. A reader that meets a format it does not know says so rather than guessing.
+`stamp` is the stamp's format. The list is open: the working revision (ticket #9) adds entries of its own kind. A reader that meets a format it does not know says so rather than guessing.
 
 ## The pipeline
 
-- `crates/agentdrafter-core/src/draw/` turns a sheet into a display list: strokes with their colour index, lineweight and dashes already laid out, and fills, in drawing units. `curves.rs` turns arcs, circles, ellipses and splines into chords (a spline through fit points is fitted as AutoCAD fits it), `linetype.rs` lays out linetypes, `hatch.rs` hatches, `text.rs` text, and `color.rs` holds the colour each index plots in. `src/text/outline.rs` gives what each character of a font draws.
-- `src/raster.rs` draws the display list on the CPU with [tiny-skia](https://crates.io/crates/tiny-skia) (BSD-3-Clause) and writes the PNG with [png](https://crates.io/crates/png) (MIT or Apache-2.0). `src/stamp.rs` makes and checks stamps, with [sha2](https://crates.io/crates/sha2) (MIT or Apache-2.0). `src/render.rs` is the entry point.
+- `crates/agentdrafter-core/src/draw/` turns a sheet into a display list: strokes with their colour index, lineweight and dashes already laid out, and fills, in drawing units, with each line of text also as a run of its characters along its baseline, which draws nothing and lets the PDF keep the text searchable. `curves.rs` turns arcs, circles, ellipses and splines into chords (a spline through fit points is fitted as AutoCAD fits it), `linetype.rs` lays out linetypes, `hatch.rs` hatches, `text.rs` text, and `color.rs` holds the colour each index plots in. `src/text/outline.rs` gives what each character of a font draws.
+- `src/raster.rs` draws the display list on the CPU with [tiny-skia](https://crates.io/crates/tiny-skia) (BSD-3-Clause) and writes the PNG with [png](https://crates.io/crates/png) (MIT or Apache-2.0). `src/stamp.rs` makes and checks stamps, with [sha2](https://crates.io/crates/sha2) (MIT or Apache-2.0). `src/render.rs` is the entry point, and `src/output.rs` holds what it shares with the PDF: reading the record and writing the output safely.
 
 The display list and the rasteriser are plain computation: no window, GPU, file system, thread or clock. A test keeps their source that way, and CI builds the core for `wasm32-unknown-unknown`, as the viewer will run it.
 

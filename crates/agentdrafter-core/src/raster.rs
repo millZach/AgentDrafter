@@ -197,3 +197,41 @@ pub(crate) fn stamp_in(bytes: &[u8]) -> Option<String> {
                 .map(|chunk| chunk.text.clone())
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::draw::{draw_sheet, MOST_HATCH_DASHES};
+    use crate::settings::Settings;
+    use crate::text::placement::SheetFonts;
+
+    /// The runs of text the display list carries for the PDF's searchable
+    /// text draw nothing: a PNG of the list is the same pixels with them or
+    /// without them.
+    #[test]
+    fn the_runs_of_text_draw_nothing() {
+        let sheet = crate::parse_sheet_description(
+            r#"units: mm
+objects:
+  - text: {contents: SEARCHABLE, position: [0, 0, 0], height: 5}
+  - mtext: {contents: "TWO\nLINES", position: [0, -5, 0], height: 3, rotation: 30}
+"#,
+        )
+        .unwrap();
+        let fonts = SheetFonts::find(&sheet, &Settings::default());
+        let list = draw_sheet(&sheet, &fonts, 0.01, MOST_HATCH_DASHES);
+        assert_eq!(list.text.len(), 3);
+        let view = View::around(list.extents().unwrap(), 20.0, 6.0, 10.0, None);
+        let with = rasterize(&list, &view).unwrap();
+        let without = DisplayList {
+            text: Vec::new(),
+            ..list.clone()
+        };
+        let without = rasterize(&without, &view).unwrap();
+        assert_eq!(with.data(), without.data());
+        assert!(
+            with.data().iter().any(|&c| c < 128),
+            "the text itself draws"
+        );
+    }
+}
