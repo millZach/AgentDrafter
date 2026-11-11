@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use agentdrafter_core::{
-    block_library_schema, build_set_with, build_with, measure_text_with, rows_schema, set_schema,
-    sheet_description_schema, template_schema, BuildRequest, Error, ErrorCode, MeasureTextRequest,
-    Reply, SetBuildRequest, Settings, FONTS_VARIABLE, SET_SETTINGS_FILE,
+    block_library_schema, build_set_with, build_with, check_stale, measure_text_with, render_with,
+    rows_schema, set_schema, sheet_description_schema, template_schema, BuildRequest, Error,
+    ErrorCode, MeasureTextRequest, RenderRequest, Reply, SetBuildRequest, Settings, StaleRequest,
+    FONTS_VARIABLE, SET_SETTINGS_FILE,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -25,6 +26,8 @@ const BUILD_USAGE: &str =
 const SCHEMA_USAGE: &str =
     "agentdrafter schema [sheet-description | block-library | template | set | rows]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
+const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...";
+const STALE_USAGE: &str = "agentdrafter stale <png> [--source <sheet-description-or-dwg>]";
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -38,7 +41,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
         return reply::<()>(Err(Error::usage(format!(
-            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE}"
+            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {STALE_USAGE}"
         ))));
     };
     match command.to_str() {
@@ -49,6 +52,14 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         },
         Some("measure-text") => match parse_measure(args) {
             Ok((request, settings)) => reply(measure_text_with(&request, &settings)),
+            Err(error) => reply::<()>(Err(error)),
+        },
+        Some("render") => match parse_render(args) {
+            Ok((request, settings)) => reply(render_with(&request, &settings)),
+            Err(error) => reply::<()>(Err(error)),
+        },
+        Some("stale") => match parse_stale(args) {
+            Ok(request) => reply(check_stale(&request)),
             Err(error) => reply::<()>(Err(error)),
         },
         Some("schema") => {
@@ -74,10 +85,134 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         Some("help" | "--help" | "-h") => reply(Ok(help())),
         Some("--version" | "-V") => reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") }))),
         _ => reply::<()>(Err(Error::usage(format!(
-            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE}",
+            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {STALE_USAGE}",
             command.to_string_lossy()
         )))),
     }
+}
+
+fn parse_render(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(RenderRequest, Settings), Error> {
+    let mut source: Option<PathBuf> = None;
+    let mut request = RenderRequest::new(PathBuf::new());
+    let mut fonts = Vec::new();
+    let value = |flag: &str, value: Option<OsString>| -> Result<OsString, Error> {
+        value.ok_or_else(|| Error::usage(format!("{flag} needs a value; usage: {RENDER_USAGE}")))
+    };
+    fn number<T: std::str::FromStr>(flag: &str, text: OsString) -> Result<T, Error> {
+        let text = text.to_string_lossy();
+        text.parse().map_err(|_| {
+            Error::usage(format!(
+                "{flag} takes a number, found `{text}`; usage: {RENDER_USAGE}"
+            ))
+        })
+    }
+    let once = |flag: &str| Error::usage(format!("{flag} is given twice"));
+    let (mut dpi, mut margin) = (None, None);
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--output" | "-o") => {
+                let path = value("--output", args.next())?;
+                if request.output.replace(path.into()).is_some() {
+                    return Err(once("--output"));
+                }
+            }
+            Some("--overwrite") => request.overwrite = true,
+            Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
+            Some("--dpi") => {
+                if dpi
+                    .replace(number("--dpi", value("--dpi", args.next())?)?)
+                    .is_some()
+                {
+                    return Err(once("--dpi"));
+                }
+            }
+            Some("--margin") => {
+                let mm = number("--margin", value("--margin", args.next())?)?;
+                if margin.replace(mm).is_some() {
+                    return Err(once("--margin"));
+                }
+            }
+            Some("--scale") => {
+                let scale = number("--scale", value("--scale", args.next())?)?;
+                if request.scale.replace(scale).is_some() {
+                    return Err(once("--scale"));
+                }
+            }
+            Some("--width") => {
+                let pixels = number("--width", value("--width", args.next())?)?;
+                if request.width.replace(pixels).is_some() {
+                    return Err(once("--width"));
+                }
+            }
+            Some("--height") => {
+                let pixels = number("--height", value("--height", args.next())?)?;
+                if request.height.replace(pixels).is_some() {
+                    return Err(once("--height"));
+                }
+            }
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(Error::usage(format!(
+                    "unknown option `{flag}`; usage: {RENDER_USAGE}"
+                )))
+            }
+            _ => {
+                if source.replace(arg.into()).is_some() {
+                    return Err(Error::usage(format!(
+                        "render takes one sheet description or DWG; usage: {RENDER_USAGE}"
+                    )));
+                }
+            }
+        }
+    }
+    request.source = source.ok_or_else(|| {
+        Error::usage(format!(
+            "render needs a sheet description or DWG; usage: {RENDER_USAGE}"
+        ))
+    })?;
+    if let Some(dpi) = dpi {
+        request.dpi = dpi;
+    }
+    if let Some(margin) = margin {
+        request.margin = margin;
+    }
+    Ok((request, settings(fonts)))
+}
+
+fn parse_stale(mut args: impl Iterator<Item = OsString>) -> Result<StaleRequest, Error> {
+    let mut output: Option<PathBuf> = None;
+    let mut source: Option<PathBuf> = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--source") => {
+                let path = args.next().ok_or_else(|| {
+                    Error::usage(format!("--source needs a path; usage: {STALE_USAGE}"))
+                })?;
+                if source.replace(path.into()).is_some() {
+                    return Err(Error::usage("--source is given twice"));
+                }
+            }
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(Error::usage(format!(
+                    "unknown option `{flag}`; usage: {STALE_USAGE}"
+                )))
+            }
+            _ => {
+                if output.replace(arg.into()).is_some() {
+                    return Err(Error::usage(format!(
+                        "stale takes one output; usage: {STALE_USAGE}"
+                    )));
+                }
+            }
+        }
+    }
+    let output = output.ok_or_else(|| {
+        Error::usage(format!(
+            "stale needs the output to check; usage: {STALE_USAGE}"
+        ))
+    })?;
+    Ok(StaleRequest { output, source })
 }
 
 /// The settings for one command: the font folders `--fonts` names, then
@@ -264,6 +399,24 @@ fn help() -> serde_json::Value {
                          AutoCAD measures a text object: from the left edge of what it draws to \
                          the right edge. Reports the font used, and the look-alike when the font \
                          is not in the font folders.",
+            },
+            "render": {
+                "usage": RENDER_USAGE,
+                "does": "Draws a sheet description, or a DWG, to a PNG as AutoCAD plots it: layer \
+                         colours on white paper, lineweights as widths on paper at --dpi (150), \
+                         linetypes, text in its fonts and hatches. The PNG covers the drawing's \
+                         extents with a --margin (5 mm of paper), at a plot --scale (1 for 1:1, \
+                         0.02 for 1:50) or fitted to --width and --height pixels; without either, \
+                         its longer side is 2000 pixels. It goes beside the source with a .png \
+                         extension unless --output names another path, and is stamped with the \
+                         source's fingerprint. An existing file is never replaced without \
+                         --overwrite, and --overwrite replaces only a PNG AgentDrafter rendered.",
+            },
+            "stale": {
+                "usage": STALE_USAGE,
+                "does": "Says whether a PNG AgentDrafter rendered is stale: whether the sheet \
+                         description or DWG its stamp names has changed since, or is gone. The \
+                         source is found from the PNG's folder unless --source names it.",
             },
         },
         "fonts": format!(

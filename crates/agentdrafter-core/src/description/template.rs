@@ -53,15 +53,16 @@ pub(crate) fn read_template(
     notices: &mut Vec<Notice>,
 ) -> Result<Sheet, Error> {
     let text = read_file(path, "the template")?;
-    fill(
+    let mut library = None;
+    let sheet = fill(
         &text,
         row,
         rows_file,
         set_units,
-        &mut library_beside(path),
+        &mut library_beside(path, &mut library),
         notices,
-    )
-    .map_err(|e| e.or_in_file(path))
+    );
+    sheet.map_err(|e| e.or_in_file(path))
 }
 
 /// Reads the text of a template as the sheet `row` names, filled in with

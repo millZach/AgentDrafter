@@ -171,15 +171,54 @@ pub fn attribute_text(
 /// block whose base point is `base`: moved so the base point sits at the
 /// insert's position, scaled about it and turned about the Z axis.
 pub(crate) fn place(insert: &Insert, base: Point3, point: Point3) -> Point3 {
-    let (sin, cos) = insert.rotation.to_radians().sin_cos();
-    let x = (point.x - base.x) * insert.scale;
-    let y = (point.y - base.y) * insert.scale;
-    let z = (point.z - base.z) * insert.scale;
-    Point3::new(
-        insert.position.x + x * cos - y * sin,
-        insert.position.y + x * sin + y * cos,
-        insert.position.z + z,
-    )
+    Placement::of(insert, base).point(point)
+}
+
+/// Where an insert puts its block's points: moved so that the block's base
+/// point sits at the insert's position, scaled about it and turned about the
+/// Z axis. The one home of that rule, for the DWG and the drawing pipeline.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Placement {
+    base: Point3,
+    position: Point3,
+    scale: f64,
+    sin: f64,
+    cos: f64,
+}
+
+impl Placement {
+    pub(crate) fn of(insert: &Insert, base: Point3) -> Placement {
+        let (sin, cos) = insert.rotation.to_radians().sin_cos();
+        Placement {
+            base,
+            position: insert.position,
+            scale: insert.scale,
+            sin,
+            cos,
+        }
+    }
+
+    /// Where a point in the block's own coordinates lands.
+    pub(crate) fn point(&self, point: Point3) -> Point3 {
+        let x = (point.x - self.base.x) * self.scale;
+        let y = (point.y - self.base.y) * self.scale;
+        let z = (point.z - self.base.z) * self.scale;
+        Point3::new(
+            self.position.x + x * self.cos - y * self.sin,
+            self.position.y + x * self.sin + y * self.cos,
+            self.position.z + z,
+        )
+    }
+
+    /// Where a placed point `[x, y]` is in the block's own coordinates.
+    pub(crate) fn back(&self, x: f64, y: f64) -> [f64; 2] {
+        let x = x - self.position.x;
+        let y = y - self.position.y;
+        [
+            self.base.x + (x * self.cos + y * self.sin) / self.scale,
+            self.base.y + (y * self.cos - x * self.sin) / self.scale,
+        ]
+    }
 }
 
 /// The text an attribute definition draws in its block: AutoCAD shows the

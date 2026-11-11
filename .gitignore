@@ -5,6 +5,8 @@
 *.bak
 *.dwl
 *.dwl2
+# Renders of the examples: build them again from the sheet descriptions.
+examples/*.png
 !demo-plant/**/*.dwg
 !demo-plant/**/*.dxf
 !tests/fixtures/**/*.dwg

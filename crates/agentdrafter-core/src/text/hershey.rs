@@ -32,12 +32,7 @@ const FIRST: u32 = 32;
 /// the table does not hold measures as `?`, as AutoCAD draws a character an
 /// SHX font has no shape for.
 pub(crate) fn glyph(c: char) -> Glyph {
-    let index = u32::from(c)
-        .checked_sub(FIRST)
-        .and_then(|i| usize::try_from(i).ok())
-        .filter(|i| *i < SIMPLEX.len())
-        .unwrap_or((u32::from('?') - FIRST) as usize);
-    let (advance, strokes) = SIMPLEX[index];
+    let (advance, strokes) = SIMPLEX[index(c)];
     let scale = 1.0 / CAPITALS;
     let ink = strokes
         .iter()
@@ -48,6 +43,33 @@ pub(crate) fn glyph(c: char) -> Glyph {
         advance: (f64::from(advance) * scale, 0.0),
         ink,
     }
+}
+
+/// The strokes `c` draws and its advance, in units where the capitals stand
+/// 1 tall, each stroke a run of points drawn with the pen down. A character
+/// the table does not hold draws as `?`.
+pub(crate) fn strokes(c: char) -> (f64, Vec<Vec<[f64; 2]>>) {
+    let (advance, strokes) = SIMPLEX[index(c)];
+    let scale = 1.0 / CAPITALS;
+    let strokes = strokes
+        .iter()
+        .map(|stroke| {
+            stroke
+                .iter()
+                .map(|&(x, y)| [f64::from(x) * scale, f64::from(y) * scale])
+                .collect()
+        })
+        .collect();
+    (f64::from(advance) * scale, strokes)
+}
+
+/// Where `c` is in the table, or `?` when it is not there.
+fn index(c: char) -> usize {
+    u32::from(c)
+        .checked_sub(FIRST)
+        .and_then(|i| usize::try_from(i).ok())
+        .filter(|i| *i < SIMPLEX.len())
+        .unwrap_or((u32::from('?') - FIRST) as usize)
 }
 
 /// A character's strokes, each a run of points drawn with the pen down.

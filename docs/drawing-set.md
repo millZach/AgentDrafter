@@ -151,3 +151,4 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 - More than one rows file in a set.
 - One block library enforced for the whole set: each template names its own, in the set's unit.
 - Checking a set without building it.
+- Rendering a sheet from its template and row. A set's sheet renders as any DWG does, with `agentdrafter render <output>/<sheet>.dwg` ([Rendering](render.md)), and its PNG's stamp names the DWG; templates and rows are not among a stamp's sources yet, and `render` refuses a template, since it holds values from a row.

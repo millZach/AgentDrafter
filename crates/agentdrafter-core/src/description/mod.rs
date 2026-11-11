@@ -28,7 +28,7 @@ mod template;
 mod text;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use objects::{Place, Tables};
 use strict_yaml::{index_path, key_path, Entry, Kind, Node, Pos};
@@ -60,9 +60,7 @@ pub(crate) const SHEET_KEYS: [&str; 7] = [
 /// a block library is read with [`read_sheet_description`], which finds the
 /// library beside it.
 pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
-    let mut root = strict_yaml::read(text)?;
-    template::refuse_row_values(root.as_mut())?;
-    sheet(root, &mut no_library, None)
+    on_its_own(text, &mut no_library)
 }
 
 /// Reads the sheet description in the file at `path` into a [`Sheet`],
@@ -73,12 +71,39 @@ pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
 /// the sheet description's.
 pub fn read_sheet_description(path: &Path) -> Result<Sheet, Error> {
     let text = read_file(path, "the sheet description")?;
-    let read = || {
-        let mut root = strict_yaml::read(&text)?;
-        template::refuse_row_values(root.as_mut())?;
-        sheet(root, &mut library_beside(path), None)
-    };
-    read().map_err(|e| e.or_in_file(path))
+    sheet_description_at(&text, path).map(|(sheet, _)| sheet)
+}
+
+/// A block library's file as a sheet description's reading read it.
+pub(crate) struct LibraryFile {
+    /// Where it was read from.
+    pub path: PathBuf,
+    /// Its bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// Reads `text`, the sheet description in the file at `path`, as
+/// [`read_sheet_description`] does, with the block library it names, and
+/// gives the library's file as it was read, if it names one.
+pub(crate) fn sheet_description_at(
+    text: &str,
+    path: &Path,
+) -> Result<(Sheet, Option<LibraryFile>), Error> {
+    let mut library = None;
+    let sheet = on_its_own(text, &mut library_beside(path, &mut library))
+        .map_err(|e| e.or_in_file(path))?;
+    Ok((sheet, library))
+}
+
+/// Reads the text of a sheet description built on its own, which takes no
+/// value from a row, with `load` reading the block library it names.
+fn on_its_own(
+    text: &str,
+    load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+) -> Result<Sheet, Error> {
+    let mut root = strict_yaml::read(text)?;
+    template::refuse_row_values(root.as_mut())?;
+    sheet(root, load, None)
 }
 
 /// The text of the file at `path`. `what` names it in the error, such as
@@ -98,8 +123,12 @@ fn no_library(_: &str) -> Result<BlockLibrary, Error> {
 }
 
 /// A loader that reads the block library a sheet description or template
-/// at `path` names, from the path it writes relative to its folder.
-fn library_beside(path: &Path) -> impl FnMut(&str) -> Result<BlockLibrary, Error> + '_ {
+/// at `path` names, from the path it writes relative to its folder, and
+/// keeps the library's file as it was read in `read`.
+fn library_beside<'a>(
+    path: &'a Path,
+    read: &'a mut Option<LibraryFile>,
+) -> impl FnMut(&str) -> Result<BlockLibrary, Error> + 'a {
     let folder = path.parent().unwrap_or(Path::new(""));
     move |written| {
         let file = folder.join(written);
@@ -112,7 +141,12 @@ fn library_beside(path: &Path) -> impl FnMut(&str) -> Result<BlockLibrary, Error
                 ),
             )
         })?;
-        parse_block_library(&text).map_err(|e| e.in_file(&file))
+        let parsed = parse_block_library(&text).map_err(|e| e.in_file(&file))?;
+        *read = Some(LibraryFile {
+            path: file,
+            bytes: text.into_bytes(),
+        });
+        Ok(parsed)
     }
 }
 

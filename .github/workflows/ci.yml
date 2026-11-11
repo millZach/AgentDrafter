@@ -43,6 +43,13 @@ jobs:
       - name: Tests
         run: cargo test --workspace --locked
 
+      # The drawing pipeline runs in the viewer's page as WebAssembly (ADR-0011): the core must build for it.
+      - name: The core builds for WebAssembly
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p agentdrafter-core --target wasm32-unknown-unknown --locked
+
       # The judge drives AutoCAD and never runs here; only its reading and scoring are tested, on made-up data.
       - uses: actions/setup-python@v7
         with:
