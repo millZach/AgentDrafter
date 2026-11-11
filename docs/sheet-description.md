@@ -74,7 +74,7 @@ A layer or linetype name is 1 to 255 characters, does not start or end with a sp
 
 ### Text styles
 
-A text style is a font that text draws with, and how wide. Every drawing already has `Standard`, whose font is AutoCAD's `txt.shx`; listing `Standard` under `text_styles` sets its font and width factor. A text style's name follows the rules for layer and linetype names above.
+A text style is a font that text draws with, and how wide. Every drawing already has `Standard`, whose font is AutoCAD's `txt.shx`; listing `Standard` under `text_styles` sets its font and width factor. A text style's name follows the rules for layer and linetype names above, so `Standard` is written just so: `standard` or `STANDARD` under `text_styles` is an error, since AutoCAD would take it for `Standard`.
 
 | Key | Required | What it is |
 |---|---|---|
@@ -151,7 +151,7 @@ AgentDrafter reads SHX fonts in the `AutoCAD-86 shapes` and `AutoCAD-86 unifont`
 
 ### Measuring text
 
-`agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...` measures one line of text as AutoCAD measures a text object (AutoLISP's `textbox`): `width` is from the left edge of what the text draws to the right edge, and `left`, `right`, `bottom` and `top` say where that is from the start of the line, in the unit of the height. `advance` is how far the pen moves. `font` says which font was used and, when it was a look-alike, why. A space at either end draws nothing, so it adds nothing to the width.
+`agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...` measures one line of text as AutoCAD measures a text object (AutoLISP's `textbox`): `width` is from the left edge of what the text draws to the right edge, and `left`, `right`, `bottom` and `top` say where that is from the start of the line, in the unit of the height. `advance` is how far the pen moves. `--font` names a font as a text style does, by its file name alone, and is read only from the font folders. `font` says which font was used and, when it was a look-alike, why. A space at either end draws nothing, so it adds nothing to the width.
 
 Measured against AutoCAD 2026 with its own fonts, on the machine that has them: the widths of 139 made-up strings in `romans.shx`, `simplex.shx`, `txt.shx`, `isocp.shx`, Arial and Times New Roman, 0.1 to 7 units high, match AutoCAD's to within 1e-12 of the unit, and the box of each of the 1,151 characters of the four SHX fonts, 100 high, matches to the eight decimal places AutoCAD printed, but for the ogonek letters Ą, ą, Ę and ę in `romans.shx` and Ą in `simplex.shx`, which AutoCAD boxes up to 0.12 of the height wider or deeper. AutoCAD does not kern.
 
@@ -216,7 +216,7 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 | `unknown_unit` | A unit that is not one of `mm`, `cm`, `m`, `in`, `ft`. |
 | `wrong_type` | A value of the wrong shape, such as a point without three coordinates, a polyline with too few points, or `closed: yes`. |
 | `bad_number` | A value that should be a number is not one, carries a unit where none belongs, or is too large to hold in the declared unit. |
-| `bad_value` | A value of the right shape that is not allowed: a colour outside 1 to 255, a lineweight that is not standard, a radius or text height that is not positive, a ratio outside 0 to 1, a width factor outside 0.01 to 100, an arc whose angles are equal, a linetype pattern that breaks AutoCAD's rules, a name AutoCAD would refuse, a font that is not an SHX or TrueType file name, a justification that does not exist, text contents that are empty or would not show as written. |
+| `bad_value` | A value of the right shape that is not allowed: a colour outside 1 to 255, a lineweight that is not standard, a radius or text height that is not positive, a ratio outside 0 to 1, a width factor outside 0.01 to 100, an arc whose angles are equal, a linetype pattern that breaks AutoCAD's rules, a name AutoCAD would refuse, a text style that is `Standard` in another case, a font that is not an SHX or TrueType file name, a justification that does not exist, text contents that are empty or would not show as written. |
 | `unknown_name` | A layer, linetype or text style that the sheet description does not define. |
 | `output_exists` | A file is already where the DWG would go, and `--overwrite` was not given. |
 | `not_a_build` | `--overwrite` was given, but the file where the DWG would go is not a DWG AgentDrafter built, or cannot be read to tell. It may be an original, and an original is never overwritten. |

@@ -4,11 +4,14 @@
 //! like a layer. Text and multiline text are objects: `objects.rs` lists
 //! them and hands their keys to [`text`] and [`mtext`] here.
 
-use super::layers::named_entries;
+use super::layers::{name_error, named_entries};
 use super::strict_yaml::{key_path, Node};
 use super::{angle, at, bad_value, choice, length, plain_number, point, scalar, Fields};
 use crate::error::{Error, ErrorCode};
-use crate::text::{Attachment, FontKind, Justify, MText, Text, TextStyle, STANDARD, WIDTH_FACTORS};
+use crate::text::{
+    font_name_problem, Attachment, Justify, MText, Text, TextStyle, FONT_CHOICES, STANDARD,
+    WIDTH_FACTORS,
+};
 use crate::units::Unit;
 
 /// The keys a text style takes.
@@ -39,14 +42,23 @@ pub(crate) const MTEXT_KEYS: [&str; 9] = [
     "layer",
 ];
 
-/// Characters a font's file name cannot hold: folder separators and the
-/// characters Windows refuses in a file name.
-pub(crate) const FORBIDDEN_IN_FONT_NAMES: &str = "/\\<>:\"|?*";
-
 pub(super) fn text_styles(node: &Node) -> Result<Vec<TextStyle>, Error> {
     let entries = named_entries(node, "text_styles", "text style")?;
     let mut styles = Vec::with_capacity(entries.len());
     for entry in entries {
+        // AutoCAD ignores case in names, so `standard` would be `Standard`
+        // in the DWG and another style on the sheet. `Standard` is written
+        // exactly, like any reference to it.
+        if entry.key != STANDARD && entry.key.eq_ignore_ascii_case(STANDARD) {
+            return Err(name_error(
+                entry,
+                "text_styles",
+                format!(
+                    "`{}` is the text style `{STANDARD}`, which every drawing has, written in another case, and AutoCAD ignores case in names; to set its font, list it as `{STANDARD}`",
+                    entry.key
+                ),
+            ));
+        }
         let path = key_path("text_styles", &entry.key);
         let fields = Fields::of(&entry.value, &path, &TEXT_STYLE_KEYS, "a text style")?;
         let font = font(fields.require("font")?, &fields.path_of("font"))?;
@@ -187,23 +199,11 @@ fn character_code(contents: &str) -> Option<String> {
 
 /// A font: the file name of an SHX or a TrueType font.
 fn font(node: &Node, path: &str) -> Result<String, Error> {
-    const CHOICES: &str =
-        "a font is the file name of an SHX font, such as `romans.shx`, or a TrueType font, such as `arial.ttf`";
-    let text = choice(node, path, "a font", CHOICES)?;
-    let problem = if let Some(c) = text
-        .chars()
-        .find(|c| FORBIDDEN_IN_FONT_NAMES.contains(*c) || c.is_control())
-    {
-        format!(
-            "a font is named by its file name alone, which cannot hold `{}`; {CHOICES}",
-            c.escape_default()
-        )
-    } else if FontKind::of(text).is_none() {
-        format!("`{text}` is not a font file name; {CHOICES}")
-    } else {
-        return Ok(text.to_owned());
-    };
-    Err(bad_value(node, path, problem))
+    let text = choice(node, path, "a font", FONT_CHOICES)?;
+    match font_name_problem(text) {
+        Some(problem) => Err(bad_value(node, path, problem)),
+        None => Ok(text.to_owned()),
+    }
 }
 
 /// A width factor: a number from 0.01 to 100, as AutoCAD allows.

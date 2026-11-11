@@ -25,10 +25,11 @@ use super::layers::{
     LONGEST_PATTERN,
 };
 use super::objects::{FEWEST_FIT_POINTS, HIGHEST_DEGREE, OBJECT_TYPES};
-use super::text::FORBIDDEN_IN_FONT_NAMES;
 use super::SHEET_KEYS;
 use crate::model::{Lineweight, CONTINUOUS, FIT_DEGREE, LAYER_ZERO, WHITE};
-use crate::text::{Attachment, Justify, STANDARD, STANDARD_FONT, WIDTH_FACTORS};
+use crate::text::{
+    Attachment, Justify, FORBIDDEN_IN_FONT_NAMES, STANDARD, STANDARD_FONT, WIDTH_FACTORS,
+};
 use crate::units::Unit;
 
 /// A plain decimal number, as `docs/sheet-description.md` defines it.
@@ -391,7 +392,8 @@ pub fn sheet_description_schema() -> Value {
                 "description": format!(
                     "The sheet's text styles, from name to text style. Style `{STANDARD}` is in \
                      every drawing, with the font `{STANDARD_FONT}`; listing it sets its font and \
-                     width factor."
+                     width factor. It is written `{STANDARD}` exactly: in another case it is an \
+                     error."
                 ),
                 "type": "object",
                 "propertyNames": { "$ref": "#/$defs/name" },

@@ -3,6 +3,8 @@
 use super::parse_sheet_description;
 use crate::error::{Error, ErrorCode};
 use crate::model::{Object, Point3, Sheet};
+use crate::settings::Settings;
+use crate::text::measure::{measure_text_with, MeasureTextRequest};
 use crate::text::{Attachment, Justify, MText, Text, TextStyle};
 
 fn sheet(text: &str) -> Sheet {
@@ -150,6 +152,26 @@ fn standard_can_be_listed_to_set_its_font() {
 }
 
 #[test]
+fn standard_in_another_case_is_an_error() {
+    // AutoCAD would take it for `Standard`; the sheet would not.
+    for name in ["standard", "STANDARD"] {
+        let e = error(&format!(
+            "units: mm\ntext_styles:\n  {name}: {{font: arial.ttf, width_factor: 0.5}}\nobjects:\n  - text: {{contents: A, position: [0, 0, 0], height: 1}}\n"
+        ));
+        assert_names(
+            &e,
+            ErrorCode::BadValue,
+            &format!("text_styles.{name}"),
+            &[
+                &format!("`{name}`"),
+                "list it as `Standard`",
+                "ignores case",
+            ],
+        );
+    }
+}
+
+#[test]
 fn an_unknown_style_lists_the_sheets_styles() {
     let e = object_error("text: {contents: A, position: [0, 0, 0], height: 1, style: Notes}");
     assert_names(
@@ -212,6 +234,48 @@ fn a_font_is_an_shx_or_truetype_file_name() {
     }
     let e = error("units: mm\ntext_styles:\n  a: {width_factor: 1}\nobjects: []\n");
     assert_names(&e, ErrorCode::MissingKey, "text_styles.a.font", &["`font`"]);
+}
+
+#[test]
+fn the_sheet_description_and_measuring_refuse_the_same_font_names_alike() {
+    for font in [
+        "a|b.shx",
+        "x?.ttf",
+        "<x>.shx",
+        "x\".shx",
+        "x*.ttf",
+        "/some/where/x.ttf",
+        "..\\x.shx",
+        "C:x.ttf",
+        "..",
+        "romans",
+        "arial.otf",
+    ] {
+        let read = error(&format!(
+            "units: mm\ntext_styles:\n  a: {{font: '{font}'}}\nobjects: []\n"
+        ));
+        let measured = measure_text_with(
+            &MeasureTextRequest {
+                contents: "A".into(),
+                font: font.into(),
+                height: 1.0,
+                width_factor: 1.0,
+            },
+            &Settings::default(),
+        )
+        .expect_err(&format!("`{font}` is not a font's file name"));
+        assert_eq!(
+            read.field.as_deref(),
+            Some("text_styles.a.font"),
+            "{read:?}"
+        );
+        assert_eq!(measured.field.as_deref(), Some("font"), "{measured:?}");
+        assert_eq!(
+            (measured.code, &measured.message),
+            (read.code, &read.message),
+            "`{font}`"
+        );
+    }
 }
 
 #[test]

@@ -76,6 +76,36 @@ impl TextStyle {
     }
 }
 
+/// Characters a font's file name cannot hold: the folder separators `/` and
+/// `\`, the drive separator `:`, and the others Windows refuses in a file
+/// name.
+pub(crate) const FORBIDDEN_IN_FONT_NAMES: &str = "/\\<>:\"|?*";
+
+/// What a font is, for the messages that refuse one.
+pub(crate) const FONT_CHOICES: &str =
+    "a font is the file name of an SHX font, such as `romans.shx`, or a TrueType font, such as `arial.ttf`";
+
+/// Why `name` cannot name a font, or none when it can. A font is named by
+/// the file name alone of an SHX or a TrueType font and is read from the
+/// font folders only, so a name that holds a folder, a drive or a parent
+/// reference, which would reach outside them, is refused. The sheet
+/// description and measuring both check a font's name here.
+pub(crate) fn font_name_problem(name: &str) -> Option<String> {
+    if let Some(c) = name
+        .chars()
+        .find(|c| FORBIDDEN_IN_FONT_NAMES.contains(*c) || c.is_control())
+    {
+        Some(format!(
+            "a font is named by its file name alone, with no folder, drive or parent folder, so it cannot hold `{}`; {FONT_CHOICES}",
+            c.escape_default()
+        ))
+    } else if FontKind::of(name).is_none() {
+        Some(format!("`{name}` is not a font file name; {FONT_CHOICES}"))
+    } else {
+        None
+    }
+}
+
 /// The kind of font a file name names, told by its extension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::fonts::{self, FontUsed, Rect};
-use super::{FontKind, WIDTH_FACTORS};
+use super::{font_name_problem, WIDTH_FACTORS};
 use crate::error::{Error, ErrorCode};
 use crate::settings::Settings;
 
@@ -91,14 +91,8 @@ pub fn measure_text_with(
 
 fn check(request: &MeasureTextRequest) -> Result<(), Error> {
     let (narrowest, widest) = WIDTH_FACTORS;
-    let problem = if FontKind::of(&request.font).is_none() {
-        Some((
-            "font",
-            format!(
-                "`{}` is not a font file name; a font is an SHX font such as `romans.shx` or a TrueType font such as `arial.ttf`",
-                request.font
-            ),
-        ))
+    let problem = if let Some(problem) = font_name_problem(&request.font) {
+        Some(("font", problem))
     } else if !(request.height.is_finite() && request.height > 0.0) {
         Some(("height", "a height is more than 0".to_owned()))
     } else if !(narrowest..=widest).contains(&request.width_factor) {
@@ -228,6 +222,32 @@ mod tests {
         .unwrap();
         assert_eq!((m.width, m.left, m.right), (0.0, 0.0, 0.0));
         assert!(m.advance > 0.0);
+    }
+
+    #[test]
+    fn a_font_outside_the_font_folders_is_never_read() {
+        let dir = folder("outside");
+        let fonts = dir.join("fonts");
+        fs::create_dir_all(&fonts).unwrap();
+        let i: &[u8] = &[2, 8, 2, 0, 1, 0xA4, 2, 8, 2, 0xF6, 0];
+        fs::write(dir.join("outside.shx"), unifont(10, &[(73, i)])).unwrap();
+        let settings = Settings {
+            font_folders: vec![fonts],
+        };
+        let absolute = dir.join("outside.shx").to_string_lossy().into_owned();
+        for name in [
+            absolute.as_str(),
+            "../outside.shx",
+            "..\\outside.shx",
+            "C:outside.shx",
+        ] {
+            let error = measure_text_with(&request("I", name, 1.0, 1.0), &settings)
+                .expect_err(&format!("`{name}` is outside the font folders"));
+            assert_eq!(error.code, ErrorCode::BadValue, "{error:?}");
+            assert_eq!(error.field.as_deref(), Some("font"), "{error:?}");
+            assert!(error.message.contains("file name alone"), "{error:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
