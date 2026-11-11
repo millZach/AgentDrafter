@@ -50,8 +50,11 @@ A pull request merges only when these jobs of the `CI` workflow (`.github/workfl
 - `check (windows-latest)`
 - `check (macos-latest)`
 - `demo plant (the same on every system)`
+- `wheel (ubuntu-latest)`
+- `wheel (windows-latest)`
+- `wheel (macos-latest)`
 
-Each `check` job runs formatting, lints with warnings as errors, and tests, and builds, plots and checks the demo plant; the last job compares the demo plant's DWGs and PDFs from the three systems byte for byte (Zach decided on 2026-11-11 that it joins the merge bar). A pull request that touches DWG reading or writing also states the judge's result before it merges.
+Each `check` job runs formatting, lints with warnings as errors, and tests, and builds, plots and checks the demo plant. The `demo plant` job compares the demo plant's DWGs and PDFs from the three systems byte for byte, and each `wheel` job builds the pip package, installs it in a clean virtual environment and runs it (Zach decided on 2026-11-11 that both join the merge bar). The ruleset `main merge bar` on GitHub requires these jobs and a branch up to date with `main`. A pull request that touches DWG reading or writing also states the judge's result before it merges.
 
 ## Agent skills
 
