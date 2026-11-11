@@ -9,6 +9,11 @@
 //! MCP server, which take their commands from the same registry
 //! (`http.rs`, `mcp.rs`).
 //!
+//! The command is a library, [`main`], so that the binary
+//! (`src/bin/agentdrafter.rs`) and the Python package's command, which runs
+//! it inside the Python library's extension (`crates/agentdrafter-py`), are
+//! the same code.
+//!
 //! Exit codes: 0 when the reply is `ok`, 1 when the core reports an error,
 //! such as a sheet of a drawing set that failed, 2 when the arguments are
 //! wrong.
@@ -45,8 +50,11 @@ const STALE_USAGE: &str =
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...";
 const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find and attributes: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [extents: --fonts <folder>...]";
 
-fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1).peekable();
+/// Runs the `agentdrafter` command on `args`, the arguments after its own
+/// name, as the binary does: it prints the reply on standard output, or
+/// serves until it is stopped, and gives the exit code.
+pub fn main(args: Vec<OsString>) -> ExitCode {
+    let mut args = args.into_iter().peekable();
     // The servers run until they are stopped, and print as their protocols
     // say; every other command prints one line.
     match args.peek().and_then(|a| a.to_str()) {

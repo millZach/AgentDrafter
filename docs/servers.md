@@ -1,10 +1,10 @@
 # The HTTP API and the MCP server
 
-The command line, the HTTP API and the MCP server are three of AgentDrafter's four interfaces (see [`CONTEXT.md`](../CONTEXT.md)); the Python library comes later. Each is a thin layer over one core (ADR-0007): it turns what it was sent into a command's input, hands it to the core, and sends back the core's reply. None of them holds drawing logic.
+The command line, the HTTP API and the MCP server are three of AgentDrafter's four interfaces (see [`CONTEXT.md`](../CONTEXT.md)); the Python library is the fourth ([`python.md`](python.md)). Each is a thin layer over one core (ADR-0007): it turns what it was sent into a command's input, hands it to the core, and sends back the core's reply. None of them holds drawing logic.
 
 ## One registry of commands
 
-The core keeps one registry of commands, and every interface takes its commands from it, so a command added there reaches all three at once and none can be missed. Each command has one name everywhere, takes one input and gives one reply:
+The core keeps one registry of commands, and every interface takes its commands from it, so a command added there reaches all four at once and none can be missed. Each command has one name everywhere, takes one input and gives one reply:
 
 | Command | What it does | Its own page |
 |---|---|---|
@@ -23,7 +23,7 @@ The core keeps one registry of commands, and every interface takes its commands 
 
 **The input** is a JSON object. Its keys are the command line's options, with `-` written `_`: `--dry-run` is `dry_run`, `--plot-style` is `plot_style`, and an option given more than once, such as `--fonts`, is a list. What the command line takes as a plain argument has a name of its own: the file or folder is `source` (`set` for `change`, `journal` and `undo`, and `output` for `stale`), the text `measure-text` measures is `contents`, `schema`'s kind is `kind`, `undo`'s change set is `change_set`, `query`'s kind and selection are `query: {"kind": "find", "name": ...}`, and `change` takes the change set itself under `change_set`, not a file. Each command's input has a JSON Schema, which `GET /commands` lists and the MCP server gives as each tool's input schema. A key the schema does not name is refused.
 
-**The reply** is the one the command line prints: `{"ok": true, "result": ...}`, or `{"ok": false, "error": {"code", "message", ...}}` with the `result` of what was done, if anything was. The same input gives the same reply through every interface, and the same change set gives the same journal entry, apart from its time. A test runs every command of the registry through all three and compares the replies.
+**The reply** is the one the command line prints: `{"ok": true, "result": ...}`, or `{"ok": false, "error": {"code", "message", ...}}` with the `result` of what was done, if anything was. The same input gives the same reply through every interface, and the same change set gives the same journal entry, apart from its time. A test runs every command of the registry through all three and compares the replies, and the Python library's test runs the same calls through it too.
 
 **Paths** are taken as the command line takes them: relative to the folder the server was started in, or absolute. Replies name files from the paths sent, as the command line's do. A server reaches every file its user can, so a server that listens beyond the local machine needs a token (below).
 

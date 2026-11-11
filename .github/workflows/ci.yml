@@ -123,3 +123,105 @@ jobs:
             diff -u "$linux" "demo-plant-$os/demo-plant-hashes.txt"
           done
           echo "Every DWG and PDF is the same on Windows, Linux and macOS."
+
+  wheel:
+    # The pip package (docs/python.md): one wheel per system, built for every Python from 3.11 on,
+    # installed into clean virtual environments of the oldest and the newest Python, its command run
+    # and its library imported and tested. Nothing is uploaded anywhere: the wheel is kept only as
+    # this run's artifact.
+    name: wheel (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Where a virtual environment keeps its programs.
+      BIN: ${{ matrix.os == 'windows-latest' && 'Scripts' || 'bin' }}
+      # The virtual environments and the demo plant's copies, in the checkout, by a relative path
+      # that every program on every system reads alike.
+      TRY: wheel-try
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the toolchain named in rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v7
+        id: oldest
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-python@v7
+        id: newest
+        with:
+          python-version: "3.14"
+
+      - name: Build the wheel
+        shell: bash
+        run: |
+          "${{ steps.newest.outputs.python-path }}" -m venv "$TRY/build"
+          "$TRY/build/$BIN/python" -m pip install --quiet --disable-pip-version-check "maturin==1.16.0"
+          "$TRY/build/$BIN/python" -m maturin build --release --out dist
+          ls -l dist
+
+      - name: Install the wheel into a clean virtual environment of Python 3.11 and of 3.14
+        shell: bash
+        run: |
+          for python in "${{ steps.oldest.outputs.python-path }}" "${{ steps.newest.outputs.python-path }}"; do
+            version=$("$python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+            "$python" -m venv "$TRY/venv-$version"
+            "$TRY/venv-$version/$BIN/python" -m pip install --quiet --disable-pip-version-check dist/*.whl
+            echo "Python $version: $("$TRY/venv-$version/$BIN/agentdrafter" --version)"
+          done
+
+      # A copy of the demo plant, built and checked by the installed command, and another built and
+      # checked through the library, on the oldest Python. The two builds' DWGs are the same bytes.
+      - name: The installed command and the library build the demo plant and it passes the checker
+        shell: bash
+        run: |
+          venv="$TRY/venv-3.11"
+          cp -R examples/demo-plant "$TRY/by-command"
+          cp -R examples/demo-plant "$TRY/by-library"
+          "$venv/$BIN/agentdrafter" build "$TRY/by-command"
+          echo
+          "$venv/$BIN/agentdrafter" check "$TRY/by-command" > "$TRY/check.json"
+          "$venv/$BIN/python" - "$TRY/check.json" "$TRY/by-library" <<'PY'
+          import json, pathlib, sys
+
+          import agentdrafter
+
+          by_command = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          print("The command:", by_command["result"]["message"])
+          if not (by_command["ok"] and by_command["result"]["passed"]):
+              sys.exit(f"the demo plant fails the checker: {by_command}")
+
+          plant = sys.argv[2]
+          built = agentdrafter.build(source=plant)
+          if not built["ok"]:
+              sys.exit(f"the library could not build the demo plant: {built}")
+          print(f"The library: built {built['result']['built']} sheets")
+          checked = agentdrafter.check(source=plant)
+          print("The library:", checked["result"]["message"])
+          if not (checked["ok"] and checked["result"]["passed"]):
+              sys.exit(f"the demo plant fails the checker through the library: {checked}")
+          PY
+          diff -r "$TRY/by-command/dwg" "$TRY/by-library/dwg"
+          echo "The command's DWGs and the library's are the same."
+
+      - name: Python tests, through the installed package, on Python 3.11 and 3.14
+        shell: bash
+        run: |
+          for version in 3.11 3.14; do
+            "$TRY/venv-$version/$BIN/python" -m unittest discover -s python/tests -v
+          done
+
+      - name: Keep the wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.os }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7

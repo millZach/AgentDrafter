@@ -9,15 +9,19 @@ publish.workspace = true
 
 [[bin]]
 name = "agentdrafter"
-path = "src/main.rs"
+path = "src/bin/agentdrafter.rs"
 
 [dependencies]
 agentdrafter-core = { path = "../agentdrafter-core" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json.workspace = true
 # The HTTP API's request parser (MIT or Apache-2.0), the constant-time
 # compare of its token (BSD-3-Clause), and the system's randomness the
 # token is made from (MIT or Apache-2.0).
 httparse = "1.10.1"
 subtle = "2.6.1"
 getrandom = "0.3.4"
+
+[dev-dependencies]
+# The servers' tests read a reply's numbers as the bytes they were sent in.
+serde_json = { workspace = true, features = ["raw_value"] }

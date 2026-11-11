@@ -1,0 +1,56 @@
+{
+  "change_sets": {
+    "move.json": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]},
+    "partial.json": {"operations": [{"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5}, {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "nope"}]}
+  },
+  "calls": {
+    "build": {
+      "args": ["build", "demo-set"],
+      "input": {"source": "demo-set"}
+    },
+    "schema": {
+      "args": ["schema", "template"],
+      "input": {"kind": "template"}
+    },
+    "measure-text": {
+      "args": ["measure-text", "PUMP 101", "--font", "romans.shx", "--height", "2.5"],
+      "input": {"contents": "PUMP 101", "font": "romans.shx", "height": 2.5}
+    },
+    "render": {
+      "args": ["render", "demo-set/dwg/DEMO-001.dwg", "--width", "320", "--height", "200"],
+      "input": {"source": "demo-set/dwg/DEMO-001.dwg", "width": 320, "height": 200}
+    },
+    "plot": {
+      "args": ["plot", "demo-set"],
+      "input": {"source": "demo-set"}
+    },
+    "stale": {
+      "args": ["stale", "demo-set/dwg/DEMO-001.png"],
+      "input": {"output": "demo-set/dwg/DEMO-001.png"}
+    },
+    "query": {
+      "args": ["query", "find", "demo-set", "--name", "title-block"],
+      "input": {"source": "demo-set", "query": {"kind": "find", "name": "title-block"}}
+    },
+    "operations": {
+      "args": ["operations"],
+      "input": {}
+    },
+    "change": {
+      "args": ["change", "demo-set", "move.json"],
+      "input": {"set": "demo-set", "change_set": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]}}
+    },
+    "journal": {
+      "args": ["journal", "demo-set"],
+      "input": {"set": "demo-set"}
+    },
+    "undo": {
+      "args": ["undo", "demo-set", "1"],
+      "input": {"set": "demo-set", "change_set": 1}
+    },
+    "check": {
+      "args": ["check", "demo-set", "--sheet", "DEMO-002"],
+      "input": {"source": "demo-set", "sheets": ["DEMO-002"]}
+    }
+  }
+}

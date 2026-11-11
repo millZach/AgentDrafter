@@ -16,7 +16,7 @@ cargo run -p agentdrafter-cli -- check examples/demo-plant
 
 `build` writes each sheet's DWG into `examples/demo-plant/dwg/`, `plot` its PDF beside it, and `check` reports every check a sheet fails; add `--overwrite` to build or plot again. CI does the same on Windows, Linux and macOS, fails on any failed check, and compares the three systems' DWGs and PDFs byte for byte.
 
-The engine is written in Rust and reads and writes DWG through [acadrust](https://github.com/hakanaktt/acadrust). It will be reached from a command line, an MCP server, a Python library and a local HTTP API, and a reviewer will watch the work in a browser.
+The engine is written in Rust and reads and writes DWG through [acadrust](https://github.com/hakanaktt/acadrust). It is reached from a command line, an MCP server, a Python library and a local HTTP API, and a reviewer will watch the work in a browser. One pip package per system will carry all four; until the first release it is built from a checkout ([the Python library and the pip package](docs/python.md)).
 
 - [The plan](docs/plan.md): the first usable version, what comes after, and what is still open.
 - [The sheet description](docs/sheet-description.md): the text a new sheet is built from.
@@ -29,6 +29,7 @@ The engine is written in Rust and reads and writes DWG through [acadrust](https:
 - [The journal and undo](docs/journal.md): every change set and failed attempt recorded in the set's folder, and undone from it, byte for byte, in a later session.
 - [The checker](docs/check.md): the default checks each sheet is held to after every change.
 - [The HTTP API and the MCP server](docs/servers.md): every command, served locally over HTTP and to an agent's MCP client.
+- [The Python library and the pip package](docs/python.md): every command as a Python function, bound to the core, and the package that carries the command and the library.
 - [The glossary](CONTEXT.md): the words this project uses.
 - [The decisions](docs/adr/): what was decided and why.
 
