@@ -6,13 +6,17 @@
 //! same through each interface and none of them holds drawing logic
 //! (ADR-0007).
 //!
-//! - [`build`] turns a sheet description into a DWG in the 2018 format.
+//! - [`build`] turns a sheet description into a DWG in the 2018 format, and
+//!   [`build_set`] builds every sheet of a drawing set, each a template
+//!   plus one row of data.
 //! - [`read_sheet_description`] reads a sheet description's file, with the
 //!   block library it names, into a [`Sheet`]; [`parse_sheet_description`]
 //!   reads the text of one that names no block library.
 //! - [`parse_block_library`] reads a block library into a [`BlockLibrary`].
-//! - [`sheet_description_schema`] and [`block_library_schema`] state what a
-//!   sheet description and a block library may hold, as JSON Schemas.
+//! - [`sheet_description_schema`], [`block_library_schema`], [`template_schema`],
+//!   [`set_schema`] and [`rows_schema`] state what a sheet description, a
+//!   block library, a template and a drawing set's settings and rows may
+//!   hold, as JSON Schemas.
 //! - [`read_dwg`] reads a DWG's linetypes, layers, text styles, block
 //!   definitions and model-space objects.
 //! - [`measure_text`] measures how wide a line of text draws in a font.
@@ -39,6 +43,7 @@ mod model;
 mod raster;
 mod render;
 mod reply;
+mod set;
 mod settings;
 mod stamp;
 mod text;
@@ -57,6 +62,10 @@ pub use model::{
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;
+pub use set::{
+    build_set, build_set_with, Notice, NoticeCode, SetBuildRequest, SetReport, SheetOutcome,
+    SET_SETTINGS_FILE,
+};
 pub use settings::{Settings, FONTS_VARIABLE};
 pub use stamp::{
     check_stale, SourceCheck, SourceKind, SourceStamp, StaleReport, StaleRequest, Stamp,
@@ -82,4 +91,23 @@ pub fn sheet_description_schema() -> serde_json::Value {
 /// block library may hold, with what each means.
 pub fn block_library_schema() -> serde_json::Value {
     description::schema::block_library_schema()
+}
+
+/// The schema of a drawing set's settings, `set.yaml`: a JSON Schema
+/// (draft 2020-12) of every key they may hold, with what each means.
+pub fn set_schema() -> serde_json::Value {
+    description::set_schema()
+}
+
+/// The schema of a drawing set's rows: a JSON Schema (draft 2020-12) of
+/// every key the rows file may hold, with what each means.
+pub fn rows_schema() -> serde_json::Value {
+    description::rows_schema()
+}
+
+/// The template's schema: a JSON Schema (draft 2020-12) of every key a
+/// template may hold, with what each means. It is the sheet description's,
+/// with values a template takes from a row.
+pub fn template_schema() -> serde_json::Value {
+    description::template_schema()
 }

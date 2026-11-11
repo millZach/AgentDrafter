@@ -1,16 +1,17 @@
 //! Build: producing a DWG from a sheet description.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::description::read_sheet_description;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
+use crate::model::Sheet;
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -36,7 +37,8 @@ pub struct BuildRequest {
 /// What a build wrote.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BuildReport {
-    /// The sheet description that was built.
+    /// The sheet description that was built, or for a sheet of a drawing
+    /// set, its template.
     pub description: String,
     /// The DWG that was written.
     pub dwg: String,
@@ -77,32 +79,45 @@ pub fn build(request: &BuildRequest) -> Result<BuildReport, Error> {
 pub fn build_with(request: &BuildRequest, settings: &Settings) -> Result<BuildReport, Error> {
     let description = request.description.as_path();
     let sheet = read_sheet_description(description)?;
-
     let output = request
         .output
         .clone()
         .unwrap_or_else(|| description.with_extension("dwg"));
-    if fs::symlink_metadata(&output).is_ok() {
-        if is_same_file(description, &output) {
+    build_sheet(&sheet, description, &output, request.overwrite, settings)
+}
+
+/// Builds `sheet`, read from the sheet description or template at
+/// `description`, into a DWG at `output`, written whole or not at all. An
+/// existing file there is replaced only when `overwrite` is asked for and it
+/// carries AgentDrafter's build mark.
+pub(crate) fn build_sheet(
+    sheet: &Sheet,
+    description: &Path,
+    output: &Path,
+    overwrite: bool,
+    settings: &Settings,
+) -> Result<BuildReport, Error> {
+    if fs::symlink_metadata(output).is_ok() {
+        if is_same_file(description, output) {
             return Err(Error::usage(
                 "the output path is the sheet description itself; choose another path for the DWG",
             )
-            .in_file(&output));
+            .in_file(output));
         }
-        if !request.overwrite {
+        if !overwrite {
             return Err(Error::new(
                 ErrorCode::OutputExists,
                 "a file is already at the output path; ask to overwrite it to replace a previous build",
             )
-            .in_file(&output));
+            .in_file(output));
         }
-        refuse_unless_built(&output)?;
+        refuse_unless_built(output)?;
     }
 
-    let fonts = SheetFonts::find(&sheet, settings);
+    let fonts = SheetFonts::find(sheet, settings);
     let bytes =
-        dwg::write_new_sheet(&sheet, &|text| fonts.start(text)).map_err(|e| e.in_file(&output))?;
-    write_whole(&output, &bytes)?;
+        dwg::write_new_sheet(sheet, &|text| fonts.start(text)).map_err(|e| e.in_file(output))?;
+    write_whole(output, &bytes)?;
 
     let mut objects = BTreeMap::new();
     for object in &sheet.objects {
@@ -163,14 +178,20 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
 
 /// Writes `bytes` to a temporary file beside `path`, then moves it onto
 /// `path`, so a reader never sees a half-written DWG.
+///
+/// The temporary file's name is short and does not hold the DWG's own, so
+/// a DWG whose name is as long as the system allows can still be written.
+/// It holds the process ID and a count, so no two writes share one.
 fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let Some(name) = path.file_name() else {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    if path.file_name().is_none() {
         return Err(Error::usage("the output path does not name a file").in_file(path));
-    };
-    let mut temporary_name = OsString::from(".");
-    temporary_name.push(name);
-    temporary_name.push(format!(".{}.tmp", std::process::id()));
-    let temporary = path.with_file_name(temporary_name);
+    }
+    let temporary = path.with_file_name(format!(
+        ".agentdrafter-{}-{}.tmp",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
     let written = File::create(&temporary)
         .and_then(|mut file| {
             file.write_all(bytes)?;

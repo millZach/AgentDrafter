@@ -66,6 +66,11 @@ pub enum ErrorCode {
     /// The file is not an output AgentDrafter produced, or its stamp
     /// cannot be read, so nothing says what it came from.
     NotStamped,
+    /// A row of a drawing set's data lacks a value its template needs.
+    MissingValue,
+    /// Some sheets of a drawing set failed and were not written; the others
+    /// were built. The reply says which.
+    SheetsFailed,
 }
 
 /// An error from the core, ready to report through any interface.

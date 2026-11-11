@@ -469,28 +469,65 @@ fn object_name(node: &Node, path: &str, names: &mut Vec<(String, Pos)>) -> Resul
 /// sheet description's folder, with `/` between folders, so that it names
 /// the same file on every system.
 pub(super) fn library_path<'a>(node: &'a Node, path: &str) -> Result<&'a str, Error> {
-    let written = scalar(
+    relative_path(
         node,
         path,
-        "the path of a block library file, such as `blocks.yaml`",
-    )?;
+        &RelativePath {
+            shape: "the path of a block library file, such as `blocks.yaml`",
+            whose: "the block library's path",
+            from: "the sheet description's folder",
+            names: "a file",
+        },
+    )
+}
+
+/// What a relative path is, for its errors.
+pub(super) struct RelativePath<'a> {
+    /// What belongs there, such as "the path of a block library file, such
+    /// as `blocks.yaml`".
+    pub shape: &'a str,
+    /// Whose path it is, such as "the block library's path".
+    pub whose: &'a str,
+    /// The folder it is relative to, such as "the sheet description's folder".
+    pub from: &'a str,
+    /// What it names: "a file" or "a folder".
+    pub names: &'a str,
+}
+
+/// A path written relative to a folder, with `/` between folders, so that
+/// it names the same file or folder on every system: not empty, not
+/// starting with `/`, holding none of [`FORBIDDEN_IN_PATHS`] and no control
+/// characters, with one `/` between folders.
+pub(super) fn relative_path<'a>(
+    node: &'a Node,
+    path: &str,
+    what: &RelativePath,
+) -> Result<&'a str, Error> {
+    let RelativePath {
+        shape,
+        whose,
+        from,
+        names,
+    } = what;
+    let written = scalar(node, path, shape)?;
     let problem = if written.is_empty() {
-        Some("the path of the block library cannot be empty".to_owned())
+        Some(format!("{whose} cannot be empty"))
     } else if written.starts_with('/') {
-        Some(
-            "the block library's path is relative to the sheet description's folder, so it cannot start with `/`"
-                .to_owned(),
-        )
+        Some(format!(
+            "{whose} is relative to {from}, so it cannot start with `/`"
+        ))
     } else if let Some(c) = written
         .chars()
         .find(|c| FORBIDDEN_IN_PATHS.contains(*c) || c.is_control())
     {
         Some(format!(
-            "the block library's path cannot hold `{}`: it is relative to the sheet description's folder, with `/` between folders, and holds none of {FORBIDDEN_IN_PATHS}",
+            "{whose} cannot hold `{}`: it is relative to {from}, with `/` between folders, and holds none of {FORBIDDEN_IN_PATHS}",
             c.escape_default()
         ))
     } else if written.split('/').any(str::is_empty) {
-        Some("the block library's path names a file, with one `/` between folders".to_owned())
+        Some(format!(
+            "{whose} names {names}, with one `/` between folders"
+        ))
     } else {
         None
     };

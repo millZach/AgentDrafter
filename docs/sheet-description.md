@@ -2,7 +2,7 @@
 
 A sheet description is the text file that states what is on a new sheet. It is the sheet's record: the DWG is built from it (ADR-0003). It is written in a strict subset of YAML, set out below, so that an agent can write it, a person can read it, and a mistake is an error that names its field rather than a guess.
 
-So far a sheet description holds lines, polylines, arcs, circles, ellipses, splines and hatches, on layers that carry a colour, a linetype and a lineweight, text and multiline text in text styles that name a TrueType or an SHX font, and inserts of blocks with attributes from a [block library](block-library.md). Templates come in a later ticket, and this page grows with them.
+So far a sheet description holds lines, polylines, arcs, circles, ellipses, splines and hatches, on layers that carry a colour, a linetype and a lineweight, text and multiline text in text styles that name a TrueType or an SHX font, and inserts of blocks with attributes from a [block library](block-library.md). A template is written with the same keys, and leaves some values to a row of a [drawing set](drawing-set.md), which builds one sheet per row.
 
 `agentdrafter schema` prints the same keys as a JSON Schema (draft 2020-12), with what each means, for an agent to read before it writes a sheet description. `agentdrafter schema block-library` prints the block library's.
 
@@ -324,6 +324,8 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 | `write_failed` | The DWG could not be written. |
 | `dwg_write` | The DWG library could not write the drawing. |
 | `dwg_read` | The DWG library could not read a drawing. |
+| `missing_value` | A row of a drawing set lacks a value its template needs. See [the drawing set](drawing-set.md#errors). |
+| `sheets_failed` | Some sheets of a drawing set failed and were not written; the others were built. |
 
 ## How it is read
 

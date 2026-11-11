@@ -1,0 +1,38 @@
+# A made-up 11 x 17 inch sheet: its trim line is the paper's edge, so the
+# paper size comes from here, with a border half an inch inside it, the
+# demo plant's title block in the lower right corner, and fixed notes.
+# Where a sheet's value comes from its row, the template writes
+# `{row: NAME}`; each row of the set fills these in.
+units: in
+block_library: ../blocks.yaml
+layers:
+  trim: {color: 8, lineweight: 0.13}
+  border: {color: white, lineweight: 0.7}
+  notes: {color: cyan}
+text_styles:
+  notes: {font: romans.shx, width_factor: 0.8}
+objects:
+  - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, layer: trim}
+  - polyline: {points: [[0.5, 0.5, 0], [16.5, 0.5, 0], [16.5, 10.5, 0], [0.5, 10.5, 0]], closed: true, layer: border}
+  - insert:
+      block: TITLE_BLOCK
+      position: [16.5, 0.5, 0]
+      name: title-block
+      attributes:
+        TITLE: {row: TITLE}
+        DWG_NO: {row: DWG_NO}
+        SHEET: {row: SHEET}
+        REV: {row: REV}
+        DATE: {row: DATE}
+        DRAWN: AD
+  - text: {contents: {row: TITLE}, position: [1, 10, 0], height: 0.25, style: notes, layer: notes}
+  - mtext:
+      contents: |
+        NOTES:
+        1. THIS IS A MADE-UP DRAWING OF THE DEMO PLANT.
+        2. DIMENSIONS ARE IN INCHES.
+      position: [10, 4.5, 0]
+      height: 0.12
+      width: 6
+      style: notes
+      layer: notes

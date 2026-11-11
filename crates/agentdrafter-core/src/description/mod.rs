@@ -1,4 +1,5 @@
-//! Reads a sheet description into a [`Sheet`].
+//! Reads a sheet description into a [`Sheet`], and the files of a drawing
+//! set: its settings, its rows and its templates.
 //!
 //! A sheet description is a strict subset of YAML, written down in
 //! `docs/sheet-description.md`. [`strict_yaml`] reads the subset into a tree
@@ -10,7 +11,8 @@
 //! [`hatch`] reads hatch patterns and hatches, [`text`] reads text styles
 //! and text, [`blocks`] reads block libraries, their blocks and inserts of
 //! them, and [`schema`] states the same keys as a JSON Schema for agents to
-//! read.
+//! read. [`set`] reads a drawing set's settings and rows, [`template`] fills
+//! a template in from a row, and [`set_schema`] states their schemas.
 
 mod block_schema;
 pub(crate) mod blocks;
@@ -19,7 +21,10 @@ mod hatch_schema;
 mod layers;
 mod objects;
 pub(crate) mod schema;
+mod set;
+mod set_schema;
 mod strict_yaml;
+mod template;
 mod text;
 
 use std::fs;
@@ -33,6 +38,9 @@ use crate::model::{BlockLibrary, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 pub use blocks::parse_block_library;
+pub(crate) use set::{read_rows, read_set_settings};
+pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
+pub(crate) use template::read_template;
 
 /// The keys at the top of a sheet description.
 pub(crate) const SHEET_KEYS: [&str; 7] = [
@@ -52,12 +60,7 @@ pub(crate) const SHEET_KEYS: [&str; 7] = [
 /// a block library is read with [`read_sheet_description`], which finds the
 /// library beside it.
 pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
-    sheet(text, &mut |_| {
-        Err(Error::usage(
-            "this sheet description names a block library, which is found from the sheet \
-             description's folder; read it from its file",
-        ))
-    })
+    on_its_own(text, &mut no_library)
 }
 
 /// Reads the sheet description in the file at `path` into a [`Sheet`],
@@ -67,13 +70,7 @@ pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
 /// An error in the block library names the library's file; any other names
 /// the sheet description's.
 pub fn read_sheet_description(path: &Path) -> Result<Sheet, Error> {
-    let text = fs::read_to_string(path).map_err(|e| {
-        Error::new(
-            ErrorCode::ReadFailed,
-            format!("could not read the sheet description: {e}"),
-        )
-        .in_file(path)
-    })?;
+    let text = read_file(path, "the sheet description")?;
     sheet_description_at(&text, path).map(|(sheet, _)| sheet)
 }
 
@@ -92,9 +89,48 @@ pub(crate) fn sheet_description_at(
     text: &str,
     path: &Path,
 ) -> Result<(Sheet, Option<LibraryFile>), Error> {
-    let folder = path.parent().unwrap_or(Path::new(""));
     let mut library = None;
-    let sheet = sheet(text, &mut |written| {
+    let sheet = on_its_own(text, &mut library_beside(path, &mut library))
+        .map_err(|e| e.or_in_file(path))?;
+    Ok((sheet, library))
+}
+
+/// Reads the text of a sheet description built on its own, which takes no
+/// value from a row, with `load` reading the block library it names.
+fn on_its_own(
+    text: &str,
+    load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+) -> Result<Sheet, Error> {
+    let mut root = strict_yaml::read(text)?;
+    template::refuse_row_values(root.as_mut())?;
+    sheet(root, load, None)
+}
+
+/// The text of the file at `path`. `what` names it in the error, such as
+/// "the sheet description".
+pub(crate) fn read_file(path: &Path, what: &str) -> Result<String, Error> {
+    fs::read_to_string(path).map_err(|e| {
+        Error::new(ErrorCode::ReadFailed, format!("could not read {what}: {e}")).in_file(path)
+    })
+}
+
+/// A loader for a sheet description that names no block library.
+fn no_library(_: &str) -> Result<BlockLibrary, Error> {
+    Err(Error::usage(
+        "this sheet description names a block library, which is found from the sheet \
+         description's folder; read it from its file",
+    ))
+}
+
+/// A loader that reads the block library a sheet description or template
+/// at `path` names, from the path it writes relative to its folder, and
+/// keeps the library's file as it was read in `read`.
+fn library_beside<'a>(
+    path: &'a Path,
+    read: &'a mut Option<LibraryFile>,
+) -> impl FnMut(&str) -> Result<BlockLibrary, Error> + 'a {
+    let folder = path.parent().unwrap_or(Path::new(""));
+    move |written| {
         let file = folder.join(written);
         let text = fs::read_to_string(&file).map_err(|e| {
             Error::new(
@@ -106,24 +142,26 @@ pub(crate) fn sheet_description_at(
             )
         })?;
         let parsed = parse_block_library(&text).map_err(|e| e.in_file(&file))?;
-        library = Some(LibraryFile {
+        *read = Some(LibraryFile {
             path: file,
             bytes: text.into_bytes(),
         });
         Ok(parsed)
-    })
-    .map_err(|e| e.or_in_file(path))?;
-    Ok((sheet, library))
+    }
 }
 
-/// Reads a sheet description. `load` reads the block library at the path
-/// the sheet writes, if it names one: an error it returns about a file is
-/// the library's own, and one about no file is placed at `block_library`.
+/// Reads a sheet description, or a template once a row has filled it in,
+/// from its tree. `load` reads the block library at the path the sheet
+/// writes, if it names one: an error it returns about a file is the
+/// library's own, and one about no file is placed at `block_library`.
+/// `set_units` is the declared unit of the drawing set the sheet is built
+/// in, if it is built in one: the sheet must be in it too.
 fn sheet(
-    text: &str,
+    root: Option<Node>,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+    set_units: Option<Unit>,
 ) -> Result<Sheet, Error> {
-    let Some(root) = strict_yaml::read(text)? else {
+    let Some(root) = root else {
         return Err(Error::new(
             ErrorCode::MissingKey,
             "the sheet description is empty; it needs `units` and `objects`",
@@ -144,6 +182,16 @@ fn sheet(
             .at_position(root.at.line, root.at.column))
         }
     };
+    if let Some(set_units) = set_units.filter(|&set| set != units) {
+        return Err(bad_value(
+            fields.require("units")?,
+            "units",
+            format!(
+                "the template is in {units} and the drawing set in {set_units}; every template, \
+                 sheet description and block library in a set is in the set's declared unit"
+            ),
+        ));
+    }
     let (block_library, library) = match fields.get("block_library") {
         Some(node) => {
             let path = "block_library";
@@ -493,3 +541,6 @@ mod text_tests;
 
 #[cfg(test)]
 mod block_tests;
+
+#[cfg(test)]
+mod set_tests;

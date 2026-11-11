@@ -104,6 +104,14 @@ _Avoid_: symbol library, catalog
 A sheet's border, title block and fixed content, waiting for data.
 _Avoid_: prototype, master
 
+**Row**:
+One sheet's data in a drawing set: the sheet's name, the template it is drawn from, and the values that template takes from it. A sheet can be a template plus one row.
+_Avoid_: record (a record is the file that is the truth for a sheet), entry, line
+
+**Set settings**:
+The file at the top of a drawing set's folder, `set.yaml`, that declares the set's unit, where its outputs go and where its rows are.
+_Avoid_: project file, config
+
 **ID**:
 An object's identifier, fixed for the object's life.
 _Avoid_: handle (a handle is the DWG's own identifier), index

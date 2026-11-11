@@ -5,23 +5,26 @@
 //! standard output, on success and on failure. Drawing logic here is a bug.
 //!
 //! Exit codes: 0 when the reply is `ok`, 1 when the core reports an error,
-//! 2 when the arguments are wrong.
+//! such as a sheet of a drawing set that failed, 2 when the arguments are
+//! wrong.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use agentdrafter_core::{
-    block_library_schema, build_with, check_stale, measure_text_with, render_with,
-    sheet_description_schema, BuildRequest, Error, ErrorCode, MeasureTextRequest, RenderRequest,
-    Reply, Settings, StaleRequest, FONTS_VARIABLE,
+    block_library_schema, build_set_with, build_with, check_stale, measure_text_with, render_with,
+    rows_schema, set_schema, sheet_description_schema, template_schema, BuildRequest, Error,
+    ErrorCode, MeasureTextRequest, RenderRequest, Reply, SetBuildRequest, Settings, StaleRequest,
+    FONTS_VARIABLE, SET_SETTINGS_FILE,
 };
 use serde::Serialize;
 use serde_json::json;
 
 const BUILD_USAGE: &str =
-    "agentdrafter build <sheet-description> [--output <dwg>] [--overwrite] [--fonts <folder>]...";
-const SCHEMA_USAGE: &str = "agentdrafter schema [sheet-description | block-library]";
+    "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg>] [--overwrite] [--fonts <folder>]...";
+const SCHEMA_USAGE: &str =
+    "agentdrafter schema [sheet-description | block-library | template | set | rows]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...";
 const STALE_USAGE: &str = "agentdrafter stale <png> [--source <sheet-description-or-dwg>]";
@@ -43,7 +46,8 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
     };
     match command.to_str() {
         Some("build") => match parse_build(args) {
-            Ok((request, settings)) => reply(build_with(&request, &settings)),
+            Ok((Build::Sheet(request), settings)) => reply(build_with(&request, &settings)),
+            Ok((Build::Set(request), settings)) => send(build_set_with(&request, &settings)),
             Err(error) => reply::<()>(Err(error)),
         },
         Some("measure-text") => match parse_measure(args) {
@@ -65,12 +69,15 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
                     reply(Ok(sheet_description_schema()))
                 }
                 (Some(Some("block-library")), None) => reply(Ok(block_library_schema())),
+                (Some(Some("template")), None) => reply(Ok(template_schema())),
+                (Some(Some("set")), None) => reply(Ok(set_schema())),
+                (Some(Some("rows")), None) => reply(Ok(rows_schema())),
                 (_, Some(extra)) => reply::<()>(Err(Error::usage(format!(
                     "schema takes at most one argument, found `{}` as well; usage: {SCHEMA_USAGE}",
                     extra.to_string_lossy()
                 )))),
                 (Some(_), None) => reply::<()>(Err(Error::usage(format!(
-                    "schema prints the schema of a sheet description or of a block library, not `{}`; usage: {SCHEMA_USAGE}",
+                    "schema prints the schema of a sheet description, a block library, a template, a drawing set's settings or its rows, not `{}`; usage: {SCHEMA_USAGE}",
                     which.unwrap_or_default().to_string_lossy()
                 )))),
             }
@@ -216,9 +223,14 @@ fn settings(fonts: Vec<PathBuf>) -> Settings {
     settings
 }
 
-fn parse_build(
-    mut args: impl Iterator<Item = OsString>,
-) -> Result<(BuildRequest, Settings), Error> {
+/// What `build` builds: one sheet description, or every sheet of a drawing
+/// set, whose folder it is given.
+enum Build {
+    Sheet(BuildRequest),
+    Set(SetBuildRequest),
+}
+
+fn parse_build(mut args: impl Iterator<Item = OsString>) -> Result<(Build, Settings), Error> {
     let mut description: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut overwrite = false;
@@ -249,7 +261,7 @@ fn parse_build(
             _ => {
                 if description.replace(arg.into()).is_some() {
                     return Err(Error::usage(format!(
-                        "build takes one sheet description; usage: {BUILD_USAGE}"
+                        "build takes one sheet description or drawing set; usage: {BUILD_USAGE}"
                     )));
                 }
             }
@@ -257,17 +269,29 @@ fn parse_build(
     }
     let description = description.ok_or_else(|| {
         Error::usage(format!(
-            "build needs a sheet description; usage: {BUILD_USAGE}"
+            "build needs a sheet description or a drawing set's folder; usage: {BUILD_USAGE}"
         ))
     })?;
-    Ok((
-        BuildRequest {
-            description,
-            output,
+    // A folder is a drawing set, whose settings say where its DWGs go.
+    if Path::new(&description).is_dir() {
+        if output.is_some() {
+            return Err(Error::usage(format!(
+                "a drawing set's DWGs go to the folder its settings ({SET_SETTINGS_FILE}) name \
+                 under `output`; --output is for one sheet description"
+            )));
+        }
+        let request = SetBuildRequest {
+            set: description,
             overwrite,
-        },
-        settings(fonts),
-    ))
+        };
+        return Ok((Build::Set(request), settings(fonts)));
+    }
+    let request = BuildRequest {
+        description,
+        output,
+        overwrite,
+    };
+    Ok((Build::Sheet(request), settings(fonts)))
 }
 
 fn parse_measure(
@@ -355,12 +379,19 @@ fn help() -> serde_json::Value {
                          --overwrite, and --overwrite replaces only a DWG AgentDrafter built. The \
                          reply lists the blocks the DWG defines, and each text style whose font \
                          is not in the font folders, with the look-alike measured in its place.",
+                "drawing_set": format!(
+                    "Given a folder, builds the drawing set in it: one DWG per row of its rows, \
+                     each its template filled in from the row, into the output folder its \
+                     settings ({SET_SETTINGS_FILE}) name. A sheet that fails writes nothing and \
+                     the others are still built; the reply gives each sheet's outcome under \
+                     sheets, and is not ok when any sheet failed."
+                ),
             },
             "schema": {
                 "usage": SCHEMA_USAGE,
-                "does": "Prints the sheet description's schema, or with block-library the block \
-                         library's: a JSON Schema (draft 2020-12) of every key it may hold, with \
-                         what each means.",
+                "does": "Prints the sheet description's schema, or the block library's, a \
+                         template's, a drawing set's settings' or its rows': a JSON Schema \
+                         (draft 2020-12) of every key it may hold, with what each means.",
             },
             "measure-text": {
                 "usage": MEASURE_USAGE,
@@ -397,18 +428,26 @@ fn help() -> serde_json::Value {
         "output": "One line of JSON on standard output: {\"ok\": true, \"result\": ...} or \
                    {\"ok\": false, \"error\": {\"code\", \"message\", \"field\", \"line\", \
                    \"column\", \"file\"}}.",
-        "exit_codes": { "0": "ok", "1": "the core reported an error", "2": "wrong arguments" },
+        "exit_codes": {
+            "0": "ok",
+            "1": "the core reported an error, or a sheet of a drawing set failed",
+            "2": "wrong arguments",
+        },
     })
 }
 
 fn reply<T: Serialize>(outcome: Result<T, Error>) -> (String, ExitCode) {
-    let code = match &outcome {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(error) if error.code == ErrorCode::Usage => ExitCode::from(2),
-        Err(_) => ExitCode::FAILURE,
+    send(Reply::from(outcome))
+}
+
+fn send<T: Serialize>(reply: Reply<T>) -> (String, ExitCode) {
+    let code = match &reply.error {
+        _ if reply.ok => ExitCode::SUCCESS,
+        Some(error) if error.code == ErrorCode::Usage => ExitCode::from(2),
+        _ => ExitCode::FAILURE,
     };
     // A reply holds only strings, numbers, lists and string-keyed maps, which
     // always serialize.
-    let line = serde_json::to_string(&Reply::from(outcome)).expect("a reply serializes to JSON");
+    let line = serde_json::to_string(&reply).expect("a reply serializes to JSON");
     (line, code)
 }

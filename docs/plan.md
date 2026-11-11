@@ -69,6 +69,7 @@ Later, order not yet set: carrying part of an old sheet into a generated one; ba
 
 - **DWG:** read every version. A new sheet is written in the 2018 format. A revision is saved in the version it arrived in. A per-job setting converts a set to 2018 or saves it down. No AutoCAD and no converter in the loop.
 - **DXF:** read and write.
+- **Data rows:** a drawing set's rows are written in YAML, in the same strict subset as sheet descriptions (ADR-0003), with a schema that accepts exactly what the reader accepts. Not CSV. Zach decided this on 2026-11-11; [`docs/drawing-set.md`](drawing-set.md) sets the rows out.
 - **PDF:** plot at issue quality with searchable text. **PNG:** render for checking.
 - **Fonts:** AutoCAD's SHX fonts are read from a machine that has AutoCAD and are never in the repository; open look-alikes are used elsewhere.
 - **3D solids inside DWG:** **open.** AutoCAD stores solids in a format no open-source library writes for curved shapes. This is decided when 3D is designed.

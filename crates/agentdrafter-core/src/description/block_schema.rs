@@ -15,22 +15,28 @@ use crate::model::LAYER_ZERO;
 use crate::text::Justify;
 
 /// Control characters, as a regular expression's character class holds them.
-const CONTROL: &str = "\\x00-\\x1f\\x7f-\\x9f";
+pub(super) const CONTROL: &str = "\\x00-\\x1f\\x7f-\\x9f";
 
 /// The schema of a sheet's `block_library` key.
 pub(super) fn block_library_property() -> Value {
+    relative_path_property(format!(
+        "The block library the sheet's inserts draw their blocks from: the path of its file, \
+         relative to the sheet description's folder, with / between folders, such as \
+         blocks.yaml or ../library/blocks.yaml. It holds none of {FORBIDDEN_IN_PATHS}. The \
+         library is in the sheet's declared unit."
+    ))
+}
+
+/// The schema of a path written relative to a folder, with `/` between
+/// folders, as `blocks.rs` reads one, with `description`.
+pub(super) fn relative_path_property(description: String) -> Value {
     let forbidden = FORBIDDEN_IN_PATHS.replace('\\', "\\\\");
     let part = format!("[^/{forbidden}{CONTROL}]+");
     json!({
-        "description": format!(
-            "The block library the sheet's inserts draw their blocks from: the path of its file, \
-             relative to the sheet description's folder, with / between folders, such as \
-             blocks.yaml or ../library/blocks.yaml. It holds none of {FORBIDDEN_IN_PATHS}. The \
-             library is in the sheet's declared unit."
-        ),
+        "description": description,
         "anyOf": [
             { "type": "string", "pattern": format!("^{part}(/{part})*$") },
-            { "type": ["number", "boolean"] },
+            { "type": ["number", "boolean", "null"] },
         ],
     })
 }

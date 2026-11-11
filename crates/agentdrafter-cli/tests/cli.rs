@@ -6,6 +6,9 @@ use std::process::Command;
 
 use serde_json::Value;
 
+#[path = "../../agentdrafter-core/tests/support/demo_set.rs"]
+mod demo_set;
+
 /// An empty folder for one test, under Cargo's scratch folder in `target/`.
 fn scratch(test: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -205,6 +208,16 @@ fn schema_prints_the_sheet_descriptions_json_schema() {
     assert_eq!(library["required"], serde_json::json!(["units", "blocks"]));
     assert!(library["$defs"]["attdef"]["properties"]["tag"].is_object());
 
+    for (kind, title) in [
+        ("template", "AgentDrafter template"),
+        ("set", "AgentDrafter drawing set settings"),
+        ("rows", "AgentDrafter drawing set rows"),
+    ] {
+        let (code, json) = agentdrafter(&["schema", kind], &dir);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(json["result"]["title"], title);
+    }
+
     for extra in [
         &["schema", "extra"][..],
         &["schema", "block-library", "extra"],
@@ -217,8 +230,60 @@ fn schema_prints_the_sheet_descriptions_json_schema() {
     let (_, json) = agentdrafter(&["--help"], &dir);
     assert_eq!(
         json["result"]["commands"]["schema"]["usage"],
-        "agentdrafter schema [sheet-description | block-library]"
+        "agentdrafter schema [sheet-description | block-library | template | set | rows]"
     );
+}
+
+/// A copy of the demo plant's drawing set in `dir`, as `demo-set`.
+fn copy_demo_set(dir: &Path) -> PathBuf {
+    let to = dir.join("demo-set");
+    demo_set::copy_demo_set(&to);
+    to
+}
+
+#[test]
+fn build_builds_a_drawing_set_from_its_folder() {
+    let dir = scratch("set");
+    let set = copy_demo_set(&dir);
+
+    let (code, json) = agentdrafter(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["ok"], true);
+    let result = &json["result"];
+    assert_eq!(result["units"], "in");
+    assert_eq!(
+        (result["built"].as_u64(), result["failed"].as_u64()),
+        (Some(3), Some(0))
+    );
+    let sheets: Vec<&str> = result["sheets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["sheet"].as_str().unwrap())
+        .collect();
+    assert_eq!(sheets, ["DEMO-001", "DEMO-002", "DEMO-003"]);
+    for sheet in &sheets {
+        assert!(set.join("dwg").join(format!("{sheet}.dwg")).is_file());
+    }
+
+    // Built again without --overwrite, every sheet fails and nothing is touched.
+    let (code, json) = agentdrafter(&["build", "demo-set"], &dir);
+    assert_eq!(code, 1, "{json}");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "sheets_failed");
+    assert_eq!(json["result"]["failed"], 3);
+    assert_eq!(
+        json["result"]["sheets"][0]["error"]["code"],
+        "output_exists"
+    );
+
+    let (code, json) = agentdrafter(&["build", "demo-set", "--overwrite"], &dir);
+    assert_eq!(code, 0, "{json}");
+
+    // A set's DWGs go where its settings say.
+    let (code, json) = agentdrafter(&["build", "demo-set", "--output", "x.dwg"], &dir);
+    assert_eq!(code, 2, "{json}");
+    assert_eq!(json["error"]["code"], "usage");
 }
 
 #[test]
