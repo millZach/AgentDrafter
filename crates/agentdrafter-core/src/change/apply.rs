@@ -9,20 +9,21 @@
 //! of them, and takes those sheets' other operations with it (Zach's
 //! decision of 2026-11-11). The operations left are applied again from the
 //! records as they were, until every sheet they reach takes its part. Only
-//! then is anything written: the records, then the DWGs, each written whole
-//! beside its place and moved into it.
+//! then is anything written, all of it together or none of it
+//! (`commit.rs`).
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 
+use super::commit::{commit, Replacement};
 use super::operations::{op_error, read_change_set, AddTo, Body, Kind, Operation, Target};
 use super::{
     mark_report, quoted_list, read_mark, write_mark, ChangeReport, ChangeRequest, Fill,
     OperationOutcome, RowValueSet, SheetChange,
 };
-use crate::build::{prepare_sheet, write_beside, PreparedSheet};
+use crate::build::{prepare_sheet, PreparedSheet};
 use crate::description::{
     read_file, read_set_settings, rows_at, template_at, AttributeSet, Listed, MarkFailure,
     ObjectList, RecordFile, Row,
@@ -426,7 +427,20 @@ pub(super) fn apply(request: &ChangeRequest, settings: &Settings) -> Result<Chan
     }
 
     if !request.dry_run && !landed.is_empty() {
-        write_all(&files, &records, &dwgs, &prepared)?;
+        let mut replacements: Vec<Replacement> = records
+            .iter()
+            .map(|(path, text)| Replacement {
+                path: path.clone(),
+                bytes: text.as_bytes().to_vec(),
+                what: "the record",
+            })
+            .collect();
+        replacements.extend(dwgs.iter().map(|(k, path)| Replacement {
+            path: path.clone(),
+            bytes: prepared[k].bytes.clone(),
+            what: "the DWG",
+        }));
+        commit(&replacements)?;
     }
     if !request.dry_run && failures != mark {
         write_mark(&files.folder, &failures)?;
@@ -1264,71 +1278,6 @@ fn held_back(files: &SetFiles, op: &Operation, cause: usize, why: &Error) -> Err
         ),
     )
     .at_field(format!("operations[{}]", op.index))
-}
-
-/// Writes the records, then the DWGs, each beside its place first, so that
-/// nothing moves into place until everything is written.
-fn write_all(
-    files: &SetFiles,
-    records: &[(PathBuf, String)],
-    dwgs: &[(usize, PathBuf)],
-    prepared: &BTreeMap<usize, PreparedSheet>,
-) -> Result<(), Error> {
-    if !dwgs.is_empty() {
-        fs::create_dir_all(&files.output).map_err(|e| {
-            Error::new(
-                ErrorCode::WriteFailed,
-                format!("could not make the drawing set's output folder: {e}"),
-            )
-            .in_file(&files.output)
-        })?;
-    }
-    let mut ready: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let staged = (|| {
-        for (path, text) in records {
-            ready.push((
-                path.clone(),
-                write_beside(path, text.as_bytes(), "the record")?,
-            ));
-        }
-        for (k, path) in dwgs {
-            let bytes = &prepared[k].bytes;
-            ready.push((path.clone(), write_beside(path, bytes, "the DWG")?));
-        }
-        Ok::<(), Error>(())
-    })();
-    if let Err(e) = staged {
-        for (_, temporary) in &ready {
-            let _ = fs::remove_file(temporary);
-        }
-        return Err(Error {
-            message: format!("{}; nothing was written", e.message),
-            ..e
-        });
-    }
-    let mut moved: Vec<String> = Vec::new();
-    for (i, (path, temporary)) in ready.iter().enumerate() {
-        if let Err(e) = fs::rename(temporary, path) {
-            for (_, left) in &ready[i..] {
-                let _ = fs::remove_file(left);
-            }
-            return Err(Error::new(
-                ErrorCode::WriteFailed,
-                format!(
-                    "could not move the new file into place ({e}) after {} were: build the set \
-                     again with --overwrite to bring its DWGs in step with its records",
-                    if moved.is_empty() {
-                        "none".to_owned()
-                    } else {
-                        moved.join(", ")
-                    }
-                ),
-            )
-            .in_file(path));
-        }
-        moved.push(path.display().to_string());
-    }
-    Ok(())
 }
 
 /// What a change set did, in words.

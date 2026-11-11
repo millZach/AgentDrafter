@@ -1,0 +1,139 @@
+//! A change set lands on disk whole or not at all: a step of its commit
+//! that fails puts back every file the commit had already put in place.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::{json, Value};
+
+use super::commit::FAIL_AT;
+use super::{change_with, ChangeRequest};
+use crate::error::ErrorCode;
+use crate::set::{build_set_with, SetBuildRequest};
+use crate::settings::Settings;
+
+/// A copy of the demo set's records in a folder of its own, built when
+/// `built` says so.
+fn demo_set(test: &str, built: bool) -> PathBuf {
+    let set = std::env::temp_dir()
+        .join(format!("agentdrafter-change-{}", std::process::id()))
+        .join(test);
+    let _ = fs::remove_dir_all(&set);
+    copy_yaml(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/demo-set"),
+        &set,
+    );
+    if built {
+        let reply = build_set_with(
+            &SetBuildRequest {
+                set: set.clone(),
+                overwrite: false,
+            },
+            &Settings::default(),
+        );
+        assert!(reply.ok, "{:#?}", reply.error);
+    }
+    set
+}
+
+fn copy_yaml(from: &Path, to: &Path) {
+    for entry in fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let target = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_yaml(&path, &target);
+        } else if path.extension().is_some_and(|e| e == "yaml") {
+            fs::create_dir_all(to).unwrap();
+            fs::copy(&path, &target).unwrap();
+        }
+    }
+}
+
+/// Every file and folder under `folder`, each file with its bytes.
+fn snapshot(folder: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    let mut found = BTreeMap::new();
+    let mut stack = vec![folder.to_owned()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.insert(path.clone(), None);
+                stack.push(path);
+            } else {
+                found.insert(path.clone(), Some(fs::read(&path).unwrap()));
+            }
+        }
+    }
+    found
+}
+
+fn apply(
+    set: &Path,
+    change_set: &Value,
+    fail_at: Option<usize>,
+) -> super::Reply<super::ChangeReport> {
+    FAIL_AT.with(|f| f.set(fail_at));
+    let reply = change_with(
+        &ChangeRequest {
+            set: set.to_owned(),
+            change_set: change_set.clone(),
+            dry_run: false,
+        },
+        &Settings::default(),
+    );
+    FAIL_AT.with(|f| f.set(None));
+    reply
+}
+
+/// Fails each step of the change set's commit in turn, each time checking
+/// that every file and folder is as it was; then lets it land.
+fn every_failed_step_puts_everything_back(set: &Path, change_set: Value, steps: usize) {
+    let before = snapshot(set);
+    for step in 0..steps {
+        let reply = apply(set, &change_set, Some(step));
+        let error = reply.error.unwrap_or_else(|| panic!("step {step} fails"));
+        assert_eq!(error.code, ErrorCode::WriteFailed, "{error:?}");
+        assert!(
+            error.message.contains("nothing was changed"),
+            "{}",
+            error.message
+        );
+        assert!(reply.result.is_none());
+        assert!(
+            snapshot(set) == before,
+            "step {step} left every file as it was"
+        );
+    }
+    let reply = apply(set, &change_set, None);
+    assert!(reply.ok, "{:#?}", reply.error);
+    assert!(snapshot(set) != before);
+}
+
+#[test]
+fn a_failed_step_puts_back_a_template_and_every_dwg_already_replaced() {
+    // A template edit: the template, then the three sheets' DWGs.
+    let set = demo_set("template", true);
+    every_failed_step_puts_everything_back(
+        &set,
+        json!({"operations": [
+            {"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]},
+        ]}),
+        4,
+    );
+}
+
+#[test]
+fn a_failed_step_takes_away_a_dwg_and_a_folder_the_change_set_made() {
+    // A set never built: the rows, then a DWG in an output folder the
+    // commit makes.
+    let set = demo_set("unbuilt", false);
+    every_failed_step_puts_everything_back(
+        &set,
+        json!({"operations": [
+            {"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5},
+        ]}),
+        2,
+    );
+    assert!(set.join("dwg/DEMO-001.dwg").is_file());
+}

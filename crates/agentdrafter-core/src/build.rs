@@ -220,15 +220,10 @@ fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 /// for the caller to move onto `path` once everything it writes together is
 /// written. `what` names the file in the error, such as "the DWG".
 pub(crate) fn write_beside(path: &Path, bytes: &[u8], what: &str) -> Result<PathBuf, Error> {
-    static WRITES: AtomicU64 = AtomicU64::new(0);
     if path.file_name().is_none() {
         return Err(Error::usage("the output path does not name a file").in_file(path));
     }
-    let temporary = path.with_file_name(format!(
-        ".agentdrafter-{}-{}.tmp",
-        std::process::id(),
-        WRITES.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary = beside(path, "tmp");
     let written = File::create(&temporary).and_then(|mut file| {
         file.write_all(bytes)?;
         file.sync_all()
@@ -244,4 +239,19 @@ pub(crate) fn write_beside(path: &Path, bytes: &[u8], what: &str) -> Result<Path
             .in_file(path))
         }
     }
+}
+
+/// A new name for a file of AgentDrafter's own beside `path`, ending in
+/// `ending`, such as `.agentdrafter-1234-7.tmp`.
+///
+/// The name is short and does not hold the file's own, so a file whose
+/// name is as long as the system allows can still have one. It holds the
+/// process ID and a count, so no two share one.
+pub(crate) fn beside(path: &Path, ending: &str) -> PathBuf {
+    static NAMES: AtomicU64 = AtomicU64::new(0);
+    path.with_file_name(format!(
+        ".agentdrafter-{}-{}.{ending}",
+        std::process::id(),
+        NAMES.fetch_add(1, Ordering::Relaxed)
+    ))
 }

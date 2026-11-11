@@ -24,6 +24,7 @@
 //! would fail and what the records would become, and changes nothing.
 
 mod apply;
+mod commit;
 mod operations;
 
 use std::fs;
@@ -335,3 +336,6 @@ fn quoted_list(items: &[&str]) -> String {
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
+
+#[cfg(test)]
+mod tests;
