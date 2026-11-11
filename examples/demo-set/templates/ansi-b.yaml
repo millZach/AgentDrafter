@@ -2,7 +2,9 @@
 # paper size comes from here, with a border half an inch inside it, the
 # demo plant's title block in the lower right corner, and fixed notes.
 # Where a sheet's value comes from its row, the template writes
-# `{row: NAME}`; each row of the set fills these in.
+# `{row: NAME}`; each row of the set fills these in. An object's `id` joins
+# the sheet's name to make its ID, such as DEMO-001/border; an object
+# without one, such as the trim line, takes its place, DEMO-001/objects[0].
 units: in
 block_library: ../blocks.yaml
 layers:
@@ -13,7 +15,7 @@ text_styles:
   notes: {font: romans.shx, width_factor: 0.8}
 objects:
   - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, layer: trim}
-  - polyline: {points: [[0.5, 0.5, 0], [16.5, 0.5, 0], [16.5, 10.5, 0], [0.5, 10.5, 0]], closed: true, layer: border}
+  - polyline: {points: [[0.5, 0.5, 0], [16.5, 0.5, 0], [16.5, 10.5, 0], [0.5, 10.5, 0]], closed: true, layer: border, id: border}
   - insert:
       block: TITLE_BLOCK
       position: [16.5, 0.5, 0]
@@ -25,7 +27,7 @@ objects:
         REV: {row: REV}
         DATE: {row: DATE}
         DRAWN: AD
-  - text: {contents: {row: TITLE}, position: [1, 10, 0], height: 0.25, style: notes, layer: notes}
+  - text: {contents: {row: TITLE}, position: [1, 10, 0], height: 0.25, style: notes, layer: notes, id: heading}
   - mtext:
       contents: |
         NOTES:
@@ -36,3 +38,4 @@ objects:
       width: 6
       style: notes
       layer: notes
+      id: notes

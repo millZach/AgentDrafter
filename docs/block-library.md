@@ -41,7 +41,7 @@ A block's name follows the rules for a layer's name: 1 to 255 characters, not st
 | Key | Required | What it is |
 |---|---|---|
 | `base_point` | no | The point of the block that sits at an insert's position, in the block's own coordinates: a point. Without it, `[0, 0, 0]`. |
-| `objects` | yes | The block's objects, in drawing order: at least one. Each is a mapping with one key, its type: any [object a sheet holds](sheet-description.md#objects) but `insert`, or `attdef`. An object names a layer, text style or hatch pattern of the library's. |
+| `objects` | yes | The block's objects, in drawing order: at least one. Each is a mapping with one key, its type: any [object a sheet holds](sheet-description.md#objects) but `insert`, or `attdef`. An object names a layer, text style or hatch pattern of the library's. It takes no `id` and no `name`: an insert of the block is the object on a sheet, with an [ID and a name](sheet-description.md#ids-and-names) of its own. |
 
 An object on layer `0` in a block draws with the layer of the insert it is drawn by, as in AutoCAD; an object on any other layer draws with that layer.
 
@@ -71,9 +71,9 @@ A sheet holds the blocks it inserts, as the library defines them, and the librar
 
 Each block is written as AutoCAD writes one: a block definition with the library's base point, in the drawing's unit so that AutoCAD scales no insert again, holding its objects in order, its attribute definitions among them. An insert is AutoCAD's block reference, with one attribute for each attribute definition of its block, in the order the block defines them, each drawn where its definition is, moved, scaled and turned with the insert. In AutoCAD the result is an ordinary block whose attributes a person edits as any other: AutoCAD 2026 opened two built sheets and their audit found no errors, read each block's attribute definitions and each insert's values, and an attribute value changed in AutoCAD saved and audited clean.
 
-An insert's name is kept in the DWG as extended data under the registered application `AGENTDRAFTER`: the text `name` followed by the name. AutoCAD carries it through a save.
+An insert's ID and name are kept in the DWG as extended data under the registered application `AGENTDRAFTER`, as every object's [ID and name](sheet-description.md#ids-and-names) are: the text `sheet` followed by the sheet's name, `id` followed by the insert's `id` or its place, then, when it has a name, `name` followed by the name. AutoCAD carries them through a save.
 
-Reading a DWG back gives its block definitions and its inserts with their attribute values, scale, rotation and name. An insert is read only when each attribute is where its block puts it, with its definition's tag, mode, style and justification.
+Reading a DWG back gives its block definitions and its inserts with their attribute values, scale, rotation and name, and each object's ID. An insert is read only when each attribute is where its block puts it, with its definition's tag, mode, style and justification.
 
 ## What is not offered yet
 

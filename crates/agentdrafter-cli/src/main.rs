@@ -18,6 +18,7 @@ use agentdrafter_core::{
     ErrorCode, MeasureTextRequest, RenderRequest, Reply, SetBuildRequest, Settings, StaleRequest,
     FONTS_VARIABLE, SET_SETTINGS_FILE,
 };
+use agentdrafter_core::{query_with, End, Matching, Measure, Query, QueryRequest, Selection};
 use serde::Serialize;
 use serde_json::json;
 
@@ -28,6 +29,7 @@ const SCHEMA_USAGE: &str =
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...";
 const STALE_USAGE: &str = "agentdrafter stale <png> [--source <sheet-description-or-dwg>]";
+const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find and attributes: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [extents: --fonts <folder>...]";
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -41,7 +43,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
         return reply::<()>(Err(Error::usage(format!(
-            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {STALE_USAGE}"
+            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {STALE_USAGE} | {QUERY_USAGE}"
         ))));
     };
     match command.to_str() {
@@ -60,6 +62,10 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         },
         Some("stale") => match parse_stale(args) {
             Ok(request) => reply(check_stale(&request)),
+            Err(error) => reply::<()>(Err(error)),
+        },
+        Some("query") => match parse_query(args) {
+            Ok((request, settings)) => reply(query_with(&request, &settings)),
             Err(error) => reply::<()>(Err(error)),
         },
         Some("schema") => {
@@ -85,7 +91,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         Some("help" | "--help" | "-h") => reply(Ok(help())),
         Some("--version" | "-V") => reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") }))),
         _ => reply::<()>(Err(Error::usage(format!(
-            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {STALE_USAGE}",
+            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {STALE_USAGE} | {QUERY_USAGE}",
             command.to_string_lossy()
         )))),
     }
@@ -213,6 +219,98 @@ fn parse_stale(mut args: impl Iterator<Item = OsString>) -> Result<StaleRequest,
         ))
     })?;
     Ok(StaleRequest { output, source })
+}
+
+fn parse_query(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(QueryRequest, Settings), Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {QUERY_USAGE}"));
+    let kind = match args.next().as_ref().map(|a| a.to_string_lossy()) {
+        Some(kind) => kind.into_owned(),
+        None => return Err(usage("query needs what to ask".to_owned())),
+    };
+    let selecting = matches!(kind.as_str(), "find" | "attributes");
+    if !selecting && !matches!(kind.as_str(), "blocks" | "measure" | "extents") {
+        return Err(usage(format!(
+            "query asks find, blocks, attributes, measure or extents, not `{kind}`"
+        )));
+    }
+    let mut source: Option<PathBuf> = None;
+    let mut sheet: Option<String> = None;
+    let mut selection = Selection::default();
+    let (mut from, mut to) = (End::default(), End::default());
+    let mut fonts = Vec::new();
+    let value = |flag: &str, value: Option<OsString>| -> Result<String, Error> {
+        value
+            .and_then(|v| v.into_string().ok())
+            .ok_or_else(|| usage(format!("{flag} needs a value")))
+    };
+    let once = |slot: &mut Option<String>, flag: &str, given: String| match slot.replace(given) {
+        Some(_) => Err(Error::usage(format!("{flag} is given twice"))),
+        None => Ok(()),
+    };
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--sheet") => once(&mut sheet, "--sheet", value("--sheet", args.next())?)?,
+            Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
+            Some("--contains") if selecting => selection.matching = Matching::Contains,
+            Some(flag @ ("--id" | "--name" | "--block" | "--tag" | "--value" | "--text"))
+                if selecting =>
+            {
+                let slot = match flag {
+                    "--id" => &mut selection.id,
+                    "--name" => &mut selection.name,
+                    "--block" => &mut selection.block,
+                    "--tag" => &mut selection.tag,
+                    "--value" => &mut selection.value,
+                    _ => &mut selection.text,
+                };
+                once(slot, flag, value(flag, args.next())?)?;
+            }
+            Some(
+                flag @ ("--from" | "--from-name" | "--from-point" | "--to" | "--to-name"
+                | "--to-point"),
+            ) if kind == "measure" => {
+                let slot = match flag {
+                    "--from" => &mut from.id,
+                    "--from-name" => &mut from.name,
+                    "--from-point" => &mut from.point,
+                    "--to" => &mut to.id,
+                    "--to-name" => &mut to.name,
+                    _ => &mut to.point,
+                };
+                once(slot, flag, value(flag, args.next())?)?;
+            }
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("`query {kind}` takes no option `{flag}`")))
+            }
+            _ => {
+                if source.replace(arg.into()).is_some() {
+                    return Err(usage(
+                        "query takes one drawing set's folder or sheet description".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    let source = source.ok_or_else(|| {
+        usage("query needs a drawing set's folder or a sheet description".to_owned())
+    })?;
+    let query = match kind.as_str() {
+        "find" => Query::Find(selection),
+        "attributes" => Query::Attributes(selection),
+        "blocks" => Query::Blocks,
+        "extents" => Query::Extents,
+        _ => Query::Measure(Measure { from, to }),
+    };
+    Ok((
+        QueryRequest {
+            source,
+            sheet,
+            query,
+        },
+        settings(fonts),
+    ))
 }
 
 /// The settings for one command: the font folders `--fonts` names, then
@@ -417,6 +515,22 @@ fn help() -> serde_json::Value {
                 "does": "Says whether a PNG AgentDrafter rendered is stale: whether the sheet \
                          description or DWG its stamp names has changed since, or is gone. The \
                          source is found from the PNG's folder unless --source names it.",
+            },
+            "query": {
+                "usage": QUERY_USAGE,
+                "does": "Asks a drawing set, or one sheet description, what is on its sheets, \
+                         from the records, with nothing selected by coordinates. find lists the \
+                         objects matching every option given, each with its ID and where it is \
+                         written; attributes gives each matching insert's attributes as JSON \
+                         from tag to value; blocks lists the blocks each sheet inserts; measure \
+                         gives the distance between a point of two objects on one sheet, each \
+                         named by ID or name, by default an insert's or a text's position, a \
+                         line's from, a circle's centre; extents gives the box round what each \
+                         sheet draws. Lengths are in the declared unit. --id, --name, --block \
+                         and --tag match whole, in any case, and --value and --text whole, case \
+                         and all; with --contains, each matches what holds it, in any case. A \
+                         query that matches nothing is ok and says so; --sheet looks at one \
+                         sheet only.",
             },
         },
         "fonts": format!(

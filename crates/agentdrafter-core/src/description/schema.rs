@@ -21,6 +21,7 @@
 use serde_json::{json, Map, Value};
 
 use super::blocks::LIBRARY_KEYS;
+use super::ids::{ID_KEY, ID_PUNCTUATION, ID_SEPARATOR, LONGEST_ID, SHEET_OBJECT_KEYS};
 use super::layers::{
     colour_names, COLOUR_NAMES, FORBIDDEN_IN_NAMES, LONGEST_DESCRIPTION, LONGEST_NAME,
     LONGEST_PATTERN,
@@ -75,8 +76,70 @@ pub fn sheet_description_schema() -> Value {
                 "items": { "oneOf": object_choices(&OBJECT_TYPES) },
             },
         },
-        "$defs": defs(),
+        "$defs": sheet_defs(),
     })
+}
+
+/// Every definition the sheet description's schema refers to: the
+/// definitions both schemas share, with an object's ID and name among the
+/// keys of every object a sheet holds. A block's objects take neither.
+fn sheet_defs() -> Map<String, Value> {
+    let mut defs = defs();
+    for (name, _) in OBJECT_TYPES {
+        if let Some(properties) = defs
+            .get_mut(name)
+            .and_then(|def| def["properties"].as_object_mut())
+        {
+            for key in SHEET_OBJECT_KEYS {
+                let def = if key == ID_KEY {
+                    "object_id"
+                } else {
+                    "object_name"
+                };
+                properties.insert(key.into(), json!({ "$ref": format!("#/$defs/{def}") }));
+            }
+        }
+    }
+    let punctuation = ID_PUNCTUATION
+        .chars()
+        .map(|c| format!("`{c}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    defs.insert(
+        "object_id".into(),
+        json!({
+            "description": format!(
+                "The object's ID, which a generator may write: 1 to {LONGEST_ID} ASCII letters, \
+                 digits and {punctuation}, such as pump-1. The object's ID in the drawing set is \
+                 the sheet's name, `{ID_SEPARATOR}` and this, such as DEMO-001/pump-1, and is \
+                 written into the DWG with the object. Each ID is given once in a file, and IDs \
+                 that differ only in case are one ID. Without it, the object's ID is its place \
+                 in the file, such as objects[3], which moves when an object is added or taken \
+                 away before it. A plain number, true, false or null is read as its text, as \
+                 every scalar is."
+            ),
+            "anyOf": [
+                {
+                    "type": "string",
+                    "pattern": format!("^[A-Za-z0-9{}]+$", regex_class(ID_PUNCTUATION)),
+                    "maxLength": LONGEST_ID,
+                },
+                { "type": ["number", "boolean", "null"] },
+            ],
+        }),
+    );
+    defs
+}
+
+/// `characters` escaped for a regular expression's character class.
+fn regex_class(characters: &str) -> String {
+    characters
+        .chars()
+        .map(|c| match c {
+            '-' | '\\' | ']' | '^' => format!("\\{c}"),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 /// The block library's schema.
@@ -692,9 +755,14 @@ mod tests {
         let types: Vec<String> = OBJECT_TYPES.iter().map(|(t, _)| (*t).to_owned()).collect();
         assert_eq!(listed, types);
         for (name, object_keys) in OBJECT_TYPES {
+            let on_a_sheet: Vec<&str> = object_keys
+                .iter()
+                .chain(&SHEET_OBJECT_KEYS)
+                .copied()
+                .collect();
             assert_eq!(
                 keys(&defs[name]["properties"]),
-                sorted(object_keys),
+                sorted(&on_a_sheet),
                 "the keys of {name}"
             );
         }

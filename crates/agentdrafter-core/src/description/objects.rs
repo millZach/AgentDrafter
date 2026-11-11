@@ -7,6 +7,7 @@
 
 use super::blocks::{attribute_definition, insert, ATTDEF_KEYS, INSERT_KEYS};
 use super::hatch::{self, HATCH_KEYS};
+use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
 use super::layers::layer_name;
 use super::strict_yaml::{index_path, key_path, Kind, Node, Pos};
 use super::text::{mtext, text, MTEXT_KEYS, TEXT_KEYS};
@@ -67,13 +68,13 @@ pub(super) struct Tables<'a> {
 }
 
 /// Where an object is: on a sheet, which may insert blocks from its block
-/// library and gives each name once, or in a block, which defines each
-/// attribute tag once.
+/// library and gives each object an ID and each name once, or in a block,
+/// which defines each attribute tag once.
 pub(super) enum Place<'a> {
     Sheet {
         library: Option<&'a BlockLibrary>,
-        /// Each name given so far, and where.
-        names: Vec<(String, Pos)>,
+        /// The record of each object read so far, with its ID and name.
+        objects: Vec<ObjectRecord>,
     },
     Block {
         /// Each attribute tag defined so far, and where.
@@ -159,12 +160,19 @@ pub(super) fn object(
     let [entry] = entries.as_slice() else {
         return Err(wrong_type(node, path, SHAPE));
     };
+    let place_in_file = path;
     let path = key_path(path, &entry.key);
-    let keys = types
+    let own_keys = types
         .iter()
         .find(|(name, _)| *name == entry.key)
         .map(|(_, keys)| *keys)
         .unwrap_or_default();
+    // An object on a sheet takes an ID and a name besides its own keys.
+    let keys: Vec<&str> = match place {
+        Place::Sheet { .. } => own_keys.iter().chain(&SHEET_OBJECT_KEYS).copied().collect(),
+        Place::Block { .. } => own_keys.to_vec(),
+    };
+    let keys = keys.as_slice();
     let article = if entry.key.starts_with(['a', 'e', 'i', 'o', 'u']) || entry.key == "mtext" {
         "an"
     } else {
@@ -181,7 +189,7 @@ pub(super) fn object(
         None => LAYER_ZERO.to_owned(),
     };
     let units = tables.units;
-    match (entry.key.as_str(), place) {
+    let mut object = match (entry.key.as_str(), &mut *place) {
         ("line", _) => line(&fields, units, layer).map(Object::Line),
         ("polyline", _) => polyline(&fields, units, layer).map(Object::Polyline),
         ("arc", _) => arc(&fields, units, layer).map(Object::Arc),
@@ -196,11 +204,20 @@ pub(super) fn object(
         ("attdef", Place::Block { tags }) => {
             attribute_definition(&fields, tables, layer, tags).map(Object::AttributeDefinition)
         }
-        ("insert", Place::Sheet { library, names }) => {
-            insert(&fields, units, layer, *library, names).map(Object::Insert)
+        ("insert", Place::Sheet { library, .. }) => {
+            insert(&fields, units, layer, *library).map(Object::Insert)
         }
         (other, _) => unreachable!("object type `{other}` is listed but not read"),
+    }?;
+    if let Place::Sheet { objects, .. } = place {
+        let record = object_record(&fields, node, place_in_file, objects)?;
+        // An insert keeps its name in the model too, as it has since blocks.
+        if let Object::Insert(insert) = &mut object {
+            insert.name.clone_from(&record.name);
+        }
+        objects.push(record);
     }
+    Ok(object)
 }
 
 fn line(fields: &Fields, units: Unit, layer: String) -> Result<Line, Error> {

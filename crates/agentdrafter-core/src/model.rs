@@ -366,6 +366,18 @@ pub struct Sheet {
     pub objects: Vec<Object>,
 }
 
+/// The ID and the name an object of a DWG carries in AgentDrafter's
+/// extended data. An object AgentDrafter did not build carries neither;
+/// one it built always carries its ID, such as `DEMO-001/border`, and its
+/// name if it has one. An insert's name is its [`Insert`]'s name as well.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdAndName {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 /// What the core read from a DWG.
 ///
 /// Lengths are in the drawing's own units, unconverted.
@@ -402,6 +414,10 @@ pub struct DrawingContents {
     pub blocks_not_read: usize,
     /// The model-space objects the core has a model for, in drawing order.
     pub objects: Vec<Object>,
+    /// The ID and name each of `objects` carries in AgentDrafter's extended
+    /// data, in the same order.
+    #[serde(default)]
+    pub ids_and_names: Vec<IdAndName>,
     /// How many model-space objects the core has no model for yet, including
     /// those that set their own colour, linetype or lineweight rather than
     /// taking their layer's.

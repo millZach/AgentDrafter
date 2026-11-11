@@ -62,6 +62,18 @@ const ANGLE: Place = Place {
     json: r#"{"units": "mm", "objects": [{"arc": {"center": [0, 0, 0], "radius": 1, "start_angle": V, "end_angle": 1}}]}"#,
 };
 
+const OBJECT_ID: Place = Place {
+    name: "an object's id",
+    yaml: "units: mm\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1, id: V}\n",
+    json: r#"{"units": "mm", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1, "id": V}}]}"#,
+};
+
+const OBJECT_NAME: Place = Place {
+    name: "an object's name",
+    yaml: "units: mm\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1, name: V}\n",
+    json: r#"{"units": "mm", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1, "name": V}}]}"#,
+};
+
 const LAYER: Place = Place {
     name: "an object's layer",
     yaml: "units: mm\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1, layer: V}\n",
@@ -285,6 +297,27 @@ fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
         // A layer: 0 and '0' are one layer.
         (&LAYER, "0", json!(0), true),
         (&LAYER, "'0'", json!("0"), true),
+        // An object's ID: ASCII letters, digits, _ - . and :, as text.
+        (&OBJECT_ID, "pump-1", json!("pump-1"), true),
+        (&OBJECT_ID, "'loop:FT_101.3'", json!("loop:FT_101.3"), true),
+        (&OBJECT_ID, "101", json!(101), true),
+        (&OBJECT_ID, "'101'", json!("101"), true),
+        (&OBJECT_ID, "1.5", json!(1.5), true),
+        (&OBJECT_ID, "true", json!(true), true),
+        (&OBJECT_ID, "''", json!(""), false),
+        (&OBJECT_ID, "'a b'", json!("a b"), false),
+        (&OBJECT_ID, "'DEMO-001/a'", json!("DEMO-001/a"), false),
+        (&OBJECT_ID, "'objects[3]'", json!("objects[3]"), false),
+        (&OBJECT_ID, "'état'", json!("état"), false),
+        (&OBJECT_ID, "[a]", json!(["a"]), false),
+        (&OBJECT_ID, "{a: b}", json!({"a": "b"}), false),
+        // An object's name, which every object on a sheet may carry.
+        (&OBJECT_NAME, "frame", json!("frame"), true),
+        (&OBJECT_NAME, "'Pump P-101 frame'", json!("Pump P-101 frame"), true),
+        (&OBJECT_NAME, "7", json!(7), true),
+        (&OBJECT_NAME, "''", json!(""), false),
+        (&OBJECT_NAME, "' frame'", json!(" frame"), false),
+        (&OBJECT_NAME, "[a]", json!(["a"]), false),
         // A hatch's scale: a number more than 0, with no unit.
         (&SCALE, "2", json!(2), true),
         (&SCALE, "'0.5'", json!("0.5"), true),
@@ -526,6 +559,19 @@ fn library_cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
             &BLOCK_OBJECTS,
             "[{insert: {block: B, position: [0, 0, 0]}}]",
             json!([{"insert": {"block": "B", "position": [0, 0, 0]}}]),
+            false,
+        ),
+        // A block's objects take no ID or name: the insert is the object on a sheet.
+        (
+            &BLOCK_OBJECTS,
+            "[{circle: {center: [0, 0, 0], radius: 1, id: a}}]",
+            json!([{"circle": {"center": [0, 0, 0], "radius": 1, "id": "a"}}]),
+            false,
+        ),
+        (
+            &BLOCK_OBJECTS,
+            "[{circle: {center: [0, 0, 0], radius: 1, name: a}}]",
+            json!([{"circle": {"center": [0, 0, 0], "radius": 1, "name": "a"}}]),
             false,
         ),
     ]

@@ -14,9 +14,11 @@
 
 use std::path::Path;
 
+use super::ids::ObjectRecord;
+use super::records::SheetRecord;
 use super::set::{value_name_problem, Row};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
-use super::{bad_value, library_beside, read_file, scalar, sheet, Fields};
+use super::{bad_value, library_beside, read_file, scalar, sheet_and_records, Fields};
 use crate::error::{Error, ErrorCode};
 use crate::model::{BlockLibrary, Sheet};
 use crate::set::{Notice, NoticeCode};
@@ -45,32 +47,38 @@ struct Filled {
 /// names the template, and one in the block library it names, the library.
 /// A value of the row the template has no place for is added to `notices`,
 /// whether or not the sheet is built.
+///
+/// The sheet comes with the record of each of its objects and is named by
+/// its row, whose name joins its objects' IDs.
 pub(crate) fn read_template(
     path: &Path,
     row: &Row,
     rows_file: &Path,
     set_units: Unit,
     notices: &mut Vec<Notice>,
-) -> Result<Sheet, Error> {
+) -> Result<SheetRecord, Error> {
     let text = read_file(path, "the template")?;
     let mut library = None;
-    let sheet = fill(
+    let (sheet, objects) = fill_with_records(
         &text,
         row,
         rows_file,
         set_units,
         &mut library_beside(path, &mut library),
         notices,
-    );
-    sheet.map_err(|e| e.or_in_file(path))
+    )
+    .map_err(|e| e.or_in_file(path))?;
+    Ok(SheetRecord {
+        name: row.sheet.clone(),
+        file: path.to_owned(),
+        sheet,
+        objects,
+    })
 }
 
-/// Reads the text of a template as the sheet `row` names, filled in with
-/// the row's values. `load` reads the block library the template names, as
-/// for a sheet description. An error about a row's value names `rows_file`;
-/// any other is left for the caller to place in the template's file, unless
-/// it names the block library's. A value of the row the template has no
-/// place for is added to `notices`.
+/// Fills a template in from a row as [`fill_with_records`] does, without
+/// its objects' records.
+#[cfg(test)]
 pub(super) fn fill(
     text: &str,
     row: &Row,
@@ -79,6 +87,24 @@ pub(super) fn fill(
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
     notices: &mut Vec<Notice>,
 ) -> Result<Sheet, Error> {
+    fill_with_records(text, row, rows_file, set_units, load, notices).map(|(sheet, _)| sheet)
+}
+
+/// Reads the text of a template as the sheet `row` names, filled in with
+/// the row's values, with the record of each of the sheet's objects: where
+/// the template writes it and the ID it carries there. `load` reads the
+/// block library the template names, as for a sheet description. An error
+/// about a row's value names `rows_file`; any other is left for the caller
+/// to place in the template's file, unless it names the block library's. A
+/// value of the row the template has no place for is added to `notices`.
+pub(super) fn fill_with_records(
+    text: &str,
+    row: &Row,
+    rows_file: &Path,
+    set_units: Unit,
+    load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+    notices: &mut Vec<Notice>,
+) -> Result<(Sheet, Vec<ObjectRecord>), Error> {
     let mut root = strict_yaml::read(text)?;
     let mut filled: Vec<Filled> = Vec::new();
     let mut missing: Vec<(String, String)> = Vec::new();
@@ -105,7 +131,8 @@ pub(super) fn fill(
     if !missing.is_empty() {
         return Err(missing_values(row, &missing).in_file(rows_file));
     }
-    sheet(root, load, Some(set_units)).map_err(|e| at_row_value(e, &filled, row, rows_file))
+    sheet_and_records(root, load, Some(set_units))
+        .map_err(|e| at_row_value(e, &filled, row, rows_file))
 }
 
 /// A notice for each of the row's values its template has no place for.

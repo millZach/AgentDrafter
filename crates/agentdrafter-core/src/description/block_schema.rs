@@ -9,7 +9,8 @@
 
 use serde_json::{json, Map, Value};
 
-use super::blocks::{BLOCK_KEYS, FORBIDDEN_IN_PATHS, LONGEST_NAME, LONGEST_TAG};
+use super::blocks::{BLOCK_KEYS, FORBIDDEN_IN_PATHS, LONGEST_TAG};
+use super::ids::LONGEST_NAME;
 use super::schema::{object_def, NUMBER};
 use crate::model::LAYER_ZERO;
 use crate::text::Justify;
@@ -136,7 +137,6 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                     "propertyNames": { "$ref": "#/$defs/attribute_tag" },
                     "additionalProperties": { "$ref": "#/$defs/attribute_value" },
                 },
-                "name": { "$ref": "#/$defs/object_name" },
             }),
         ),
     );
