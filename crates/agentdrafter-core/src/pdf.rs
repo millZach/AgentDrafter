@@ -459,9 +459,12 @@ fn document_information(bytes: &[u8]) -> Option<Dictionary<'_>> {
     None
 }
 
-/// The cross-reference table at `at`, as where each object in use starts by
-/// its number and generation, and the trailer after it.
-fn cross_reference(bytes: &[u8], at: usize) -> Option<(Vec<(u64, u64, usize)>, Dictionary<'_>)> {
+/// Where each object in use starts, by its number and generation.
+type Places = Vec<(u64, u64, usize)>;
+
+/// The cross-reference table at `at`, as where each object it lists
+/// starts, and the trailer after it.
+fn cross_reference(bytes: &[u8], at: usize) -> Option<(Places, Dictionary<'_>)> {
     let mut lexer = Lexer::at(bytes, at);
     if lexer.next()? != Token::Word(b"xref") {
         return None;
