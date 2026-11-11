@@ -1,0 +1,236 @@
+# One row per loop sheet of the demo plant. Every tag, number, cable and
+# name here is made up. Each row names its template, gives the values the
+# template writes `{row: NAME}`, and holds its own two objects: the field
+# device, whose bubble sits at [2, 6.5, 0], and the controller I/O channel,
+# whose left side sits at [11.5, 6.5, 0]. The blocks are in blocks.yaml.
+rows:
+  # Analog inputs: two-wire transmitters, loop powered.
+  - sheet: DP-LD-101
+    template: templates/loop-2-wire.yaml
+    values:
+      TITLE: LOOP 101 - RAW WATER INLET FLOW
+      LOOP: '101'
+      AREA: 100 RAW WATER
+      DWG_NO: DP-LD-101
+      SHEET: 1 OF 8
+      REV: '0'
+      DATE: 2026-11-11
+      REV_DESC: FIRST ISSUE
+      SERVICE: FT-101 RAW WATER INLET FLOW
+      SIGNAL: 0-500 GPM = 4-20 mA, 2-WIRE, LOOP POWERED
+      FIELD_CABLE: C-101
+      FIELD_SPEC: 1 PR 16 AWG TSP
+      JB: JB-100
+      TB: TB1
+      TERM_1: '1'
+      TERM_2: '2'
+      WIRE_1: 101+
+      WIRE_2: 101-
+      HOME_CABLE: MC-100
+      HOME_SPEC: PR 01, 12 PR 16 AWG
+      CABINET: CONTROL PANEL CP-100
+    objects:
+      - insert: {block: TRANSMITTER, position: [2, 6.5, 0], attributes: {FUNC: FT, LOOP: '101'}, id: device, name: FT-101}
+      - insert: {block: AI_CHANNEL, position: [11.5, 6.5, 0], attributes: {T1: '1', T2: '2', CARD: R1-S02, CH: '01', POINT: FT101_PV}, id: io-channel, name: FT101_PV}
+
+  - sheet: DP-LD-102
+    template: templates/loop-2-wire.yaml
+    values:
+      TITLE: LOOP 102 - CLEARWELL LEVEL
+      LOOP: '102'
+      AREA: 100 RAW WATER
+      DWG_NO: DP-LD-102
+      SHEET: 2 OF 8
+      REV: '0'
+      DATE: 2026-11-11
+      REV_DESC: FIRST ISSUE
+      SERVICE: LT-102 CLEARWELL LEVEL
+      SIGNAL: 0-12 FT = 4-20 mA, 2-WIRE, LOOP POWERED
+      FIELD_CABLE: C-102
+      FIELD_SPEC: 1 PR 16 AWG TSP
+      JB: JB-100
+      TB: TB1
+      TERM_1: '3'
+      TERM_2: '4'
+      WIRE_1: 102+
+      WIRE_2: 102-
+      HOME_CABLE: MC-100
+      HOME_SPEC: PR 02, 12 PR 16 AWG
+      CABINET: CONTROL PANEL CP-100
+    objects:
+      - insert: {block: TRANSMITTER, position: [2, 6.5, 0], attributes: {FUNC: LT, LOOP: '102'}, id: device, name: LT-102}
+      - insert: {block: AI_CHANNEL, position: [11.5, 6.5, 0], attributes: {T1: '3', T2: '4', CARD: R1-S02, CH: '02', POINT: LT102_PV}, id: io-channel, name: LT102_PV}
+
+  # An RTD input: a three-wire element, on the three-wire template.
+  - sheet: DP-LD-103
+    template: templates/loop-3-wire.yaml
+    values:
+      TITLE: LOOP 103 - RAW WATER INLET TEMPERATURE
+      LOOP: '103'
+      AREA: 100 RAW WATER
+      DWG_NO: DP-LD-103
+      SHEET: 3 OF 8
+      REV: '0'
+      DATE: 2026-11-11
+      REV_DESC: FIRST ISSUE
+      SERVICE: TE-103 RAW WATER INLET TEMPERATURE
+      SIGNAL: 100 OHM PLATINUM RTD, 3-WIRE, 0-50 DEG C
+      FIELD_CABLE: C-103
+      FIELD_SPEC: 1 TRIAD 16 AWG TSP
+      JB: JB-100
+      TB: TB1
+      TERM_1: '5'
+      TERM_2: '6'
+      TERM_3: '7'
+      WIRE_1: 103A
+      WIRE_2: 103B
+      WIRE_3: 103C
+      HOME_CABLE: MC-101
+      HOME_SPEC: TR 01, 4 TRIAD 16 AWG
+      CABINET: CONTROL PANEL CP-100
+    objects:
+      - insert: {block: RTD, position: [2, 6.5, 0], attributes: {FUNC: TE, LOOP: '103'}, id: device, name: TE-103}
+      - insert: {block: RTD_CHANNEL, position: [11.5, 6.5, 0], attributes: {T1: '1', T2: '2', T3: '3', CARD: R1-S03, CH: '01', POINT: TE103_PV}, id: io-channel, name: TE103_PV}
+
+  # An analog output: a positioner on a control valve.
+  - sheet: DP-LD-104
+    template: templates/loop-2-wire.yaml
+    values:
+      TITLE: LOOP 104 - RAW WATER INLET FLOW CONTROL VALVE
+      LOOP: '104'
+      AREA: 100 RAW WATER
+      DWG_NO: DP-LD-104
+      SHEET: 4 OF 8
+      REV: '0'
+      DATE: 2026-11-11
+      REV_DESC: FIRST ISSUE
+      SERVICE: FY-104 RAW WATER INLET FLOW CONTROL
+      SIGNAL: 4-20 mA = CLOSED TO OPEN, VALVE FAILS CLOSED
+      FIELD_CABLE: C-104
+      FIELD_SPEC: 1 PR 16 AWG TSP
+      JB: JB-100
+      TB: TB1
+      TERM_1: '8'
+      TERM_2: '9'
+      WIRE_1: 104+
+      WIRE_2: 104-
+      HOME_CABLE: MC-100
+      HOME_SPEC: PR 03, 12 PR 16 AWG
+      CABINET: CONTROL PANEL CP-100
+    objects:
+      - insert: {block: CONTROL_VALVE, position: [2, 6.5, 0], attributes: {FUNC: FY, LOOP: '104', VALVE: FV-104}, id: device, name: FY-104}
+      - insert: {block: AO_CHANNEL, position: [11.5, 6.5, 0], attributes: {T1: '1', T2: '2', CARD: R1-S04, CH: '01', POINT: FV104_OUT}, id: io-channel, name: FV104_OUT}
+
+  # Discrete inputs: dry contacts the card wets with 24 V DC.
+  - sheet: DP-LD-201
+    template: templates/loop-2-wire.yaml
+    values:
+      TITLE: LOOP 201 - SUMP HIGH LEVEL
+      LOOP: '201'
+      AREA: 200 SUMP
+      DWG_NO: DP-LD-201
+      SHEET: 5 OF 8
+      REV: '0'
+      DATE: 2026-11-11
+      REV_DESC: FIRST ISSUE
+      SERVICE: LSH-201 SUMP HIGH LEVEL
+      SIGNAL: DRY CONTACT, CLOSES ON HIGH LEVEL
+      FIELD_CABLE: C-201
+      FIELD_SPEC: 1 PR 16 AWG TSP
+      JB: JB-200
+      TB: TB1
+      TERM_1: '1'
+      TERM_2: '2'
+      WIRE_1: 201-1
+      WIRE_2: 201-2
+      HOME_CABLE: MC-200
+      HOME_SPEC: PR 01, 8 PR 16 AWG
+      CABINET: CONTROL PANEL CP-100
+    objects:
+      - insert: {block: SWITCH, position: [2, 6.5, 0], attributes: {FUNC: LSH, LOOP: '201'}, id: device, name: LSH-201}
+      - insert: {block: DI_CHANNEL, position: [11.5, 6.5, 0], attributes: {T1: '1', T2: '2', CARD: R1-S05, CH: '01', POINT: LSH201_DI}, id: io-channel, name: LSH201_DI}
+
+  - sheet: DP-LD-202
+    template: templates/loop-2-wire.yaml
+    values:
+      TITLE: LOOP 202 - SUMP INLET VALVE CLOSED
+      LOOP: '202'
+      AREA: 200 SUMP
+      DWG_NO: DP-LD-202
+      SHEET: 6 OF 8
+      REV: '0'
+      DATE: 2026-11-11
+      REV_DESC: FIRST ISSUE
+      SERVICE: ZSC-202 SUMP INLET VALVE CLOSED
+      SIGNAL: DRY CONTACT, CLOSES WITH THE VALVE CLOSED
+      FIELD_CABLE: C-202
+      FIELD_SPEC: 1 PR 16 AWG TSP
+      JB: JB-200
+      TB: TB1
+      TERM_1: '3'
+      TERM_2: '4'
+      WIRE_1: 202-1
+      WIRE_2: 202-2
+      HOME_CABLE: MC-200
+      HOME_SPEC: PR 02, 8 PR 16 AWG
+      CABINET: CONTROL PANEL CP-100
+    objects:
+      - insert: {block: SWITCH, position: [2, 6.5, 0], attributes: {FUNC: ZSC, LOOP: '202'}, id: device, name: ZSC-202}
+      - insert: {block: DI_CHANNEL, position: [11.5, 6.5, 0], attributes: {T1: '3', T2: '4', CARD: R1-S05, CH: '02', POINT: ZSC202_DI}, id: io-channel, name: ZSC202_DI}
+
+  # Discrete outputs: 24 V DC solenoids on backwash valves.
+  - sheet: DP-LD-301
+    template: templates/loop-2-wire.yaml
+    values:
+      TITLE: LOOP 301 - FILTER 1 BACKWASH VALVE
+      LOOP: '301'
+      AREA: 300 FILTERS
+      DWG_NO: DP-LD-301
+      SHEET: 7 OF 8
+      REV: '0'
+      DATE: 2026-11-11
+      REV_DESC: FIRST ISSUE
+      SERVICE: XY-301 FILTER 1 BACKWASH VALVE SOLENOID
+      SIGNAL: 24 V DC, ENERGIZE TO OPEN
+      FIELD_CABLE: C-301
+      FIELD_SPEC: 1 PR 14 AWG
+      JB: JB-300
+      TB: TB1
+      TERM_1: '1'
+      TERM_2: '2'
+      WIRE_1: 301+
+      WIRE_2: 301-
+      HOME_CABLE: MC-300
+      HOME_SPEC: PR 01, 8 PR 14 AWG
+      CABINET: CONTROL PANEL CP-100
+    objects:
+      - insert: {block: SOLENOID_VALVE, position: [2, 6.5, 0], attributes: {FUNC: XY, LOOP: '301', VALVE: XV-301}, id: device, name: XY-301}
+      - insert: {block: DO_CHANNEL, position: [11.5, 6.5, 0], attributes: {T1: '1', T2: '2', CARD: R1-S06, CH: '01', POINT: XY301_DO}, id: io-channel, name: XY301_DO}
+
+  - sheet: DP-LD-302
+    template: templates/loop-2-wire.yaml
+    values:
+      TITLE: LOOP 302 - FILTER 2 BACKWASH VALVE
+      LOOP: '302'
+      AREA: 300 FILTERS
+      DWG_NO: DP-LD-302
+      SHEET: 8 OF 8
+      REV: '0'
+      DATE: 2026-11-11
+      REV_DESC: FIRST ISSUE
+      SERVICE: XY-302 FILTER 2 BACKWASH VALVE SOLENOID
+      SIGNAL: 24 V DC, ENERGIZE TO OPEN
+      FIELD_CABLE: C-302
+      FIELD_SPEC: 1 PR 14 AWG
+      JB: JB-300
+      TB: TB1
+      TERM_1: '3'
+      TERM_2: '4'
+      WIRE_1: 302+
+      WIRE_2: 302-
+      HOME_CABLE: MC-300
+      HOME_SPEC: PR 02, 8 PR 14 AWG
+      CABINET: CONTROL PANEL CP-100
+    objects:
+      - insert: {block: SOLENOID_VALVE, position: [2, 6.5, 0], attributes: {FUNC: XY, LOOP: '302', VALVE: XV-302}, id: device, name: XY-302}
+      - insert: {block: DO_CHANNEL, position: [11.5, 6.5, 0], attributes: {T1: '3', T2: '4', CARD: R1-S06, CH: '02', POINT: XY302_DO}, id: io-channel, name: XY302_DO}

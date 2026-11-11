@@ -7,6 +7,8 @@
 *.dwl2
 # Renders of the examples: build them again from the sheet descriptions.
 examples/*.png
+# What building and plotting the demo plant writes: build and plot it again.
+examples/demo-plant/dwg/
 !demo-plant/**/*.dwg
 !demo-plant/**/*.dxf
 !tests/fixtures/**/*.dwg

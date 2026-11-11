@@ -59,6 +59,8 @@ objects:
 
 `agentdrafter build examples/demo-set` writes `examples/demo-set/dwg/DEMO-001.dwg`, `DEMO-002.dwg` and `DEMO-003.dwg`, each with its row's values in its title block.
 
+`examples/demo-plant/` is the demo plant's loop sheets, a larger set built the same way: eight sheets from two templates, one for loops of two wires and one for three, where each row gives its loop's values and holds its own two objects, its field device and its I/O channel, since their blocks differ from loop to loop and a template names its blocks itself. CI builds, plots and checks it on Windows, Linux and macOS.
+
 ## The settings
 
 The settings are the file `set.yaml` at the top of the set's folder. `agentdrafter build` finds the set by it.

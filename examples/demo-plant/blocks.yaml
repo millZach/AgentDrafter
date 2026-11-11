@@ -1,0 +1,301 @@
+# The demo plant's block library, made up for AgentDrafter's examples, in
+# inches: a title block and a revision block, a junction box terminal and a
+# cable tag, five field devices and five controller I/O channels. Nothing in
+# it is taken from a real plant, a real drawing or a vendor's block. Each text
+# gives the cell the checker holds it to.
+#
+# A field device's base point is the centre of its bubble, and its wires land
+# at the right of its terminal head: at [1.25, 0.25, 0] and [1.25, -0.25, 0],
+# or for three wires at [1.25, 0.4, 0], [1.25, 0, 0] and [1.25, -0.4, 0]. An
+# I/O channel's base point is the middle of its left side, where its terminals
+# take the same wires. The templates draw the wires between them.
+units: in
+layers:
+  title: {color: white, lineweight: 0.5}
+  title-line: {color: white, lineweight: 0.25}
+  title-text: {color: white}
+  symbol: {color: white, lineweight: 0.35}
+  symbol-line: {color: white, lineweight: 0.25}
+  symbol-text: {color: blue}
+text_styles:
+  title: {font: romans.shx, width_factor: 0.8}
+  symbol: {font: romans.shx, width_factor: 0.8}
+blocks:
+  # 6.5 by 2 inches, its base point its lower right corner, so a template
+  # inserts it at the inner corner of its border.
+  LOOP_TITLE:
+    objects:
+      - polyline: {points: [[-6.5, 0, 0], [0, 0, 0], [0, 2, 0], [-6.5, 2, 0]], closed: true, layer: title}
+      - line: {from: [-6.5, 1.5, 0], to: [0, 1.5, 0], layer: title-line}
+      - line: {from: [-6.5, 1, 0], to: [0, 1, 0], layer: title-line}
+      - line: {from: [-6.5, 0.5, 0], to: [0, 0.5, 0], layer: title-line}
+      - line: {from: [-4.5, 0.5, 0], to: [-4.5, 1, 0], layer: title-line}
+      - line: {from: [-2.3, 0, 0], to: [-2.3, 1, 0], layer: title-line}
+      - line: {from: [-1.15, 0.5, 0], to: [-1.15, 1, 0], layer: title-line}
+      - line: {from: [-4, 0, 0], to: [-4, 0.5, 0], layer: title-line}
+      - line: {from: [-3, 0, 0], to: [-3, 0.5, 0], layer: title-line}
+      - line: {from: [-1, 0, 0], to: [-1, 0.5, 0], layer: title-line}
+      - text: {contents: DEMO PLANT, position: [-3.25, 1.75, 0], height: 0.22, style: title, justify: middle_center, layer: title-text, cell: [[-6.5, 1.5, 0], [0, 2, 0]]}
+      - text: {contents: LOOP DIAGRAM, position: [-6.45, 1.45, 0], height: 0.07, style: title, justify: top_left, layer: title-text, cell: [[-6.5, 1, 0], [0, 1.5, 0]]}
+      - attdef: {tag: TITLE, prompt: Title, position: [-3.25, 1.2, 0], height: 0.14, style: title, justify: middle_center, layer: title-text, cell: [[-6.5, 1, 0], [0, 1.5, 0]]}
+      - text: {contents: LOOP NO., position: [-6.45, 0.95, 0], height: 0.07, style: title, justify: top_left, layer: title-text, cell: [[-6.5, 0.5, 0], [-4.5, 1, 0]]}
+      - text: {contents: AREA, position: [-4.45, 0.95, 0], height: 0.07, style: title, justify: top_left, layer: title-text, cell: [[-4.5, 0.5, 0], [-2.3, 1, 0]]}
+      - text: {contents: DRAWN, position: [-2.25, 0.95, 0], height: 0.07, style: title, justify: top_left, layer: title-text, cell: [[-2.3, 0.5, 0], [-1.15, 1, 0]]}
+      - text: {contents: CHECKED, position: [-1.1, 0.95, 0], height: 0.07, style: title, justify: top_left, layer: title-text, cell: [[-1.15, 0.5, 0], [0, 1, 0]]}
+      - attdef: {tag: LOOP, prompt: Loop number, position: [-5.5, 0.68, 0], height: 0.12, style: title, justify: middle_center, layer: title-text, cell: [[-6.5, 0.5, 0], [-4.5, 1, 0]]}
+      - attdef: {tag: AREA, prompt: Area, position: [-3.4, 0.68, 0], height: 0.12, style: title, justify: middle_center, layer: title-text, cell: [[-4.5, 0.5, 0], [-2.3, 1, 0]]}
+      - attdef: {tag: DRAWN, prompt: Drawn by, position: [-1.725, 0.68, 0], height: 0.12, style: title, justify: middle_center, layer: title-text, cell: [[-2.3, 0.5, 0], [-1.15, 1, 0]]}
+      - attdef: {tag: CHECKED, prompt: Checked by, position: [-0.575, 0.68, 0], height: 0.12, style: title, justify: middle_center, layer: title-text, cell: [[-1.15, 0.5, 0], [0, 1, 0]]}
+      - text: {contents: DWG NO., position: [-6.45, 0.45, 0], height: 0.07, style: title, justify: top_left, layer: title-text, cell: [[-6.5, 0, 0], [-4, 0.5, 0]]}
+      - text: {contents: SHEET, position: [-3.95, 0.45, 0], height: 0.07, style: title, justify: top_left, layer: title-text, cell: [[-4, 0, 0], [-3, 0.5, 0]]}
+      - text: {contents: REV, position: [-2.95, 0.45, 0], height: 0.07, style: title, justify: top_left, layer: title-text, cell: [[-3, 0, 0], [-2.3, 0.5, 0]]}
+      - text: {contents: DATE, position: [-2.25, 0.45, 0], height: 0.07, style: title, justify: top_left, layer: title-text, cell: [[-2.3, 0, 0], [-1, 0.5, 0]]}
+      - text: {contents: SCALE, position: [-0.95, 0.45, 0], height: 0.07, style: title, justify: top_left, layer: title-text, cell: [[-1, 0, 0], [0, 0.5, 0]]}
+      - attdef: {tag: DWG_NO, prompt: Drawing number, position: [-5.25, 0.18, 0], height: 0.14, style: title, justify: middle_center, layer: title-text, cell: [[-6.5, 0, 0], [-4, 0.5, 0]]}
+      - attdef: {tag: SHEET, prompt: Sheet, position: [-3.5, 0.18, 0], height: 0.12, style: title, justify: middle_center, layer: title-text, cell: [[-4, 0, 0], [-3, 0.5, 0]]}
+      - attdef: {tag: REV, prompt: Revision, default: '0', position: [-2.65, 0.18, 0], height: 0.12, style: title, justify: middle_center, layer: title-text, cell: [[-3, 0, 0], [-2.3, 0.5, 0]]}
+      - attdef: {tag: DATE, prompt: Date, position: [-1.65, 0.18, 0], height: 0.12, style: title, justify: middle_center, layer: title-text, cell: [[-2.3, 0, 0], [-1, 0.5, 0]]}
+      - attdef: {tag: SCALE, prompt: Scale, default: NONE, position: [-0.5, 0.18, 0], height: 0.12, style: title, justify: middle_center, layer: title-text, cell: [[-1, 0, 0], [0, 0.5, 0]]}
+
+  # 3.5 by 2 inches, its base point its lower right corner: a heading, the
+  # column names and four revision lines, filled in from the top.
+  REVISIONS:
+    objects:
+      - polyline: {points: [[-3.5, 0, 0], [0, 0, 0], [0, 2, 0], [-3.5, 2, 0]], closed: true, layer: title}
+      - line: {from: [-3.5, 1.7, 0], to: [0, 1.7, 0], layer: title-line}
+      - line: {from: [-3.5, 1.4, 0], to: [0, 1.4, 0], layer: title-line}
+      - line: {from: [-3.5, 1.05, 0], to: [0, 1.05, 0], layer: title-line}
+      - line: {from: [-3.5, 0.7, 0], to: [0, 0.7, 0], layer: title-line}
+      - line: {from: [-3.5, 0.35, 0], to: [0, 0.35, 0], layer: title-line}
+      - line: {from: [-3.1, 0, 0], to: [-3.1, 1.7, 0], layer: title-line}
+      - line: {from: [-2.2, 0, 0], to: [-2.2, 1.7, 0], layer: title-line}
+      - line: {from: [-0.4, 0, 0], to: [-0.4, 1.7, 0], layer: title-line}
+      - text: {contents: REVISIONS, position: [-1.75, 1.85, 0], height: 0.12, style: title, justify: middle_center, layer: title-text, cell: [[-3.5, 1.7, 0], [0, 2, 0]]}
+      - text: {contents: REV, position: [-3.3, 1.55, 0], height: 0.08, style: title, justify: middle_center, layer: title-text, cell: [[-3.5, 1.4, 0], [-3.1, 1.7, 0]]}
+      - text: {contents: DATE, position: [-2.65, 1.55, 0], height: 0.08, style: title, justify: middle_center, layer: title-text, cell: [[-3.1, 1.4, 0], [-2.2, 1.7, 0]]}
+      - text: {contents: DESCRIPTION, position: [-1.3, 1.55, 0], height: 0.08, style: title, justify: middle_center, layer: title-text, cell: [[-2.2, 1.4, 0], [-0.4, 1.7, 0]]}
+      - text: {contents: BY, position: [-0.2, 1.55, 0], height: 0.08, style: title, justify: middle_center, layer: title-text, cell: [[-0.4, 1.4, 0], [0, 1.7, 0]]}
+      - attdef: {tag: REV_1, prompt: Revision 1, position: [-3.3, 1.225, 0], height: 0.1, style: title, justify: middle_center, layer: title-text, cell: [[-3.5, 1.05, 0], [-3.1, 1.4, 0]]}
+      - attdef: {tag: DATE_1, prompt: Revision 1 date, position: [-2.65, 1.225, 0], height: 0.09, style: title, justify: middle_center, layer: title-text, cell: [[-3.1, 1.05, 0], [-2.2, 1.4, 0]]}
+      - attdef: {tag: DESC_1, prompt: Revision 1 description, position: [-2.15, 1.225, 0], height: 0.09, style: title, justify: middle_left, layer: title-text, cell: [[-2.2, 1.05, 0], [-0.4, 1.4, 0]]}
+      - attdef: {tag: BY_1, prompt: Revision 1 by, position: [-0.2, 1.225, 0], height: 0.09, style: title, justify: middle_center, layer: title-text, cell: [[-0.4, 1.05, 0], [0, 1.4, 0]]}
+      - attdef: {tag: REV_2, prompt: Revision 2, position: [-3.3, 0.875, 0], height: 0.1, style: title, justify: middle_center, layer: title-text, cell: [[-3.5, 0.7, 0], [-3.1, 1.05, 0]]}
+      - attdef: {tag: DATE_2, prompt: Revision 2 date, position: [-2.65, 0.875, 0], height: 0.09, style: title, justify: middle_center, layer: title-text, cell: [[-3.1, 0.7, 0], [-2.2, 1.05, 0]]}
+      - attdef: {tag: DESC_2, prompt: Revision 2 description, position: [-2.15, 0.875, 0], height: 0.09, style: title, justify: middle_left, layer: title-text, cell: [[-2.2, 0.7, 0], [-0.4, 1.05, 0]]}
+      - attdef: {tag: BY_2, prompt: Revision 2 by, position: [-0.2, 0.875, 0], height: 0.09, style: title, justify: middle_center, layer: title-text, cell: [[-0.4, 0.7, 0], [0, 1.05, 0]]}
+      - attdef: {tag: REV_3, prompt: Revision 3, position: [-3.3, 0.525, 0], height: 0.1, style: title, justify: middle_center, layer: title-text, cell: [[-3.5, 0.35, 0], [-3.1, 0.7, 0]]}
+      - attdef: {tag: DATE_3, prompt: Revision 3 date, position: [-2.65, 0.525, 0], height: 0.09, style: title, justify: middle_center, layer: title-text, cell: [[-3.1, 0.35, 0], [-2.2, 0.7, 0]]}
+      - attdef: {tag: DESC_3, prompt: Revision 3 description, position: [-2.15, 0.525, 0], height: 0.09, style: title, justify: middle_left, layer: title-text, cell: [[-2.2, 0.35, 0], [-0.4, 0.7, 0]]}
+      - attdef: {tag: BY_3, prompt: Revision 3 by, position: [-0.2, 0.525, 0], height: 0.09, style: title, justify: middle_center, layer: title-text, cell: [[-0.4, 0.35, 0], [0, 0.7, 0]]}
+      - attdef: {tag: REV_4, prompt: Revision 4, position: [-3.3, 0.175, 0], height: 0.1, style: title, justify: middle_center, layer: title-text, cell: [[-3.5, 0, 0], [-3.1, 0.35, 0]]}
+      - attdef: {tag: DATE_4, prompt: Revision 4 date, position: [-2.65, 0.175, 0], height: 0.09, style: title, justify: middle_center, layer: title-text, cell: [[-3.1, 0, 0], [-2.2, 0.35, 0]]}
+      - attdef: {tag: DESC_4, prompt: Revision 4 description, position: [-2.15, 0.175, 0], height: 0.09, style: title, justify: middle_left, layer: title-text, cell: [[-2.2, 0, 0], [-0.4, 0.35, 0]]}
+      - attdef: {tag: BY_4, prompt: Revision 4 by, position: [-0.2, 0.175, 0], height: 0.09, style: title, justify: middle_center, layer: title-text, cell: [[-0.4, 0, 0], [0, 0.35, 0]]}
+
+  # One terminal of a junction box's terminal strip, 0.6 by 0.3 inches, its
+  # base point its centre. A wire lands on each end.
+  TERMINAL:
+    objects:
+      - polyline: {points: [[-0.3, -0.15, 0], [0.3, -0.15, 0], [0.3, 0.15, 0], [-0.3, 0.15, 0]], closed: true, layer: symbol-line}
+      - attdef: {tag: TERM, prompt: Terminal number, position: [0, 0, 0], height: 0.1, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.3, -0.15, 0], [0.3, 0.15, 0]]}
+
+  # A cable's number in a flag, with what the cable is above it. Its base
+  # point is the middle of the flag's lower side.
+  CABLE_TAG:
+    objects:
+      - polyline: {points: [[-0.5, 0, 0], [0.5, 0, 0], [0.6, 0.12, 0], [0.5, 0.24, 0], [-0.5, 0.24, 0], [-0.6, 0.12, 0]], closed: true, layer: symbol-line}
+      - attdef: {tag: CABLE, prompt: Cable number, position: [0, 0.12, 0], height: 0.1, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.5, 0, 0], [0.5, 0.24, 0]]}
+      - attdef: {tag: SPEC, prompt: Cable, position: [0, 0.32, 0], height: 0.08, style: symbol, justify: bottom_center, layer: symbol-text, cell: [[-1, 0.24, 0], [1, 0.5, 0]]}
+
+  # Field devices. Each is a bubble with the device's letters above its loop
+  # number, and a terminal head its wires land on.
+  TRANSMITTER:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 0.3, layer: symbol}
+      - attdef: {tag: FUNC, prompt: Letters, position: [0, 0.09, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.25, 0, 0], [0.25, 0.25, 0]]}
+      - attdef: {tag: LOOP, prompt: Loop number, position: [0, -0.09, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.25, -0.25, 0], [0.25, 0, 0]]}
+      - line: {from: [0.3, 0, 0], to: [0.6, 0, 0], layer: symbol-line}
+      - polyline: {points: [[0.6, -0.45, 0], [1.2, -0.45, 0], [1.2, 0.45, 0], [0.6, 0.45, 0]], closed: true, layer: symbol-line}
+      - circle: {center: [1.2, 0.25, 0], radius: 0.05, layer: symbol-line}
+      - circle: {center: [1.2, -0.25, 0], radius: 0.05, layer: symbol-line}
+      - text: {contents: +, position: [0.95, 0.25, 0], height: 0.1, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0.6, 0.05, 0], [1.15, 0.45, 0]]}
+      - text: {contents: '-', position: [0.95, -0.25, 0], height: 0.1, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0.6, -0.45, 0], [1.15, -0.05, 0]]}
+
+  # A contact that opens or closes with what it senses: common and normally open.
+  SWITCH:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 0.3, layer: symbol}
+      - attdef: {tag: FUNC, prompt: Letters, position: [0, 0.09, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.25, 0, 0], [0.25, 0.25, 0]]}
+      - attdef: {tag: LOOP, prompt: Loop number, position: [0, -0.09, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.25, -0.25, 0], [0.25, 0, 0]]}
+      - line: {from: [0.3, 0, 0], to: [0.6, 0, 0], layer: symbol-line}
+      - polyline: {points: [[0.6, -0.45, 0], [1.2, -0.45, 0], [1.2, 0.45, 0], [0.6, 0.45, 0]], closed: true, layer: symbol-line}
+      - circle: {center: [1.2, 0.25, 0], radius: 0.05, layer: symbol-line}
+      - circle: {center: [1.2, -0.25, 0], radius: 0.05, layer: symbol-line}
+      - polyline: {points: [[1.15, 0.25, 0], [0.75, 0.25, 0], [0.75, 0.08, 0]], layer: symbol-line}
+      - polyline: {points: [[1.15, -0.25, 0], [0.75, -0.25, 0], [0.75, -0.08, 0]], layer: symbol-line}
+      - line: {from: [0.75, -0.08, 0], to: [0.84, 0.1, 0], layer: symbol-line}
+      - text: {contents: C, position: [0.97, 0.3, 0], height: 0.08, style: symbol, justify: bottom_center, layer: symbol-text, cell: [[0.8, 0.27, 0], [1.15, 0.45, 0]]}
+      - text: {contents: NO, position: [0.97, -0.2, 0], height: 0.08, style: symbol, justify: bottom_center, layer: symbol-text, cell: [[0.8, -0.23, 0], [1.15, -0.05, 0]]}
+
+  # A solenoid that opens a valve, the valve's tag beside it.
+  SOLENOID_VALVE:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 0.3, layer: symbol}
+      - attdef: {tag: FUNC, prompt: Letters, position: [0, 0.09, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.25, 0, 0], [0.25, 0.25, 0]]}
+      - attdef: {tag: LOOP, prompt: Loop number, position: [0, -0.09, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.25, -0.25, 0], [0.25, 0, 0]]}
+      - line: {from: [0.3, 0, 0], to: [0.6, 0, 0], layer: symbol-line}
+      - polyline: {points: [[0.6, -0.45, 0], [1.2, -0.45, 0], [1.2, 0.45, 0], [0.6, 0.45, 0]], closed: true, layer: symbol-line}
+      - circle: {center: [1.2, 0.25, 0], radius: 0.05, layer: symbol-line}
+      - circle: {center: [1.2, -0.25, 0], radius: 0.05, layer: symbol-line}
+      - text: {contents: +, position: [0.95, 0.25, 0], height: 0.1, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0.6, 0.05, 0], [1.15, 0.45, 0]]}
+      - text: {contents: '-', position: [0.95, -0.25, 0], height: 0.1, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0.6, -0.45, 0], [1.15, -0.05, 0]]}
+      - line: {from: [0, -0.3, 0], to: [0, -0.5, 0], layer: symbol-line}
+      - polyline: {points: [[-0.15, -0.8, 0], [0.15, -0.8, 0], [0.15, -0.5, 0], [-0.15, -0.5, 0]], closed: true, layer: symbol}
+      - text: {contents: S, position: [0, -0.65, 0], height: 0.12, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.15, -0.8, 0], [0.15, -0.5, 0]]}
+      - line: {from: [0, -0.8, 0], to: [0, -1.2, 0], layer: symbol}
+      - polyline: {points: [[-0.3, -1.02, 0], [0.3, -1.38, 0], [0.3, -1.02, 0], [-0.3, -1.38, 0]], closed: true, layer: symbol}
+      - attdef: {tag: VALVE, prompt: Valve tag, position: [0.4, -1.2, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[0.35, -1.35, 0], [1.3, -1.05, 0]]}
+
+  # A positioner on a control valve with a diaphragm actuator, the valve's
+  # tag beside it.
+  CONTROL_VALVE:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 0.3, layer: symbol}
+      - attdef: {tag: FUNC, prompt: Letters, position: [0, 0.09, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.25, 0, 0], [0.25, 0.25, 0]]}
+      - attdef: {tag: LOOP, prompt: Loop number, position: [0, -0.09, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.25, -0.25, 0], [0.25, 0, 0]]}
+      - line: {from: [0.3, 0, 0], to: [0.6, 0, 0], layer: symbol-line}
+      - polyline: {points: [[0.6, -0.45, 0], [1.2, -0.45, 0], [1.2, 0.45, 0], [0.6, 0.45, 0]], closed: true, layer: symbol-line}
+      - circle: {center: [1.2, 0.25, 0], radius: 0.05, layer: symbol-line}
+      - circle: {center: [1.2, -0.25, 0], radius: 0.05, layer: symbol-line}
+      - text: {contents: +, position: [0.95, 0.25, 0], height: 0.1, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0.6, 0.05, 0], [1.15, 0.45, 0]]}
+      - text: {contents: '-', position: [0.95, -0.25, 0], height: 0.1, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0.6, -0.45, 0], [1.15, -0.05, 0]]}
+      - line: {from: [0, -0.3, 0], to: [0, -0.55, 0], layer: symbol-line}
+      - arc: {center: [0, -0.8, 0], radius: 0.25, start_angle: 0, end_angle: 180, layer: symbol}
+      - line: {from: [-0.25, -0.8, 0], to: [0.25, -0.8, 0], layer: symbol}
+      - line: {from: [0, -0.8, 0], to: [0, -1.2, 0], layer: symbol}
+      - polyline: {points: [[-0.3, -1.02, 0], [0.3, -1.38, 0], [0.3, -1.02, 0], [-0.3, -1.38, 0]], closed: true, layer: symbol}
+      - attdef: {tag: VALVE, prompt: Valve tag, position: [0.4, -1.2, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[0.35, -1.35, 0], [1.3, -1.05, 0]]}
+
+  # A three-wire resistance temperature element in a thermowell.
+  RTD:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 0.3, layer: symbol}
+      - attdef: {tag: FUNC, prompt: Letters, position: [0, 0.09, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.25, 0, 0], [0.25, 0.25, 0]]}
+      - attdef: {tag: LOOP, prompt: Loop number, position: [0, -0.09, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[-0.25, -0.25, 0], [0.25, 0, 0]]}
+      - line: {from: [0.3, 0, 0], to: [0.6, 0, 0], layer: symbol-line}
+      - polyline: {points: [[0.6, -0.6, 0], [1.2, -0.6, 0], [1.2, 0.6, 0], [0.6, 0.6, 0]], closed: true, layer: symbol-line}
+      - circle: {center: [1.2, 0.4, 0], radius: 0.05, layer: symbol-line}
+      - circle: {center: [1.2, 0, 0], radius: 0.05, layer: symbol-line}
+      - circle: {center: [1.2, -0.4, 0], radius: 0.05, layer: symbol-line}
+      - text: {contents: A, position: [0.95, 0.4, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0.6, 0.25, 0], [1.15, 0.55, 0]]}
+      - text: {contents: B, position: [0.95, 0, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0.6, -0.15, 0], [1.15, 0.15, 0]]}
+      - text: {contents: C, position: [0.95, -0.4, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0.6, -0.55, 0], [1.15, -0.25, 0]]}
+      - line: {from: [0, -0.3, 0], to: [0, -0.5, 0], layer: symbol-line}
+      - polyline: {points: [[-0.08, -0.5, 0], [-0.08, -1.1, 0], [0, -1.18, 0], [0.08, -1.1, 0], [0.08, -0.5, 0]], layer: symbol}
+
+  # Controller I/O channels. Each is the channel's part of an I/O card: its
+  # terminals on the left, what the card does with the signal, and the card,
+  # channel and controller point it is.
+  AI_CHANNEL:
+    objects:
+      - polyline: {points: [[0, -1.2, 0], [3.6, -1.2, 0], [3.6, 1.2, 0], [0, 1.2, 0]], closed: true, layer: symbol}
+      - line: {from: [0, 0.85, 0], to: [3.6, 0.85, 0], layer: symbol-line}
+      - text: {contents: ANALOG INPUT 4-20 mA, position: [1.8, 1.025, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, 0.85, 0], [3.6, 1.2, 0]]}
+      - polyline: {points: [[0, 0.1, 0], [0.35, 0.1, 0], [0.35, 0.4, 0], [0, 0.4, 0]], closed: true, layer: symbol-line}
+      - polyline: {points: [[0, -0.4, 0], [0.35, -0.4, 0], [0.35, -0.1, 0], [0, -0.1, 0]], closed: true, layer: symbol-line}
+      - attdef: {tag: T1, prompt: Positive terminal, position: [0.175, 0.25, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, 0.1, 0], [0.35, 0.4, 0]]}
+      - attdef: {tag: T2, prompt: Negative terminal, position: [0.175, -0.25, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, -0.4, 0], [0.35, -0.1, 0]]}
+      - polyline: {points: [[0.35, 0.25, 0], [0.8, 0.25, 0], [0.8, 0.15, 0]], layer: symbol-line}
+      - polyline: {points: [[0.35, -0.25, 0], [0.8, -0.25, 0], [0.8, -0.15, 0]], layer: symbol-line}
+      - polyline: {points: [[0.8, 0.15, 0], [0.86, 0.125, 0], [0.74, 0.075, 0], [0.86, 0.025, 0], [0.74, -0.025, 0], [0.86, -0.075, 0], [0.74, -0.125, 0], [0.8, -0.15, 0]], layer: symbol-line}
+      - text: {contents: CARD, position: [1.5, 0.55, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, 0.4, 0], [2.3, 0.7, 0]]}
+      - text: {contents: CHANNEL, position: [1.5, 0.2, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, 0.05, 0], [2.3, 0.35, 0]]}
+      - text: {contents: POINT, position: [1.5, -0.15, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, -0.3, 0], [2.3, 0, 0]]}
+      - attdef: {tag: CARD, prompt: Card, position: [2.35, 0.55, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, 0.4, 0], [3.55, 0.7, 0]]}
+      - attdef: {tag: CH, prompt: Channel, position: [2.35, 0.2, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, 0.05, 0], [3.55, 0.35, 0]]}
+      - attdef: {tag: POINT, prompt: Controller point, position: [2.35, -0.15, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, -0.3, 0], [3.55, 0, 0]]}
+
+  AO_CHANNEL:
+    objects:
+      - polyline: {points: [[0, -1.2, 0], [3.6, -1.2, 0], [3.6, 1.2, 0], [0, 1.2, 0]], closed: true, layer: symbol}
+      - line: {from: [0, 0.85, 0], to: [3.6, 0.85, 0], layer: symbol-line}
+      - text: {contents: ANALOG OUTPUT 4-20 mA, position: [1.8, 1.025, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, 0.85, 0], [3.6, 1.2, 0]]}
+      - polyline: {points: [[0, 0.1, 0], [0.35, 0.1, 0], [0.35, 0.4, 0], [0, 0.4, 0]], closed: true, layer: symbol-line}
+      - polyline: {points: [[0, -0.4, 0], [0.35, -0.4, 0], [0.35, -0.1, 0], [0, -0.1, 0]], closed: true, layer: symbol-line}
+      - attdef: {tag: T1, prompt: Positive terminal, position: [0.175, 0.25, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, 0.1, 0], [0.35, 0.4, 0]]}
+      - attdef: {tag: T2, prompt: Negative terminal, position: [0.175, -0.25, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, -0.4, 0], [0.35, -0.1, 0]]}
+      - polyline: {points: [[0.35, 0.25, 0], [0.8, 0.25, 0], [0.8, 0.15, 0]], layer: symbol-line}
+      - polyline: {points: [[0.35, -0.25, 0], [0.8, -0.25, 0], [0.8, -0.15, 0]], layer: symbol-line}
+      - circle: {center: [0.8, 0, 0], radius: 0.15, layer: symbol-line}
+      - line: {from: [0.8, -0.1, 0], to: [0.8, 0.06, 0], layer: symbol-line}
+      - polyline: {points: [[0.76, 0.04, 0], [0.84, 0.04, 0], [0.8, 0.1, 0]], closed: true, layer: symbol-line}
+      - text: {contents: CARD, position: [1.5, 0.55, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, 0.4, 0], [2.3, 0.7, 0]]}
+      - text: {contents: CHANNEL, position: [1.5, 0.2, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, 0.05, 0], [2.3, 0.35, 0]]}
+      - text: {contents: POINT, position: [1.5, -0.15, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, -0.3, 0], [2.3, 0, 0]]}
+      - attdef: {tag: CARD, prompt: Card, position: [2.35, 0.55, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, 0.4, 0], [3.55, 0.7, 0]]}
+      - attdef: {tag: CH, prompt: Channel, position: [2.35, 0.2, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, 0.05, 0], [3.55, 0.35, 0]]}
+      - attdef: {tag: POINT, prompt: Controller point, position: [2.35, -0.15, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, -0.3, 0], [3.55, 0, 0]]}
+
+  DI_CHANNEL:
+    objects:
+      - polyline: {points: [[0, -1.2, 0], [3.6, -1.2, 0], [3.6, 1.2, 0], [0, 1.2, 0]], closed: true, layer: symbol}
+      - line: {from: [0, 0.85, 0], to: [3.6, 0.85, 0], layer: symbol-line}
+      - text: {contents: DISCRETE INPUT 24 VDC, position: [1.8, 1.025, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, 0.85, 0], [3.6, 1.2, 0]]}
+      - polyline: {points: [[0, 0.1, 0], [0.35, 0.1, 0], [0.35, 0.4, 0], [0, 0.4, 0]], closed: true, layer: symbol-line}
+      - polyline: {points: [[0, -0.4, 0], [0.35, -0.4, 0], [0.35, -0.1, 0], [0, -0.1, 0]], closed: true, layer: symbol-line}
+      - attdef: {tag: T1, prompt: Terminal 1, position: [0.175, 0.25, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, 0.1, 0], [0.35, 0.4, 0]]}
+      - attdef: {tag: T2, prompt: Terminal 2, position: [0.175, -0.25, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, -0.4, 0], [0.35, -0.1, 0]]}
+      - polyline: {points: [[0.35, 0.25, 0], [0.8, 0.25, 0], [0.8, 0.08, 0]], layer: symbol-line}
+      - polyline: {points: [[0.35, -0.25, 0], [0.8, -0.25, 0], [0.8, -0.06, 0]], layer: symbol-line}
+      - polyline: {points: [[0.72, 0.08, 0], [0.88, 0.08, 0], [0.8, -0.06, 0]], closed: true, layer: symbol-line}
+      - line: {from: [0.72, -0.06, 0], to: [0.88, -0.06, 0], layer: symbol-line}
+      - text: {contents: CARD, position: [1.5, 0.55, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, 0.4, 0], [2.3, 0.7, 0]]}
+      - text: {contents: CHANNEL, position: [1.5, 0.2, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, 0.05, 0], [2.3, 0.35, 0]]}
+      - text: {contents: POINT, position: [1.5, -0.15, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, -0.3, 0], [2.3, 0, 0]]}
+      - attdef: {tag: CARD, prompt: Card, position: [2.35, 0.55, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, 0.4, 0], [3.55, 0.7, 0]]}
+      - attdef: {tag: CH, prompt: Channel, position: [2.35, 0.2, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, 0.05, 0], [3.55, 0.35, 0]]}
+      - attdef: {tag: POINT, prompt: Controller point, position: [2.35, -0.15, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, -0.3, 0], [3.55, 0, 0]]}
+
+  DO_CHANNEL:
+    objects:
+      - polyline: {points: [[0, -1.2, 0], [3.6, -1.2, 0], [3.6, 1.2, 0], [0, 1.2, 0]], closed: true, layer: symbol}
+      - line: {from: [0, 0.85, 0], to: [3.6, 0.85, 0], layer: symbol-line}
+      - text: {contents: DISCRETE OUTPUT 24 VDC, position: [1.8, 1.025, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, 0.85, 0], [3.6, 1.2, 0]]}
+      - polyline: {points: [[0, 0.1, 0], [0.35, 0.1, 0], [0.35, 0.4, 0], [0, 0.4, 0]], closed: true, layer: symbol-line}
+      - polyline: {points: [[0, -0.4, 0], [0.35, -0.4, 0], [0.35, -0.1, 0], [0, -0.1, 0]], closed: true, layer: symbol-line}
+      - attdef: {tag: T1, prompt: Positive terminal, position: [0.175, 0.25, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, 0.1, 0], [0.35, 0.4, 0]]}
+      - attdef: {tag: T2, prompt: Negative terminal, position: [0.175, -0.25, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, -0.4, 0], [0.35, -0.1, 0]]}
+      - polyline: {points: [[0.35, 0.25, 0], [0.8, 0.25, 0], [0.8, 0.05, 0]], layer: symbol-line}
+      - polyline: {points: [[0.35, -0.25, 0], [0.8, -0.25, 0], [0.8, -0.05, 0]], layer: symbol-line}
+      - line: {from: [0.7, 0.05, 0], to: [0.9, 0.05, 0], layer: symbol-line}
+      - line: {from: [0.7, -0.05, 0], to: [0.9, -0.05, 0], layer: symbol-line}
+      - text: {contents: CARD, position: [1.5, 0.55, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, 0.4, 0], [2.3, 0.7, 0]]}
+      - text: {contents: CHANNEL, position: [1.5, 0.2, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, 0.05, 0], [2.3, 0.35, 0]]}
+      - text: {contents: POINT, position: [1.5, -0.15, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, -0.3, 0], [2.3, 0, 0]]}
+      - attdef: {tag: CARD, prompt: Card, position: [2.35, 0.55, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, 0.4, 0], [3.55, 0.7, 0]]}
+      - attdef: {tag: CH, prompt: Channel, position: [2.35, 0.2, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, 0.05, 0], [3.55, 0.35, 0]]}
+      - attdef: {tag: POINT, prompt: Controller point, position: [2.35, -0.15, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, -0.3, 0], [3.55, 0, 0]]}
+
+  # Three terminals, for the RTD's three wires, into a converter.
+  RTD_CHANNEL:
+    objects:
+      - polyline: {points: [[0, -1.2, 0], [3.6, -1.2, 0], [3.6, 1.2, 0], [0, 1.2, 0]], closed: true, layer: symbol}
+      - line: {from: [0, 0.85, 0], to: [3.6, 0.85, 0], layer: symbol-line}
+      - text: {contents: RTD INPUT 3-WIRE, position: [1.8, 1.025, 0], height: 0.11, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, 0.85, 0], [3.6, 1.2, 0]]}
+      - polyline: {points: [[0, 0.25, 0], [0.35, 0.25, 0], [0.35, 0.55, 0], [0, 0.55, 0]], closed: true, layer: symbol-line}
+      - polyline: {points: [[0, -0.15, 0], [0.35, -0.15, 0], [0.35, 0.15, 0], [0, 0.15, 0]], closed: true, layer: symbol-line}
+      - polyline: {points: [[0, -0.55, 0], [0.35, -0.55, 0], [0.35, -0.25, 0], [0, -0.25, 0]], closed: true, layer: symbol-line}
+      - attdef: {tag: T1, prompt: Terminal A, position: [0.175, 0.4, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, 0.25, 0], [0.35, 0.55, 0]]}
+      - attdef: {tag: T2, prompt: Terminal B, position: [0.175, 0, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, -0.15, 0], [0.35, 0.15, 0]]}
+      - attdef: {tag: T3, prompt: Terminal C, position: [0.175, -0.4, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0, -0.55, 0], [0.35, -0.25, 0]]}
+      - line: {from: [0.35, 0.4, 0], to: [0.75, 0.4, 0], layer: symbol-line}
+      - line: {from: [0.35, 0, 0], to: [0.75, 0, 0], layer: symbol-line}
+      - line: {from: [0.35, -0.4, 0], to: [0.75, -0.4, 0], layer: symbol-line}
+      - polyline: {points: [[0.75, -0.6, 0], [1.2, -0.6, 0], [1.2, 0.6, 0], [0.75, 0.6, 0]], closed: true, layer: symbol-line}
+      - text: {contents: A/D, position: [0.975, 0, 0], height: 0.09, style: symbol, justify: middle_center, layer: symbol-text, cell: [[0.75, -0.6, 0], [1.2, 0.6, 0]]}
+      - text: {contents: CARD, position: [1.5, 0.55, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, 0.4, 0], [2.3, 0.7, 0]]}
+      - text: {contents: CHANNEL, position: [1.5, 0.2, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, 0.05, 0], [2.3, 0.35, 0]]}
+      - text: {contents: POINT, position: [1.5, -0.15, 0], height: 0.08, style: symbol, justify: middle_left, layer: symbol-text, cell: [[1.45, -0.3, 0], [2.3, 0, 0]]}
+      - attdef: {tag: CARD, prompt: Card, position: [2.35, 0.55, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, 0.4, 0], [3.55, 0.7, 0]]}
+      - attdef: {tag: CH, prompt: Channel, position: [2.35, 0.2, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, 0.05, 0], [3.55, 0.35, 0]]}
+      - attdef: {tag: POINT, prompt: Controller point, position: [2.35, -0.15, 0], height: 0.1, style: symbol, justify: middle_left, layer: symbol-text, cell: [[2.3, -0.3, 0], [3.55, 0, 0]]}
