@@ -25,6 +25,7 @@ pub(crate) mod ids;
 mod layers;
 mod mark;
 mod objects;
+pub(crate) mod paper;
 mod records;
 pub(crate) mod schema;
 mod set;
@@ -55,7 +56,7 @@ pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
 pub(crate) use template::{read_template, template_at};
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 7] = [
+pub(crate) const SHEET_KEYS: [&str; 8] = [
     "units",
     "block_library",
     "linetypes",
@@ -63,6 +64,7 @@ pub(crate) const SHEET_KEYS: [&str; 7] = [
     "hatch_patterns",
     "text_styles",
     "objects",
+    paper::PAPER_KEY,
 ];
 
 /// The keys an object of type `object` takes on a sheet: its own, then its
@@ -302,6 +304,10 @@ fn sheet_and_records(
         Some(node) => text::text_styles(node)?,
         None => Vec::new(),
     };
+    let paper = match fields.get(paper::PAPER_KEY) {
+        Some(node) => Some(paper::paper(node, paper::PAPER_KEY, units)?),
+        None => None,
+    };
     let list = sequence(fields.require("objects")?, "objects", "a list of objects")?;
     let tables = Tables {
         units,
@@ -346,6 +352,7 @@ fn sheet_and_records(
         text_styles,
         blocks: Vec::new(),
         objects,
+        paper,
     };
     if let Some(library) = &library {
         blocks::take_from_library(&mut sheet, library, &fields)?;

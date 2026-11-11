@@ -50,6 +50,7 @@ Keys are spelled as AutoCAD spells them: `color`, `center`.
 | `hatch_patterns` | no | The sheet's hatch patterns: a mapping from each pattern's name to its lines. |
 | `text_styles` | no | The sheet's text styles: a mapping from each style's name to its font and width factor. |
 | `objects` | yes | A list of objects, which may be empty, in drawing order. Each object is a mapping with one key, its type. |
+| `paper` | no | The paper the sheet is drawn on, which the checker holds it to. See [Paper](#paper). |
 
 ### Linetypes
 
@@ -260,6 +261,23 @@ Every object has an ID, fixed for its life, and agents select objects by ID or b
 - **A block's objects take no `id` and no `name`**: an insert is the object on the sheet, and its block's objects are shared by every insert of it.
 
 [Queries](query.md) find objects by ID or by name.
+
+### Paper
+
+```yaml
+units: in
+paper: ANSI B landscape
+objects:
+  - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true}
+```
+
+Zach decided on 2026-11-11 that a sheet's paper is declared. `paper` says what the sheet is drawn on, and [the checker](check.md) holds the sheet to it: its extents are the paper's size, and nothing draws off it. Only the checker reads it: a build, a render and a plot are the same with it or without it, and the DWG is unchanged by it. A sheet without it is checked all the same, and told that it declares no paper.
+
+- **Its size**: two lengths more than 0, `[width, height]`, such as `[17, 11]`, in the declared unit, or each with its own, such as `[431.8 mm, 279.4 mm]`.
+- **Or a standard size by name, with the way it lies**: `landscape` lays its longer side across, along X, and `portrait` up. The names are `ANSI A`, `ANSI B`, `ANSI C`, `ANSI D` and `ANSI E` (8.5 by 11, 11 by 17, 17 by 22, 22 by 34 and 34 by 44 inches), and `ISO A0`, `ISO A1`, `ISO A2`, `ISO A3` and `ISO A4` (841 by 1189, 594 by 841, 420 by 594, 297 by 420 and 210 by 297 mm), each followed by `landscape` or `portrait` and written exactly so: `ANSI B landscape` is 17 by 11 inches, converted to the declared unit. A name without the way it lies is the `bad_value` error, which names both.
+- **Its lower left corner is at the origin**, `[0, 0]`: the sheet is drawn in model space at its paper's size from there, as a template draws its trim line.
+
+A template declares its paper as a sheet description does; the set's settings take none, since the template draws the border.
 
 ### Fonts
 

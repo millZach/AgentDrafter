@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::build::BuildReport;
+use crate::check::{check_with, CheckReport, CheckRequest};
 use crate::description::{parse_mark, MarkFailure};
 use crate::error::{Error, ErrorCode};
 use crate::reply::Reply;
@@ -86,6 +87,12 @@ pub struct ChangeReport {
     /// would after a dry run. Absent when the set is consistent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inconsistent: Option<Inconsistent>,
+    /// The checker's reply on the sheets the change set landed on, which it
+    /// read back from their saved files once they were written. A failed
+    /// check does not stop a change set from landing. Absent for a dry run,
+    /// which saves nothing to read back, and when no sheet took its part.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checks: Option<Reply<CheckReport>>,
 }
 
 /// What became of one sheet.
@@ -214,13 +221,46 @@ pub fn change(request: &ChangeRequest) -> Reply<ChangeReport> {
 /// did not; and not `ok`, with only an error, when the change set itself is
 /// wrong, such as an operation that does not exist, and nothing was done.
 pub fn change_with(request: &ChangeRequest, settings: &Settings) -> Reply<ChangeReport> {
-    match apply::apply(request, settings) {
+    let outcome = apply::apply(request, settings).map(|mut report| {
+        report.checks = checks(request, &report, settings);
+        report
+    });
+    match outcome {
         Ok(report) if report.failed > 0 => {
             let error = Error::new(ErrorCode::SheetsFailed, report.message.clone());
             Reply::partly(report, error)
         }
         outcome => Reply::from(outcome),
     }
+}
+
+/// The checker's reply on the sheets a change set landed on, read back from
+/// the set's saved files, as `agentdrafter check` reads them: never the
+/// records this module held in memory, so the change set does not mark its
+/// own work. None for a dry run, which saves nothing, and when no sheet took
+/// its part.
+fn checks(
+    request: &ChangeRequest,
+    report: &ChangeReport,
+    settings: &Settings,
+) -> Option<Reply<CheckReport>> {
+    if report.dry_run {
+        return None;
+    }
+    let landed: Vec<String> = report
+        .sheets
+        .iter()
+        .filter(|sheet| sheet.ok)
+        .map(|sheet| sheet.sheet.clone())
+        .collect();
+    if landed.is_empty() {
+        return None;
+    }
+    let request = CheckRequest {
+        source: request.set.clone(),
+        sheets: landed,
+    };
+    Some(Reply::from(check_with(&request, settings)))
 }
 
 /// The drawing set's inconsistent mark, if it is marked. A mark that cannot

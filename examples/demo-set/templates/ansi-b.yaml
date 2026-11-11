@@ -1,11 +1,11 @@
-# A made-up 11 x 17 inch sheet: its trim line is the paper's edge, so the
-# paper size comes from here, with a border half an inch inside it, the
-# demo plant's title block in the lower right corner, and fixed notes.
-# Where a sheet's value comes from its row, the template writes
-# `{row: NAME}`; each row of the set fills these in. An object's `id` joins
-# the sheet's name to make its ID, such as DEMO-001/border; an object
-# without one, such as the trim line, takes its place, DEMO-001/objects[0].
+# A made-up 11 x 17 inch sheet, ANSI B, its trim line on the paper's edge
+# and a border half an inch inside it, the demo plant's title block in the
+# lower right corner, and fixed notes. A sheet's value from its row is
+# written `{row: NAME}`, which each row fills in. An object's `id` joins the
+# sheet's name to make its ID, such as DEMO-001/border; one without an `id`,
+# such as the trim line, takes its place, DEMO-001/objects[0].
 units: in
+paper: ANSI B landscape
 block_library: ../blocks.yaml
 layers:
   trim: {color: 8, lineweight: 0.13}

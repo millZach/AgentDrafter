@@ -24,8 +24,8 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Attribute, AttributeDefinition, Block, BlockLibrary, Insert, Layer, Linetype, Object, Point3,
-    Sheet, CONTINUOUS,
+    Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert, Layer, Linetype, Object,
+    Point3, Sheet, CONTINUOUS,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
@@ -43,8 +43,11 @@ pub(crate) const LIBRARY_KEYS: [&str; 6] = [
 /// The keys a block takes.
 pub(crate) const BLOCK_KEYS: [&str; 2] = ["base_point", "objects"];
 
+/// The key a block's text or attribute definition declares its cell under.
+pub(crate) const CELL_KEY: &str = "cell";
+
 /// The keys an attribute definition takes.
-pub(crate) const ATTDEF_KEYS: [&str; 11] = [
+pub(crate) const ATTDEF_KEYS: [&str; 12] = [
     "tag",
     "prompt",
     "default",
@@ -56,6 +59,21 @@ pub(crate) const ATTDEF_KEYS: [&str; 11] = [
     "justify",
     "invisible",
     "layer",
+    CELL_KEY,
+];
+
+/// The keys a single line of text takes in a block: a sheet's, and its
+/// cell.
+pub(crate) const BLOCK_TEXT_KEYS: [&str; 9] = [
+    "contents",
+    "position",
+    "height",
+    "style",
+    "width_factor",
+    "rotation",
+    "justify",
+    "layer",
+    CELL_KEY,
 ];
 
 /// The keys an insert takes, besides those every object on a sheet takes.
@@ -156,16 +174,72 @@ fn block(name: &str, node: &Node, tables: &Tables) -> Result<Block, Error> {
         ));
     }
     let mut place = Place::Block { tags: Vec::new() };
-    let objects = items
-        .iter()
-        .enumerate()
-        .map(|(i, item)| object(item, &index_path(&objects_path, i), tables, &mut place))
-        .collect::<Result<_, _>>()?;
+    let mut objects = Vec::with_capacity(items.len());
+    let mut cells = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let path = index_path(&objects_path, i);
+        objects.push(object(item, &path, tables, &mut place)?);
+        if let Some(cell) = cell(item, &path, i, tables.units)? {
+            cells.push(cell);
+        }
+    }
     Ok(Block {
         name: name.to_owned(),
         base_point,
         objects,
+        cells,
     })
+}
+
+/// The cell the block's object at `item`, its `index`th, declares, if it
+/// declares one: two opposite corners of a box in the block's own
+/// coordinates, which only a text and an attribute definition take. The
+/// object has been read, so its keys are its type's.
+fn cell(item: &Node, path: &str, index: usize, units: Unit) -> Result<Option<Cell>, Error> {
+    const SHAPE: &str = "a cell, two opposite corners of a box [[x, y, z], [x, y, z]]";
+    let Kind::Mapping(types) = &item.kind else {
+        return Ok(None);
+    };
+    let [object] = types.as_slice() else {
+        return Ok(None);
+    };
+    let Kind::Mapping(keys) = &object.value.kind else {
+        return Ok(None);
+    };
+    let Some(entry) = keys.iter().find(|k| k.key == CELL_KEY) else {
+        return Ok(None);
+    };
+    let path = key_path(&key_path(path, &object.key), CELL_KEY);
+    let node = &entry.value;
+    let corners = sequence(node, &path, SHAPE)?;
+    let [a, b] = corners else {
+        return Err(at(
+            Error::new(
+                ErrorCode::WrongType,
+                format!(
+                    "a cell is two opposite corners of a box, [[x, y, z], [x, y, z]]; this one \
+                     has {} points",
+                    corners.len()
+                ),
+            ),
+            &path,
+            node.at,
+        ));
+    };
+    let a = point(a, &index_path(&path, 0), units)?;
+    let b = point(b, &index_path(&path, 1), units)?;
+    if a.x == b.x || a.y == b.y {
+        return Err(bad_value(
+            node,
+            &path,
+            "a cell has a width and a height, so its corners differ in x and in y",
+        ));
+    }
+    Ok(Some(Cell {
+        object: index,
+        min: [a.x.min(b.x), a.y.min(b.y)],
+        max: [a.x.max(b.x), a.y.max(b.y)],
+    }))
 }
 
 /// An attribute definition. `tags` holds the tags the block has defined

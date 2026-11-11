@@ -33,6 +33,11 @@
 //!   working revision, its own files, or reports what it would do in a dry
 //!   run; [`operations`] lists the operations with their AutoCAD aliases
 //!   and schemas, and [`change_set_schema`] states what a change set holds.
+//! - [`check`] re-reads a drawing set's saved files, or one sheet
+//!   description, and reports each default check a sheet fails: the exact
+//!   paper size, nothing off the sheet, no text overflowing its cell and no
+//!   text sitting on other text. A change set's reply carries its report on
+//!   the sheets it landed on.
 //!
 //! [`Settings`] say where the machine keeps its fonts and plot styles;
 //! [`build`], [`measure_text`], [`render`] and [`plot`] read them from the
@@ -46,6 +51,7 @@
 
 mod build;
 mod change;
+mod check;
 mod description;
 mod draw;
 mod dwg;
@@ -73,6 +79,10 @@ pub use change::{
     Inconsistent, OperationInfo, OperationList, OperationOutcome, RowValueSet, SheetChange,
     MARK_FILE,
 };
+pub use check::{
+    check, check_with, BlockPart, CheckReport, CheckRequest, CheckedObject, Finding, Rule, Sides,
+    CHECK_TOLERANCE_MM,
+};
 pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
 pub use error::{Error, ErrorCode};
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
@@ -80,6 +90,7 @@ pub use model::{
     Arc, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype, Lineweight, Object,
     Point3, Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
 };
+pub use model::{Cell, Paper};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use plot::{
     plot, plot_set, plot_set_with, plot_with, PlotReport, PlotRequest, PlotSetReport,

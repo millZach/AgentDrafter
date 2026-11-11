@@ -42,6 +42,7 @@ fn reads_one_line() {
                 to: Point3::new(100.0, 50.0, 0.0),
                 layer: "0".to_owned(),
             })],
+            paper: None,
         }
     );
 }

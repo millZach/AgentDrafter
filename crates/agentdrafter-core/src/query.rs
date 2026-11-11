@@ -30,9 +30,9 @@ use serde::{Deserialize, Serialize, Serializer};
 use crate::description::{
     read_rows, read_set_settings, read_sheet_record, read_template, template_path, SheetRecord,
 };
-use crate::draw::{self, MOST_HATCH_DASHES};
+use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
-use crate::model::{Attribute, Object, Point3, CONTINUOUS};
+use crate::model::{Attribute, Object, Point3, Sheet, CONTINUOUS};
 use crate::set::SET_SETTINGS_FILE;
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
@@ -653,7 +653,8 @@ fn matched<'a>(
     })
 }
 
-fn written_at(record: &SheetRecord, index: usize) -> WrittenAt {
+/// Where the object at `index` of `record`'s sheet is written.
+pub(crate) fn written_at(record: &SheetRecord, index: usize) -> WrittenAt {
     let object = &record.objects[index].object;
     WrittenAt {
         file: record.file_of(index).display().to_string(),
@@ -1059,25 +1060,45 @@ fn extents(
 /// linetype lays along it: the sheet is drawn through the one pipeline with
 /// every layer continuous. Text still draws as its font draws it.
 fn sheet_extents(record: &SheetRecord, fonts: &SheetFonts) -> Option<Extents> {
-    let mut sheet = record.sheet.clone();
+    measuring_drawing(&record.sheet, fonts)
+        .extents()
+        .map(|fine| Extents::of(&fine))
+}
+
+/// The sheet drawn to measure it: through the one pipeline with every
+/// layer continuous, so that what it draws follows the geometry, not the
+/// dashes a linetype lays along it, with its curves drawn within
+/// [`EXTENTS_TOLERANCE`] of its larger side. Text draws as its font draws
+/// it. Empty when the sheet draws nothing.
+pub(crate) fn measuring_drawing(sheet: &Sheet, fonts: &SheetFonts) -> DisplayList {
+    let mut sheet = sheet.clone();
     for layer in &mut sheet.layers {
         CONTINUOUS.clone_into(&mut layer.linetype);
     }
     let sheet = &sheet;
     // A coarse drawing, curves to within a unit, for the sheet's size; then
     // one fine enough to measure it by.
-    let coarse = draw::draw_sheet(sheet, fonts, 1.0, MOST_HATCH_DASHES).extents()?;
-    let size = coarse.width().max(coarse.height());
+    let coarse = draw::draw_sheet(sheet, fonts, 1.0, MOST_HATCH_DASHES);
+    let Some(bounds) = coarse.extents() else {
+        return coarse;
+    };
+    let size = bounds.width().max(bounds.height());
     let tolerance = if size > 0.0 {
         size * EXTENTS_TOLERANCE
     } else {
         EXTENTS_TOLERANCE
     };
-    let fine = draw::draw_sheet(sheet, fonts, tolerance, MOST_HATCH_DASHES).extents()?;
-    Some(Extents {
-        min: fine.min,
-        max: fine.max,
-        width: fine.width(),
-        height: fine.height(),
-    })
+    draw::draw_sheet(sheet, fonts, tolerance, MOST_HATCH_DASHES)
+}
+
+impl Extents {
+    /// The box `bounds` draws within.
+    pub(crate) fn of(bounds: &Bounds) -> Extents {
+        Extents {
+            min: bounds.min,
+            max: bounds.max,
+            width: bounds.width(),
+            height: bounds.height(),
+        }
+    }
 }

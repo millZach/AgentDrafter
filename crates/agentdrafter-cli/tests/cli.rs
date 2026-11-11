@@ -468,3 +468,80 @@ fn templates_are_grouped_by_the_file_their_path_names() {
         .unwrap()
         .contains("radius: 2"));
 }
+
+#[test]
+fn check_reports_each_failed_check_and_a_change_set_carries_them() {
+    let dir = scratch("check");
+    let set = copy_demo_set(&dir);
+    let (code, json) = agentdrafter(&["check", "demo-set"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["passed"], true);
+    assert_eq!(json["result"]["count"], 0);
+    assert_eq!(json["result"]["findings"], serde_json::json!([]));
+    assert_eq!(
+        json["result"]["sheets"],
+        serde_json::json!(["DEMO-001", "DEMO-002", "DEMO-003"])
+    );
+
+    // A failed check is reported, and the reply is still ok.
+    let template = set.join("templates/ansi-b.yaml");
+    let text = fs::read_to_string(&template).unwrap();
+    fs::write(&template, text.replace("paper: ANSI B landscape\n", "")).unwrap();
+    let (code, json) = agentdrafter(&["check", "demo-set", "--sheet", "demo-002"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["sheets"], serde_json::json!(["DEMO-002"]));
+    assert_eq!(json["result"]["count"], 1);
+    let finding = &json["result"]["findings"][0];
+    assert_eq!(finding["sheet"], "DEMO-002");
+    assert_eq!(finding["rule"], "paper_size");
+    assert!(finding["message"]
+        .as_str()
+        .unwrap()
+        .contains("declares no paper"));
+    fs::write(&template, text).unwrap();
+
+    // A change set's reply carries the checker's reply on the sheets it
+    // landed on.
+    let (code, json) = agentdrafter(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{json}");
+    fs::write(
+        dir.join("off.json"),
+        r#"{"operations": [{"op": "add_circle", "sheet": "DEMO-003", "center": [17, 5, 0], "radius": 0.5, "layer": "notes", "id": "edge"}]}"#,
+    )
+    .unwrap();
+    let (code, json) = agentdrafter(&["change", "demo-set", "off.json"], &dir);
+    assert_eq!(code, 0, "{json}");
+    let checks = &json["result"]["checks"];
+    assert_eq!(checks["ok"], true, "{json}");
+    assert_eq!(checks["result"]["sheets"], serde_json::json!(["DEMO-003"]));
+    let rules: Vec<&str> = checks["result"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["rule"].as_str().unwrap())
+        .collect();
+    assert_eq!(rules, ["paper_size", "off_sheet"]);
+    assert_eq!(
+        checks["result"]["findings"][1]["object"]["id"],
+        "DEMO-003/edge"
+    );
+
+    let (code, json) = agentdrafter(&["check", "demo-set", "--sheet", "DEMO-009"], &dir);
+    assert_eq!(code, 1, "{json}");
+    assert_eq!(json["error"]["code"], "unknown_name");
+    for args in [
+        &["check"][..],
+        &["check", "demo-set", "--nope"],
+        &["check", "demo-set", "other"],
+        &["check", "demo-set", "--sheet"],
+    ] {
+        let (code, json) = agentdrafter(args, &dir);
+        assert_eq!(code, 2, "{json}");
+        assert_eq!(json["error"]["code"], "usage");
+    }
+    let (_, json) = agentdrafter(&["--help"], &dir);
+    assert_eq!(
+        json["result"]["commands"]["check"]["usage"],
+        "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]..."
+    );
+}

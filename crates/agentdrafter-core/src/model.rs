@@ -17,7 +17,9 @@ use crate::units::Unit;
 
 pub(crate) mod block;
 pub(crate) mod hatch;
-pub use block::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
+pub use block::{
+    attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
+};
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 
 /// The layer every drawing has, and the one an object sits on unless it names another.
@@ -364,6 +366,27 @@ pub struct Sheet {
     #[serde(default)]
     pub blocks: Vec<Block>,
     pub objects: Vec<Object>,
+    /// The paper the sheet is drawn on, if its sheet description or
+    /// template declares it. Only the checker reads it: a build, a render
+    /// and a plot draw the sheet as they would without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<Paper>,
+}
+
+/// The paper a sheet is drawn on, as its sheet description or template
+/// declares it: its size in the declared unit, with its lower left corner
+/// at the origin, `[0, 0]`, as a sheet drawn in model space at its paper
+/// size draws its trim line from there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Paper {
+    /// The size's name, when it is declared by name, such as
+    /// `ANSI B landscape`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Across, along X.
+    pub width: f64,
+    /// Up, along Y.
+    pub height: f64,
 }
 
 /// The ID and the name an object of a DWG carries in AgentDrafter's

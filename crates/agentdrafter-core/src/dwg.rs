@@ -414,6 +414,7 @@ fn read_block(drawing: &CadDocument, record: &BlockRecord) -> Option<Block> {
         name: record.name.clone(),
         base_point: point(record.base_point),
         objects,
+        cells: Vec::new(),
     })
 }
 
@@ -692,6 +693,7 @@ mod tests {
             text_styles: Vec::new(),
             blocks: Vec::new(),
             objects: Vec::new(),
+            paper: None,
         }
     }
 

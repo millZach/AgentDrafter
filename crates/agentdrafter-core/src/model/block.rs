@@ -36,6 +36,25 @@ pub struct Block {
     /// The block's objects in drawing order, its attribute definitions
     /// among them. A block holds no inserts.
     pub objects: Vec<Object>,
+    /// The cells its texts and attribute definitions declare, in the order
+    /// of `objects`. Only the checker reads them: a DWG holds none, and a
+    /// block read from a DWG has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cells: Vec<Cell>,
+}
+
+/// The box a block's text or attribute definition draws within, such as
+/// its title-block cell: in the block's own coordinates, seen from above.
+/// On each insert it is moved, scaled and turned with the insert.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Cell {
+    /// The text's or attribute definition's place in the block's objects,
+    /// counted from 0.
+    pub object: usize,
+    /// The cell's lower left corner, `[x, y]`.
+    pub min: [f64; 2],
+    /// The cell's upper right corner, `[x, y]`.
+    pub max: [f64; 2],
 }
 
 impl Block {
@@ -273,6 +292,7 @@ mod tests {
             name: "B".into(),
             base_point,
             objects: Vec::new(),
+            cells: Vec::new(),
         }
     }
 

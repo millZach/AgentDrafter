@@ -189,9 +189,45 @@ const LIBRARY_PATH: Place = Place {
     json: r#"{"units": "mm", "block_library": V, "objects": []}"#,
 };
 
+const PAPER: Place = Place {
+    name: "a sheet's paper",
+    yaml: "units: mm\npaper: V\nobjects: []\n",
+    json: r#"{"units": "mm", "paper": V, "objects": []}"#,
+};
+
+const SHEET_TEXT_CELL: Place = Place {
+    name: "a sheet's text's cell",
+    yaml: "units: mm\nobjects:\n  - text: {contents: A, position: [0, 0, 0], height: 1, cell: V}\n",
+    json: r#"{"units": "mm", "objects": [{"text": {"contents": "A", "position": [0, 0, 0], "height": 1, "cell": V}}]}"#,
+};
+
 /// `(place, value as YAML, the same value as JSON, accepted)`.
 fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
     vec![
+        // A paper: two lengths more than 0, or a standard size and the way
+        // it lies, written exactly.
+        (&PAPER, "[297, 210]", json!([297, 210]), true),
+        (&PAPER, "['17 in', '11 in']", json!(["17 in", "11 in"]), true),
+        (&PAPER, "['17', 11.5]", json!(["17", 11.5]), true),
+        (&PAPER, "ANSI B landscape", json!("ANSI B landscape"), true),
+        (&PAPER, "ISO A4 portrait", json!("ISO A4 portrait"), true),
+        (&PAPER, "ANSI B", json!("ANSI B"), false),
+        (&PAPER, "'ansi b landscape'", json!("ansi b landscape"), false),
+        (&PAPER, "ANSI F landscape", json!("ANSI F landscape"), false),
+        (&PAPER, "[17]", json!([17]), false),
+        (&PAPER, "[17, 11, 0]", json!([17, 11, 0]), false),
+        (&PAPER, "[0, 11]", json!([0, 11]), false),
+        (&PAPER, "[-17, 11]", json!([-17, 11]), false),
+        (&PAPER, "[17, wide]", json!([17, "wide"]), false),
+        (&PAPER, "17", json!(17), false),
+        (&PAPER, "{width: 17}", json!({"width": 17}), false),
+        // A cell is a block's: a sheet's text takes none.
+        (
+            &SHEET_TEXT_CELL,
+            "[[0, 0, 0], [1, 1, 0]]",
+            json!([[0, 0, 0], [1, 1, 0]]),
+            false,
+        ),
         // An insert's scale: a number more than 0, with no unit.
         (&INSERT_SCALE, "2", json!(2), true),
         (&INSERT_SCALE, "'0.5'", json!("0.5"), true),
@@ -516,9 +552,68 @@ const BLOCK_OBJECTS: Place = Place {
     json: r#"{"units": "mm", "blocks": {"B": {"objects": V}}}"#,
 };
 
+const ATTDEF_CELL: Place = Place {
+    name: "an attribute definition's cell",
+    yaml: "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: T, position: [0, 0, 0], height: 1, cell: V}}]}\n",
+    json: r#"{"units": "mm", "blocks": {"B": {"objects": [{"attdef": {"tag": "T", "position": [0, 0, 0], "height": 1, "cell": V}}]}}}"#,
+};
+
+const TEXT_CELL: Place = Place {
+    name: "a block's text's cell",
+    yaml: "units: mm\nblocks:\n  B: {objects: [{text: {contents: A, position: [0, 0, 0], height: 1, cell: V}}]}\n",
+    json: r#"{"units": "mm", "blocks": {"B": {"objects": [{"text": {"contents": "A", "position": [0, 0, 0], "height": 1, "cell": V}}]}}}"#,
+};
+
+const MTEXT_CELL: Place = Place {
+    name: "a block's mtext's cell",
+    yaml: "units: mm\nblocks:\n  B: {objects: [{mtext: {contents: A, position: [0, 0, 0], height: 1, cell: V}}]}\n",
+    json: r#"{"units": "mm", "blocks": {"B": {"objects": [{"mtext": {"contents": "A", "position": [0, 0, 0], "height": 1, "cell": V}}]}}}"#,
+};
+
 /// `(place in a block library, value as YAML, the same value as JSON, accepted)`.
 fn library_cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
     vec![
+        // A cell: two opposite corners, each a point.
+        (
+            &ATTDEF_CELL,
+            "[[0, 0, 0], [5, 2, 0]]",
+            json!([[0, 0, 0], [5, 2, 0]]),
+            true,
+        ),
+        (
+            &ATTDEF_CELL,
+            "[[5, 2, 0], ['0 in', 0, 0]]",
+            json!([[5, 2, 0], ["0 in", 0, 0]]),
+            true,
+        ),
+        (&ATTDEF_CELL, "[[0, 0, 0]]", json!([[0, 0, 0]]), false),
+        (
+            &ATTDEF_CELL,
+            "[[0, 0, 0], [1, 1, 0], [2, 2, 0]]",
+            json!([[0, 0, 0], [1, 1, 0], [2, 2, 0]]),
+            false,
+        ),
+        (
+            &ATTDEF_CELL,
+            "[[0, 0], [1, 1]]",
+            json!([[0, 0], [1, 1]]),
+            false,
+        ),
+        (&ATTDEF_CELL, "[0, 0, 1, 1]", json!([0, 0, 1, 1]), false),
+        (
+            &TEXT_CELL,
+            "[[-1, -1, 0], [5, 2, 0]]",
+            json!([[-1, -1, 0], [5, 2, 0]]),
+            true,
+        ),
+        (&TEXT_CELL, "box", json!("box"), false),
+        // Multiline text takes no cell.
+        (
+            &MTEXT_CELL,
+            "[[0, 0, 0], [5, 2, 0]]",
+            json!([[0, 0, 0], [5, 2, 0]]),
+            false,
+        ),
         // A tag: capitals, no spaces.
         (&TAG, "TAG", json!("TAG"), true),
         (&TAG, "'TAG_2'", json!("TAG_2"), true),
