@@ -10,7 +10,13 @@
 //! - [`parse_sheet_description`] reads a sheet description into a [`Sheet`].
 //! - [`sheet_description_schema`] states what a sheet description may hold,
 //!   as a JSON Schema.
-//! - [`read_dwg`] reads a DWG's linetypes, layers and model-space objects.
+//! - [`read_dwg`] reads a DWG's linetypes, layers, text styles and
+//!   model-space objects.
+//! - [`measure_text`] measures how wide a line of text draws in a font.
+//!
+//! [`Settings`] say where the machine keeps its fonts; [`build`] and
+//! [`measure_text`] read them from the environment, and [`build_with`] and
+//! [`measure_text_with`] take them as given.
 //!
 //! DWG is read and written through acadrust, behind one seam in the `dwg`
 //! module. Every coordinate in the core is 3D.
@@ -21,11 +27,13 @@ mod dwg;
 mod error;
 mod model;
 mod reply;
+mod settings;
+mod text;
 mod units;
 
 use std::path::Path;
 
-pub use build::{build, BuildReport, BuildRequest};
+pub use build::{build, build_with, BuildReport, BuildRequest};
 pub use description::parse_sheet_description;
 pub use error::{Error, ErrorCode};
 pub use model::{
@@ -33,9 +41,14 @@ pub use model::{
     Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
 };
 pub use reply::Reply;
+pub use settings::{Settings, FONTS_VARIABLE};
+pub use text::fonts::{FontSubstitution, FontUsed};
+pub use text::measure::{measure_text, measure_text_with, MeasureTextRequest, TextMeasurement};
+pub use text::{Attachment, FontKind, Justify, MText, Text, TextStyle, STANDARD};
 pub use units::Unit;
 
-/// Reads the linetypes, the layers and the model-space objects of the DWG at `path`.
+/// Reads the linetypes, the layers, the text styles and the model-space
+/// objects of the DWG at `path`.
 pub fn read_dwg(path: &Path) -> Result<DrawingContents, Error> {
     dwg::read(path)
 }

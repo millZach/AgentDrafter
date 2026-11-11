@@ -2,6 +2,7 @@
 
 use super::layers::layer_name;
 use super::strict_yaml::{index_path, key_path, Kind, Node};
+use super::text::{mtext, text, MTEXT_KEYS, TEXT_KEYS};
 use super::{
     angle, at, bad_value, boolean, length, plain_number, point, points, scalar, unknown_key,
     wrong_type, Fields,
@@ -10,16 +11,19 @@ use crate::error::{Error, ErrorCode};
 use crate::model::{
     Arc, Circle, Ellipse, Layer, Line, Object, Polyline, Spline, FIT_DEGREE, LAYER_ZERO,
 };
+use crate::text::TextStyle;
 use crate::units::Unit;
 
 /// Every object type a sheet description can hold, and the keys each takes.
-pub(crate) const OBJECT_TYPES: [(&str, &[&str]); 6] = [
+pub(crate) const OBJECT_TYPES: [(&str, &[&str]); 8] = [
     ("line", &LINE_KEYS),
     ("polyline", &POLYLINE_KEYS),
     ("arc", &ARC_KEYS),
     ("circle", &CIRCLE_KEYS),
     ("ellipse", &ELLIPSE_KEYS),
     ("spline", &SPLINE_KEYS),
+    ("text", &TEXT_KEYS),
+    ("mtext", &MTEXT_KEYS),
 ];
 
 const LINE_KEYS: [&str; 3] = ["from", "to", "layer"];
@@ -47,6 +51,7 @@ pub(super) fn object(
     path: &str,
     units: Unit,
     layers: &[Layer],
+    styles: &[TextStyle],
 ) -> Result<Object, Error> {
     const SHAPE: &str = "a mapping with one key naming the object's type, such as `line:`";
     let Kind::Mapping(entries) = &node.kind else {
@@ -79,7 +84,7 @@ pub(super) fn object(
         .find(|(name, _)| *name == entry.key)
         .map(|(_, keys)| *keys)
         .unwrap_or_default();
-    let article = if entry.key.starts_with(['a', 'e']) {
+    let article = if entry.key.starts_with(['a', 'e']) || entry.key == "mtext" {
         "an"
     } else {
         "a"
@@ -101,6 +106,8 @@ pub(super) fn object(
         "circle" => circle(&fields, units, layer).map(Object::Circle),
         "ellipse" => ellipse(&fields, units, layer).map(Object::Ellipse),
         "spline" => spline(&fields, units, layer).map(Object::Spline),
+        "text" => text(&fields, units, layer, styles).map(Object::Text),
+        "mtext" => mtext(&fields, units, layer, styles).map(Object::MText),
         other => unreachable!("object type `{other}` is listed but not read"),
     }
 }

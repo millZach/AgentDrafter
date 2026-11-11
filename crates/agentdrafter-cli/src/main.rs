@@ -11,12 +11,17 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use agentdrafter_core::{build, sheet_description_schema, BuildRequest, Error, ErrorCode, Reply};
+use agentdrafter_core::{
+    build_with, measure_text_with, sheet_description_schema, BuildRequest, Error, ErrorCode,
+    MeasureTextRequest, Reply, Settings, FONTS_VARIABLE,
+};
 use serde::Serialize;
 use serde_json::json;
 
-const BUILD_USAGE: &str = "agentdrafter build <sheet-description> [--output <dwg>] [--overwrite]";
+const BUILD_USAGE: &str =
+    "agentdrafter build <sheet-description> [--output <dwg>] [--overwrite] [--fonts <folder>]...";
 const SCHEMA_USAGE: &str = "agentdrafter schema";
+const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -30,12 +35,16 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
         return reply::<()>(Err(Error::usage(format!(
-            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE}"
+            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE}"
         ))));
     };
     match command.to_str() {
         Some("build") => match parse_build(args) {
-            Ok(request) => reply(build(&request)),
+            Ok((request, settings)) => reply(build_with(&request, &settings)),
+            Err(error) => reply::<()>(Err(error)),
+        },
+        Some("measure-text") => match parse_measure(args) {
+            Ok((request, settings)) => reply(measure_text_with(&request, &settings)),
             Err(error) => reply::<()>(Err(error)),
         },
         Some("schema") => match args.next() {
@@ -48,18 +57,36 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         Some("help" | "--help" | "-h") => reply(Ok(help())),
         Some("--version" | "-V") => reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") }))),
         _ => reply::<()>(Err(Error::usage(format!(
-            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE}",
+            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE}",
             command.to_string_lossy()
         )))),
     }
 }
 
-fn parse_build(mut args: impl Iterator<Item = OsString>) -> Result<BuildRequest, Error> {
+/// The settings for one command: the font folders `--fonts` names, then
+/// those the environment names.
+fn settings(fonts: Vec<PathBuf>) -> Settings {
+    let mut settings = Settings::from_env();
+    settings.font_folders.splice(0..0, fonts);
+    settings
+}
+
+fn parse_build(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(BuildRequest, Settings), Error> {
     let mut description: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut overwrite = false;
+    let mut fonts = Vec::new();
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--fonts") => fonts.push(
+                args.next()
+                    .ok_or_else(|| {
+                        Error::usage(format!("--fonts needs a folder; usage: {BUILD_USAGE}"))
+                    })?
+                    .into(),
+            ),
             Some("--output" | "-o") => {
                 let path = args.next().ok_or_else(|| {
                     Error::usage(format!("--output needs a path; usage: {BUILD_USAGE}"))
@@ -88,11 +115,85 @@ fn parse_build(mut args: impl Iterator<Item = OsString>) -> Result<BuildRequest,
             "build needs a sheet description; usage: {BUILD_USAGE}"
         ))
     })?;
-    Ok(BuildRequest {
-        description,
-        output,
-        overwrite,
-    })
+    Ok((
+        BuildRequest {
+            description,
+            output,
+            overwrite,
+        },
+        settings(fonts),
+    ))
+}
+
+fn parse_measure(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(MeasureTextRequest, Settings), Error> {
+    let mut contents: Option<String> = None;
+    let mut font: Option<String> = None;
+    let mut height: Option<f64> = None;
+    let mut width_factor: Option<f64> = None;
+    let mut fonts = Vec::new();
+    let value = |flag: &str, value: Option<OsString>| -> Result<String, Error> {
+        value
+            .and_then(|v| v.into_string().ok())
+            .ok_or_else(|| Error::usage(format!("{flag} needs a value; usage: {MEASURE_USAGE}")))
+    };
+    let number = |flag: &str, text: String| -> Result<f64, Error> {
+        text.parse().map_err(|_| {
+            Error::usage(format!(
+                "{flag} takes a number, found `{text}`; usage: {MEASURE_USAGE}"
+            ))
+        })
+    };
+    let once = |flag: &str| Error::usage(format!("{flag} is given twice"));
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--font") => {
+                if font.replace(value("--font", args.next())?).is_some() {
+                    return Err(once("--font"));
+                }
+            }
+            Some("--height") => {
+                let h = number("--height", value("--height", args.next())?)?;
+                if height.replace(h).is_some() {
+                    return Err(once("--height"));
+                }
+            }
+            Some("--width-factor") => {
+                let f = number("--width-factor", value("--width-factor", args.next())?)?;
+                if width_factor.replace(f).is_some() {
+                    return Err(once("--width-factor"));
+                }
+            }
+            Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
+            Some(flag) if flag.starts_with("--") => {
+                return Err(Error::usage(format!(
+                    "unknown option `{flag}`; usage: {MEASURE_USAGE}"
+                )))
+            }
+            _ => {
+                let text = arg
+                    .into_string()
+                    .map_err(|_| Error::usage("the contents are not valid text".to_owned()))?;
+                if contents.replace(text).is_some() {
+                    return Err(Error::usage(format!(
+                        "measure-text takes one line of contents; quote it if it has spaces; usage: {MEASURE_USAGE}"
+                    )));
+                }
+            }
+        }
+    }
+    let missing =
+        |what: &str| Error::usage(format!("measure-text needs {what}; usage: {MEASURE_USAGE}"));
+    Ok((
+        MeasureTextRequest {
+            contents: contents.ok_or_else(|| missing("the contents to measure"))?,
+            font: font.ok_or_else(|| missing("--font"))?,
+            height: height.ok_or_else(|| missing("--height"))?,
+            width_factor: width_factor.unwrap_or(1.0),
+        },
+        settings(fonts),
+    ))
 }
 
 fn help() -> serde_json::Value {
@@ -106,14 +207,28 @@ fn help() -> serde_json::Value {
                          The DWG goes beside the sheet description with a .dwg extension unless \
                          --output names another path. An existing file is never replaced \
                          without --overwrite, and --overwrite replaces only a DWG AgentDrafter \
-                         built.",
+                         built. The reply lists each text style whose font is not in the font \
+                         folders, with the look-alike measured in its place.",
             },
             "schema": {
                 "usage": SCHEMA_USAGE,
                 "does": "Prints the sheet description's schema: a JSON Schema (draft 2020-12) of \
                          every key a sheet description may hold, with what each means.",
             },
+            "measure-text": {
+                "usage": MEASURE_USAGE,
+                "does": "Measures how wide one line of text draws in a font at a height, as \
+                         AutoCAD measures a text object: from the left edge of what it draws to \
+                         the right edge. Reports the font used, and the look-alike when the font \
+                         is not in the font folders.",
+            },
         },
+        "fonts": format!(
+            "Fonts are read from the folders --fonts names, then from those the {FONTS_VARIABLE} \
+             environment variable lists (separated as the system separates paths). There is no \
+             default folder. A font in none of them is replaced by a look-alike, and the reply \
+             says which."
+        ),
         "output": "One line of JSON on standard output: {\"ok\": true, \"result\": ...} or \
                    {\"ok\": false, \"error\": {\"code\", \"message\", \"field\", \"line\", \
                    \"column\", \"file\"}}.",

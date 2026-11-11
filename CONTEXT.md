@@ -52,6 +52,18 @@ _Avoid_: line style, dash pattern
 The pen width a layer plots with, one of AutoCAD's standard widths in millimetres. It is a width on paper, so it is not in the declared unit.
 _Avoid_: line width, pen size, thickness (a thickness is AutoCAD's extrusion of an object)
 
+**Text style**:
+A named font that text draws with, and how wide its characters are, as in AutoCAD. The font is an AutoCAD SHX font such as `romans.shx` or a TrueType font such as `arial.ttf`. Every drawing has the style `Standard`.
+_Avoid_: font style, text format
+
+**Font folder**:
+A folder AgentDrafter reads fonts from when it measures text, named by a setting, such as AutoCAD's `Fonts` folder on a machine that has AutoCAD. There is no default.
+_Avoid_: font path, font directory
+
+**Look-alike**:
+An open font AgentDrafter measures text with when a text style's font is not in any font folder, such as Hershey's Roman Simplex in place of `romans.shx`. The drawing still names the style's own font, and the build says which look-alike it used.
+_Avoid_: fallback font, substitute font
+
 **Block**:
 A named group of objects defined once and inserted many times, as in AutoCAD.
 _Avoid_: symbol, component, cell

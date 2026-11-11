@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::description::parse_sheet_description;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
+use crate::settings::Settings;
+use crate::text::fonts::FontSubstitution;
+use crate::text::placement::SheetFonts;
 use crate::units::Unit;
 
 /// A request to build one sheet description into a DWG.
@@ -45,13 +48,24 @@ pub struct BuildReport {
     pub objects: BTreeMap<String, usize>,
     /// The size of the DWG in bytes.
     pub bytes: usize,
+    /// The text styles whose fonts are not in the font folders, and the
+    /// look-alike each is measured with. The DWG names the styles' own
+    /// fonts all the same. Empty when every font was found.
+    pub font_substitutions: Vec<FontSubstitution>,
 }
 
-/// Builds a sheet description into a DWG in the 2018 format.
+/// Builds a sheet description into a DWG in the 2018 format, reading fonts
+/// from the font folders the environment names ([`Settings::from_env`]).
 ///
 /// The DWG is written whole or not at all: it is written beside its final
 /// path and moved into place once complete.
 pub fn build(request: &BuildRequest) -> Result<BuildReport, Error> {
+    build_with(request, &Settings::from_env())
+}
+
+/// Builds a sheet description into a DWG in the 2018 format, reading fonts
+/// from the font folders `settings` names.
+pub fn build_with(request: &BuildRequest, settings: &Settings) -> Result<BuildReport, Error> {
     let description = request.description.as_path();
     let text = fs::read_to_string(description).map_err(|e| {
         Error::new(
@@ -83,7 +97,9 @@ pub fn build(request: &BuildRequest) -> Result<BuildReport, Error> {
         refuse_unless_built(&output)?;
     }
 
-    let bytes = dwg::write_new_sheet(&sheet).map_err(|e| e.in_file(&output))?;
+    let fonts = SheetFonts::find(&sheet, settings);
+    let bytes =
+        dwg::write_new_sheet(&sheet, &|text| fonts.start(text)).map_err(|e| e.in_file(&output))?;
     write_whole(&output, &bytes)?;
 
     let mut objects = BTreeMap::new();
@@ -97,6 +113,7 @@ pub fn build(request: &BuildRequest) -> Result<BuildReport, Error> {
         units: sheet.units,
         objects,
         bytes: bytes.len(),
+        font_substitutions: fonts.substitutions(),
     })
 }
 

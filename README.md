@@ -2,7 +2,7 @@
 
 An open-source CAD engine built for agents first. An agent creates, revises and checks technical drawings with no window open, and a person reviews the result. It reads and writes DWG without AutoCAD and runs on Windows, Linux and macOS.
 
-**Status: walking skeleton.** There is nothing to install yet. From a checkout, `cargo run -p agentdrafter-cli -- build examples/one-line.yaml` builds a sheet description that holds one line into a DWG in the 2018 format and prints the result as JSON. `examples/geometry.yaml` adds polylines, arcs, circles, ellipses and splines on layers with linetypes, and `cargo run -p agentdrafter-cli -- schema` prints what a sheet description may hold.
+**Status: walking skeleton.** There is nothing to install yet. From a checkout, `cargo run -p agentdrafter-cli -- build examples/one-line.yaml` builds a sheet description that holds one line into a DWG in the 2018 format and prints the result as JSON. `examples/geometry.yaml` adds polylines, arcs, circles, ellipses and splines on layers with linetypes, `examples/text.yaml` adds text and multiline text in TrueType and SHX text styles, `cargo run -p agentdrafter-cli -- schema` prints what a sheet description may hold, and `cargo run -p agentdrafter-cli -- measure-text "PUMP 101" --font romans.shx --height 2.5` measures how wide a line of text draws.
 
 The engine is written in Rust and reads and writes DWG through [acadrust](https://github.com/hakanaktt/acadrust). It will be reached from a command line, an MCP server, a Python library and a local HTTP API, and a reviewer will watch the work in a browser.
 

@@ -5,6 +5,9 @@
 //! pin, or the library itself, changes this file and `Cargo.toml` only.
 //! Moving the pin means running the judge again.
 //!
+//! Text styles and text are in the submodule `dwg/text.rs`, part of the
+//! same seam.
+//!
 //! Our own names here follow `CONTEXT.md`: a DWG file's contents are a
 //! drawing and the things in it are objects. acadrust's names, such as
 //! `CadDocument` and `EntityType`, stay as acadrust spells them.
@@ -28,7 +31,10 @@ use crate::model::{
     Arc, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object, Point3,
     Polyline, Sheet, Spline, BUILT_IN_LINETYPES, FIT_DEGREE, LAYER_ZERO,
 };
+use crate::text::Text as TextObject;
 use crate::units::Unit;
+
+mod text;
 
 /// The DWG version a new sheet is written in: the 2018 format, AC1032 (ADR-0006).
 const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;
@@ -52,8 +58,12 @@ pub(crate) fn new_sheet_version() -> String {
 }
 
 /// Writes a new sheet as the bytes of a DWG in the 2018 format, carrying the
-/// build mark.
-pub(crate) fn write_new_sheet(sheet: &Sheet) -> Result<Vec<u8>, Error> {
+/// build mark. `start_of` gives where each single line of text starts,
+/// which the DWG records beside the point it is justified at.
+pub(crate) fn write_new_sheet(
+    sheet: &Sheet,
+    start_of: &dyn Fn(&TextObject) -> Point3,
+) -> Result<Vec<u8>, Error> {
     let mut drawing = CadDocument::with_version(NEW_SHEET_VERSION);
     drawing.header.insertion_units = insertion_units(sheet.units);
     drawing.header.measurement = i16::from(sheet.units.is_metric());
@@ -92,15 +102,19 @@ pub(crate) fn write_new_sheet(sheet: &Sheet) -> Result<Vec<u8>, Error> {
             }
         }
     }
-    // Layers and linetypes take their handles before the objects take theirs.
+    text::add_text_styles(&mut drawing, &sheet.text_styles)?;
+    // Layers, linetypes and text styles take their handles before the
+    // objects take theirs.
     drawing.assign_table_entry_handles();
     for object in &sheet.objects {
-        drawing.add_entity(dwg_object(object)).map_err(|e| {
-            Error::new(
-                ErrorCode::DwgWrite,
-                format!("could not add a {} to the drawing: {e}", object.type_name()),
-            )
-        })?;
+        drawing
+            .add_entity(dwg_object(object, start_of))
+            .map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a {} to the drawing: {e}", object.type_name()),
+                )
+            })?;
     }
     match catch_unwind(AssertUnwindSafe(|| DwgWriter::write_to_vec(&drawing))) {
         Ok(Ok(bytes)) => Ok(bytes),
@@ -145,7 +159,7 @@ fn set_layer_properties(dwg_layer: &mut DwgLayer, layer: &Layer) {
 /// The DWG object for one of ours, on its layer. It takes its colour,
 /// linetype and lineweight from the layer, as acadrust's objects do unless
 /// told otherwise.
-fn dwg_object(object: &Object) -> EntityType {
+fn dwg_object(object: &Object, start_of: &dyn Fn(&TextObject) -> Point3) -> EntityType {
     let mut dwg_object = match object {
         Object::Line(line) => {
             EntityType::Line(DwgLine::from_points(vector(line.from), vector(line.to)))
@@ -163,6 +177,8 @@ fn dwg_object(object: &Object) -> EntityType {
         )),
         Object::Ellipse(ellipse) => EntityType::Ellipse(dwg_ellipse(ellipse)),
         Object::Spline(spline) => EntityType::Spline(dwg_spline(spline)),
+        Object::Text(t) => EntityType::Text(text::dwg_text(t, start_of(t))),
+        Object::MText(t) => EntityType::MText(Box::new(text::dwg_mtext(t))),
     };
     object
         .layer()
@@ -266,6 +282,7 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             None => layers_not_read += 1,
         }
     }
+    let (text_styles, text_styles_not_read) = text::read_text_styles(&drawing);
     let mut objects = Vec::new();
     let mut objects_not_read = 0;
     for dwg_object in drawing.model_space_entities() {
@@ -281,6 +298,8 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         linetypes_not_read,
         layers,
         layers_not_read,
+        text_styles,
+        text_styles_not_read,
         objects,
         objects_not_read,
     })
@@ -396,6 +415,8 @@ fn read_object(dwg_object: &EntityType) -> Option<Object> {
             })
         }
         EntityType::Spline(spline) => Object::Spline(read_spline(spline, layer)?),
+        EntityType::Text(t) => Object::Text(text::read_text(t, layer)?),
+        EntityType::MText(t) => Object::MText(text::read_mtext(t, layer)?),
         _ => return None,
     };
     Some(object)
@@ -548,6 +569,7 @@ mod tests {
             units: Unit::Mm,
             linetypes: Vec::new(),
             layers: Vec::new(),
+            text_styles: Vec::new(),
             objects: Vec::new(),
         }
     }
@@ -556,7 +578,11 @@ mod tests {
     fn a_built_dwg_carries_the_build_mark() {
         let dir = scratch("marked");
         let dwg = dir.join("sheet.dwg");
-        fs::write(&dwg, write_new_sheet(&empty_sheet()).unwrap()).unwrap();
+        fs::write(
+            &dwg,
+            write_new_sheet(&empty_sheet(), &|t| t.position).unwrap(),
+        )
+        .unwrap();
         assert_eq!(carries_build_mark(&dwg), Ok(true));
         let _ = fs::remove_dir_all(&dir);
     }

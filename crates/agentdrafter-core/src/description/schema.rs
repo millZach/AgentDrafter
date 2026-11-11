@@ -2,8 +2,8 @@
 //! agent can read before it writes a sheet description.
 //!
 //! The schema is built from the same tables the reader checks keys against:
-//! the object types and their keys, the units, the colour names and the
-//! lineweights. A test holds the two together, so a key cannot be added to
+//! the object types and their keys, the units, the colour names, the
+//! lineweights, the text style keys and the justifications. A test holds the two together, so a key cannot be added to
 //! one and not the other.
 //!
 //! JSON Schema describes JSON values, and a YAML reader that guesses types
@@ -25,8 +25,10 @@ use super::layers::{
     LONGEST_PATTERN,
 };
 use super::objects::{FEWEST_FIT_POINTS, HIGHEST_DEGREE, OBJECT_TYPES};
+use super::text::FORBIDDEN_IN_FONT_NAMES;
 use super::SHEET_KEYS;
 use crate::model::{Lineweight, CONTINUOUS, FIT_DEGREE, LAYER_ZERO, WHITE};
+use crate::text::{Attachment, Justify, STANDARD, STANDARD_FONT, WIDTH_FACTORS};
 use crate::units::Unit;
 
 /// A plain decimal number, as `docs/sheet-description.md` defines it.
@@ -343,7 +345,9 @@ pub fn sheet_description_schema() -> Value {
         },
     );
 
-    let [units_key, linetypes_key, layers_key, objects_key] = SHEET_KEYS;
+    text_defs(&mut defs);
+
+    let [units_key, linetypes_key, layers_key, text_styles_key, objects_key] = SHEET_KEYS;
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "AgentDrafter sheet description",
@@ -383,6 +387,16 @@ pub fn sheet_description_schema() -> Value {
                 "propertyNames": { "$ref": "#/$defs/name" },
                 "additionalProperties": { "$ref": "#/$defs/layer" },
             },
+            text_styles_key: {
+                "description": format!(
+                    "The sheet's text styles, from name to text style. Style `{STANDARD}` is in \
+                     every drawing, with the font `{STANDARD_FONT}`; listing it sets its font and \
+                     width factor."
+                ),
+                "type": "object",
+                "propertyNames": { "$ref": "#/$defs/name" },
+                "additionalProperties": { "$ref": "#/$defs/text_style" },
+            },
             objects_key: {
                 "description": "The objects on the sheet, in drawing order. Each is a mapping \
                                 with one key, its type.",
@@ -392,6 +406,147 @@ pub fn sheet_description_schema() -> Value {
         },
         "$defs": defs,
     })
+}
+
+/// The definitions text styles, text and multiline text need.
+fn text_defs(defs: &mut Map<String, Value>) {
+    let (narrowest, widest) = WIDTH_FACTORS;
+    let forbidden = FORBIDDEN_IN_FONT_NAMES.replace('\\', "\\\\");
+    defs.insert(
+        "font".into(),
+        json!({
+            "description": "A font, by its file name alone: an AutoCAD SHX font such as \
+                            `romans.shx` or a TrueType font such as `arial.ttf`. The extension \
+                            may be in any case. The DWG names the font, and AutoCAD finds it on \
+                            the machine that opens it.",
+            "type": "string",
+            "pattern": format!("^[^{forbidden}\\x00-\\x1f]+\\.([sS][hH][xX]|[tT][tT][fF])$"),
+        }),
+    );
+    defs.insert(
+        "width_factor".into(),
+        json!({
+            "description": format!(
+                "How wide characters are drawn, as a share of their normal width: 1 is normal, \
+                 0.8 narrower. From {narrowest} to {widest}."
+            ),
+            "anyOf": [
+                { "type": "number", "minimum": narrowest, "maximum": widest },
+                { "type": "string", "pattern": format!("^{NUMBER}$") },
+            ],
+        }),
+    );
+    defs.insert(
+        "text_style".into(),
+        json!({
+            "description": "A text style: the font text draws with, and how wide.",
+            "type": "object",
+            "required": ["font"],
+            "additionalProperties": false,
+            "properties": {
+                "font": { "$ref": "#/$defs/font" },
+                "width_factor": {
+                    "$ref": "#/$defs/width_factor",
+                    "description": "The width factor text in the style takes unless it states \
+                                    its own. Without it, 1.",
+                },
+            },
+        }),
+    );
+    defs.insert(
+        "style_name".into(),
+        json!({
+            "description": format!(
+                "The text style the text draws with: `{STANDARD}`, which every drawing has, or a \
+                 name under `text_styles`, written exactly as it is there. Without it, \
+                 `{STANDARD}`."
+            ),
+            "type": ["string", "number", "boolean", "null"],
+        }),
+    );
+    defs.insert(
+        "height".into(),
+        json!({
+            "$ref": "#/$defs/length",
+            "description": "The height of the capitals: a length more than 0.",
+        }),
+    );
+    defs.insert(
+        "text".into(),
+        object_def(
+            "A single line of text, as AutoCAD's TEXT draws it.",
+            &["contents", "position", "height"],
+            json!({
+                "contents": {
+                    "description": "What the text says, exactly as it shows: one line, not \
+                                    empty, with no control characters. `%` shows as a percent \
+                                    sign, however many there are.",
+                    "type": ["string", "number", "boolean", "null"],
+                },
+                "position": {
+                    "$ref": "#/$defs/point",
+                    "description": "The point the text is justified at.",
+                },
+                "height": { "$ref": "#/$defs/height" },
+                "style": { "$ref": "#/$defs/style_name" },
+                "width_factor": {
+                    "$ref": "#/$defs/width_factor",
+                    "description": "Without it, the style's width factor.",
+                },
+                "rotation": {
+                    "$ref": "#/$defs/angle",
+                    "description": "Degrees anticlockwise from the X axis. Without it, 0.",
+                },
+                "justify": {
+                    "description": "Where the text sits against its position. left, center and \
+                                    right sit on the baseline; middle centres the text both ways; \
+                                    the others name the top, middle or bottom of the capitals \
+                                    (bottom is the lowest descender). Without it, left.",
+                    "enum": Justify::ALL.map(Justify::name),
+                },
+            }),
+        ),
+    );
+    defs.insert(
+        "mtext".into(),
+        object_def(
+            "Text of one or more lines in a box, as AutoCAD's MTEXT draws it.",
+            &["contents", "position", "height"],
+            json!({
+                "contents": {
+                    "description": "What the text says, exactly as it shows, not empty: a line \
+                                    break starts a new line, and line breaks at the end are \
+                                    dropped. No control characters but line breaks. A \\, { or } \
+                                    shows as itself; formatting codes are not read.",
+                    "type": ["string", "number", "boolean", "null"],
+                },
+                "position": {
+                    "$ref": "#/$defs/point",
+                    "description": "The point the text's box is attached at.",
+                },
+                "height": { "$ref": "#/$defs/height" },
+                "width": {
+                    "$ref": "#/$defs/length",
+                    "description": "The width lines wrap in: a length of 0 or more. Without it, \
+                                    0, and lines break only where the contents break them.",
+                },
+                "style": { "$ref": "#/$defs/style_name" },
+                "width_factor": {
+                    "$ref": "#/$defs/width_factor",
+                    "description": "Without it, the style's width factor.",
+                },
+                "rotation": {
+                    "$ref": "#/$defs/angle",
+                    "description": "Degrees anticlockwise from the X axis. Without it, 0.",
+                },
+                "justify": {
+                    "description": "Which point of the text's box sits at its position. \
+                                    Without it, top_left.",
+                    "enum": Attachment::ALL.map(Attachment::name),
+                },
+            }),
+        ),
+    );
 }
 
 /// The definition of one object type: its own `properties` and `layer`.
@@ -420,6 +575,7 @@ fn name_pattern() -> String {
 mod tests {
     use super::*;
     use crate::description::layers::{LAYER_KEYS, LINETYPE_KEYS};
+    use crate::description::text::TEXT_STYLE_KEYS;
 
     fn keys(value: &Value) -> Vec<String> {
         let mut keys: Vec<String> = value
@@ -448,6 +604,10 @@ mod tests {
             sorted(&LINETYPE_KEYS)
         );
         assert_eq!(keys(&defs["layer"]["properties"]), sorted(&LAYER_KEYS));
+        assert_eq!(
+            keys(&defs["text_style"]["properties"]),
+            sorted(&TEXT_STYLE_KEYS)
+        );
         let listed: Vec<String> = schema["properties"]["objects"]["items"]["oneOf"]
             .as_array()
             .unwrap()

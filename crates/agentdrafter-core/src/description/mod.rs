@@ -6,13 +6,15 @@
 //! sheet description does not know. Every error names the field it is about,
 //! and an error about a choice lists the valid choices.
 //!
-//! [`layers`] reads linetypes and layers, [`objects`] reads the objects, and
-//! [`schema`] states the same keys as a JSON Schema for agents to read.
+//! [`layers`] reads linetypes and layers, [`objects`] reads the objects,
+//! [`text`] reads text styles and text, and [`schema`] states the same keys
+//! as a JSON Schema for agents to read.
 
 mod layers;
 mod objects;
 pub(crate) mod schema;
 mod strict_yaml;
+mod text;
 
 use strict_yaml::{index_path, key_path, Entry, Kind, Node, Pos};
 
@@ -21,7 +23,7 @@ use crate::model::{Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 4] = ["units", "linetypes", "layers", "objects"];
+pub(crate) const SHEET_KEYS: [&str; 5] = ["units", "linetypes", "layers", "text_styles", "objects"];
 
 /// Reads the text of a sheet description into a [`Sheet`].
 ///
@@ -57,16 +59,29 @@ pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
         Some(node) => layers::layers(node, &linetypes)?,
         None => Vec::new(),
     };
+    let text_styles = match fields.get("text_styles") {
+        Some(node) => text::text_styles(node)?,
+        None => Vec::new(),
+    };
     let list = sequence(fields.require("objects")?, "objects", "a list of objects")?;
     let objects = list
         .iter()
         .enumerate()
-        .map(|(i, node)| objects::object(node, &index_path("objects", i), units, &layers))
+        .map(|(i, node)| {
+            objects::object(
+                node,
+                &index_path("objects", i),
+                units,
+                &layers,
+                &text_styles,
+            )
+        })
         .collect::<Result<_, _>>()?;
     Ok(Sheet {
         units,
         linetypes,
         layers,
+        text_styles,
         objects,
     })
 }
@@ -339,3 +354,6 @@ mod tests;
 
 #[cfg(test)]
 mod geometry_tests;
+
+#[cfg(test)]
+mod text_tests;
