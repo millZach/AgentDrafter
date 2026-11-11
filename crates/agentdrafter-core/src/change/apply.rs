@@ -26,8 +26,8 @@ use super::{
 };
 use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::{
-    mark_text, read_file, read_set_settings, rows_at, template_at, template_path, AttributeSet,
-    Listed, MarkFailure, ObjectList, RecordFile, Row,
+    article, mark_text, read_file, read_set_settings, rows_at, template_at, template_path,
+    AttributeSet, Listed, MarkFailure, ObjectList, RecordFile, Row,
 };
 use crate::error::{Error, ErrorCode};
 use crate::set::{Notice, SET_SETTINGS_FILE};
@@ -1089,8 +1089,8 @@ fn attribute(
     let field = error.field.clone().unwrap_or_default();
     let mut cause: Option<(usize, String)> = None;
     if in_rows {
-        if let Some((row, index, rest)) = split_place(&field).filter(|p| p.0 != usize::MAX) {
-            if let Some(i) = at.rows.blame(ObjectList::Row(row), index, rest) {
+        if let Some((list @ ObjectList::Row(_), index, rest)) = split_place(&field) {
+            if let Some(i) = at.rows.blame(list, index, rest) {
                 cause = Some((i, rest.to_owned()));
             }
         } else if let Some(value) = field.strip_prefix(&format!("rows[{}].values.", k)) {
@@ -1099,7 +1099,7 @@ fn attribute(
             }
         }
     } else if in_template {
-        if let Some((usize::MAX, index, rest)) = split_place(&field) {
+        if let Some((ObjectList::Template, index, rest)) = split_place(&field) {
             if let Some(Some(Ok(template))) = at.templates.get(t) {
                 if let Some(i) = template.blame(ObjectList::Template, index, rest) {
                     cause = Some((i, rest.to_owned()));
@@ -1211,24 +1211,23 @@ fn before_change(files: &SetFiles, k: usize, settings: &Settings) -> Result<Resu
 }
 
 /// Splits a place in a record, `objects[3].line.to` or
-/// `rows[1].objects[0].line.to`, into its row (`usize::MAX` for a
-/// template's own objects), the object's place in its list and what
-/// follows, `line.to`.
-fn split_place(field: &str) -> Option<(usize, usize, &str)> {
+/// `rows[1].objects[0].line.to`, into the list the object is in, its place
+/// in the list and what follows, `line.to`.
+fn split_place(field: &str) -> Option<(ObjectList, usize, &str)> {
     fn index(text: &str) -> Option<(usize, &str)> {
         let rest = text.strip_prefix('[')?;
         let end = rest.find(']')?;
         Some((rest[..end].parse().ok()?, &rest[end + 1..]))
     }
-    let (row, rest) = match field.strip_prefix("rows") {
+    let (list, rest) = match field.strip_prefix("rows") {
         Some(rest) => {
             let (row, rest) = index(rest)?;
-            (row, rest.strip_prefix(".objects")?)
+            (ObjectList::Row(row), rest.strip_prefix(".objects")?)
         }
-        None => (usize::MAX, field.strip_prefix("objects")?),
+        None => (ObjectList::Template, field.strip_prefix("objects")?),
     };
     let (object, rest) = index(rest)?;
-    Some((row, object, rest.strip_prefix('.').unwrap_or(rest)))
+    Some((list, object, rest.strip_prefix('.').unwrap_or(rest)))
 }
 
 /// The field within operation `op` that `rest`, a place within the object
@@ -1386,14 +1385,6 @@ fn every_sheet(names: &[String]) -> String {
     } else {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         format!("every sheet built from it: {}", quoted_list(&refs))
-    }
-}
-
-fn article(object: &str) -> &'static str {
-    if object.starts_with(['a', 'e', 'i', 'o', 'u']) || object == "mtext" {
-        "an"
-    } else {
-        "a"
     }
 }
 

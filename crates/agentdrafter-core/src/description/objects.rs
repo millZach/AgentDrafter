@@ -118,6 +118,16 @@ const ELLIPSE_KEYS: [&str; 6] = [
 ];
 const SPLINE_KEYS: [&str; 4] = ["fit_points", "control_points", "degree", "layer"];
 
+/// The article an object type takes in a message: `an` for `arc`,
+/// `ellipse`, `insert` and `mtext`, `a` for the others.
+pub(crate) fn article(object: &str) -> &'static str {
+    if object.starts_with(['a', 'e', 'i', 'o', 'u']) || object == "mtext" {
+        "an"
+    } else {
+        "a"
+    }
+}
+
 /// The highest degree a spline by control points can have, as in AutoCAD.
 pub(crate) const HIGHEST_DEGREE: u8 = 10;
 

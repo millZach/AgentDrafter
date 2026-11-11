@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 use super::emit::{number_text, scalar_text, Context, Emitter};
 use super::ids::{ID_KEY, NAME_KEY};
-use super::objects::OBJECT_TYPES;
+use super::objects::{article, OBJECT_TYPES};
 use super::set::ROW_OBJECTS_KEY;
 use super::strict_yaml::{self, index_path, key_path, Entry, Kind, Node, Source, Style};
 use super::template::ROW_KEY;
@@ -367,11 +367,7 @@ impl RecordFile {
                     ErrorCode::UnknownKey,
                     format!(
                         "unknown key `{key}`; `change` sets keys {} {kind} takes: {}",
-                        if kind.starts_with(['a', 'e', 'i', 'o', 'u']) || kind == "mtext" {
-                            "an"
-                        } else {
-                            "a"
-                        },
+                        article(&kind),
                         allowed.join(", ")
                     ),
                 )
@@ -1191,12 +1187,4 @@ fn record_shape_in(what: &str, path: &Path) -> Error {
         format!("the record does not hold {what} where an edit needs one"),
     )
     .in_file(path)
-}
-
-fn article(kind: &str) -> &'static str {
-    if kind.starts_with(['a', 'e', 'i', 'o', 'u']) || kind == "mtext" {
-        "an"
-    } else {
-        "a"
-    }
 }

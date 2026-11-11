@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::description::schema::sheet_description_schema;
-use crate::description::{objects_table, rows_schema};
+use crate::description::{article, objects_table, rows_schema};
 use crate::error::{Error, ErrorCode};
 use crate::units::{parse_length, LengthError, Unit};
 
@@ -174,14 +174,6 @@ fn does(spec: &Spec) -> String {
                                reply names every place on the sheet the value fills. AutoCAD's \
                                ATTEDIT."
             .to_owned(),
-    }
-}
-
-fn article(object: &str) -> &'static str {
-    if object.starts_with(['a', 'e', 'i', 'o', 'u']) || object == "mtext" {
-        "an"
-    } else {
-        "a"
     }
 }
 
