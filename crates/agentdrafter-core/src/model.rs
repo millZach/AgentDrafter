@@ -12,6 +12,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::text::{MText, Text, TextStyle};
 use crate::units::Unit;
 
 pub(crate) mod hatch;
@@ -34,7 +35,7 @@ pub(crate) const FIT_DEGREE: u8 = 3;
 /// background and black on paper.
 pub const WHITE: u8 = 7;
 
-fn layer_zero() -> String {
+pub(crate) fn layer_zero() -> String {
     LAYER_ZERO.to_owned()
 }
 
@@ -171,6 +172,9 @@ pub enum Object {
     Ellipse(Ellipse),
     Spline(Spline),
     Hatch(Hatch),
+    Text(Text),
+    #[serde(rename = "mtext")]
+    MText(MText),
 }
 
 impl Object {
@@ -184,6 +188,8 @@ impl Object {
             Object::Ellipse(_) => "ellipse",
             Object::Spline(_) => "spline",
             Object::Hatch(_) => "hatch",
+            Object::Text(_) => "text",
+            Object::MText(_) => "mtext",
         }
     }
 
@@ -197,6 +203,8 @@ impl Object {
             Object::Ellipse(o) => &o.layer,
             Object::Spline(o) => &o.layer,
             Object::Hatch(o) => &o.layer,
+            Object::Text(o) => &o.layer,
+            Object::MText(o) => &o.layer,
         }
     }
 }
@@ -331,6 +339,10 @@ pub struct Sheet {
     /// it here sets its colour, linetype and lineweight.
     #[serde(default)]
     pub layers: Vec<Layer>,
+    /// The text styles the sheet defines. Style `Standard` is in every
+    /// drawing; listing it here sets its font and width factor.
+    #[serde(default)]
+    pub text_styles: Vec<TextStyle>,
     pub objects: Vec<Object>,
 }
 
@@ -354,6 +366,13 @@ pub struct DrawingContents {
     /// How many layers the core has no model for yet, such as those with a
     /// true colour rather than a colour index.
     pub layers_not_read: usize,
+    /// The drawing's text styles the core has a model for, in table order,
+    /// `Standard` among them, leaving out the entries that load shapes for
+    /// linetypes rather than fonts for text.
+    pub text_styles: Vec<TextStyle>,
+    /// How many text styles the core has no model for yet, such as those
+    /// that slant, mirror or fix the height of their text, or add a big font.
+    pub text_styles_not_read: usize,
     /// The model-space objects the core has a model for, in drawing order.
     pub objects: Vec<Object>,
     /// How many model-space objects the core has no model for yet, including

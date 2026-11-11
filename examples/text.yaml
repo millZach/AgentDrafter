@@ -1,0 +1,82 @@
+# Text and multiline text in every justification, in three text styles:
+# two SHX fonts and a TrueType font. A small circle marks each position, so
+# the justification shows. Made up; no trade.
+# Build it with: agentdrafter build examples/text.yaml
+units: mm
+
+text_styles:
+  Standard: {font: txt.shx}
+  notes: {font: romans.shx, width_factor: 0.8}
+  title: {font: arial.ttf}
+
+layers:
+  text: {color: white}
+  marks: {color: red, lineweight: 0.13}
+
+objects:
+  # A title in the TrueType style.
+  - text: {contents: TEXT IN EVERY JUSTIFICATION, position: [0, 120, 0], height: 7, style: title, layer: text}
+
+  # Single-line text: one of each justification, in a column.
+  - text: {contents: left, position: [10, 100, 0], height: 3.5, style: notes, layer: text}
+  - text: {contents: center, position: [10, 92, 0], height: 3.5, style: notes, justify: center, layer: text}
+  - text: {contents: right, position: [10, 84, 0], height: 3.5, style: notes, justify: right, layer: text}
+  - text: {contents: middle, position: [10, 76, 0], height: 3.5, style: notes, justify: middle, layer: text}
+  - text: {contents: top_left, position: [10, 68, 0], height: 3.5, justify: top_left, layer: text}
+  - text: {contents: top_center, position: [10, 60, 0], height: 3.5, justify: top_center, layer: text}
+  - text: {contents: top_right, position: [10, 52, 0], height: 3.5, justify: top_right, layer: text}
+  - text: {contents: middle_left, position: [10, 44, 0], height: 3.5, style: title, justify: middle_left, layer: text}
+  - text: {contents: middle_center, position: [10, 36, 0], height: 3.5, style: title, justify: middle_center, layer: text}
+  - text: {contents: middle_right, position: [10, 28, 0], height: 3.5, style: title, justify: middle_right, layer: text}
+  - text: {contents: bottom_left, position: [10, 20, 0], height: 3.5, style: notes, width_factor: 1, justify: bottom_left, layer: text}
+  - text: {contents: bottom_center, position: [10, 12, 0], height: 3.5, style: notes, justify: bottom_center, rotation: 10, layer: text}
+  - text: {contents: bottom_right, position: [10, 4, 0], height: 3.5, style: notes, justify: bottom_right, layer: text}
+
+  # Multiline text: one of each justification, in a row of 40 mm boxes.
+  - mtext: {contents: "top_left\nsecond line", position: [60, 100, 0], height: 2.5, width: 40, style: notes, layer: text}
+  - mtext: {contents: "top_center\nsecond line", position: [110, 100, 0], height: 2.5, width: 40, style: notes, justify: top_center, layer: text}
+  - mtext: {contents: "top_right\nsecond line", position: [160, 100, 0], height: 2.5, width: 40, style: notes, justify: top_right, layer: text}
+  - mtext: {contents: "middle_left\nsecond line", position: [60, 70, 0], height: 2.5, width: 40, justify: middle_left, layer: text}
+  - mtext: {contents: "middle_center\nsecond line", position: [110, 70, 0], height: 2.5, width: 40, justify: middle_center, layer: text}
+  - mtext: {contents: "middle_right\nsecond line", position: [160, 70, 0], height: 2.5, width: 40, justify: middle_right, layer: text}
+  - mtext: {contents: "bottom_left\nsecond line", position: [60, 40, 0], height: 2.5, width: 40, style: title, justify: bottom_left, layer: text}
+  - mtext: {contents: "bottom_center\nsecond line", position: [110, 40, 0], height: 2.5, width: 40, style: title, justify: bottom_center, layer: text}
+  - mtext: {contents: "bottom_right\nsecond line", position: [160, 40, 0], height: 2.5, width: 40, style: title, justify: bottom_right, width_factor: 0.7, layer: text}
+
+  # A note that wraps in its box, turned a quarter.
+  - mtext:
+      contents: |
+        NOTES:
+        1. THIS TEXT WRAPS IN A BOX 60 MM WIDE, AND KEEPS {BRACES}, A \ AND 100% AS WRITTEN.
+        2. A SECOND NOTE.
+      position: [200, 10, 0]
+      height: 2.5
+      width: 60
+      style: notes
+      rotation: 90
+      layer: text
+
+  # Marks at every position.
+  - circle: {center: [10, 100, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 92, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 84, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 76, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 68, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 60, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 52, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 44, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 36, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 28, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 20, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 12, 0], radius: 0.5, layer: marks}
+  - circle: {center: [10, 4, 0], radius: 0.5, layer: marks}
+  - circle: {center: [60, 100, 0], radius: 0.5, layer: marks}
+  - circle: {center: [110, 100, 0], radius: 0.5, layer: marks}
+  - circle: {center: [160, 100, 0], radius: 0.5, layer: marks}
+  - circle: {center: [60, 70, 0], radius: 0.5, layer: marks}
+  - circle: {center: [110, 70, 0], radius: 0.5, layer: marks}
+  - circle: {center: [160, 70, 0], radius: 0.5, layer: marks}
+  - circle: {center: [60, 40, 0], radius: 0.5, layer: marks}
+  - circle: {center: [110, 40, 0], radius: 0.5, layer: marks}
+  - circle: {center: [160, 40, 0], radius: 0.5, layer: marks}
+  - circle: {center: [200, 10, 0], radius: 0.5, layer: marks}

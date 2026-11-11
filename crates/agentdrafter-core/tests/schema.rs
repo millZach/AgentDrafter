@@ -98,6 +98,44 @@ const BOUNDARY: Place = Place {
     json: r#"{"units": "mm", "objects": [{"hatch": {"pattern": "SOLID", "boundary": V}}]}"#,
 };
 
+const FONT: Place = Place {
+    name: "a text style's font",
+    yaml: "units: mm\ntext_styles:\n  a: {font: V}\nobjects: []\n",
+    json: r#"{"units": "mm", "text_styles": {"a": {"font": V}}, "objects": []}"#,
+};
+
+const STYLE_WIDTH_FACTOR: Place = Place {
+    name: "a text style's width factor",
+    yaml: "units: mm\ntext_styles:\n  a: {font: a.shx, width_factor: V}\nobjects: []\n",
+    json: r#"{"units": "mm", "text_styles": {"a": {"font": "a.shx", "width_factor": V}}, "objects": []}"#,
+};
+
+const CONTENTS: Place = Place {
+    name: "a text's contents",
+    yaml: "units: mm\nobjects:\n  - text: {contents: V, position: [0, 0, 0], height: 1}\n",
+    json: r#"{"units": "mm", "objects": [{"text": {"contents": V, "position": [0, 0, 0], "height": 1}}]}"#,
+};
+
+const JUSTIFY: Place = Place {
+    name: "a text's justify",
+    yaml:
+        "units: mm\nobjects:\n  - text: {contents: A, position: [0, 0, 0], height: 1, justify: V}\n",
+    json: r#"{"units": "mm", "objects": [{"text": {"contents": "A", "position": [0, 0, 0], "height": 1, "justify": V}}]}"#,
+};
+
+const ATTACH: Place = Place {
+    name: "an mtext's justify",
+    yaml: "units: mm\nobjects:\n  - mtext: {contents: A, position: [0, 0, 0], height: 1, justify: V}\n",
+    json: r#"{"units": "mm", "objects": [{"mtext": {"contents": "A", "position": [0, 0, 0], "height": 1, "justify": V}}]}"#,
+};
+
+const MTEXT_WIDTH: Place = Place {
+    name: "an mtext's width",
+    yaml:
+        "units: mm\nobjects:\n  - mtext: {contents: A, position: [0, 0, 0], height: 1, width: V}\n",
+    json: r#"{"units": "mm", "objects": [{"mtext": {"contents": "A", "position": [0, 0, 0], "height": 1, "width": V}}]}"#,
+};
+
 /// `(place, value as YAML, the same value as JSON, accepted)`.
 fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
     vec![
@@ -250,6 +288,49 @@ fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
             json!([{"circle": {"center": [0, 0, 0], "radius": 1}}]),
             false,
         ),
+        // A font: an SHX or TrueType file name, the extension in any case.
+        (&FONT, "romans.shx", json!("romans.shx"), true),
+        (&FONT, "'Arial.TTF'", json!("Arial.TTF"), true),
+        (&FONT, "a.b.shx", json!("a.b.shx"), true),
+        (&FONT, "romans", json!("romans"), false),
+        (&FONT, "arial.otf", json!("arial.otf"), false),
+        (&FONT, "'.shx'", json!(".shx"), false),
+        (
+            &FONT,
+            "'fonts/romans.shx'",
+            json!("fonts/romans.shx"),
+            false,
+        ),
+        (&FONT, "'C:romans.shx'", json!("C:romans.shx"), false),
+        // A width factor: a number from 0.01 to 100, quoted or not.
+        (&STYLE_WIDTH_FACTOR, "0.8", json!(0.8), true),
+        (&STYLE_WIDTH_FACTOR, "'0.8'", json!("0.8"), true),
+        (&STYLE_WIDTH_FACTOR, "100", json!(100), true),
+        (&STYLE_WIDTH_FACTOR, "0.01", json!(0.01), true),
+        (&STYLE_WIDTH_FACTOR, "0", json!(0), false),
+        (&STYLE_WIDTH_FACTOR, "101", json!(101), false),
+        (&STYLE_WIDTH_FACTOR, "'0.8 mm'", json!("0.8 mm"), false),
+        (&STYLE_WIDTH_FACTOR, "narrow", json!("narrow"), false),
+        // Contents: text, whatever a type-guessing reader makes of it.
+        (&CONTENTS, "PUMP", json!("PUMP"), true),
+        (&CONTENTS, "100", json!(100), true),
+        (&CONTENTS, "'yes'", json!("yes"), true),
+        (&CONTENTS, "[A]", json!(["A"]), false),
+        // A single line's justification.
+        (&JUSTIFY, "middle_center", json!("middle_center"), true),
+        (&JUSTIFY, "'left'", json!("left"), true),
+        (&JUSTIFY, "middle", json!("middle"), true),
+        (&JUSTIFY, "centre", json!("centre"), false),
+        (&JUSTIFY, "Left", json!("Left"), false),
+        (&JUSTIFY, "aligned", json!("aligned"), false),
+        // Multiline text's justification: no baseline ones.
+        (&ATTACH, "bottom_right", json!("bottom_right"), true),
+        (&ATTACH, "left", json!("left"), false),
+        (&ATTACH, "middle", json!("middle"), false),
+        // An mtext width: a length, 0 or more (the sign JSON Schema cannot see).
+        (&MTEXT_WIDTH, "80", json!(80), true),
+        (&MTEXT_WIDTH, "'3 in'", json!("3 in"), true),
+        (&MTEXT_WIDTH, "wide", json!("wide"), false),
     ]
 }
 

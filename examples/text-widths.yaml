@@ -1,0 +1,142 @@
+# A fixed set of made-up strings in four SHX fonts and two TrueType fonts,
+# for comparing AgentDrafter's measured text widths with AutoCAD's own.
+# Each string is drawn twice: 2.5 high at the style's width factor, and
+# 3.5 high at a width factor of 0.8.
+# Build it with: agentdrafter build examples/text-widths.yaml
+units: mm
+
+text_styles:
+  romans: {font: romans.shx}
+  simplex: {font: simplex.shx}
+  txt: {font: txt.shx}
+  isocp: {font: isocp.shx}
+  arial: {font: arial.ttf}
+  times: {font: times.ttf}
+
+objects:
+  # romans.shx
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, 0, 0], height: 2.5, style: romans}
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -5, 0], height: 3.5, style: romans, width_factor: 0.8}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -11, 0], height: 2.5, style: romans}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -16, 0], height: 3.5, style: romans, width_factor: 0.8}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -22, 0], height: 2.5, style: romans}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -27, 0], height: 3.5, style: romans, width_factor: 0.8}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -33, 0], height: 2.5, style: romans}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -38, 0], height: 3.5, style: romans, width_factor: 0.8}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -44, 0], height: 2.5, style: romans}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -49, 0], height: 3.5, style: romans, width_factor: 0.8}
+  - text: {contents: 'iiiiiiii', position: [0, -55, 0], height: 2.5, style: romans}
+  - text: {contents: 'iiiiiiii', position: [0, -60, 0], height: 3.5, style: romans, width_factor: 0.8}
+  - text: {contents: 'WWWWWWWW', position: [0, -66, 0], height: 2.5, style: romans}
+  - text: {contents: 'WWWWWWWW', position: [0, -71, 0], height: 3.5, style: romans, width_factor: 0.8}
+  - text: {contents: 'Ag jy Qp', position: [0, -77, 0], height: 2.5, style: romans}
+  - text: {contents: 'Ag jy Qp', position: [0, -82, 0], height: 3.5, style: romans, width_factor: 0.8}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -88, 0], height: 2.5, style: romans}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -93, 0], height: 3.5, style: romans, width_factor: 0.8}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -99, 0], height: 2.5, style: romans}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -104, 0], height: 3.5, style: romans, width_factor: 0.8}
+  # simplex.shx
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -120, 0], height: 2.5, style: simplex}
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -125, 0], height: 3.5, style: simplex, width_factor: 0.8}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -131, 0], height: 2.5, style: simplex}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -136, 0], height: 3.5, style: simplex, width_factor: 0.8}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -142, 0], height: 2.5, style: simplex}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -147, 0], height: 3.5, style: simplex, width_factor: 0.8}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -153, 0], height: 2.5, style: simplex}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -158, 0], height: 3.5, style: simplex, width_factor: 0.8}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -164, 0], height: 2.5, style: simplex}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -169, 0], height: 3.5, style: simplex, width_factor: 0.8}
+  - text: {contents: 'iiiiiiii', position: [0, -175, 0], height: 2.5, style: simplex}
+  - text: {contents: 'iiiiiiii', position: [0, -180, 0], height: 3.5, style: simplex, width_factor: 0.8}
+  - text: {contents: 'WWWWWWWW', position: [0, -186, 0], height: 2.5, style: simplex}
+  - text: {contents: 'WWWWWWWW', position: [0, -191, 0], height: 3.5, style: simplex, width_factor: 0.8}
+  - text: {contents: 'Ag jy Qp', position: [0, -197, 0], height: 2.5, style: simplex}
+  - text: {contents: 'Ag jy Qp', position: [0, -202, 0], height: 3.5, style: simplex, width_factor: 0.8}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -208, 0], height: 2.5, style: simplex}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -213, 0], height: 3.5, style: simplex, width_factor: 0.8}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -219, 0], height: 2.5, style: simplex}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -224, 0], height: 3.5, style: simplex, width_factor: 0.8}
+  # txt.shx
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -240, 0], height: 2.5, style: txt}
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -245, 0], height: 3.5, style: txt, width_factor: 0.8}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -251, 0], height: 2.5, style: txt}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -256, 0], height: 3.5, style: txt, width_factor: 0.8}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -262, 0], height: 2.5, style: txt}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -267, 0], height: 3.5, style: txt, width_factor: 0.8}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -273, 0], height: 2.5, style: txt}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -278, 0], height: 3.5, style: txt, width_factor: 0.8}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -284, 0], height: 2.5, style: txt}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -289, 0], height: 3.5, style: txt, width_factor: 0.8}
+  - text: {contents: 'iiiiiiii', position: [0, -295, 0], height: 2.5, style: txt}
+  - text: {contents: 'iiiiiiii', position: [0, -300, 0], height: 3.5, style: txt, width_factor: 0.8}
+  - text: {contents: 'WWWWWWWW', position: [0, -306, 0], height: 2.5, style: txt}
+  - text: {contents: 'WWWWWWWW', position: [0, -311, 0], height: 3.5, style: txt, width_factor: 0.8}
+  - text: {contents: 'Ag jy Qp', position: [0, -317, 0], height: 2.5, style: txt}
+  - text: {contents: 'Ag jy Qp', position: [0, -322, 0], height: 3.5, style: txt, width_factor: 0.8}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -328, 0], height: 2.5, style: txt}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -333, 0], height: 3.5, style: txt, width_factor: 0.8}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -339, 0], height: 2.5, style: txt}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -344, 0], height: 3.5, style: txt, width_factor: 0.8}
+  # isocp.shx
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -360, 0], height: 2.5, style: isocp}
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -365, 0], height: 3.5, style: isocp, width_factor: 0.8}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -371, 0], height: 2.5, style: isocp}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -376, 0], height: 3.5, style: isocp, width_factor: 0.8}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -382, 0], height: 2.5, style: isocp}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -387, 0], height: 3.5, style: isocp, width_factor: 0.8}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -393, 0], height: 2.5, style: isocp}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -398, 0], height: 3.5, style: isocp, width_factor: 0.8}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -404, 0], height: 2.5, style: isocp}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -409, 0], height: 3.5, style: isocp, width_factor: 0.8}
+  - text: {contents: 'iiiiiiii', position: [0, -415, 0], height: 2.5, style: isocp}
+  - text: {contents: 'iiiiiiii', position: [0, -420, 0], height: 3.5, style: isocp, width_factor: 0.8}
+  - text: {contents: 'WWWWWWWW', position: [0, -426, 0], height: 2.5, style: isocp}
+  - text: {contents: 'WWWWWWWW', position: [0, -431, 0], height: 3.5, style: isocp, width_factor: 0.8}
+  - text: {contents: 'Ag jy Qp', position: [0, -437, 0], height: 2.5, style: isocp}
+  - text: {contents: 'Ag jy Qp', position: [0, -442, 0], height: 3.5, style: isocp, width_factor: 0.8}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -448, 0], height: 2.5, style: isocp}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -453, 0], height: 3.5, style: isocp, width_factor: 0.8}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -459, 0], height: 2.5, style: isocp}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -464, 0], height: 3.5, style: isocp, width_factor: 0.8}
+  # arial.ttf
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -480, 0], height: 2.5, style: arial}
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -485, 0], height: 3.5, style: arial, width_factor: 0.8}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -491, 0], height: 2.5, style: arial}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -496, 0], height: 3.5, style: arial, width_factor: 0.8}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -502, 0], height: 2.5, style: arial}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -507, 0], height: 3.5, style: arial, width_factor: 0.8}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -513, 0], height: 2.5, style: arial}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -518, 0], height: 3.5, style: arial, width_factor: 0.8}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -524, 0], height: 2.5, style: arial}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -529, 0], height: 3.5, style: arial, width_factor: 0.8}
+  - text: {contents: 'iiiiiiii', position: [0, -535, 0], height: 2.5, style: arial}
+  - text: {contents: 'iiiiiiii', position: [0, -540, 0], height: 3.5, style: arial, width_factor: 0.8}
+  - text: {contents: 'WWWWWWWW', position: [0, -546, 0], height: 2.5, style: arial}
+  - text: {contents: 'WWWWWWWW', position: [0, -551, 0], height: 3.5, style: arial, width_factor: 0.8}
+  - text: {contents: 'Ag jy Qp', position: [0, -557, 0], height: 2.5, style: arial}
+  - text: {contents: 'Ag jy Qp', position: [0, -562, 0], height: 3.5, style: arial, width_factor: 0.8}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -568, 0], height: 2.5, style: arial}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -573, 0], height: 3.5, style: arial, width_factor: 0.8}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -579, 0], height: 2.5, style: arial}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -584, 0], height: 3.5, style: arial, width_factor: 0.8}
+  # times.ttf
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -600, 0], height: 2.5, style: times}
+  - text: {contents: 'THE QUICK BROWN FOX JUMPS OVER 13 LAZY DOGS', position: [0, -605, 0], height: 3.5, style: times, width_factor: 0.8}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -611, 0], height: 2.5, style: times}
+  - text: {contents: 'the quick brown fox jumps over the lazy dog', position: [0, -616, 0], height: 3.5, style: times, width_factor: 0.8}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -622, 0], height: 2.5, style: times}
+  - text: {contents: '0123456789 +-=/()%', position: [0, -627, 0], height: 3.5, style: times, width_factor: 0.8}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -633, 0], height: 2.5, style: times}
+  - text: {contents: 'AVATAR To WAVE LT', position: [0, -638, 0], height: 3.5, style: times, width_factor: 0.8}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -644, 0], height: 2.5, style: times}
+  - text: {contents: 'Mixed Case: Width & Height.', position: [0, -649, 0], height: 3.5, style: times, width_factor: 0.8}
+  - text: {contents: 'iiiiiiii', position: [0, -655, 0], height: 2.5, style: times}
+  - text: {contents: 'iiiiiiii', position: [0, -660, 0], height: 3.5, style: times, width_factor: 0.8}
+  - text: {contents: 'WWWWWWWW', position: [0, -666, 0], height: 2.5, style: times}
+  - text: {contents: 'WWWWWWWW', position: [0, -671, 0], height: 3.5, style: times, width_factor: 0.8}
+  - text: {contents: 'Ag jy Qp', position: [0, -677, 0], height: 2.5, style: times}
+  - text: {contents: 'Ag jy Qp', position: [0, -682, 0], height: 3.5, style: times, width_factor: 0.8}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -688, 0], height: 2.5, style: times}
+  - text: {contents: 'Ø 25 ± 0.1 °C', position: [0, -693, 0], height: 3.5, style: times, width_factor: 0.8}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -699, 0], height: 2.5, style: times}
+  - text: {contents: 'ÀÉÎÕÜ àéîõü', position: [0, -704, 0], height: 3.5, style: times, width_factor: 0.8}

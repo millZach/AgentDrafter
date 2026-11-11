@@ -164,7 +164,7 @@ fn check_name(entry: &Entry, table: &str, what: &str) -> Result<(), Error> {
     Err(name_error(entry, table, problem))
 }
 
-fn name_error(entry: &Entry, table: &str, message: String) -> Error {
+pub(super) fn name_error(entry: &Entry, table: &str, message: String) -> Error {
     Error::new(ErrorCode::BadValue, message)
         .at_field(key_path(table, &entry.key))
         .at_position(entry.key_at.line, entry.key_at.column)
