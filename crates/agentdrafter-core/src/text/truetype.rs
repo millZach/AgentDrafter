@@ -87,6 +87,122 @@ impl TrueTypeFont {
             })
             .collect()
     }
+
+    /// The outlines of `text`'s characters, each with its advance, in units
+    /// where the capitals stand 1 tall: closed contours that fill by the
+    /// non-zero rule, with curves as chords that stray at most `tolerance`
+    /// from them. A character the font has no glyph for takes the font's
+    /// missing glyph, as [`Self::glyphs`] measures it.
+    pub(crate) fn outlines(&self, text: &str, tolerance: f64) -> Vec<(f64, Vec<Vec<[f64; 2]>>)> {
+        let Ok(face) = Face::parse(&self.bytes, 0) else {
+            return Vec::new();
+        };
+        let scale = 1.0 / self.capitals;
+        text.chars()
+            .map(|c| {
+                let id = face.glyph_index(c).unwrap_or(GlyphId(0));
+                let advance = face.glyph_hor_advance(id).map_or(0.0, f64::from) * scale;
+                let mut contours = Contours {
+                    scale,
+                    tolerance,
+                    contours: Vec::new(),
+                };
+                face.outline_glyph(id, &mut contours);
+                (advance, contours.contours)
+            })
+            .collect()
+    }
+}
+
+/// Collects a glyph's outline as contours of points, curves flattened.
+struct Contours {
+    scale: f64,
+    tolerance: f64,
+    contours: Vec<Vec<[f64; 2]>>,
+}
+
+impl Contours {
+    fn last(&self) -> [f64; 2] {
+        self.contours
+            .last()
+            .and_then(|c| c.last())
+            .copied()
+            .unwrap_or([0.0, 0.0])
+    }
+
+    fn push(&mut self, point: [f64; 2]) {
+        match self.contours.last_mut() {
+            Some(contour) => contour.push(point),
+            None => self.contours.push(vec![point]),
+        }
+    }
+
+    /// Flattens a curve from the last point through `controls`, a quadratic
+    /// with one control point and a cubic with two.
+    fn curve(&mut self, controls: &[[f64; 2]], end: [f64; 2]) {
+        let start = self.last();
+        let mut hull = start;
+        let mut length = 0.0;
+        for &p in controls.iter().chain([&end]) {
+            length += (p[0] - hull[0]).hypot(p[1] - hull[1]);
+            hull = p;
+        }
+        // A chord strays from a curve by about the square of its length over
+        // eight times the curve's radius, so chords as long as the square
+        // root of the tolerance keep within it wherever the radius is more
+        // than an eighth of the capitals' height.
+        let steps = ((length / self.tolerance.sqrt()).ceil() as usize).clamp(1, 64);
+        for step in 1..=steps {
+            let t = step as f64 / steps as f64;
+            let u = 1.0 - t;
+            let point = match controls {
+                [c] => [
+                    u * u * start[0] + 2.0 * u * t * c[0] + t * t * end[0],
+                    u * u * start[1] + 2.0 * u * t * c[1] + t * t * end[1],
+                ],
+                [c, d] => [
+                    u * u * u * start[0]
+                        + 3.0 * u * u * t * c[0]
+                        + 3.0 * u * t * t * d[0]
+                        + t * t * t * end[0],
+                    u * u * u * start[1]
+                        + 3.0 * u * u * t * c[1]
+                        + 3.0 * u * t * t * d[1]
+                        + t * t * t * end[1],
+                ],
+                _ => end,
+            };
+            self.push(point);
+        }
+    }
+
+    fn scaled(&self, x: f32, y: f32) -> [f64; 2] {
+        [f64::from(x) * self.scale, f64::from(y) * self.scale]
+    }
+}
+
+impl ttf_parser::OutlineBuilder for Contours {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let point = self.scaled(x, y);
+        self.contours.push(vec![point]);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let point = self.scaled(x, y);
+        self.push(point);
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let (control, end) = (self.scaled(x1, y1), self.scaled(x, y));
+        self.curve(&[control], end);
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let (c, d, end) = (self.scaled(x1, y1), self.scaled(x2, y2), self.scaled(x, y));
+        self.curve(&[c, d], end);
+    }
+
+    fn close(&mut self) {}
 }
 
 #[cfg(test)]

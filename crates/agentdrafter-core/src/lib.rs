@@ -16,21 +16,31 @@
 //! - [`read_dwg`] reads a DWG's linetypes, layers, text styles, block
 //!   definitions and model-space objects.
 //! - [`measure_text`] measures how wide a line of text draws in a font.
+//! - [`render`] draws a sheet description or a DWG to a PNG, stamped with
+//!   every file it was drawn from, and [`check_stale`] says whether any of
+//!   them has moved on.
 //!
-//! [`Settings`] say where the machine keeps its fonts; [`build`] and
-//! [`measure_text`] read them from the environment, and [`build_with`] and
-//! [`measure_text_with`] take them as given.
+//! [`Settings`] say where the machine keeps its fonts; [`build`],
+//! [`measure_text`] and [`render`] read them from the environment, and
+//! [`build_with`], [`measure_text_with`] and [`render_with`] take them as
+//! given.
 //!
 //! DWG is read and written through acadrust, behind one seam in the `dwg`
-//! module. Every coordinate in the core is 3D.
+//! module. Every coordinate in the core is 3D. A sheet is drawn by one
+//! pipeline, the `draw` module, whose display list every output draws
+//! from (ADR-0011).
 
 mod build;
 mod description;
+mod draw;
 mod dwg;
 mod error;
 mod model;
+mod raster;
+mod render;
 mod reply;
 mod settings;
+mod stamp;
 mod text;
 mod units;
 
@@ -45,8 +55,12 @@ pub use model::{
     Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
 };
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
+pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;
 pub use settings::{Settings, FONTS_VARIABLE};
+pub use stamp::{
+    check_stale, SourceCheck, SourceKind, SourceStamp, StaleReport, StaleRequest, Stamp,
+};
 pub use text::fonts::{FontSubstitution, FontUsed};
 pub use text::measure::{measure_text, measure_text_with, MeasureTextRequest, TextMeasurement};
 pub use text::{Attachment, FontKind, Justify, MText, Text, TextStyle, STANDARD};
