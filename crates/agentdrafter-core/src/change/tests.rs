@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use super::commit::FAIL_AT;
+use super::commit::{FAIL_AT, FAIL_SYNC};
 use super::journal::{read_entries, EntryKind};
 use super::{change_with, ChangeRequest, JOURNAL_FILE};
 use crate::error::ErrorCode;
@@ -183,4 +183,93 @@ fn a_partial_change_lands_with_its_mark_or_not_at_all() {
         7,
     );
     assert!(!set.join(super::MARK_FILE).exists());
+}
+
+/// The template edit every test here sends: the template, then the three
+/// sheets' DWGs, then the undo state of each, then the journal's entry.
+fn template_move() -> Value {
+    json!({"operations": [
+        {"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]},
+    ]})
+}
+
+#[test]
+fn a_failed_attempt_keeps_the_sheets_its_commit_could_not_write() {
+    // The move reaches all three sheets; saving the first undo state, step
+    // 4, fails, so none of them is written.
+    let set = demo_set("attempt-sheets", true);
+    let reply = apply(&set, &template_move(), Some(4));
+    let error = reply.error.unwrap();
+    assert_eq!(error.code, ErrorCode::WriteFailed);
+    assert!(error.message.contains("an undo state"), "{}", error.message);
+    let last = read_entries(&set).unwrap().pop().unwrap();
+    assert_eq!(last.kind, EntryKind::FailedAttempt);
+    assert!(last.landed_on.is_empty(), "nothing landed");
+    let sheets: Vec<&str> = last.failed_on.iter().map(|f| f.sheet.as_str()).collect();
+    assert_eq!(sheets, ["DEMO-001", "DEMO-002", "DEMO-003"]);
+    for failed in &last.failed_on {
+        assert_eq!(failed.code, "write_failed");
+        assert_eq!(failed.message, error.message);
+    }
+    assert_eq!(last.error.unwrap().code, "write_failed");
+}
+
+#[test]
+fn a_journal_that_cannot_be_cut_back_is_named_and_never_said_unchanged() {
+    let set = demo_set("cut-back", true);
+    let journal = set.join(JOURNAL_FILE);
+    let before = snapshot(&set);
+
+    // The entry is written, its sync fails, and cutting it back fails too:
+    // the files go back, but the journal may still hold the entry, and the
+    // error says so and names it.
+    FAIL_SYNC.with(|f| f.set(Some(true)));
+    let reply = apply(&set, &template_move(), None);
+    FAIL_SYNC.with(|f| f.set(None));
+    let error = reply.error.unwrap();
+    assert_eq!(error.code, ErrorCode::WriteFailed);
+    assert!(
+        !error.message.contains("nothing was changed"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains(&format!(
+            "the set's journal could not be cut back (a failed cut the test asked for), so it \
+             may still hold entry 1, or part of it, for a change that was rolled back; take it \
+             out of {}",
+            journal.display()
+        )),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.file, Some(journal.display().to_string()));
+    assert!(snapshot(&set) == before, "every drawing file went back");
+    let entries = read_entries(&set).unwrap();
+    assert_eq!(entries[0].entry, 1);
+    assert_eq!(
+        entries[0].kind,
+        EntryKind::ChangeSet,
+        "the entry the error names is there"
+    );
+
+    // Cut back as it should be, the journal holds no entry for the change
+    // set, and nothing was changed.
+    let length = fs::read(&journal).unwrap().len();
+    FAIL_SYNC.with(|f| f.set(Some(false)));
+    let reply = apply(&set, &template_move(), None);
+    FAIL_SYNC.with(|f| f.set(None));
+    let error = reply.error.unwrap();
+    assert!(
+        error.message.contains("so nothing was changed"),
+        "{}",
+        error.message
+    );
+    assert!(snapshot(&set) == before);
+    let entries = read_entries(&set).unwrap();
+    let last = entries.last().unwrap();
+    assert_eq!(last.kind, EntryKind::FailedAttempt);
+    let cut = fs::read(&journal).unwrap();
+    let added = String::from_utf8(cut[length..].to_vec()).unwrap();
+    assert_eq!(added.lines().count(), 1, "only the failed attempt: {added}");
 }

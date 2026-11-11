@@ -232,8 +232,9 @@ pub fn change(request: &ChangeRequest) -> Reply<ChangeReport> {
 /// that landed in the same step as its files, and one that changed nothing
 /// as a failed attempt.
 pub fn change_with(request: &ChangeRequest, settings: &Settings) -> Reply<ChangeReport> {
-    let mut outcome = apply::apply(request, settings);
-    journal::record_failed_attempt(request, &mut outcome);
+    let mut attempted = None;
+    let mut outcome = apply::apply(request, settings, &mut attempted);
+    journal::record_failed_attempt(request, &mut outcome, attempted);
     match outcome {
         Ok(report) if report.failed > 0 => {
             let error = Error::new(ErrorCode::SheetsFailed, report.message.clone());

@@ -41,7 +41,7 @@ The journal is written in JSON lines: one entry per line, each a JSON object, ad
 Keys with nothing to say are left out.
 
 - **A change set** is recorded in the same all-or-nothing step as its files: its records, its DWGs and the mark land with their undo state and the journal's entry, or none of them does. A change set that lands on some sheets and fails on others is a change set: it lists both.
-- **A failed attempt** changed nothing. It is a change set refused whole, such as one naming an operation that does not exist, one that failed on every sheet it touched, or one whose files could not be written. It stays in the journal and is never undone.
+- **A failed attempt** changed nothing. It is a change set refused whole, such as one naming an operation that does not exist, one that failed on every sheet it touched, or one whose files could not be written, which lists every sheet it touched under `failed_on`, each with the error. It stays in the journal and is never undone.
 - **A dry run** changes nothing on disk, the journal included, so it is not recorded.
 - **An undo** is recorded with the change sets it undid and the files it put back.
 
@@ -108,7 +108,7 @@ Zach decided on 2026-11-11 that **old undo states are pruned so that the 50 newe
 
 ## How it works
 
-`crates/agentdrafter-core/src/change/journal.rs` holds the journal: its entries, reading it, a change set's undo state and entry, a failed attempt's entry, and pruning. `undo.rs` holds the undo. Both put their files in place through `commit.rs`, which adds the journal's entry last, once every file is in place: a journal that cannot take it is cut back to its length before, and every file is put back, so nothing lands without its entry. Nothing reads or runs git.
+`crates/agentdrafter-core/src/change/journal.rs` holds the journal: its entries, reading it, a change set's undo state and entry, a failed attempt's entry, and pruning. `undo.rs` holds the undo. Both put their files in place through `commit.rs`, which adds the journal's entry last, once every file is in place: a journal that cannot take it is cut back to its length before, and every file is put back, so nothing lands without its entry. If the journal cannot be cut back either, the error does not say nothing was changed: it names the journal and the entry it may still hold for the change that was rolled back. Nothing reads or runs git.
 
 ## What is not offered yet
 

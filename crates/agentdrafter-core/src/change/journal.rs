@@ -359,6 +359,7 @@ fn append_of(folder: &Path, text: Option<&str>, entry: &Entry) -> Append {
         path: folder.join(JOURNAL_FILE),
         bytes: line.into_bytes(),
         what: "the set's journal",
+        holds: format!("entry {}", entry.entry),
     }
 }
 
@@ -368,6 +369,7 @@ fn next_number(entries: &[Entry]) -> u64 {
 }
 
 /// What a change set did to its sheets, for its entry.
+#[derive(Clone)]
 pub(super) struct Landing {
     pub landed_on: Vec<String>,
     pub failed_on: Vec<SheetFailed>,
@@ -454,9 +456,14 @@ pub(super) fn commit_change_set(
 /// was a dry run, which is not recorded, or it landed and its entry is
 /// recorded already. An attempt that cannot be recorded, such as on a
 /// folder that is not a drawing set, is left unrecorded: it changed nothing.
+///
+/// `attempted` is what the change set did to its sheets when its files
+/// could not be put in place: the sheets it would have landed on are
+/// recorded as failed with the commit's error, beside those it failed on.
 pub(super) fn record_failed_attempt(
     request: &ChangeRequest,
     outcome: &mut Result<ChangeReport, Error>,
+    attempted: Option<Landing>,
 ) {
     if request.dry_run {
         return;
@@ -484,7 +491,16 @@ pub(super) fn record_failed_attempt(
         Err(error) => (
             Landing {
                 landed_on: Vec::new(),
-                failed_on: Vec::new(),
+                failed_on: attempted
+                    .map(|landing| {
+                        let unwritten = landing.landed_on.into_iter().map(|sheet| SheetFailed {
+                            sheet,
+                            code: code_text(error.code),
+                            message: error.message.clone(),
+                        });
+                        unwritten.chain(landing.failed_on).collect()
+                    })
+                    .unwrap_or_default(),
             },
             Some(Refusal {
                 code: code_text(error.code),

@@ -258,7 +258,14 @@ struct Done {
     message: String,
 }
 
-pub(super) fn apply(request: &ChangeRequest, settings: &Settings) -> Result<ChangeReport, Error> {
+/// Applies the change set. `attempted` is given what it did to its sheets
+/// before its files are put in place, so a commit that fails is recorded as
+/// a failed attempt with the sheets it touched.
+pub(super) fn apply(
+    request: &ChangeRequest,
+    settings: &Settings,
+    attempted: &mut Option<Landing>,
+) -> Result<ChangeReport, Error> {
     let files = SetFiles::load(&request.set)?;
     let change_set = read_change_set(&request.change_set, files.units)?;
     let mark = read_mark(&files.folder)?;
@@ -464,6 +471,7 @@ pub(super) fn apply(request: &ChangeRequest, settings: &Settings) -> Result<Chan
                 })
                 .collect(),
         };
+        *attempted = Some(landing.clone());
         journal_entry = Some(commit_change_set(
             &files.folder,
             &request.change_set,
