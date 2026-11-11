@@ -36,7 +36,7 @@ pub(crate) fn mark_text(failures: &[MarkFailure]) -> String {
         "# AgentDrafter marks this drawing set inconsistent: a change set landed on some of\n\
          # its sheets and failed on others, which were left as they were. Each failure\n\
          # below stays until a later change set names its sheet under `fixes` and lands\n\
-         # on it. Undo, which would clear it too, is not built yet.\n\
+         # on it, or until the change set that marked it is undone.\n\
          failures:\n",
     );
     for failure in failures {
