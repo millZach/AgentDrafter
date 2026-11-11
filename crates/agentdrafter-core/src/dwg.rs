@@ -4,8 +4,9 @@
 //! names acadrust (ADR-0009). Everything else in the core works on its own
 //! model ([`crate::model`]), so moving the acadrust pin, or the library
 //! itself, changes these files and `Cargo.toml` only. Moving the pin means
-//! running the judge again. [`hatch`] carries hatches through the seam, and
-//! [`text`] text styles and text.
+//! running the judge again. [`hatch`] carries hatches through the seam,
+//! [`text`] text styles and text, and [`block`] blocks, attribute
+//! definitions and inserts.
 //!
 //! Our own names here follow `CONTEXT.md`: a DWG file's contents are a
 //! drawing and the things in it are objects. acadrust's names, such as
@@ -20,19 +21,20 @@ use acadrust::entities::{
     Arc as DwgArc, Circle as DwgCircle, Ellipse as DwgEllipse, EntityCommon, EntityType,
     Line as DwgLine, LwPolyline, LwVertex, Polyline3D, Spline as DwgSpline,
 };
-use acadrust::tables::{Layer as DwgLayer, LineType, LineTypeElement};
+use acadrust::tables::{BlockRecord, Layer as DwgLayer, LineType, LineTypeElement};
 use acadrust::types::{Color, DxfVersion, LineWeight, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, DwgWriter};
 
 use crate::description::normalize_degrees;
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arc, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object, Point3,
-    Polyline, Sheet, Spline, BUILT_IN_LINETYPES, FIT_DEGREE, LAYER_ZERO,
+    Arc, Block, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object,
+    Point3, Polyline, Sheet, Spline, BUILT_IN_LINETYPES, FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::Text as TextObject;
 use crate::units::Unit;
 
+mod block;
 mod hatch;
 mod text;
 
@@ -103,12 +105,37 @@ pub(crate) fn write_new_sheet(
         }
     }
     text::add_text_styles(&mut drawing, &sheet.text_styles)?;
-    // Layers, linetypes and text styles take their handles before the
-    // objects take theirs.
+    let named = sheet
+        .objects
+        .iter()
+        .any(|o| matches!(o, Object::Insert(insert) if insert.name.is_some()));
+    if named {
+        block::register_application(&mut drawing)?;
+    }
+    // Layers, linetypes, text styles and applications take their handles
+    // before the blocks and objects take theirs.
     drawing.assign_table_entry_handles();
+    let units = insertion_units(sheet.units);
+    for definition in &sheet.blocks {
+        let owner = block::add_block_record(&mut drawing, definition, units)?;
+        for object in &definition.objects {
+            let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
+            dwg_object.common_mut().owner_handle = owner;
+            drawing.add_entity(dwg_object).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!(
+                        "could not add a {} to block `{}`: {e}",
+                        object.type_name(),
+                        definition.name
+                    ),
+                )
+            })?;
+        }
+    }
     for object in &sheet.objects {
         drawing
-            .add_entity(dwg_object(object, start_of))
+            .add_entity(dwg_object(object, start_of, &sheet.blocks)?)
             .map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
@@ -158,8 +185,12 @@ fn set_layer_properties(dwg_layer: &mut DwgLayer, layer: &Layer) {
 
 /// The DWG object for one of ours, on its layer. It takes its colour,
 /// linetype and lineweight from the layer, as acadrust's objects do unless
-/// told otherwise.
-fn dwg_object(object: &Object, start_of: &dyn Fn(&TextObject) -> Point3) -> EntityType {
+/// told otherwise. An insert's block is one of `blocks`.
+fn dwg_object(
+    object: &Object,
+    start_of: &dyn Fn(&TextObject) -> Point3,
+    blocks: &[Block],
+) -> Result<EntityType, Error> {
     let mut dwg_object = match object {
         Object::Line(line) => {
             EntityType::Line(DwgLine::from_points(vector(line.from), vector(line.to)))
@@ -180,11 +211,26 @@ fn dwg_object(object: &Object, start_of: &dyn Fn(&TextObject) -> Point3) -> Enti
         Object::Hatch(hatch) => EntityType::Hatch(Box::new(hatch::dwg_hatch(hatch))),
         Object::Text(t) => EntityType::Text(text::dwg_text(t, start_of(t))),
         Object::MText(t) => EntityType::MText(Box::new(text::dwg_mtext(t))),
+        Object::AttributeDefinition(definition) => {
+            EntityType::AttributeDefinition(block::dwg_attribute_definition(definition, start_of))
+        }
+        Object::Insert(insert) => {
+            let Some(definition) = blocks.iter().find(|b| b.name == insert.block) else {
+                return Err(Error::new(
+                    ErrorCode::DwgWrite,
+                    format!(
+                        "an insert places block `{}`, which the sheet does not define",
+                        insert.block
+                    ),
+                ));
+            };
+            EntityType::Insert(block::dwg_insert(insert, definition, start_of)?)
+        }
     };
     object
         .layer()
         .clone_into(&mut dwg_object.common_mut().layer);
-    dwg_object
+    Ok(dwg_object)
 }
 
 /// A polyline whose points share one `z` is a lightweight polyline at that
@@ -284,10 +330,21 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         }
     }
     let (text_styles, text_styles_not_read) = text::read_text_styles(&drawing);
+    let mut blocks = Vec::new();
+    let mut blocks_not_read = 0;
+    for record in drawing.block_records.iter() {
+        if record.is_model_space() || record.is_paper_space() || record.is_layout() {
+            continue;
+        }
+        match read_block(&drawing, record) {
+            Some(definition) => blocks.push(definition),
+            None => blocks_not_read += 1,
+        }
+    }
     let mut objects = Vec::new();
     let mut objects_not_read = 0;
     for dwg_object in drawing.model_space_entities() {
-        match read_object(dwg_object) {
+        match read_object(dwg_object, &blocks) {
             Some(object) => objects.push(object),
             None => objects_not_read += 1,
         }
@@ -301,8 +358,36 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         layers_not_read,
         text_styles,
         text_styles_not_read,
+        blocks,
+        blocks_not_read,
         objects,
         objects_not_read,
+    })
+}
+
+/// A block definition the core can read back whole: named, not an
+/// external reference, and holding only objects the core has a model for,
+/// none of them an insert.
+fn read_block(drawing: &CadDocument, record: &BlockRecord) -> Option<Block> {
+    if record.is_anonymous()
+        || record.flags.is_xref
+        || record.flags.is_xref_overlay
+        || !record.xref_path.is_empty()
+    {
+        return None;
+    }
+    let mut objects = Vec::new();
+    for dwg_object in drawing.entities_in_block(&record.name) {
+        if matches!(dwg_object, EntityType::Block(_) | EntityType::BlockEnd(_)) {
+            continue;
+        }
+        // No blocks are given, so an insert inside a block is not read.
+        objects.push(read_object(dwg_object, &[])?);
+    }
+    Some(Block {
+        name: record.name.clone(),
+        base_point: point(record.base_point),
+        objects,
     })
 }
 
@@ -338,8 +423,9 @@ fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
 }
 
 /// One of our objects, if the DWG object has a model in the core and takes
-/// its colour, linetype and lineweight from its layer.
-fn read_object(dwg_object: &EntityType) -> Option<Object> {
+/// its colour, linetype and lineweight from its layer. An insert is read
+/// only when its block is one of `blocks`.
+fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
     let common = dwg_object.common();
     if !takes_layer_properties(common) {
         return None;
@@ -419,6 +505,10 @@ fn read_object(dwg_object: &EntityType) -> Option<Object> {
         EntityType::Hatch(dwg_hatch) => Object::Hatch(hatch::read_hatch(dwg_hatch, layer)?),
         EntityType::Text(t) => Object::Text(text::read_text(t, layer)?),
         EntityType::MText(t) => Object::MText(text::read_mtext(t, layer)?),
+        EntityType::AttributeDefinition(definition) => {
+            Object::AttributeDefinition(block::read_attribute_definition(definition, layer)?)
+        }
+        EntityType::Insert(insert) => Object::Insert(block::read_insert(insert, layer, blocks)?),
         _ => return None,
     };
     Some(object)
@@ -569,9 +659,11 @@ mod tests {
     fn empty_sheet() -> Sheet {
         Sheet {
             units: Unit::Mm,
+            block_library: None,
             linetypes: Vec::new(),
             layers: Vec::new(),
             text_styles: Vec::new(),
+            blocks: Vec::new(),
             objects: Vec::new(),
         }
     }
@@ -676,9 +768,9 @@ mod tests {
     #[test]
     fn an_object_with_its_own_colour_is_not_read_as_one_of_ours() {
         let mut line = DwgLine::from_points(Vector3::ZERO, Vector3::UNIT_X);
-        assert!(read_object(&EntityType::Line(line.clone())).is_some());
+        assert!(read_object(&EntityType::Line(line.clone()), &[]).is_some());
         line.common.color = Color::Index(1);
-        assert!(read_object(&EntityType::Line(line)).is_none());
+        assert!(read_object(&EntityType::Line(line), &[]).is_none());
     }
 
     /// `CONTEXT.md` says drawing and object. acadrust's own names, which
@@ -699,6 +791,7 @@ mod tests {
             "EntityType",
             "acadrust::entities",
             "add_entity",
+            "entities_in_block",
             "model_space_entities",
         ] {
             ours = ours.replace(acadrust_name, "");

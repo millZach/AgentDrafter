@@ -1,0 +1,44 @@
+# A made-up block library: a marker with a tag, a number and a hidden note,
+# and an arrow with no attributes. Each block is defined once here, and any
+# sheet that names this file under `block_library` can insert it.
+units: mm
+layers:
+  symbols: {color: yellow, lineweight: 0.35}
+  tags: {color: green}
+text_styles:
+  tags: {font: romans.shx, width_factor: 0.8}
+blocks:
+  MARKER:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 6, layer: symbols}
+      - line: {from: [-6, 0, 0], to: [6, 0, 0], layer: symbols}
+      - attdef:
+          tag: TAG
+          prompt: Tag
+          default: '?'
+          position: [0, 2.5, 0]
+          height: 2.5
+          style: tags
+          justify: middle_center
+          layer: tags
+      - attdef:
+          tag: NUMBER
+          prompt: Number
+          default: '0'
+          position: [0, -2.5, 0]
+          height: 2
+          style: tags
+          justify: middle_center
+          layer: tags
+      # On layer 0, so it sits on the layer of each insert.
+      - attdef: {tag: NOTE, prompt: Note, position: [8, 0, 0], height: 2, invisible: true}
+  ARROW:
+    # The tip is the point that sits at an insert's position.
+    base_point: [10, 0, 0]
+    objects:
+      - line: {from: [0, 0, 0], to: [10, 0, 0], layer: symbols}
+      - hatch:
+          pattern: SOLID
+          boundary:
+            - polyline: {points: [[10, 0, 0], [7, 1.5, 0], [7, -1.5, 0]]}
+          layer: symbols

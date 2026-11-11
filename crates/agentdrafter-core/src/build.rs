@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::description::parse_sheet_description;
+use crate::description::read_sheet_description;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
 use crate::settings::Settings;
@@ -44,7 +44,15 @@ pub struct BuildReport {
     pub dwg_version: String,
     /// The sheet's declared unit, which is the drawing's unit.
     pub units: Unit,
-    /// How many objects of each type the DWG holds, such as `{"line": 1}`.
+    /// The block library the sheet draws on, where it was read from, if the
+    /// sheet names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_library: Option<String>,
+    /// The blocks the DWG defines, as the block library defines them: the
+    /// ones the sheet inserts.
+    pub blocks: Vec<String>,
+    /// How many objects of each type the DWG holds in model space, such as
+    /// `{"line": 1}`.
     pub objects: BTreeMap<String, usize>,
     /// The size of the DWG in bytes.
     pub bytes: usize,
@@ -64,17 +72,11 @@ pub fn build(request: &BuildRequest) -> Result<BuildReport, Error> {
 }
 
 /// Builds a sheet description into a DWG in the 2018 format, reading fonts
-/// from the font folders `settings` names.
+/// from the font folders `settings` names. A block library the sheet
+/// description names is read from beside it.
 pub fn build_with(request: &BuildRequest, settings: &Settings) -> Result<BuildReport, Error> {
     let description = request.description.as_path();
-    let text = fs::read_to_string(description).map_err(|e| {
-        Error::new(
-            ErrorCode::ReadFailed,
-            format!("could not read the sheet description: {e}"),
-        )
-        .in_file(description)
-    })?;
-    let sheet = parse_sheet_description(&text).map_err(|e| e.in_file(description))?;
+    let sheet = read_sheet_description(description)?;
 
     let output = request
         .output
@@ -106,11 +108,21 @@ pub fn build_with(request: &BuildRequest, settings: &Settings) -> Result<BuildRe
     for object in &sheet.objects {
         *objects.entry(object.type_name().to_owned()).or_insert(0) += 1;
     }
+    let block_library = sheet.block_library.as_ref().map(|written| {
+        description
+            .parent()
+            .unwrap_or(Path::new(""))
+            .join(written)
+            .display()
+            .to_string()
+    });
     Ok(BuildReport {
         description: description.display().to_string(),
         dwg: output.display().to_string(),
         dwg_version: dwg::new_sheet_version(),
         units: sheet.units,
+        block_library,
+        blocks: sheet.blocks.iter().map(|b| b.name.clone()).collect(),
         objects,
         bytes: bytes.len(),
         font_substitutions: fonts.substitutions(),

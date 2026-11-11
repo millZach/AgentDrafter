@@ -4,7 +4,7 @@ AgentDrafter is an open-source CAD engine built for agents first. An agent creat
 
 This is a brief, not a specification. It names what is expensive to get wrong and leaves the rest to you. Where it does not reach, work out what AgentDrafter would do from `CONTEXT.md`, the ADRs and `docs/plan.md`, and say in the pull request what you worked out.
 
-**Status: walking skeleton.** `agentdrafter build` turns a sheet description that holds lines, polylines, arcs, circles, ellipses, splines and hatches on layers with linetypes, and text and multiline text in TrueType and SHX text styles, into a DWG in the 2018 format; `agentdrafter schema` prints what a sheet description may hold, and `agentdrafter measure-text` measures how wide text draws; nothing else is built yet. `docs/plan.md` holds the agreed plan. The stack is decided: a Rust core that reads and writes DWG through acadrust, a Python binding and thin interfaces over it, and a browser viewer that draws with the same Rust code compiled to WebAssembly, with TypeScript and React around it.
+**Status: walking skeleton.** `agentdrafter build` turns a sheet description that holds lines, polylines, arcs, circles, ellipses, splines and hatches on layers with linetypes, text and multiline text in TrueType and SHX text styles, and inserts of blocks with attributes from a block library, into a DWG in the 2018 format; `agentdrafter schema` prints what a sheet description may hold (`schema block-library`, a block library), and `agentdrafter measure-text` measures how wide text draws; nothing else is built yet. `docs/plan.md` holds the agreed plan. The stack is decided: a Rust core that reads and writes DWG through acadrust, a Python binding and thin interfaces over it, and a browser viewer that draws with the same Rust code compiled to WebAssembly, with TypeScript and React around it.
 
 ## What is expensive to get wrong
 
@@ -22,14 +22,14 @@ This is a brief, not a specification. It names what is expensive to get wrong an
 - `CONTEXT.md` is the glossary. Write in its terms; when the work needs a word it has not got, add the entry in the same pull request.
 - `docs/plan.md` is the agreed plan: the first usable version, what comes after, the rules of the engine and what is still open.
 - `docs/adr/` records the decisions that are hard to reverse. Read the ones that touch your area before changing it, and amend or supersede one you contradict. `docs/agents/domain.md` has the rules.
-- `docs/sheet-description.md` sets out the sheet description: its keys, its units and the strict YAML subset it is written in.
+- `docs/sheet-description.md` sets out the sheet description: its keys, its units and the strict YAML subset it is written in. `docs/block-library.md` sets out the block library sheets insert blocks from.
 
 ## Run, test and prove
 
 The code is one Cargo workspace. `crates/agentdrafter-core` is the core, the library that knows drawings; its entry points take and return plain data, and acadrust sits behind its one seam, `src/dwg.rs` with its submodules in `src/dwg/`. `crates/agentdrafter-cli` is the `agentdrafter` command, a thin layer that prints the core's reply as JSON. The Rust toolchain is pinned in `rust-toolchain.toml`.
 
 - Build: `cargo build --workspace`. On forge, add `-j4` and keep `target/` inside the checkout, not under `/tmp`.
-- Run: `cargo run -p agentdrafter-cli -- build examples/one-line.yaml` writes `examples/one-line.dwg` and prints one line of JSON. Add `--overwrite` to build it again. `examples/geometry.yaml` holds every kind of line and curve, `examples/hatch.yaml` holds hatches and `examples/text.yaml` every kind of text; `cargo run -p agentdrafter-cli -- schema` prints the sheet description's JSON Schema.
+- Run: `cargo run -p agentdrafter-cli -- build examples/one-line.yaml` writes `examples/one-line.dwg` and prints one line of JSON. Add `--overwrite` to build it again. `examples/geometry.yaml` holds every kind of line and curve, `examples/hatch.yaml` holds hatches, `examples/text.yaml` every kind of text, and `examples/blocks/` a block library with two sheets that insert its blocks; `cargo run -p agentdrafter-cli -- schema` prints the sheet description's JSON Schema.
 - Fonts: AutoCAD's SHX fonts are Autodesk's and never enter the repository, not even in a test. Text is measured with the fonts in the folders `AGENTDRAFTER_FONTS` lists (or `--fonts`), such as AutoCAD's `Fonts` folder on a machine that has AutoCAD; anywhere else a look-alike is used and the reply says so. Tests write their own made-up fonts.
 - Test: `cargo test --workspace`.
 - Before pushing, run what CI runs: `cargo fmt --all --check`, then `cargo clippy --workspace --all-targets --locked -- -D warnings`, then `cargo test --workspace --locked`, then `python3 -m unittest discover -s tools/judge/tests`.

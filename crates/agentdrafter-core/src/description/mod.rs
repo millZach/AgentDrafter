@@ -8,9 +8,12 @@
 //!
 //! [`layers`] reads linetypes and layers, [`objects`] reads the objects,
 //! [`hatch`] reads hatch patterns and hatches, [`text`] reads text styles
-//! and text, and [`schema`] states the same keys as a JSON Schema for
-//! agents to read.
+//! and text, [`blocks`] reads block libraries, their blocks and inserts of
+//! them, and [`schema`] states the same keys as a JSON Schema for agents to
+//! read.
 
+mod block_schema;
+pub(crate) mod blocks;
 mod hatch;
 mod hatch_schema;
 mod layers;
@@ -19,15 +22,22 @@ pub(crate) mod schema;
 mod strict_yaml;
 mod text;
 
+use std::fs;
+use std::path::Path;
+
+use objects::{Place, Tables};
 use strict_yaml::{index_path, key_path, Entry, Kind, Node, Pos};
 
 use crate::error::{Error, ErrorCode};
-use crate::model::{Point3, Sheet};
+use crate::model::{BlockLibrary, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
+pub use blocks::parse_block_library;
+
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 6] = [
+pub(crate) const SHEET_KEYS: [&str; 7] = [
     "units",
+    "block_library",
     "linetypes",
     "layers",
     "hatch_patterns",
@@ -38,8 +48,56 @@ pub(crate) const SHEET_KEYS: [&str; 6] = [
 /// Reads the text of a sheet description into a [`Sheet`].
 ///
 /// Every length comes back in the sheet's declared unit; a number that
-/// carries its own unit is converted to it.
+/// carries its own unit is converted to it. A sheet description that names
+/// a block library is read with [`read_sheet_description`], which finds the
+/// library beside it.
 pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
+    sheet(text, &mut |_| {
+        Err(Error::usage(
+            "this sheet description names a block library, which is found from the sheet \
+             description's folder; read it from its file",
+        ))
+    })
+}
+
+/// Reads the sheet description in the file at `path` into a [`Sheet`],
+/// with the block library it names, if it names one. The library's path is
+/// relative to the sheet description's folder.
+///
+/// An error in the block library names the library's file; any other names
+/// the sheet description's.
+pub fn read_sheet_description(path: &Path) -> Result<Sheet, Error> {
+    let text = fs::read_to_string(path).map_err(|e| {
+        Error::new(
+            ErrorCode::ReadFailed,
+            format!("could not read the sheet description: {e}"),
+        )
+        .in_file(path)
+    })?;
+    let folder = path.parent().unwrap_or(Path::new(""));
+    sheet(&text, &mut |written| {
+        let file = folder.join(written);
+        let text = fs::read_to_string(&file).map_err(|e| {
+            Error::new(
+                ErrorCode::ReadFailed,
+                format!(
+                    "could not read the block library `{written}`, looked for at `{}`: {e}",
+                    file.display()
+                ),
+            )
+        })?;
+        parse_block_library(&text).map_err(|e| e.in_file(&file))
+    })
+    .map_err(|e| e.or_in_file(path))
+}
+
+/// Reads a sheet description. `load` reads the block library at the path
+/// the sheet writes, if it names one: an error it returns about a file is
+/// the library's own, and one about no file is placed at `block_library`.
+fn sheet(
+    text: &str,
+    load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+) -> Result<Sheet, Error> {
     let Some(root) = strict_yaml::read(text)? else {
         return Err(Error::new(
             ErrorCode::MissingKey,
@@ -61,6 +119,31 @@ pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
             .at_position(root.at.line, root.at.column))
         }
     };
+    let (block_library, library) = match fields.get("block_library") {
+        Some(node) => {
+            let path = "block_library";
+            let written = blocks::library_path(node, path)?;
+            let library = load(written).map_err(|e| {
+                if e.file.is_some() {
+                    e
+                } else {
+                    at(e, path, node.at)
+                }
+            })?;
+            if library.units != units {
+                return Err(bad_value(
+                    node,
+                    path,
+                    format!(
+                        "the block library is in {} and the sheet in {units}; a sheet draws on a block library in its own declared unit",
+                        library.units
+                    ),
+                ));
+            }
+            (Some(written.to_owned()), Some(library))
+        }
+        None => (None, None),
+    };
     let linetypes = match fields.get("linetypes") {
         Some(node) => layers::linetypes(node, units)?,
         None => Vec::new(),
@@ -78,27 +161,34 @@ pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
         None => Vec::new(),
     };
     let list = sequence(fields.require("objects")?, "objects", "a list of objects")?;
+    let tables = Tables {
+        units,
+        layers: &layers,
+        hatch_patterns: &hatch_patterns,
+        styles: &text_styles,
+    };
+    let mut place = Place::Sheet {
+        library: library.as_ref(),
+        names: Vec::new(),
+    };
     let objects = list
         .iter()
         .enumerate()
-        .map(|(i, node)| {
-            objects::object(
-                node,
-                &index_path("objects", i),
-                units,
-                &layers,
-                &hatch_patterns,
-                &text_styles,
-            )
-        })
+        .map(|(i, node)| objects::object(node, &index_path("objects", i), &tables, &mut place))
         .collect::<Result<_, _>>()?;
-    Ok(Sheet {
+    let mut sheet = Sheet {
         units,
+        block_library,
         linetypes,
         layers,
         text_styles,
+        blocks: Vec::new(),
         objects,
-    })
+    };
+    if let Some(library) = &library {
+        blocks::take_from_library(&mut sheet, library, &fields)?;
+    }
+    Ok(sheet)
 }
 
 fn point(node: &Node, path: &str, units: Unit) -> Result<Point3, Error> {
@@ -375,3 +465,6 @@ mod hatch_tests;
 
 #[cfg(test)]
 mod text_tests;
+
+#[cfg(test)]
+mod block_tests;
