@@ -74,8 +74,14 @@ pub fn read_sheet_description(path: &Path) -> Result<Sheet, Error> {
         )
         .in_file(path)
     })?;
+    sheet_description_at(&text, path)
+}
+
+/// Reads `text`, the sheet description in the file at `path`, as
+/// [`read_sheet_description`] does, with the block library it names.
+pub(crate) fn sheet_description_at(text: &str, path: &Path) -> Result<Sheet, Error> {
     let folder = path.parent().unwrap_or(Path::new(""));
-    sheet(&text, &mut |written| {
+    sheet(text, &mut |written| {
         let file = folder.join(written);
         let text = fs::read_to_string(&file).map_err(|e| {
             Error::new(

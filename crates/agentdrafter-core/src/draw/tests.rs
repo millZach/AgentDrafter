@@ -295,6 +295,148 @@ fn stretched_text_keeps_within_the_tolerance_both_ways() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Draws a sheet description that names a block library, each written to
+/// a folder of the test's own, with no font folders.
+fn draw_with_library(test: &str, library: &str, description: &str) -> DisplayList {
+    let dir = std::env::temp_dir()
+        .join(format!("agentdrafter-draw-{}", std::process::id()))
+        .join(test);
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("blocks.yaml"), library).unwrap();
+    fs::write(dir.join("sheet.yaml"), description).unwrap();
+    let sheet = crate::description::read_sheet_description(&dir.join("sheet.yaml"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let fonts = SheetFonts::find(&sheet, &Settings::default());
+    let list = draw_sheet(&sheet, &fonts, 0.001, MOST_HATCH_DASHES);
+    let _ = fs::remove_dir_all(&dir);
+    list
+}
+
+const LIBRARY: &str = r#"
+units: mm
+linetypes:
+  DASHED: {pattern: [2, -1]}
+layers:
+  own: {color: blue}
+  tags: {color: green}
+blocks:
+  B:
+    base_point: [10, 0, 0]
+    objects:
+      - line: {from: [0, 0, 0], to: [10, 0, 0]}
+      - circle: {center: [10, 0, 0], radius: 1, layer: own}
+      - attdef: {tag: TAG, position: [0, 5, 0], height: 2, layer: tags}
+      - attdef: {tag: HIDDEN, position: [0, -5, 0], height: 2, invisible: true}
+"#;
+
+const INSERTS: &str = r#"
+units: mm
+block_library: blocks.yaml
+layers:
+  red: {color: red, lineweight: 0.5}
+objects:
+  - insert: {block: B, position: [100, 50, 0], scale: 2, rotation: 90, attributes: {TAG: X, HIDDEN: Y}, layer: red}
+"#;
+
+#[track_caller]
+fn near(a: Point2, b: Point2) {
+    assert!(
+        (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9,
+        "{a:?} is not {b:?}"
+    );
+}
+
+/// An insert draws its block's objects moved so the base point sits at its
+/// position, doubled and turned a quarter; the line on layer 0 draws with
+/// the insert's layer, the circle on its own; the visible attribute draws
+/// its value and the invisible one, and the definitions, draw nothing.
+#[test]
+fn an_insert_draws_its_block_placed_with_its_visible_attributes() {
+    let list = draw_with_library("insert", LIBRARY, INSERTS);
+    let colors: Vec<Color> = list.items.iter().map(|i| i.color).collect();
+    assert_eq!(colors, [Color(1), Color(5), Color(3)], "{:?}", list.items);
+    assert!(list.items.iter().all(|i| i.object == 0));
+    // The line, from (0, 0) and (10, 0) in the block's own coordinates.
+    let line = runs(&list.items[0]);
+    assert_eq!(line.len(), 1);
+    near(line[0][0], [100.0, 30.0]);
+    near(line[0][1], [100.0, 50.0]);
+    assert_eq!(lineweight(&list.items[0]), 0.5);
+    // The circle round the base point, at the insert's position, radius 2.
+    for p in list.items[1].points() {
+        assert!(
+            ((p[0] - 100.0).hypot(p[1] - 50.0) - 2.0).abs() < 1e-3,
+            "{p:?}"
+        );
+    }
+    assert_eq!(lineweight(&list.items[1]), DEFAULT_LINEWEIGHT);
+    // The attribute, 4 high and turned a quarter, starts at (90, 30): it
+    // reaches up to 4 towards -X and runs along +Y.
+    let text: Vec<Point2> = list.items[2].points().collect();
+    assert!(
+        text.iter()
+            .all(|p| (86.0 - 1e-9..=90.0 + 1e-9).contains(&p[0])
+                && (30.0 - 1e-9..36.0).contains(&p[1])),
+        "{text:?}"
+    );
+    assert!(text.iter().any(|p| (p[0] - 86.0).abs() < 1e-9));
+    // The extents take in the block's box, placed, (0, -1) to (11, 1) in
+    // the block, and the attribute.
+    let extents = list.extents().unwrap();
+    near(extents.min, [86.0, 30.0]);
+    near(extents.max, [102.0, 52.0]);
+}
+
+/// A turned insert's extents are its block's box turned, which reaches past
+/// what it draws, as AutoCAD 2026's extents of the blocks example did.
+#[test]
+fn a_turned_inserts_extents_are_its_block_box_turned() {
+    let sheet = INSERTS.replace("rotation: 90", "rotation: 45");
+    let list = draw_with_library("turned", LIBRARY, &sheet);
+    // The box from (0, -1) to (11, 1), doubled about the base point (10,
+    // 0) and turned 45 degrees: its corner (2, -2) from the base point
+    // reaches furthest right and (2, 2) furthest up, past the circle of
+    // radius 2 round the insert's position.
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    let reach = 4.0 * half;
+    let extents = list.extents().unwrap();
+    near(extents.max, [100.0 + reach, 50.0 + reach]);
+    let drawn = list.items.iter().flat_map(Item::points);
+    let right = drawn.map(|p| p[0]).fold(f64::MIN, f64::max);
+    assert!(right < 100.0 + reach - 0.5, "{right}");
+}
+
+/// Layer 0's pen inside a block is the insert's layer's: its colour,
+/// linetype and lineweight.
+#[test]
+fn an_object_on_layer_zero_in_a_block_takes_the_inserts_layer() {
+    let sheet = INSERTS.replace(
+        "layers:\n  red: {color: red, lineweight: 0.5}",
+        "linetypes:\n  DASHED: {pattern: [2, -1]}\nlayers:\n  red: {color: red, lineweight: 0.5}\n  hidden: {color: 30, linetype: DASHED, lineweight: 0.7}",
+    )
+    .replace("rotation: 90, attributes: {TAG: X, HIDDEN: Y}, layer: red}", "attributes: {TAG: X, HIDDEN: Y}, layer: hidden}");
+    let list = draw_with_library("layer-zero", LIBRARY, &sheet);
+    let line = &list.items[0];
+    assert_eq!(line.color, Color(30));
+    assert_eq!(lineweight(line), 0.7);
+    // The block's line, 10 long, is doubled to 20 where the insert puts
+    // it, and the linetype is laid out along that at its own lengths, as
+    // AutoCAD 2026 plotted a made-up probe: not doubled with the block.
+    let placed = linetype::along(&[[80.0, 50.0], [100.0, 50.0]], Some(&[2.0, -1.0]), false);
+    let dashes = runs(line);
+    assert_eq!(dashes.len(), placed.len(), "{dashes:?}");
+    for (dash, placed) in dashes.iter().zip(&placed) {
+        assert_eq!(dash.len(), placed.len());
+        for (p, q) in dash.iter().zip(placed) {
+            near(*p, *q);
+        }
+    }
+    assert!(dashes.len() > 5, "{dashes:?}");
+    // The circle keeps its own layer.
+    assert_eq!(list.items[1].color, Color(5));
+}
+
 #[test]
 fn the_extents_take_in_a_hatchs_boundary() {
     let list = draw(

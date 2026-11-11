@@ -435,3 +435,97 @@ fn a_dwg_renders_as_the_sheet_description_it_was_built_from() {
         "{differ} pixels differ"
     );
 }
+
+/// A made-up block library: a square on layer 0 with a visible attribute
+/// in its middle and an invisible one below it.
+const BLOCK_LIBRARY: &str = r#"
+units: mm
+layers:
+  tags: {color: green, lineweight: 0.5}
+  hidden: {color: blue, lineweight: 0.5}
+blocks:
+  MARK:
+    objects:
+      - polyline: {points: [[-10, -10, 0], [10, -10, 0], [10, 10, 0], [-10, 10, 0]], closed: true}
+      - attdef: {tag: TAG, position: [0, 0, 0], height: 8, justify: middle_center, layer: tags}
+      - attdef: {tag: NOTE, position: [0, -20, 0], height: 8, justify: middle_center, invisible: true, layer: hidden}
+"#;
+
+/// Two inserts of the square on a red layer, the second halved and turned
+/// 45 degrees.
+const INSERTS: &str = r#"
+units: mm
+block_library: blocks.yaml
+layers:
+  marks: {color: red, lineweight: 0.5}
+objects:
+  - insert: {block: MARK, position: [30, 30, 0], attributes: {TAG: AB, NOTE: HIDDEN}, layer: marks}
+  - insert: {block: MARK, position: [80, 30, 0], scale: 0.5, rotation: 45, attributes: {TAG: CD, NOTE: HIDDEN}, layer: marks}
+  - line: {from: [0, 0, 0], to: [110, 0, 0]}
+"#;
+
+#[test]
+fn an_insert_and_its_visible_attributes_show_and_its_invisible_ones_do_not() {
+    let dir = scratch("inserts");
+    fs::write(dir.join("blocks.yaml"), BLOCK_LIBRARY).unwrap();
+    let image = render(&dir, INSERTS, |r| r.dpi = 200.0);
+    let red = [255, 0, 0];
+    let green = [0, 255, 0];
+    // The square, on layer 0, draws in the insert's layer's red.
+    assert!(image.count((18.0, 18.0), (42.0, 42.0), red) > 300);
+    assert!(
+        image.count((19.0, 19.0), (21.0, 41.0), red) > 50,
+        "its left side"
+    );
+    // The visible attribute says AB in the square's middle, in green.
+    assert!(image.count((22.0, 25.0), (38.0, 35.0), green) > 50);
+    // The invisible one draws nothing anywhere.
+    assert_eq!(image.count((0.0, -5.0), (110.0, 45.0), [0, 0, 255]), 0);
+    // The second square is halved and turned into a diamond: its sides
+    // pass through (76.5, 33.5), and no corner sits at (75, 35).
+    assert!(image.count((75.5, 32.5), (77.5, 34.5), red) > 10);
+    assert_eq!(image.count((74.0, 34.5), (75.5, 36.0), red), 0);
+    assert!(image.count((76.0, 27.0), (84.0, 33.0), green) > 10);
+    assert_eq!(image.report.objects.get("insert"), Some(&2));
+}
+
+#[test]
+fn a_dwg_with_inserts_renders_as_its_sheet_description() {
+    let dir = scratch("inserts-dwg");
+    fs::write(dir.join("blocks.yaml"), BLOCK_LIBRARY).unwrap();
+    let description = dir.join("sheet.yaml");
+    fs::write(&description, INSERTS).unwrap();
+    build_with(
+        &BuildRequest {
+            description: description.clone(),
+            output: None,
+            overwrite: false,
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let render_to = |source: PathBuf, png: &str| {
+        let mut r = RenderRequest::new(source);
+        r.output = Some(dir.join(png));
+        let report = render_with(&r, &Settings::default()).unwrap();
+        decode(&dir.join(png), report)
+    };
+    let from_description = render_to(description.clone(), "a.png");
+    let from_dwg = render_to(dir.join("sheet.dwg"), "b.png");
+    assert_eq!(from_dwg.report.objects_not_drawn, 0);
+    assert_eq!(from_dwg.report.objects, from_description.report.objects);
+    assert_eq!(
+        (from_dwg.width, from_dwg.height),
+        (from_description.width, from_description.height)
+    );
+    let differ = from_dwg
+        .rgb
+        .chunks(3)
+        .zip(from_description.rgb.chunks(3))
+        .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 64))
+        .count();
+    assert!(
+        differ * 1000 < from_dwg.width * from_dwg.height,
+        "{differ} pixels differ"
+    );
+}

@@ -10,7 +10,7 @@
 //! lines draw with the layer's pen; the layer's linetype does not apply.
 
 use super::curves;
-use super::{Bounds, FillRule, Point2, Shape};
+use super::{FillRule, Point2, Shape};
 use crate::model::hatch::walk;
 use crate::model::{Hatch, HatchEdge, HatchLoop};
 
@@ -28,8 +28,8 @@ pub(crate) const MOST_DASHES: usize = 2_000_000;
 pub(super) struct Drawn {
     /// A fill, or one stroke of all its pattern lines.
     pub shapes: Vec<Shape>,
-    /// The box round its boundary.
-    pub bounds: Option<Bounds>,
+    /// The points of its boundary, curves as chords.
+    pub boundary: Vec<Point2>,
     /// Whether its pattern stopped at the most lines or dashes a hatch
     /// draws, so that it is not drawn in full.
     pub cut_short: bool,
@@ -43,11 +43,11 @@ pub(super) fn draw(hatch: &Hatch, lineweight: f64, tolerance: f64, most_dashes: 
         .map(|l| boundary_loop(l, tolerance))
         .filter(|l| l.len() >= 3)
         .collect();
-    let bounds = Bounds::of(loops.iter().flatten().copied());
+    let boundary = loops.iter().flatten().copied().collect();
     let (shapes, cut_short) = shapes(hatch, loops, lineweight, most_dashes);
     Drawn {
         shapes,
-        bounds,
+        boundary,
         cut_short,
     }
 }

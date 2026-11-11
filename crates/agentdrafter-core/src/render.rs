@@ -20,11 +20,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::description::parse_sheet_description;
+use crate::description::sheet_description_at;
+pub use crate::draw::HatchCutShort;
 use crate::draw::{self, Bounds};
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::{Object, Sheet};
+use crate::model::Sheet;
 use crate::raster::{self, View};
 use crate::settings::Settings;
 use crate::stamp::{self, SourceKind, Stamp};
@@ -155,20 +156,6 @@ pub struct RenderReport {
     pub stamp: Stamp,
 }
 
-/// A hatch whose pattern needed more lines or dashes than one hatch draws:
-/// the PNG holds only the first of them.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct HatchCutShort {
-    /// The hatch's place in the sheet's objects, counted from 0.
-    pub object: usize,
-    /// Its pattern.
-    pub pattern: String,
-    /// Its layer.
-    pub layer: String,
-    /// Why it was not drawn in full.
-    pub why: String,
-}
-
 /// Renders a sheet to a PNG, reading fonts from the font folders the
 /// environment names ([`Settings::from_env`]).
 pub fn render(request: &RenderRequest) -> Result<RenderReport, Error> {
@@ -206,7 +193,7 @@ fn render_within(
                 )
                 .in_file(source)
             })?;
-            let sheet = parse_sheet_description(&text).map_err(|e| e.in_file(source))?;
+            let sheet = sheet_description_at(&text, source)?;
             let units = Some(sheet.units);
             (sheet, units, 0)
         }
@@ -308,29 +295,9 @@ fn render_within(
         objects_not_drawn,
         bytes: png.len(),
         font_substitutions: fonts.substitutions(),
-        hatches_cut_short: cut_short(&sheet, &list, most_dashes),
+        hatches_cut_short: list.hatches_cut_short.clone(),
         stamp,
     })
-}
-
-/// The hatches the display list could not draw in full, and why.
-fn cut_short(sheet: &Sheet, list: &draw::DisplayList, most_dashes: usize) -> Vec<HatchCutShort> {
-    list.hatches_cut_short
-        .iter()
-        .filter_map(|&object| match sheet.objects.get(object) {
-            Some(Object::Hatch(hatch)) => Some(HatchCutShort {
-                object,
-                pattern: hatch.pattern.name.clone(),
-                layer: hatch.layer.clone(),
-                why: format!(
-                    "its pattern needs more than the {} lines or {most_dashes} dashes one \
-                     hatch draws; only the first are drawn",
-                    draw::MOST_HATCH_LINES
-                ),
-            }),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Refuses a request that cannot be rendered as asked, naming its field.

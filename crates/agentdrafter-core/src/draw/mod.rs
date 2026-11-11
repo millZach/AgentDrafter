@@ -18,6 +18,13 @@
 //!   and a TrueType font's outlines filled ([`text`]).
 //! - A hatch fills its area solid, or draws its pattern's lines inside its
 //!   boundary ([`hatch`]).
+//! - An insert draws its block's objects moved, scaled and turned. Hatch
+//!   patterns and text are enlarged and turned with them, but a linetype
+//!   keeps its own lengths, laid out along each object where the insert
+//!   puts it. An object on layer `0` draws with the insert's layer. Each
+//!   visible attribute draws as single-line text saying its value; an
+//!   invisible one, and the block's attribute definitions, draw nothing.
+//!   The extents take in the block's box, placed, as AutoCAD's do.
 //! - The sheet is seen from above: `z` is dropped.
 //!
 //! Everything here is plain computation. It opens no window and uses no
@@ -33,7 +40,8 @@ mod text;
 
 use serde::Serialize;
 
-use crate::model::{Layer, Object, Sheet, CONTINUOUS, LAYER_ZERO};
+use crate::model::block::definition_text;
+use crate::model::{attribute_text, Block, Insert, Layer, Object, Sheet, CONTINUOUS, LAYER_ZERO};
 use crate::text::placement::SheetFonts;
 
 pub use color::Color;
@@ -54,12 +62,30 @@ pub struct DisplayList {
     pub items: Vec<Item>,
     /// The box round what counts towards the extents but draws nothing of
     /// its own: the boundaries of patterned hatches, whose lines may stop
-    /// short of them. AutoCAD's extents take in a hatch's boundary.
+    /// short of them, and the boxes of inserts' blocks. AutoCAD's extents
+    /// take in both.
     pub reach: Option<Bounds>,
     /// The hatches whose pattern needed more lines or dashes than one hatch
-    /// draws, and so are not drawn in full: each one's place in the sheet's
-    /// objects, counted from 0.
-    pub hatches_cut_short: Vec<usize>,
+    /// draws, and so are not drawn in full.
+    pub hatches_cut_short: Vec<HatchCutShort>,
+}
+
+/// A hatch whose pattern needed more lines or dashes than one hatch draws:
+/// only the first of them are drawn.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HatchCutShort {
+    /// The place in the sheet's objects, counted from 0, of the hatch, or
+    /// of the insert whose block holds it.
+    pub object: usize,
+    /// The block that holds the hatch, when an insert draws it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block: Option<String>,
+    /// The hatch's pattern.
+    pub pattern: String,
+    /// The hatch's own layer.
+    pub layer: String,
+    /// Why it was not drawn in full.
+    pub why: String,
 }
 
 /// One shape of one object.
@@ -132,14 +158,21 @@ impl Bounds {
     }
 }
 
-impl Item {
+impl Shape {
     /// Every point the shape is drawn through.
     pub fn points(&self) -> impl Iterator<Item = Point2> + '_ {
-        let lists = match &self.shape {
+        let lists = match self {
             Shape::Stroke { runs, .. } => runs,
             Shape::Fill { contours, .. } => contours,
         };
         lists.iter().flatten().copied()
+    }
+}
+
+impl Item {
+    /// Every point the shape is drawn through.
+    pub fn points(&self) -> impl Iterator<Item = Point2> + '_ {
+        self.shape.points()
     }
 }
 
@@ -153,6 +186,7 @@ impl DisplayList {
 }
 
 /// How a layer draws its objects, resolved.
+#[derive(Clone, Copy)]
 struct Pen<'a> {
     color: Color,
     /// The linetype's pattern; none for a continuous line.
@@ -161,19 +195,91 @@ struct Pen<'a> {
     lineweight: f64,
 }
 
-/// Draws a sheet: every object, in drawing order, as AutoCAD plots it.
-/// Curves are drawn as chords that stray at most `tolerance` drawing units
-/// from them; text is drawn in the fonts `fonts` holds; each hatch draws
-/// at most `most_dashes` dashes, [`MOST_HATCH_DASHES`] but in tests.
-pub fn draw_sheet(
-    sheet: &Sheet,
-    fonts: &SheetFonts,
-    tolerance: f64,
+/// What one object draws, in its own coordinates.
+#[derive(Default)]
+struct Drawn {
+    shapes: Vec<Shape>,
+    /// The points that count towards the extents without drawing: a
+    /// patterned hatch's boundary.
+    reach: Vec<Point2>,
+    /// Whether it is a hatch whose pattern was cut short.
+    cut_short: bool,
+}
+
+/// Where an insert puts its block's points: moved so that the block's base
+/// point sits at the insert's position, scaled about it and turned.
+struct Placed {
+    base: Point2,
+    position: Point2,
+    scale: f64,
+    sin: f64,
+    cos: f64,
+}
+
+impl Placed {
+    fn of(insert: &Insert, block: &Block) -> Placed {
+        let (sin, cos) = insert.rotation.to_radians().sin_cos();
+        Placed {
+            base: flat(block.base_point),
+            position: flat(insert.position),
+            scale: insert.scale,
+            sin,
+            cos,
+        }
+    }
+
+    fn point(&self, p: Point2) -> Point2 {
+        let x = (p[0] - self.base[0]) * self.scale;
+        let y = (p[1] - self.base[1]) * self.scale;
+        [
+            self.position[0] + x * self.cos - y * self.sin,
+            self.position[1] + x * self.sin + y * self.cos,
+        ]
+    }
+
+    /// Where a placed point is in the block's own coordinates.
+    fn back(&self, p: Point2) -> Point2 {
+        let x = p[0] - self.position[0];
+        let y = p[1] - self.position[1];
+        [
+            self.base[0] + (x * self.cos + y * self.sin) / self.scale,
+            self.base[1] + (y * self.cos - x * self.sin) / self.scale,
+        ]
+    }
+
+    fn shape(&self, shape: Shape) -> Shape {
+        let place = |lists: Vec<Vec<Point2>>| -> Vec<Vec<Point2>> {
+            lists
+                .into_iter()
+                .map(|list| list.into_iter().map(|p| self.point(p)).collect())
+                .collect()
+        };
+        match shape {
+            Shape::Stroke { lineweight, runs } => Shape::Stroke {
+                lineweight,
+                runs: place(runs),
+            },
+            Shape::Fill { rule, contours } => Shape::Fill {
+                rule,
+                contours: place(contours),
+            },
+        }
+    }
+}
+
+/// What draws a sheet's objects: its layers, linetypes, blocks and fonts.
+struct Drawer<'a> {
+    sheet: &'a Sheet,
+    fonts: &'a SheetFonts,
     most_dashes: usize,
-) -> DisplayList {
-    let tolerance = if tolerance > 0.0 { tolerance } else { 1e-3 };
-    let layer_zero = Layer::new(LAYER_ZERO);
-    let pen_of = |name: &str| -> Pen<'_> {
+    layer_zero: Layer,
+}
+
+impl<'a> Drawer<'a> {
+    /// How the layer named `name` draws, layer `0`'s defaults for a layer
+    /// the sheet does not define.
+    fn pen(&self, name: &str) -> Pen<'a> {
+        let sheet = self.sheet;
         let layer = sheet
             .layers
             .iter()
@@ -184,7 +290,7 @@ pub fn draw_sheet(
                     .iter()
                     .find(|l| l.name.eq_ignore_ascii_case(name))
             })
-            .unwrap_or(&layer_zero);
+            .unwrap_or(&self.layer_zero);
         let pattern = if layer.linetype.eq_ignore_ascii_case(CONTINUOUS) {
             None
         } else {
@@ -201,31 +307,139 @@ pub fn draw_sheet(
                 .lineweight
                 .map_or(DEFAULT_LINEWEIGHT, |w| w.millimetres()),
         }
-    };
-    let mut list = DisplayList::default();
-    for (index, object) in sheet.objects.iter().enumerate() {
-        let pen = pen_of(object.layer());
-        let stroke = |runs: Vec<Vec<Point2>>| -> Vec<Shape> {
-            if runs.is_empty() {
+    }
+
+    /// The block an insert places, by its name.
+    fn block(&self, name: &str) -> Option<&'a Block> {
+        let blocks = &self.sheet.blocks;
+        blocks
+            .iter()
+            .find(|b| b.name == name)
+            .or_else(|| blocks.iter().find(|b| b.name.eq_ignore_ascii_case(name)))
+    }
+
+    /// Adds what the sheet's object at `index` draws to `list`.
+    fn sheet_object(&self, index: usize, object: &Object, tolerance: f64, list: &mut DisplayList) {
+        if let Object::Insert(insert) = object {
+            self.insert(index, insert, tolerance, list);
+            return;
+        }
+        let pen = self.pen(object.layer());
+        let drawn = self.object(object, pen, tolerance, None);
+        if drawn.cut_short {
+            list.hatches_cut_short
+                .push(self.cut_short(index, object, None));
+        }
+        list.add(index, pen.color, drawn.shapes, drawn.reach);
+    }
+
+    /// Adds what an insert draws to `list`: its block's objects moved,
+    /// scaled and turned, those on layer `0` drawn with the insert's layer,
+    /// and each visible attribute as text saying its value, as AutoCAD
+    /// plots an insert. The block's attribute definitions themselves draw
+    /// nothing on an insert.
+    fn insert(&self, index: usize, insert: &Insert, tolerance: f64, list: &mut DisplayList) {
+        let Some(block) = self.block(&insert.block) else {
+            return;
+        };
+        let placed = Placed::of(insert, block);
+        // Curves are made chords in the block's own coordinates, then
+        // enlarged: to keep within the tolerance once enlarged, they are
+        // made finer.
+        let within = tolerance / insert.scale.abs().max(f64::MIN_POSITIVE);
+        // The box round the block's objects in its own coordinates.
+        let mut own: Option<Bounds> = None;
+        for object in &block.objects {
+            if matches!(object, Object::AttributeDefinition(_) | Object::Insert(_)) {
+                continue;
+            }
+            let layer = match object.layer() {
+                LAYER_ZERO => insert.layer.as_str(),
+                layer => layer,
+            };
+            let pen = self.pen(layer);
+            let drawn = self.object(object, pen, within, Some(&placed));
+            if drawn.cut_short {
+                let cut = self.cut_short(index, object, Some(&block.name));
+                list.hatches_cut_short.push(cut);
+            }
+            let drawn_points = drawn.shapes.iter().flat_map(Shape::points);
+            let points = drawn_points.chain(drawn.reach.iter().copied());
+            let had = own.into_iter().flat_map(|b| [b.min, b.max]);
+            own = Bounds::of(had.chain(points.map(|p| placed.back(p))));
+            list.add(index, pen.color, drawn.shapes, drawn.reach);
+        }
+        // AutoCAD's extents take in an insert's block box: the box round the
+        // block's objects in its own coordinates, placed whole. Turned, it
+        // reaches past what the insert draws.
+        if let Some(b) = own {
+            let corners = [b.min, [b.max[0], b.min[1]], b.max, [b.min[0], b.max[1]]];
+            list.take_in(corners.map(|c| placed.point(c)));
+        }
+        for definition in block.attribute_definitions() {
+            if definition.invisible {
+                continue;
+            }
+            let value = insert
+                .attributes
+                .iter()
+                .find(|a| a.tag == definition.tag)
+                .map_or(definition.default.as_str(), |a| a.value.as_str());
+            let text = attribute_text(insert, block, definition, value);
+            let pen = self.pen(&text.layer);
+            let shapes = text::draw_text(&text, self.fonts, pen.lineweight, tolerance);
+            list.add(index, pen.color, shapes, Vec::new());
+        }
+    }
+
+    /// What one object draws with `pen`, put where `placed` puts it when an
+    /// insert draws it. Its path is placed before its linetype is laid out
+    /// along it, so that the linetype keeps its own lengths, as AutoCAD
+    /// 2026 plotted a made-up probe of inserts scaled and turned; anything
+    /// else is drawn and then placed whole. `tolerance` is in the object's
+    /// own units. An insert draws nothing here: [`Drawer::insert`] draws it.
+    fn object(
+        &self,
+        object: &Object,
+        pen: Pen<'_>,
+        tolerance: f64,
+        placed: Option<&Placed>,
+    ) -> Drawn {
+        let path = |points: Vec<Point2>| -> Vec<Point2> {
+            match placed {
+                Some(placed) => points.into_iter().map(|p| placed.point(p)).collect(),
+                None => points,
+            }
+        };
+        let stroke = |runs: Vec<Vec<Point2>>| -> Drawn {
+            let shapes = if runs.is_empty() {
                 Vec::new()
             } else {
                 vec![Shape::Stroke {
                     lineweight: pen.lineweight,
                     runs,
                 }]
+            };
+            Drawn {
+                shapes,
+                ..Drawn::default()
             }
         };
-        // Blocks arrive with ticket #6: an insert will draw its block's
-        // objects, moved, scaled and turned, and its attributes as text,
-        // through this same match.
-        let shapes = match object {
+        let shapes = |shapes: Vec<Shape>| Drawn {
+            shapes: match placed {
+                Some(placed) => shapes.into_iter().map(|s| placed.shape(s)).collect(),
+                None => shapes,
+            },
+            ..Drawn::default()
+        };
+        match object {
             Object::Line(line) => stroke(linetype::along(
-                &[flat(line.from), flat(line.to)],
+                &path(vec![flat(line.from), flat(line.to)]),
                 pen.pattern,
                 false,
             )),
             Object::Polyline(polyline) => {
-                let mut points: Vec<Point2> = polyline.points.iter().map(|&p| flat(p)).collect();
+                let mut points = path(polyline.points.iter().map(|&p| flat(p)).collect());
                 if polyline.closed && !points.is_empty() {
                     points.push(points[0]);
                 }
@@ -243,51 +457,120 @@ pub fn draw_sheet(
                 }
             }
             Object::Arc(arc) => stroke(linetype::along(
-                &curves::arc(
+                &path(curves::arc(
                     flat(arc.center),
                     arc.radius,
                     arc.start_angle,
                     arc.end_angle,
                     tolerance,
-                ),
+                )),
                 pen.pattern,
                 false,
             )),
             Object::Circle(circle) => stroke(linetype::along(
-                &curves::circle(flat(circle.center), circle.radius, tolerance),
+                &path(curves::circle(
+                    flat(circle.center),
+                    circle.radius,
+                    tolerance,
+                )),
                 pen.pattern,
                 true,
             )),
             Object::Ellipse(ellipse) => stroke(linetype::along(
-                &curves::ellipse(ellipse, tolerance),
+                &path(curves::ellipse(ellipse, tolerance)),
                 pen.pattern,
                 ellipse.is_whole(),
             )),
             Object::Spline(spline) => stroke(linetype::along(
-                &curves::spline(spline, tolerance),
+                &path(curves::spline(spline, tolerance)),
                 pen.pattern,
                 false,
             )),
             Object::Hatch(h) => {
-                let drawn = hatch::draw(h, pen.lineweight, tolerance, most_dashes);
-                let reach = list.reach.into_iter().flat_map(|b| [b.min, b.max]);
-                let boundary = drawn.bounds.into_iter().flat_map(|b| [b.min, b.max]);
-                list.reach = Bounds::of(reach.chain(boundary));
-                if drawn.cut_short {
-                    list.hatches_cut_short.push(index);
+                // A hatch's pattern is enlarged and turned with the insert.
+                let drawn = hatch::draw(h, pen.lineweight, tolerance, self.most_dashes);
+                Drawn {
+                    reach: path(drawn.boundary),
+                    cut_short: drawn.cut_short,
+                    ..shapes(drawn.shapes)
                 }
-                drawn.shapes
             }
-            Object::Text(t) => text::draw_text(t, fonts, pen.lineweight, tolerance),
-            Object::MText(t) => text::draw_mtext(t, fonts, pen.lineweight, tolerance),
-            // Inserts and attribute definitions draw in the next commit.
-            Object::AttributeDefinition(_) | Object::Insert(_) => Vec::new(),
+            Object::Text(t) => shapes(text::draw_text(t, self.fonts, pen.lineweight, tolerance)),
+            Object::MText(t) => shapes(text::draw_mtext(t, self.fonts, pen.lineweight, tolerance)),
+            // An attribute definition outside a block shows its tag, as
+            // AutoCAD shows it.
+            Object::AttributeDefinition(d) => shapes(text::draw_text(
+                &definition_text(d),
+                self.fonts,
+                pen.lineweight,
+                tolerance,
+            )),
+            Object::Insert(_) => Drawn::default(),
+        }
+    }
+
+    /// The record of a hatch cut short: the sheet's object at `index`, or
+    /// one of the objects of `block`, which that object inserts.
+    fn cut_short(&self, index: usize, object: &Object, block: Option<&str>) -> HatchCutShort {
+        let pattern = match object {
+            Object::Hatch(h) => h.pattern.name.clone(),
+            _ => String::new(),
         };
-        list.items.extend(shapes.into_iter().map(|shape| Item {
+        HatchCutShort {
             object: index,
-            color: pen.color,
+            block: block.map(str::to_owned),
+            pattern,
+            layer: object.layer().to_owned(),
+            why: format!(
+                "its pattern needs more than the {MOST_HATCH_LINES} lines or {} dashes one \
+                 hatch draws; only the first are drawn",
+                self.most_dashes
+            ),
+        }
+    }
+}
+
+impl DisplayList {
+    /// Adds what the sheet's object at `index` draws in `color`.
+    fn add(&mut self, index: usize, color: Color, shapes: Vec<Shape>, reach: Vec<Point2>) {
+        self.take_in(reach);
+        self.items.extend(shapes.into_iter().map(|shape| Item {
+            object: index,
+            color,
             shape,
         }));
+    }
+
+    /// Takes `points` into the extents without drawing them.
+    fn take_in(&mut self, points: impl IntoIterator<Item = Point2>) {
+        let mut points = points.into_iter().peekable();
+        if points.peek().is_some() {
+            let had = self.reach.into_iter().flat_map(|b| [b.min, b.max]);
+            self.reach = Bounds::of(had.chain(points));
+        }
+    }
+}
+
+/// Draws a sheet: every object, in drawing order, as AutoCAD plots it.
+/// Curves are drawn as chords that stray at most `tolerance` drawing units
+/// from them; text is drawn in the fonts `fonts` holds; each hatch draws
+/// at most `most_dashes` dashes, [`MOST_HATCH_DASHES`] but in tests.
+pub fn draw_sheet(
+    sheet: &Sheet,
+    fonts: &SheetFonts,
+    tolerance: f64,
+    most_dashes: usize,
+) -> DisplayList {
+    let tolerance = if tolerance > 0.0 { tolerance } else { 1e-3 };
+    let drawer = Drawer {
+        sheet,
+        fonts,
+        most_dashes,
+        layer_zero: Layer::new(LAYER_ZERO),
+    };
+    let mut list = DisplayList::default();
+    for (index, object) in sheet.objects.iter().enumerate() {
+        drawer.sheet_object(index, object, tolerance, &mut list);
     }
     list
 }
