@@ -68,6 +68,12 @@ const OBJECT_ID: Place = Place {
     json: r#"{"units": "mm", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1, "id": V}}]}"#,
 };
 
+const OBJECT_NAME: Place = Place {
+    name: "an object's name",
+    yaml: "units: mm\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1, name: V}\n",
+    json: r#"{"units": "mm", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1, "name": V}}]}"#,
+};
+
 const LAYER: Place = Place {
     name: "an object's layer",
     yaml: "units: mm\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1, layer: V}\n",
@@ -305,6 +311,13 @@ fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
         (&OBJECT_ID, "'état'", json!("état"), false),
         (&OBJECT_ID, "[a]", json!(["a"]), false),
         (&OBJECT_ID, "{a: b}", json!({"a": "b"}), false),
+        // An object's name, which every object on a sheet may carry.
+        (&OBJECT_NAME, "frame", json!("frame"), true),
+        (&OBJECT_NAME, "'Pump P-101 frame'", json!("Pump P-101 frame"), true),
+        (&OBJECT_NAME, "7", json!(7), true),
+        (&OBJECT_NAME, "''", json!(""), false),
+        (&OBJECT_NAME, "' frame'", json!(" frame"), false),
+        (&OBJECT_NAME, "[a]", json!(["a"]), false),
         // A hatch's scale: a number more than 0, with no unit.
         (&SCALE, "2", json!(2), true),
         (&SCALE, "'0.5'", json!("0.5"), true),
@@ -548,11 +561,17 @@ fn library_cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
             json!([{"insert": {"block": "B", "position": [0, 0, 0]}}]),
             false,
         ),
-        // A block's objects take no ID: the insert is the object on a sheet.
+        // A block's objects take no ID or name: the insert is the object on a sheet.
         (
             &BLOCK_OBJECTS,
             "[{circle: {center: [0, 0, 0], radius: 1, id: a}}]",
             json!([{"circle": {"center": [0, 0, 0], "radius": 1, "id": "a"}}]),
+            false,
+        ),
+        (
+            &BLOCK_OBJECTS,
+            "[{circle: {center: [0, 0, 0], radius: 1, name: a}}]",
+            json!([{"circle": {"center": [0, 0, 0], "radius": 1, "name": "a"}}]),
             false,
         ),
     ]

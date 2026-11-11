@@ -25,11 +25,11 @@ use acadrust::tables::{BlockRecord, Layer as DwgLayer, LineType, LineTypeElement
 use acadrust::types::{Color, DxfVersion, LineWeight, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, DwgWriter};
 
-use crate::description::normalize_degrees;
+use crate::description::{normalize_degrees, SheetRecord};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arc, Block, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object,
-    Point3, Polyline, Sheet, Spline, BUILT_IN_LINETYPES, FIT_DEGREE, LAYER_ZERO,
+    Arc, Block, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype, Lineweight,
+    Object, Point3, Polyline, Spline, BUILT_IN_LINETYPES, FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::Text as TextObject;
 use crate::units::Unit;
@@ -61,15 +61,27 @@ pub(crate) fn new_sheet_version() -> String {
 }
 
 /// Writes a new sheet as the bytes of a DWG in the 2018 format, carrying the
-/// build mark. Each of the sheet's objects carries its ID from `ids`, which
-/// holds one for each object in order, or none. `start_of` gives where each
-/// single line of text starts, which the DWG records beside the point it is
-/// justified at.
+/// build mark. `record` holds the sheet with the record of each of its
+/// objects, and each object is written with its ID and name from its
+/// record. `start_of` gives where each single line of text starts, which
+/// the DWG records beside the point it is justified at.
 pub(crate) fn write_new_sheet(
-    sheet: &Sheet,
-    ids: &[String],
+    record: &SheetRecord,
     start_of: &dyn Fn(&TextObject) -> Point3,
 ) -> Result<Vec<u8>, Error> {
+    let sheet = &record.sheet;
+    if record.objects.len() != sheet.objects.len() {
+        return Err(Error::new(
+            ErrorCode::DwgWrite,
+            format!(
+                "sheet `{}` holds {} objects and the records of {}; every object is written \
+                 with its ID",
+                record.name,
+                sheet.objects.len(),
+                record.objects.len()
+            ),
+        ));
+    }
     let mut drawing = CadDocument::with_version(NEW_SHEET_VERSION);
     drawing.header.insertion_units = insertion_units(sheet.units);
     drawing.header.measurement = i16::from(sheet.units.is_metric());
@@ -109,11 +121,8 @@ pub(crate) fn write_new_sheet(
         }
     }
     text::add_text_styles(&mut drawing, &sheet.text_styles)?;
-    let named = sheet
-        .objects
-        .iter()
-        .any(|o| matches!(o, Object::Insert(insert) if insert.name.is_some()));
-    if named || !ids.is_empty() {
+    // Every object carries its ID in AgentDrafter's extended data.
+    if !sheet.objects.is_empty() {
         block::register_application(&mut drawing)?;
     }
     // Layers, linetypes, text styles and applications take their handles
@@ -137,11 +146,14 @@ pub(crate) fn write_new_sheet(
             })?;
         }
     }
-    for (index, object) in sheet.objects.iter().enumerate() {
+    for (object, written) in sheet.objects.iter().zip(&record.objects) {
         let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
-        if let Some(id) = ids.get(index) {
-            self::ids::write_id(dwg_object.common_mut(), id);
-        }
+        ids::write_id_and_name(
+            dwg_object.common_mut(),
+            &record.name,
+            &written.id,
+            written.name.as_deref(),
+        );
         drawing.add_entity(dwg_object).map_err(|e| {
             Error::new(
                 ErrorCode::DwgWrite,
@@ -348,13 +360,16 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         }
     }
     let mut objects = Vec::new();
-    let mut ids = Vec::new();
+    let mut ids_and_names = Vec::new();
     let mut objects_not_read = 0;
     for dwg_object in drawing.model_space_entities() {
         match read_object(dwg_object, &blocks) {
             Some(object) => {
                 objects.push(object);
-                ids.push(self::ids::read_id(dwg_object.common()));
+                ids_and_names.push(IdAndName {
+                    id: ids::read_id(dwg_object.common()),
+                    name: ids::read_name(dwg_object.common()),
+                });
             }
             None => objects_not_read += 1,
         }
@@ -371,7 +386,7 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         blocks,
         blocks_not_read,
         objects,
-        ids,
+        ids_and_names,
         objects_not_read,
     })
 }
@@ -656,6 +671,7 @@ mod tests {
 
     use super::*;
     use crate::build::{build, BuildRequest};
+    use crate::model::Sheet;
 
     /// An empty folder for one test under the system's temporary folder.
     fn scratch(test: &str) -> PathBuf {
@@ -679,17 +695,41 @@ mod tests {
         }
     }
 
+    fn record(sheet: Sheet) -> SheetRecord {
+        SheetRecord {
+            name: "sheet".into(),
+            file: PathBuf::from("sheet.yaml"),
+            sheet,
+            objects: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_built_dwg_carries_the_build_mark() {
         let dir = scratch("marked");
         let dwg = dir.join("sheet.dwg");
         fs::write(
             &dwg,
-            write_new_sheet(&empty_sheet(), &[], &|t| t.position).unwrap(),
+            write_new_sheet(&record(empty_sheet()), &|t| t.position).unwrap(),
         )
         .unwrap();
         assert_eq!(carries_build_mark(&dwg), Ok(true));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Every object is written with its ID: a sheet whose objects and
+    /// records disagree is refused, never written with an object unmarked.
+    #[test]
+    fn an_object_without_its_record_is_not_written() {
+        let mut sheet = empty_sheet();
+        sheet.objects.push(Object::Line(Line {
+            from: Point3::new(0.0, 0.0, 0.0),
+            to: Point3::new(1.0, 0.0, 0.0),
+            layer: LAYER_ZERO.to_owned(),
+        }));
+        let error = write_new_sheet(&record(sheet), &|t| t.position).unwrap_err();
+        assert_eq!(error.code, ErrorCode::DwgWrite);
+        assert!(error.message.contains("with its ID"), "{error:?}");
     }
 
     #[test]

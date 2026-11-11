@@ -6,8 +6,8 @@
 //! the drawing's unit so an insert is not scaled again. An insert carries
 //! one attribute for each attribute definition of its block, in the order
 //! the block defines them, drawn where the definition is, moved, scaled and
-//! turned with the insert ([`attribute_text`]). An insert's name is kept in
-//! extended data under AgentDrafter's own registered application.
+//! turned with the insert ([`attribute_text`]). An insert's name, as every
+//! object's ID and name, is kept in AgentDrafter's extended data ([`super::ids`]).
 //!
 //! An insert reads back only when its attributes are where its block puts
 //! them, so the core's model, which holds their values, is the whole truth.
@@ -19,7 +19,6 @@ use acadrust::entities::{
 };
 use acadrust::tables::{AppId, BlockRecord, TableEntry};
 use acadrust::types::{Handle, Vector3};
-use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 use acadrust::CadDocument;
 
 use super::text::{style_name, text_code, text_contents};
@@ -36,9 +35,6 @@ use crate::text::{Justify, Text};
 /// ID, and on an insert its name as well, each as a key followed by its
 /// value ([`super::ids`]).
 pub(super) const APPLICATION: &str = "AGENTDRAFTER";
-
-/// The key of an insert's name in its extended data.
-const NAME_KEY: &str = "name";
 
 /// Each justification, with AutoCAD's horizontal and vertical alignment of
 /// an attribute for it.
@@ -177,12 +173,6 @@ pub(super) fn dwg_insert(
         dwg_attribute.common.layer = text.layer;
         dwg.attributes.push(dwg_attribute);
     }
-    if let Some(name) = &insert.name {
-        let mut record = ExtendedDataRecord::new(APPLICATION);
-        record.add_value(XDataValue::String(NAME_KEY.to_owned()));
-        record.add_value(XDataValue::String(name.clone()));
-        dwg.common.extended_data.add_record(record);
-    }
     Ok(dwg)
 }
 
@@ -269,7 +259,7 @@ pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> O
         scale,
         rotation: normalize_degrees(dwg.rotation.to_degrees()),
         attributes: Vec::with_capacity(definitions.len()),
-        name: name(dwg),
+        name: super::ids::read_name(&dwg.common),
         layer,
     };
     for (definition, dwg_attribute) in definitions.into_iter().zip(&dwg.attributes) {
@@ -325,11 +315,6 @@ fn read_attribute(
         && same_angle(dwg.rotation.to_degrees(), expected.rotation)
         && same_point(point(position), expected.position);
     same.then_some(value)
-}
-
-/// The insert's name, from AgentDrafter's extended data on it.
-fn name(dwg: &DwgInsert) -> Option<String> {
-    super::ids::value_of(&dwg.common.extended_data, NAME_KEY)
 }
 
 /// Whether an attribute's modes are those the core models: none, or
@@ -423,7 +408,14 @@ mod tests {
     fn an_insert_reads_back_with_its_attributes_and_name() {
         let block = block();
         let insert = insert();
-        let written = dwg_insert(&insert, &block, &|t| t.position).unwrap();
+        let mut written = dwg_insert(&insert, &block, &|t| t.position).unwrap();
+        // A build writes every object's ID and name, an insert's among them.
+        super::super::ids::write_id_and_name(
+            &mut written.common,
+            "S",
+            "objects[0]",
+            Some("mark-1"),
+        );
         assert_eq!(written.attributes.len(), 2);
         let justified = &written.attributes[0];
         assert_eq!(

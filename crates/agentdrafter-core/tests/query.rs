@@ -50,10 +50,10 @@ fn build(set: &Path, overwrite: bool) {
 /// Each object a built sheet's DWG holds, with the ID it carries.
 fn built(set: &Path, sheet: &str) -> Vec<(String, Object)> {
     let read = read_dwg(&set.join("dwg").join(format!("{sheet}.dwg"))).unwrap();
-    assert_eq!(read.ids.len(), read.objects.len());
-    read.ids
+    assert_eq!(read.ids_and_names.len(), read.objects.len());
+    read.ids_and_names
         .into_iter()
-        .map(|id| id.expect("every object a build writes carries its ID"))
+        .map(|i| i.id.expect("every object a build writes carries its ID"))
         .zip(read.objects)
         .collect()
 }
@@ -111,7 +111,9 @@ fn measure(source: &Path, sheet: Option<&str>, from: End, to: End) -> QueryRepor
 fn distance(report: &QueryReport) -> (f64, [f64; 3]) {
     match &report.answer {
         Answer::Measure {
-            distance, delta, ..
+            distance: Some(distance),
+            delta: Some(delta),
+            ..
         } => (*distance, *delta),
         other => panic!("a measure's answer: {other:#?}"),
     }
@@ -505,8 +507,42 @@ fn a_query_that_matches_nothing_succeeds_and_says_so() {
 }
 
 #[test]
-fn a_distance_to_an_object_nobody_has_is_an_error_that_lists_nothing() {
+fn a_distance_to_an_object_nobody_has_matches_nothing_and_is_not_an_error() {
     let set = demo_set("no-such");
+
+    let report = measure(&set, None, by_id("DEMO-001/nope"), by_id("DEMO-001/border"));
+    assert_eq!(
+        report.message,
+        "nothing matches: no object on the 3 sheets looked at has the ID `DEMO-001/nope`, the \
+         end to measure from"
+    );
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["kind"], "measure");
+    assert!(json.get("distance").is_none(), "{json}");
+    assert!(json.get("from").is_none(), "{json}");
+    assert_eq!(json["to"]["id"], "DEMO-001/border");
+
+    let nobody = End {
+        name: Some("nobody".into()),
+        ..End::default()
+    };
+    let report = measure(&set, Some("DEMO-002"), by_id("DEMO-002/nope"), nobody);
+    assert_eq!(
+        report.message,
+        "nothing matches: no object on sheet `DEMO-002` has the ID `DEMO-002/nope`, the end to \
+         measure from, nor the name `nobody`, the end to measure to"
+    );
+    assert!(matches!(
+        report.answer,
+        Answer::Measure {
+            distance: None,
+            from: None,
+            to: None,
+            ..
+        }
+    ));
+
+    // A request that cannot be answered as asked is still an error.
     let ask_measure = |sheet: Option<&str>, from: End, to: End| {
         query_with(
             &QueryRequest {
@@ -518,27 +554,6 @@ fn a_distance_to_an_object_nobody_has_is_an_error_that_lists_nothing() {
         )
         .unwrap_err()
     };
-
-    let e = ask_measure(None, by_id("DEMO-001/nope"), by_id("DEMO-001/border"));
-    assert_eq!(e.code, ErrorCode::NoSuchObject);
-    assert_eq!(
-        e.message,
-        "no object on the 3 sheets looked at has the ID `DEMO-001/nope`"
-    );
-    assert_eq!(e.field.as_deref(), Some("query.from.id"));
-
-    let nobody = End {
-        name: Some("nobody".into()),
-        ..End::default()
-    };
-    let e = ask_measure(Some("DEMO-002"), by_id("DEMO-002/border"), nobody);
-    assert_eq!(e.code, ErrorCode::NoSuchObject);
-    assert_eq!(
-        e.message,
-        "no object on sheet `DEMO-002` has the name `nobody`"
-    );
-    assert_eq!(e.field.as_deref(), Some("query.to.name"));
-
     // A name every sheet gives needs its sheet.
     let everywhere = End {
         name: Some("title-block".into()),
@@ -611,4 +626,134 @@ fn a_duplicate_id_is_refused_naming_both_places() {
         assert_eq!(sheet.error.as_ref().unwrap().code, ErrorCode::DuplicateId);
     }
     assert!(!set.join("dwg").join("DEMO-001.dwg").exists());
+}
+
+#[test]
+fn extents_follow_the_geometry_not_the_dashes_of_its_linetype() {
+    // A circle of radius 10 whose linetype draws a dash of 1 and a gap of
+    // 20: the dashes cover a little of it, its extents all of it.
+    let dir = scratch("dashed");
+    let dashed = dir.join("dashed.yaml");
+    fs::write(
+        &dashed,
+        "units: mm\nlinetypes:\n  SPARSE: {pattern: [1, -20]}\nlayers:\n  dashed: {linetype: SPARSE}\n\
+         objects:\n  - circle: {center: [50, 50, 0], radius: 10, layer: dashed}\n",
+    )
+    .unwrap();
+    let report = ask(&dashed, Query::Extents);
+    let Answer::Extents { extents, .. } = &report.answer else {
+        panic!("an extents answer: {report:#?}");
+    };
+    let e = extents[0].extents.unwrap();
+    let within = 20.0 * 1e-6;
+    close(e.width, 20.0, within);
+    close(e.height, 20.0, within);
+    close(e.min[0], 40.0, within);
+    close(e.max[1], 60.0, within);
+}
+
+#[test]
+fn every_object_may_have_a_name_carried_into_its_dwg_and_found_by_it() {
+    let set = demo_set("names");
+    let template = set.join("templates/ansi-b.yaml");
+    let text = fs::read_to_string(&template).unwrap();
+    let text = text.replacen(
+        "layer: border, id: border}",
+        "layer: border, id: border, name: frame}",
+        1,
+    );
+    fs::write(&template, text).unwrap();
+    build(&set, false);
+
+    // The DWG carries the border's name, and the title block's as before.
+    let read = read_dwg(&set.join("dwg/DEMO-002.dwg")).unwrap();
+    let named: Vec<(Option<&str>, Option<&str>)> = read
+        .ids_and_names
+        .iter()
+        .map(|i| (i.id.as_deref(), i.name.as_deref()))
+        .filter(|(_, name)| name.is_some())
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (Some("DEMO-002/border"), Some("frame")),
+            (Some("DEMO-002/objects[2]"), Some("title-block")),
+        ]
+    );
+
+    // Found by its name, in any case, on every sheet.
+    let by_name = Selection {
+        name: Some("FRAME".into()),
+        ..Selection::default()
+    };
+    assert_eq!(found(&find(&set, by_name)), on_every_sheet("border"));
+
+    // And measured from by its name: the border's first corner to the title block.
+    let named = |name: &str| End {
+        name: Some(name.to_owned()),
+        ..End::default()
+    };
+    let report = measure(&set, Some("DEMO-001"), named("frame"), named("title-block"));
+    let (d, delta) = distance(&report);
+    assert_eq!((d, delta), (16.0, [16.0, 0.0, 0.0]));
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["from"]["name"], "frame");
+    assert_eq!(json["from"]["point"], "points[0]");
+
+    // A name is given once on a sheet, whatever objects carry it.
+    let text = fs::read_to_string(&template).unwrap();
+    let text = text.replacen("layer: trim}", "layer: trim, name: Title-Block}", 1);
+    fs::write(&template, text).unwrap();
+    let e = query_with(
+        &QueryRequest {
+            source: set.clone(),
+            sheet: None,
+            query: Query::Blocks,
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::DuplicateName);
+    assert_eq!(e.field.as_deref(), Some("objects[2].insert.name"));
+    assert!(
+        e.message.contains(
+            "the name `title-block` is given at line 17 already, to the object at `objects[0]`"
+        ),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn a_query_finds_text_an_inserted_block_draws() {
+    let set = demo_set("block-text");
+    let report = find(
+        &set,
+        Selection {
+            text: Some("DEMO PLANT".into()),
+            ..Selection::default()
+        },
+    );
+    assert_eq!(found(&report), on_every_sheet("objects[2]"));
+    let Answer::Find { objects, .. } = &report.answer else {
+        unreachable!()
+    };
+    for object in objects {
+        assert!(matches!(object.object, Object::Insert(_)));
+        assert_eq!(object.block_text.len(), 1);
+        let text = &object.block_text[0];
+        assert_eq!(text.field, "blocks.TITLE_BLOCK.objects[7]");
+        assert_eq!(text.contents, "DEMO PLANT");
+        assert!(text.file.ends_with("blocks.yaml"), "{text:?}");
+    }
+    // Text on the sheet itself carries no block text.
+    let heading = find(
+        &set,
+        Selection {
+            text: Some("AREA 100 GENERAL ARRANGEMENT".into()),
+            ..Selection::default()
+        },
+    );
+    let line = serde_json::to_value(&heading).unwrap();
+    assert_eq!(line["objects"][0]["id"], "DEMO-001/heading");
+    assert!(line["objects"][0].get("block_text").is_none(), "{line}");
 }

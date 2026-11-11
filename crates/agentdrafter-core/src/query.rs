@@ -6,18 +6,21 @@
 //! truth (ADR-0003): a query needs no build, cannot read a stale DWG, and
 //! answers in the set's declared unit, exactly as the record gives it.
 //!
-//! - **Find** objects by ID, name, block, attribute or text.
+//! - **Find** objects by ID, name, block, attribute or text, the text an
+//!   insert's block draws among it.
 //! - **Blocks**: the blocks each sheet inserts, and the IDs of the inserts.
 //! - **Attributes**: the attributes of inserts, as JSON from tag to value.
 //! - **Measure** the distance between points of two objects given by ID or
 //!   name: an insert's or a text's position, a line's ends, a circle's
 //!   centre.
 //! - **Extents**: the box round everything each sheet draws, drawn through
-//!   the one drawing pipeline (ADR-0011), as AutoCAD's extents are.
+//!   the one drawing pipeline (ADR-0011) with every layer continuous, as
+//!   AutoCAD's extents are.
 //!
-//! A query that matches nothing says so and is not an error. A distance to
-//! measure that names an ID or a name no object carries is an error, as is
-//! a sheet that cannot be read: an answer must not leave a sheet out.
+//! A query that matches nothing says so and is not an error, a distance
+//! whose end names an ID or a name no object carries among them. A request
+//! that cannot be answered as asked is an error, and so is a sheet that
+//! cannot be read: an answer must not leave a sheet out.
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +32,7 @@ use crate::description::{
 };
 use crate::draw::{self, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
-use crate::model::{Attribute, Object, Point3};
+use crate::model::{Attribute, Object, Point3, CONTINUOUS};
 use crate::set::SET_SETTINGS_FILE;
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
@@ -185,13 +188,19 @@ pub enum Answer {
         count: usize,
         inserts: Vec<InsertAttributes>,
     },
+    /// A distance; when an end matches no object, no distance and only
+    /// the end that matched.
     Measure {
         /// The distance from one point to the other, in the declared unit.
-        distance: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        distance: Option<f64>,
         /// How far the second point is from the first along X, Y and Z.
-        delta: [f64; 3],
-        from: Box<MeasuredPoint>,
-        to: Box<MeasuredPoint>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delta: Option<[f64; 3]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<Box<MeasuredPoint>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to: Option<Box<MeasuredPoint>>,
     },
     Extents {
         /// How many sheets draw something.
@@ -233,6 +242,23 @@ pub struct FoundObject {
     pub written_at: WrittenAt,
     /// The object, as the sheet holds it, in the declared unit.
     pub object: Object,
+    /// When an insert is found by text its block draws: each text or
+    /// multiline text of the block that matched.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub block_text: Vec<BlockText>,
+}
+
+/// A text or a multiline text of an insert's block that a query's `text`
+/// matched.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BlockText {
+    /// The block library that defines the block.
+    pub file: String,
+    /// Its place in the block definition, such as
+    /// `blocks.TITLE_BLOCK.objects[7]`.
+    pub field: String,
+    /// What it says.
+    pub contents: String,
 }
 
 /// The blocks one sheet inserts.
@@ -263,6 +289,10 @@ pub struct InsertAttributes {
     pub attributes: AttributeValues,
     #[serde(flatten)]
     pub written_at: WrittenAt,
+    /// When the insert is found by text its block draws: each text or
+    /// multiline text of the block that matched.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub block_text: Vec<BlockText>,
 }
 
 /// An insert's attributes, written in JSON as a mapping from each tag to
@@ -438,8 +468,11 @@ fn contains(have: &str, wanted: &str) -> bool {
 }
 
 impl Selection {
-    /// Whether the object at `index` of `record` matches every part given.
-    fn matches(&self, record: &SheetRecord, index: usize) -> bool {
+    /// Whether the object at `index` of `record` matches every part given:
+    /// none when it does not; when it does, the text and multiline text of
+    /// an insert's block that `text` matched, empty when the object matched
+    /// in itself.
+    fn matches(&self, record: &SheetRecord, index: usize) -> Option<Vec<BlockText>> {
         let m = self.matching;
         let object = &record.sheet.objects[index];
         let insert = match object {
@@ -448,44 +481,45 @@ impl Selection {
         };
         if let Some(id) = &self.id {
             if !m.identifier(&record.id(index), id) {
-                return false;
+                return None;
             }
         }
         if let Some(name) = &self.name {
-            match insert.and_then(|i| i.name.as_deref()) {
+            match record.objects[index].name.as_deref() {
                 Some(have) if m.identifier(have, name) => {}
-                _ => return false,
+                _ => return None,
             }
         }
         if let Some(block) = &self.block {
             match insert {
                 Some(insert) if m.identifier(&insert.block, block) => {}
-                _ => return false,
+                _ => return None,
             }
         }
         if self.tag.is_some() || self.value.is_some() {
-            let Some(insert) = insert else {
-                return false;
-            };
-            let found = insert.attributes.iter().any(|a| {
+            let found = insert?.attributes.iter().any(|a| {
                 self.tag.as_deref().is_none_or(|t| m.identifier(&a.tag, t))
                     && self.value.as_deref().is_none_or(|v| m.text(&a.value, v))
             });
             if !found {
-                return false;
+                return None;
             }
         }
+        let mut in_block = Vec::new();
         if let Some(text) = &self.text {
-            let contents = match object {
-                Object::Text(t) => &t.contents,
-                Object::MText(t) => &t.contents,
-                _ => return false,
-            };
-            if !m.text(contents, text) {
-                return false;
+            match object {
+                Object::Text(t) if m.text(&t.contents, text) => {}
+                Object::MText(t) if m.text(&t.contents, text) => {}
+                Object::Insert(insert) => {
+                    in_block = block_text(record, &insert.block, |c| m.text(c, text));
+                    if in_block.is_empty() {
+                        return None;
+                    }
+                }
+                _ => return None,
             }
         }
-        true
+        Some(in_block)
     }
 
     /// The selection in words, such as "the text `NOTES`"; none when it
@@ -545,6 +579,70 @@ impl Selection {
     }
 }
 
+/// The text and multiline text of `block`, as the block library of
+/// `record`'s sheet defines it, whose contents `wanted` takes.
+fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) -> Vec<BlockText> {
+    let Some(definition) = record.sheet.blocks.iter().find(|b| b.name == block) else {
+        return Vec::new();
+    };
+    let file = record
+        .sheet
+        .block_library
+        .as_ref()
+        .map(|written| {
+            record
+                .file
+                .parent()
+                .unwrap_or(Path::new(""))
+                .join(written)
+                .display()
+                .to_string()
+        })
+        .unwrap_or_default();
+    definition
+        .objects
+        .iter()
+        .enumerate()
+        .filter_map(|(i, object)| {
+            let contents = match object {
+                Object::Text(t) => &t.contents,
+                Object::MText(t) => &t.contents,
+                _ => return None,
+            };
+            wanted(contents).then(|| BlockText {
+                file: file.clone(),
+                field: format!("blocks.{}.objects[{i}]", definition.name),
+                contents: contents.clone(),
+            })
+        })
+        .collect()
+}
+
+/// One object a selection matched, on one of the sheets looked at.
+struct Matched<'a> {
+    record: &'a SheetRecord,
+    index: usize,
+    /// The text of its block that matched, when it is an insert found by
+    /// the text its block draws.
+    block_text: Vec<BlockText>,
+}
+
+/// Each object on `sheets` that `selection` matches, in order.
+fn matched<'a>(
+    sheets: &'a [&'a SheetRecord],
+    selection: &'a Selection,
+) -> impl Iterator<Item = Matched<'a>> + 'a {
+    sheets.iter().flat_map(move |record| {
+        (0..record.objects.len()).filter_map(move |index| {
+            selection.matches(record, index).map(|block_text| Matched {
+                record,
+                index,
+                block_text,
+            })
+        })
+    })
+}
+
 fn written_at(record: &SheetRecord, index: usize) -> WrittenAt {
     let object = &record.objects[index].object;
     WrittenAt {
@@ -555,7 +653,7 @@ fn written_at(record: &SheetRecord, index: usize) -> WrittenAt {
     }
 }
 
-/// What a search found, in words: `count` of `thing` that match `words`,
+/// What a query found, in words: `count` of `thing` that match `words`,
 /// the selection in words, on the sheets `on` names; or that none did.
 fn found_message(count: usize, thing: &str, words: Option<String>, on: &str) -> String {
     match (count, words) {
@@ -577,20 +675,16 @@ fn counted(count: usize, thing: &str) -> String {
 }
 
 fn find(sheets: &[&SheetRecord], selection: &Selection, looked: &LookedAt) -> (String, Answer) {
-    let mut objects = Vec::new();
-    for record in sheets {
-        for (index, object) in record.sheet.objects.iter().enumerate() {
-            if selection.matches(record, index) {
-                objects.push(FoundObject {
-                    sheet: record.name.clone(),
-                    id: record.id(index),
-                    id_written: record.objects[index].written(),
-                    written_at: written_at(record, index),
-                    object: object.clone(),
-                });
-            }
-        }
-    }
+    let objects: Vec<FoundObject> = matched(sheets, selection)
+        .map(|m| FoundObject {
+            sheet: m.record.name.clone(),
+            id: m.record.id(m.index),
+            id_written: m.record.objects[m.index].written(),
+            written_at: written_at(m.record, m.index),
+            object: m.record.sheet.objects[m.index].clone(),
+            block_text: m.block_text,
+        })
+        .collect();
     let count = objects.len();
     let message = found_message(count, "object", selection.words(), &looked.on());
     (message, Answer::Find { count, objects })
@@ -650,24 +744,20 @@ fn attributes(
     selection: &Selection,
     looked: &LookedAt,
 ) -> (String, Answer) {
-    let mut inserts = Vec::new();
-    for record in sheets {
-        for (index, object) in record.sheet.objects.iter().enumerate() {
-            let Object::Insert(insert) = object else {
-                continue;
-            };
-            if selection.matches(record, index) {
-                inserts.push(InsertAttributes {
-                    sheet: record.name.clone(),
-                    id: record.id(index),
-                    name: insert.name.clone(),
-                    block: insert.block.clone(),
-                    attributes: AttributeValues(insert.attributes.clone()),
-                    written_at: written_at(record, index),
-                });
-            }
-        }
-    }
+    let inserts: Vec<InsertAttributes> = matched(sheets, selection)
+        .filter_map(|m| match &m.record.sheet.objects[m.index] {
+            Object::Insert(insert) => Some(InsertAttributes {
+                sheet: m.record.name.clone(),
+                id: m.record.id(m.index),
+                name: insert.name.clone(),
+                block: insert.block.clone(),
+                attributes: AttributeValues(insert.attributes.clone()),
+                written_at: written_at(m.record, m.index),
+                block_text: m.block_text,
+            }),
+            _ => None,
+        })
+        .collect();
     let count = inserts.len();
     let message = found_message(count, "insert", selection.words(), &looked.on());
     (message, Answer::Attributes { count, inserts })
@@ -679,8 +769,32 @@ fn measure(
     units: Unit,
     looked: &LookedAt,
 ) -> Result<(String, Answer), Error> {
-    let from = end(sheets, &measure.from, "query.from", looked)?;
-    let to = end(sheets, &measure.to, "query.to", looked)?;
+    let from = end(sheets, &measure.from, "query.from")?;
+    let to = end(sheets, &measure.to, "query.to")?;
+    let (from, to) = match (from, to) {
+        (Some(from), Some(to)) => (from, to),
+        (from, to) => {
+            let mut missing = Vec::new();
+            if from.is_none() {
+                missing.push(format!("{}, the end to measure from", measure.from.words()));
+            }
+            if to.is_none() {
+                missing.push(format!("{}, the end to measure to", measure.to.words()));
+            }
+            let message = format!(
+                "nothing matches: no object {} has {}",
+                looked.on(),
+                missing.join(", nor ")
+            );
+            let answer = Answer::Measure {
+                distance: None,
+                delta: None,
+                from: from.map(Box::new),
+                to: to.map(Box::new),
+            };
+            return Ok((message, answer));
+        }
+    };
     if from.sheet != to.sheet {
         return Err(Error::new(
             ErrorCode::BadValue,
@@ -705,88 +819,79 @@ fn measure(
     Ok((
         message,
         Answer::Measure {
-            distance,
-            delta,
-            from: Box::new(from),
-            to: Box::new(to),
+            distance: Some(distance),
+            delta: Some(delta),
+            from: Some(Box::new(from)),
+            to: Some(Box::new(to)),
         },
     ))
 }
 
-/// The point one end of a distance names. `field` is the end's place in
-/// the request, for an error.
-fn end(
-    sheets: &[&SheetRecord],
-    end: &End,
-    field: &str,
-    looked: &LookedAt,
-) -> Result<MeasuredPoint, Error> {
-    let (record, index) = match (&end.id, &end.name) {
-        (Some(id), None) => {
-            let found = sheets.iter().find_map(|record| {
+impl End {
+    /// The object the end names, in words, such as "the ID `DEMO-001/border`".
+    fn words(&self) -> String {
+        match (&self.id, &self.name) {
+            (Some(id), _) => format!("the ID `{id}`"),
+            (None, Some(name)) => format!("the name `{name}`"),
+            (None, None) => "no object".to_owned(),
+        }
+    }
+}
+
+/// The point one end of a distance names, or none when no object on
+/// `sheets` has the ID or name it gives. `field` is the end's place in the
+/// request, for an error.
+fn end(sheets: &[&SheetRecord], end: &End, field: &str) -> Result<Option<MeasuredPoint>, Error> {
+    let found: Vec<(&SheetRecord, usize)> = match (&end.id, &end.name) {
+        (Some(id), None) => sheets
+            .iter()
+            .flat_map(|record| {
                 (0..record.objects.len())
-                    .find(|&i| Matching::Exact.identifier(&record.id(i), id))
+                    .filter(|&i| Matching::Exact.identifier(&record.id(i), id))
                     .map(|i| (*record, i))
-            });
-            found.ok_or_else(|| {
-                Error::new(
-                    ErrorCode::NoSuchObject,
-                    format!("no object {} has the ID `{id}`", looked.on()),
-                )
-                .at_field(format!("{field}.id"))
-            })?
-        }
-        (None, Some(name)) => {
-            let found: Vec<(&SheetRecord, usize)> = sheets
-                .iter()
-                .filter_map(|record| {
-                    record
-                        .sheet
-                        .objects
-                        .iter()
-                        .position(|object| match object {
-                            Object::Insert(insert) => insert
-                                .name
-                                .as_deref()
-                                .is_some_and(|have| Matching::Exact.identifier(have, name)),
-                            _ => false,
-                        })
-                        .map(|i| (*record, i))
-                })
-                .collect();
-            match found.as_slice() {
-                [] => {
-                    return Err(Error::new(
-                        ErrorCode::NoSuchObject,
-                        format!("no object {} has the name `{name}`", looked.on()),
-                    )
-                    .at_field(format!("{field}.name")))
-                }
-                [one] => *one,
-                several => {
-                    return Err(Error::new(
-                        ErrorCode::BadValue,
-                        format!(
-                            "the name `{name}` is given on {} sheets, {}, and a name is given \
-                             once on a sheet; name the sheet to measure on, or give the \
-                             object's ID",
-                            several.len(),
-                            several
-                                .iter()
-                                .map(|(r, _)| r.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                    )
-                    .at_field(format!("{field}.name")))
-                }
-            }
-        }
+            })
+            .take(1)
+            .collect(),
+        (None, Some(name)) => sheets
+            .iter()
+            .flat_map(|record| {
+                record
+                    .objects
+                    .iter()
+                    .position(|r| {
+                        r.name
+                            .as_deref()
+                            .is_some_and(|have| Matching::Exact.identifier(have, name))
+                    })
+                    .map(|i| (*record, i))
+            })
+            .collect(),
         _ => {
             return Err(Error::usage(
                 "each end of a distance names its object by `id` or by `name`, and not both",
             )
             .at_field(field.to_owned()))
+        }
+    };
+    let (record, index) = match found.as_slice() {
+        [] => return Ok(None),
+        [one] => *one,
+        several => {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "{} is given on {} sheets, {}, and a name is given once on a sheet; name \
+                     the sheet to measure on, or give the object's ID",
+                    end.words(),
+                    several.len(),
+                    several
+                        .iter()
+                        .map(|(r, _)| r.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .at_field(format!("{field}.name")))
         }
     };
     let object = &record.sheet.objects[index];
@@ -816,17 +921,14 @@ fn end(
                 .at_field(format!("{field}.point"))
             })?,
     };
-    Ok(MeasuredPoint {
+    Ok(Some(MeasuredPoint {
         sheet: record.name.clone(),
         id,
-        name: match object {
-            Object::Insert(insert) => insert.name.clone(),
-            _ => None,
-        },
+        name: record.objects[index].name.clone(),
         kind: object.type_name().to_owned(),
         point,
         at,
-    })
+    }))
 }
 
 /// The error for an object with no point of its own to measure from.
@@ -942,8 +1044,16 @@ fn extents(
 
 /// The box round everything a sheet draws, its curves drawn within
 /// [`EXTENTS_TOLERANCE`] of its larger side; none when it draws nothing.
+///
+/// The extents follow the geometry, as AutoCAD's do, not the dashes a
+/// linetype lays along it: the sheet is drawn through the one pipeline with
+/// every layer continuous. Text still draws as its font draws it.
 fn sheet_extents(record: &SheetRecord, fonts: &SheetFonts) -> Option<Extents> {
-    let sheet = &record.sheet;
+    let mut sheet = record.sheet.clone();
+    for layer in &mut sheet.layers {
+        CONTINUOUS.clone_into(&mut layer.linetype);
+    }
+    let sheet = &sheet;
     // A coarse drawing, curves to within a unit, for the sheet's size; then
     // one fine enough to measure it by.
     let coarse = draw::draw_sheet(sheet, fonts, 1.0, MOST_HATCH_DASHES).extents()?;

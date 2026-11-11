@@ -326,7 +326,7 @@ fn an_inserts_values_are_checked() {
             "insert: {block: MARKER, position: [0, 0, 0], colour: red}",
             ErrorCode::UnknownKey,
             "objects[0].insert.colour",
-            &["an insert takes block, position, scale, rotation, attributes, name, layer"],
+            &["an insert takes block, position, scale, rotation, attributes, layer, id, name"],
         ),
         (
             "insert: {position: [0, 0, 0]}",

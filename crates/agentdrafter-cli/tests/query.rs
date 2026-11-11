@@ -108,7 +108,7 @@ fn query_that_matches_nothing_is_ok_and_says_so() {
 }
 
 #[test]
-fn query_measuring_to_an_object_nobody_has_fails() {
+fn query_measuring_to_an_object_nobody_has_matches_nothing() {
     let dir = demo_set("no-such");
     let (code, json) = agentdrafter(
         &[
@@ -122,8 +122,17 @@ fn query_measuring_to_an_object_nobody_has_fails() {
         ],
         &dir,
     );
-    assert_eq!(code, 1, "{json}");
-    assert_eq!(json["error"]["code"], "no_such_object");
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["ok"], true);
+    assert!(json["result"].get("distance").is_none(), "{json}");
+    assert!(
+        json["result"]["message"].as_str().unwrap().starts_with(
+            "nothing matches: no object on the 3 sheets looked at has the ID `DEMO-001/nope`"
+        ),
+        "{json}"
+    );
+
+    // A request that cannot be answered as asked is still wrong.
 
     let (code, json) = agentdrafter(&["query", "blocks", "demo-set", "--id", "x"], &dir);
     assert_eq!(code, 2, "{json}");

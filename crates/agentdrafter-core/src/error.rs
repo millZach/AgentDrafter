@@ -74,9 +74,6 @@ pub enum ErrorCode {
     /// Two objects in one sheet description or template carry the same ID,
     /// or IDs that differ only in case.
     DuplicateId,
-    /// A query names an object by an ID or a name no object carries where
-    /// it looks, such as an end of a distance to measure.
-    NoSuchObject,
 }
 
 /// An error from the core, ready to report through any interface.

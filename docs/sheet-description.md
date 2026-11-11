@@ -113,7 +113,7 @@ The DWG names the font, and AutoCAD finds it on the machine that opens the drawi
 
 ### Objects
 
-Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight; it has none of its own. Every object may also take an `id` key, its ID in the record; see [IDs](#ids).
+Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight; it has none of its own. Every object may also take an `id` key, its ID in the record, and a `name` key, a name an agent selects it by; see [IDs and names](#ids-and-names).
 
 | Type | Keys | What it is |
 |---|---|---|
@@ -126,7 +126,7 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 | `hatch` | `pattern`, `boundary`; `scale`, `angle` | An area filled solid or with a pattern, inside a boundary; see below. |
 | `text` | `contents`, `position`, `height`; `style`, `width_factor`, `rotation`, `justify` | A single line of text, as AutoCAD's TEXT draws it. See [Text](#text). |
 | `mtext` | `contents`, `position`, `height`; `width`, `style`, `width_factor`, `rotation`, `justify` | Text of one or more lines in a box, as AutoCAD's MTEXT draws it. See [Text](#text). |
-| `insert` | `block`, `position`; `scale`, `rotation`, `attributes`, `name` | A block from the sheet's block library, placed as AutoCAD's INSERT places it. See [Inserts](#inserts). |
+| `insert` | `block`, `position`; `scale`, `rotation`, `attributes` | A block from the sheet's block library, placed as AutoCAD's INSERT places it. See [Inserts](#inserts). |
 
 Keys before the semicolon are required; keys after it are not. A `radius` is a length more than 0.
 
@@ -232,19 +232,20 @@ A block is defined once, in the block library of the drawing set, and inserted o
 | `scale` | no | How much the block is enlarged, the same along every axis: a number more than 0, with no unit. Without it, 1. |
 | `rotation` | no | An angle: degrees anticlockwise from the X axis. Without it, 0. |
 | `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty. An attribute the insert leaves out takes its definition's default. |
-| `name` | no | A name an agent selects the insert by later, such as `jb`: 1 to 255 characters, not starting or ending with a space, with no control characters. Each name is given once on a sheet, and names that differ only in case are one name. A name is not an attribute tag. |
 | `layer` | no | The layer the insert sits on, as for every object. |
+
+An insert takes an `id` and a `name` as every object does ([IDs and names](#ids-and-names)).
 
 A block that is not in the library, or an attribute tag the block does not define, is an error that lists the library's blocks or the block's attribute tags. An insert's attributes draw where the block's attribute definitions are, moved, scaled and turned with the insert. Only uniform, positive scales are offered: a mirrored or stretched insert waits for a later ticket.
 
 A built sheet holds the blocks it inserts, as the library defines them, and the library's layers, linetypes and text styles those blocks use. A layer, linetype or text style the sheet defines too must be defined the same in both, or the build stops with an error at the sheet's definition: otherwise a block would not draw on the sheet as the library defines it. Layer `0`, `Continuous` and `Standard`, when the library does not list them, are the sheet's own, as they are in AutoCAD. The sheet's own objects, an insert among them, sit on the sheet's layers, so an insert on a layer the library defines lists that layer under `layers` as well.
 
-### IDs
+### IDs and names
 
 ```yaml
 units: mm
 objects:
-  - polyline: {points: [[0, 0, 0], [100, 0, 0], [100, 60, 0], [0, 60, 0]], closed: true, id: frame}
+  - polyline: {points: [[0, 0, 0], [100, 0, 0], [100, 60, 0], [0, 60, 0]], closed: true, id: frame, name: outline}
   - circle: {center: [50, 30, 0], radius: 10}
 ```
 
@@ -253,10 +254,11 @@ Every object has an ID, fixed for its life, and agents select objects by ID or b
 - **`id`**, which every object may take, is the object's ID in its file: 1 to 255 ASCII letters, digits, `_`, `-`, `.` and `:`, such as `frame` or `loop:FT-101.3`. A generator can write its own. Each `id` is given once in a file, and two that differ only in case are one ID: the second is the `duplicate_id` error, which names the line and place of the first.
 - **An object without an `id`** takes its place in the file, such as `objects[1]`. It holds while the file is unchanged, and moves when an object is added or taken away before it; an object that must keep its ID through such an edit carries an `id`. The operations of a later ticket will write an `id` in as they edit. A build never writes into a sheet description.
 - **The object's ID** is its sheet's name, `/`, and that, such as `frame-plate/frame` or `frame-plate/objects[1]`. A sheet description built on its own is named by its file, without the extension (`frame-plate.yaml` above); a sheet of a drawing set by its row's `sheet`. A template's objects are on every sheet built from it, and each sheet's name is given once in a set, so `DEMO-001/border` and `DEMO-002/border` are two objects and every ID is unique in the set.
-- **The DWG carries it.** A build writes every object's ID into the DWG with the object, as extended data under the registered application `AGENTDRAFTER`, as a named insert's name is ([The block library](block-library.md#how-it-is-written)): the text `sheet` and the sheet's name, then `id` and the object's `id` or place. A DWG's extended data holds strings of at most 255 characters, so the two parts are kept apart. AutoCAD keeps extended data through a save, so a revision can find the object again. Building the same set twice gives every object the same ID.
-- **A block's objects take no `id`**: an insert is the object on the sheet, and its block's objects are shared by every insert of it.
+- **The DWG carries it.** A build writes every object's ID into the DWG with the object, as extended data under the registered application `AGENTDRAFTER` ([The block library](block-library.md#how-it-is-written)): the text `sheet` and the sheet's name, then `id` and the object's `id` or place, then, for an object with a name, `name` and its name. A DWG's extended data holds strings of at most 255 characters, so the two parts are kept apart. AutoCAD keeps extended data through a save, so a revision can find the object again. Building the same set twice gives every object the same ID.
+- **`name`**, which every object may take as well, is a name an agent selects the object by, such as `outline` or `jb`: 1 to 255 characters, not starting or ending with a space, with no control characters. Each name is given once on a sheet, whatever objects carry it, and names that differ only in case are one name: the second is the `duplicate_name` error. A name is not an ID, which a sheet's objects all have and which is unique in the set, and it is never a tag or an attribute tag.
+- **A block's objects take no `id` and no `name`**: an insert is the object on the sheet, and its block's objects are shared by every insert of it.
 
-A name is not an ID. A name, which an insert may carry, is a label an agent selects by, given once on a sheet; it is never a tag. [Queries](query.md) find objects by either.
+[Queries](query.md) find objects by ID or by name.
 
 ### Fonts
 
@@ -346,7 +348,6 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 | `dwg_read` | The DWG library could not read a drawing. |
 | `missing_value` | A row of a drawing set lacks a value its template needs. See [the drawing set](drawing-set.md#errors). |
 | `sheets_failed` | Some sheets of a drawing set failed and were not written; the others were built. |
-| `no_such_object` | A query measures from or to an ID or a name that no object carries where it looks. See [Queries](query.md#errors). |
 
 ## How it is read
 

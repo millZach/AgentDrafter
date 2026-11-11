@@ -26,6 +26,7 @@ fn an_object_carries_the_id_its_record_gives_or_takes_its_place() {
         [
             ObjectRecord {
                 id: "objects[0]".into(),
+                name: None,
                 object: Written {
                     field: "objects[0]".into(),
                     line: 3,
@@ -35,6 +36,7 @@ fn an_object_carries_the_id_its_record_gives_or_takes_its_place() {
             },
             ObjectRecord {
                 id: "hole:A-1.2".into(),
+                name: None,
                 object: Written {
                     field: "objects[1]".into(),
                     line: 4,
@@ -118,7 +120,10 @@ fn a_sheet_description_on_its_own_is_named_by_its_file() {
     .unwrap();
     let record = read_sheet_record(&path).unwrap();
     assert_eq!(record.name, "pump-skid");
-    assert_eq!(record.ids(), ["pump-skid/objects[0]", "pump-skid/edge"]);
+    assert_eq!(
+        [record.id(0), record.id(1)],
+        ["pump-skid/objects[0]", "pump-skid/edge"]
+    );
     assert_eq!(record.file, path);
     let _ = fs::remove_dir_all(&dir);
 }

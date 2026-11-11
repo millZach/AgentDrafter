@@ -1,6 +1,6 @@
 # Queries
 
-A query is what an agent asks a drawing set about what is on its sheets, to check its own work: which objects carry a tag or say a piece of text, which blocks a sheet inserts, what an insert's attributes are, how far apart two objects are and how large a sheet is (see [`CONTEXT.md`](../CONTEXT.md)). Objects are selected by [ID](sheet-description.md#ids), name, block, attribute or text, never by coordinates. A query changes nothing.
+A query is what an agent asks a drawing set about what is on its sheets, to check its own work: which objects carry a tag or say a piece of text, which blocks a sheet inserts, what an insert's attributes are, how far apart two objects are and how large a sheet is (see [`CONTEXT.md`](../CONTEXT.md)). Objects are selected by [ID](sheet-description.md#ids-and-names), name, block, attribute or text, never by coordinates. A query changes nothing.
 
 `agentdrafter query <kind> <drawing-set-folder | sheet-description> [options]` asks a drawing set's folder, or one sheet description, and prints one line of JSON. It is a thin layer over the core's `query_with`, which takes a request and returns the answer as plain data (ADR-0007).
 
@@ -37,11 +37,11 @@ Every answer has the same frame, then what its kind found:
 | Option | Matches |
 |---|---|
 | `--id` | The object's ID, such as `DEMO-001/border`. |
-| `--name` | The object's name, such as `title-block`. Only inserts carry names so far. |
+| `--name` | The object's name, such as `title-block`. Any object may carry one. |
 | `--block` | An insert of the block. |
 | `--tag` | An insert carrying the attribute; with `--value`, the attribute the value is looked for in. |
 | `--value` | An insert one of whose attributes has the value, or the attribute `--tag` names. |
-| `--text` | A text or an mtext saying it. |
+| `--text` | A text or an mtext saying it, or an insert whose block draws a text or an mtext saying it. |
 
 **How each matches.** An ID, a name, a block and an attribute tag are identifiers, and no two of a kind differ only in case, so each matches the whole of it in any case: `--name TITLE-BLOCK` finds `title-block`. A value and a text match the whole of it, case and all. With `--contains`, every option matches a value that holds it, in any case: `--id border --contains` finds the border on every sheet, and `--text made-up --contains` the notes.
 
@@ -51,9 +51,17 @@ Each object found comes with its sheet, its ID, whether the record writes that I
 {"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-002"],"message":"1 object has the ID `DEMO-002/border`, on sheet `DEMO-002`","kind":"find","count":1,"objects":[{"sheet":"DEMO-002","id":"DEMO-002/border","id_written":true,"file":"examples/demo-set/templates/ansi-b.yaml","field":"objects[1]","line":18,"column":5,"object":{"type":"polyline","points":[[0.5,0.5,0.0],[16.5,0.5,0.0],[16.5,10.5,0.0],[0.5,10.5,0.0]],"closed":true,"layer":"border"}}]}}
 ```
 
+**Text an insert's block draws.** `--text` also looks at the text and multiline text in the block each insert draws, as its block library defines the block. The object found is the insert, and its `block_text` lists each text of the block that matched: the block library's `file`, the text's place in the block definition (`field`) and what it says. The demo set's title block says `DEMO PLANT` on every sheet:
+
+```json
+{"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-001"],"message":"1 object has the text `DEMO PLANT`, on sheet `DEMO-001`","kind":"find","count":1,"objects":[{"sheet":"DEMO-001","id":"DEMO-001/objects[2]","id_written":false,"file":"examples/demo-set/templates/ansi-b.yaml","field":"objects[2]","line":19,"column":5,"object":{"type":"insert","...":"..."},"block_text":[{"file":"examples/demo-set/templates/../blocks.yaml","field":"blocks.TITLE_BLOCK.objects[7]","contents":"DEMO PLANT"}]}]}}
+```
+
+An attribute's value is not text the block draws: it is found with `--value`.
+
 ## Attributes
 
-`agentdrafter query attributes <source>` with the options of `find` gives each matching insert's attributes as JSON, from tag to value in the order the block defines them:
+`agentdrafter query attributes <source>` with the options of `find` gives each matching insert's attributes as JSON, from tag to value in the order the block defines them, with `block_text` as `find` gives it:
 
 ```json
 {"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-001"],"message":"1 insert has the name `title-block`, on sheet `DEMO-001`","kind":"attributes","count":1,"inserts":[{"sheet":"DEMO-001","id":"DEMO-001/objects[2]","name":"title-block","block":"TITLE_BLOCK","attributes":{"TITLE":"AREA 100 GENERAL ARRANGEMENT","DWG_NO":"DEMO-001","SHEET":"1 OF 3","REV":"0","DATE":"2026-11-11","DRAWN":"AD"},"file":"examples/demo-set/templates/ansi-b.yaml","field":"objects[2]","line":19,"column":5}]}}
@@ -73,6 +81,12 @@ Each object found comes with its sheet, its ID, whether the record writes that I
 
 An object is named by its ID or by its name. A name is given once on a sheet, and a template's names are on every sheet built from it, so a name found on more than one of the sheets looked at needs `--sheet`.
 
+**An end that matches nothing is not an error.** When no object on the sheets looked at has the ID or name an end gives, the reply is `ok`, with no `distance` and no `delta`, the end that matched, and a `message` naming the end that matched nothing:
+
+```json
+{"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-001","DEMO-002","DEMO-003"],"message":"nothing matches: no object on the 3 sheets looked at has the ID `DEMO-001/nope`, the end to measure from","kind":"measure","to":{"sheet":"DEMO-001","id":"DEMO-001/border","type":"polyline","point":"points[0]","at":[0.5,0.5,0.0]}}}
+```
+
 A point is named as its key in the sheet description. Without one, the object's own point is used, the first in this table:
 
 | Object | Points |
@@ -90,7 +104,7 @@ A point is named as its key in the sheet description. Without one, the object's 
 
 ## Extents
 
-`agentdrafter query extents <source> [--sheet <sheet>] [--fonts <folder>]...` gives, for each sheet, the box round everything it draws, seen from above, as AutoCAD's extents are: `min` and `max` corners, `width` and `height`, in the declared unit, or `null` for a sheet that draws nothing. The sheet is drawn through the drawing pipeline that draws the PNG, so text counts as its font draws it, and the reply lists, under `font_substitutions`, each text style whose font was not in a font folder and the look-alike its text was measured with. Curves are drawn as chords within a millionth of the sheet's larger side, so how far a curve reaches is found to within that; straight lines are exact. The demo set's sheets draw within their trim line:
+`agentdrafter query extents <source> [--sheet <sheet>] [--fonts <folder>]...` gives, for each sheet, the box round everything it draws, seen from above, as AutoCAD's extents are: `min` and `max` corners, `width` and `height`, in the declared unit, or `null` for a sheet that draws nothing. The extents follow the geometry, not the dashes a linetype lays along it: a circle of radius 10 drawn with a sparse dashed linetype spans 20 by 20. The sheet is drawn through the drawing pipeline that draws the PNG, with every layer continuous, so text counts as its font draws it, and the reply lists, under `font_substitutions`, each text style whose font was not in a font folder and the look-alike its text was measured with. Curves are drawn as chords within a millionth of the sheet's larger side, so how far a curve reaches is found to within that; straight lines are exact. The demo set's sheets draw within their trim line:
 
 ```json
 {"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-003"],"message":"sheet `DEMO-003` draws within 17 by 11 in, from [0, 0] to [17, 11]","kind":"extents","count":1,"extents":[{"sheet":"DEMO-003","extents":{"min":[0.0,0.0],"max":[17.0,11.0],"width":17.0,"height":11.0}}],"font_substitutions":[{"style":"notes","font":"romans.shx","used":"Hershey Roman Simplex","why":"no font folder is set"},"..."]}}
@@ -102,7 +116,6 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 
 | Code | In a query it means |
 |---|---|
-| `no_such_object` | A measure's end names an ID or a name no object carries on the sheets looked at. The message says none matched and lists nothing. |
 | `bad_value` | A measure's ends are on two sheets, a name to measure from is given on more than one of the sheets looked at, or the object has no point of its own, such as a hatch. |
 | `unknown_name` | A sheet the set does not hold, or a point the object does not have; the message lists the choices. |
 | `usage` | A measure's end names its object by both ID and name, or by neither, or the command was called wrongly. |
@@ -115,6 +128,5 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 ## What is not offered yet
 
 - Querying DWGs, built or someone else's. Every DWG a build writes carries each object's ID, ready for it.
-- Names on objects other than inserts.
 - Patterns other than a whole value or a part of it, such as wildcards.
 - A distance from a point given by coordinates. Nothing is selected by coordinates.

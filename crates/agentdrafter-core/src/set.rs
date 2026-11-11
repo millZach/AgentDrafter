@@ -165,15 +165,7 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
             let mut notices = Vec::new();
             let built = read_template(&template, row, &rows_file, set.units, &mut notices)
                 .and_then(|record| {
-                    let ids = record.ids();
-                    build_sheet(
-                        &record.sheet,
-                        &ids,
-                        &template,
-                        &dwg,
-                        request.overwrite,
-                        settings,
-                    )
+                    build_sheet(&record, &template, &dwg, request.overwrite, settings)
                 });
             let (result, error) = match built {
                 Ok(report) => (Some(report), None),

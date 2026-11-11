@@ -97,7 +97,7 @@ A value from the row stands for the whole value; it is not spliced into other te
 - **Block library.** A template names its block library under `block_library`, relative to the template's own folder, as a sheet description does.
 - **Paper size.** There is no paper setting. A sheet is as large as what its template draws: the demo set's template draws its trim line at 17 by 11 inches, and the usual case is one DWG per sheet, drawn in model space with its border.
 - **A sheet drawn by hand.** A template that writes no `{row: NAME}` is a sheet description. A set can build one as a row with no values.
-- **IDs.** A template's objects are on every sheet built from it, so each sheet's object's [ID](sheet-description.md#ids) is the sheet's name joined to the `id` the template gives the object, or to its place in the template: the demo set's border is `DEMO-001/border` on its first sheet and `DEMO-002/border` on its second, and its trim line, which has no `id`, is `DEMO-001/objects[0]`. Each sheet's name is given once in a set and each `id` once in its template, so every ID is unique in the set.
+- **IDs.** A template's objects are on every sheet built from it, so each sheet's object's [ID](sheet-description.md#ids-and-names) is the sheet's name joined to the `id` the template gives the object, or to its place in the template: the demo set's border is `DEMO-001/border` on its first sheet and `DEMO-002/border` on its second, and its trim line, which has no `id`, is `DEMO-001/objects[0]`. Each sheet's name is given once in a set and each `id` once in its template, so every ID is unique in the set.
 
 A sheet description built on its own takes no value from a row: `{row: NAME}` in it is an error that says to build the set's folder or to write the value.
 

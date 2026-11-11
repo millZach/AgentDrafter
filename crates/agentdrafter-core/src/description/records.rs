@@ -34,11 +34,6 @@ impl SheetRecord {
     pub(crate) fn id(&self, index: usize) -> String {
         object_id(&self.name, &self.objects[index])
     }
-
-    /// The ID of each of the sheet's objects, in order.
-    pub(crate) fn ids(&self) -> Vec<String> {
-        (0..self.objects.len()).map(|i| self.id(i)).collect()
-    }
 }
 
 /// Reads the sheet description in the file at `path`, built on its own,

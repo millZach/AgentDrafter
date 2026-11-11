@@ -21,7 +21,7 @@
 use serde_json::{json, Map, Value};
 
 use super::blocks::LIBRARY_KEYS;
-use super::ids::{ID_PUNCTUATION, ID_SEPARATOR, LONGEST_ID, SHEET_OBJECT_KEYS};
+use super::ids::{ID_KEY, ID_PUNCTUATION, ID_SEPARATOR, LONGEST_ID, SHEET_OBJECT_KEYS};
 use super::layers::{
     colour_names, COLOUR_NAMES, FORBIDDEN_IN_NAMES, LONGEST_DESCRIPTION, LONGEST_NAME,
     LONGEST_PATTERN,
@@ -81,8 +81,8 @@ pub fn sheet_description_schema() -> Value {
 }
 
 /// Every definition the sheet description's schema refers to: the
-/// definitions both schemas share, with an object's ID among the keys of
-/// every object a sheet holds. A block's objects take no ID.
+/// definitions both schemas share, with an object's ID and name among the
+/// keys of every object a sheet holds. A block's objects take neither.
 fn sheet_defs() -> Map<String, Value> {
     let mut defs = defs();
     for (name, _) in OBJECT_TYPES {
@@ -91,7 +91,12 @@ fn sheet_defs() -> Map<String, Value> {
             .and_then(|def| def["properties"].as_object_mut())
         {
             for key in SHEET_OBJECT_KEYS {
-                properties.insert(key.into(), json!({ "$ref": "#/$defs/object_id" }));
+                let def = if key == ID_KEY {
+                    "object_id"
+                } else {
+                    "object_name"
+                };
+                properties.insert(key.into(), json!({ "$ref": format!("#/$defs/{def}") }));
             }
         }
     }

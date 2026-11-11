@@ -268,7 +268,6 @@ fn sheet_and_records(
     };
     let mut place = Place::Sheet {
         library: library.as_ref(),
-        names: Vec::new(),
         objects: Vec::new(),
     };
     let objects = list

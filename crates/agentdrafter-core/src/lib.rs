@@ -60,12 +60,12 @@ pub use description::{parse_block_library, parse_sheet_description, read_sheet_d
 pub use error::{Error, ErrorCode};
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use model::{
-    Arc, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object, Point3,
-    Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
+    Arc, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype, Lineweight, Object,
+    Point3, Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
 };
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use query::{
-    query, query_with, Answer, AttributeValues, BlockInserts, End, Extents, FoundObject,
+    query, query_with, Answer, AttributeValues, BlockInserts, BlockText, End, Extents, FoundObject,
     InsertAttributes, Matching, Measure, MeasuredPoint, Query, QueryReport, QueryRequest,
     Selection, SheetBlocks, SheetExtents, WrittenAt, EXTENTS_TOLERANCE,
 };
