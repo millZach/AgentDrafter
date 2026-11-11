@@ -942,7 +942,7 @@ fn a_file_at_a_sheets_path_that_agentdrafter_did_not_build_is_never_touched() {
 }
 
 #[test]
-fn a_partial_change_whose_mark_cannot_be_read_does_not_land() {
+fn a_partial_change_whose_mark_has_a_file_in_its_folders_place_does_not_land() {
     let set = demo_set("mark-unreadable");
     // A file where the mark's folder would go.
     fs::write(set.join(".agentdrafter"), b"in the way").unwrap();
@@ -955,7 +955,14 @@ fn a_partial_change_whose_mark_cannot_be_read_does_not_land() {
         ]}),
     );
     assert!(reply.result.is_none(), "nothing landed");
-    assert_eq!(reply.error.unwrap().code, ErrorCode::ReadFailed);
+    // Linux and macOS refuse to read a mark under a file; Windows finds no
+    // mark there, and the commit then cannot write one. Either way nothing
+    // lands.
+    let code = reply.error.unwrap().code;
+    assert!(
+        matches!(code, ErrorCode::ReadFailed | ErrorCode::WriteFailed),
+        "{code:?}"
+    );
     assert_eq!(snapshot(&set), before);
 }
 
