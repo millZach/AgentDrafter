@@ -1,18 +1,18 @@
 //! Stamps: what an output records about the files it came from, and the
 //! check that tells when one of them has moved on and the output is stale.
 //!
-//! Every output carries a stamp: so far the PNG, in a text chunk keyed
+//! Every output carries a stamp: the PNG in a text chunk keyed
+//! `AgentDrafter`, the PDF in its document information under the key
 //! `AgentDrafter`. A stamp lists every file read to produce the output,
-//! the record first (the sheet description or the DWG), then the files it
-//! draws on, such as the block library a sheet description names. It names
-//! each by its kind, where it was and a SHA-256 fingerprint of its bytes.
-//! An output is stale when any listed file's bytes no longer have that
-//! fingerprint, or the file is gone.
+//! the record first (the sheet description, the DWG, or a drawing set's
+//! template), then the files it draws on, such as the block library and a
+//! set's rows. It names each by its kind, where it was and a SHA-256
+//! fingerprint of its bytes. An output is stale when any listed file's
+//! bytes no longer have that fingerprint, or the file is gone.
 //!
-//! The list is open: templates and data rows (ticket #7) and the working
-//! revision (ticket #9) add entries of their own kinds. A stamp is JSON
-//! with a format number; a reader that meets a number it does not know
-//! says so rather than guessing.
+//! The list is open: the working revision (ticket #9) adds entries of its
+//! own kind. A stamp is JSON with a format number; a reader that meets a
+//! number it does not know says so rather than guessing.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, ErrorCode};
-use crate::raster;
+use crate::{pdf, raster};
 
 /// The format of the stamps this version writes and reads.
 pub const STAMP_FORMAT: u32 = 1;
@@ -59,8 +59,15 @@ pub enum SourceKind {
     SheetDescription,
     /// A DWG.
     Dwg,
-    /// The block library a sheet description draws its blocks from.
+    /// The block library a sheet description or a template draws its
+    /// blocks from.
     BlockLibrary,
+    /// A drawing set's template, which a sheet of the set is drawn from
+    /// with its row.
+    Template,
+    /// A drawing set's rows file, which holds the row a sheet of the set is
+    /// drawn with.
+    Rows,
 }
 
 impl SourceKind {
@@ -84,6 +91,8 @@ impl SourceKind {
             SourceKind::SheetDescription => "sheet description",
             SourceKind::Dwg => "DWG",
             SourceKind::BlockLibrary => "block library",
+            SourceKind::Template => "template",
+            SourceKind::Rows => "rows file",
         }
     }
 }
@@ -126,7 +135,8 @@ pub(crate) fn fingerprint(bytes: &[u8]) -> String {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StaleRequest {
-    /// The output to check: a PNG AgentDrafter rendered.
+    /// The output to check: a PNG AgentDrafter rendered or a PDF it
+    /// plotted.
     pub output: PathBuf,
     /// Where the record is now, the first file the stamp lists. Without
     /// it, where the stamp names it, found from the output's folder. The
@@ -239,10 +249,18 @@ pub(crate) fn read_stamp(output: &Path) -> Result<Stamp, Error> {
     stamp_of(&bytes).map_err(|why| Error::new(ErrorCode::NotStamped, why).in_file(output))
 }
 
-/// The stamp in an output's bytes, or why there is none.
+/// The stamp in an output's bytes, a PNG's or a PDF's, or why there is
+/// none.
 pub(crate) fn stamp_of(bytes: &[u8]) -> Result<Stamp, String> {
-    let text = raster::stamp_in(bytes)
-        .ok_or("the file is not a PNG AgentDrafter rendered: it carries no AgentDrafter stamp")?;
+    let text = if bytes.starts_with(b"%PDF-") {
+        pdf::stamp_in(bytes)
+            .ok_or("the file is not a PDF AgentDrafter plotted: it carries no AgentDrafter stamp")?
+    } else {
+        raster::stamp_in(bytes).ok_or(
+            "the file is not a PNG AgentDrafter rendered or a PDF it plotted: it carries no \
+             AgentDrafter stamp",
+        )?
+    };
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("the file's AgentDrafter stamp is not JSON ({e})"))?;
     let format = value.get("stamp").and_then(serde_json::Value::as_u64);

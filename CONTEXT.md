@@ -215,8 +215,20 @@ _Avoid_: watermark, signature, build mark (a build mark tells that AgentDrafter 
 Drawing a sheet to a PNG, through the display list, so an agent can look at its own work.
 _Avoid_: screenshot, export, build (a build produces a DWG)
 
+**Plot**:
+Drawing a sheet to a PDF at its sheet size, through a plot style, as AutoCAD plots the same DWG, for issue. The PDF is an output; its text can be searched.
+_Avoid_: print, export (and a plot is the act, not the PDF: the PDF is an output)
+
+**Plot style**:
+The pens a plot draws with: for each AutoCAD colour index, the colour and the lineweight it plots in, read from a CTB file such as AutoCAD's `monochrome.ctb`. With none named, every pen plots black at its object's own lineweight.
+_Avoid_: pen table, pen settings, CTB (the CTB is the file a plot style is read from)
+
+**Plot style folder**:
+A folder AgentDrafter reads CTB files from, named by a setting, such as AutoCAD's `Plot Styles` folder on a machine that has AutoCAD. There is no default.
+_Avoid_: plot style path, CTB directory
+
 **Display list**:
-What the drawing pipeline turns a sheet into: lines drawn with a colour, a lineweight and their dashes laid out, and filled areas, text among them as strokes and outlines, in drawing units. The PNG, the PDF and the viewer all draw from it, so they agree.
+What the drawing pipeline turns a sheet into: lines drawn with a colour, a lineweight and their dashes laid out, and filled areas, text among them as strokes and outlines, in drawing units, with each line of text also as the characters it reads, so an output can keep it searchable. The PNG, the PDF and the viewer all draw from it, so they agree.
 _Avoid_: scene, render tree, drawn object (the judge's count of records)
 
 **Script**:

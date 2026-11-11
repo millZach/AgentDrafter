@@ -65,7 +65,7 @@ The settings are the file `set.yaml` at the top of the set's folder. `agentdraft
 | Key | Required | What it is |
 |---|---|---|
 | `units` | yes | The set's declared unit: `mm`, `cm`, `m`, `in` or `ft`. Every template, sheet description and block library in the set is in it, and every DWG the set builds is in it. There is no default. |
-| `output` | yes | The folder the set's DWGs go to, relative to the set's folder, such as `dwg` or `../issued`. A build makes it if it is not there. |
+| `output` | yes | The folder the set's outputs go to, relative to the set's folder, such as `dwg` or `../issued`: its DWGs, and its PDFs when it is plotted. A build or a plot makes it if it is not there. |
 | `rows` | yes | The file the set's rows are in, relative to the set's folder, such as `rows.yaml`. |
 
 A path in a set is written as a sheet description writes its block library's: relative, with `/` between folders on every system, not starting with `/`, and holding none of `\ : < > " | ? *`.
@@ -146,10 +146,10 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 
 - Paper-space layouts and viewports: a sheet is drawn in model space.
 - More than one sheet in one DWG.
-- Outputs other than DWG, such as PDF, and stamping an output with its revision.
+- Stamping an output with its revision. A set's sheets plot to PDF with `agentdrafter plot <folder>` ([plotting](plot.md#where-it-goes)), each stamped with its template, its rows file and its block library.
 - The journal, change sets and undo across the set. Stable IDs and [queries](query.md) across the set are built.
 - A value from the row spliced into other text, such as `SHEET {n} OF {m}`, or put anywhere but an attribute's value or a text's contents, such as a position or a layer; and a default for a value a row leaves out.
 - More than one rows file in a set.
 - One block library enforced for the whole set: each template names its own, in the set's unit.
 - Checking a set without building it.
-- Rendering a sheet from its template and row. A set's sheet renders as any DWG does, with `agentdrafter render <output>/<sheet>.dwg` ([Rendering](render.md)), and its PNG's stamp names the DWG; templates and rows are not among a stamp's sources yet, and `render` refuses a template, since it holds values from a row.
+- Rendering a sheet from its template and row to PNG. A set's sheet renders as any DWG does, with `agentdrafter render <output>/<sheet>.dwg` ([Rendering](render.md)), and its PNG's stamp names the DWG; `render` refuses a template, since it holds values from a row.

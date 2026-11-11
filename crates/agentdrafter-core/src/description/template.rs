@@ -18,7 +18,7 @@ use super::ids::ObjectRecord;
 use super::records::SheetRecord;
 use super::set::{value_name_problem, Row};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
-use super::{bad_value, library_beside, read_file, scalar, sheet_and_records, Fields};
+use super::{bad_value, library_beside, read_file, scalar, sheet_and_records, Fields, LibraryFile};
 use crate::error::{Error, ErrorCode};
 use crate::model::{BlockLibrary, Sheet};
 use crate::set::{Notice, NoticeCode};
@@ -58,9 +58,24 @@ pub(crate) fn read_template(
     notices: &mut Vec<Notice>,
 ) -> Result<SheetRecord, Error> {
     let text = read_file(path, "the template")?;
+    template_at(&text, path, row, rows_file, set_units, notices).map(|(record, _)| record)
+}
+
+/// Reads `text`, the template in the file at `path`, as [`read_template`]
+/// reads it, and gives the block library's file as it was read, if the
+/// template names one, so that an output can be stamped with the bytes it
+/// was drawn from.
+pub(crate) fn template_at(
+    text: &str,
+    path: &Path,
+    row: &Row,
+    rows_file: &Path,
+    set_units: Unit,
+    notices: &mut Vec<Notice>,
+) -> Result<(SheetRecord, Option<LibraryFile>), Error> {
     let mut library = None;
     let (sheet, objects) = fill_with_records(
-        &text,
+        text,
         row,
         rows_file,
         set_units,
@@ -68,12 +83,13 @@ pub(crate) fn read_template(
         notices,
     )
     .map_err(|e| e.or_in_file(path))?;
-    Ok(SheetRecord {
+    let record = SheetRecord {
         name: row.sheet.clone(),
         file: path.to_owned(),
         sheet,
         objects,
-    })
+    };
+    Ok((record, library))
 }
 
 /// Fills a template in from a row as [`fill_with_records`] does, without

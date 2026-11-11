@@ -15,7 +15,9 @@
 //!   draw alike ([`linetype`]). A 3D polyline draws continuous, as AutoCAD
 //!   draws it.
 //! - Text draws in its font: an SHX font's strokes with the layer's pen,
-//!   and a TrueType font's outlines filled ([`text`]).
+//!   and a TrueType font's outlines filled ([`text`]). Each line of text
+//!   also gives a run of its characters along its baseline, which draws
+//!   nothing, so an output can keep the text searchable where it draws.
 //! - A hatch fills its area solid, or draws its pattern's lines inside its
 //!   boundary ([`hatch`]).
 //! - An insert draws its block's objects moved, scaled and turned. Hatch
@@ -62,6 +64,11 @@ pub type Point2 = [f64; 2];
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct DisplayList {
     pub items: Vec<Item>,
+    /// Each line of text the items draw, as the characters it reads, laid
+    /// along its baseline. A run draws nothing: the items draw the text.
+    /// It lets an output keep the text searchable where it draws, as the
+    /// PDF does.
+    pub text: Vec<TextRun>,
     /// The box round what counts towards the extents but draws nothing of
     /// its own: the boundaries of patterned hatches, whose lines may stop
     /// short of them, and the boxes of inserts' blocks. AutoCAD's extents
@@ -88,6 +95,30 @@ pub struct HatchCutShort {
     pub layer: String,
     /// Why it was not drawn in full.
     pub why: String,
+}
+
+/// One line of text as it reads: its characters, laid along its baseline
+/// as the font advances them.
+///
+/// The line's frame maps the font's own units to drawing units: a point
+/// `(u, v)` of the font, `u` along the line in the font's advances and `v`
+/// up in heights of its capitals, is at `origin + u * across + v * up`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TextRun {
+    /// Which object of the sheet draws it: its place in the sheet's
+    /// objects, counted from 0.
+    pub object: usize,
+    /// Where the first character's pen starts, on the baseline.
+    pub origin: Point2,
+    /// One unit of the font's advances along the baseline: the text's
+    /// height times its width factor, turned with it.
+    pub across: Point2,
+    /// From the baseline to the top of the capitals: the text's height,
+    /// turned with it.
+    pub up: Point2,
+    /// Each character the line draws, with how far the pen moves along the
+    /// baseline after it, in units of `across`.
+    pub characters: Vec<(char, f64)>,
 }
 
 /// One shape of one object.
@@ -201,6 +232,8 @@ struct Pen<'a> {
 #[derive(Default)]
 struct Drawn {
     shapes: Vec<Shape>,
+    /// The lines of text it draws, as they read.
+    runs: Vec<TextRun>,
     /// The points that count towards the extents without drawing: a
     /// patterned hatch's boundary.
     reach: Vec<Point2>,
@@ -241,6 +274,21 @@ impl Placed {
                 rule,
                 contours: place(contours),
             },
+        }
+    }
+
+    /// A line of text placed: its frame moved, scaled and turned.
+    fn run(&self, run: TextRun) -> TextRun {
+        let origin = self.point(run.origin);
+        let vector = |v: Point2| {
+            let tip = self.point([run.origin[0] + v[0], run.origin[1] + v[1]]);
+            [tip[0] - origin[0], tip[1] - origin[1]]
+        };
+        TextRun {
+            origin,
+            across: vector(run.across),
+            up: vector(run.up),
+            ..run
         }
     }
 }
@@ -309,6 +357,7 @@ impl<'a> Drawer<'a> {
                 .push(self.cut_short(index, object, None));
         }
         list.add(index, pen.color, drawn.shapes, drawn.reach);
+        list.add_text(index, drawn.runs);
     }
 
     /// Adds what an insert draws to `list`: its block's objects moved,
@@ -346,6 +395,7 @@ impl<'a> Drawer<'a> {
             let had = own.into_iter().flat_map(|b| [b.min, b.max]);
             own = Bounds::of(had.chain(points.map(|p| placed.back(p))));
             list.add(index, pen.color, drawn.shapes, drawn.reach);
+            list.add_text(index, drawn.runs);
         }
         // AutoCAD's extents take in an insert's block box: the box round the
         // block's objects in its own coordinates, placed whole. Turned, it
@@ -365,8 +415,9 @@ impl<'a> Drawer<'a> {
                 .map_or(definition.default.as_str(), |a| a.value.as_str());
             let text = attribute_text(insert, block, definition, value);
             let pen = self.pen(&text.layer);
-            let shapes = text::draw_text(&text, self.fonts, pen.lineweight, tolerance);
-            list.add(index, pen.color, shapes, Vec::new());
+            let lettering = text::draw_text(&text, self.fonts, pen.lineweight, tolerance);
+            list.add(index, pen.color, lettering.shapes, Vec::new());
+            list.add_text(index, lettering.runs);
         }
     }
 
@@ -409,6 +460,13 @@ impl<'a> Drawer<'a> {
                 None => shapes,
             },
             ..Drawn::default()
+        };
+        let lettering = |lettering: text::Lettering| Drawn {
+            runs: match placed {
+                Some(placed) => lettering.runs.into_iter().map(|r| placed.run(r)).collect(),
+                None => lettering.runs,
+            },
+            ..shapes(lettering.shapes)
         };
         match object {
             Object::Line(line) => stroke(linetype::along(
@@ -473,11 +531,13 @@ impl<'a> Drawer<'a> {
                     ..shapes(drawn.shapes)
                 }
             }
-            Object::Text(t) => shapes(text::draw_text(t, self.fonts, pen.lineweight, tolerance)),
-            Object::MText(t) => shapes(text::draw_mtext(t, self.fonts, pen.lineweight, tolerance)),
+            Object::Text(t) => lettering(text::draw_text(t, self.fonts, pen.lineweight, tolerance)),
+            Object::MText(t) => {
+                lettering(text::draw_mtext(t, self.fonts, pen.lineweight, tolerance))
+            }
             // An attribute definition outside a block shows its tag, as
             // AutoCAD shows it.
-            Object::AttributeDefinition(d) => shapes(text::draw_text(
+            Object::AttributeDefinition(d) => lettering(text::draw_text(
                 &definition_text(d),
                 self.fonts,
                 pen.lineweight,
@@ -516,6 +576,15 @@ impl DisplayList {
             object: index,
             color,
             shape,
+        }));
+    }
+
+    /// Adds the lines of text the sheet's object at `index` draws, as they
+    /// read.
+    fn add_text(&mut self, index: usize, runs: Vec<TextRun>) {
+        self.text.extend(runs.into_iter().map(|run| TextRun {
+            object: index,
+            ..run
         }));
     }
 

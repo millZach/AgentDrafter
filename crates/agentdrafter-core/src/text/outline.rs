@@ -14,6 +14,8 @@ use super::hershey;
 /// tall, from where the pen starts.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct GlyphOutline {
+    /// The character it draws.
+    pub character: char,
     /// Where the pen ends: where the next character starts.
     pub advance: (f64, f64),
     /// Strokes drawn with the pen down; a run of one point is a dot.
@@ -31,17 +33,19 @@ impl Font {
         match self {
             Font::Shx(font) => text
                 .chars()
-                .filter_map(|c| font.strokes(c, tolerance))
-                .map(|(advance, strokes)| GlyphOutline {
+                .filter_map(|c| font.strokes(c, tolerance).map(|drawn| (c, drawn)))
+                .map(|(character, (advance, strokes))| GlyphOutline {
+                    character,
                     advance,
                     strokes,
                     fills: Vec::new(),
                 })
                 .collect(),
-            Font::TrueType(font) => font
-                .outlines(text, tolerance)
-                .into_iter()
-                .map(|(advance, fills)| GlyphOutline {
+            Font::TrueType(font) => text
+                .chars()
+                .zip(font.outlines(text, tolerance))
+                .map(|(character, (advance, fills))| GlyphOutline {
+                    character,
                     advance: (advance, 0.0),
                     strokes: Vec::new(),
                     fills,
@@ -52,6 +56,7 @@ impl Font {
                 .map(|c| {
                     let (advance, strokes) = hershey::strokes(c);
                     GlyphOutline {
+                        character: c,
                         advance: (advance, 0.0),
                         strokes,
                         fills: Vec::new(),

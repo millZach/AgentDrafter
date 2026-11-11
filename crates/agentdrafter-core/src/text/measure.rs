@@ -156,6 +156,7 @@ mod tests {
         fs::write(dir.join("madeup.shx"), unifont(10, &[(73, i), (32, space)])).unwrap();
         let settings = Settings {
             font_folders: vec![dir.clone()],
+            ..Settings::default()
         };
         let m = measure_text_with(&request(" II ", "madeup.shx", 2.5, 1.0), &settings).unwrap();
         // Strokes at 5 + 2 and 5 + 4 + 2 units; capitals are 10 units tall.
@@ -188,6 +189,7 @@ mod tests {
         .unwrap();
         let settings = Settings {
             font_folders: vec![dir.clone()],
+            ..Settings::default()
         };
         let m = measure_text_with(&request("Hg", "madeup.ttf", 6.4, 1.0), &settings).unwrap();
         close(m.left, 1.0);
@@ -233,6 +235,7 @@ mod tests {
         fs::write(dir.join("outside.shx"), unifont(10, &[(73, i)])).unwrap();
         let settings = Settings {
             font_folders: vec![fonts],
+            ..Settings::default()
         };
         let absolute = dir.join("outside.shx").to_string_lossy().into_owned();
         for name in [
