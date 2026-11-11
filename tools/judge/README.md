@@ -52,7 +52,7 @@ The private folder holds:
 ## One AutoCAD at a time
 
 - A run holds `judge.lock` in the private folder while it uses AutoCAD. A second run prints that the judge is busy and waits for it.
-- On the AutoCAD machine, before each drawing, it waits until no AutoCAD console is running, because other programs use AutoCAD there too. Then it checks that at least 3 GB of memory is free and waits while it is not. A drawing that cannot start within 20 minutes is reported as `not judged` rather than failed. The run's ssh call allows that wait before every drawing, so a busy machine never ends a run early.
+- On the AutoCAD machine, before each drawing, it waits until no AutoCAD console is running, because other programs use AutoCAD there too. Then it checks that at least 3 GB of memory is free and waits while it is not. A run waits 20 minutes at most for all of this together, not per drawing. Once those 20 minutes are spent, every drawing left is reported as `not judged` at once, rather than failed, and the run ends as usual. The run's ssh calls allow for that wait plus each drawing's own time, so a busy machine never cuts a run off before it reports.
 - Each AutoCAD console is started and stopped by its process ID, with a 120-second limit per drawing.
 - If a run is stopped (an error, Ctrl-C, `kill`), it stops its own AutoCAD console and empties its work folder there. Stop a run with a plain `kill`, not `kill -9`, so this can happen.
 

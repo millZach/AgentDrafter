@@ -21,7 +21,7 @@ from .report import NOT_JUDGED, gz_ok, read_runs, read_status
 LAPTOP = Path(__file__).resolve().parent.parent / "laptop"
 SLOT = "judging"
 TIMEOUT_SEC = 120     # per drawing
-MAX_WAIT_SEC = 1200   # per drawing, for memory or for another AutoCAD console to finish
+MAX_WAIT_SEC = 1200   # per run, in all: waiting for memory or for another AutoCAD console to finish
 MAX_RECOVER = 8       # a file RECOVER cannot read hangs until the time limit; cap the cost of a broken run
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ServerAliveInterval=30", "-o", "ConnectTimeout=20"]
 
@@ -106,10 +106,13 @@ def recover_script(folder: str, i: str) -> str:
 
 
 class Remote:
-    """The Windows machine that has AutoCAD, reached with ssh and scp."""
+    """The Windows machine that has AutoCAD, reached with ssh and scp. One per run: it also carries the
+    run's budget for waiting until AutoCAD is free and memory is available, shared by every pass."""
 
     def __init__(self, host: str, scratch: str, accore: str):
         self.host, self.scratch, self.accore = host, scratch, accore
+        self.wait_left = MAX_WAIT_SEC   # seconds the run may still wait, in all
+        self.gave_up = ""               # BUSY or LOWMEM once the budget is spent
 
     def win(self, *parts: str) -> str:
         return "\\".join((self.scratch,) + parts)
@@ -159,20 +162,40 @@ def _say(name, log, text):
     log("[%s] %s %s" % (name, time.strftime("%H:%M:%S"), text))
 
 
-def driver_timeout(n: int) -> int:
-    """How long the ssh call running the driver on n drawings may take. The driver may wait up to
-    MAX_WAIT_SEC for its turn before every drawing, then gives each up to TIMEOUT_SEC and 10 s to stop;
-    30 s per drawing covers that and its own checks, so busy drawings end as not judged, not in a timeout."""
-    return n * (MAX_WAIT_SEC + TIMEOUT_SEC + 30) + 300
+def driver_timeout(n: int, wait: int) -> int:
+    """How long the ssh call running the driver on n drawings may take when the run may still wait
+    `wait` seconds in all: that wait, then up to TIMEOUT_SEC per drawing and 10 s to stop it, with 30 s
+    per drawing for that and the driver's own checks. Busy drawings end as not judged, not in a timeout."""
+    return wait + n * (TIMEOUT_SEC + 30) + 300
 
 
-def _run_driver(remote: Remote, jobs_file: Path, results: str, n: int) -> None:
+def _run_driver(remote: Remote, jobs_file: Path, results: str, ids: list[str]) -> None:
+    """Run the driver on the jobs and fetch its record to <jobs folder>/<results>. It may wait only what
+    is left of the run's budget; once the budget is spent, every drawing left is not judged at once,
+    in this call and in every later call of the run, which then starts no driver at all."""
+    out = jobs_file.parent
+    if remote.gave_up:
+        (out / results).write_text("id\tstatus\texit\tseconds\tfree_kb_before\tpid\n"
+                                   + "".join("%s\t%s\t\t0\t\t\n" % (i, remote.gave_up) for i in ids)
+                                   + "DRIVER DONE\t0\n")
+        return
+    wait = max(0, int(remote.wait_left))
     remote.put([jobs_file], "lanes", SLOT)
     remote.ps_file("driver.ps1", ["-Jobs", remote.win("lanes", SLOT, jobs_file.name),
                                   "-Results", remote.win("lanes", SLOT, results),
                                   "-Accore", remote.accore,
-                                  "-TimeoutSec", str(TIMEOUT_SEC), "-MaxWaitSec", str(MAX_WAIT_SEC)],
-                   timeout=driver_timeout(n))
+                                  "-TimeoutSec", str(TIMEOUT_SEC), "-MaxWaitSec", str(wait)],
+                   timeout=driver_timeout(len(ids), wait))
+    remote.get(results, out, "lanes", SLOT)
+    waited = 0
+    p = out / results
+    for line in (p.read_text(encoding="utf-8", errors="replace").splitlines() if p.exists() else []):
+        f = line.split("\t")
+        if f[0] == "DRIVER DONE" and len(f) > 1 and f[1].strip().isdigit():
+            waited = int(f[1])
+        elif len(f) > 1 and f[1] in NOT_JUDGED:
+            remote.gave_up = f[1]
+    remote.wait_left = max(0, wait - waited)
 
 
 def read_drawings(remote: Remote, files: dict, out: Path, name: str, log=print) -> None:
@@ -205,8 +228,7 @@ def read_drawings(remote: Remote, files: dict, out: Path, name: str, log=print) 
         jobs = out / "jobs1.tsv"
         jobs.write_text("".join("%s\t%s\\%s.dwg\t%s\t%s\\%s\r\n" % (i, lw, i, remote.win("scripts", "judge.scr"), lw, i)
                                 for i in ids), newline="")
-        _run_driver(remote, jobs, "results1.tsv", len(ids))
-        remote.get("results1.tsv", out, "lanes", SLOT)
+        _run_driver(remote, jobs, "results1.tsv", ids)
         remote.get("*.status", out, "lanes", SLOT)
 
         # pass 2: RECOVER for anything that did not open (not for drawings the driver never started)
@@ -231,8 +253,7 @@ def read_drawings(remote: Remote, files: dict, out: Path, name: str, log=print) 
             remote.ps_file("tasks.ps1", ["-Action", "forget", "-Root", remote.scratch, "-Ids", ",".join(rec)])
             jobs = out / "jobs2.tsv"
             jobs.write_text("".join("%s\t-\t%s\\%s.rec.scr\t%s\\%s.rec\r\n" % (i, lw, i, lw, i) for i in rec), newline="")
-            _run_driver(remote, jobs, "results2.tsv", len(rec))
-            remote.get("results2.tsv", out, "lanes", SLOT)
+            _run_driver(remote, jobs, "results2.tsv", rec)
             for i in rec:
                 remote.get(i + ".status", out, "lanes", SLOT)
 

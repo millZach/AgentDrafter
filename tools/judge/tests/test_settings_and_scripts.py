@@ -10,7 +10,7 @@ from pathlib import Path
 JUDGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(JUDGE))
 
-from judgelib import autocad, settings  # noqa: E402
+from judgelib import autocad, report, settings  # noqa: E402
 
 
 class Settings(unittest.TestCase):
@@ -96,30 +96,69 @@ class Scripts(unittest.TestCase):
         self.assertIn('"MODE\\trecovered"', scr)
 
 
+class Machine(autocad.Remote):
+    """The AutoCAD machine with the driver stood in for: each driver call waits the seconds its plan
+    says and, when the plan says so, gives up (BUSY) on its drawings."""
+
+    def __init__(self, t, plans):
+        super().__init__("cad-box", "C:\\Temp\\judge", "accoreconsole.exe")
+        self.there = Path(t, "there")
+        self.there.mkdir()
+        self.plans, self.calls, self.jobs = list(plans), [], []
+
+    def put(self, files, *parts):
+        self.jobs = [ln.split("\t")[0] for ln in Path(files[0]).read_text().splitlines() if ln.strip()]
+
+    def ps_file(self, script, args, timeout=180):
+        budget = int(args[args.index("-MaxWaitSec") + 1])
+        results = args[args.index("-Results") + 1].rsplit("\\", 1)[1]
+        self.calls.append((len(self.jobs), budget, timeout))
+        waited, give_up = self.plans.pop(0)
+        rows = "".join("%s\t%s\t0\t5\t8000000\t1\n" % (i, "BUSY" if give_up else "OK") for i in self.jobs)
+        (self.there / results).write_text("id\tstatus\texit\tseconds\tfree_kb_before\tpid\n" + rows
+                                          + "DRIVER DONE\t%d\n" % waited)
+        return ""
+
+    def get(self, pattern, dest, *parts):
+        shutil.copy(self.there / pattern, Path(dest) / pattern)
+        return True
+
+
 class Budgets(unittest.TestCase):
-    def test_the_ssh_call_outlasts_a_full_wait_before_every_drawing(self):
-        class Machine:
-            accore = "accoreconsole.exe"
+    def test_a_run_waits_twenty_minutes_in_all_and_the_ssh_call_covers_that_and_the_drawings(self):
+        with tempfile.TemporaryDirectory() as t:
+            ref, lane = Path(t, "ref"), Path(t, "lane")
+            ref.mkdir()
+            lane.mkdir()
 
-            def __init__(self):
-                self.timeouts = []
+            def call(m, out, results, ids):
+                jobs = out / results.replace("results", "jobs")
+                jobs.write_text("".join("%s\t-\tscr\tout\r\n" % i for i in ids))
+                autocad._run_driver(m, jobs, results, ids)
 
-            def put(self, files, *parts):
-                pass
+            per_drawing = autocad.TIMEOUT_SEC + 10   # a drawing's time limit and 10 s to stop it
+            m = Machine(t, [(300, False), (900, True)])
+            ids = ["m%03d" % n for n in range(1, 54)]
+            call(m, ref, "results1.tsv", ids)
+            n, budget, timeout = m.calls[0]
+            self.assertEqual(budget, autocad.MAX_WAIT_SEC)
+            self.assertGreaterEqual(timeout, budget + n * per_drawing)
+            # one wait for the whole run, not one per drawing
+            self.assertLess(timeout, autocad.MAX_WAIT_SEC + n * (per_drawing + 60) + 600)
 
-            def win(self, *parts):
-                return "\\".join(("C:\\Temp\\judge",) + parts)
+            # the RECOVER pass of the same run gets only what is left of the budget, and spends it
+            call(m, ref, "results2.tsv", ids[:8])
+            self.assertEqual(m.calls[1][1], autocad.MAX_WAIT_SEC - 300)
+            self.assertGreaterEqual(m.calls[1][2], m.calls[1][1] + 8 * per_drawing)
+            self.assertEqual(m.gave_up, "BUSY")
 
-            def ps_file(self, script, args, timeout=180):
-                self.timeouts.append(timeout)
-                return ""
-
-        for n in (1, 2, 13):
-            m = Machine()
-            autocad._run_driver(m, Path("jobs1.tsv"), "results1.tsv", n)
-            # each drawing: the wait for its turn, its time limit, and 10 s to stop it
-            self.assertEqual(len(m.timeouts), 1)
-            self.assertGreaterEqual(m.timeouts[0], n * (autocad.MAX_WAIT_SEC + autocad.TIMEOUT_SEC + 10))
+            # once it is spent, every drawing left in the run (here a lane read after the reference) is not
+            # judged at once, with no driver started
+            call(m, lane, "results1.tsv", ids[8:20])
+            self.assertEqual(len(m.calls), 2)
+            runs = report.read_runs(lane)
+            self.assertEqual(sorted(runs), ids[8:20])
+            self.assertTrue(all(r[0]["status"] == "BUSY" for r in runs.values()))
 
 
 class Glossary(unittest.TestCase):
