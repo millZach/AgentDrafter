@@ -1090,7 +1090,7 @@ fn attribute(
     let mut cause: Option<(usize, String)> = None;
     if in_rows {
         if let Some((row, index, rest)) = split_place(&field).filter(|p| p.0 != usize::MAX) {
-            if let Some(&i) = at.rows.touched_by(ObjectList::Row(row), index).last() {
+            if let Some(i) = at.rows.blame(ObjectList::Row(row), index, rest) {
                 cause = Some((i, rest.to_owned()));
             }
         } else if let Some(value) = field.strip_prefix(&format!("rows[{}].values.", k)) {
@@ -1101,7 +1101,7 @@ fn attribute(
     } else if in_template {
         if let Some((usize::MAX, index, rest)) = split_place(&field) {
             if let Some(Some(Ok(template))) = at.templates.get(t) {
-                if let Some(&i) = template.touched_by(ObjectList::Template, index).last() {
+                if let Some(i) = template.blame(ObjectList::Template, index, rest) {
                     cause = Some((i, rest.to_owned()));
                 }
             }

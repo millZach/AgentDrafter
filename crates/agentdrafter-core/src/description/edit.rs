@@ -113,8 +113,34 @@ struct Item {
     /// Its place in the file as read, or `None` for an object added.
     origin: Option<usize>,
     edited: bool,
-    /// The operations that touched it, by their place in the change set.
-    operations: Vec<usize>,
+    /// The operations that touched it, by their place in the change set,
+    /// in the order they did, each with what it set.
+    touches: Vec<(usize, Touch)>,
+}
+
+/// What an operation set in an object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Touch {
+    /// The whole object, which it added.
+    Whole,
+    /// These keys, such as `layer` or `attributes.REV`.
+    Keys(Vec<String>),
+}
+
+impl Touch {
+    /// Whether it set the value at `key`, a path within the object such as
+    /// `layer`, `points[2]` or `attributes.REV`.
+    fn covers(&self, key: &str) -> bool {
+        match self {
+            Touch::Whole => true,
+            Touch::Keys(keys) => keys.iter().any(|set| {
+                key == set
+                    || key.starts_with(&format!("{set}."))
+                    || key.starts_with(&format!("{set}["))
+                    || set.starts_with(&format!("{key}."))
+            }),
+        }
+    }
 }
 
 /// A row's value an edit set: where its old text was written.
@@ -178,13 +204,25 @@ impl RecordFile {
             .collect()
     }
 
-    /// The operations that touched the object of `list` at `index`.
-    pub(crate) fn touched_by(&self, list: ObjectList, index: usize) -> &[usize] {
-        self.lists
+    /// The operation to blame for what is wrong at `within` in the object
+    /// of `list` at `index`, such as `circle.layer`: the last that set that
+    /// value, or else the last that touched the object at all. `None` when
+    /// no operation touched it.
+    pub(crate) fn blame(&self, list: ObjectList, index: usize, within: &str) -> Option<usize> {
+        let item = self
+            .lists
             .iter()
             .find(|(l, _)| *l == list)
-            .and_then(|(_, state)| state.items.get(index))
-            .map_or(&[], |item| item.operations.as_slice())
+            .and_then(|(_, state)| state.items.get(index))?;
+        // The path within the object, after its type: `circle.layer` is
+        // `layer`.
+        let key = within.split_once('.').map_or("", |(_, key)| key);
+        let set_it = item
+            .touches
+            .iter()
+            .rev()
+            .find(|(_, touch)| !key.is_empty() && touch.covers(key));
+        set_it.or(item.touches.last()).map(|(op, _)| *op)
     }
 
     /// The object of `list` at `index` as one line of the record's YAML,
@@ -233,7 +271,7 @@ impl RecordFile {
         self.list_state(list).items.push(Item {
             origin: None,
             edited: true,
-            operations: vec![operation],
+            touches: vec![(operation, Touch::Whole)],
         });
         Ok(index)
     }
@@ -267,7 +305,8 @@ impl RecordFile {
         for (i, _) in &kept {
             let item = &mut state.items[*i];
             item.edited = true;
-            item.operations.push(operation);
+            item.touches
+                .push((operation, Touch::Keys(vec![ID_KEY.to_owned()])));
         }
         kept.into_iter().map(|(_, place)| place).collect()
     }
@@ -371,7 +410,12 @@ impl RecordFile {
             edited = true;
         }
         if edited {
-            self.touch(list, index, operation);
+            let keys: Vec<String> = set
+                .keys()
+                .filter(|k| from_row.is_none() || k.as_str() != "contents")
+                .cloned()
+                .collect();
+            self.touch(list, index, operation, Touch::Keys(keys));
         }
         Ok(Changed { edited, from_row })
     }
@@ -395,6 +439,7 @@ impl RecordFile {
         let kind = object_parts(item).0.unwrap_or_default().to_owned();
         let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
         let object_path = key_path(&path, &kind);
+        let mut moved = Vec::new();
         for entry in keys.iter_mut() {
             let field = key_path(&object_path, &entry.key);
             match (kind.as_str(), entry.key.as_str()) {
@@ -407,10 +452,11 @@ impl RecordFile {
                     move_points(&mut entry.value, by, units, &field)?;
                 }
                 ("hatch", "boundary") => move_boundary(&mut entry.value, by, units, &field)?,
-                _ => {}
+                _ => continue,
             }
+            moved.push(entry.key.clone());
         }
-        self.touch(list, index, operation);
+        self.touch(list, index, operation, Touch::Keys(moved));
         Ok(())
     }
 
@@ -463,7 +509,8 @@ impl RecordFile {
             }
             None => values.push(new_entry(tag, Node::scalar(value))),
         }
-        self.touch(list, index, operation);
+        let key = key_path("attributes", tag);
+        self.touch(list, index, operation, Touch::Keys(vec![key]));
         Ok(AttributeSet::Written)
     }
 
@@ -605,14 +652,12 @@ impl RecordFile {
         }
     }
 
-    /// Notes that operation `operation` edited the object of `list` at
-    /// `index`.
-    fn touch(&mut self, list: ObjectList, index: usize, operation: usize) {
+    /// Notes that operation `operation` set `what` in the object of `list`
+    /// at `index`.
+    fn touch(&mut self, list: ObjectList, index: usize, operation: usize, what: Touch) {
         let item = &mut self.list_state(list).items[index];
         item.edited = true;
-        if !item.operations.contains(&operation) {
-            item.operations.push(operation);
-        }
+        item.touches.push((operation, what));
     }
 
     /// Starts keeping track of `list`, before its first edit.
@@ -628,7 +673,7 @@ impl RecordFile {
             .map(|i| Item {
                 origin: Some(i),
                 edited: false,
-                operations: Vec::new(),
+                touches: Vec::new(),
             })
             .collect();
         self.lists.push((

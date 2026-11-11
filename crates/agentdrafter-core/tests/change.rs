@@ -1077,3 +1077,36 @@ fn an_add_that_leaves_out_a_required_key_refuses_the_whole_change_set() {
     );
     assert_eq!(snapshot(&set), before);
 }
+
+#[test]
+fn an_error_names_the_operation_that_set_the_bad_value() {
+    let set = demo_set("blame");
+    let error_of = |change_set: Value| {
+        let report = apply(&set, change_set).result.unwrap();
+        report.sheets[0].error.clone().unwrap()
+    };
+    // The add put the bad layer there; the move after it only moved it.
+    let e = error_of(json!({"operations": [
+        {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "nope", "id": "spot"},
+        {"op": "move", "target": {"id": "DEMO-002/spot"}, "by": [1, 0, 0]},
+    ]}));
+    assert_eq!(e.code, ErrorCode::UnknownName);
+    assert_eq!(e.field.as_deref(), Some("operations[0].layer"));
+    assert!(
+        e.message.starts_with("operation 0 (`add_circle`)"),
+        "{}",
+        e.message
+    );
+    // A change after the add set it, and a move after the change did not.
+    let e = error_of(json!({"operations": [
+        {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "id": "spot"},
+        {"op": "change", "target": {"id": "DEMO-002/spot"}, "set": {"layer": "nope"}},
+        {"op": "move", "target": {"id": "DEMO-002/spot"}, "by": [1, 0, 0]},
+    ]}));
+    assert_eq!(e.field.as_deref(), Some("operations[1].set.layer"));
+    assert!(
+        e.message.starts_with("operation 1 (`change`)"),
+        "{}",
+        e.message
+    );
+}
