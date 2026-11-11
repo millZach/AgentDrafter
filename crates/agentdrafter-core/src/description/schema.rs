@@ -20,12 +20,13 @@
 
 use serde_json::{json, Map, Value};
 
+use super::blocks::LIBRARY_KEYS;
 use super::layers::{
     colour_names, COLOUR_NAMES, FORBIDDEN_IN_NAMES, LONGEST_DESCRIPTION, LONGEST_NAME,
     LONGEST_PATTERN,
 };
 use super::objects::{FEWEST_FIT_POINTS, HIGHEST_DEGREE, OBJECT_TYPES};
-use super::{hatch_schema, SHEET_KEYS};
+use super::{block_schema, hatch_schema, SHEET_KEYS};
 use crate::model::{Lineweight, CONTINUOUS, FIT_DEGREE, LAYER_ZERO, WHITE};
 use crate::text::{
     Attachment, Justify, FORBIDDEN_IN_FONT_NAMES, STANDARD, STANDARD_FONT, WIDTH_FACTORS,
@@ -35,8 +36,147 @@ use crate::units::Unit;
 /// A plain decimal number, as `docs/sheet-description.md` defines it.
 pub(super) const NUMBER: &str = "-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?";
 
+/// The strict YAML subset, as both schemas' descriptions state it.
+const SUBSET: &str = "It is written in a strict subset of YAML 1.2: one document; no anchors, \
+                      aliases, tags or directives; every key is text and appears once in its \
+                      mapping; a key not in this schema is an error that lists the keys allowed \
+                      there. Every scalar is read as text and given its meaning here, so `yes`, \
+                      `null` and `0x10` are never booleans, nulls or numbers. Comments, block \
+                      style and flow style are all allowed. Lengths are in the declared unit; \
+                      angles are in degrees, anticlockwise; a lineweight is in millimetres.";
+
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
+    let [units_key, block_library_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, objects_key] =
+        SHEET_KEYS;
+    let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AgentDrafter sheet description",
+        "description": format!(
+            "The text file that states what is on a new sheet; a build turns it into a DWG. \
+             {SUBSET}"
+        ),
+        "type": "object",
+        "required": [units_key, objects_key],
+        "additionalProperties": false,
+        "properties": {
+            units_key: units_property("sheet"),
+            block_library_key: block_schema::block_library_property(),
+            linetypes_key: linetypes,
+            layers_key: layers,
+            hatch_patterns_key: hatch_patterns,
+            text_styles_key: text_styles,
+            objects_key: {
+                "description": "The objects on the sheet, in drawing order. Each is a mapping \
+                                with one key, its type.",
+                "type": "array",
+                "items": { "oneOf": object_choices(&OBJECT_TYPES) },
+            },
+        },
+        "$defs": defs(),
+    })
+}
+
+/// The block library's schema.
+pub fn block_library_schema() -> Value {
+    let [units_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, blocks_key] =
+        LIBRARY_KEYS;
+    let (linetypes, layers, hatch_patterns, text_styles) = table_properties("block library");
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AgentDrafter block library",
+        "description": format!(
+            "The blocks a drawing set shares, each defined once, with the layers, linetypes, \
+             hatch patterns and text styles their objects use. A sheet description names it under \
+             block_library and inserts its blocks. {SUBSET}"
+        ),
+        "type": "object",
+        "required": [units_key, blocks_key],
+        "additionalProperties": false,
+        "properties": {
+            units_key: units_property("block library"),
+            linetypes_key: linetypes,
+            layers_key: layers,
+            hatch_patterns_key: hatch_patterns,
+            text_styles_key: text_styles,
+            blocks_key: {
+                "description": "The blocks, from name to block. A block name follows the rules for \
+                                a layer name.",
+                "type": "object",
+                "propertyNames": { "$ref": "#/$defs/name" },
+                "additionalProperties": { "$ref": "#/$defs/block" },
+            },
+        },
+        "$defs": defs(),
+    })
+}
+
+/// One choice of object for each of `types`: a mapping with that one key.
+pub(super) fn object_choices(types: &[(&str, &[&str])]) -> Vec<Value> {
+    types
+        .iter()
+        .map(|(name, _)| {
+            json!({
+                "type": "object",
+                "required": [name],
+                "additionalProperties": false,
+                "properties": { *name: { "$ref": format!("#/$defs/{name}") } },
+            })
+        })
+        .collect()
+}
+
+/// The `units` key of a sheet or a block library.
+fn units_property(whose: &str) -> Value {
+    let description = if whose == "sheet" {
+        "The declared unit: every length on the sheet is in it unless it carries its own. It \
+         becomes the DWG's insertion unit. There is no default."
+    } else {
+        "The declared unit: every length in the library is in it unless it carries its own. A \
+         sheet that names the library is in the same unit. There is no default."
+    };
+    json!({ "description": description, "enum": Unit::ALL.map(Unit::symbol) })
+}
+
+/// The `linetypes`, `layers`, `hatch_patterns` and `text_styles` keys of a
+/// sheet or a block library: `whose` they are.
+fn table_properties(whose: &str) -> (Value, Value, Value, Value) {
+    (
+        json!({
+            "description": format!(
+                "The {whose}'s linetypes, from name to linetype. `{CONTINUOUS}`, `ByLayer` and \
+                 `ByBlock` are in every drawing and cannot be defined again."
+            ),
+            "type": "object",
+            "propertyNames": { "$ref": "#/$defs/name" },
+            "additionalProperties": { "$ref": "#/$defs/linetype" },
+        }),
+        json!({
+            "description": format!(
+                "The {whose}'s layers, from name to layer. Layer `{LAYER_ZERO}` is in every \
+                 drawing; listing it sets its colour, linetype and lineweight."
+            ),
+            "type": "object",
+            "propertyNames": { "$ref": "#/$defs/name" },
+            "additionalProperties": { "$ref": "#/$defs/layer" },
+        }),
+        hatch_schema::hatch_patterns_property(whose),
+        json!({
+            "description": format!(
+                "The {whose}'s text styles, from name to text style. Style `{STANDARD}` is in \
+                 every drawing, with the font `{STANDARD_FONT}`; listing it sets its font and \
+                 width factor. It is written `{STANDARD}` exactly: in another case it is an error."
+            ),
+            "type": "object",
+            "propertyNames": { "$ref": "#/$defs/name" },
+            "additionalProperties": { "$ref": "#/$defs/text_style" },
+        }),
+    )
+}
+
+/// Every definition the two schemas refer to.
+fn defs() -> Map<String, Value> {
     let units = Unit::ALL.map(Unit::symbol);
     let unit_pattern = units.join("|");
     let lineweights: Vec<f64> = Lineweight::ALL.iter().map(|w| w.millimetres()).collect();
@@ -53,17 +193,6 @@ pub fn sheet_description_schema() -> Value {
         .collect::<Vec<_>>()
         .join("|");
     let colours = COLOUR_NAMES.map(|(name, _)| name);
-    let objects: Vec<Value> = OBJECT_TYPES
-        .iter()
-        .map(|(name, _)| {
-            json!({
-                "type": "object",
-                "required": [name],
-                "additionalProperties": false,
-                "properties": { *name: { "$ref": format!("#/$defs/{name}") } },
-            })
-        })
-        .collect();
 
     let mut defs = Map::new();
     defs.insert(
@@ -108,7 +237,7 @@ pub fn sheet_description_schema() -> Value {
         "name".into(),
         json!({
             "description": format!(
-                "A layer or linetype name: 1 to {LONGEST_NAME} characters, not starting or \
+                "A layer, linetype, text style or block name: 1 to {LONGEST_NAME} characters, not starting or \
                  ending with a space, holding none of {FORBIDDEN_IN_NAMES} and no control \
                  characters. AutoCAD ignores case in names, so two names that differ only in \
                  case are the same name."
@@ -346,71 +475,9 @@ pub fn sheet_description_schema() -> Value {
         },
     );
     hatch_schema::add_defs(&mut defs);
-
     text_defs(&mut defs);
-
-    let [units_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, objects_key] =
-        SHEET_KEYS;
-    json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "AgentDrafter sheet description",
-        "description": "The text file that states what is on a new sheet; a build turns it into \
-                        a DWG. It is written in a strict subset of YAML 1.2: one document; no \
-                        anchors, aliases, tags or directives; every key is text and appears once \
-                        in its mapping; a key not in this schema is an error that lists the keys \
-                        allowed there. Every scalar is read as text and given its meaning here, so \
-                        `yes`, `null` and `0x10` are never booleans, nulls or numbers. Comments, \
-                        block style and flow style are all allowed. Lengths are in the declared \
-                        unit; angles are in degrees, anticlockwise; a lineweight is in millimetres.",
-        "type": "object",
-        "required": [units_key, objects_key],
-        "additionalProperties": false,
-        "properties": {
-            units_key: {
-                "description": "The declared unit: every length on the sheet is in it unless it \
-                                carries its own. It becomes the DWG's insertion unit. There is no \
-                                default.",
-                "enum": units,
-            },
-            linetypes_key: {
-                "description": format!(
-                    "The sheet's linetypes, from name to linetype. `{CONTINUOUS}`, `ByLayer` and \
-                     `ByBlock` are in every drawing and cannot be defined again."
-                ),
-                "type": "object",
-                "propertyNames": { "$ref": "#/$defs/name" },
-                "additionalProperties": { "$ref": "#/$defs/linetype" },
-            },
-            layers_key: {
-                "description": format!(
-                    "The sheet's layers, from name to layer. Layer `{LAYER_ZERO}` is in every \
-                     drawing; listing it sets its colour, linetype and lineweight."
-                ),
-                "type": "object",
-                "propertyNames": { "$ref": "#/$defs/name" },
-                "additionalProperties": { "$ref": "#/$defs/layer" },
-            },
-            hatch_patterns_key: hatch_schema::hatch_patterns_property(),
-            text_styles_key: {
-                "description": format!(
-                    "The sheet's text styles, from name to text style. Style `{STANDARD}` is in \
-                     every drawing, with the font `{STANDARD_FONT}`; listing it sets its font and \
-                     width factor. It is written `{STANDARD}` exactly: in another case it is an \
-                     error."
-                ),
-                "type": "object",
-                "propertyNames": { "$ref": "#/$defs/name" },
-                "additionalProperties": { "$ref": "#/$defs/text_style" },
-            },
-            objects_key: {
-                "description": "The objects on the sheet, in drawing order. Each is a mapping \
-                                with one key, its type.",
-                "type": "array",
-                "items": { "oneOf": objects },
-            },
-        },
-        "$defs": defs,
-    })
+    block_schema::add_defs(&mut defs);
+    defs
 }
 
 /// The definitions text styles, text and multiline text need.
@@ -579,7 +646,9 @@ fn name_pattern() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::description::blocks::BLOCK_KEYS;
     use crate::description::layers::{LAYER_KEYS, LINETYPE_KEYS};
+    use crate::description::objects::BLOCK_OBJECT_TYPES;
     use crate::description::text::TEXT_STYLE_KEYS;
 
     fn keys(value: &Value) -> Vec<String> {
@@ -631,6 +700,32 @@ mod tests {
     }
 
     #[test]
+    fn the_block_library_schema_and_the_reader_know_the_same_keys() {
+        let schema = block_library_schema();
+        assert_eq!(keys(&schema["properties"]), sorted(&LIBRARY_KEYS));
+        let defs = &schema["$defs"];
+        assert_eq!(keys(&defs["block"]["properties"]), sorted(&BLOCK_KEYS));
+        let listed: Vec<String> = defs["block"]["properties"]["objects"]["items"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| keys(&o["properties"])[0].clone())
+            .collect();
+        let types: Vec<String> = BLOCK_OBJECT_TYPES
+            .iter()
+            .map(|(t, _)| (*t).to_owned())
+            .collect();
+        assert_eq!(listed, types);
+        for (name, object_keys) in BLOCK_OBJECT_TYPES {
+            assert_eq!(
+                keys(&defs[name]["properties"]),
+                sorted(object_keys),
+                "the keys of {name}"
+            );
+        }
+    }
+
+    #[test]
     fn every_reference_in_the_schema_resolves() {
         fn walk(value: &Value, defs: &Value) {
             match value {
@@ -645,7 +740,8 @@ mod tests {
                 _ => {}
             }
         }
-        let schema = sheet_description_schema();
-        walk(&schema, &schema["$defs"]);
+        for schema in [sheet_description_schema(), block_library_schema()] {
+            walk(&schema, &schema["$defs"]);
+        }
     }
 }

@@ -8,7 +8,13 @@
 //! `+5` and `5` into the same number, and JSON Schema cannot compare a
 //! value against another (a spline's degree against its number of points).
 
-use agentdrafter_core::{parse_sheet_description, sheet_description_schema};
+use std::fs;
+use std::path::Path;
+
+use agentdrafter_core::{
+    block_library_schema, parse_block_library, parse_sheet_description, read_sheet_description,
+    sheet_description_schema, Error,
+};
 use serde_json::{json, Value};
 
 /// Where a value goes: a sheet description in YAML and the same sheet in
@@ -136,9 +142,83 @@ const MTEXT_WIDTH: Place = Place {
     json: r#"{"units": "mm", "objects": [{"mtext": {"contents": "A", "position": [0, 0, 0], "height": 1, "width": V}}]}"#,
 };
 
+/// The block library the places on a sheet that names one draw on: a block
+/// `B` with the attribute `TAG`.
+const LIBRARY: &str =
+    "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: TAG, position: [0, 0, 0], height: 1}}]}\n";
+
+const INSERT_SCALE: Place = Place {
+    name: "an insert's scale",
+    yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - insert: {block: B, position: [0, 0, 0], scale: V}\n",
+    json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"insert": {"block": "B", "position": [0, 0, 0], "scale": V}}]}"#,
+};
+
+const ATTRIBUTE_VALUE: Place = Place {
+    name: "an insert's attribute value",
+    yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - insert: {block: B, position: [0, 0, 0], attributes: {TAG: V}}\n",
+    json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"insert": {"block": "B", "position": [0, 0, 0], "attributes": {"TAG": V}}}]}"#,
+};
+
+const ATTRIBUTE_KEY: Place = Place {
+    name: "an insert's attribute tag",
+    yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - insert: {block: B, position: [0, 0, 0], attributes: {V: A-1}}\n",
+    json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"insert": {"block": "B", "position": [0, 0, 0], "attributes": {V: "A-1"}}}]}"#,
+};
+
+const INSERT_NAME: Place = Place {
+    name: "an insert's name",
+    yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - insert: {block: B, position: [0, 0, 0], name: V}\n",
+    json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"insert": {"block": "B", "position": [0, 0, 0], "name": V}}]}"#,
+};
+
+const LIBRARY_PATH: Place = Place {
+    name: "a sheet's block library",
+    yaml: "units: mm\nblock_library: V\nobjects: []\n",
+    json: r#"{"units": "mm", "block_library": V, "objects": []}"#,
+};
+
 /// `(place, value as YAML, the same value as JSON, accepted)`.
 fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
     vec![
+        // An insert's scale: a number more than 0, with no unit.
+        (&INSERT_SCALE, "2", json!(2), true),
+        (&INSERT_SCALE, "'0.5'", json!("0.5"), true),
+        (&INSERT_SCALE, "0", json!(0), false),
+        (&INSERT_SCALE, "-1", json!(-1), false),
+        (&INSERT_SCALE, "'2 mm'", json!("2 mm"), false),
+        (&INSERT_SCALE, "big", json!("big"), false),
+        // An attribute's value: one line of text, which may be empty.
+        (&ATTRIBUTE_VALUE, "A-1", json!("A-1"), true),
+        (&ATTRIBUTE_VALUE, "100", json!(100), true),
+        (&ATTRIBUTE_VALUE, "'yes'", json!("yes"), true),
+        (&ATTRIBUTE_VALUE, "''", json!(""), true),
+        (&ATTRIBUTE_VALUE, "", json!(null), true),
+        (&ATTRIBUTE_VALUE, "'50%'", json!("50%"), true),
+        (&ATTRIBUTE_VALUE, "\"A\\nB\"", json!("A\nB"), false),
+        (&ATTRIBUTE_VALUE, "'\\U+00B0'", json!("\\U+00B0"), false),
+        (&ATTRIBUTE_VALUE, "[A]", json!(["A"]), false),
+        // An attribute's tag, as a key: in capitals.
+        (&ATTRIBUTE_KEY, "TAG", json!("TAG"), true),
+        (&ATTRIBUTE_KEY, "tag", json!("tag"), false),
+        (&ATTRIBUTE_KEY, "'T G'", json!("T G"), false),
+        // A name: text with no space at either end, given once.
+        (&INSERT_NAME, "jb", json!("jb"), true),
+        (&INSERT_NAME, "'junction box 2'", json!("junction box 2"), true),
+        (&INSERT_NAME, "42", json!(42), true),
+        (&INSERT_NAME, "' jb'", json!(" jb"), false),
+        (&INSERT_NAME, "''", json!(""), false),
+        (&INSERT_NAME, "", json!(null), false),
+        (&INSERT_NAME, "[jb]", json!(["jb"]), false),
+        // A block library's path: relative, with / between folders.
+        (&LIBRARY_PATH, "lib.yaml", json!("lib.yaml"), true),
+        (&LIBRARY_PATH, "'./lib.yaml'", json!("./lib.yaml"), true),
+        (&LIBRARY_PATH, "sub/../lib.yaml", json!("sub/../lib.yaml"), true),
+        (&LIBRARY_PATH, "/lib.yaml", json!("/lib.yaml"), false),
+        (&LIBRARY_PATH, "'sub\\lib.yaml'", json!("sub\\lib.yaml"), false),
+        (&LIBRARY_PATH, "sub//lib.yaml", json!("sub//lib.yaml"), false),
+        (&LIBRARY_PATH, "'C:lib.yaml'", json!("C:lib.yaml"), false),
+        (&LIBRARY_PATH, "sub/", json!("sub/"), false),
+        (&LIBRARY_PATH, "''", json!(""), false),
         // A color: an index from 1 to 255, quoted or not, or a name.
         (&COLOR, "42", json!(42), true),
         (&COLOR, "'42'", json!("42"), true),
@@ -334,16 +414,144 @@ fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
     ]
 }
 
+/// Reads a sheet description as `agentdrafter build` does. One that names a
+/// block library is written to a folder beside [`LIBRARY`], as `lib.yaml`.
+fn read_sheet(yaml: &str) -> Result<(), Error> {
+    if !yaml.contains("block_library") {
+        return parse_sheet_description(yaml).map(|_| ());
+    }
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("core-schema");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("lib.yaml"), LIBRARY).unwrap();
+    let description = dir.join("sheet.yaml");
+    fs::write(&description, yaml).unwrap();
+    read_sheet_description(&description).map(|_| ())
+}
+
 #[test]
 fn the_schema_accepts_exactly_the_values_the_reader_accepts() {
-    let schema = sheet_description_schema();
-    let validator = jsonschema::validator_for(&schema).expect("the schema is a valid JSON Schema");
+    assert_reader_and_schema_agree(&sheet_description_schema(), cases(), read_sheet);
+}
+
+const TAG: Place = Place {
+    name: "an attribute definition's tag",
+    yaml:
+        "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: V, position: [0, 0, 0], height: 1}}]}\n",
+    json: r#"{"units": "mm", "blocks": {"B": {"objects": [{"attdef": {"tag": V, "position": [0, 0, 0], "height": 1}}]}}}"#,
+};
+
+const INVISIBLE: Place = Place {
+    name: "an attribute definition's invisible",
+    yaml: "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: T, position: [0, 0, 0], height: 1, invisible: V}}]}\n",
+    json: r#"{"units": "mm", "blocks": {"B": {"objects": [{"attdef": {"tag": "T", "position": [0, 0, 0], "height": 1, "invisible": V}}]}}}"#,
+};
+
+const DEFAULT: Place = Place {
+    name: "an attribute definition's default",
+    yaml: "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: T, position: [0, 0, 0], height: 1, default: V}}]}\n",
+    json: r#"{"units": "mm", "blocks": {"B": {"objects": [{"attdef": {"tag": "T", "position": [0, 0, 0], "height": 1, "default": V}}]}}}"#,
+};
+
+const PROMPT: Place = Place {
+    name: "an attribute definition's prompt",
+    yaml: "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: T, position: [0, 0, 0], height: 1, prompt: V}}]}\n",
+    json: r#"{"units": "mm", "blocks": {"B": {"objects": [{"attdef": {"tag": "T", "position": [0, 0, 0], "height": 1, "prompt": V}}]}}}"#,
+};
+
+const BLOCK_NAME: Place = Place {
+    name: "a block's name",
+    yaml: "units: mm\nblocks:\n  V: {objects: [{line: {from: [0, 0, 0], to: [1, 0, 0]}}]}\n",
+    json: r#"{"units": "mm", "blocks": {V: {"objects": [{"line": {"from": [0, 0, 0], "to": [1, 0, 0]}}]}}}"#,
+};
+
+const BASE_POINT: Place = Place {
+    name: "a block's base point",
+    yaml: "units: mm\nblocks:\n  B: {base_point: V, objects: [{line: {from: [0, 0, 0], to: [1, 0, 0]}}]}\n",
+    json: r#"{"units": "mm", "blocks": {"B": {"base_point": V, "objects": [{"line": {"from": [0, 0, 0], "to": [1, 0, 0]}}]}}}"#,
+};
+
+const BLOCK_OBJECTS: Place = Place {
+    name: "a block's objects",
+    yaml: "units: mm\nblocks:\n  B: {objects: V}\n",
+    json: r#"{"units": "mm", "blocks": {"B": {"objects": V}}}"#,
+};
+
+/// `(place in a block library, value as YAML, the same value as JSON, accepted)`.
+fn library_cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
+    vec![
+        // A tag: capitals, no spaces.
+        (&TAG, "TAG", json!("TAG"), true),
+        (&TAG, "'TAG_2'", json!("TAG_2"), true),
+        (&TAG, "ÉTAT", json!("ÉTAT"), true),
+        (&TAG, "'100'", json!("100"), true),
+        (&TAG, "100", json!(100), true),
+        (&TAG, "TRUE", json!(true), true),
+        (&TAG, "Tag", json!("Tag"), false),
+        (&TAG, "état", json!("état"), false),
+        (&TAG, "'A B'", json!("A B"), false),
+        (&TAG, "''", json!(""), false),
+        // invisible: true or false, quoted or not.
+        (&INVISIBLE, "true", json!(true), true),
+        (&INVISIBLE, "'false'", json!("false"), true),
+        (&INVISIBLE, "yes", json!("yes"), false),
+        (&INVISIBLE, "'True'", json!("True"), false),
+        // A default: one line of text, which may be empty.
+        (&DEFAULT, "''", json!(""), true),
+        (&DEFAULT, "A-1", json!("A-1"), true),
+        (&DEFAULT, "5", json!(5), true),
+        (&DEFAULT, "'\\U+0041'", json!("\\U+0041"), false),
+        (&DEFAULT, "\"A\\tB\"", json!("A\tB"), false),
+        // A prompt: one line of text.
+        (&PROMPT, "Enter the tag", json!("Enter the tag"), true),
+        (&PROMPT, "", json!(null), true),
+        (&PROMPT, "\"A\\nB\"", json!("A\nB"), false),
+        // A block's name: as a layer's name.
+        (&BLOCK_NAME, "MARKER", json!("MARKER"), true),
+        (&BLOCK_NAME, "'TAG BUBBLE'", json!("TAG BUBBLE"), true),
+        (&BLOCK_NAME, "'A/B'", json!("A/B"), false),
+        (&BLOCK_NAME, "' A'", json!(" A"), false),
+        // A base point: a point.
+        (&BASE_POINT, "[1, 2, 0]", json!([1, 2, 0]), true),
+        (&BASE_POINT, "['1 in', 0, 0]", json!(["1 in", 0, 0]), true),
+        (&BASE_POINT, "[1, 2]", json!([1, 2]), false),
+        // A block's objects: at least one, and no inserts.
+        (
+            &BLOCK_OBJECTS,
+            "[{circle: {center: [0, 0, 0], radius: 1}}]",
+            json!([{"circle": {"center": [0, 0, 0], "radius": 1}}]),
+            true,
+        ),
+        (&BLOCK_OBJECTS, "[]", json!([]), false),
+        (
+            &BLOCK_OBJECTS,
+            "[{insert: {block: B, position: [0, 0, 0]}}]",
+            json!([{"insert": {"block": "B", "position": [0, 0, 0]}}]),
+            false,
+        ),
+    ]
+}
+
+#[test]
+fn the_block_library_schema_accepts_exactly_the_values_the_reader_accepts() {
+    assert_reader_and_schema_agree(&block_library_schema(), library_cases(), |yaml| {
+        parse_block_library(yaml).map(|_| ())
+    });
+}
+
+/// Asserts that the reader and the schema both accept exactly the cases
+/// marked accepted, and lists every case where either disagrees.
+fn assert_reader_and_schema_agree(
+    schema: &Value,
+    cases: Vec<(&'static Place, &'static str, Value, bool)>,
+    read: impl Fn(&str) -> Result<(), Error>,
+) {
+    let validator = jsonschema::validator_for(schema).expect("the schema is a valid JSON Schema");
     let mut disagreements = Vec::new();
-    for (place, yaml_value, json_value, accepted) in cases() {
+    for (place, yaml_value, json_value, accepted) in cases {
         let yaml = place.yaml.replace('V', yaml_value);
         let json: Value = serde_json::from_str(&place.json.replace('V', &json_value.to_string()))
             .expect("the JSON case is JSON");
-        let reader = parse_sheet_description(&yaml);
+        let reader = read(&yaml);
         let by_schema = validator.is_valid(&json);
         if reader.is_ok() != accepted || by_schema != accepted {
             disagreements.push(format!(

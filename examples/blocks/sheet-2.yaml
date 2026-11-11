@@ -1,0 +1,17 @@
+# A second sheet on the same block library: the marker is the same block,
+# defined once in the library, with other values.
+units: mm
+block_library: blocks.yaml
+objects:
+  - insert:
+      block: MARKER
+      position: [30, 40, 0]
+      attributes: {TAG: B-7, NUMBER: '207'}
+      name: marker-b7
+  - insert:
+      block: MARKER
+      position: [80, 40, 0]
+      scale: 0.5
+      rotation: 270
+      attributes: {TAG: B-8}
+  - text: {contents: SHEET 2, position: [10, 10, 0], height: 3.5}

@@ -84,8 +84,20 @@ _Avoid_: symbol, component, cell
 A labelled text field on a block that is filled in at each insert, such as a tag or a terminal number.
 _Avoid_: property, field, parameter
 
+**Attribute definition**:
+An attribute as its block defines it, once: its attribute tag, its prompt, its default value and how its text draws. AutoCAD's ATTDEF.
+_Avoid_: attribute template
+
+**Attribute tag**:
+The label an attribute is filled in by, such as `TAG` or `TERMINAL`, written in capitals as AutoCAD keeps it. A plain tag is what an instrument or device is called on the drawing, which is often an attribute's value.
+_Avoid_: attribute name, field name
+
+**Insert**:
+One placement of a block on a sheet, at a position, scale and rotation, carrying a value for each of the block's attributes. AutoCAD calls it a block reference.
+_Avoid_: instance, block reference
+
 **Block library**:
-The blocks a drawing set shares, each defined once for the whole set.
+The blocks a drawing set shares, each defined once for the whole set. It is a file of its own that sheet descriptions name.
 _Avoid_: symbol library, catalog
 
 **Template**:

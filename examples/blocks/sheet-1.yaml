@@ -1,0 +1,22 @@
+# A sheet that inserts blocks from the block library beside it: two markers,
+# one scaled and turned, and an arrow pointing at the first.
+units: mm
+block_library: blocks.yaml
+layers:
+  symbols: {color: yellow, lineweight: 0.35}
+objects:
+  - insert:
+      block: MARKER
+      position: [50, 50, 0]
+      attributes: {TAG: A-1, NUMBER: '101'}
+      name: marker-a1
+      layer: symbols
+  - insert:
+      block: MARKER
+      position: [100, 60, 0]
+      scale: 1.5
+      rotation: 30
+      attributes: {TAG: A-2, NUMBER: '102', NOTE: SEE NOTE 1}
+      name: marker-a2
+  - insert: {block: ARROW, position: [56, 50, 0], rotation: 180}
+  - text: {contents: SHEET 1, position: [10, 10, 0], height: 3.5}

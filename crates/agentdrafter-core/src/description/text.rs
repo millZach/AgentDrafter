@@ -179,7 +179,7 @@ fn contents_problem(contents: &str) -> Option<String> {
 /// AutoCAD reads `\U+` and four hexadecimal digits in a single line of text
 /// as the character with that code, and `\M+` and five as a multibyte one,
 /// so such contents would not show as written.
-fn character_code(contents: &str) -> Option<String> {
+pub(super) fn character_code(contents: &str) -> Option<String> {
     let bytes = contents.as_bytes();
     (0..bytes.len()).find_map(|i| {
         let digits = match bytes.get(i..i + 3)? {
@@ -207,7 +207,7 @@ fn font(node: &Node, path: &str) -> Result<String, Error> {
 }
 
 /// A width factor: a number from 0.01 to 100, as AutoCAD allows.
-fn width_factor(node: &Node, path: &str) -> Result<f64, Error> {
+pub(super) fn width_factor(node: &Node, path: &str) -> Result<f64, Error> {
     let (narrowest, widest) = WIDTH_FACTORS;
     let factor = plain_number(
         node,
@@ -226,7 +226,7 @@ fn width_factor(node: &Node, path: &str) -> Result<f64, Error> {
 }
 
 /// The text's height, a length more than 0.
-fn height(fields: &Fields, units: Unit) -> Result<f64, Error> {
+pub(super) fn height(fields: &Fields, units: Unit) -> Result<f64, Error> {
     let node = fields.require("height")?;
     let path = fields.path_of("height");
     let height = length(node, &path, units)?;
@@ -241,7 +241,7 @@ fn height(fields: &Fields, units: Unit) -> Result<f64, Error> {
     }
 }
 
-fn rotation(fields: &Fields) -> Result<f64, Error> {
+pub(super) fn rotation(fields: &Fields) -> Result<f64, Error> {
     match fields.get("rotation") {
         Some(node) => angle(node, &fields.path_of("rotation")),
         None => Ok(0.0),
@@ -249,7 +249,7 @@ fn rotation(fields: &Fields) -> Result<f64, Error> {
 }
 
 /// The style the text draws with: `Standard` or one of the sheet's.
-fn style_name(fields: &Fields, styles: &[TextStyle]) -> Result<String, Error> {
+pub(super) fn style_name(fields: &Fields, styles: &[TextStyle]) -> Result<String, Error> {
     let Some(node) = fields.get("style") else {
         return Ok(STANDARD.to_owned());
     };
@@ -276,11 +276,11 @@ fn style_name(fields: &Fields, styles: &[TextStyle]) -> Result<String, Error> {
     ))
 }
 
-fn style_of<'a>(name: &str, styles: &'a [TextStyle]) -> Option<&'a TextStyle> {
+pub(super) fn style_of<'a>(name: &str, styles: &'a [TextStyle]) -> Option<&'a TextStyle> {
     styles.iter().find(|s| s.name == name)
 }
 
-fn justify(fields: &Fields) -> Result<Justify, Error> {
+pub(super) fn justify(fields: &Fields) -> Result<Justify, Error> {
     let names = Justify::ALL.map(Justify::name);
     named_choice(fields, "a text", &names)
         .map(|found| found.map_or(Justify::Left, |i| Justify::ALL[i]))

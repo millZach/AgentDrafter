@@ -214,9 +214,11 @@ fn render_within(
             let drawing = dwg::read(source)?;
             let sheet = Sheet {
                 units: drawing.units.unwrap_or(Unit::Mm),
+                block_library: None,
                 linetypes: drawing.linetypes,
                 layers: drawing.layers,
                 text_styles: drawing.text_styles,
+                blocks: drawing.blocks,
                 objects: drawing.objects,
             };
             (sheet, drawing.units, drawing.objects_not_read)

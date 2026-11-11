@@ -280,6 +280,8 @@ pub fn draw_sheet(
             }
             Object::Text(t) => text::draw_text(t, fonts, pen.lineweight, tolerance),
             Object::MText(t) => text::draw_mtext(t, fonts, pen.lineweight, tolerance),
+            // Inserts and attribute definitions draw in the next commit.
+            Object::AttributeDefinition(_) | Object::Insert(_) => Vec::new(),
         };
         list.items.extend(shapes.into_iter().map(|shape| Item {
             object: index,

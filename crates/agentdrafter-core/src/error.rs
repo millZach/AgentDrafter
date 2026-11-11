@@ -23,8 +23,12 @@ pub enum ErrorCode {
     /// The sheet description uses YAML outside the subset: an anchor, an
     /// alias, a tag, a directive, a second document or a key that is not text.
     NotInSubset,
-    /// A key appears twice in the same mapping.
+    /// A key appears twice in the same mapping, or a block defines one
+    /// attribute tag twice.
     DuplicateKey,
+    /// Two objects on a sheet carry the same name, or names that differ
+    /// only in case.
+    DuplicateName,
     /// A key the sheet description does not know.
     UnknownKey,
     /// A key the sheet description needs is not there.
@@ -114,6 +118,16 @@ impl Error {
     pub(crate) fn in_file(mut self, file: &Path) -> Self {
         self.file = Some(file.display().to_string());
         self
+    }
+
+    /// Places the error in `file` unless it is about another file already,
+    /// such as the block library a sheet description names.
+    pub(crate) fn or_in_file(self, file: &Path) -> Self {
+        if self.file.is_some() {
+            self
+        } else {
+            self.in_file(file)
+        }
     }
 }
 

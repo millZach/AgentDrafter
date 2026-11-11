@@ -7,11 +7,14 @@
 //! (ADR-0007).
 //!
 //! - [`build`] turns a sheet description into a DWG in the 2018 format.
-//! - [`parse_sheet_description`] reads a sheet description into a [`Sheet`].
-//! - [`sheet_description_schema`] states what a sheet description may hold,
-//!   as a JSON Schema.
-//! - [`read_dwg`] reads a DWG's linetypes, layers, text styles and
-//!   model-space objects.
+//! - [`read_sheet_description`] reads a sheet description's file, with the
+//!   block library it names, into a [`Sheet`]; [`parse_sheet_description`]
+//!   reads the text of one that names no block library.
+//! - [`parse_block_library`] reads a block library into a [`BlockLibrary`].
+//! - [`sheet_description_schema`] and [`block_library_schema`] state what a
+//!   sheet description and a block library may hold, as JSON Schemas.
+//! - [`read_dwg`] reads a DWG's linetypes, layers, text styles, block
+//!   definitions and model-space objects.
 //! - [`measure_text`] measures how wide a line of text draws in a font.
 //! - [`render`] draws a sheet description or a DWG to a PNG, stamped with
 //!   the record it came from, and [`check_stale`] says whether such an
@@ -44,8 +47,9 @@ mod units;
 use std::path::Path;
 
 pub use build::{build, build_with, BuildReport, BuildRequest};
-pub use description::parse_sheet_description;
+pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
 pub use error::{Error, ErrorCode};
+pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use model::{
     Arc, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object, Point3,
     Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
@@ -60,8 +64,8 @@ pub use text::measure::{measure_text, measure_text_with, MeasureTextRequest, Tex
 pub use text::{Attachment, FontKind, Justify, MText, Text, TextStyle, STANDARD};
 pub use units::Unit;
 
-/// Reads the linetypes, the layers, the text styles and the model-space
-/// objects of the DWG at `path`.
+/// Reads the linetypes, the layers, the text styles, the block definitions
+/// and the model-space objects of the DWG at `path`.
 pub fn read_dwg(path: &Path) -> Result<DrawingContents, Error> {
     dwg::read(path)
 }
@@ -70,4 +74,10 @@ pub fn read_dwg(path: &Path) -> Result<DrawingContents, Error> {
 /// key a sheet description may hold, with what each means.
 pub fn sheet_description_schema() -> serde_json::Value {
     description::schema::sheet_description_schema()
+}
+
+/// The block library's schema: a JSON Schema (draft 2020-12) of every key a
+/// block library may hold, with what each means.
+pub fn block_library_schema() -> serde_json::Value {
+    description::schema::block_library_schema()
 }

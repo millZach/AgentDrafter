@@ -2,9 +2,9 @@
 
 A sheet description is the text file that states what is on a new sheet. It is the sheet's record: the DWG is built from it (ADR-0003). It is written in a strict subset of YAML, set out below, so that an agent can write it, a person can read it, and a mistake is an error that names its field rather than a guess.
 
-So far a sheet description holds lines, polylines, arcs, circles, ellipses, splines and hatches, on layers that carry a colour, a linetype and a lineweight, and text and multiline text in text styles that name a TrueType or an SHX font. Blocks, attributes and templates come in later tickets, and this page grows with them.
+So far a sheet description holds lines, polylines, arcs, circles, ellipses, splines and hatches, on layers that carry a colour, a linetype and a lineweight, text and multiline text in text styles that name a TrueType or an SHX font, and inserts of blocks with attributes from a [block library](block-library.md). Templates come in a later ticket, and this page grows with them.
 
-`agentdrafter schema` prints the same keys as a JSON Schema (draft 2020-12), with what each means, for an agent to read before it writes a sheet description.
+`agentdrafter schema` prints the same keys as a JSON Schema (draft 2020-12), with what each means, for an agent to read before it writes a sheet description. `agentdrafter schema block-library` prints the block library's.
 
 ## An example
 
@@ -17,7 +17,7 @@ objects:
       to: [100, 50, 0]
 ```
 
-`agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on.
+`agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on. `examples/blocks/` holds a block library and two sheets that insert its blocks.
 
 Every DWG a build writes carries AgentDrafter's build mark: a custom drawing property, `AgentDrafter` with the value `build`, which AutoCAD shows under DWGPROPS. `--overwrite` replaces only a DWG that carries it.
 
@@ -44,6 +44,7 @@ Keys are spelled as AutoCAD spells them: `color`, `center`.
 | Key | Required | What it is |
 |---|---|---|
 | `units` | yes | The sheet's declared unit: `mm`, `cm`, `m`, `in` or `ft`. Every length on the sheet is in this unit unless it carries its own. It becomes the DWG's insertion unit. |
+| `block_library` | no | The block library the sheet's inserts draw their blocks from: the path of its file. See [Inserts](#inserts). |
 | `linetypes` | no | The sheet's linetypes: a mapping from each linetype's name to its definition. |
 | `layers` | no | The sheet's layers: a mapping from each layer's name to its colour, linetype and lineweight. |
 | `hatch_patterns` | no | The sheet's hatch patterns: a mapping from each pattern's name to its lines. |
@@ -125,6 +126,7 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 | `hatch` | `pattern`, `boundary`; `scale`, `angle` | An area filled solid or with a pattern, inside a boundary; see below. |
 | `text` | `contents`, `position`, `height`; `style`, `width_factor`, `rotation`, `justify` | A single line of text, as AutoCAD's TEXT draws it. See [Text](#text). |
 | `mtext` | `contents`, `position`, `height`; `width`, `style`, `width_factor`, `rotation`, `justify` | Text of one or more lines in a box, as AutoCAD's MTEXT draws it. See [Text](#text). |
+| `insert` | `block`, `position`; `scale`, `rotation`, `attributes`, `name` | A block from the sheet's block library, placed as AutoCAD's INSERT places it. See [Inserts](#inserts). |
 
 Keys before the semicolon are required; keys after it are not. A `radius` is a length more than 0.
 
@@ -203,6 +205,40 @@ Contents show as written. AutoCAD reads some characters in text as codes, so Age
 
 A justified `text` records in the DWG where its baseline starts as well as where it is justified, as AutoCAD does. AutoCAD draws the text from the start, so a build works the start out from the font's widths, by AutoCAD's own rules; when the font is not in a font folder, the start comes from its look-alike and may sit a little away from where AutoCAD would put it, until the text is edited in AutoCAD. The build's result names every such font.
 
+### Inserts
+
+```yaml
+units: mm
+block_library: blocks.yaml
+layers:
+  symbols: {color: yellow, lineweight: 0.35}
+objects:
+  - insert:
+      block: MARKER
+      position: [100, 60, 0]
+      scale: 1.5
+      rotation: 30
+      attributes: {TAG: A-2, NUMBER: '102'}
+      name: marker-a2
+      layer: symbols
+```
+
+A block is defined once, in the block library of the drawing set, and inserted on any sheet that names the library under `block_library`. [The block library](block-library.md) sets out what a library holds. `block_library` is the path of the library's file, relative to the folder the sheet description is in, with `/` between folders on every system, such as `blocks.yaml` or `../library/blocks.yaml`. It does not start with `/` and holds none of `\ : < > " | ? *`. The library is in the sheet's declared unit: a library in another unit is an error.
+
+| Key | Required | What it is |
+|---|---|---|
+| `block` | yes | The name of a block in the block library, written exactly as it is there. |
+| `position` | yes | Where the block's base point sits: a point. |
+| `scale` | no | How much the block is enlarged, the same along every axis: a number more than 0, with no unit. Without it, 1. |
+| `rotation` | no | An angle: degrees anticlockwise from the X axis. Without it, 0. |
+| `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty. An attribute the insert leaves out takes its definition's default. |
+| `name` | no | A name an agent selects the insert by later, such as `jb`: 1 to 255 characters, not starting or ending with a space, with no control characters. Each name is given once on a sheet, and names that differ only in case are one name. A name is not an attribute tag. |
+| `layer` | no | The layer the insert sits on, as for every object. |
+
+A block that is not in the library, or an attribute tag the block does not define, is an error that lists the library's blocks or the block's attribute tags. An insert's attributes draw where the block's attribute definitions are, moved, scaled and turned with the insert. Only uniform, positive scales are offered: a mirrored or stretched insert waits for a later ticket.
+
+A built sheet holds the blocks it inserts, as the library defines them, and the library's layers, linetypes and text styles those blocks use. A layer, linetype or text style the sheet defines too must be defined the same in both, or the build stops with an error at the sheet's definition: otherwise a block would not draw on the sheet as the library defines it. Layer `0`, `Continuous` and `Standard`, when the library does not list them, are the sheet's own, as they are in AutoCAD. The sheet's own objects, an insert among them, sit on the sheet's layers, so an insert on a layer the library defines lists that layer under `layers` as well.
+
 ### Fonts
 
 AutoCAD's SHX fonts are Autodesk's files and are never in this repository (ADR-0008). AgentDrafter reads fonts from the font folders a setting names: the folders `--fonts` gives, then those the environment variable `AGENTDRAFTER_FONTS` lists, separated as the system separates paths (`;` on Windows, `:` elsewhere). On a machine that has AutoCAD, name its `Fonts` folder for the SHX fonts and the system's fonts folder for the TrueType ones. There is no default folder. A font is found by its file name, ignoring case.
@@ -255,7 +291,7 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 
 ## The schema
 
-`agentdrafter schema` prints one line of JSON, `{"ok":true,"result":{...}}`, whose result is a JSON Schema of the sheet description. JSON Schema describes JSON, and a YAML reader that guesses types turns `100` into a number and `4 in` into a string, so in the schema a length is a number or a string that reads as one. Quoted and plain scalars mean the same here, so the schema takes every value the reader takes in either form: `color: '42'`, `lineweight: '0.50 mm'`, `closed: 'true'` and `degree: '2'` pass both. What JSON Schema cannot see is left to the reader: such a YAML reader turns `+5` and `5` into one number, and some checks compare one value with another, such as a degree with the number of control points. The rules of the YAML subset are not JSON Schema either; the schema's top-level description states them. The schema is built from the same tables the reader checks keys against, and tests keep the two in step.
+`agentdrafter schema` prints one line of JSON, `{"ok":true,"result":{...}}`, whose result is a JSON Schema of the sheet description; `agentdrafter schema block-library` prints the block library's in the same way, and everything below holds for both. JSON Schema describes JSON, and a YAML reader that guesses types turns `100` into a number and `4 in` into a string, so in the schema a length is a number or a string that reads as one. Quoted and plain scalars mean the same here, so the schema takes every value the reader takes in either form: `color: '42'`, `lineweight: '0.50 mm'`, `closed: 'true'` and `degree: '2'` pass both. What JSON Schema cannot see is left to the reader: such a YAML reader turns `+5` and `5` into one number, and some checks compare one value with another, such as a degree with the number of control points, or reach into another file, such as whether a block or an attribute tag is in the block library. The rules of the YAML subset are not JSON Schema either; the schema's top-level description states them. The schema is built from the same tables the reader checks keys against, and tests keep the two in step.
 
 ## Errors
 
@@ -265,23 +301,24 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 {"ok":false,"error":{"code":"unknown_key","message":"unknown key `too`; a line takes from, to, layer","field":"objects[0].line.too","line":5,"column":7,"file":"bad.yaml"}}
 ```
 
-`field` is the path to the value in the sheet description: keys joined with `.`, list items as `[index]` counted from 0, such as `layers.hidden.linetype` or `objects[2].arc.radius`. `line` and `column` count from 1. `field`, `line`, `column` and `file` appear when they are known. An error about a choice, such as a key, a unit, a layer, a linetype, a text style, a colour, a lineweight or a justification, lists the valid choices in its message.
+`field` is the path to the value in the sheet description: keys joined with `.`, list items as `[index]` counted from 0, such as `layers.hidden.linetype` or `objects[2].arc.radius`. `line` and `column` count from 1. `field`, `line`, `column` and `file` appear when they are known. An error in the block library a sheet names gives the library's file and a path in the library, such as `blocks.MARKER.objects[1].attdef.tag`. An error about a choice, such as a key, a unit, a layer, a linetype, a text style, a colour, a lineweight, a justification, a block or an attribute tag, lists the valid choices in its message.
 
 | Code | Meaning |
 |---|---|
-| `usage` | The command was called wrongly, or the output path is the sheet description itself. |
-| `read_failed` | The sheet description could not be read. |
+| `usage` | The command was called wrongly, or the output path is the sheet description itself, or the text of a sheet description that names a block library was read without its file. |
+| `read_failed` | The sheet description, or the block library it names, could not be read. |
 | `yaml_syntax` | The text is not well-formed YAML. |
 | `not_in_subset` | An anchor, alias, tag, directive, second document or key that is not text. |
-| `duplicate_key` | A key appears twice in one mapping, or two layer, linetype or hatch pattern names differ only in case. The message gives the line of the first. |
-| `unknown_key` | A key the sheet description does not define, including an unknown object type. |
+| `duplicate_key` | A key appears twice in one mapping, two layer, linetype, hatch pattern or block names differ only in case, or a block defines one attribute tag twice. The message gives the line of the first. |
+| `duplicate_name` | Two objects on a sheet carry the same name, or names that differ only in case. The message gives the line of the first. |
+| `unknown_key` | A key the sheet description does not define, including an unknown object type, an attribute definition on a sheet or an insert in a block. |
 | `missing_key` | A required key is missing, or the file is empty. |
 | `missing_unit` | The sheet declares no unit. |
 | `unknown_unit` | A unit that is not one of `mm`, `cm`, `m`, `in`, `ft`. |
 | `wrong_type` | A value of the wrong shape, such as a point without three coordinates, a polyline with too few points, a hatch with no loops, or `closed: yes`. |
 | `bad_number` | A value that should be a number is not one, carries a unit where none belongs, or is too large to hold in the declared unit. |
-| `bad_value` | A value of the right shape that is not allowed: a colour outside 1 to 255, a lineweight that is not standard, a radius or text height that is not positive, a ratio outside 0 to 1, a width factor outside 0.01 to 100, an arc whose angles are equal, a linetype pattern that breaks AutoCAD's rules, a name AutoCAD would refuse, a hatch pattern line whose lines would lie on one another, a hatch scale or angle given with `SOLID`, a boundary that does not lie flat or whose edges do not join up, a text style that is `Standard` in another case, a font that is not an SHX or TrueType file name, a justification that does not exist, text contents that are empty or would not show as written. |
-| `unknown_name` | A layer, linetype, hatch pattern or text style that the sheet description does not define. |
+| `bad_value` | A value of the right shape that is not allowed: a colour outside 1 to 255, a lineweight that is not standard, a radius or text height that is not positive, a ratio outside 0 to 1, a width factor outside 0.01 to 100, an arc whose angles are equal, a linetype pattern that breaks AutoCAD's rules, a name AutoCAD would refuse, a hatch pattern line whose lines would lie on one another, a hatch scale or angle given with `SOLID`, a boundary that does not lie flat or whose edges do not join up, a text style that is `Standard` in another case, a font that is not an SHX or TrueType file name, a justification that does not exist, text contents that are empty or would not show as written, an attribute tag that is not in capitals or holds a space, a name AgentDrafter refuses, an insert's scale that is not more than 0, a block library path that is not relative or holds a character it cannot, a block library in another unit than the sheet, a layer, linetype or text style the sheet and the blocks it inserts define differently. |
+| `unknown_name` | A layer, linetype, hatch pattern or text style that the sheet description does not define, a block that is not in the block library, or an attribute tag the block does not define. |
 | `output_exists` | A file is already where the DWG would go, and `--overwrite` was not given. |
 | `not_a_build` | `--overwrite` was given, but the file where the DWG would go is not a DWG AgentDrafter built, or cannot be read to tell. It may be an original, and an original is never overwritten. |
 | `write_failed` | The DWG could not be written. |
@@ -290,4 +327,4 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 
 ## How it is read
 
-The YAML is read by [saphyr-parser](https://crates.io/crates/saphyr-parser) (MIT or Apache-2.0), a YAML 1.2 parser that reports each node with its anchor, tag and position. AgentDrafter builds its own tree from those events, refusing anything outside the subset as it goes, so a duplicate key or an anchor is caught where it is written rather than lost in a parsed value. The code is `crates/agentdrafter-core/src/description/`: `mod.rs` reads the top level and the values, `layers.rs` the linetypes and layers, `objects.rs` the objects, `hatch.rs` the hatch patterns and hatches, `text.rs` the text styles and text, and `schema.rs` writes the schema, with `hatch_schema.rs` writing its hatch parts. Fonts and measuring are in `crates/agentdrafter-core/src/text/`, and text's side of the DWG in `src/dwg/text.rs`.
+The YAML is read by [saphyr-parser](https://crates.io/crates/saphyr-parser) (MIT or Apache-2.0), a YAML 1.2 parser that reports each node with its anchor, tag and position. AgentDrafter builds its own tree from those events, refusing anything outside the subset as it goes, so a duplicate key or an anchor is caught where it is written rather than lost in a parsed value. The code is `crates/agentdrafter-core/src/description/`: `mod.rs` reads the top level and the values, `layers.rs` the linetypes and layers, `objects.rs` the objects, `hatch.rs` the hatch patterns and hatches, `text.rs` the text styles and text, `blocks.rs` the block library, its blocks and inserts of them, and `schema.rs` writes both schemas, with `hatch_schema.rs` and `block_schema.rs` writing their hatch and block parts. Fonts and measuring are in `crates/agentdrafter-core/src/text/`, text's side of the DWG in `src/dwg/text.rs`, and blocks' in `src/dwg/block.rs`.
