@@ -12,7 +12,8 @@
 //! A CTB file is a 48-byte heading, `PIAFILEVERSION_2.0,CTBVER1,compress`
 //! and `pmzlibcodec` on two lines, then three little-endian 32-bit numbers
 //! (the Adler-32 of what follows, its length unpacked and its length
-//! packed), then zlib-packed text. The text holds nested sections of
+//! packed), then zlib-packed text, which some writers, such as ezdxf, end
+//! with a NUL byte. The text holds nested sections of
 //! `key=value` lines: `plot_style` holds a section per colour index, `0` for
 //! index 1 up to `254` for index 255, and `custom_lineweight_table` the
 //! lineweights in millimetres that a pen's `lineweight` counts into.
@@ -20,8 +21,10 @@
 //! What a pen sets:
 //!
 //! - `color`: -1, or -1006632961, plots the object's own colour; any other
-//!   value is the colour to plot in, red, green and blue in its low three
-//!   bytes.
+//!   value means the pen plots in a colour of its own, red, green and blue
+//!   in the low three bytes of its `mode_color`. CTB writers keep a custom
+//!   colour there, and `color` may then hold another value; a pen with no
+//!   `mode_color` plots the colour in `color`'s low three bytes.
 //! - `lineweight`: 0 plots the object's own lineweight; any other value `n`
 //!   plots with the lineweight at place `n - 1` of `custom_lineweight_table`,
 //!   counted from 0, so 1 is the table's first, 0 mm. AutoCAD 2026 plotted a
@@ -129,8 +132,13 @@ impl PlotStyle {
         let packed = &bytes[BEFORE_TEXT..];
         let text = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(packed, MOST_TEXT)
             .map_err(|e| format!("its packed text cannot be unpacked ({:?})", e.status))?;
+        // Some writers end the text with a NUL byte, which ends nothing.
+        let end = text
+            .iter()
+            .rposition(|&b| b != 0)
+            .map_or(0, |last| last + 1);
         // The text is single-byte; names may hold bytes above 127.
-        let text: String = text.iter().map(|&b| char::from(b)).collect();
+        let text: String = text[..end].iter().map(|&b| char::from(b)).collect();
         PlotStyle::from_text(&text)
     }
 
@@ -192,7 +200,9 @@ impl PlotStyle {
                 None => None,
                 Some(c) if OBJECT_COLORS.contains(&c) => None,
                 Some(c) => {
-                    let c = c as u32;
+                    // A custom colour is kept in `mode_color`, and `color`
+                    // may then hold another value.
+                    let c = number("mode_color")?.unwrap_or(c) as u32;
                     Some([(c >> 16) as u8, (c >> 8) as u8, c as u8])
                 }
             };
@@ -406,6 +416,43 @@ mod tests {
         let text = made_up_ctb_text(&[(5, -1_006_632_961, 0)], "");
         let style = PlotStyle::parse_ctb(&ctb_file(&text)).unwrap();
         assert_eq!(style.color(Color(5)), [0, 0, 255]);
+    }
+
+    #[test]
+    fn a_ctb_ending_in_a_nul_byte_is_read() {
+        // ezdxf's writer ends the packed text with a NUL byte.
+        let text = made_up_ctb_text(&[(1, rgb(0, 0, 255), 21)], "") + "\0";
+        let style = PlotStyle::parse_ctb(&ctb_file(&text)).unwrap();
+        assert_eq!(style.color(Color(1)), [0, 0, 255]);
+        assert_eq!(style.lineweight(Color(1), 0.25), 1.0);
+        assert_eq!(style.color(Color(2)), [0, 0, 0]);
+    }
+
+    #[test]
+    fn a_custom_colour_is_read_from_mode_color() {
+        // Pen 1's `color` holds red and its `mode_color` blue, which it
+        // plots in; pen 2 has no `mode_color` and plots in its `color`;
+        // pen 3 plots the object's own colour whatever its `mode_color`.
+        let red = rgb(255, 0, 0);
+        let text = made_up_ctb_text(
+            &[(1, red, 0), (2, rgb(0, 128, 0), 0), (3, OBJECT_COLOR, 0)],
+            "",
+        )
+        .replacen(
+            &format!("  color={red}\n"),
+            &format!("  color={red}\n  mode_color={}\n", rgb(0, 0, 255)),
+            1,
+        )
+        .replacen(
+            &format!("  color={OBJECT_COLOR}\n"),
+            &format!("  color={OBJECT_COLOR}\n  mode_color={}\n", rgb(9, 9, 9)),
+            1,
+        );
+        assert_eq!(text.matches("mode_color").count(), 2);
+        let style = PlotStyle::parse_ctb(&ctb_file(&text)).unwrap();
+        assert_eq!(style.color(Color(1)), [0, 0, 255]);
+        assert_eq!(style.color(Color(2)), [0, 128, 0]);
+        assert_eq!(style.color(Color(3)), Color(3).on_paper());
     }
 
     #[test]

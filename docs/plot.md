@@ -32,11 +32,11 @@ What a CTB's pen sets, and what the plot follows:
 
 | A pen's setting | What the plot does |
 |---|---|
-| `color` | Followed. -1 (or -1006632961) plots the object's own colour, in the colour AutoCAD plots that index in ([`render`](render.md#what-it-draws)), index 7 black. Any other value is the colour to plot in: red, green and blue in its low three bytes. |
+| `color` | Followed. -1 (or -1006632961) plots the object's own colour, in the colour AutoCAD plots that index in ([`render`](render.md#what-it-draws)), index 7 black. Any other value means the pen plots in a colour of its own: red, green and blue in the low three bytes of the pen's `mode_color`, where CTB writers keep a custom colour while `color` may hold another value, or of `color` when the pen has no `mode_color`. AutoCAD's own `monochrome.ctb` and `acad.ctb` write no `mode_color`, and the made-up probe below wrote the same colour in both, so AutoCAD has not been seen plotting a pen whose two differ. |
 | `lineweight` | Followed. 0 plots the object's own lineweight, its layer's or AutoCAD's default of 0.25 mm; any other value `n` plots with the lineweight at place `n - 1` of the file's `custom_lineweight_table`, counted from 0, so 1 is its first, 0 mm. AutoCAD 2026 plotted a made-up CTB's pens of `lineweight` 20 and 25 at the table's 0.9 and 1.58 mm, its places 19 and 24, not at 1 and 2 mm. |
 | `screen`, grayscale in `color_policy`, `linetype`, `end_style`, `join_style`, `fill_style`, and the table's `apply_factor` | Not followed yet. The reply's `plot_style.not_followed` lists each one a CTB sets, with what it means, what the plot does instead, and the colour indexes whose pens set it, so nothing is left out in silence. AutoCAD's `monochrome.ctb` and `acad.ctb` set none of them. |
 
-A CTB that cannot be found, or read, is an error (`read_failed`, at `plot_style`) and nothing is written. A named plot style table (STB) is refused: a sheet is plotted through a CTB.
+A NUL byte at the end of a CTB's text, which some writers such as ezdxf add, is ignored. A CTB that cannot be found, or read, is an error (`read_failed`, at `plot_style`) and nothing is written. A named plot style table (STB) is refused: a sheet is plotted through a CTB.
 
 ## The text
 
