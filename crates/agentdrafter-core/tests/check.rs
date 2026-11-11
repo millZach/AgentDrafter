@@ -8,9 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, change_with, check_with, parse_block_library, parse_sheet_description,
+    build_set_with, change_with, check_with, parse_block_library, parse_sheet_description, undo,
     ChangeRequest, CheckReport, CheckRequest, ErrorCode, Finding, Paper, Rule, SetBuildRequest,
-    Settings,
+    Settings, UndoRequest, JOURNAL_FILE,
 };
 use serde_json::json;
 
@@ -763,4 +763,42 @@ objects:
     assert_eq!(object.id, "sheet/fill");
     assert_eq!(object.kind, "hatch");
     close(finding.past.unwrap().left, 1.0);
+}
+
+#[test]
+fn the_journal_and_undo_leave_the_checker_reading_the_sets_files() {
+    let set = demo_set("journal", true);
+    let reply = change_with(
+        &ChangeRequest {
+            set: set.clone(),
+            change_set: json!({"operations": [
+                {"op": "add_text", "sheet": "DEMO-002", "contents": "OFF THE EDGE",
+                 "position": [16.5, 5, 0], "height": 0.2, "style": "notes", "layer": "notes"},
+            ]}),
+            dry_run: false,
+        },
+        &Settings::default(),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    let report = reply.result.unwrap();
+    // The reply carries both the change set's journal entry and its checks.
+    let entry = report.journal_entry.expect("the change set is journalled");
+    let checks = report.checks.unwrap().result.unwrap();
+    assert_eq!(checks.sheets, ["DEMO-002"]);
+    assert!(!checks.passed);
+    assert!(set.join(JOURNAL_FILE).is_file());
+
+    // The journal in the set's folder is no record the checker reads: the
+    // whole set is checked as its records say.
+    let after = check(&set, &[]);
+    assert_eq!(after.findings, checks.findings);
+
+    // Undone, the records are put back, and the checker follows them.
+    let undone = undo(&UndoRequest {
+        set: set.clone(),
+        change_set: entry,
+        dry_run: false,
+    });
+    assert!(undone.ok, "{:#?}", undone.error);
+    passes(&check(&set, &[]));
 }

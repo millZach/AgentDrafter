@@ -8,7 +8,7 @@ A change set is the operations an agent sends together to change a drawing set (
 
 Zach decided on 2026-11-11:
 
-1. **The working revision is the set's own files, edited in place.** A change set writes the set's records, its templates and its rows file, directly, and builds again only the DWGs of the sheets it touched. History is git's, and later the journal's. A DWG is replaced only when it carries AgentDrafter's build mark, as `build --overwrite` replaces one; any other file at a sheet's path may be an original, so that sheet fails and the file is not touched. Revising an existing DWG, an original into a revision, is not part of change sets yet.
+1. **The working revision is the set's own files, edited in place.** A change set writes the set's records, its templates and its rows file, directly, and builds again only the DWGs of the sheets it touched. History is the [journal](journal.md)'s, and git's too when the set is in a repository. A DWG is replaced only when it carries AgentDrafter's build mark, as `build --overwrite` replaces one; any other file at a sheet's path may be an original, so that sheet fails and the file is not touched. Revising an existing DWG, an original into a revision, is not part of change sets yet.
 2. **An edit to an object that comes from a template changes the template.** Every sheet built from it follows, and the reply lists the sheets it reaches.
 3. **An object added to one sheet goes in that sheet's row**, under the row's [`objects`](drawing-set.md#a-rows-own-objects). The template stays shared.
 4. **A template edit is all or nothing across its sheets.** It lands only if every sheet built from that template takes its whole part. Otherwise the template, those sheets' rows and their DWGs stay as they were, byte for byte. Sheets built from other templates still land. ADR-0005 stands.
@@ -100,7 +100,7 @@ failures:
 
 **It is reported until fixed**, under `inconsistent`, by every reply that reads the set's folder: a change set's, a dry run's, and those of `agentdrafter build`, `plot` and `query` given the folder. The reviewer cannot accept a set while it is marked.
 
-**A sheet is cleared by a change set that names it under `fixes` and lands on it.** The change set may hold operations for the sheet or none; either way the sheet is read and built again, and cleared only when it takes its part. A `fixes` naming a sheet the mark does not hold refuses the change set. When the last failure is cleared, the mark and its folder are taken away. Undo, which will clear a mark too, is the journal's ([#10](https://github.com/millZach/AgentDrafter/issues/10)).
+**A sheet is cleared by a change set that names it under `fixes` and lands on it.** The change set may hold operations for the sheet or none; either way the sheet is read and built again, and cleared only when it takes its part. A `fixes` naming a sheet the mark does not hold refuses the change set. When the last failure is cleared, the mark is taken away, and its folder when nothing else is in it. **Undoing the change set** puts the mark back as it was before it ([the journal](journal.md#undo)), which clears the failures that change set marked.
 
 ## A dry run
 
@@ -115,6 +115,7 @@ failures:
 | Key | What it is |
 |---|---|
 | `dry_run` | Whether this was a dry run, which wrote nothing. |
+| `journal_entry` | The [journal](journal.md) entry that records the change set, or the failed attempt; `agentdrafter undo` takes a change set by it. Absent for a dry run, which is not recorded. |
 | `message` | What the change set did, in words. |
 | `landed`, `failed` | How many sheets took their part, and how many did not. |
 | `sheets` | Each sheet the change set touched, in the set's order: whether it took its part, the operations that were its part, whether it was cleared from the mark (`fixed`), whether its DWG was written, what its build wrote (`result`, as `build` reports a sheet), and why it failed (`error`). |
@@ -151,11 +152,10 @@ Only what an operation touched is rewritten. Each record is read into the strict
 
 ## How it works
 
-`crates/agentdrafter-core/src/change/` holds the change set: `operations.rs` the operations, their schemas and reading a change set, `apply.rs` applying it sheet by sheet, `commit.rs` putting its records, DWGs and mark in place together or not at all, and `mod.rs` the reply and the mark. `src/description/edit.rs` edits a record in place and `emit.rs` writes nodes back as text; `mark.rs` reads and writes the mark. Every sheet is read by the same code that reads it for a build, and built by the same code that builds it.
+`crates/agentdrafter-core/src/change/` holds the change set: `operations.rs` the operations, their schemas and reading a change set, `apply.rs` applying it sheet by sheet, `commit.rs` putting its records, DWGs and mark in place together or not at all, with its entry in the journal, `journal.rs` and `undo.rs` the [journal and undo](journal.md), and `mod.rs` the reply and the mark. `src/description/edit.rs` edits a record in place and `emit.rs` writes nodes back as text; `mark.rs` reads and writes the mark. Every sheet is read by the same code that reads it for a build, and built by the same code that builds it.
 
 ## What is not offered yet
 
-- The journal and undo ([#10](https://github.com/millZach/AgentDrafter/issues/10)): history is git's for now, and a mark is cleared only by fixing.
 - Failed checks in a dry run: the [checker](check.md) reads saved files, and a dry run saves none.
 - Revising an existing DWG: a change set edits a drawing set's records, not an original.
 - Change sets on a sheet description outside a drawing set.

@@ -7,4 +7,4 @@ A job's sheets, block library, templates and data form one drawing set. A change
 - The journal, undo states and change lists live in the set's folder and travel with the job. Old undo states are pruned. A set works with git but does not need it.
 - A sheet is never left half-edited.
 - A template is a record of every sheet built from it, so a template edit lands only if every one of those sheets takes its whole part; otherwise none of them takes it, and sheets built from other templates still land. Zach decided this on 2026-11-11.
-- Until the journal is built, the working revision is the set's own files, edited in place, history is git's, and the inconsistent mark is a file in the set's folder (`docs/change-sets.md`).
+- The working revision is the set's own files, edited in place, and the inconsistent mark is a file in the set's folder (`docs/change-sets.md`). The journal beside it records every change set and failed attempt, and undo puts a change set's files back from it, byte for byte, with every later change set's (`docs/journal.md`).

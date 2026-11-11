@@ -80,6 +80,8 @@ Once a change set has landed, its reply carries the checker's reply under `check
 
 A failed check does not make the change set's reply not `ok`, and does not stop the change set from landing. `checks` is absent for a dry run, which saves nothing for the checker to read, and when the change set landed on no sheet. Should the checker not be able to read a sheet it landed on, `checks` holds its error: `{"ok":false,"error":{...}}`.
 
+The change set's [journal](journal.md) entry is written with its files, before the checker reads them; the journal and the undo states in the set's `.agentdrafter` folder are not records, and the checker does not read them. An [undo](journal.md) puts the records back, and `agentdrafter check` then checks the set as they now are; an undo's reply carries no checks.
+
 ## Errors
 
 Errors take the shape and codes a sheet description's do ([Errors](sheet-description.md#errors)).
@@ -98,6 +100,7 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 
 - Checks a set chooses, rule sets of its own, and checks of a trade, which belong in a generator (ADR-0002).
 - A dry run's checks: the checker reads saved files, and a dry run saves none.
+- Checks in an undo's reply: an undo reports the files it put back, not the sheets they draw.
 - A paper placed anywhere but at the origin, or a paper in the set's settings.
 - A cell for a text or mtext on a sheet, outside a block, or for a block's mtext.
 - Text sitting on lines or other objects: `text_on_text` holds text to text.

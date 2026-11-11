@@ -21,6 +21,7 @@ use agentdrafter_core::{
 };
 use agentdrafter_core::{change_set_schema, change_with, operations, ChangeRequest};
 use agentdrafter_core::{check_with, CheckRequest};
+use agentdrafter_core::{journal, undo, JournalRequest, UndoRequest};
 use agentdrafter_core::{query_with, End, Matching, Measure, Query, QueryRequest, Selection};
 use serde::Serialize;
 use serde_json::json;
@@ -31,6 +32,8 @@ const SCHEMA_USAGE: &str =
     "agentdrafter schema [sheet-description | block-library | template | set | rows | change-set]";
 const OPERATIONS_USAGE: &str = "agentdrafter operations";
 const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder> <change-set.json | -> [--dry-run] [--fonts <folder>]...";
+const JOURNAL_USAGE: &str = "agentdrafter journal <drawing-set-folder>";
+const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [--dry-run]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...";
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]...";
@@ -51,7 +54,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
         return reply::<()>(Err(Error::usage(format!(
-            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE} | {CHECK_USAGE}"
+            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE} | {JOURNAL_USAGE} | {UNDO_USAGE} | {CHECK_USAGE}"
         ))));
     };
     match command.to_str() {
@@ -92,6 +95,14 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
             Ok((request, settings)) => send(change_with(&request, &settings)),
             Err(error) => reply::<()>(Err(error)),
         },
+        Some("journal") => match parse_journal(args) {
+            Ok(request) => send(journal(&request)),
+            Err(error) => reply::<()>(Err(error)),
+        },
+        Some("undo") => match parse_undo(args) {
+            Ok(request) => send(undo(&request)),
+            Err(error) => reply::<()>(Err(error)),
+        },
         Some("check") => match parse_check(args) {
             Ok((request, settings)) => reply(check_with(&request, &settings)),
             Err(error) => reply::<()>(Err(error)),
@@ -120,7 +131,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         Some("help" | "--help" | "-h") => reply(Ok(help())),
         Some("--version" | "-V") => reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") }))),
         _ => reply::<()>(Err(Error::usage(format!(
-            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE} | {CHECK_USAGE}",
+            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE} | {MEASURE_USAGE} | {RENDER_USAGE} | {PLOT_USAGE} | {STALE_USAGE} | {QUERY_USAGE} | {OPERATIONS_USAGE} | {CHANGE_USAGE} | {JOURNAL_USAGE} | {UNDO_USAGE} | {CHECK_USAGE}",
             command.to_string_lossy()
         )))),
     }
@@ -391,6 +402,67 @@ fn parse_change(
         },
         settings(fonts),
     ))
+}
+
+/// Reads `journal`'s argument: the set's folder.
+fn parse_journal(args: impl Iterator<Item = OsString>) -> Result<JournalRequest, Error> {
+    let given: Vec<OsString> = args.collect();
+    if let Some(flag) = given
+        .iter()
+        .filter_map(|a| a.to_str())
+        .find(|a| a.starts_with('-') && a.len() > 1)
+    {
+        return Err(Error::usage(format!(
+            "journal takes no option `{flag}`; usage: {JOURNAL_USAGE}"
+        )));
+    }
+    let [set] = <[OsString; 1]>::try_from(given).map_err(|given| {
+        Error::usage(format!(
+            "journal takes a drawing set's folder, found {} arguments; usage: {JOURNAL_USAGE}",
+            given.len()
+        ))
+    })?;
+    Ok(JournalRequest {
+        set: PathBuf::from(set),
+    })
+}
+
+/// Reads `undo`'s arguments: the set's folder, the change set's entry in
+/// the journal, and the options.
+fn parse_undo(args: impl Iterator<Item = OsString>) -> Result<UndoRequest, Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {UNDO_USAGE}"));
+    let mut given: Vec<OsString> = Vec::new();
+    let mut dry_run = false;
+    for arg in args {
+        match arg.to_str() {
+            Some("--dry-run") => dry_run = true,
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("undo takes no option `{flag}`")))
+            }
+            _ => given.push(arg),
+        }
+    }
+    let [set, change_set] = <[OsString; 2]>::try_from(given).map_err(|given| {
+        usage(format!(
+            "undo takes a drawing set's folder and a change set, found {} arguments",
+            given.len()
+        ))
+    })?;
+    let change_set = change_set
+        .to_str()
+        .and_then(|n| n.parse::<u64>().ok())
+        .ok_or_else(|| {
+            usage(format!(
+                "undo takes the change set by its entry's number in the journal, such as 3, \
+                 not `{}`",
+                change_set.to_string_lossy()
+            ))
+        })?;
+    Ok(UndoRequest {
+        set: PathBuf::from(set),
+        change_set,
+        dry_run,
+    })
 }
 
 fn parse_query(
@@ -803,6 +875,25 @@ fn help() -> serde_json::Value {
                          says what is wrong in numbers in the declared unit, within a \
                          tolerance of 0.01 mm on paper. A failed check is ok and listed under \
                          findings; --sheet checks only the sheets it names.",
+            },
+            "journal": {
+                "usage": JOURNAL_USAGE,
+                "does": "Lists a drawing set's journal, kept in its folder whether or not it is \
+                         a git repository: every change set, with its operations, the sheets it \
+                         landed and failed on and the files it wrote; every failed attempt, \
+                         which changed nothing; and every undo. It says which change sets can \
+                         still be undone: the undo states of the 50 newest change sets are \
+                         kept, and an older one's are pruned.",
+            },
+            "undo": {
+                "usage": UNDO_USAGE,
+                "does": "Undoes a change set, named by its entry's number in the journal, and \
+                         every later change set with it, the newest first: every file they \
+                         wrote, records, DWGs and the inconsistent mark, goes back byte for \
+                         byte as it was before, and a file they made is taken away. It refuses, \
+                         changing nothing and naming the files, when a file was changed since \
+                         by hand, and when a change set's undo state was pruned. --dry-run \
+                         reports what it would do and writes nothing.",
             },
         },
         "fonts": format!(

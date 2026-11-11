@@ -71,6 +71,12 @@ pub enum ErrorCode {
     /// Some sheets of a drawing set failed and were not written; the others
     /// were built. The reply says which.
     SheetsFailed,
+    /// An undo needs a change set's undo state, which was pruned: only the
+    /// newest change sets keep theirs.
+    Pruned,
+    /// An undo would put back a file that was changed since the change set
+    /// left it, by hand or by another program, and so lose that change.
+    ChangedByHand,
     /// Two objects in one sheet description or template carry the same ID,
     /// or IDs that differ only in case.
     DuplicateId,
