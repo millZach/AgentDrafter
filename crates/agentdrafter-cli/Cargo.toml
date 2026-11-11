@@ -1,0 +1,17 @@
+[package]
+name = "agentdrafter-cli"
+description = "The agentdrafter command: a thin command line over agentdrafter-core that prints JSON."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "agentdrafter"
+path = "src/main.rs"
+
+[dependencies]
+agentdrafter-core = { path = "../agentdrafter-core" }
+serde = "1"
+serde_json = "1"

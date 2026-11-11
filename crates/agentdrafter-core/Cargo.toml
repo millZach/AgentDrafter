@@ -1,0 +1,13 @@
+[package]
+name = "agentdrafter-core"
+description = "AgentDrafter's core: the library that knows drawings. Every interface is a thin layer over it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+acadrust.workspace = true
+saphyr-parser = "0.3.3"
+serde = { version = "1", features = ["derive"] }

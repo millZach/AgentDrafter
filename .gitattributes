@@ -1,0 +1,7 @@
+# Text files are stored and checked out with LF on every operating system,
+# so formatting checks and line and column numbers agree everywhere.
+* text=auto eol=lf
+
+# Drawings are bytes, never text.
+*.dwg binary
+*.dxf -text

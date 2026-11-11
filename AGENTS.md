@@ -4,7 +4,7 @@ AgentDrafter is an open-source CAD engine built for agents first. An agent creat
 
 This is a brief, not a specification. It names what is expensive to get wrong and leaves the rest to you. Where it does not reach, work out what AgentDrafter would do from `CONTEXT.md`, the ADRs and `docs/plan.md`, and say in the pull request what you worked out.
 
-**Status: planned, not built.** `docs/plan.md` holds the agreed plan. No code exists yet. The stack is decided: a Rust core that reads and writes DWG through acadrust, a Python binding and thin interfaces over it, and a browser viewer that draws with the same Rust code compiled to WebAssembly, with TypeScript and React around it.
+**Status: walking skeleton.** `agentdrafter build` turns a sheet description that holds lines into a DWG in the 2018 format; nothing else is built yet. `docs/plan.md` holds the agreed plan. The stack is decided: a Rust core that reads and writes DWG through acadrust, a Python binding and thin interfaces over it, and a browser viewer that draws with the same Rust code compiled to WebAssembly, with TypeScript and React around it.
 
 ## What is expensive to get wrong
 
@@ -22,18 +22,30 @@ This is a brief, not a specification. It names what is expensive to get wrong an
 - `CONTEXT.md` is the glossary. Write in its terms; when the work needs a word it has not got, add the entry in the same pull request.
 - `docs/plan.md` is the agreed plan: the first usable version, what comes after, the rules of the engine and what is still open.
 - `docs/adr/` records the decisions that are hard to reverse. Read the ones that touch your area before changing it, and amend or supersede one you contradict. `docs/agents/domain.md` has the rules.
+- `docs/sheet-description.md` sets out the sheet description: its keys, its units and the strict YAML subset it is written in.
 
 ## Run, test and prove
 
-Nothing to run yet. When the first code lands, this section names the commands for building, testing and proving a change on the real surface, and CI is added with the first test.
+The code is one Cargo workspace. `crates/agentdrafter-core` is the core, the library that knows drawings; its entry points take and return plain data, and acadrust sits behind its one seam, `src/dwg.rs`. `crates/agentdrafter-cli` is the `agentdrafter` command, a thin layer that prints the core's reply as JSON. The Rust toolchain is pinned in `rust-toolchain.toml`.
 
+- Build: `cargo build --workspace`. On forge, add `-j4` and keep `target/` inside the checkout, not under `/tmp`.
+- Run: `cargo run -p agentdrafter-cli -- build examples/one-line.yaml` writes `examples/one-line.dwg` and prints one line of JSON. Add `--overwrite` to build it again.
+- Test: `cargo test --workspace`.
+- Before pushing, run what CI runs: `cargo fmt --all --check`, then `cargo clippy --workspace --all-targets --locked -- -D warnings`, then `cargo test --workspace --locked`.
+- Prove a change to DWG writing with the judge: build the DWG with `agentdrafter build` and have AutoCAD open and audit it. Until the judge moves into this repository, that is the DWG bake-off's judge on forge, run by hand. A new file passes when AutoCAD opens it without recovery and its audit finds no errors. Say in the pull request what the judge found.
 - CI runs on GitHub's Windows, Linux and macOS runners, never on Zach's laptop.
 - A DWG that AgentDrafter wrote is proven by AutoCAD: it opens without recovery, its audit finds no errors, and AutoCAD's own reading of the result matches its reading of the original outside what was changed. AutoCAD is the judge in tests on a machine that has a licence. It is never part of a job and never part of CI.
 - Anything a reviewer will see, starting with the viewer, is shown as a prototype that opens on a phone before it is built for real.
 
 ## The merge bar
 
-To be named when CI exists: the jobs that must be green on a pull request's latest commit before it merges.
+A pull request merges only when these jobs of the `CI` workflow (`.github/workflows/ci.yml`) are green on its latest commit:
+
+- `check (ubuntu-latest)`
+- `check (windows-latest)`
+- `check (macos-latest)`
+
+Each runs formatting, lints with warnings as errors, and tests. A pull request that touches DWG reading or writing also states the judge's result before it merges.
 
 ## Agent skills
 

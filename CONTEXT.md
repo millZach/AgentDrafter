@@ -78,6 +78,10 @@ _Avoid_: script, spec, source file
 Producing a DWG from a sheet description.
 _Avoid_: compile, render, export
 
+**Declared unit**:
+The unit a sheet description states for its numbers, such as `mm`. A number with no unit of its own is in the declared unit; a number that carries its own unit is converted to it. There is no default unit.
+_Avoid_: default unit, base unit
+
 **Original**:
 A DWG that someone else drew, such as a plant's drawing. It is read-only to AgentDrafter and is never overwritten.
 _Avoid_: source drawing, input file
@@ -140,6 +144,10 @@ Code an agent sends to run inside AgentDrafter for an edit no operation covers. 
 _Avoid_: macro, plugin
 
 ### Reaching AgentDrafter
+
+**Core**:
+The Rust library that knows drawings. Every interface is a thin layer over it, and it reads and writes DWG through acadrust behind one seam.
+_Avoid_: backend, server
 
 **Interface**:
 One of the four ways in: the command line, the MCP server, the Python library and the local HTTP API. All four expose the same operations with the same behaviour.
