@@ -26,6 +26,9 @@
 //! - [`plot`] draws a sheet description or a DWG to a PDF at its sheet
 //!   size, through a CTB plot style, with searchable text, stamped as a PNG
 //!   is; [`plot_set`] plots every sheet of a drawing set.
+//! - [`query`] asks a drawing set, or one sheet description, what is on its
+//!   sheets: objects by ID, name, block, attribute or text, the blocks
+//!   inserted, inserts' attributes, a distance and a sheet's extents.
 //!
 //! [`Settings`] say where the machine keeps its fonts and plot styles;
 //! [`build`], [`measure_text`], [`render`] and [`plot`] read them from the
@@ -47,6 +50,7 @@ mod output;
 mod pdf;
 mod plot;
 mod plot_style;
+mod query;
 mod raster;
 mod render;
 mod reply;
@@ -63,8 +67,8 @@ pub use description::{parse_block_library, parse_sheet_description, read_sheet_d
 pub use error::{Error, ErrorCode};
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use model::{
-    Arc, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object, Point3,
-    Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
+    Arc, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype, Lineweight, Object,
+    Point3, Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
 };
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use plot::{
@@ -72,6 +76,11 @@ pub use plot::{
     PlotSetRequest, PlotStyleUsed, PlottedSheet, SheetSize, BUILT_IN_PLOT_STYLE,
 };
 pub use plot_style::NotFollowed;
+pub use query::{
+    query, query_with, Answer, AttributeValues, BlockInserts, BlockText, End, Extents, FoundObject,
+    InsertAttributes, Matching, Measure, MeasuredPoint, Query, QueryReport, QueryRequest,
+    Selection, SheetBlocks, SheetExtents, WrittenAt, EXTENTS_TOLERANCE,
+};
 pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;
 pub use set::{

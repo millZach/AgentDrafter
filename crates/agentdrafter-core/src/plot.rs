@@ -298,8 +298,9 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
             let pdf = output.join(format!("{}.pdf", row.sheet));
             let mut notices = Vec::new();
             let plotted = read_text(&template, "the template").and_then(|(bytes, text)| {
-                let (sheet, library) =
+                let (read, library) =
                     template_at(&text, &template, row, &rows_file, set.units, &mut notices)?;
+                let sheet = read.sheet;
                 let mut files = vec![
                     (SourceKind::Template, template.clone(), bytes),
                     (SourceKind::Rows, rows_file.clone(), rows_bytes.clone()),

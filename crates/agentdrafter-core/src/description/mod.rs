@@ -10,16 +10,19 @@
 //! [`layers`] reads linetypes and layers, [`objects`] reads the objects,
 //! [`hatch`] reads hatch patterns and hatches, [`text`] reads text styles
 //! and text, [`blocks`] reads block libraries, their blocks and inserts of
-//! them, and [`schema`] states the same keys as a JSON Schema for agents to
-//! read. [`set`] reads a drawing set's settings and rows, [`template`] fills
+//! them, [`ids`] reads each object's ID, [`records`] gives a sheet with its
+//! objects' IDs, and [`schema`] states the same keys as a JSON Schema for
+//! agents to read. [`set`] reads a drawing set's settings and rows, [`template`] fills
 //! a template in from a row, and [`set_schema`] states their schemas.
 
 mod block_schema;
 pub(crate) mod blocks;
 mod hatch;
 mod hatch_schema;
+pub(crate) mod ids;
 mod layers;
 mod objects;
+mod records;
 pub(crate) mod schema;
 mod set;
 mod set_schema;
@@ -30,6 +33,7 @@ mod text;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ids::ObjectRecord;
 use objects::{Place, Tables};
 use strict_yaml::{index_path, key_path, Entry, Kind, Node, Pos};
 
@@ -38,6 +42,7 @@ use crate::model::{BlockLibrary, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 pub use blocks::parse_block_library;
+pub(crate) use records::{read_sheet_record, SheetRecord};
 pub(crate) use set::{read_rows, read_set_settings, rows_at};
 pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
 pub(crate) use template::{read_template, template_at};
@@ -101,9 +106,18 @@ fn on_its_own(
     text: &str,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
 ) -> Result<Sheet, Error> {
+    on_its_own_with_records(text, load).map(|(sheet, _)| sheet)
+}
+
+/// Reads a sheet description built on its own as [`on_its_own`] does, with
+/// the record of each of its objects.
+fn on_its_own_with_records(
+    text: &str,
+    load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+) -> Result<(Sheet, Vec<ObjectRecord>), Error> {
     let mut root = strict_yaml::read(text)?;
     template::refuse_row_values(root.as_mut())?;
-    sheet(root, load, None)
+    sheet_and_records(root, load, None)
 }
 
 /// The text of the file at `path`. `what` names it in the error, such as
@@ -150,17 +164,29 @@ fn library_beside<'a>(
     }
 }
 
-/// Reads a sheet description, or a template once a row has filled it in,
-/// from its tree. `load` reads the block library at the path the sheet
-/// writes, if it names one: an error it returns about a file is the
-/// library's own, and one about no file is placed at `block_library`.
-/// `set_units` is the declared unit of the drawing set the sheet is built
-/// in, if it is built in one: the sheet must be in it too.
+/// Reads a sheet as [`sheet_and_records`] does, without its objects' records.
+#[cfg(test)]
 fn sheet(
     root: Option<Node>,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
     set_units: Option<Unit>,
 ) -> Result<Sheet, Error> {
+    sheet_and_records(root, load, set_units).map(|(sheet, _)| sheet)
+}
+
+/// Reads a sheet description, or a template once a row has filled it in,
+/// from its tree, with the record of each of its objects, in the same
+/// order: where it is written and the ID it carries there. `load` reads the
+/// block library at the path the sheet writes, if it names one: an error it
+/// returns about a file is the library's own, and one about no file is
+/// placed at `block_library`. `set_units` is the declared unit of the
+/// drawing set the sheet is built in, if it is built in one: the sheet must
+/// be in it too.
+fn sheet_and_records(
+    root: Option<Node>,
+    load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+    set_units: Option<Unit>,
+) -> Result<(Sheet, Vec<ObjectRecord>), Error> {
     let Some(root) = root else {
         return Err(Error::new(
             ErrorCode::MissingKey,
@@ -242,13 +268,19 @@ fn sheet(
     };
     let mut place = Place::Sheet {
         library: library.as_ref(),
-        names: Vec::new(),
+        objects: Vec::new(),
     };
     let objects = list
         .iter()
         .enumerate()
         .map(|(i, node)| objects::object(node, &index_path("objects", i), &tables, &mut place))
         .collect::<Result<_, _>>()?;
+    let Place::Sheet {
+        objects: records, ..
+    } = place
+    else {
+        unreachable!("a sheet's objects are read on a sheet")
+    };
     let mut sheet = Sheet {
         units,
         block_library,
@@ -261,7 +293,7 @@ fn sheet(
     if let Some(library) = &library {
         blocks::take_from_library(&mut sheet, library, &fields)?;
     }
-    Ok(sheet)
+    Ok((sheet, records))
 }
 
 fn point(node: &Node, path: &str, units: Unit) -> Result<Point3, Error> {
@@ -544,3 +576,6 @@ mod block_tests;
 
 #[cfg(test)]
 mod set_tests;
+
+#[cfg(test)]
+mod id_tests;

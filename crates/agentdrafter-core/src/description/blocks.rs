@@ -58,22 +58,18 @@ pub(crate) const ATTDEF_KEYS: [&str; 11] = [
     "layer",
 ];
 
-/// The keys an insert takes.
-pub(crate) const INSERT_KEYS: [&str; 7] = [
+/// The keys an insert takes, besides those every object on a sheet takes.
+pub(crate) const INSERT_KEYS: [&str; 6] = [
     "block",
     "position",
     "scale",
     "rotation",
     "attributes",
-    "name",
     "layer",
 ];
 
 /// The longest attribute tag AgentDrafter writes, in characters.
 pub(crate) const LONGEST_TAG: usize = 255;
-
-/// The longest name an object can carry, in characters.
-pub(crate) const LONGEST_NAME: usize = 255;
 
 /// Characters a block library's path cannot hold, so that it names the same
 /// file on Windows, Linux and macOS: `\` (folders are separated by `/`), the
@@ -243,14 +239,13 @@ pub(super) fn attribute_definition(
     })
 }
 
-/// An insert of a block from `library`. `names` holds the names given on
-/// the sheet before it, each with where it was given.
+/// An insert of a block from `library`. Its name, which every object on a
+/// sheet may carry, is read with its ID ([`super::ids`]).
 pub(super) fn insert(
     fields: &Fields,
     units: Unit,
     layer: String,
     library: Option<&BlockLibrary>,
-    names: &mut Vec<(String, Pos)>,
 ) -> Result<Insert, Error> {
     let block = block_named(fields, library)?;
     let scale = match fields.get("scale") {
@@ -273,10 +268,6 @@ pub(super) fn insert(
         None => 0.0,
     };
     let attributes = attributes(fields, block)?;
-    let name = match fields.get("name") {
-        Some(node) => Some(object_name(node, &fields.path_of("name"), names)?),
-        None => None,
-    };
     Ok(Insert {
         block: block.name.clone(),
         position: point(
@@ -287,7 +278,7 @@ pub(super) fn insert(
         scale,
         rotation,
         attributes,
-        name,
+        name: None,
         layer,
     })
 }
@@ -424,45 +415,6 @@ fn tag_problem(tag: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-/// The name an object carries, which no other object on the sheet carries,
-/// ignoring case. `names` holds the names given before it.
-fn object_name(node: &Node, path: &str, names: &mut Vec<(String, Pos)>) -> Result<String, Error> {
-    let name = scalar(node, path, "a name, text such as `jb`")?;
-    let problem = if name.is_empty() {
-        Some("a name cannot be empty".to_owned())
-    } else if name.chars().count() > LONGEST_NAME {
-        Some(format!("a name has at most {LONGEST_NAME} characters"))
-    } else if name.trim() != name {
-        Some("a name cannot start or end with a space".to_owned())
-    } else {
-        name.chars().find(|c| c.is_control()).map(|c| {
-            format!(
-                "a name cannot hold the control character `{}`",
-                c.escape_default()
-            )
-        })
-    };
-    if let Some(problem) = problem {
-        return Err(bad_value(node, path, problem));
-    }
-    let folded = name.to_lowercase();
-    if let Some((_, first)) = names.iter().find(|(n, _)| *n == folded) {
-        return Err(at(
-            Error::new(
-                ErrorCode::DuplicateName,
-                format!(
-                    "the name `{name}` is given at line {} already; an agent selects an object by its name, so each name is given once on a sheet, and names that differ only in case are one name",
-                    first.line
-                ),
-            ),
-            path,
-            node.at,
-        ));
-    }
-    names.push((folded, node.at));
-    Ok(name.to_owned())
 }
 
 /// The path of a block library as a sheet writes it: relative to the

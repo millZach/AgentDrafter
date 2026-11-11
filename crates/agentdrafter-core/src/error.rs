@@ -71,6 +71,9 @@ pub enum ErrorCode {
     /// Some sheets of a drawing set failed and were not written; the others
     /// were built. The reply says which.
     SheetsFailed,
+    /// Two objects in one sheet description or template carry the same ID,
+    /// or IDs that differ only in case.
+    DuplicateId,
 }
 
 /// An error from the core, ready to report through any interface.

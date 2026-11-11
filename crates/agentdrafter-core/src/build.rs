@@ -8,10 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::description::read_sheet_description;
+use crate::description::{read_sheet_record, SheetRecord};
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::Sheet;
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -78,20 +77,21 @@ pub fn build(request: &BuildRequest) -> Result<BuildReport, Error> {
 /// description names is read from beside it.
 pub fn build_with(request: &BuildRequest, settings: &Settings) -> Result<BuildReport, Error> {
     let description = request.description.as_path();
-    let sheet = read_sheet_description(description)?;
+    let record = read_sheet_record(description)?;
     let output = request
         .output
         .clone()
         .unwrap_or_else(|| description.with_extension("dwg"));
-    build_sheet(&sheet, description, &output, request.overwrite, settings)
+    build_sheet(&record, description, &output, request.overwrite, settings)
 }
 
-/// Builds `sheet`, read from the sheet description or template at
-/// `description`, into a DWG at `output`, written whole or not at all. An
-/// existing file there is replaced only when `overwrite` is asked for and it
-/// carries AgentDrafter's build mark.
+/// Builds the sheet `record` holds, read from the sheet description or
+/// template at `description`, into a DWG at `output`, written whole or not
+/// at all, each object carrying the ID and name its record gives it. An
+/// existing file there is replaced only when `overwrite` is asked for and
+/// it carries AgentDrafter's build mark.
 pub(crate) fn build_sheet(
-    sheet: &Sheet,
+    record: &SheetRecord,
     description: &Path,
     output: &Path,
     overwrite: bool,
@@ -114,9 +114,10 @@ pub(crate) fn build_sheet(
         refuse_unless_built(output)?;
     }
 
+    let sheet = &record.sheet;
     let fonts = SheetFonts::find(sheet, settings);
     let bytes =
-        dwg::write_new_sheet(sheet, &|text| fonts.start(text)).map_err(|e| e.in_file(output))?;
+        dwg::write_new_sheet(record, &|text| fonts.start(text)).map_err(|e| e.in_file(output))?;
     write_whole(output, &bytes)?;
 
     let mut objects = BTreeMap::new();
