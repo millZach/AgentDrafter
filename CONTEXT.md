@@ -40,6 +40,18 @@ _Avoid_: project, package, workspace
 Any single thing in a drawing: a line, a piece of text, a block insert.
 _Avoid_: entity, element, shape
 
+**Layer**:
+A named group of objects in a drawing, as in AutoCAD. An object sits on one layer and draws with the layer's colour, linetype and lineweight.
+_Avoid_: level, class
+
+**Linetype**:
+A named pattern of dashes, gaps and dots that a layer draws its objects with, such as `HIDDEN`. Every linetype but `Continuous` comes from a definition in the sheet description.
+_Avoid_: line style, dash pattern
+
+**Lineweight**:
+The pen width a layer plots with, one of AutoCAD's standard widths in millimetres. It is a width on paper, so it is not in the declared unit.
+_Avoid_: line width, pen size, thickness (a thickness is AutoCAD's extrusion of an object)
+
 **Block**:
 A named group of objects defined once and inserted many times, as in AutoCAD.
 _Avoid_: symbol, component, cell

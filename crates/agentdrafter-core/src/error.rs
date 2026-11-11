@@ -37,6 +37,12 @@ pub enum ErrorCode {
     WrongType,
     /// A value that should be a number is not one.
     BadNumber,
+    /// A value of the right shape that is not allowed, such as a colour
+    /// outside 1 to 255 or a radius that is not positive.
+    BadValue,
+    /// A name that refers to nothing the sheet description defines, such as
+    /// a layer that is not under `layers`.
+    UnknownName,
     /// The DWG to write already exists and replacing it was not asked for.
     OutputExists,
     /// Replacing was asked for, but the file at the output path is not a DWG

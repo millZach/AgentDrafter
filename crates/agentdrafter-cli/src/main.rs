@@ -11,11 +11,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use agentdrafter_core::{build, BuildRequest, Error, ErrorCode, Reply};
+use agentdrafter_core::{build, sheet_description_schema, BuildRequest, Error, ErrorCode, Reply};
 use serde::Serialize;
 use serde_json::json;
 
 const BUILD_USAGE: &str = "agentdrafter build <sheet-description> [--output <dwg>] [--overwrite]";
+const SCHEMA_USAGE: &str = "agentdrafter schema";
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -29,7 +30,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
         return reply::<()>(Err(Error::usage(format!(
-            "no command given; usage: {BUILD_USAGE}"
+            "no command given; usage: {BUILD_USAGE} | {SCHEMA_USAGE}"
         ))));
     };
     match command.to_str() {
@@ -37,10 +38,17 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
             Ok(request) => reply(build(&request)),
             Err(error) => reply::<()>(Err(error)),
         },
+        Some("schema") => match args.next() {
+            None => reply(Ok(sheet_description_schema())),
+            Some(arg) => reply::<()>(Err(Error::usage(format!(
+                "schema takes no arguments, found `{}`; usage: {SCHEMA_USAGE}",
+                arg.to_string_lossy()
+            )))),
+        },
         Some("help" | "--help" | "-h") => reply(Ok(help())),
         Some("--version" | "-V") => reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") }))),
         _ => reply::<()>(Err(Error::usage(format!(
-            "unknown command `{}`; usage: {BUILD_USAGE}",
+            "unknown command `{}`; usage: {BUILD_USAGE} | {SCHEMA_USAGE}",
             command.to_string_lossy()
         )))),
     }
@@ -99,6 +107,11 @@ fn help() -> serde_json::Value {
                          --output names another path. An existing file is never replaced \
                          without --overwrite, and --overwrite replaces only a DWG AgentDrafter \
                          built.",
+            },
+            "schema": {
+                "usage": SCHEMA_USAGE,
+                "does": "Prints the sheet description's schema: a JSON Schema (draft 2020-12) of \
+                         every key a sheet description may hold, with what each means.",
             },
         },
         "output": "One line of JSON on standard output: {\"ok\": true, \"result\": ...} or \

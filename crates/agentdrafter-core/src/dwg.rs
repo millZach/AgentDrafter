@@ -10,15 +10,24 @@
 //! `CadDocument` and `EntityType`, stay as acadrust spells them.
 
 use std::any::Any;
+use std::f64::consts::TAU;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
-use acadrust::entities::{EntityType, Line as DwgLine};
-use acadrust::types::{DxfVersion, Vector3};
+use acadrust::entities::{
+    Arc as DwgArc, Circle as DwgCircle, Ellipse as DwgEllipse, EntityCommon, EntityType,
+    Line as DwgLine, LwPolyline, LwVertex, Polyline3D, Spline as DwgSpline,
+};
+use acadrust::tables::{Layer as DwgLayer, LineType, LineTypeElement};
+use acadrust::types::{Color, DxfVersion, LineWeight, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, DwgWriter};
 
+use crate::description::normalize_degrees;
 use crate::error::{Error, ErrorCode};
-use crate::model::{DrawingContents, Line, Object, Point3, Sheet};
+use crate::model::{
+    Arc, Circle, DrawingContents, Ellipse, Layer, Line, Linetype, Lineweight, Object, Point3,
+    Polyline, Sheet, Spline, BUILT_IN_LINETYPES, FIT_DEGREE, LAYER_ZERO,
+};
 use crate::units::Unit;
 
 /// The DWG version a new sheet is written in: the 2018 format, AC1032 (ADR-0006).
@@ -28,6 +37,14 @@ const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;
 /// it, written into every DWG AgentDrafter builds. A build replaces an
 /// existing DWG only when it carries this property with this value.
 const BUILD_MARK: (&str, &str) = ("AgentDrafter", "build");
+
+/// AutoCAD's own knot spacing for a curve through fit points: by the chord
+/// length between them.
+const CHORD_KNOTS: i32 = 0;
+
+/// How far a knot or an ellipse's end parameter may sit from where it
+/// belongs and still be read as there.
+const TOLERANCE: f64 = 1e-12;
 
 /// The DWG version a new sheet is written in, as the DWG names it.
 pub(crate) fn new_sheet_version() -> String {
@@ -45,13 +62,40 @@ pub(crate) fn write_new_sheet(sheet: &Sheet) -> Result<Vec<u8>, Error> {
         .summary_info
         .custom_properties
         .push((name.to_owned(), value.to_owned()));
-    for object in &sheet.objects {
-        let dwg_object = match object {
-            Object::Line(line) => {
-                EntityType::Line(DwgLine::from_points(vector(line.from), vector(line.to)))
+    for linetype in &sheet.linetypes {
+        drawing
+            .line_types
+            .add(dwg_linetype(linetype))
+            .map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!(
+                        "could not add linetype `{}` to the drawing: {e}",
+                        linetype.name
+                    ),
+                )
+            })?;
+    }
+    for layer in &sheet.layers {
+        match drawing.layers.get_mut(&layer.name) {
+            // Layer 0 is in every drawing: the sheet sets its properties.
+            Some(existing) => set_layer_properties(existing, layer),
+            None => {
+                let mut dwg_layer = DwgLayer::new(layer.name.clone());
+                set_layer_properties(&mut dwg_layer, layer);
+                drawing.layers.add(dwg_layer).map_err(|e| {
+                    Error::new(
+                        ErrorCode::DwgWrite,
+                        format!("could not add layer `{}` to the drawing: {e}", layer.name),
+                    )
+                })?;
             }
-        };
-        drawing.add_entity(dwg_object).map_err(|e| {
+        }
+    }
+    // Layers and linetypes take their handles before the objects take theirs.
+    drawing.assign_table_entry_handles();
+    for object in &sheet.objects {
+        drawing.add_entity(dwg_object(object)).map_err(|e| {
             Error::new(
                 ErrorCode::DwgWrite,
                 format!("could not add a {} to the drawing: {e}", object.type_name()),
@@ -74,25 +118,340 @@ pub(crate) fn write_new_sheet(sheet: &Sheet) -> Result<Vec<u8>, Error> {
     }
 }
 
-/// Reads the model space of the DWG at `path`.
+fn dwg_linetype(linetype: &Linetype) -> LineType {
+    let mut dwg_linetype = LineType::new(linetype.name.clone());
+    dwg_linetype.description = linetype.description.clone();
+    dwg_linetype.elements = linetype
+        .pattern
+        .iter()
+        .map(|&length| LineTypeElement {
+            length,
+            complex: None,
+        })
+        .collect();
+    dwg_linetype.pattern_length = linetype.pattern.iter().map(|l| l.abs()).sum();
+    dwg_linetype
+}
+
+fn set_layer_properties(dwg_layer: &mut DwgLayer, layer: &Layer) {
+    dwg_layer.color = Color::Index(layer.color);
+    dwg_layer.line_type = layer.linetype.clone();
+    dwg_layer.line_weight = match layer.lineweight {
+        Some(weight) => LineWeight::Value(weight.hundredths()),
+        None => LineWeight::Default,
+    };
+}
+
+/// The DWG object for one of ours, on its layer. It takes its colour,
+/// linetype and lineweight from the layer, as acadrust's objects do unless
+/// told otherwise.
+fn dwg_object(object: &Object) -> EntityType {
+    let mut dwg_object = match object {
+        Object::Line(line) => {
+            EntityType::Line(DwgLine::from_points(vector(line.from), vector(line.to)))
+        }
+        Object::Polyline(polyline) => dwg_polyline(polyline),
+        Object::Arc(arc) => EntityType::Arc(DwgArc::from_center_radius_angles(
+            vector(arc.center),
+            arc.radius,
+            arc.start_angle.to_radians(),
+            arc.end_angle.to_radians(),
+        )),
+        Object::Circle(circle) => EntityType::Circle(DwgCircle::from_center_radius(
+            vector(circle.center),
+            circle.radius,
+        )),
+        Object::Ellipse(ellipse) => EntityType::Ellipse(dwg_ellipse(ellipse)),
+        Object::Spline(spline) => EntityType::Spline(dwg_spline(spline)),
+    };
+    object
+        .layer()
+        .clone_into(&mut dwg_object.common_mut().layer);
+    dwg_object
+}
+
+/// A polyline whose points share one `z` is a lightweight polyline at that
+/// elevation, as AutoCAD's PLINE draws it; any other is a 3D polyline.
+fn dwg_polyline(polyline: &Polyline) -> EntityType {
+    let elevation = polyline.points.first().map_or(0.0, |p| p.z);
+    if polyline.points.iter().all(|p| p.z == elevation) {
+        let mut flat = LwPolyline::from_points(
+            polyline
+                .points
+                .iter()
+                .map(|p| Vector2::new(p.x, p.y))
+                .collect(),
+        );
+        flat.elevation = elevation;
+        flat.is_closed = polyline.closed;
+        EntityType::LwPolyline(flat)
+    } else {
+        let mut spatial =
+            Polyline3D::from_points(polyline.points.iter().map(|&p| vector(p)).collect());
+        spatial.flags.closed = polyline.closed;
+        EntityType::Polyline3D(spatial)
+    }
+}
+
+fn dwg_ellipse(ellipse: &Ellipse) -> DwgEllipse {
+    let mut dwg_ellipse = DwgEllipse::from_center_axes(
+        vector(ellipse.center),
+        vector(ellipse.major_axis),
+        ellipse.ratio,
+    );
+    if !ellipse.is_whole() {
+        let start = parameter(ellipse.start_angle, ellipse.ratio);
+        let end = parameter(ellipse.end_angle, ellipse.ratio);
+        dwg_ellipse.start_parameter = start;
+        // The curve runs anticlockwise from start to end. AutoCAD keeps the
+        // end parameter above the start, so an arc that crosses the major
+        // axis ends past 2π; written that way, AutoCAD reads back the bytes
+        // as written.
+        dwg_ellipse.end_parameter = if end > start { end } else { end + TAU };
+    }
+    dwg_ellipse
+}
+
+/// The DWG's parameter, in `[0, 2π)`, for the point of an ellipse at
+/// `degrees` from its major axis. The point at parameter `t` is
+/// `centre + cos t · major + sin t · minor`, so its angle `θ` from the major
+/// axis has `tan θ = ratio · tan t`.
+fn parameter(degrees: f64, ratio: f64) -> f64 {
+    let theta = degrees.to_radians();
+    theta.sin().atan2(ratio * theta.cos()).rem_euclid(TAU)
+}
+
+/// The angle from the major axis, in degrees, of the point of an ellipse at
+/// parameter `t`.
+fn ellipse_angle(t: f64, ratio: f64) -> f64 {
+    normalize_degrees((ratio * t.sin()).atan2(t.cos()).to_degrees())
+}
+
+fn dwg_spline(spline: &Spline) -> DwgSpline {
+    let mut dwg_spline = if spline.fit_points.is_empty() {
+        DwgSpline::from_control_points(
+            i32::from(spline.degree),
+            spline.control_points.iter().map(|&p| vector(p)).collect(),
+        )
+    } else {
+        DwgSpline::from_fit_points(spline.fit_points.iter().map(|&p| vector(p)).collect())
+    };
+    dwg_spline.knot_parameterization = CHORD_KNOTS;
+    dwg_spline
+}
+
+/// Reads the drawing in the DWG at `path`: its linetypes, its layers and
+/// the objects in its model space.
 pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
     let drawing = read_drawing(path)?;
+    let mut linetypes = Vec::new();
+    let mut linetypes_not_read = 0;
+    for dwg_linetype in drawing.line_types.iter() {
+        if BUILT_IN_LINETYPES
+            .iter()
+            .any(|built_in| built_in.eq_ignore_ascii_case(&dwg_linetype.name))
+        {
+            continue;
+        }
+        match read_linetype(dwg_linetype) {
+            Some(linetype) => linetypes.push(linetype),
+            None => linetypes_not_read += 1,
+        }
+    }
+    let mut layers = Vec::new();
+    let mut layers_not_read = 0;
+    for dwg_layer in drawing.layers.iter() {
+        match read_layer(dwg_layer) {
+            Some(layer) => layers.push(layer),
+            None => layers_not_read += 1,
+        }
+    }
     let mut objects = Vec::new();
     let mut objects_not_read = 0;
     for dwg_object in drawing.model_space_entities() {
-        match dwg_object {
-            EntityType::Line(line) => objects.push(Object::Line(Line {
-                from: point(line.start),
-                to: point(line.end),
-            })),
-            _ => objects_not_read += 1,
+        match read_object(dwg_object) {
+            Some(object) => objects.push(object),
+            None => objects_not_read += 1,
         }
     }
     Ok(DrawingContents {
         dwg_version: drawing.version.to_string(),
         units: unit(drawing.header.insertion_units),
+        linetypes,
+        linetypes_not_read,
+        layers,
+        layers_not_read,
         objects,
         objects_not_read,
+    })
+}
+
+/// A linetype of dashes, gaps and dots. One that draws text or shapes has
+/// no model yet.
+fn read_linetype(dwg_linetype: &LineType) -> Option<Linetype> {
+    if dwg_linetype.is_complex() {
+        return None;
+    }
+    Some(Linetype {
+        name: dwg_linetype.name.clone(),
+        description: dwg_linetype.description.clone(),
+        pattern: dwg_linetype.elements.iter().map(|e| e.length).collect(),
+    })
+}
+
+/// A layer with an index colour and a standard or default lineweight.
+fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
+    let Color::Index(color) = dwg_layer.color else {
+        return None;
+    };
+    let lineweight = match dwg_layer.line_weight {
+        LineWeight::Default => None,
+        LineWeight::Value(hundredths) => Some(Lineweight::from_hundredths(hundredths)?),
+        LineWeight::ByLayer | LineWeight::ByBlock => return None,
+    };
+    Some(Layer {
+        name: dwg_layer.name.clone(),
+        color,
+        linetype: dwg_layer.line_type.clone(),
+        lineweight,
+    })
+}
+
+/// One of our objects, if the DWG object has a model in the core and takes
+/// its colour, linetype and lineweight from its layer.
+fn read_object(dwg_object: &EntityType) -> Option<Object> {
+    let common = dwg_object.common();
+    if !takes_layer_properties(common) {
+        return None;
+    }
+    let layer = if common.layer.is_empty() {
+        LAYER_ZERO.to_owned()
+    } else {
+        common.layer.clone()
+    };
+    let object = match dwg_object {
+        EntityType::Line(line) => Object::Line(Line {
+            from: point(line.start),
+            to: point(line.end),
+            layer,
+        }),
+        EntityType::LwPolyline(flat)
+            if flat.normal == Vector3::UNIT_Z
+                && flat.constant_width == 0.0
+                && flat.vertices.iter().all(is_plain_vertex) =>
+        {
+            Object::Polyline(Polyline {
+                points: flat
+                    .vertices
+                    .iter()
+                    .map(|v| Point3::new(v.location.x, v.location.y, flat.elevation))
+                    .collect(),
+                closed: flat.is_closed,
+                layer,
+            })
+        }
+        EntityType::Polyline3D(spatial)
+            if !spatial.flags.spline_fit
+                && !spatial.flags.is_3d_mesh
+                && !spatial.flags.is_polyface_mesh =>
+        {
+            Object::Polyline(Polyline {
+                points: spatial.vertices.iter().map(|v| point(v.position)).collect(),
+                closed: spatial.flags.closed,
+                layer,
+            })
+        }
+        EntityType::Arc(arc) if arc.normal == Vector3::UNIT_Z => Object::Arc(Arc {
+            center: point(arc.center),
+            radius: arc.radius,
+            start_angle: normalize_degrees(arc.start_angle.to_degrees()),
+            end_angle: normalize_degrees(arc.end_angle.to_degrees()),
+            layer,
+        }),
+        EntityType::Circle(circle) if circle.normal == Vector3::UNIT_Z => Object::Circle(Circle {
+            center: point(circle.center),
+            radius: circle.radius,
+            layer,
+        }),
+        EntityType::Ellipse(ellipse)
+            if ellipse.normal == Vector3::UNIT_Z && ellipse.major_axis.z == 0.0 =>
+        {
+            let whole =
+                ellipse.start_parameter == 0.0 && (ellipse.end_parameter - TAU).abs() <= TOLERANCE;
+            let (start_angle, end_angle) = if whole {
+                (0.0, 360.0)
+            } else {
+                (
+                    ellipse_angle(ellipse.start_parameter, ellipse.minor_axis_ratio),
+                    ellipse_angle(ellipse.end_parameter, ellipse.minor_axis_ratio),
+                )
+            };
+            Object::Ellipse(Ellipse {
+                center: point(ellipse.center),
+                major_axis: point(ellipse.major_axis),
+                ratio: ellipse.minor_axis_ratio,
+                start_angle,
+                end_angle,
+                layer,
+            })
+        }
+        EntityType::Spline(spline) => Object::Spline(read_spline(spline, layer)?),
+        _ => return None,
+    };
+    Some(object)
+}
+
+/// Whether an object is visible and draws with its layer's colour, linetype
+/// and lineweight, which is all the core's model of an object knows.
+fn takes_layer_properties(common: &EntityCommon) -> bool {
+    common.color == Color::ByLayer
+        && common.line_weight == LineWeight::ByLayer
+        && (common.linetype.is_empty() || common.linetype.eq_ignore_ascii_case("ByLayer"))
+        && !common.invisible
+}
+
+fn is_plain_vertex(vertex: &LwVertex) -> bool {
+    vertex.bulge == 0.0 && vertex.start_width == 0.0 && vertex.end_width == 0.0
+}
+
+/// A spline through fit points with AutoCAD's default fit, or a
+/// non-rational clamped B-spline with uniform knots. Any other has no model
+/// yet.
+fn read_spline(spline: &DwgSpline, layer: String) -> Option<Spline> {
+    let points = |list: &[Vector3]| list.iter().map(|&v| point(v)).collect::<Vec<_>>();
+    if spline.control_points.is_empty() {
+        let default_fit = !spline.fit_points.is_empty()
+            && spline.degree == i32::from(FIT_DEGREE)
+            && spline.knot_parameterization == CHORD_KNOTS
+            && spline.fit_tolerance == 0.0
+            && spline.begin_tangent == Vector3::ZERO
+            && spline.end_tangent == Vector3::ZERO;
+        return default_fit.then(|| Spline {
+            fit_points: points(&spline.fit_points),
+            control_points: Vec::new(),
+            degree: FIT_DEGREE,
+            layer,
+        });
+    }
+    let degree = u8::try_from(spline.degree).ok()?;
+    let (clamped_degree, uniform_knots) =
+        DwgSpline::clamped_knots_with_degree(spline.degree, spline.control_points.len());
+    let plain = spline.fit_points.is_empty()
+        && !spline.flags.closed
+        && !spline.flags.periodic
+        && spline.weights.iter().all(|&w| w == 1.0)
+        && clamped_degree == spline.degree
+        && spline.knots.len() == uniform_knots.len()
+        && spline
+            .knots
+            .iter()
+            .zip(&uniform_knots)
+            .all(|(k, u)| (k - u).abs() <= TOLERANCE);
+    plain.then(|| Spline {
+        fit_points: Vec::new(),
+        control_points: points(&spline.control_points),
+        degree,
+        layer,
     })
 }
 
@@ -184,15 +543,20 @@ mod tests {
         dir
     }
 
+    fn empty_sheet() -> Sheet {
+        Sheet {
+            units: Unit::Mm,
+            linetypes: Vec::new(),
+            layers: Vec::new(),
+            objects: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_built_dwg_carries_the_build_mark() {
         let dir = scratch("marked");
         let dwg = dir.join("sheet.dwg");
-        let sheet = Sheet {
-            units: Unit::Mm,
-            objects: Vec::new(),
-        };
-        fs::write(&dwg, write_new_sheet(&sheet).unwrap()).unwrap();
+        fs::write(&dwg, write_new_sheet(&empty_sheet()).unwrap()).unwrap();
         assert_eq!(carries_build_mark(&dwg), Ok(true));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -223,6 +587,72 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn an_ellipse_angle_and_its_parameter_agree() {
+        for ratio in [1.0, 0.5, 0.125] {
+            for degrees in [0.0, 30.0, 90.0, 135.0, 180.0, 200.0, 270.0, 315.0, 359.5] {
+                let t = parameter(degrees, ratio);
+                assert!((0.0..TAU).contains(&t), "{degrees} at {ratio}: {t}");
+                let back = ellipse_angle(t, ratio);
+                assert!(
+                    (back - degrees).abs() < 1e-9,
+                    "{degrees} at {ratio} came back as {back}"
+                );
+            }
+        }
+        // On a circle the parameter is the angle itself.
+        assert!((parameter(60.0, 1.0) - 60f64.to_radians()).abs() < 1e-15);
+    }
+
+    /// AutoCAD keeps an elliptical arc's end parameter above its start, so
+    /// one that crosses the major axis ends past 2π (seen in AutoCAD 2026's
+    /// reading of a built DWG).
+    #[test]
+    fn an_elliptical_arc_across_the_major_axis_ends_past_two_pi() {
+        let arc = |start_angle, end_angle| {
+            dwg_ellipse(&Ellipse {
+                center: Point3::new(0.0, 0.0, 0.0),
+                major_axis: Point3::new(0.0, 8.0, 0.0),
+                ratio: 0.75,
+                start_angle,
+                end_angle,
+                layer: LAYER_ZERO.to_owned(),
+            })
+        };
+        let across = arc(300.0, 60.0);
+        assert!(across.start_parameter < TAU, "{across:?}");
+        assert!(across.end_parameter > TAU, "{across:?}");
+        let within = arc(20.0, 200.0);
+        assert!(within.start_parameter < within.end_parameter);
+        assert!(within.end_parameter < TAU, "{within:?}");
+        let whole = arc(0.0, 360.0);
+        assert_eq!((whole.start_parameter, whole.end_parameter), (0.0, TAU));
+    }
+
+    #[test]
+    fn a_flat_polyline_is_lightweight_and_any_other_is_3d() {
+        let polyline = |points: Vec<Point3>| Polyline {
+            points,
+            closed: false,
+            layer: LAYER_ZERO.to_owned(),
+        };
+        let flat = polyline(vec![Point3::new(0.0, 0.0, 2.0), Point3::new(1.0, 0.0, 2.0)]);
+        let EntityType::LwPolyline(written) = dwg_polyline(&flat) else {
+            panic!("a flat polyline is written as a lightweight polyline");
+        };
+        assert_eq!(written.elevation, 2.0);
+        let climbing = polyline(vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 2.0)]);
+        assert!(matches!(dwg_polyline(&climbing), EntityType::Polyline3D(_)));
+    }
+
+    #[test]
+    fn an_object_with_its_own_colour_is_not_read_as_one_of_ours() {
+        let mut line = DwgLine::from_points(Vector3::ZERO, Vector3::UNIT_X);
+        assert!(read_object(&EntityType::Line(line.clone())).is_some());
+        line.common.color = Color::Index(1);
+        assert!(read_object(&EntityType::Line(line)).is_none());
+    }
+
     /// `CONTEXT.md` says drawing and object. acadrust's own names, which
     /// say document and entity, are allowed; ours are not.
     #[test]
@@ -232,6 +662,7 @@ mod tests {
         let mut ours = code.to_owned();
         for acadrust_name in [
             "CadDocument",
+            "EntityCommon",
             "EntityType",
             "acadrust::entities",
             "add_entity",

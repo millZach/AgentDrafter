@@ -165,3 +165,82 @@ fn help_and_version_are_json() {
     assert_eq!(code, 0);
     assert_eq!(json["result"]["version"], env!("CARGO_PKG_VERSION"));
 }
+
+#[test]
+fn schema_prints_the_sheet_descriptions_json_schema() {
+    let dir = scratch("schema");
+    let (code, json) = agentdrafter(&["schema"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["ok"], true);
+    let schema = &json["result"];
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(schema["required"], serde_json::json!(["units", "objects"]));
+    assert_eq!(
+        schema["properties"]["units"]["enum"],
+        serde_json::json!(["mm", "cm", "m", "in", "ft"])
+    );
+    for object_type in ["line", "polyline", "arc", "circle", "ellipse", "spline"] {
+        assert!(
+            schema["$defs"][object_type]["properties"]["layer"].is_object(),
+            "{object_type} takes a layer"
+        );
+    }
+    assert!(schema["$defs"]["layer"]["properties"]["lineweight"].is_object());
+    assert!(schema["$defs"]["linetype"]["properties"]["pattern"].is_object());
+
+    let (code, json) = agentdrafter(&["schema", "extra"], &dir);
+    assert_eq!(code, 2, "{json}");
+    assert_eq!(json["error"]["code"], "usage");
+
+    let (_, json) = agentdrafter(&["--help"], &dir);
+    assert_eq!(
+        json["result"]["commands"]["schema"]["usage"],
+        "agentdrafter schema"
+    );
+}
+
+#[test]
+fn the_geometry_example_builds_every_object_type() {
+    let dir = scratch("geometry");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/geometry.yaml"),
+        dir.join("geometry.yaml"),
+    )
+    .unwrap();
+
+    let (code, json) = agentdrafter(&["build", "geometry.yaml"], &dir);
+
+    assert_eq!(code, 0, "{json}");
+    let objects = &json["result"]["objects"];
+    for object_type in ["line", "polyline", "arc", "circle", "ellipse", "spline"] {
+        assert!(
+            objects[object_type].as_u64().unwrap_or(0) > 0,
+            "{object_type} in {objects}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_layer_is_reported_with_the_choices() {
+    let dir = scratch("unknown-layer");
+    fs::write(
+        dir.join("sheet.yaml"),
+        "units: mm\nlayers: {outline: {}}\nobjects:\n  - circle: {center: [0, 0, 0], radius: 5, layer: hidden}\n",
+    )
+    .unwrap();
+
+    let (code, json) = agentdrafter(&["build", "sheet.yaml"], &dir);
+
+    assert_eq!(code, 1, "{json}");
+    let error = &json["error"];
+    assert_eq!(error["code"], "unknown_name");
+    assert_eq!(error["field"], "objects[0].circle.layer");
+    assert_eq!(
+        error["message"],
+        "unknown layer `hidden`; the sheet's layers: 0, outline"
+    );
+    assert!(!dir.join("sheet.dwg").exists());
+}
