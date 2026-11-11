@@ -17,8 +17,8 @@
 //!   definitions and model-space objects.
 //! - [`measure_text`] measures how wide a line of text draws in a font.
 //! - [`render`] draws a sheet description or a DWG to a PNG, stamped with
-//!   the record it came from, and [`check_stale`] says whether such an
-//!   output's record has moved on.
+//!   every file it was drawn from, and [`check_stale`] says whether any of
+//!   them has moved on.
 //!
 //! [`Settings`] say where the machine keeps its fonts; [`build`],
 //! [`measure_text`] and [`render`] read them from the environment, and
@@ -58,7 +58,9 @@ pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOL
 pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;
 pub use settings::{Settings, FONTS_VARIABLE};
-pub use stamp::{check_stale, SourceKind, SourceStamp, StaleReport, StaleRequest, Stamp};
+pub use stamp::{
+    check_stale, SourceCheck, SourceKind, SourceStamp, StaleReport, StaleRequest, Stamp,
+};
 pub use text::fonts::{FontSubstitution, FontUsed};
 pub use text::measure::{measure_text, measure_text_with, MeasureTextRequest, TextMeasurement};
 pub use text::{Attachment, FontKind, Justify, MText, Text, TextStyle, STANDARD};

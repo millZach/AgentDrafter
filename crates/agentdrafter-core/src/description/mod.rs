@@ -23,7 +23,7 @@ mod strict_yaml;
 mod text;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use objects::{Place, Tables};
 use strict_yaml::{index_path, key_path, Entry, Kind, Node, Pos};
@@ -74,14 +74,27 @@ pub fn read_sheet_description(path: &Path) -> Result<Sheet, Error> {
         )
         .in_file(path)
     })?;
-    sheet_description_at(&text, path)
+    sheet_description_at(&text, path).map(|(sheet, _)| sheet)
+}
+
+/// A block library's file as a sheet description's reading read it.
+pub(crate) struct LibraryFile {
+    /// Where it was read from.
+    pub path: PathBuf,
+    /// Its bytes.
+    pub bytes: Vec<u8>,
 }
 
 /// Reads `text`, the sheet description in the file at `path`, as
-/// [`read_sheet_description`] does, with the block library it names.
-pub(crate) fn sheet_description_at(text: &str, path: &Path) -> Result<Sheet, Error> {
+/// [`read_sheet_description`] does, with the block library it names, and
+/// gives the library's file as it was read, if it names one.
+pub(crate) fn sheet_description_at(
+    text: &str,
+    path: &Path,
+) -> Result<(Sheet, Option<LibraryFile>), Error> {
     let folder = path.parent().unwrap_or(Path::new(""));
-    sheet(text, &mut |written| {
+    let mut library = None;
+    let sheet = sheet(text, &mut |written| {
         let file = folder.join(written);
         let text = fs::read_to_string(&file).map_err(|e| {
             Error::new(
@@ -92,9 +105,15 @@ pub(crate) fn sheet_description_at(text: &str, path: &Path) -> Result<Sheet, Err
                 ),
             )
         })?;
-        parse_block_library(&text).map_err(|e| e.in_file(&file))
+        let parsed = parse_block_library(&text).map_err(|e| e.in_file(&file))?;
+        library = Some(LibraryFile {
+            path: file,
+            bytes: text.into_bytes(),
+        });
+        Ok(parsed)
     })
-    .map_err(|e| e.or_in_file(path))
+    .map_err(|e| e.or_in_file(path))?;
+    Ok((sheet, library))
 }
 
 /// Reads a sheet description. `load` reads the block library at the path

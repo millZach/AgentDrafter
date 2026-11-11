@@ -1,6 +1,6 @@
 # Rendering a sheet to PNG
 
-`agentdrafter render` draws a sheet to a PNG so that an agent can look at its own work. It draws through the one drawing pipeline that the PDF and the viewer will also draw through (ADR-0011): the sheet becomes a display list, and the display list becomes pixels. The PNG is stamped with the record it came from, and `agentdrafter stale` says whether that record has moved on since.
+`agentdrafter render` draws a sheet to a PNG so that an agent can look at its own work. It draws through the one drawing pipeline that the PDF and the viewer will also draw through (ADR-0011): the sheet becomes a display list, and the display list becomes pixels. The PNG is stamped with every file it was drawn from, and `agentdrafter stale` says whether any of them has moved on since.
 
 ```
 agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>]
@@ -43,19 +43,20 @@ The PNG goes beside the source with a `.png` extension unless `--output` names a
 
 ## The stamp
 
-Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of JSON:
+Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of JSON. It lists every file the render read to draw the sheet: the record first, then the files it draws on.
 
 ```json
-{"stamp":1,"produced_by":"agentdrafter 0.0.0","source":{"kind":"sheet_description","path":"geometry.yaml","sha256":"…"}}
+{"stamp":1,"produced_by":"agentdrafter 0.0.0","sources":[{"kind":"sheet_description","path":"sheet-1.yaml","sha256":"…"},{"kind":"block_library","path":"blocks.yaml","sha256":"…"}]}
 ```
 
-- `source.kind` is `sheet_description` or `dwg`.
-- `source.path` is where the record was, from the PNG's folder when the two share a folder above them, with `/` between folders, so a PNG and its record moved together still find each other and the stamp names no folder above them. Otherwise it is the path in full.
-- `source.sha256` is the SHA-256 of the record's bytes.
+- `sources` holds a sheet description and the block library it names, when it names one, or a DWG alone.
+- Each entry's `kind` is `sheet_description`, `dwg` or `block_library`.
+- `path` is where the file was, from the PNG's folder when the two share a folder above them, with `/` between folders, so a PNG and its files moved together still find each other and the stamp names no folder above them. Otherwise it is the path in full.
+- `sha256` is the SHA-256 of the file's bytes, as the render read them.
 
-`agentdrafter stale <png>` reads the stamp, finds the record from the PNG's folder (or at `--source`) and reports `stale: true` when its bytes no longer have that fingerprint or it cannot be read, with why. A file with no stamp is `not_stamped`.
+`agentdrafter stale <png>` reads the stamp, finds each file it lists from the PNG's folder, and reports `stale: true` when any file's bytes no longer have their fingerprint or it cannot be read. `--source` says where the record, the first file, is now; the others are found as the stamp names them. The reply's `why` names each file that moved on, and `sources` gives each file as it was checked: its kind, where it was looked for, whether it is stale and why. A file with no stamp is `not_stamped`.
 
-`stamp` is the stamp's format. The working revision arrives with ticket #9: that ticket adds the revision beside `source` and raises the format, and a reader that meets a format it does not know says so rather than guessing.
+`stamp` is the stamp's format. The list is open: templates and data rows (ticket #7) and the working revision (ticket #9) add entries of their own kinds. A reader that meets a format it does not know says so rather than guessing.
 
 ## The pipeline
 

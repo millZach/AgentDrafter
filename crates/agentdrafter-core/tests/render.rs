@@ -281,9 +281,10 @@ fn a_png_is_stamped_and_reported_stale_when_its_record_moves_on() {
         |_| (),
     );
     let stamp = &image.report.stamp;
-    assert_eq!(stamp.source.kind, SourceKind::SheetDescription);
-    assert_eq!(stamp.source.path, "sheet.yaml");
-    assert_eq!(stamp.source.sha256.len(), 64);
+    assert_eq!(stamp.sources.len(), 1, "{stamp:?}");
+    assert_eq!(stamp.sources[0].kind, SourceKind::SheetDescription);
+    assert_eq!(stamp.sources[0].path, "sheet.yaml");
+    assert_eq!(stamp.sources[0].sha256.len(), 64);
     assert!(stamp.produced_by.starts_with("agentdrafter "));
     let png = dir.join("sheet.png");
     let check = || {
@@ -417,7 +418,9 @@ fn a_dwg_renders_as_the_sheet_description_it_was_built_from() {
         let report = render_with(&r, &Settings::default()).unwrap();
         decode(&dir.join("b.png"), report)
     };
-    assert_eq!(from_dwg.report.stamp.source.kind, SourceKind::Dwg);
+    let sources = &from_dwg.report.stamp.sources;
+    assert_eq!(sources.len(), 1, "{sources:?}");
+    assert_eq!(sources[0].kind, SourceKind::Dwg);
     assert_eq!(from_dwg.report.objects_not_drawn, 0);
     assert_eq!(from_dwg.report.objects, from_description.report.objects);
     assert_eq!(
@@ -487,6 +490,69 @@ fn an_insert_and_its_visible_attributes_show_and_its_invisible_ones_do_not() {
     assert_eq!(image.count((74.0, 34.5), (75.5, 36.0), red), 0);
     assert!(image.count((76.0, 27.0), (84.0, 33.0), green) > 10);
     assert_eq!(image.report.objects.get("insert"), Some(&2));
+}
+
+/// The stamp lists the block library beside the sheet description, so a
+/// PNG whose library has moved on is stale and says which file moved.
+#[test]
+fn a_png_is_stale_when_its_block_library_moves_on() {
+    let dir = scratch("stale-library");
+    fs::write(dir.join("blocks.yaml"), BLOCK_LIBRARY).unwrap();
+    let image = render(&dir, INSERTS, |_| ());
+    let kinds: Vec<(SourceKind, &str)> = image
+        .report
+        .stamp
+        .sources
+        .iter()
+        .map(|s| (s.kind, s.path.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (SourceKind::SheetDescription, "sheet.yaml"),
+            (SourceKind::BlockLibrary, "blocks.yaml")
+        ]
+    );
+    let check = || {
+        check_stale(&StaleRequest {
+            output: dir.join("sheet.png"),
+            source: None,
+        })
+        .unwrap()
+    };
+    // An unchanged library: not stale.
+    let fresh = check();
+    assert!(!fresh.stale, "{fresh:?}");
+    assert!(fresh.sources.iter().all(|s| !s.stale), "{fresh:?}");
+
+    // A changed library: stale, and the library is the file that moved on.
+    fs::write(
+        dir.join("blocks.yaml"),
+        BLOCK_LIBRARY.replace("color: green", "color: cyan"),
+    )
+    .unwrap();
+    let moved_on = check();
+    assert!(moved_on.stale, "{moved_on:?}");
+    assert_eq!(
+        moved_on.sources.iter().map(|s| s.stale).collect::<Vec<_>>(),
+        [false, true]
+    );
+    assert!(
+        moved_on.why.contains("block library") && moved_on.why.contains("has changed"),
+        "{}",
+        moved_on.why
+    );
+    assert!(
+        !moved_on.why.contains("sheet description"),
+        "{}",
+        moved_on.why
+    );
+
+    // A library that is gone: stale.
+    fs::remove_file(dir.join("blocks.yaml")).unwrap();
+    let gone = check();
+    assert!(gone.stale, "{gone:?}");
+    assert!(gone.sources[1].why.contains("cannot be read"), "{gone:?}");
 }
 
 #[test]

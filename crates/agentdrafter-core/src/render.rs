@@ -3,8 +3,9 @@
 //!
 //! The sheet becomes a display list ([`crate::draw`]), the display list
 //! becomes pixels on the CPU ([`crate::raster`]), and the PNG carries a
-//! stamp of the record it came from ([`crate::stamp`]). Nothing here needs
-//! a window or a GPU.
+//! stamp of every file read to draw it: the record, and the block library
+//! a sheet description names ([`crate::stamp`]). Nothing here needs a
+//! window or a GPU.
 //!
 //! Until drawing sets and their paper sizes arrive (ticket #7), a render
 //! covers the drawing's extents with a margin, at a plot scale or an image
@@ -184,33 +185,40 @@ fn render_within(
         )
         .in_file(source)
     })?;
-    let (sheet, units, objects_not_drawn) = match SourceKind::of(source) {
-        SourceKind::SheetDescription => {
-            let text = String::from_utf8(bytes.clone()).map_err(|_| {
-                Error::new(
-                    ErrorCode::ReadFailed,
-                    "could not read the sheet description: it is not UTF-8 text",
-                )
-                .in_file(source)
-            })?;
-            let sheet = sheet_description_at(&text, source)?;
-            let units = Some(sheet.units);
-            (sheet, units, 0)
-        }
-        SourceKind::Dwg => {
-            let drawing = dwg::read(source)?;
-            let sheet = Sheet {
-                units: drawing.units.unwrap_or(Unit::Mm),
-                block_library: None,
-                linetypes: drawing.linetypes,
-                layers: drawing.layers,
-                text_styles: drawing.text_styles,
-                blocks: drawing.blocks,
-                objects: drawing.objects,
-            };
-            (sheet, drawing.units, drawing.objects_not_read)
-        }
+    let kind = SourceKind::of(source);
+    let (sheet, units, objects_not_drawn, library) = if kind == SourceKind::Dwg {
+        let drawing = dwg::read(source)?;
+        let sheet = Sheet {
+            units: drawing.units.unwrap_or(Unit::Mm),
+            block_library: None,
+            linetypes: drawing.linetypes,
+            layers: drawing.layers,
+            text_styles: drawing.text_styles,
+            blocks: drawing.blocks,
+            objects: drawing.objects,
+        };
+        (sheet, drawing.units, drawing.objects_not_read, None)
+    } else {
+        let text = String::from_utf8(bytes.clone()).map_err(|_| {
+            Error::new(
+                ErrorCode::ReadFailed,
+                "could not read the sheet description: it is not UTF-8 text",
+            )
+            .in_file(source)
+        })?;
+        let (sheet, library) = sheet_description_at(&text, source)?;
+        let units = Some(sheet.units);
+        (sheet, units, 0, library)
     };
+    // Every file read to draw the sheet, the record first.
+    let mut read = vec![(kind, source, bytes.as_slice())];
+    if let Some(library) = &library {
+        read.push((
+            SourceKind::BlockLibrary,
+            library.path.as_path(),
+            library.bytes.as_slice(),
+        ));
+    }
 
     let output = request
         .output
@@ -266,7 +274,7 @@ fn render_within(
             ),
         )
     })?;
-    let stamp = Stamp::new(source, &bytes, &output);
+    let stamp = Stamp::new(&read, &output);
     let png = raster::png(&pixmap, &stamp.to_json(), pixels_per_millimetre).map_err(|e| {
         Error::new(
             ErrorCode::WriteFailed,

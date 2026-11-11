@@ -54,7 +54,7 @@ fn render_writes_a_stamped_png_and_stale_checks_it() {
     assert_eq!(result["dpi"], 100.0);
     assert_eq!(result["scale"], 1.0);
     assert_eq!(result["objects"]["mtext"], 10);
-    assert_eq!(result["stamp"]["source"]["path"], "text.yaml");
+    assert_eq!(result["stamp"]["sources"][0]["path"], "text.yaml");
     // No font folder: every style's font is replaced by a look-alike, and said so.
     assert_eq!(result["font_substitutions"].as_array().unwrap().len(), 3);
     assert_eq!(

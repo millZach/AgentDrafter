@@ -1,16 +1,18 @@
-//! Stamps: what an output records about the record it came from, and the
-//! check that tells when that record has moved on and the output is stale.
+//! Stamps: what an output records about the files it came from, and the
+//! check that tells when one of them has moved on and the output is stale.
 //!
 //! Every output carries a stamp: so far the PNG, in a text chunk keyed
-//! `AgentDrafter`. A stamp names the record (the sheet description or the
-//! DWG it was produced from) by where it was and by a SHA-256 fingerprint
-//! of its bytes. An output is stale when its record's bytes no longer have
-//! that fingerprint, or the record is gone.
+//! `AgentDrafter`. A stamp lists every file read to produce the output,
+//! the record first (the sheet description or the DWG), then the files it
+//! draws on, such as the block library a sheet description names. It names
+//! each by its kind, where it was and a SHA-256 fingerprint of its bytes.
+//! An output is stale when any listed file's bytes no longer have that
+//! fingerprint, or the file is gone.
 //!
-//! The working revision arrives with ticket #9. A stamp is JSON with a
-//! format number, so that ticket adds the revision beside `source` and
-//! raises the number; a reader that meets a number it does not know says
-//! so rather than guessing.
+//! The list is open: templates and data rows (ticket #7) and the working
+//! revision (ticket #9) add entries of their own kinds. A stamp is JSON
+//! with a format number; a reader that meets a number it does not know
+//! says so rather than guessing.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -27,28 +29,29 @@ pub const STAMP_FORMAT: u32 = 1;
 /// What an output records about where it came from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp {
-    /// The stamp's format: 1 so far. A stamp that records more raises it.
+    /// The stamp's format: 1 so far.
     pub stamp: u32,
     /// What produced the output, such as `agentdrafter 0.0.0`.
     pub produced_by: String,
-    /// The record the output was produced from.
-    pub source: SourceStamp,
+    /// Every file read to produce the output: the record first, then the
+    /// files it draws on.
+    pub sources: Vec<SourceStamp>,
 }
 
-/// The record an output was produced from, as its stamp names it.
+/// A file an output was produced from, as its stamp names it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceStamp {
-    /// What the record is.
+    /// What the file is.
     pub kind: SourceKind,
-    /// Where the record was: from the output's folder when the two share a
+    /// Where the file was: from the output's folder when the two share a
     /// folder anywhere above them, with `/` between folders, and otherwise
     /// in full.
     pub path: String,
-    /// The SHA-256 of the record's bytes, in lower-case hexadecimal.
+    /// The SHA-256 of the file's bytes, in lower-case hexadecimal.
     pub sha256: String,
 }
 
-/// What kind of record an output was produced from.
+/// What kind of file an output was produced from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceKind {
@@ -56,11 +59,13 @@ pub enum SourceKind {
     SheetDescription,
     /// A DWG.
     Dwg,
+    /// The block library a sheet description draws its blocks from.
+    BlockLibrary,
 }
 
 impl SourceKind {
-    /// What a file is, by its name: a DWG when it ends `.dwg` in any case,
-    /// and otherwise a sheet description.
+    /// What a record is, by its name: a DWG when it ends `.dwg` in any
+    /// case, and otherwise a sheet description.
     pub(crate) fn of(path: &Path) -> SourceKind {
         let dwg = path
             .extension()
@@ -78,22 +83,27 @@ impl SourceKind {
         match self {
             SourceKind::SheetDescription => "sheet description",
             SourceKind::Dwg => "DWG",
+            SourceKind::BlockLibrary => "block library",
         }
     }
 }
 
 impl Stamp {
-    /// The stamp for an output at `output` produced from the record at
-    /// `source`, whose bytes are `bytes`.
-    pub(crate) fn new(source: &Path, bytes: &[u8], output: &Path) -> Stamp {
+    /// The stamp for an output at `output` produced from `files`: each
+    /// one's kind, where it was read from and the bytes read, the record
+    /// first.
+    pub(crate) fn new(files: &[(SourceKind, &Path, &[u8])], output: &Path) -> Stamp {
         Stamp {
             stamp: STAMP_FORMAT,
             produced_by: format!("agentdrafter {}", env!("CARGO_PKG_VERSION")),
-            source: SourceStamp {
-                kind: SourceKind::of(source),
-                path: path_from(output, source),
-                sha256: fingerprint(bytes),
-            },
+            sources: files
+                .iter()
+                .map(|&(kind, path, bytes)| SourceStamp {
+                    kind,
+                    path: path_from(output, path),
+                    sha256: fingerprint(bytes),
+                })
+                .collect(),
         }
     }
 
@@ -118,8 +128,9 @@ pub(crate) fn fingerprint(bytes: &[u8]) -> String {
 pub struct StaleRequest {
     /// The output to check: a PNG AgentDrafter rendered.
     pub output: PathBuf,
-    /// The record to check it against. Without it, the record the stamp
-    /// names, found from the output's folder.
+    /// Where the record is now, the first file the stamp lists. Without
+    /// it, where the stamp names it, found from the output's folder. The
+    /// other files are always found as the stamp names them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<PathBuf>,
 }
@@ -129,48 +140,90 @@ pub struct StaleRequest {
 pub struct StaleReport {
     /// The output that was checked.
     pub output: String,
-    /// The record it was checked against.
-    pub source: String,
-    /// Whether the record has moved on since the output was produced, or
-    /// is gone.
+    /// Whether any file the output was produced from has moved on since,
+    /// or is gone.
     pub stale: bool,
-    /// Why, in words.
+    /// Why, in words: which files have moved on, or that none has.
     pub why: String,
+    /// Each file the stamp lists, as it was checked.
+    pub sources: Vec<SourceCheck>,
     /// The output's stamp.
     pub stamp: Stamp,
 }
 
-/// Checks whether an output is stale: whether the record its stamp names
-/// has changed since, or is gone.
+/// One file an output was produced from, checked.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SourceCheck {
+    /// What the file is.
+    pub kind: SourceKind,
+    /// Where it was looked for.
+    pub path: String,
+    /// Whether it has changed since the output was produced, or is gone.
+    pub stale: bool,
+    /// Why, in words.
+    pub why: String,
+}
+
+/// Checks whether an output is stale: whether any file its stamp lists has
+/// changed since, or is gone.
 pub fn check_stale(request: &StaleRequest) -> Result<StaleReport, Error> {
     let output = request.output.as_path();
     let stamp = read_stamp(output)?;
-    let source = match &request.source {
-        Some(source) => source.clone(),
-        None => resolve(output, &stamp.source.path),
-    };
-    let kind = stamp.source.kind.words();
-    let (stale, why) = match fs::read(&source) {
-        Ok(bytes) if fingerprint(&bytes) == stamp.source.sha256 => (
-            false,
-            format!("the {kind} has not changed since the output was produced"),
-        ),
-        Ok(_) => (
-            true,
-            format!("the {kind} has changed since the output was produced"),
-        ),
-        Err(e) => (
-            true,
-            format!("the {kind} the output was produced from cannot be read ({e})"),
-        ),
+    let sources: Vec<SourceCheck> = stamp
+        .sources
+        .iter()
+        .enumerate()
+        .map(|(i, named)| {
+            let path = match (&request.source, i) {
+                (Some(source), 0) => source.clone(),
+                _ => resolve(output, &named.path),
+            };
+            check(named, &path)
+        })
+        .collect();
+    let moved_on: Vec<&str> = sources
+        .iter()
+        .filter(|s| s.stale)
+        .map(|s| s.why.as_str())
+        .collect();
+    let why = if moved_on.is_empty() {
+        "no file the output was produced from has changed since".to_owned()
+    } else {
+        moved_on.join("; ")
     };
     Ok(StaleReport {
         output: output.display().to_string(),
-        source: source.display().to_string(),
-        stale,
+        stale: !moved_on.is_empty(),
         why,
+        sources,
         stamp,
     })
+}
+
+/// Checks one file a stamp lists, found at `path`.
+fn check(named: &SourceStamp, path: &Path) -> SourceCheck {
+    let kind = named.kind.words();
+    let shown = path.display();
+    let (stale, why) = match fs::read(path) {
+        Ok(bytes) if fingerprint(&bytes) == named.sha256 => (
+            false,
+            format!("the {kind} `{shown}` has not changed since the output was produced"),
+        ),
+        Ok(_) => (
+            true,
+            format!("the {kind} `{shown}` has changed since the output was produced"),
+        ),
+        Err(e) => (
+            true,
+            format!("the {kind} `{shown}` the output was produced from cannot be read ({e})"),
+        ),
+    };
+    SourceCheck {
+        kind: named.kind,
+        path: shown.to_string(),
+        stale,
+        why,
+    }
 }
 
 /// The stamp an output carries. An output that cannot be read is an error,
@@ -284,11 +337,11 @@ mod tests {
         let mut stamp = Stamp {
             stamp: STAMP_FORMAT,
             produced_by: "agentdrafter 0.0.0".into(),
-            source: SourceStamp {
+            sources: vec![SourceStamp {
                 kind: SourceKind::Dwg,
                 path: "a.dwg".into(),
                 sha256: fingerprint(b""),
-            },
+            }],
         };
         let png = |stamp: &Stamp| {
             let pixmap = tiny_skia::Pixmap::new(2, 2).unwrap();

@@ -192,7 +192,7 @@ A PDF, PNG or DWG produced from a revision and stamped with the revision it came
 _Avoid_: export, artifact, plot
 
 **Stamp**:
-What an output records about the record it came from: where the record was and a fingerprint of its bytes, and the revision once revisions are built. An output whose record no longer matches its stamp, or is gone, is stale.
+What an output records about the files it came from: the record and the files it draws on, such as a block library, each by where it was and a fingerprint of its bytes, and the revision once revisions are built. An output any of whose files no longer matches its stamp, or is gone, is stale.
 _Avoid_: watermark, signature, build mark (a build mark tells that AgentDrafter built a DWG, not what from)
 
 **Render**:
