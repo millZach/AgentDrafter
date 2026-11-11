@@ -97,7 +97,7 @@ Decided on 2026-11-10, after the DWG bake-off.
 | Engine language | Rust (ADR-0009) |
 | DWG reading and writing | acadrust, pinned to a commit; fixes go upstream (ADR-0009) |
 | Licence | Apache-2.0 for AgentDrafter's own code (ADR-0010) |
-| Interfaces | One Rust core. The command line, the MCP server and the HTTP API are thin layers over it, and the Python library is a binding to it (ADR-0007) |
+| Interfaces | One Rust core. The command line, the MCP server and the HTTP API are thin layers over it, and the Python library is a binding to it (ADR-0007). They take their commands from one registry in the core, so a command reaches every interface at once. The HTTP API listens on the local machine unless told otherwise. Zach decided on 2026-11-11 that a token is needed only when it listens beyond the local machine: on loopback no token is needed; on any other address every request carries a token, made new each time the server starts and printed in the line it starts with, compared in constant time, and a request without it is refused with a JSON error ([`docs/servers.md`](servers.md)) |
 | Rendering | One Rust drawing pipeline for the screen, the PNG and the PDF (ADR-0011) |
 | Front end | That pipeline compiled to WebAssembly in the page, with TypeScript and React around it. The engine stays on the machine that holds the drawings and streams changes to the page (ADR-0011) |
 | Install | One pip package per operating system carries the Rust core, the command, both servers and the Python library: `pip install agentdrafter`, or `uvx agentdrafter` with no install. Plain binaries go on GitHub Releases too. No code signing until the drafting app ships. Nothing is published until Zach says so at the first release |

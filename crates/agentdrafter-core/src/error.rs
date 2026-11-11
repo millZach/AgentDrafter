@@ -84,6 +84,14 @@ pub enum ErrorCode {
     /// in its part could not land on another sheet built from the same
     /// template: a template edit lands on all of them or on none.
     SharedEditFailed,
+    /// A server refused the request before it reached a command: it does
+    /// not carry the token a server listening beyond the local machine
+    /// needs, or it is not addressed to a server listening on the local
+    /// machine only.
+    Unauthorized,
+    /// A server could not listen on the address it was given, such as a
+    /// port another program holds.
+    ListenFailed,
 }
 
 /// An error from the core, ready to report through any interface.

@@ -265,6 +265,14 @@ _Avoid_: backend, server
 One of the four ways in: the command line, the MCP server, the Python library and the local HTTP API. All four expose the same operations with the same behaviour.
 _Avoid_: door, adapter, front end
 
+**Command**:
+One thing an interface asks the core to do, such as build, query, change or undo, with one name through every interface and taken from one registry in the core. It takes its input as plain data and gives the same reply through each interface. Applying a change set is the command `change`; the change set's operations are operations, not commands.
+_Avoid_: endpoint, route, tool (the MCP server's word for a command), subcommand
+
+**Token**:
+The secret every request to the HTTP API carries when it listens beyond the local machine, made new each time it starts and printed when it does. On the local machine none is needed.
+_Avoid_: password, API key
+
 **Viewer**:
 The browser window where the reviewer watches a drawing set change, steps through its journal, and accepts or undoes.
 _Avoid_: app, editor, UI

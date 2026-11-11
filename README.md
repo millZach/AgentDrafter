@@ -28,6 +28,7 @@ The engine is written in Rust and reads and writes DWG through [acadrust](https:
 - [Change sets](docs/change-sets.md): adding, changing, moving and deleting objects and setting attribute values across a drawing set, each sheet fully or not at all.
 - [The journal and undo](docs/journal.md): every change set and failed attempt recorded in the set's folder, and undone from it, byte for byte, in a later session.
 - [The checker](docs/check.md): the default checks each sheet is held to after every change.
+- [The HTTP API and the MCP server](docs/servers.md): every command, served locally over HTTP and to an agent's MCP client.
 - [The glossary](CONTEXT.md): the words this project uses.
 - [The decisions](docs/adr/): what was decided and why.
 

@@ -1,11 +1,15 @@
 //! AgentDrafter's core: the library that knows drawings.
 //!
 //! Every interface is a thin layer over the entry points here: the command
-//! line now, and the MCP server, the Python library and the HTTP API later.
+//! line, the HTTP API and the MCP server now, and the Python library later.
 //! The entry points take and return plain data, so an operation behaves the
 //! same through each interface and none of them holds drawing logic
 //! (ADR-0007).
 //!
+//! - [`commands`] is the registry every interface takes its commands from:
+//!   each command's name, what it does, the JSON Schema of its input and
+//!   how the core carries it out, so that a command added here reaches
+//!   every interface at once.
 //! - [`build`] turns a sheet description into a DWG in the 2018 format, and
 //!   [`build_set`] builds every sheet of a drawing set, each a template
 //!   plus one row of data.
@@ -55,6 +59,7 @@
 mod build;
 mod change;
 mod check;
+mod commands;
 mod description;
 mod draw;
 mod dwg;
@@ -91,6 +96,7 @@ pub use check::{
     check, check_with, BlockPart, CheckReport, CheckRequest, CheckedObject, Finding, Rule, Sides,
     CHECK_TOLERANCE_MM,
 };
+pub use commands::{commands, find_command, Command, CommandInfo, JsonReply};
 pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
 pub use error::{Error, ErrorCode};
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
