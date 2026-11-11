@@ -41,6 +41,23 @@ impl OutputKind {
             OutputKind::Pdf => "plot",
         }
     }
+
+    /// How AgentDrafter made one: rendered or plotted.
+    fn made(self) -> &'static str {
+        match self {
+            OutputKind::Png => "rendered",
+            OutputKind::Pdf => "plotted",
+        }
+    }
+
+    /// Whether `bytes` are a file of this kind, by how every such file
+    /// starts.
+    fn is_kind_of(self, bytes: &[u8]) -> bool {
+        bytes.starts_with(match self {
+            OutputKind::Png => b"\x89PNG\r\n\x1a\n".as_slice(),
+            OutputKind::Pdf => b"%PDF-".as_slice(),
+        })
+    }
 }
 
 /// A record read to draw an output, with every file read for it.
@@ -125,9 +142,10 @@ pub(crate) fn object_counts(sheet: &Sheet) -> BTreeMap<String, usize> {
 }
 
 /// Refuses to write over the file at `output` unless `overwrite` asks to
-/// and it is an output AgentDrafter produced, as its stamp shows. Anything
-/// else may be someone's own file, and is never overwritten. The output
-/// may never be the record it is drawn from.
+/// and it is an output of the same kind AgentDrafter produced, as its stamp
+/// shows: a render replaces only a PNG it rendered, and a plot only a PDF
+/// it plotted. Anything else may be someone's own file, and is never
+/// overwritten. The output may never be the record it is drawn from.
 pub(crate) fn refuse_to_replace(
     source: &Path,
     output: &Path,
@@ -157,7 +175,20 @@ pub(crate) fn refuse_to_replace(
         )
         .in_file(output));
     }
-    match fs::read(output).map_err(|e| e.to_string()).and_then(|b| stamp::stamp_of(&b)) {
+    let replaceable = fs::read(output)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| {
+            if kind.is_kind_of(&bytes) {
+                stamp::stamp_of(&bytes)
+            } else {
+                Err(format!(
+                    "the file is not a {0} AgentDrafter {1}: it is not a {0}",
+                    kind.name(),
+                    kind.made()
+                ))
+            }
+        });
+    match replaceable {
         Ok(_) => Ok(()),
         Err(why) => Err(Error::new(
             ErrorCode::NotAnOutput,

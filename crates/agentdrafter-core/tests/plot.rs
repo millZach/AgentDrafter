@@ -7,8 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, check_stale, plot_set_with, plot_with, ErrorCode, PlotReport, PlotRequest,
-    PlotSetRequest, SetBuildRequest, Settings, SourceKind, StaleRequest, BUILT_IN_PLOT_STYLE,
+    build_set_with, check_stale, plot_set_with, plot_with, render_with, ErrorCode, PlotReport,
+    PlotRequest, PlotSetRequest, RenderRequest, SetBuildRequest, Settings, SourceKind,
+    StaleRequest, BUILT_IN_PLOT_STYLE,
 };
 
 #[path = "support/ctb.rs"]
@@ -475,6 +476,52 @@ fn a_pdf_is_replaced_only_when_asked_and_only_when_agentdrafter_plotted_it() {
     })
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::NotStamped);
+}
+
+#[test]
+fn overwrite_replaces_only_an_output_of_the_same_kind() {
+    let dir = scratch("overwrite-kind");
+    let source = dir.join("sheet.yaml");
+    fs::write(&source, THREE_PENS).unwrap();
+    let settings = Settings::default();
+    let render = |overwrite: bool, output: &Path| {
+        render_with(
+            &RenderRequest {
+                output: Some(output.to_owned()),
+                overwrite,
+                ..RenderRequest::new(&source)
+            },
+            &settings,
+        )
+    };
+    let png = dir.join("rendered.png");
+    render(false, &png).unwrap();
+    let pdf = PathBuf::from(plot(&source, |_| {}, &settings).pdf);
+    let (rendered, plotted) = (fs::read(&png).unwrap(), fs::read(&pdf).unwrap());
+
+    // A plot does not replace a PNG AgentDrafter rendered.
+    let error = plot_with(
+        &PlotRequest {
+            output: Some(png.clone()),
+            overwrite: true,
+            ..PlotRequest::new(&source)
+        },
+        &settings,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotAnOutput, "{error:?}");
+    assert!(error.message.contains("not a PDF"), "{}", error.message);
+    assert_eq!(fs::read(&png).unwrap(), rendered);
+
+    // A render does not replace a PDF AgentDrafter plotted.
+    let error = render(true, &pdf).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotAnOutput, "{error:?}");
+    assert!(error.message.contains("not a PNG"), "{}", error.message);
+    assert_eq!(fs::read(&pdf).unwrap(), plotted);
+
+    // Each still replaces its own kind.
+    render(true, &png).unwrap();
+    plot(&source, |r| r.overwrite = true, &settings);
 }
 
 #[test]
