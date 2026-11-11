@@ -1,0 +1,136 @@
+# A made-up loop sheet of the demo plant, for a loop of two wires: an analog
+# input, an analog output, a discrete input or a discrete output. The sheet
+# is 11 x 17 inches, ANSI B, its trim line on the paper's edge and a border
+# half an inch inside it, split into the field, the junction box and the
+# control room. The wires run from the field device's terminal head through
+# a junction box's two terminals to the controller's I/O channel.
+#
+# Each row gives the values written `{row: NAME}` and, as its own objects,
+# the field device and the I/O channel: their blocks differ from loop to loop,
+# and a template names its blocks itself. A row puts the device's bubble at
+# [2, 6.5, 0] and the channel's left side at [11.5, 6.5, 0], where these
+# wires land.
+units: in
+paper: ANSI B landscape
+block_library: ../blocks.yaml
+linetypes:
+  DASHED:
+    description: Dashed __ __ __ __
+    pattern: [0.25, -0.125]
+layers:
+  trim: {color: 8, lineweight: 0.13}
+  border: {color: white, lineweight: 0.7}
+  zone: {color: white, lineweight: 0.35}
+  enclosure: {color: 8, linetype: DASHED, lineweight: 0.25}
+  wire: {color: white, lineweight: 0.35}
+  cable: {color: white, lineweight: 0.18}
+  wire-number: {color: red}
+  notes: {color: white}
+text_styles:
+  notes: {font: romans.shx, width_factor: 0.8}
+objects:
+  # The sheet: trim line, border, zones and their headings.
+  - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, layer: trim}
+  - polyline: {points: [[0.5, 0.5, 0], [16.5, 0.5, 0], [16.5, 10.5, 0], [0.5, 10.5, 0]], closed: true, layer: border, id: border}
+  - line: {from: [0.5, 10, 0], to: [16.5, 10, 0], layer: zone}
+  - line: {from: [0.5, 2.5, 0], to: [16.5, 2.5, 0], layer: zone}
+  - line: {from: [5.5, 2.5, 0], to: [5.5, 10.5, 0], layer: zone}
+  - line: {from: [9.5, 2.5, 0], to: [9.5, 10.5, 0], layer: zone}
+  - text: {contents: FIELD, position: [3, 10.25, 0], height: 0.18, style: notes, justify: middle_center, layer: notes}
+  - text: {contents: JUNCTION BOX, position: [7.5, 10.25, 0], height: 0.18, style: notes, justify: middle_center, layer: notes}
+  - text: {contents: CONTROL ROOM, position: [13, 10.25, 0], height: 0.18, style: notes, justify: middle_center, layer: notes}
+
+  # The title block, the revision block and the notes.
+  - insert:
+      block: LOOP_TITLE
+      position: [16.5, 0.5, 0]
+      id: title-block
+      name: title-block
+      attributes:
+        TITLE: {row: TITLE}
+        LOOP: {row: LOOP}
+        AREA: {row: AREA}
+        DRAWN: AD
+        DWG_NO: {row: DWG_NO}
+        SHEET: {row: SHEET}
+        REV: {row: REV}
+        DATE: {row: DATE}
+  - insert:
+      block: REVISIONS
+      position: [10, 0.5, 0]
+      id: revisions
+      name: revisions
+      attributes:
+        REV_1: {row: REV}
+        DATE_1: {row: DATE}
+        DESC_1: {row: REV_DESC}
+        BY_1: AD
+  - mtext:
+      contents: |
+        NOTES:
+        1. A MADE-UP LOOP SHEET OF THE DEMO PLANT, DRAWN FOR AGENTDRAFTER'S EXAMPLES. NO TAG, NUMBER OR NAME ON IT COMES FROM A REAL PLANT.
+        2. CABLE SHIELDS ARE GROUNDED AT THE CONTROL ROOM END ONLY.
+        3. TERMINAL NUMBERS ARE SHOWN IN BOXES, WIRE NUMBERS ON THE WIRES.
+      position: [0.7, 2.3, 0]
+      height: 0.1
+      width: 5.6
+      style: notes
+      layer: notes
+      id: notes
+
+  # The field: what the device serves and its signal, under the device the row places.
+  - text: {contents: {row: SERVICE}, position: [0.8, 4.6, 0], height: 0.12, style: notes, layer: notes, id: service}
+  - text: {contents: {row: SIGNAL}, position: [0.8, 4.35, 0], height: 0.1, style: notes, layer: notes, id: signal}
+
+  # The field cable, from the device to the junction box.
+  - line: {from: [3.25, 6.75, 0], to: [7.2, 6.75, 0], layer: wire, id: field-wire-1}
+  - line: {from: [3.25, 6.25, 0], to: [7.2, 6.25, 0], layer: wire, id: field-wire-2}
+  - ellipse: {center: [4.4, 6.5, 0], major_axis: [0, 0.4, 0], ratio: 0.35, layer: cable}
+  - line: {from: [4.4, 6.9, 0], to: [4.4, 7.05, 0], layer: cable}
+  - insert:
+      block: CABLE_TAG
+      position: [4.4, 7.05, 0]
+      id: field-cable
+      attributes:
+        CABLE: {row: FIELD_CABLE}
+        SPEC: {row: FIELD_SPEC}
+  - text: {contents: {row: WIRE_1}, position: [3.4, 6.79, 0], height: 0.08, style: notes, layer: wire-number}
+  - text: {contents: {row: WIRE_2}, position: [3.4, 6.29, 0], height: 0.08, style: notes, layer: wire-number}
+  - text: {contents: {row: WIRE_1}, position: [7.1, 6.79, 0], height: 0.08, style: notes, justify: right, layer: wire-number}
+  - text: {contents: {row: WIRE_2}, position: [7.1, 6.29, 0], height: 0.08, style: notes, justify: right, layer: wire-number}
+
+  # The junction box and its terminals.
+  - polyline: {points: [[6.4, 5.5, 0], [8.6, 5.5, 0], [8.6, 7.5, 0], [6.4, 7.5, 0]], closed: true, layer: enclosure, id: junction-box}
+  - text: {contents: {row: JB}, position: [7.5, 7.6, 0], height: 0.14, style: notes, justify: bottom_center, layer: notes, id: junction-box-tag}
+  - text: {contents: {row: TB}, position: [7.5, 7.15, 0], height: 0.1, style: notes, justify: middle_center, layer: notes}
+  - insert:
+      block: TERMINAL
+      position: [7.5, 6.75, 0]
+      id: terminal-1
+      attributes: {TERM: {row: TERM_1}}
+  - insert:
+      block: TERMINAL
+      position: [7.5, 6.25, 0]
+      id: terminal-2
+      attributes: {TERM: {row: TERM_2}}
+
+  # The home-run cable, from the junction box to the I/O channel the row places.
+  - line: {from: [7.8, 6.75, 0], to: [11.5, 6.75, 0], layer: wire, id: home-run-wire-1}
+  - line: {from: [7.8, 6.25, 0], to: [11.5, 6.25, 0], layer: wire, id: home-run-wire-2}
+  - ellipse: {center: [10.2, 6.5, 0], major_axis: [0, 0.4, 0], ratio: 0.35, layer: cable}
+  - line: {from: [10.2, 6.9, 0], to: [10.2, 7.05, 0], layer: cable}
+  - insert:
+      block: CABLE_TAG
+      position: [10.2, 7.05, 0]
+      id: home-run-cable
+      attributes:
+        CABLE: {row: HOME_CABLE}
+        SPEC: {row: HOME_SPEC}
+  - text: {contents: {row: WIRE_1}, position: [7.9, 6.79, 0], height: 0.08, style: notes, layer: wire-number}
+  - text: {contents: {row: WIRE_2}, position: [7.9, 6.29, 0], height: 0.08, style: notes, layer: wire-number}
+  - text: {contents: {row: WIRE_1}, position: [11.4, 6.79, 0], height: 0.08, style: notes, justify: right, layer: wire-number}
+  - text: {contents: {row: WIRE_2}, position: [11.4, 6.29, 0], height: 0.08, style: notes, justify: right, layer: wire-number}
+
+  # The control room: the controller's cabinet round the I/O channel.
+  - polyline: {points: [[11, 4.9, 0], [15.4, 4.9, 0], [15.4, 8.2, 0], [11, 8.2, 0]], closed: true, layer: enclosure, id: cabinet}
+  - text: {contents: {row: CABINET}, position: [11.1, 8.1, 0], height: 0.12, style: notes, justify: top_left, layer: notes, id: cabinet-tag}
