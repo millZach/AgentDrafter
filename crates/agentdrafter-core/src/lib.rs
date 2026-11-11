@@ -27,6 +27,9 @@
 //! - [`render`] draws a sheet description or a DWG to a PNG, stamped with
 //!   every file it was drawn from, and [`check_stale`] says whether any of
 //!   them has moved on.
+//! - [`display_list`] draws a sheet of a drawing set, a sheet description
+//!   or a DWG to its [`DisplayList`], the shapes every output draws from,
+//!   as plain data, for the viewer to draw in the page.
 //! - [`plot`] draws a sheet description or a DWG to a PDF at its sheet
 //!   size, through a CTB plot style, with searchable text, stamped as a PNG
 //!   is; [`plot_set`] plots every sheet of a drawing set.
@@ -61,6 +64,7 @@ mod change;
 mod check;
 mod commands;
 mod description;
+mod display_list;
 mod draw;
 mod dwg;
 mod error;
@@ -98,6 +102,10 @@ pub use check::{
 };
 pub use commands::{commands, find_command, Command, CommandInfo, JsonReply};
 pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
+pub use display_list::{
+    display_list, display_list_with, DisplayListReport, DisplayListRequest, DISPLAY_LIST_TOLERANCE,
+};
+pub use draw::{Bounds, Color, DisplayList, FillRule, Item, Point2, Shape, TextRun};
 pub use error::{Error, ErrorCode};
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use model::{

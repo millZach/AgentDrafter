@@ -20,6 +20,10 @@
       "args": ["render", "demo-set/dwg/DEMO-001.dwg", "--width", "320", "--height", "200"],
       "input": {"source": "demo-set/dwg/DEMO-001.dwg", "width": 320, "height": 200}
     },
+    "display-list": {
+      "args": ["display-list", "demo-set", "--sheet", "demo-002"],
+      "input": {"source": "demo-set", "sheet": "demo-002"}
+    },
     "plot": {
       "args": ["plot", "demo-set"],
       "input": {"source": "demo-set"}

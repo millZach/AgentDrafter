@@ -44,6 +44,10 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({"source": "missing.yaml", "output": "x.png", "overwrite": false, "dpi": 96, "width": 320, "height": 200, "margin": 2, "fonts": ["f"]}),
         ),
         (
+            "display-list",
+            json!({"source": "missing", "sheet": "DEMO-001", "tolerance": 0.01, "fonts": ["f"]}),
+        ),
+        (
             "plot",
             json!({"source": "missing.yaml", "output": "x.pdf", "plot_style": "monochrome.ctb", "plot_styles": ["p"], "fonts": ["f"]}),
         ),

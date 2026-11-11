@@ -1,0 +1,31 @@
+{
+  "name": "agentdrafter-viewer",
+  "private": true,
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "description": "The viewer's page: TypeScript and React round the Rust drawing pipeline compiled to WebAssembly (ADR-0011). Built into viewer/dist, which the agentdrafter binary serves.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "wasm": "node scripts/build-wasm.mjs",
+    "typecheck": "tsc --noEmit -p .",
+    "build": "node scripts/build-wasm.mjs && tsc --noEmit -p . && vite build",
+    "dev": "vite",
+    "test": "node --test test/*.test.ts test/*.test.mjs",
+    "e2e": "node e2e/run.mjs"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "playwright-core": "1.65.0",
+    "typescript": "6.0.3",
+    "vite": "8.3.8"
+  }
+}

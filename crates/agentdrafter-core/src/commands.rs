@@ -27,6 +27,7 @@ use crate::build::{build_with, BuildRequest};
 use crate::change::{change_set_schema, change_with, journal, operations, undo, ChangeRequest};
 use crate::change::{JournalRequest, UndoRequest};
 use crate::check::{check_with, CheckRequest};
+use crate::display_list::{display_list_with, DisplayListRequest};
 use crate::error::Error;
 use crate::plot::{plot_set_with, plot_with, PlotRequest, PlotSetRequest, BUILT_IN_PLOT_STYLE};
 use crate::query::{query_with, QueryRequest};
@@ -143,6 +144,12 @@ const COMMANDS: &[Command] = &[
         does: render_does,
         input: render_input,
         run: run_render,
+    },
+    Command {
+        name: "display-list",
+        does: display_list_does,
+        input: display_list_input,
+        run: run_display_list,
     },
     Command {
         name: "plot",
@@ -376,6 +383,39 @@ fn run_render(mut input: Map<String, Value>, base: &Settings) -> Result<JsonRepl
     let settings = take_settings(&mut input, base, false)?;
     let request: RenderRequest = parse("render", input)?;
     Ok(done(render_with(&request, &settings)))
+}
+
+// display-list
+
+fn display_list_does() -> String {
+    "Draws a sheet to its display list, the shapes the PNG, the PDF and the viewer all draw \
+     from, and gives it as JSON without writing a file: each item's colour index and its \
+     strokes, with their lineweight in millimetres of paper and their dashes laid out, or its \
+     filled contours, in drawing units, with each line of text as the characters it reads. \
+     `source` is a sheet description, a DWG or a drawing set's folder, whose sheet `sheet` \
+     names (its first without it); the reply lists the set's sheets, the paper, the extents \
+     and how many millimetres of paper a drawing unit spans. Curves are drawn within \
+     `tolerance` drawing units, by default a 100,000th of the sheet's larger side. A loop \
+     sheet's display list runs to megabytes: it is for the viewer to draw, not to read."
+        .to_owned()
+}
+
+fn display_list_input() -> Value {
+    input(
+        json!({
+            "source": text("The record to draw: a sheet description, a DWG when the file ends .dwg, or a drawing set's folder."),
+            "sheet": text("Which of the drawing set's sheets to draw, by name. Without it, the set's first."),
+            "tolerance": number("How far, in drawing units, a curve's chords may stray from it. Without it, a 100,000th of the sheet's larger side."),
+            "fonts": fonts(),
+        }),
+        &["source"],
+    )
+}
+
+fn run_display_list(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply, Error> {
+    let settings = take_settings(&mut input, base, false)?;
+    let request: DisplayListRequest = parse("display-list", input)?;
+    Ok(done(display_list_with(&request, &settings)))
 }
 
 // plot

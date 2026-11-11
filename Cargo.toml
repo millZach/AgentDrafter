@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/agentdrafter-core", "crates/agentdrafter-cli", "crates/agentdrafter-py"]
+members = ["crates/agentdrafter-core", "crates/agentdrafter-cli", "crates/agentdrafter-py", "crates/agentdrafter-viewer"]
 
 [workspace.package]
 version = "0.0.0"
@@ -18,3 +18,13 @@ acadrust = { git = "https://github.com/hakanaktt/acadrust", rev = "4d07b528552ff
 # reply read back, as the MCP server's structured content is, keeps every
 # digit of the reply it was written from (ADR-0007).
 serde_json = { version = "1", features = ["float_roundtrip"] }
+
+# The viewer's WebAssembly module (crates/agentdrafter-viewer), built by
+# `npm run build` in viewer/: small and fast, without touching how the
+# command line is built.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

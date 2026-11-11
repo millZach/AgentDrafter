@@ -1,0 +1,95 @@
+// What the viewer shows tests and proofs, as `window.agentdrafterViewer`:
+// the sheet loaded, the view, how long each frame's draw took, and the
+// canvas drawn at a fixed view and size, to hold it to the PNG `agentdrafter
+// render` draws of the same sheet. It reads; it changes nothing the
+// reviewer sees, beyond one frame drawn and drawn again.
+
+import type { Viewer } from './wasm/agentdrafter_viewer.js';
+import type { Paper, View } from './view.ts';
+
+/** What the renderer says of a loaded sheet. */
+export interface Summary {
+  source: string;
+  /** What the record is called, for the heading, such as `demo-plant`. */
+  name: string;
+  sheet: string;
+  sheets: string[];
+  millimetres_per_unit: number;
+  paper: Paper;
+  segments: number;
+  triangles: number;
+  fills_not_drawn: number;
+}
+
+export interface Capture {
+  /** The drawing point at the image's top left, and pixels per drawing unit. */
+  left: number;
+  top: number;
+  scale: number;
+  width: number;
+  height: number;
+  /** Draw white round the paper, as a PNG's paper is everywhere. */
+  white?: boolean;
+}
+
+export interface Probe {
+  summary: Summary | null;
+  view(): View;
+  /** Shows `view` from the next frame, as a pan or a zoom does. */
+  show(view: View): void;
+  /** Each frame's draw time in milliseconds since the last call. */
+  takeDrawTimes(): number[];
+  /** The canvas drawn at `capture`, one CSS pixel to a pixel: RGBA, base64. */
+  capture(capture: Capture): string;
+}
+
+declare global {
+  interface Window {
+    agentdrafterViewer?: Probe;
+  }
+}
+
+interface Parts {
+  viewer(): Viewer | null;
+  canvas: HTMLCanvasElement;
+  view(): View;
+  show(view: View): void;
+  drawTimes: number[];
+  redraw(): void;
+}
+
+/** Installs the probe; gives back what takes it off. */
+export function installProbe(parts: Parts): () => void {
+  const probe: Probe = {
+    summary: null,
+    view: parts.view,
+    show: parts.show,
+    takeDrawTimes() {
+      return parts.drawTimes.splice(0, parts.drawTimes.length);
+    },
+    capture({ left, top, scale, width, height, white = true }) {
+      const viewer = parts.viewer();
+      if (!viewer) throw new Error('no renderer');
+      const c = parts.canvas;
+      const kept = { width: c.width, height: c.height };
+      c.width = width;
+      c.height = height;
+      viewer.set_white_surround(white);
+      viewer.draw(left, top, scale, 1);
+      const pixels = viewer.pixels();
+      viewer.set_white_surround(false);
+      c.width = kept.width;
+      c.height = kept.height;
+      parts.redraw();
+      let text = '';
+      for (let i = 0; i < pixels.length; i += 0x8000) {
+        text += String.fromCharCode(...pixels.subarray(i, i + 0x8000));
+      }
+      return btoa(text);
+    },
+  };
+  window.agentdrafterViewer = probe;
+  return () => {
+    if (window.agentdrafterViewer === probe) delete window.agentdrafterViewer;
+  };
+}
