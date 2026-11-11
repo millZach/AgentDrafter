@@ -1,6 +1,7 @@
 //! Puts a change set's files in place together: the records it edited, the
 //! DWGs of the sheets it landed on, and the set's inconsistent mark, written
-//! or taken away.
+//! or taken away, with the undo state it saves and its entry added to the end
+//! of the set's journal. An undo puts its files back through the same step.
 //!
 //! Every new file is first written whole beside its place. Then, one file
 //! at a time, the file already there is moved aside and the new one moved
@@ -10,10 +11,16 @@
 //! old DWG, and no record two sheets share changes for one of them only
 //! (ADR-0005), and the mark never lags the sheets: a change set that lands
 //! on some sheets and fails on others either lands with its mark or not at
-//! all. The files moved aside are taken away once all are in place.
+//! all. The journal's entry is added last, once every file is in place, and
+//! a journal that cannot take it is cut back to its length before, and every
+//! file put back, so a change set lands only with its entry. A journal that
+//! cannot be cut back is never passed over: the error names it and the entry
+//! it may still hold for a change that was rolled back. The files moved
+//! aside are taken away once all are in place.
 
-use std::fs;
-use std::io;
+use std::cmp::Reverse;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::build::{beside, write_beside};
@@ -28,18 +35,47 @@ pub(super) struct Replacement {
     pub what: &'static str,
 }
 
+/// Text added to the end of a file, such as a journal's entry, in the same
+/// step as the replacements.
+pub(super) struct Append {
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+    /// What the file is, for an error, such as "the journal".
+    pub what: &'static str,
+    /// What the bytes hold, for an error, such as "entry 7".
+    pub holds: String,
+}
+
+/// Why text could not be added to the end of a file: the error, and why the
+/// file could not be cut back to its length before, when it could not.
+struct AddFailed {
+    error: io::Error,
+    left: Option<io::Error>,
+}
+
+impl From<io::Error> for AddFailed {
+    fn from(error: io::Error) -> Self {
+        Self { error, left: None }
+    }
+}
+
 /// Where one replacement got to: the file that was there, moved aside, and
 /// whether the new one is in place.
 struct Placed {
     aside: Option<PathBuf>,
 }
 
-/// Puts every file of `replacements` in place, or none of them. On failure
-/// the error says so, and every file is as it was before.
-pub(super) fn commit(replacements: &[Replacement]) -> Result<(), Error> {
+/// Puts every file of `replacements` in place and adds `append` to the end
+/// of its file, or does none of it. On failure the error says so, and every
+/// file is as it was before.
+pub(super) fn commit(replacements: &[Replacement], append: Option<&Append>) -> Result<(), Error> {
     let mut made: Vec<PathBuf> = Vec::new();
     let mut staged: Vec<Option<PathBuf>> = Vec::new();
-    if let Err(e) = stage(replacements, &mut made, &mut staged) {
+    let staging = stage(replacements, &mut made, &mut staged).and_then(|()| match append {
+        Some(append) => make_folder(&append.path, append.what, &mut made),
+        None => Ok(()),
+    });
+    if let Err(e) = staging {
         clean(&staged, &made);
         return Err(Error {
             message: format!("{}; nothing was changed", e.message),
@@ -71,6 +107,44 @@ pub(super) fn commit(replacements: &[Replacement]) -> Result<(), Error> {
             }
         }
     }
+    if let Some(append) = append {
+        if let Err(failed) = add_to_end(replacements.len(), append) {
+            let not_back = roll_back(replacements, &placed);
+            clean(&[], &made);
+            let e = failed.error;
+            // A journal that could not be cut back may still record the
+            // change that was just rolled back: say so, and where.
+            let left = failed.left.map(|left| {
+                format!(
+                    "{} could not be cut back ({left}), so it may still hold {}, or part of it, \
+                     for a change that was rolled back; take it out of {}",
+                    append.what,
+                    append.holds,
+                    append.path.display()
+                )
+            });
+            let message = match (not_back.is_empty(), left) {
+                (true, None) => format!(
+                    "could not add to {} ({e}); every file put in place was put back as it was, \
+                     so nothing was changed",
+                    append.what
+                ),
+                (true, Some(left)) => format!(
+                    "could not add to {} ({e}); every file put in place was put back as it was, \
+                     but {left}",
+                    append.what
+                ),
+                (false, left) => format!(
+                    "could not add to {} ({e}), and could not put back {}: build the set again \
+                     with --overwrite to bring its DWGs in step with its records{}",
+                    append.what,
+                    not_back.join(", "),
+                    left.map(|l| format!("; and {l}")).unwrap_or_default()
+                ),
+            };
+            return Err(Error::new(ErrorCode::WriteFailed, message).in_file(&append.path));
+        }
+    }
     for (replacement, done) in replacements.iter().zip(&placed) {
         if let Some(aside) = &done.aside {
             let _ = fs::remove_file(aside);
@@ -97,21 +171,63 @@ fn stage(
             staged.push(None);
             continue;
         };
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            let missing: Vec<&Path> = parent.ancestors().take_while(|a| !a.exists()).collect();
-            fs::create_dir_all(parent).map_err(|e| {
-                Error::new(
-                    ErrorCode::WriteFailed,
-                    format!(
-                        "could not make the folder {} goes in: {e}",
-                        replacement.what
-                    ),
-                )
-                .in_file(parent)
-            })?;
-            made.extend(missing.into_iter().map(Path::to_owned));
-        }
+        make_folder(path, replacement.what, made)?;
         staged.push(Some(write_beside(path, bytes, replacement.what)?));
+    }
+    Ok(())
+}
+
+/// Makes the folder the file at `path` goes in, and every folder above it
+/// that is missing, adding each it made to `made`.
+fn make_folder(path: &Path, what: &str, made: &mut Vec<PathBuf>) -> Result<(), Error> {
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    let missing: Vec<&Path> = parent.ancestors().take_while(|a| !a.exists()).collect();
+    fs::create_dir_all(parent).map_err(|e| {
+        Error::new(
+            ErrorCode::WriteFailed,
+            format!("could not make the folder {what} goes in: {e}"),
+        )
+        .in_file(parent)
+    })?;
+    made.extend(missing.into_iter().map(Path::to_owned));
+    Ok(())
+}
+
+/// Adds `append`'s bytes to the end of its file, making the file if it is
+/// not there. When they cannot all be written, the file is cut back to its
+/// length before, or taken away if it was not there; when that fails too,
+/// the failure says why.
+fn add_to_end(index: usize, append: &Append) -> Result<(), AddFailed> {
+    fail_here(index)?;
+    let existed = fs::symlink_metadata(&append.path).is_ok();
+    // Opened to write, not only to append, so that Windows lets it be cut
+    // back.
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&append.path)?;
+    let length = file.seek(SeekFrom::End(0))?;
+    let written = file
+        .write_all(&append.bytes)
+        .and_then(|()| fail_sync())
+        .and_then(|()| file.sync_all());
+    if let Err(error) = written {
+        let back = fail_cut_back().and_then(|()| file.set_len(length));
+        drop(file);
+        let back = back.and_then(|()| {
+            if existed {
+                Ok(())
+            } else {
+                fs::remove_file(&append.path)
+            }
+        });
+        return Err(AddFailed {
+            error,
+            left: back.err(),
+        });
     }
     Ok(())
 }
@@ -163,7 +279,9 @@ fn clean(staged: &[Option<PathBuf>], made: &[PathBuf]) {
     for temporary in staged.iter().flatten() {
         let _ = fs::remove_file(temporary);
     }
-    for folder in made {
+    let mut folders = made.to_vec();
+    folders.sort_by_key(|f| Reverse(f.components().count()));
+    for folder in folders {
         let _ = fs::remove_dir(folder);
     }
 }
@@ -172,15 +290,38 @@ fn clean(staged: &[Option<PathBuf>], made: &[PathBuf]) {
 thread_local! {
     /// The replacement a test asks to fail, by its place in the commit.
     pub(super) static FAIL_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// Whether a test asks the append to fail once its bytes are written,
+    /// as a failed sync would, and, when `true`, cutting it back to fail
+    /// too.
+    pub(super) static FAIL_SYNC: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
-/// Fails replacement `index` when a test asks for it, so a test can show a
-/// failed commit puts every file back.
+/// Fails replacement `index`, or the append after the last, once, when a
+/// test asks for it, so a test can show a failed commit puts every file
+/// back.
 fn fail_here(index: usize) -> io::Result<()> {
     #[cfg(test)]
-    if FAIL_AT.with(std::cell::Cell::get) == Some(index) {
+    if FAIL_AT.with(|f| f.get() == Some(index) && f.replace(None).is_some()) {
         return Err(io::Error::other("a failure the test asked for"));
     }
     let _ = index;
+    Ok(())
+}
+
+/// Fails the append's sync once a test asks for it.
+fn fail_sync() -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_SYNC.with(std::cell::Cell::get).is_some() {
+        return Err(io::Error::other("a failed sync the test asked for"));
+    }
+    Ok(())
+}
+
+/// Fails cutting the append back once, when a test asks for it.
+fn fail_cut_back() -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_SYNC.with(|f| f.replace(None)) == Some(true) {
+        return Err(io::Error::other("a failed cut the test asked for"));
+    }
     Ok(())
 }

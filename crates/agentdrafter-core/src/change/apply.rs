@@ -9,15 +9,16 @@
 //! of them, and takes those sheets' other operations with it (Zach's
 //! decision of 2026-11-11). The operations left are applied again from the
 //! records as they were, until every sheet they reach takes its part. Only
-//! then is anything written, all of it together or none of it
-//! (`commit.rs`).
+//! then is anything written, all of it together or none of it, with the
+//! change set's entry in the journal (`commit.rs`, `journal.rs`).
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use super::commit::{commit, Replacement};
+use super::commit::Replacement;
+use super::journal::{commit_change_set, Landing, SheetFailed};
 use super::operations::{op_error, read_change_set, AddTo, Body, Kind, Operation, Target};
 use super::MARK_FILE;
 use super::{
@@ -257,7 +258,14 @@ struct Done {
     message: String,
 }
 
-pub(super) fn apply(request: &ChangeRequest, settings: &Settings) -> Result<ChangeReport, Error> {
+/// Applies the change set. `attempted` is given what it did to its sheets
+/// before its files are put in place, so a commit that fails is recorded as
+/// a failed attempt with the sheets it touched.
+pub(super) fn apply(
+    request: &ChangeRequest,
+    settings: &Settings,
+    attempted: &mut Option<Landing>,
+) -> Result<ChangeReport, Error> {
     let files = SetFiles::load(&request.set)?;
     let change_set = read_change_set(&request.change_set, files.units)?;
     let mark = read_mark(&files.folder)?;
@@ -426,8 +434,12 @@ pub(super) fn apply(request: &ChangeRequest, settings: &Settings) -> Result<Chan
         }
     }
 
-    // The records, the DWGs and the mark land together, or nothing does.
-    if !request.dry_run {
+    // The records, the DWGs and the mark land together, with the change
+    // set's undo state and its entry in the journal, or nothing does. A
+    // change set that failed on every sheet it touched changed nothing, and
+    // is recorded as a failed attempt.
+    let mut journal_entry = None;
+    if !request.dry_run && (!landed.is_empty() || failed.is_empty()) {
         let mut replacements: Vec<Replacement> = records
             .iter()
             .map(|(path, text)| Replacement {
@@ -448,9 +460,24 @@ pub(super) fn apply(request: &ChangeRequest, settings: &Settings) -> Result<Chan
                 what: "the set's inconsistent mark",
             });
         }
-        if !replacements.is_empty() {
-            commit(&replacements)?;
-        }
+        let landing = Landing {
+            landed_on: files.names(&landed),
+            failed_on: failed
+                .iter()
+                .map(|(&k, e)| SheetFailed {
+                    sheet: files.name(k).to_owned(),
+                    code: code_text(e),
+                    message: e.message.clone(),
+                })
+                .collect(),
+        };
+        *attempted = Some(landing.clone());
+        journal_entry = Some(commit_change_set(
+            &files.folder,
+            &request.change_set,
+            landing,
+            replacements,
+        )?);
     }
 
     let written: BTreeSet<usize> = if request.dry_run {
@@ -516,6 +543,7 @@ pub(super) fn apply(request: &ChangeRequest, settings: &Settings) -> Result<Chan
         set: files.folder.display().to_string(),
         units: files.units,
         dry_run: request.dry_run,
+        journal_entry,
         message,
         landed: landed.len(),
         failed: failed.len(),

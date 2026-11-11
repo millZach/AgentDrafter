@@ -33,6 +33,9 @@
 //!   working revision, its own files, or reports what it would do in a dry
 //!   run; [`operations`] lists the operations with their AutoCAD aliases
 //!   and schemas, and [`change_set_schema`] states what a change set holds.
+//! - [`journal`] reads a drawing set's journal, the record in its folder of
+//!   every change set and failed attempt, and [`undo`] undoes a change set,
+//!   with every later one, from it, in a later session as in the same one.
 //!
 //! [`Settings`] say where the machine keeps its fonts and plot styles;
 //! [`build`], [`measure_text`], [`render`] and [`plot`] read them from the
@@ -72,6 +75,11 @@ pub use change::{
     change, change_set_schema, change_with, operations, ChangeReport, ChangeRequest, Failure, Fill,
     Inconsistent, OperationInfo, OperationList, OperationOutcome, RowValueSet, SheetChange,
     MARK_FILE,
+};
+pub use change::{
+    journal, undo, Entry, EntryKind, FileState, FileUndone, JournalEntry, JournalReport,
+    JournalRequest, Refusal, SheetFailed, UndoAction, UndoReport, UndoRequest, UndoState,
+    JOURNAL_FILE, KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
 };
 pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
 pub use error::{Error, ErrorCode};

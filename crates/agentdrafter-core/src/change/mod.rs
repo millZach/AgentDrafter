@@ -4,7 +4,9 @@
 //! The working revision is the set's own files, edited in place, as Zach
 //! decided on 2026-11-11: a change set writes the set's records, its
 //! templates and its rows, and builds again only the DWGs of the sheets it
-//! touched. History is git's, and later the journal's.
+//! touched. History is the journal's (`journal.rs`), which records every
+//! change set and failed attempt in the set's folder, and from which a later
+//! session undoes them (`undo.rs`); git is optional.
 //!
 //! An operation names its target by ID or by name, never by coordinates.
 //! An edit to an object of a template changes the template, so every sheet
@@ -25,7 +27,9 @@
 
 mod apply;
 mod commit;
+mod journal;
 mod operations;
+mod undo;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,6 +46,12 @@ use crate::settings::Settings;
 use crate::units::Unit;
 
 pub use operations::{change_set_schema, operations, OperationInfo, OperationList};
+
+pub use journal::{
+    journal, Entry, EntryKind, FileState, JournalEntry, JournalReport, JournalRequest, Refusal,
+    SheetFailed, UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
+};
+pub use undo::{undo, FileUndone, UndoAction, UndoReport, UndoRequest};
 
 /// The file, relative to a drawing set's folder, that marks the set
 /// inconsistent while it is.
@@ -70,6 +80,10 @@ pub struct ChangeReport {
     pub units: Unit,
     /// Whether this was a dry run, which wrote nothing.
     pub dry_run: bool,
+    /// The journal entry that records the change set, or the failed
+    /// attempt; undo takes a change set by it. Absent for a dry run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_entry: Option<u64>,
     /// What the change set did, in words.
     pub message: String,
     /// How many sheets took their part.
@@ -213,8 +227,15 @@ pub fn change(request: &ChangeRequest) -> Reply<ChangeReport> {
 /// part; not `ok`, with the report and a `sheets_failed` error, when some
 /// did not; and not `ok`, with only an error, when the change set itself is
 /// wrong, such as an operation that does not exist, and nothing was done.
+///
+/// Every change set but a dry run is recorded in the set's journal: one
+/// that landed in the same step as its files, and one that changed nothing
+/// as a failed attempt.
 pub fn change_with(request: &ChangeRequest, settings: &Settings) -> Reply<ChangeReport> {
-    match apply::apply(request, settings) {
+    let mut attempted = None;
+    let mut outcome = apply::apply(request, settings, &mut attempted);
+    journal::record_failed_attempt(request, &mut outcome, attempted);
+    match outcome {
         Ok(report) if report.failed > 0 => {
             let error = Error::new(ErrorCode::SheetsFailed, report.message.clone());
             Reply::partly(report, error)
@@ -272,8 +293,8 @@ fn mark_report(folder: &Path, failures: &[MarkFailure]) -> Inconsistent {
         file: folder.join(MARK_FILE).display().to_string(),
         message: format!(
             "the set is inconsistent: a change set landed on some of its sheets and failed on \
-             {}, which {left}. Fix {them} with a change set that names {them} under `fixes`; \
-             the reviewer cannot accept the set until then",
+             {}, which {left}. Fix {them} with a change set that names {them} under `fixes`, \
+             or undo the change set; the reviewer cannot accept the set until then",
             quoted_list(&sheets),
         ),
         failures: failures

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use agentdrafter_core::{
     build_set_with, change_set_schema, change_with, operations, query_with, read_dwg, Answer,
     ChangeReport, ChangeRequest, ErrorCode, Object, Query, QueryRequest, Reply, Selection,
-    SetBuildRequest, Settings, MARK_FILE,
+    SetBuildRequest, Settings, JOURNAL_FILE, MARK_FILE,
 };
 use serde_json::{json, Value};
 
@@ -104,8 +104,10 @@ fn recorded(set: &Path) -> BTreeMap<String, Object> {
     objects.into_iter().map(|o| (o.id, o.object)).collect()
 }
 
-/// Every file in `folder` and below, with its bytes.
+/// Every file in `folder` and below, with its bytes, but the journal, which
+/// records every change set and failed attempt.
 fn snapshot(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let journal = folder.join(JOURNAL_FILE);
     let mut files = BTreeMap::new();
     let mut stack = vec![folder.to_owned()];
     while let Some(dir) = stack.pop() {
@@ -113,7 +115,7 @@ fn snapshot(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
-            } else {
+            } else if path != journal {
                 files.insert(path.clone(), fs::read(&path).unwrap());
             }
         }
@@ -659,7 +661,7 @@ fn an_inconsistent_set_is_reported_until_its_failed_sheet_is_fixed() {
     assert!(fixed.inconsistent.is_none());
     assert!(fixed.sheets[0].fixed);
     assert!(!set.join(MARK_FILE).exists());
-    assert!(!set.join(".agentdrafter").exists());
+    assert!(set.join(JOURNAL_FILE).is_file(), "the journal stays");
     let built = build_set_with(
         &SetBuildRequest {
             set: set.clone(),

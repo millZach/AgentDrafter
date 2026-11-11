@@ -176,6 +176,14 @@ _Avoid_: batch, transaction, commit
 The on-disk record of every change set and every failed attempt. A later session reads it to see what was done and to undo it. Undo is a stack: undoing a change set also undoes every later one that is not issued.
 _Avoid_: history, log, undo stack
 
+**Failed attempt**:
+A change set that changed nothing: one refused whole, one that failed on every sheet it touched, or one whose files could not be written. It stays in the journal and is never undone.
+_Avoid_: failed change set, error entry
+
+**Undo state**:
+The saved bytes a change set's undo needs: each file it wrote, as it was before. Only the newest change sets keep theirs; an older one's is pruned, and that change set can no longer be undone.
+_Avoid_: snapshot, backup, checkpoint
+
 **Inconsistent set**:
 A drawing set in which a change set landed on some sheets and failed on others. It stays marked, in a file in the set's folder, until the failed sheets are fixed or the change set is undone as one.
 
