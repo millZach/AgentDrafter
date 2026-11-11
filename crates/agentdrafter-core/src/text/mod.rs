@@ -9,15 +9,16 @@
 //! look-alike when it is not there. [`shx`] reads SHX fonts, [`truetype`]
 //! reads TrueType metrics, and [`hershey`] holds the look-alike that is
 //! always at hand. [`placement`] works out where justified text starts,
-//! which the DWG records. Drawing text is not here: that comes with
-//! rendering.
+//! which the DWG records. [`outline`] gives what each character draws,
+//! which the drawing pipeline ([`crate::draw`]) lays out.
 
 pub(crate) mod fonts;
 mod hershey;
 pub(crate) mod measure;
+pub(crate) mod outline;
 pub(crate) mod placement;
 mod shx;
-mod truetype;
+pub(crate) mod truetype;
 
 use serde::{Deserialize, Serialize};
 

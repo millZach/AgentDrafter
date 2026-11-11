@@ -10,13 +10,15 @@
 //! read.
 //!
 //! Running a shape gives what measuring needs: how far the pen moved and
-//! the box around every stroke drawn with the pen down. Text is never drawn
-//! here.
+//! the box around every stroke drawn with the pen down. Run again with a
+//! trace, it gives the strokes themselves, which the drawing pipeline
+//! ([`crate::draw`]) draws with the text's pen.
 
 use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_4, PI, TAU};
 
 use super::fonts::{Glyph, Rect};
+use crate::draw::curves::arc_steps;
 
 /// The deepest a shape may nest subshapes before it is taken as a loop.
 const DEEPEST_SUBSHAPE: u8 = 8;
@@ -147,19 +149,51 @@ impl ShxFont {
     /// character the font has no shape for draws as `?`, as AutoCAD draws
     /// it; none when the font has no `?` either.
     pub(crate) fn glyph(&self, c: char) -> Option<Glyph> {
-        let number = u32::from(c);
-        let number = if self.shapes.contains_key(&number) {
-            number
-        } else {
-            u32::from('?')
-        };
         let mut pen = Pen::default();
-        self.run(number, &mut pen, 0).ok()?;
+        self.run(self.shape_for(c), &mut pen, 0).ok()?;
         let scale = 1.0 / self.above;
         Some(Glyph {
             advance: (pen.x * scale, pen.y * scale),
             ink: pen.ink.map(|r| r.scaled(scale)),
         })
+    }
+
+    /// The strokes `c` draws and where the pen ends, in units where the
+    /// capitals stand 1 tall: each stroke a run of points drawn with the pen
+    /// down, arcs as chords that stray at most `tolerance` from them. A run
+    /// of one point is a dot. A character the font has no shape for draws as
+    /// `?`; none when the font has no `?` either.
+    pub(crate) fn strokes(&self, c: char, tolerance: f64) -> Option<((f64, f64), Strokes)> {
+        let mut pen = Pen {
+            trace: Some(Trace {
+                runs: Vec::new(),
+                open: false,
+                tolerance: tolerance * self.above,
+            }),
+            ..Pen::default()
+        };
+        self.run(self.shape_for(c), &mut pen, 0).ok()?;
+        let scale = 1.0 / self.above;
+        let runs = pen.trace.map_or_else(Vec::new, |trace| trace.runs);
+        let strokes = runs
+            .into_iter()
+            .map(|run| {
+                run.into_iter()
+                    .map(|(x, y)| [x * scale, y * scale])
+                    .collect()
+            })
+            .collect();
+        Some(((pen.x * scale, pen.y * scale), strokes))
+    }
+
+    /// The shape that draws `c`: its own, or `?` when the font has none.
+    fn shape_for(&self, c: char) -> u32 {
+        let number = u32::from(c);
+        if self.shapes.contains_key(&number) {
+            number
+        } else {
+            u32::from('?')
+        }
     }
 
     /// Runs shape `number`'s program on `pen`, in horizontal text.
@@ -184,8 +218,13 @@ impl ShxFont {
                     // drawn, even when nothing follows.
                     pen.down = true;
                     pen.mark(pen.x, pen.y);
+                    pen.lift();
+                    pen.trace_to(pen.x, pen.y);
                 }
-                2 => pen.down = false,
+                2 => {
+                    pen.down = false;
+                    pen.lift();
+                }
                 3 => {
                     let divisor = code.u8()?;
                     if divisor == 0 {
@@ -203,6 +242,8 @@ impl ShxFont {
                     if let Some((x, y)) = pen.stack.pop() {
                         pen.x = x;
                         pen.y = y;
+                        // The pen jumps without drawing.
+                        pen.lift();
                     }
                 }
                 7 => {
@@ -353,6 +394,9 @@ fn fractional_arc(
     (from.to_radians(), to.to_radians())
 }
 
+/// A glyph's strokes: runs of points drawn with the pen down.
+pub(crate) type Strokes = Vec<Vec<[f64; 2]>>;
+
 /// The pen as a shape runs.
 #[derive(Debug)]
 struct Pen {
@@ -362,6 +406,18 @@ struct Pen {
     scale: f64,
     stack: Vec<(f64, f64)>,
     ink: Option<Rect>,
+    /// The strokes drawn, when they are wanted as well as the box.
+    trace: Option<Trace>,
+}
+
+/// The strokes a shape draws, in shape units.
+#[derive(Debug)]
+struct Trace {
+    runs: Vec<Vec<(f64, f64)>>,
+    /// Whether the last run goes on from where the pen is.
+    open: bool,
+    /// How far a chord may stray from the arc it stands for.
+    tolerance: f64,
 }
 
 impl Default for Pen {
@@ -374,6 +430,7 @@ impl Default for Pen {
             scale: 1.0,
             stack: Vec::new(),
             ink: None,
+            trace: None,
         }
     }
 }
@@ -387,12 +444,39 @@ impl Pen {
         });
     }
 
+    /// Ends the stroke being traced: the next point starts a new one.
+    fn lift(&mut self) {
+        if let Some(trace) = &mut self.trace {
+            trace.open = false;
+        }
+    }
+
+    /// Traces a stroke on to `(x, y)`, starting a new one if none is open.
+    fn trace_to(&mut self, x: f64, y: f64) {
+        let Some(trace) = &mut self.trace else {
+            return;
+        };
+        match trace.runs.last_mut() {
+            Some(run) if trace.open => {
+                if run.last() != Some(&(x, y)) {
+                    run.push((x, y));
+                }
+            }
+            _ => {
+                trace.runs.push(vec![(x, y)]);
+                trace.open = true;
+            }
+        }
+    }
+
     /// Moves by `(dx, dy)` shape units at the current scale, drawing if the pen is down.
     fn line(&mut self, dx: f64, dy: f64) {
         let (x, y) = (self.x + dx * self.scale, self.y + dy * self.scale);
         if self.down {
             self.mark(self.x, self.y);
             self.mark(x, y);
+            self.trace_to(self.x, self.y);
+            self.trace_to(x, y);
         }
         self.x = x;
         self.y = y;
@@ -422,6 +506,14 @@ impl Pen {
                 let (dx, dy) = (mx - (x0 + x1) / 2.0, my - (y0 + y1) / 2.0);
                 for (x, y) in [(x0, y0), (x1, y1), (x0 + dx, y0 + dy), (x1 + dx, y1 + dy)] {
                     self.mark(x, y);
+                }
+            }
+            if let Some(tolerance) = self.trace.as_ref().map(|t| t.tolerance) {
+                let steps = arc_steps(radius, sweep, tolerance);
+                self.trace_to(self.x, self.y);
+                for step in 1..=steps {
+                    let (x, y) = on_circle(start + sweep * f64::from(step) / f64::from(steps));
+                    self.trace_to(x, y);
                 }
             }
         }

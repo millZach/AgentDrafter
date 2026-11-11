@@ -55,6 +55,13 @@ pub enum ErrorCode {
     DwgWrite,
     /// The DWG library could not read the drawing.
     DwgRead,
+    /// Replacing was asked for, but the file at the output path is not an
+    /// output AgentDrafter produced: it carries no stamp. It may be
+    /// someone's own file, and is never overwritten.
+    NotAnOutput,
+    /// The file is not an output AgentDrafter produced, or its stamp
+    /// cannot be read, so nothing says what it came from.
+    NotStamped,
 }
 
 /// An error from the core, ready to report through any interface.

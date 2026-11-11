@@ -179,6 +179,18 @@ _Avoid_: validator, linter
 A PDF, PNG or DWG produced from a revision and stamped with the revision it came from. An output whose revision has moved on is stale.
 _Avoid_: export, artifact, plot
 
+**Stamp**:
+What an output records about the record it came from: where the record was and a fingerprint of its bytes, and the revision once revisions are built. An output whose record no longer matches its stamp, or is gone, is stale.
+_Avoid_: watermark, signature, build mark (a build mark tells that AgentDrafter built a DWG, not what from)
+
+**Render**:
+Drawing a sheet to a PNG, through the display list, so an agent can look at its own work.
+_Avoid_: screenshot, export, build (a build produces a DWG)
+
+**Display list**:
+What the drawing pipeline turns a sheet into: lines drawn with a colour, a lineweight and their dashes laid out, and filled areas, text among them as strokes and outlines, in drawing units. The PNG, the PDF and the viewer all draw from it, so they agree.
+_Avoid_: scene, render tree, drawn object (the judge's count of records)
+
 **Script**:
 Code an agent sends to run inside AgentDrafter for an edit no operation covers. It runs sandboxed as one change set and only when the reviewer has switched scripts on.
 _Avoid_: macro, plugin

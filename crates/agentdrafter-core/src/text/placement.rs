@@ -101,17 +101,23 @@ impl SheetFonts {
             .collect()
     }
 
+    /// The font text in `style` draws with, and the style's width factor:
+    /// the look-alike, at a normal width, for a style the sheet does not
+    /// have.
+    pub(crate) fn style(&self, style: &str) -> (&Font, f64) {
+        self.styles
+            .iter()
+            .find(|(s, _, _)| s.name == style)
+            .map_or((&Font::Hershey, 1.0), |(s, font, _)| (font, s.width_factor))
+    }
+
     /// Where `text`'s baseline starts: its position when it is
     /// left-justified, and otherwise where AutoCAD would start it.
     pub(crate) fn start(&self, text: &Text) -> Point3 {
         if text.justify == Justify::Left {
             return text.position;
         }
-        let font = self
-            .styles
-            .iter()
-            .find(|(style, _, _)| style.name == text.style)
-            .map_or(&Font::Hershey, |(_, font, _)| font);
+        let (font, _) = self.style(&text.style);
         let (u, v) = offset(font, text);
         let (sin, cos) = text.rotation.to_radians().sin_cos();
         Point3::new(
