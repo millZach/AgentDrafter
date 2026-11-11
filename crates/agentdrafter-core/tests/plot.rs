@@ -277,6 +277,9 @@ fn a_plot_style_that_cannot_be_found_or_read_says_why() {
     assert_eq!(error.code, ErrorCode::BadValue);
     let error = plot_with(&request("sheet.yaml"), &settings).unwrap_err();
     assert_eq!(error.code, ErrorCode::BadValue);
+    // A name whose last four bytes cut a character in two.
+    let error = plot_with(&request("éaaa"), &settings).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadValue);
     // Not a CTB.
     fs::write(dir.join("broken.ctb"), "not a plot style").unwrap();
     let error = plot_with(&request("broken.ctb"), &settings).unwrap_err();

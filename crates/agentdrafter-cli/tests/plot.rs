@@ -100,3 +100,19 @@ fn plot_takes_a_plot_style_from_the_folders_it_is_given() {
         .unwrap()
         .contains("--output is for one sheet"));
 }
+
+#[test]
+fn a_plot_style_name_of_any_characters_gets_a_json_reply() {
+    let dir = scratch("plot-style-name");
+    fs::write(
+        dir.join("sheet.yaml"),
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [100, 50, 0]}\n",
+    )
+    .unwrap();
+    // Its last four bytes start inside the `é`.
+    let (code, json) = agentdrafter(&["plot", "sheet.yaml", "--plot-style", "éaaa"], &dir);
+    assert_eq!(code, 1, "{json}");
+    assert_eq!(json["error"]["code"], "bad_value");
+    assert_eq!(json["error"]["field"], "plot_style");
+    assert!(!dir.join("sheet.pdf").exists());
+}

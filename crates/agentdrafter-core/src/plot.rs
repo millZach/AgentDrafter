@@ -379,10 +379,11 @@ fn plot_style(
         };
         return Ok((PlotStyle::monochrome(), used));
     };
-    let plain = !name.is_empty()
-        && !name.contains(['/', '\\', ':'])
+    // Lower-cased whole, so a name of any characters is checked without
+    // cutting one in two.
+    let plain = !name.contains(['/', '\\', ':'])
         && name.len() > 4
-        && name[name.len() - 4..].eq_ignore_ascii_case(".ctb");
+        && name.to_ascii_lowercase().ends_with(".ctb");
     if !plain {
         return Err(Error::new(
             ErrorCode::BadValue,
