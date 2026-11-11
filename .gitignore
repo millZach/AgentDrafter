@@ -1,0 +1,26 @@
+# Client material never enters this public repo.
+# Real drawings are tested from folders outside the repository.
+*.dwg
+*.dxf
+*.bak
+*.dwl
+*.dwl2
+!demo-plant/**/*.dwg
+!demo-plant/**/*.dxf
+!tests/fixtures/**/*.dwg
+!tests/fixtures/**/*.dxf
+
+# Secrets
+.env
+.env.*
+
+# Run files and scratch
+.zstack/
+
+# Build output and tool folders
+target/
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
