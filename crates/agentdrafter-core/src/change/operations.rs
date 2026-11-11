@@ -539,10 +539,12 @@ pub(crate) fn read_change_set(value: &Value, units: Unit) -> Result<ChangeSet, E
                 .at_field("operations"),
         );
     };
+    // What each object an add writes requires, as the schema states it.
+    let objects = sheet_description_schema()["$defs"].take();
     let operations = items
         .iter()
         .enumerate()
-        .map(|(index, item)| operation(index, item, units))
+        .map(|(index, item)| operation(index, item, units, &objects))
         .collect::<Result<_, _>>()?;
     let fixes = match map.get("fixes") {
         None => Vec::new(),
@@ -585,7 +587,16 @@ pub(crate) fn op_error(
     .at_field(path)
 }
 
-fn operation(index: usize, value: &Value, units: Unit) -> Result<Operation, Error> {
+/// Reads operation `index`, whose lengths are in `units`. `objects` holds
+/// the schema of each object an add writes, whose required keys an add
+/// must give: an operation that leaves one out is wrong in itself, so the
+/// whole change set is refused before anything is applied.
+fn operation(
+    index: usize,
+    value: &Value,
+    units: Unit,
+    objects: &Value,
+) -> Result<Operation, Error> {
     let Value::Object(map) = value else {
         return Err(Error::new(
             ErrorCode::WrongType,
@@ -666,6 +677,18 @@ fn operation(index: usize, value: &Value, units: Unit) -> Result<Operation, Erro
             let mut allowed = vec!["sheet", "template"];
             allowed.extend(&own);
             keys(&allowed)?;
+            if let Some(missing) = missing_required(&objects[object], map) {
+                return Err(fail(
+                    ErrorCode::MissingKey,
+                    format!(
+                        "missing key `{}`; {} {object} needs {}",
+                        missing.first,
+                        article(object),
+                        missing.needs
+                    ),
+                    &missing.first,
+                ));
+            }
             let to =
                 match (map.get("sheet"), map.get("template")) {
                     (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
@@ -814,6 +837,59 @@ fn operation(index: usize, value: &Value, units: Unit) -> Result<Operation, Erro
         body,
         sent: value.clone(),
     })
+}
+
+/// The required keys an object leaves out: the first one missing, and what
+/// the object needs, in words.
+struct Missing {
+    first: String,
+    needs: String,
+}
+
+/// What `keys` leaves out of what the object's schema `object` requires:
+/// its required keys, and one of the sets of keys it offers a choice of,
+/// such as a spline's `fit_points` or `control_points`.
+fn missing_required(object: &Value, keys: &Map<String, Value>) -> Option<Missing> {
+    let names = |list: Option<&Value>| -> Vec<String> {
+        list.and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let required = names(object.get("required"));
+    if let Some(first) = required.iter().find(|k| !keys.contains_key(*k)) {
+        return Some(Missing {
+            first: first.clone(),
+            needs: required.join(", "),
+        });
+    }
+    let choices: Vec<Vec<String>> = object
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .map(|options| options.iter().map(|o| names(o.get("required"))).collect())
+        .unwrap_or_default();
+    let chosen = choices
+        .iter()
+        .any(|choice| choice.iter().all(|k| keys.contains_key(k)));
+    if choices.is_empty() || chosen {
+        return None;
+    }
+    let first = choices
+        .iter()
+        .flat_map(|choice| choice.iter().find(|k| !keys.contains_key(*k)))
+        .next()?
+        .clone();
+    let needs = choices
+        .iter()
+        .map(|choice| choice.join(" and "))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    Some(Missing { first, needs })
 }
 
 /// Reads a target: `{"id": "SHEET/ID"}` or `{"name": ..., "sheet": ...}`.

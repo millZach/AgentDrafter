@@ -1038,3 +1038,42 @@ fn two_spellings_of_one_template_file_are_one_template() {
         close(c.radius, 2.0);
     }
 }
+
+#[test]
+fn an_add_that_leaves_out_a_required_key_refuses_the_whole_change_set() {
+    let set = demo_set("required");
+    let before = snapshot(&set);
+    let reply = apply(
+        &set,
+        json!({"operations": [
+            {"op": "add_line", "sheet": "DEMO-001", "from": [0, 0, 0]},
+            {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5},
+        ]}),
+    );
+    assert!(reply.result.is_none(), "nothing is applied");
+    let e = reply.error.unwrap();
+    assert_eq!(e.code, ErrorCode::MissingKey);
+    assert_eq!(e.field.as_deref(), Some("operations[0].to"));
+    assert!(
+        e.message
+            .starts_with("operation 0 (`add_line`): missing key `to`; a line needs from, to"),
+        "{}",
+        e.message
+    );
+    assert_eq!(snapshot(&set), before);
+
+    let e = apply(
+        &set,
+        json!({"operations": [{"op": "add_spline", "sheet": "DEMO-001", "degree": 2}]}),
+    )
+    .error
+    .unwrap();
+    assert_eq!(e.code, ErrorCode::MissingKey);
+    assert!(
+        e.message
+            .contains("a spline needs fit_points or control_points"),
+        "{}",
+        e.message
+    );
+    assert_eq!(snapshot(&set), before);
+}
