@@ -37,7 +37,8 @@ use crate::units::Unit;
 pub(super) const NUMBER: &str = "-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?";
 
 /// The strict YAML subset, as both schemas' descriptions state it.
-const SUBSET: &str = "It is written in a strict subset of YAML 1.2: one document; no anchors, \
+pub(super) const SUBSET: &str =
+    "It is written in a strict subset of YAML 1.2: one document; no anchors, \
                       aliases, tags or directives; every key is text and appears once in its \
                       mapping; a key not in this schema is an error that lists the keys allowed \
                       there. Every scalar is read as text and given its meaning here, so `yes`, \

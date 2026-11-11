@@ -43,7 +43,11 @@ fn library() -> BlockLibrary {
 
 /// Reads a sheet that draws on `library` without touching the disk.
 fn read_with(text: &str, library: &str) -> Result<Sheet, Error> {
-    sheet(text, &mut |_| parse_block_library(library))
+    sheet(
+        super::strict_yaml::read(text)?,
+        &mut |_| parse_block_library(library),
+        None,
+    )
 }
 
 fn with_library(text: &str) -> Sheet {

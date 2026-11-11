@@ -59,6 +59,11 @@ pub enum ErrorCode {
     DwgWrite,
     /// The DWG library could not read the drawing.
     DwgRead,
+    /// A row of a drawing set's data lacks a value its template needs.
+    MissingValue,
+    /// Some sheets of a drawing set failed and were not written; the others
+    /// were built. The reply says which.
+    SheetsFailed,
 }
 
 /// An error from the core, ready to report through any interface.

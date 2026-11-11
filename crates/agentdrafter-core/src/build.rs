@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::description::read_sheet_description;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
+use crate::model::Sheet;
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -36,7 +37,8 @@ pub struct BuildRequest {
 /// What a build wrote.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BuildReport {
-    /// The sheet description that was built.
+    /// The sheet description that was built, or for a sheet of a drawing
+    /// set, its template.
     pub description: String,
     /// The DWG that was written.
     pub dwg: String,
@@ -77,32 +79,45 @@ pub fn build(request: &BuildRequest) -> Result<BuildReport, Error> {
 pub fn build_with(request: &BuildRequest, settings: &Settings) -> Result<BuildReport, Error> {
     let description = request.description.as_path();
     let sheet = read_sheet_description(description)?;
-
     let output = request
         .output
         .clone()
         .unwrap_or_else(|| description.with_extension("dwg"));
-    if fs::symlink_metadata(&output).is_ok() {
-        if is_same_file(description, &output) {
+    build_sheet(&sheet, description, &output, request.overwrite, settings)
+}
+
+/// Builds `sheet`, read from the sheet description or template at
+/// `description`, into a DWG at `output`, written whole or not at all. An
+/// existing file there is replaced only when `overwrite` is asked for and it
+/// carries AgentDrafter's build mark.
+pub(crate) fn build_sheet(
+    sheet: &Sheet,
+    description: &Path,
+    output: &Path,
+    overwrite: bool,
+    settings: &Settings,
+) -> Result<BuildReport, Error> {
+    if fs::symlink_metadata(output).is_ok() {
+        if is_same_file(description, output) {
             return Err(Error::usage(
                 "the output path is the sheet description itself; choose another path for the DWG",
             )
-            .in_file(&output));
+            .in_file(output));
         }
-        if !request.overwrite {
+        if !overwrite {
             return Err(Error::new(
                 ErrorCode::OutputExists,
                 "a file is already at the output path; ask to overwrite it to replace a previous build",
             )
-            .in_file(&output));
+            .in_file(output));
         }
-        refuse_unless_built(&output)?;
+        refuse_unless_built(output)?;
     }
 
-    let fonts = SheetFonts::find(&sheet, settings);
+    let fonts = SheetFonts::find(sheet, settings);
     let bytes =
-        dwg::write_new_sheet(&sheet, &|text| fonts.start(text)).map_err(|e| e.in_file(&output))?;
-    write_whole(&output, &bytes)?;
+        dwg::write_new_sheet(sheet, &|text| fonts.start(text)).map_err(|e| e.in_file(output))?;
+    write_whole(output, &bytes)?;
 
     let mut objects = BTreeMap::new();
     for object in &sheet.objects {

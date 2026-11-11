@@ -1,0 +1,27 @@
+# One row per sheet: the sheet's name, which names its DWG, the template it
+# is drawn from, and the values the template takes from the row.
+rows:
+  - sheet: DEMO-001
+    template: templates/ansi-b.yaml
+    values:
+      TITLE: AREA 100 GENERAL ARRANGEMENT
+      DWG_NO: DEMO-001
+      SHEET: 1 OF 3
+      REV: '0'
+      DATE: 2026-11-11
+  - sheet: DEMO-002
+    template: templates/ansi-b.yaml
+    values:
+      TITLE: AREA 200 GENERAL ARRANGEMENT
+      DWG_NO: DEMO-002
+      SHEET: 2 OF 3
+      REV: '0'
+      DATE: 2026-11-11
+  - sheet: DEMO-003
+    template: templates/ansi-b.yaml
+    values:
+      TITLE: AREA 300 GENERAL ARRANGEMENT
+      DWG_NO: DEMO-003
+      SHEET: 3 OF 3
+      REV: A
+      DATE: 2026-11-11

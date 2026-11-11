@@ -1,0 +1,31 @@
+# The demo plant's block library: a made-up title block, 6.5 by 2 inches,
+# whose base point is its lower right corner, so a template inserts it at
+# the inner corner of its border.
+units: in
+layers:
+  title: {color: white, lineweight: 0.5}
+  title-text: {color: green}
+text_styles:
+  title: {font: romans.shx, width_factor: 0.8}
+blocks:
+  TITLE_BLOCK:
+    objects:
+      - polyline: {points: [[-6.5, 0, 0], [0, 0, 0], [0, 2, 0], [-6.5, 2, 0]], closed: true, layer: title}
+      - line: {from: [-6.5, 1.4, 0], to: [0, 1.4, 0], layer: title}
+      - line: {from: [-6.5, 0.6, 0], to: [0, 0.6, 0], layer: title}
+      - line: {from: [-4, 0, 0], to: [-4, 0.6, 0], layer: title}
+      - line: {from: [-3, 0, 0], to: [-3, 0.6, 0], layer: title}
+      - line: {from: [-2.3, 0, 0], to: [-2.3, 0.6, 0], layer: title}
+      - line: {from: [-1, 0, 0], to: [-1, 0.6, 0], layer: title}
+      - text: {contents: DEMO PLANT, position: [-3.25, 1.7, 0], height: 0.25, style: title, justify: middle_center, layer: title-text}
+      - text: {contents: DWG NO., position: [-6.45, 0.52, 0], height: 0.08, style: title, justify: top_left, layer: title-text}
+      - text: {contents: SHEET, position: [-3.95, 0.52, 0], height: 0.08, style: title, justify: top_left, layer: title-text}
+      - text: {contents: REV, position: [-2.95, 0.52, 0], height: 0.08, style: title, justify: top_left, layer: title-text}
+      - text: {contents: DATE, position: [-2.25, 0.52, 0], height: 0.08, style: title, justify: top_left, layer: title-text}
+      - text: {contents: DRAWN, position: [-0.95, 0.52, 0], height: 0.08, style: title, justify: top_left, layer: title-text}
+      - attdef: {tag: TITLE, prompt: Title, position: [-3.25, 1, 0], height: 0.2, style: title, justify: middle_center, layer: title-text}
+      - attdef: {tag: DWG_NO, prompt: Drawing number, position: [-5.25, 0.22, 0], height: 0.14, style: title, justify: middle_center, layer: title-text}
+      - attdef: {tag: SHEET, prompt: Sheet, position: [-3.5, 0.22, 0], height: 0.14, style: title, justify: middle_center, layer: title-text}
+      - attdef: {tag: REV, prompt: Revision, default: '0', position: [-2.65, 0.22, 0], height: 0.14, style: title, justify: middle_center, layer: title-text}
+      - attdef: {tag: DATE, prompt: Date, position: [-1.65, 0.22, 0], height: 0.14, style: title, justify: middle_center, layer: title-text}
+      - attdef: {tag: DRAWN, prompt: Drawn by, position: [-0.5, 0.22, 0], height: 0.14, style: title, justify: middle_center, layer: title-text}
