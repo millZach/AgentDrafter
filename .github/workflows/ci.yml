@@ -57,3 +57,69 @@ jobs:
 
       - name: Judge tests (made-up data, no AutoCAD)
         run: python -m unittest discover -s tools/judge/tests
+
+      # The demo plant (examples/demo-plant): every sheet built to DWG and plotted to PDF, and the
+      # checker run on it; a failed check fails the job. Each system's SHA-256 of every DWG and PDF
+      # goes to the `demo-plant` job below, which holds the three systems to the same bytes.
+      - name: The demo plant builds, plots and passes the checker
+        shell: bash
+        run: |
+          agentdrafter() { cargo run --quiet -p agentdrafter-cli --locked -- "$@"; }
+          agentdrafter build examples/demo-plant
+          echo
+          agentdrafter plot examples/demo-plant
+          echo
+          agentdrafter check examples/demo-plant > demo-plant-check.json
+          python - <<'PY'
+          import hashlib, json, pathlib, sys
+
+          reply = json.loads(pathlib.Path("demo-plant-check.json").read_text(encoding="utf-8"))
+          if not reply["ok"]:
+              sys.exit(f"the checker could not read the demo plant: {reply['error']}")
+          result = reply["result"]
+          print(result["message"])
+          for finding in result["findings"]:
+              print(f"{finding['sheet']} {finding['rule']}: {finding['message']}")
+          if not result["passed"]:
+              sys.exit("the demo plant fails the checker")
+
+          out = pathlib.Path("examples/demo-plant/dwg")
+          lines = []
+          for sheet in result["sheets"]:
+              for extension in (".dwg", ".pdf"):
+                  path = out / (sheet + extension)
+                  lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")
+          pathlib.Path("demo-plant-hashes.txt").write_bytes("".join(lines).encode("ascii"))
+          print("".join(lines), end="")
+          PY
+
+      - name: Keep the demo plant's hashes, DWGs and PDFs
+        uses: actions/upload-artifact@v7
+        with:
+          name: demo-plant-${{ matrix.os }}
+          path: |
+            demo-plant-hashes.txt
+            examples/demo-plant/dwg/
+          if-no-files-found: error
+          retention-days: 7
+
+  demo-plant:
+    # Every DWG and PDF of the demo plant is the same, byte for byte, on Windows, Linux and macOS.
+    name: demo plant (the same on every system)
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: demo-plant-*
+
+      - name: Compare each system's hashes of every DWG and PDF
+        run: |
+          linux=demo-plant-ubuntu-latest/demo-plant-hashes.txt
+          test -s "$linux"
+          cat "$linux"
+          for os in windows-latest macos-latest; do
+            echo "Linux against $os:"
+            diff -u "$linux" "demo-plant-$os/demo-plant-hashes.txt"
+          done
+          echo "Every DWG and PDF is the same on Windows, Linux and macOS."

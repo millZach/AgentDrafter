@@ -1,0 +1,7 @@
+# The demo plant's loop sheets, made up for AgentDrafter's examples: two
+# templates, a block library and one row per loop, in inches. Building this
+# folder writes one DWG per row into dwg/, and plotting it one PDF per row
+# beside them.
+units: in
+output: dwg
+rows: rows.yaml
