@@ -139,14 +139,19 @@ fn the_page_is_the_extents_at_one_to_one_and_the_drawing_sits_on_it() {
     assert!((h - points(50.0)).abs() < 1e-3, "{h}");
     assert_eq!(report.sheet_size.width_mm, 100.0);
     assert_eq!(report.sheet_size.height_mm, 50.0);
-    // The line runs from (10, 10) to (90, 40) mm on the page. The frame lies
-    // on the page's edge, which AutoCAD's plot of the same sheet leaves
-    // out, and so does this.
+    // The frame's corners are the page's corners, and the line runs from
+    // (10, 10) to (90, 40) mm on the page.
     let drawn = pdf.points();
     let near = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).abs() < 1e-3 && (p[1] - q[1]).abs() < 1e-3;
-    assert_eq!(drawn.len(), 2, "{drawn:?}");
-    assert!(near(drawn[0], [points(10.0), points(10.0)]), "{drawn:?}");
-    assert!(near(drawn[1], [points(90.0), points(40.0)]), "{drawn:?}");
+    for corner in [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]] {
+        assert!(
+            drawn.iter().any(|&p| near(p, corner)),
+            "{corner:?} in {drawn:?}"
+        );
+    }
+    let line = &drawn[drawn.len() - 2..];
+    assert!(near(line[0], [points(10.0), points(10.0)]), "{drawn:?}");
+    assert!(near(line[1], [points(90.0), points(40.0)]), "{drawn:?}");
 
     // A sheet that draws nothing has no size to plot.
     let empty = dir.join("empty.yaml");
@@ -171,57 +176,17 @@ fn the_page_is_the_extents_at_one_to_one_and_the_drawing_sits_on_it() {
 }
 
 /// Three lines on layers of colours 1, 2 and 3, of lineweights 0.25, 0.5
-/// and the default, inside a frame on the page's edge, which draws nothing.
+/// and the default.
 const THREE_PENS: &str = "units: mm
 layers:
   red: {color: 1, lineweight: 0.25}
   yellow: {color: 2, lineweight: 0.5}
   green: {color: 3}
 objects:
-  - polyline: {points: [[-10, -10, 0], [110, -10, 0], [110, 30, 0], [-10, 30, 0]], closed: true}
   - line: {from: [0, 0, 0], to: [100, 0, 0], layer: red}
   - line: {from: [0, 10, 0], to: [100, 10, 0], layer: yellow}
   - line: {from: [0, 20, 0], to: [100, 20, 0], layer: green}
 ";
-
-/// What lies along the page's edge, such as a template's trim line, is not
-/// drawn, as AutoCAD 2026 left it out of its plot of a made-up probe on
-/// paper the sheet's size; what only touches the edge is drawn.
-#[test]
-fn what_lies_on_the_pages_edge_is_left_out_as_autocad_leaves_it_out() {
-    let dir = scratch("edge");
-    let source = dir.join("sheet.yaml");
-    fs::write(
-        &source,
-        "units: in
-objects:
-  - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true}
-  - polyline: {points: [[2, 0, 0], [4, 0, 0], [4, 2, 0], [6, 2, 0], [6, 0, 0], [8, 0, 0]]}
-  - line: {from: [17, 3, 0], to: [17, 5, 0]}
-  - line: {from: [0, 5, 0], to: [17, 5, 0]}
-",
-    )
-    .unwrap();
-    let report = plot(&source, |_| {}, &Settings::default());
-    let drawn = read(&report.pdf).points();
-    // The polyline's middle, from (4, 0) up, across and down to (6, 0), each
-    // segment a stroke of its own as a flat polyline's linetype restarts at
-    // each vertex, and the line across the page, from edge to edge.
-    let inches = |x: f64, y: f64| [x * 72.0, y * 72.0];
-    assert_eq!(
-        drawn,
-        [
-            inches(4.0, 0.0),
-            inches(4.0, 2.0),
-            inches(4.0, 2.0),
-            inches(6.0, 2.0),
-            inches(6.0, 2.0),
-            inches(6.0, 0.0),
-            inches(0.0, 5.0),
-            inches(17.0, 5.0),
-        ]
-    );
-}
 
 #[test]
 fn a_ctb_plot_style_sets_the_colour_and_lineweight_of_each_pen() {
@@ -252,12 +217,10 @@ fn a_ctb_plot_style_sets_the_colour_and_lineweight_of_each_pen() {
         &settings,
     );
     assert_eq!(report.plot_style.name, "made-up.ctb");
-    assert!(report
-        .plot_style
-        .file
-        .as_deref()
-        .unwrap()
-        .ends_with("Made-Up.ctb"));
+    // Where it was found: on a system whose files ignore case, under the
+    // name it was asked for.
+    let file = report.plot_style.file.as_deref().unwrap();
+    assert!(file.to_ascii_lowercase().ends_with("made-up.ctb"), "{file}");
     let pens = read(&report.pdf).strokes();
     assert_eq!(pens.len(), 3, "{pens:?}");
     let near = |a: f64, b: f64| (a - b).abs() < 1e-3;

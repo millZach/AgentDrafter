@@ -112,10 +112,9 @@ objects:
     let [a, b, c, d, ..] = text[2].matrix;
     assert!(near(a, 0.0) && near(b, mm(4.0)) && near(c, -mm(4.0)) && near(d, 0.0));
 
-    // The text still draws: the two SHX texts as strokes, the TrueType text
-    // as filled outlines. The frame lies on the page's edge and draws
-    // nothing.
-    assert_eq!(pdf.strokes().len(), 2, "{:?}", pdf.strokes());
+    // The text still draws: the two SHX texts as strokes, after the frame,
+    // and the TrueType text as filled outlines.
+    assert_eq!(pdf.strokes().len(), 3, "{:?}", pdf.strokes());
     assert!(!pdf.fills().is_empty());
 }
 

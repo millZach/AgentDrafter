@@ -12,11 +12,11 @@ Both print one line of JSON, as `build` does.
 
 ## The sheet size
 
-A sheet is as large as what it draws ([the drawing set](drawing-set.md#templates)): its template draws its trim line at the paper's edge, and the usual case is one DWG per sheet, drawn in model space and plotted to extents at 1:1. So the PDF's page is the drawing's extents, the box round everything it draws as AutoCAD's extents are, at 1:1 in the drawing's unit. There is no paper setting and no scale to give.
+A sheet is as large as what it draws ([the drawing set](drawing-set.md#templates)): its template draws its trim line at the paper's edge, and the usual case is one DWG per sheet, drawn in model space and plotted to extents at 1:1. So the PDF's page is the drawing's extents at 1:1 in the drawing's unit: the box round everything it draws, as the PNG's extents are (AutoCAD's take the same box but for text, whose box they take where AgentDrafter takes what it draws). There is no paper setting and no scale to give.
 
 - The demo set's template draws its trim line from (0, 0) to (17, 11) inches, so each of its sheets plots on a page of exactly 17 by 11 inches: 431.8 by 279.4 mm, 1224 by 792 points. Inches are exact in points, so the page box is exact; a sheet drawn in millimetres lands on the same page to within a millionth of a point.
 - The drawing's corner at its extents' lower left is the page's lower left corner.
-- What lies along the page's edge, such as the template's trim line, is not drawn: AutoCAD 2026, plotting a made-up sheet to extents on paper its own size, left out every segment that lay along the paper's edge, the trim line and the parts of a polyline on the edge, and drew what only touched it, a line from edge to edge and the parts of the polyline that met the edge. A plot does the same. So a sheet with no trim line of its own loses whatever lies along its extents' edge: draw a sheet's trim line, as a template does.
+- What lies along the page's edge, such as the template's trim line, draws the half of its pen that falls on the page. AutoCAD 2026, plotting a sheet to extents on paper its own size, leaves out every segment that lies along the paper's edge (the trim line, and on a made-up probe a line on the edge and the parts of a polyline on it) and draws what only touches it. A plot does not leave them out: the page's edge is the box round what the sheet draws, so on a sheet with no trim line it runs along the sheet's own outermost lines, and along the strokes of text where text is outermost, which AutoCAD's extents, taking text's box, never do. Leaving them out would cut those away; drawing them costs a hairline, half the trim line's pen, on the very edge of the paper.
 - A DWG with no unit is taken to be in millimetres, as `render` takes it.
 - A sheet that draws nothing, or nothing with both a width and a height, has no size and is refused (`bad_value`), and so is one larger than 200 inches (5080 mm) a side, the largest page PDF readers open: a sheet that size has objects drawn far outside its border.
 
@@ -82,18 +82,17 @@ Both PDFs were turned into pixels at 300 dots per inch (one pixel is 0.085 mm). 
 
 | Sheet | Page, AutoCAD's and AgentDrafter's | AutoCAD's ink within 1 px of AgentDrafter's | within 2 px | AgentDrafter's ink within 1 px of AutoCAD's | within 2 px |
 |---|---|---|---|---|---|
-| `DEMO-001`, `DEMO-002`, `DEMO-003` | 1224 by 792 points, both | 99.96% | 100% | 99.96% | 100% |
-| made-up edge probe | 1224 by 792 points, both | 99.96% | 100% | 99.98% | 100% |
+| `DEMO-001`, `DEMO-002`, `DEMO-003` | 1224 by 792 points, both | 99.96% | 100% | 99.96% away from the page's edge; 93% in all | 100% away from the page's edge; 93% in all |
 | `examples/one-line.yaml` | A3; 100 by 50 mm | 100% | 100% | 100% | 100% |
 | `examples/geometry.yaml` | A3; 245 by 154 mm | 99.99% | 100% | 99.99% | 100% |
 | `examples/hatch.yaml` | A3; 220 by 200 mm | 100% | 100% | 100% | 100% |
-| `examples/text.yaml` | A3; 237.643 by 123.623 mm | 99.52% | 100% | 99.59% | 99.99% |
+| `examples/text.yaml` | A3; 237.643 by 123.623 mm | 99.53% | 100% | 99.60% | 99.99% |
 | `examples/blocks/sheet-1.yaml`, `sheet-2.yaml` | A3; 102.294 by 62.293 and 72.999 by 35.999 mm | 100% | 100% | 100% | 100% |
 | made-up CTB probe | A3; 200 by 110 mm | 99.96% | 100% | 99.99% | 100% |
 
-The examples' rows leave out a band 5 pixels wide along AgentDrafter's page's edge, where AutoCAD, on larger paper, draws what lies on the extents' edge. Through the made-up CTB, every pen plotted in the same colour in both, and every lineweight the CTB set came out the same to the pixel.
+On the demo sheets, the 7% of AgentDrafter's ink that is not near AutoCAD's is the trim line's half pen on the page's edge, which AutoCAD leaves out; away from a band 5 pixels wide along the edge, both ways match. Through the made-up CTB, every pen plotted in the same colour in both, and every lineweight the CTB set came out the same to the pixel.
 
-What still differs: AutoCAD writes its PDF on a grid of 1/600 inch, one step down and to the left of where things are, and rounds each lineweight to it, so its sheets sit 0.04 mm off AgentDrafter's and its pens are up to 0.01 mm wider or narrower; TrueType text sits up to 2 pixels from AutoCAD's, as it does in the PNG; and AutoCAD writes its SHX text as lines, so none of it can be searched, where AgentDrafter's can.
+What still differs: the trim line on the page's edge (above); AutoCAD writes its PDF on a grid of 1/600 inch, one step down and to the left of where things are, and rounds each lineweight to it, so its sheets sit 0.04 mm off AgentDrafter's and its pens are up to 0.01 mm wider or narrower; TrueType text sits up to 2 pixels from AutoCAD's, as it does in the PNG; and AutoCAD writes its SHX text as lines, so none of it can be searched, where AgentDrafter's can.
 
 ## What is not offered yet
 

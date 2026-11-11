@@ -3,10 +3,7 @@
 //!
 //! The page is the sheet's size. Every item of the display list is drawn
 //! in its order as vectors, through the plot style's pens: strokes with
-//! round ends and corners at the pen's lineweight, fills by their rule. A
-//! stroke's segments that lie along the page's edge, such as a template's
-//! trim line, are left out, as AutoCAD 2026 left them out of its plot of a
-//! made-up sheet on paper the sheet's size. The
+//! round ends and corners at the pen's lineweight, fills by their rule. The
 //! text draws as the display list draws it, an SHX font's strokes and a
 //! TrueType font's filled outlines, so it looks as AutoCAD plots it; and
 //! each line of text is written again on top as invisible text, character
@@ -73,43 +70,6 @@ impl Page {
     /// A drawing vector on the page, in points.
     fn vector(&self, v: Point2) -> [f64; 2] {
         [v[0] * self.points_per_unit, v[1] * self.points_per_unit]
-    }
-
-    /// The pieces of a run of page points that a plot draws: the run, less
-    /// each segment that lies along an edge of the page, as AutoCAD's plot
-    /// of the same window leaves out a template's trim line drawn on the
-    /// paper's edge. A dot is drawn wherever it is.
-    fn inside(&self, run: Vec<(f32, f32)>) -> Vec<Vec<(f32, f32)>> {
-        let Some(&first) = run.first() else {
-            return Vec::new();
-        };
-        if run.iter().all(|&p| p == first) {
-            return vec![run];
-        }
-        let (width, height) = (snap(self.width), snap(self.height));
-        let along = |a: (f32, f32), b: (f32, f32)| {
-            let both = |u: f32, v: f32, at: f32| u == at && v == at;
-            both(a.0, b.0, 0.0)
-                || both(a.0, b.0, width)
-                || both(a.1, b.1, 0.0)
-                || both(a.1, b.1, height)
-        };
-        let mut pieces = Vec::new();
-        let mut piece = vec![first];
-        for pair in run.windows(2) {
-            if along(pair[0], pair[1]) {
-                if piece.len() > 1 {
-                    pieces.push(std::mem::take(&mut piece));
-                }
-                piece = vec![pair[1]];
-            } else {
-                piece.push(pair[1]);
-            }
-        }
-        if piece.len() > 1 {
-            pieces.push(piece);
-        }
-        pieces
     }
 }
 
@@ -249,10 +209,8 @@ fn drawing(list: &DisplayList, page: &Page, style: &PlotStyle, codes: &Codes) ->
             Shape::Stroke { lineweight, runs } => {
                 let width = snap(style.lineweight(item.color, *lineweight) * POINTS_PER_MILLIMETRE);
                 let mut drawn = false;
-                let pieces = runs
-                    .iter()
-                    .flat_map(|run| page.inside(run.iter().map(|&p| page.at(p)).collect()));
-                for points in pieces {
+                for run in runs {
+                    let points: Vec<(f32, f32)> = run.iter().map(|&p| page.at(p)).collect();
                     let Some(&first) = points.first() else {
                         continue;
                     };
