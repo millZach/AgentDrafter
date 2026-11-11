@@ -12,15 +12,15 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agentdrafter_core::{
-    build_with, measure_text_with, sheet_description_schema, BuildRequest, Error, ErrorCode,
-    MeasureTextRequest, Reply, Settings, FONTS_VARIABLE,
+    block_library_schema, build_with, measure_text_with, sheet_description_schema, BuildRequest,
+    Error, ErrorCode, MeasureTextRequest, Reply, Settings, FONTS_VARIABLE,
 };
 use serde::Serialize;
 use serde_json::json;
 
 const BUILD_USAGE: &str =
     "agentdrafter build <sheet-description> [--output <dwg>] [--overwrite] [--fonts <folder>]...";
-const SCHEMA_USAGE: &str = "agentdrafter schema";
+const SCHEMA_USAGE: &str = "agentdrafter schema [sheet-description | block-library]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
 
 fn main() -> ExitCode {
@@ -47,13 +47,23 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
             Ok((request, settings)) => reply(measure_text_with(&request, &settings)),
             Err(error) => reply::<()>(Err(error)),
         },
-        Some("schema") => match args.next() {
-            None => reply(Ok(sheet_description_schema())),
-            Some(arg) => reply::<()>(Err(Error::usage(format!(
-                "schema takes no arguments, found `{}`; usage: {SCHEMA_USAGE}",
-                arg.to_string_lossy()
-            )))),
-        },
+        Some("schema") => {
+            let which = args.next();
+            match (which.as_ref().map(|a| a.to_str()), args.next()) {
+                (None | Some(Some("sheet-description")), None) => {
+                    reply(Ok(sheet_description_schema()))
+                }
+                (Some(Some("block-library")), None) => reply(Ok(block_library_schema())),
+                (_, Some(extra)) => reply::<()>(Err(Error::usage(format!(
+                    "schema takes at most one argument, found `{}` as well; usage: {SCHEMA_USAGE}",
+                    extra.to_string_lossy()
+                )))),
+                (Some(_), None) => reply::<()>(Err(Error::usage(format!(
+                    "schema prints the schema of a sheet description or of a block library, not `{}`; usage: {SCHEMA_USAGE}",
+                    which.unwrap_or_default().to_string_lossy()
+                )))),
+            }
+        }
         Some("help" | "--help" | "-h") => reply(Ok(help())),
         Some("--version" | "-V") => reply(Ok(json!({ "version": env!("CARGO_PKG_VERSION") }))),
         _ => reply::<()>(Err(Error::usage(format!(
@@ -203,17 +213,19 @@ fn help() -> serde_json::Value {
         "commands": {
             "build": {
                 "usage": BUILD_USAGE,
-                "does": "Builds a sheet description into a DWG in the 2018 format (AC1032). \
-                         The DWG goes beside the sheet description with a .dwg extension unless \
-                         --output names another path. An existing file is never replaced \
-                         without --overwrite, and --overwrite replaces only a DWG AgentDrafter \
-                         built. The reply lists each text style whose font is not in the font \
-                         folders, with the look-alike measured in its place.",
+                "does": "Builds a sheet description into a DWG in the 2018 format (AC1032), \
+                         with the blocks it inserts from the block library it names. The DWG \
+                         goes beside the sheet description with a .dwg extension unless --output \
+                         names another path. An existing file is never replaced without \
+                         --overwrite, and --overwrite replaces only a DWG AgentDrafter built. The \
+                         reply lists the blocks the DWG defines, and each text style whose font \
+                         is not in the font folders, with the look-alike measured in its place.",
             },
             "schema": {
                 "usage": SCHEMA_USAGE,
-                "does": "Prints the sheet description's schema: a JSON Schema (draft 2020-12) of \
-                         every key a sheet description may hold, with what each means.",
+                "does": "Prints the sheet description's schema, or with block-library the block \
+                         library's: a JSON Schema (draft 2020-12) of every key it may hold, with \
+                         what each means.",
             },
             "measure-text": {
                 "usage": MEASURE_USAGE,

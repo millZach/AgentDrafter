@@ -66,14 +66,20 @@ pub(crate) struct SheetFonts {
 
 impl SheetFonts {
     /// Finds the font of every style the sheet defines, and of `Standard`
-    /// when text draws with it.
+    /// when text, on the sheet or in a block it inserts, draws with it.
     pub(crate) fn find(sheet: &Sheet, settings: &Settings) -> Self {
         let mut styles: Vec<TextStyle> = sheet.text_styles.clone();
-        let standard_used = sheet.objects.iter().any(|object| match object {
-            Object::Text(text) => text.style == STANDARD,
-            Object::MText(text) => text.style == STANDARD,
-            _ => false,
-        });
+        let in_blocks = sheet.blocks.iter().flat_map(|b| &b.objects);
+        let standard_used = sheet
+            .objects
+            .iter()
+            .chain(in_blocks)
+            .any(|object| match object {
+                Object::Text(text) => text.style == STANDARD,
+                Object::MText(text) => text.style == STANDARD,
+                Object::AttributeDefinition(definition) => definition.style == STANDARD,
+                _ => false,
+            });
         if standard_used && !styles.iter().any(|s| s.name == STANDARD) {
             styles.insert(0, TextStyle::standard());
         }

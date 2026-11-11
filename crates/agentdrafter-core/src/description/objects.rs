@@ -1,8 +1,14 @@
-//! Reads the objects on a sheet: each is a mapping with one key, its type.
+//! Reads the objects on a sheet and in a block: each is a mapping with one
+//! key, its type.
+//!
+//! A sheet and a block hold the same drawn objects. A sheet also holds
+//! inserts of blocks, and a block also holds attribute definitions;
+//! `blocks.rs` reads both.
 
+use super::blocks::{attribute_definition, insert, ATTDEF_KEYS, INSERT_KEYS};
 use super::hatch::{self, HATCH_KEYS};
 use super::layers::layer_name;
-use super::strict_yaml::{index_path, key_path, Kind, Node};
+use super::strict_yaml::{index_path, key_path, Kind, Node, Pos};
 use super::text::{mtext, text, MTEXT_KEYS, TEXT_KEYS};
 use super::{
     angle, at, bad_value, boolean, length, plain_number, point, points, scalar, unknown_key,
@@ -10,14 +16,17 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arc, Circle, Ellipse, HatchPattern, Layer, Line, Object, Polyline, Spline, FIT_DEGREE,
-    LAYER_ZERO,
+    Arc, BlockLibrary, Circle, Ellipse, HatchPattern, Layer, Line, Object, Polyline, Spline,
+    FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
 
-/// Every object type a sheet description can hold, and the keys each takes.
-pub(crate) const OBJECT_TYPES: [(&str, &[&str]); 9] = [
+/// An object type and the keys it takes.
+type ObjectType = (&'static str, &'static [&'static str]);
+
+/// The drawn objects both a sheet and a block hold, and the keys each takes.
+const DRAWN_OBJECT_TYPES: [ObjectType; 9] = [
     ("line", &LINE_KEYS),
     ("polyline", &POLYLINE_KEYS),
     ("arc", &ARC_KEYS),
@@ -28,6 +37,71 @@ pub(crate) const OBJECT_TYPES: [(&str, &[&str]); 9] = [
     ("text", &TEXT_KEYS),
     ("mtext", &MTEXT_KEYS),
 ];
+
+/// The drawn objects followed by one more object type.
+const fn drawn_and(last: ObjectType) -> [ObjectType; 10] {
+    let mut types = [last; 10];
+    let mut i = 0;
+    while i < DRAWN_OBJECT_TYPES.len() {
+        types[i] = DRAWN_OBJECT_TYPES[i];
+        i += 1;
+    }
+    types
+}
+
+/// Every object type a sheet description can hold, and the keys each takes:
+/// the drawn objects, and inserts.
+pub(crate) const OBJECT_TYPES: [ObjectType; 10] = drawn_and(("insert", &INSERT_KEYS));
+
+/// Every object type a block in a block library can hold, and the keys
+/// each takes: the drawn objects a sheet holds, and attribute definitions.
+pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 10] = drawn_and(("attdef", &ATTDEF_KEYS));
+
+/// What the objects of one sheet or one block may name: the declared unit
+/// and the layers, hatch patterns and text styles defined beside them.
+pub(super) struct Tables<'a> {
+    pub units: Unit,
+    pub layers: &'a [Layer],
+    pub hatch_patterns: &'a [HatchPattern],
+    pub styles: &'a [TextStyle],
+}
+
+/// Where an object is: on a sheet, which may insert blocks from its block
+/// library and gives each name once, or in a block, which defines each
+/// attribute tag once.
+pub(super) enum Place<'a> {
+    Sheet {
+        library: Option<&'a BlockLibrary>,
+        /// Each name given so far, and where.
+        names: Vec<(String, Pos)>,
+    },
+    Block {
+        /// Each attribute tag defined so far, and where.
+        tags: Vec<(String, Pos)>,
+    },
+}
+
+impl Place<'_> {
+    fn types(&self) -> &'static [(&'static str, &'static [&'static str])] {
+        match self {
+            Place::Sheet { .. } => &OBJECT_TYPES,
+            Place::Block { .. } => &BLOCK_OBJECT_TYPES,
+        }
+    }
+
+    /// Why an object type belongs elsewhere, for the error that refuses it.
+    fn elsewhere(&self, kind: &str) -> Option<&'static str> {
+        match (self, kind) {
+            (Place::Sheet { .. }, "attdef") => {
+                Some("an attribute definition belongs in a block in the block library")
+            }
+            (Place::Block { .. }, "insert") => {
+                Some("a block cannot insert another block; nested blocks are not offered yet")
+            }
+            _ => None,
+        }
+    }
+}
 
 const LINE_KEYS: [&str; 3] = ["from", "to", "layer"];
 const POLYLINE_KEYS: [&str; 3] = ["points", "closed", "layer"];
@@ -52,17 +126,16 @@ pub(crate) const FEWEST_FIT_POINTS: usize = 3;
 pub(super) fn object(
     node: &Node,
     path: &str,
-    units: Unit,
-    layers: &[Layer],
-    hatch_patterns: &[HatchPattern],
-    styles: &[TextStyle],
+    tables: &Tables,
+    place: &mut Place,
 ) -> Result<Object, Error> {
     const SHAPE: &str = "a mapping with one key naming the object's type, such as `line:`";
     let Kind::Mapping(entries) = &node.kind else {
         return Err(wrong_type(node, path, SHAPE));
     };
+    let types = place.types();
     let known = || {
-        OBJECT_TYPES
+        types
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>()
@@ -70,12 +143,16 @@ pub(super) fn object(
     };
     if let Some(entry) = entries
         .iter()
-        .find(|e| !OBJECT_TYPES.iter().any(|(name, _)| *name == e.key))
+        .find(|e| !types.iter().any(|(name, _)| *name == e.key))
     {
+        let what = match place.elsewhere(&entry.key) {
+            Some(why) => format!("object type `{}` is not allowed here: {why}", entry.key),
+            None => format!("unknown object type `{}`", entry.key),
+        };
         return Err(unknown_key(
             entry,
             path,
-            &format!("unknown object type `{}`", entry.key),
+            &what,
             &format!("known types: {}", known()),
         ));
     }
@@ -83,12 +160,12 @@ pub(super) fn object(
         return Err(wrong_type(node, path, SHAPE));
     };
     let path = key_path(path, &entry.key);
-    let keys = OBJECT_TYPES
+    let keys = types
         .iter()
         .find(|(name, _)| *name == entry.key)
         .map(|(_, keys)| *keys)
         .unwrap_or_default();
-    let article = if entry.key.starts_with(['a', 'e']) || entry.key == "mtext" {
+    let article = if entry.key.starts_with(['a', 'e', 'i', 'o', 'u']) || entry.key == "mtext" {
         "an"
     } else {
         "a"
@@ -100,20 +177,29 @@ pub(super) fn object(
         &format!("{article} {}", entry.key),
     )?;
     let layer = match fields.get("layer") {
-        Some(node) => layer_name(node, &fields.path_of("layer"), layers)?,
+        Some(node) => layer_name(node, &fields.path_of("layer"), tables.layers)?,
         None => LAYER_ZERO.to_owned(),
     };
-    match entry.key.as_str() {
-        "line" => line(&fields, units, layer).map(Object::Line),
-        "polyline" => polyline(&fields, units, layer).map(Object::Polyline),
-        "arc" => arc(&fields, units, layer).map(Object::Arc),
-        "circle" => circle(&fields, units, layer).map(Object::Circle),
-        "ellipse" => ellipse(&fields, units, layer).map(Object::Ellipse),
-        "spline" => spline(&fields, units, layer).map(Object::Spline),
-        "hatch" => hatch::hatch(&fields, units, layer, hatch_patterns).map(Object::Hatch),
-        "text" => text(&fields, units, layer, styles).map(Object::Text),
-        "mtext" => mtext(&fields, units, layer, styles).map(Object::MText),
-        other => unreachable!("object type `{other}` is listed but not read"),
+    let units = tables.units;
+    match (entry.key.as_str(), place) {
+        ("line", _) => line(&fields, units, layer).map(Object::Line),
+        ("polyline", _) => polyline(&fields, units, layer).map(Object::Polyline),
+        ("arc", _) => arc(&fields, units, layer).map(Object::Arc),
+        ("circle", _) => circle(&fields, units, layer).map(Object::Circle),
+        ("ellipse", _) => ellipse(&fields, units, layer).map(Object::Ellipse),
+        ("spline", _) => spline(&fields, units, layer).map(Object::Spline),
+        ("hatch", _) => {
+            hatch::hatch(&fields, units, layer, tables.hatch_patterns).map(Object::Hatch)
+        }
+        ("text", _) => text(&fields, units, layer, tables.styles).map(Object::Text),
+        ("mtext", _) => mtext(&fields, units, layer, tables.styles).map(Object::MText),
+        ("attdef", Place::Block { tags }) => {
+            attribute_definition(&fields, tables, layer, tags).map(Object::AttributeDefinition)
+        }
+        ("insert", Place::Sheet { library, names }) => {
+            insert(&fields, units, layer, *library, names).map(Object::Insert)
+        }
+        (other, _) => unreachable!("object type `{other}` is listed but not read"),
     }
 }
 

@@ -16,11 +16,12 @@ use super::layers::FORBIDDEN_IN_NAMES;
 use super::schema::{object_def, NUMBER};
 use crate::model::SOLID;
 
-/// The schema of the top-level `hatch_patterns` key.
-pub(super) fn hatch_patterns_property() -> Value {
+/// The schema of the top-level `hatch_patterns` key of a sheet or a block
+/// library: `whose` they are.
+pub(super) fn hatch_patterns_property(whose: &str) -> Value {
     json!({
         "description": format!(
-            "The sheet's hatch patterns, from name to pattern. `{SOLID}`, AutoCAD's solid hatch, \
+            "The {whose}'s hatch patterns, from name to pattern. `{SOLID}`, AutoCAD's solid hatch, \
              needs no definition, and neither it nor `_USER` can be defined."
         ),
         "type": "object",

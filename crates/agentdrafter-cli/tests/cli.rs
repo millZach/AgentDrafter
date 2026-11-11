@@ -194,14 +194,30 @@ fn schema_prints_the_sheet_descriptions_json_schema() {
     assert!(schema["$defs"]["linetype"]["properties"]["pattern"].is_object());
     assert!(schema["properties"]["hatch_patterns"].is_object());
 
-    let (code, json) = agentdrafter(&["schema", "extra"], &dir);
-    assert_eq!(code, 2, "{json}");
-    assert_eq!(json["error"]["code"], "usage");
+    assert!(schema["$defs"]["insert"]["properties"]["attributes"].is_object());
+    let (_, named) = agentdrafter(&["schema", "sheet-description"], &dir);
+    assert_eq!(named, json);
+
+    let (code, json) = agentdrafter(&["schema", "block-library"], &dir);
+    assert_eq!(code, 0, "{json}");
+    let library = &json["result"];
+    assert_eq!(library["title"], "AgentDrafter block library");
+    assert_eq!(library["required"], serde_json::json!(["units", "blocks"]));
+    assert!(library["$defs"]["attdef"]["properties"]["tag"].is_object());
+
+    for extra in [
+        &["schema", "extra"][..],
+        &["schema", "block-library", "extra"],
+    ] {
+        let (code, json) = agentdrafter(extra, &dir);
+        assert_eq!(code, 2, "{json}");
+        assert_eq!(json["error"]["code"], "usage");
+    }
 
     let (_, json) = agentdrafter(&["--help"], &dir);
     assert_eq!(
         json["result"]["commands"]["schema"]["usage"],
-        "agentdrafter schema"
+        "agentdrafter schema [sheet-description | block-library]"
     );
 }
 

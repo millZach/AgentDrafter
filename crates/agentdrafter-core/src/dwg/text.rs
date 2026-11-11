@@ -244,7 +244,7 @@ pub(super) fn read_mtext(dwg_text: &DwgMText, layer: String) -> Option<MText> {
     })
 }
 
-fn style_name(name: &str) -> String {
+pub(super) fn style_name(name: &str) -> String {
     if name.is_empty() {
         STANDARD.to_owned()
     } else {
@@ -253,7 +253,7 @@ fn style_name(name: &str) -> String {
 }
 
 /// Codes a single line of text: each `%` of a run of two or more becomes `%%%`.
-fn text_code(contents: &str) -> String {
+pub(super) fn text_code(contents: &str) -> String {
     code_percent_runs(contents, "%%%")
 }
 
@@ -281,7 +281,7 @@ fn code_percent_runs(contents: &str, code: &str) -> String {
 
 /// What a single line of text says, decoded, or none when it holds a code
 /// other than `%%%`, such as `%%d`, `%%u` or `\U+00B0`.
-fn text_contents(value: &str) -> Option<String> {
+pub(super) fn text_contents(value: &str) -> Option<String> {
     let mut contents = String::with_capacity(value.len());
     let mut rest = value;
     while let Some(c) = rest.chars().next() {

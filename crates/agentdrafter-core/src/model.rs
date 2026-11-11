@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use crate::text::{MText, Text, TextStyle};
 use crate::units::Unit;
 
+pub(crate) mod block;
 pub(crate) mod hatch;
+pub use block::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 
 /// The layer every drawing has, and the one an object sits on unless it names another.
@@ -175,6 +177,11 @@ pub enum Object {
     Text(Text),
     #[serde(rename = "mtext")]
     MText(MText),
+    /// An attribute definition, which belongs in a block.
+    #[serde(rename = "attdef")]
+    AttributeDefinition(AttributeDefinition),
+    /// An insert of a block, which belongs on a sheet.
+    Insert(Insert),
 }
 
 impl Object {
@@ -190,6 +197,8 @@ impl Object {
             Object::Hatch(_) => "hatch",
             Object::Text(_) => "text",
             Object::MText(_) => "mtext",
+            Object::AttributeDefinition(_) => "attdef",
+            Object::Insert(_) => "insert",
         }
     }
 
@@ -205,6 +214,8 @@ impl Object {
             Object::Hatch(o) => &o.layer,
             Object::Text(o) => &o.layer,
             Object::MText(o) => &o.layer,
+            Object::AttributeDefinition(o) => &o.layer,
+            Object::Insert(o) => &o.layer,
         }
     }
 }
@@ -332,6 +343,10 @@ impl From<Lineweight> for f64 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sheet {
     pub units: Unit,
+    /// The block library the sheet draws on, as its sheet description
+    /// writes its path: relative to the sheet description's folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_library: Option<String>,
     /// The linetypes the sheet defines, besides `Continuous`, which every drawing has.
     #[serde(default)]
     pub linetypes: Vec<Linetype>,
@@ -343,6 +358,11 @@ pub struct Sheet {
     /// drawing; listing it here sets its font and width factor.
     #[serde(default)]
     pub text_styles: Vec<TextStyle>,
+    /// The blocks the sheet's inserts place, as the block library defines
+    /// them. The layers, linetypes and text styles their objects use are
+    /// among the sheet's.
+    #[serde(default)]
+    pub blocks: Vec<Block>,
     pub objects: Vec<Object>,
 }
 
@@ -373,6 +393,13 @@ pub struct DrawingContents {
     /// How many text styles the core has no model for yet, such as those
     /// that slant, mirror or fix the height of their text, or add a big font.
     pub text_styles_not_read: usize,
+    /// The drawing's block definitions the core has a model for, in table
+    /// order, leaving out model space and the layouts.
+    pub blocks: Vec<Block>,
+    /// How many block definitions the core has no model for yet, such as
+    /// anonymous blocks, external references and blocks holding an object
+    /// the core has no model for.
+    pub blocks_not_read: usize,
     /// The model-space objects the core has a model for, in drawing order.
     pub objects: Vec<Object>,
     /// How many model-space objects the core has no model for yet, including
