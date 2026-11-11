@@ -58,7 +58,7 @@ The same sheet plots to the same bytes: the PDF holds no date and no random iden
 
 ## The stamp
 
-The PDF carries the same stamp as the PNG ([the stamp](render.md#the-stamp)), as one line of JSON in plain ASCII (any other character written as a `\u` escape) under the key `AgentDrafter` in the PDF's document information. Its `produced_by` is also the PDF's `Producer`, and its `Creator` names the plot style.
+The PDF carries the same stamp as the PNG ([the stamp](render.md#the-stamp)), as one line of JSON in plain ASCII (any other character written as a `\u` escape) under the key `AgentDrafter` in the PDF's document information. Its `produced_by` is also the PDF's `Producer`, and its `Creator` names the plot style. The stamp is read only from there, the dictionary the PDF's last trailer names as `/Info`: the same text anywhere else, such as in a page's text, is not a stamp, so `stale` says such a PDF is not stamped and `--overwrite` never replaces it. A PDF whose trailer is kept in a cross-reference stream, as some editors save one and a plot never does, is read as not stamped.
 
 - A sheet description's PDF lists the sheet description, and the block library it names.
 - A DWG's PDF lists the DWG.

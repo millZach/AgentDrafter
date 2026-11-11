@@ -142,3 +142,40 @@ fn each_character_of_the_invisible_text_is_as_wide_as_it_draws() {
     let drawn: f64 = run.characters.iter().map(|&(_, a)| a).sum();
     assert!((drawn - measured).abs() < 1e-12, "{drawn} {measured}");
 }
+
+#[test]
+fn a_pdf_whose_text_shows_a_stamp_is_not_one_agentdrafter_plotted() {
+    let dir = scratch("stamp-shown");
+    let source = dir.join("sheet.yaml");
+    fs::write(
+        &source,
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [100, 50, 0]}\n",
+    )
+    .unwrap();
+    // The stamp of a real plot beside it, whose source has not moved on.
+    let plotted = plot_with(&PlotRequest::new(&source), &Settings::default()).unwrap();
+    let shown = format!("/AgentDrafter ({})", plotted.stamp.to_json());
+    // Someone's PDF that shows that stamp in its page's text, as a page
+    // about AgentDrafter might, with no stamp in its document information.
+    let theirs = dir.join("theirs.pdf");
+    let bytes = crate::pdf::tests::their_pdf(&shown, &[("Title", "How a PDF is stamped")]);
+    fs::write(&theirs, &bytes).unwrap();
+
+    let error = crate::check_stale(&crate::StaleRequest {
+        output: theirs.clone(),
+        source: None,
+    })
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotStamped, "{error:?}");
+    let error = plot_with(
+        &PlotRequest {
+            output: Some(theirs.clone()),
+            overwrite: true,
+            ..PlotRequest::new(&source)
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotAnOutput, "{error:?}");
+    assert_eq!(fs::read(&theirs).unwrap(), bytes);
+}

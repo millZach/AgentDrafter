@@ -403,35 +403,288 @@ fn ascii_json(json: &str) -> String {
 }
 
 /// The stamp written in a PDF's document information, if it has one: the
-/// last string written under the key `AgentDrafter`, as a later update of
-/// the PDF would add it.
+/// string under the key `AgentDrafter` in the dictionary the PDF's last
+/// trailer names as `/Info`, found through its cross-reference tables. The
+/// same text anywhere else, such as in a page's text, is not a stamp; nor
+/// is anything in a PDF whose trailer is kept in a cross-reference stream,
+/// which a plot never writes.
 pub(crate) fn stamp_in(bytes: &[u8]) -> Option<String> {
     if !bytes.starts_with(b"%PDF-") {
         return None;
     }
-    let key = [b"/".as_slice(), STAMP_KEY].concat();
-    let mut found = None;
-    let mut from = 0;
-    while let Some(at) = find(&bytes[from..], &key) {
-        let after = from + at + key.len();
-        let rest = &bytes[after..];
-        let start = rest.iter().position(|b| !b.is_ascii_whitespace());
-        if let Some(text) = start.and_then(|s| literal_string(&rest[s..])) {
-            found = Some(text);
-        }
-        from = after;
+    match document_information(bytes)?.get(STAMP_KEY)? {
+        Value::String(text) => String::from_utf8(text.clone()).ok(),
+        _ => None,
     }
-    let bytes = found?;
-    String::from_utf8(bytes).ok()
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
+/// The most cross-reference sections, one per update, followed back from
+/// the last to find the document information.
+const MOST_SECTIONS: usize = 100;
+
+/// A PDF's document information: the dictionary its last trailer names as
+/// `/Info`, at the place the newest cross-reference section that lists it
+/// gives.
+fn document_information(bytes: &[u8]) -> Option<Dictionary<'_>> {
+    let keyword = b"startxref";
+    let at = bytes.windows(keyword.len()).rposition(|w| w == keyword)?;
+    let mut section = Lexer::at(bytes, at + keyword.len()).offset();
+    let mut info = None;
+    for _ in 0..MOST_SECTIONS {
+        let (objects, trailer) = cross_reference(bytes, section?)?;
+        let (number, generation) = match info {
+            Some(info) => info,
+            None => *info.insert(match trailer.get(b"Info")? {
+                Value::Reference(number, generation) => (*number, *generation),
+                _ => return None,
+            }),
+        };
+        if let Some(&(_, _, offset)) = objects
+            .iter()
+            .find(|&&(n, g, _)| (n, g) == (number, generation))
+        {
+            let mut lexer = Lexer::at(bytes, offset);
+            let heading = (lexer.number()?, lexer.number()?, lexer.next()?);
+            return (heading == (number, generation, Token::Word(b"obj")))
+                .then(|| lexer.dictionary())
+                .flatten();
+        }
+        // An update lists only what it changed; the section before it
+        // lists the rest.
+        section = match trailer.get(b"Prev")? {
+            Value::Number(at) => usize::try_from(*at).ok(),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// The cross-reference table at `at`, as where each object in use starts by
+/// its number and generation, and the trailer after it.
+fn cross_reference(bytes: &[u8], at: usize) -> Option<(Vec<(u64, u64, usize)>, Dictionary<'_>)> {
+    let mut lexer = Lexer::at(bytes, at);
+    if lexer.next()? != Token::Word(b"xref") {
+        return None;
+    }
+    let mut objects = Vec::new();
+    loop {
+        match lexer.next()? {
+            Token::Word(b"trailer") => break,
+            Token::Word(first) => {
+                let first = whole_number(first)?;
+                let count = lexer.number()?;
+                for number in first..first.checked_add(count)? {
+                    let offset = lexer.offset()?;
+                    let generation = lexer.number()?;
+                    if lexer.next()? == Token::Word(b"n") {
+                        objects.push((number, generation, offset));
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some((objects, lexer.dictionary()?))
+}
+
+/// A token of a PDF's syntax, as far as reading its stamp needs.
+#[derive(Debug, PartialEq)]
+enum Token<'a> {
+    /// `<<`
+    DictionaryStart,
+    /// `>>`
+    DictionaryEnd,
+    /// `[`
+    ArrayStart,
+    /// `]`
+    ArrayEnd,
+    /// A name, such as `/Info`, without its slash.
+    Name(&'a [u8]),
+    /// A string, literal `(...)` or hexadecimal `<...>`, its escapes undone.
+    String(Vec<u8>),
+    /// Anything else: a number or a keyword, such as `obj` or `R`.
+    Word(&'a [u8]),
+}
+
+/// A value in a dictionary, as far as reading a stamp needs.
+#[derive(Debug, PartialEq)]
+enum Value {
+    String(Vec<u8>),
+    /// An indirect reference, `number generation R`.
+    Reference(u64, u64),
+    /// A whole number.
+    Number(u64),
+    /// Anything else: a name, an array, a dictionary, a keyword.
+    Other,
+}
+
+/// A dictionary's keys, without their slashes, and values.
+#[derive(Debug)]
+struct Dictionary<'a>(Vec<(&'a [u8], Value)>);
+
+impl Dictionary<'_> {
+    fn get(&self, key: &[u8]) -> Option<&Value> {
+        self.0.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+    }
+}
+
+/// Reads a PDF's tokens in turn from a place in its bytes.
+struct Lexer<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Lexer<'a> {
+    fn at(bytes: &'a [u8], at: usize) -> Lexer<'a> {
+        Lexer { bytes, at }
+    }
+
+    /// The next token, past any white space and comments.
+    fn next(&mut self) -> Option<Token<'a>> {
+        loop {
+            match *self.bytes.get(self.at)? {
+                b'%' => {
+                    while !matches!(self.bytes.get(self.at), None | Some(b'\r' | b'\n')) {
+                        self.at += 1;
+                    }
+                }
+                b if is_white(b) => self.at += 1,
+                _ => break,
+            }
+        }
+        let rest = &self.bytes[self.at..];
+        let (token, length) = match rest {
+            [b'<', b'<', ..] => (Token::DictionaryStart, 2),
+            [b'>', b'>', ..] => (Token::DictionaryEnd, 2),
+            [b'[', ..] => (Token::ArrayStart, 1),
+            [b']', ..] => (Token::ArrayEnd, 1),
+            [b'(', ..] => {
+                let (text, length) = literal_string(rest)?;
+                (Token::String(text), length)
+            }
+            [b'<', ..] => {
+                let (text, length) = hex_string(rest)?;
+                (Token::String(text), length)
+            }
+            [b'/', name @ ..] => {
+                let length = word_length(name);
+                (Token::Name(&name[..length]), 1 + length)
+            }
+            _ => {
+                // A stray delimiter, such as `)`, is a word of its own.
+                let length = word_length(rest).max(1);
+                (Token::Word(&rest[..length]), length)
+            }
+        };
+        self.at += length;
+        Some(token)
+    }
+
+    /// The next token, a whole number.
+    fn number(&mut self) -> Option<u64> {
+        match self.next()? {
+            Token::Word(word) => whole_number(word),
+            _ => None,
+        }
+    }
+
+    /// The next token, a whole number that is a place in the bytes.
+    fn offset(&mut self) -> Option<usize> {
+        usize::try_from(self.number()?).ok()
+    }
+
+    /// The dictionary that starts at the next token.
+    fn dictionary(&mut self) -> Option<Dictionary<'a>> {
+        if self.next()? != Token::DictionaryStart {
+            return None;
+        }
+        let mut entries = Vec::new();
+        loop {
+            match self.next()? {
+                Token::DictionaryEnd => return Some(Dictionary(entries)),
+                Token::Name(key) => entries.push((key, self.value()?)),
+                _ => return None,
+            }
+        }
+    }
+
+    /// The value that starts at the next token. An array or a dictionary
+    /// inside is passed over whole, without reading what it holds.
+    fn value(&mut self) -> Option<Value> {
+        Some(match self.next()? {
+            Token::String(text) => Value::String(text),
+            Token::Word(word) => match whole_number(word) {
+                Some(number) => {
+                    let mut ahead = Lexer::at(self.bytes, self.at);
+                    match (ahead.number(), ahead.next()) {
+                        (Some(generation), Some(Token::Word(b"R"))) => {
+                            self.at = ahead.at;
+                            Value::Reference(number, generation)
+                        }
+                        _ => Value::Number(number),
+                    }
+                }
+                None => Value::Other,
+            },
+            Token::Name(_) => Value::Other,
+            Token::DictionaryStart | Token::ArrayStart => {
+                let mut depth = 1usize;
+                while depth > 0 {
+                    match self.next()? {
+                        Token::DictionaryStart | Token::ArrayStart => depth += 1,
+                        Token::DictionaryEnd | Token::ArrayEnd => depth -= 1,
+                        _ => {}
+                    }
+                }
+                Value::Other
+            }
+            Token::DictionaryEnd | Token::ArrayEnd => return None,
+        })
+    }
+}
+
+/// Whether `b` is white space in a PDF.
+fn is_white(b: u8) -> bool {
+    matches!(b, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
+}
+
+/// How many bytes at the start of `bytes` run up to white space or a
+/// delimiter.
+fn word_length(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .position(|&b| is_white(b) || b"()<>[]{}/%".contains(&b))
+        .unwrap_or(bytes.len())
+}
+
+/// `word` as a whole number, if it is one.
+fn whole_number(word: &[u8]) -> Option<u64> {
+    if word.is_empty() || !word.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(word).ok()?.parse().ok()
+}
+
+/// The bytes of the PDF hexadecimal string `<...>` at the start of
+/// `bytes`, and how many bytes it takes.
+fn hex_string(bytes: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let end = bytes.iter().position(|&b| b == b'>')?;
+    let digits = bytes[1..end]
+        .iter()
+        .filter(|&&b| !is_white(b))
+        .map(|&b| char::from(b).to_digit(16).map(|d| d as u8))
+        .collect::<Option<Vec<u8>>>()?;
+    // A last digit alone is followed by a 0.
+    let text = digits
+        .chunks(2)
+        .map(|pair| pair[0] << 4 | pair.get(1).copied().unwrap_or(0))
+        .collect();
+    Some((text, end + 1))
 }
 
 /// The bytes of the PDF literal string `(...)` at the start of `bytes`,
-/// its escapes undone.
-fn literal_string(bytes: &[u8]) -> Option<Vec<u8>> {
+/// its escapes undone, and how many bytes it takes.
+fn literal_string(bytes: &[u8]) -> Option<(Vec<u8>, usize)> {
     if bytes.first() != Some(&b'(') {
         return None;
     }
@@ -476,7 +729,7 @@ fn literal_string(bytes: &[u8]) -> Option<Vec<u8>> {
             b'(' => depth += 1,
             b')' => {
                 if depth == 0 {
-                    return Some(out);
+                    return Some((out, i + 1));
                 }
                 depth -= 1;
             }
@@ -489,7 +742,7 @@ fn literal_string(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -520,11 +773,89 @@ mod tests {
         assert_eq!(stamp_in(b"not a pdf /AgentDrafter (x)"), None);
     }
 
+    /// A one-page PDF someone else wrote, whose page shows `shown` as text
+    /// and whose document information holds `info`.
+    pub(crate) fn their_pdf(shown: &str, info: &[(&str, &str)]) -> Vec<u8> {
+        let [catalog, pages, page, content, font, about] = [1, 2, 3, 4, 5, 6].map(Ref::new);
+        let mut writer = Pdf::new();
+        writer.catalog(catalog).pages(pages);
+        writer.pages(pages).kids([page]).count(1);
+        {
+            let mut sheet = writer.page(page);
+            sheet
+                .media_box(Rect::new(0.0, 0.0, 595.0, 842.0))
+                .parent(pages)
+                .contents(content);
+            sheet.resources().fonts().pair(Name(b"F1"), font);
+        }
+        writer.type1_font(font).base_font(Name(b"Helvetica"));
+        let text = format!("BT /F1 10 Tf 20 800 Td ({shown}) Tj ET");
+        writer.stream(content, text.as_bytes());
+        {
+            let mut dictionary = writer.document_info(about);
+            for (key, value) in info {
+                dictionary.pair(Name(key.as_bytes()), Str(value.as_bytes()));
+            }
+        }
+        writer.finish()
+    }
+
+    #[test]
+    fn the_stamp_is_read_only_from_the_document_information() {
+        let stamp = r#"{"stamp":1,"produced_by":"agentdrafter 0.0.0","sources":[]}"#;
+        let example = format!("/AgentDrafter ({stamp})");
+        // A page that shows a stamp as text, as a page about AgentDrafter
+        // might: its bytes hold the key and the string, but its document
+        // information holds no stamp.
+        let shown = their_pdf(&example, &[("Title", "a manual")]);
+        assert!(shown
+            .windows(example.len())
+            .any(|w| w == example.as_bytes()));
+        let info = document_information(&shown).unwrap();
+        assert_eq!(
+            info.get(b"Title"),
+            Some(&Value::String(b"a manual".to_vec()))
+        );
+        assert_eq!(stamp_in(&shown), None);
+        // Nor is a stamp inside another entry's value one.
+        let inside = their_pdf("a sheet", &[("Title", &example)]);
+        assert_eq!(stamp_in(&inside), None);
+        // Under its key in the document information, it is.
+        let stamped = their_pdf("a sheet", &[("Title", "a"), ("AgentDrafter", stamp)]);
+        assert_eq!(stamp_in(&stamped).as_deref(), Some(stamp));
+    }
+
+    #[test]
+    fn a_stamp_is_still_read_after_a_later_update_of_the_pdf() {
+        let stamp = r#"{"stamp":1,"produced_by":"agentdrafter 0.0.0","sources":[]}"#;
+        let mut bytes = their_pdf("a sheet", &[("AgentDrafter", stamp)]);
+        // An update appended as a reader that saves in place appends it: a
+        // section listing only what changed, here nothing, and a trailer
+        // that points back to the section before.
+        let tail = String::from_utf8_lossy(&bytes[bytes.len() - 40..]).into_owned();
+        let previous: usize = tail
+            .split_whitespace()
+            .rev()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let section = bytes.len();
+        bytes.extend(
+            format!(
+                "\nxref\n0 0\ntrailer\n<< /Size 7 /Root 1 0 R /Info 6 0 R /Prev {previous} >>\n\
+                 startxref\n{section}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        assert_eq!(stamp_in(&bytes).as_deref(), Some(stamp));
+    }
+
     #[test]
     fn literal_strings_undo_their_escapes() {
         assert_eq!(
             literal_string(br"(a\(b\) (c) \\ \101\n) tail").unwrap(),
-            b"a(b) (c) \\ A\n"
+            (b"a(b) (c) \\ A\n".to_vec(), 22)
         );
         assert_eq!(literal_string(b"(unclosed"), None);
     }
