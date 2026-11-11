@@ -108,7 +108,11 @@ pub(super) fn layer_name(node: &Node, path: &str, layers: &[Layer]) -> Result<St
 
 /// The entries of a mapping from names to definitions, each name checked.
 /// `table` is the key the mapping sits under and `what` names one entry.
-fn named_entries<'a>(node: &'a Node, table: &str, what: &str) -> Result<&'a [Entry], Error> {
+pub(super) fn named_entries<'a>(
+    node: &'a Node,
+    table: &str,
+    what: &str,
+) -> Result<&'a [Entry], Error> {
     let Kind::Mapping(entries) = &node.kind else {
         return Err(wrong_type(
             node,

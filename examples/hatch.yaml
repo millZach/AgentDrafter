@@ -1,0 +1,123 @@
+# Hatches, solid and patterned, inside boundaries of polylines, lines and
+# arcs, in millimetres. A made-up bracket in section beside a few sample
+# panels; no trade.
+# Build it with: agentdrafter build examples/hatch.yaml
+units: mm
+
+# Each pattern is families of parallel lines, as in a .pat file: the
+# lines' angle, a point one passes through (origin), the step from one
+# line to the next along and across them (delta), and the dashes, gaps
+# and dots each repeats. SOLID needs no definition.
+hatch_patterns:
+  DIAGONAL:
+    lines:
+      - {angle: 45, delta: [0, 3]}
+  GRID:
+    lines:
+      - {angle: 0, delta: [0, 5]}
+      - {angle: 90, delta: [0, 5]}
+  # Blocks 20 long and 10 high, each course shifted by half a block.
+  COURSES:
+    lines:
+      - {angle: 0, delta: [0, 10]}
+      - {angle: 90, delta: [10, 10], dashes: [10, -10]}
+  DOTS:
+    lines:
+      - {angle: 0, delta: [2.5, 5], dashes: [0, -5]}
+  DASH_DOT:
+    lines:
+      - {angle: 0, origin: [0, 1], delta: [4, 4], dashes: [8, -2, 0, -2]}
+
+layers:
+  outline: {color: white, lineweight: 0.5}
+  section: {color: 8, lineweight: 0.18}
+  fill: {color: cyan}
+
+objects:
+  # The bracket in section: an L-shaped outline with a slot and a round
+  # hole. A loop inside another is a hole. The hatch draws no outline, so
+  # the outline is drawn as objects of its own.
+  - hatch:
+      pattern: DIAGONAL
+      boundary:
+        - polyline:
+            points: [[0, 0, 0], [80, 0, 0], [80, 20, 0], [20, 20, 0], [20, 60, 0], [0, 60, 0]]
+        - edges:
+            - line: {from: [35, 5, 0], to: [65, 5, 0]}
+            - arc: {center: [65, 10, 0], radius: 5, start_angle: 270, end_angle: 90}
+            - line: {from: [65, 15, 0], to: [35, 15, 0]}
+            - arc: {center: [35, 10, 0], radius: 5, start_angle: 90, end_angle: 270}
+        - edges:
+            - arc: {center: [10, 45, 0], radius: 5, start_angle: 0, end_angle: 180}
+            - arc: {center: [10, 45, 0], radius: 5, start_angle: 180, end_angle: 360}
+      layer: section
+  - polyline:
+      points: [[0, 0, 0], [80, 0, 0], [80, 20, 0], [20, 20, 0], [20, 60, 0], [0, 60, 0]]
+      closed: true
+      layer: outline
+  - line: {from: [35, 5, 0], to: [65, 5, 0], layer: outline}
+  - arc: {center: [65, 10, 0], radius: 5, start_angle: 270, end_angle: 90, layer: outline}
+  - line: {from: [65, 15, 0], to: [35, 15, 0], layer: outline}
+  - arc: {center: [35, 10, 0], radius: 5, start_angle: 90, end_angle: 270, layer: outline}
+  - circle: {center: [10, 45, 0], radius: 5, layer: outline}
+
+  # Solid fills: a triangle, and a half disc of a line and an arc.
+  - hatch:
+      pattern: SOLID
+      boundary:
+        - polyline: {points: [[100, 0, 0], [140, 0, 0], [120, 30, 0]]}
+      layer: fill
+  - hatch:
+      pattern: SOLID
+      boundary:
+        - edges:
+            - line: {from: [150, 0, 0], to: [190, 0, 0]}
+            - arc: {center: [170, 0, 0], radius: 20, start_angle: 0, end_angle: 180}
+      layer: fill
+
+  # A panel with a round notch, gridded at twice the size and turned 30
+  # degrees. The notch's arc runs anticlockwise from 180 to 360, so the
+  # loop walks it backwards, from its end to its start.
+  - hatch:
+      pattern: GRID
+      scale: 2
+      angle: 30
+      boundary:
+        - edges:
+            - line: {from: [0, 80, 0], to: [60, 80, 0]}
+            - line: {from: [60, 80, 0], to: [60, 120, 0]}
+            - line: {from: [60, 120, 0], to: [40, 120, 0]}
+            - arc: {center: [30, 120, 0], radius: 10, start_angle: 180, end_angle: 360}
+            - line: {from: [20, 120, 0], to: [0, 120, 0]}
+            - line: {from: [0, 120, 0], to: [0, 80, 0]}
+
+  # Coursed blocks in a rectangle, dots in a disc, dashes and dots in a
+  # hexagon.
+  - hatch:
+      pattern: COURSES
+      boundary:
+        - polyline: {points: [[80, 80, 0], [140, 80, 0], [140, 120, 0], [80, 120, 0]]}
+  - hatch:
+      pattern: DOTS
+      angle: 45
+      boundary:
+        - edges:
+            - arc: {center: [170, 100, 0], radius: 20, start_angle: 90, end_angle: 270}
+            - arc: {center: [170, 100, 0], radius: 20, start_angle: 270, end_angle: 90}
+  - hatch:
+      pattern: DASH_DOT
+      angle: 135
+      scale: 0.5
+      boundary:
+        - polyline:
+            points: [[220, 100, 0], [210, 117.320508, 0], [190, 117.320508, 0], [180, 100, 0], [190, 82.679492, 0], [210, 82.679492, 0]]
+
+  # Islands: a square with a square hole, and a smaller square inside the
+  # hole filled again.
+  - hatch:
+      pattern: SOLID
+      boundary:
+        - polyline: {points: [[0, 140, 0], [60, 140, 0], [60, 200, 0], [0, 200, 0]]}
+        - polyline: {points: [[10, 150, 0], [50, 150, 0], [50, 190, 0], [10, 190, 0]]}
+        - polyline: {points: [[20, 160, 0], [40, 160, 0], [40, 180, 0], [20, 180, 0]]}
+      layer: fill

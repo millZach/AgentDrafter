@@ -62,6 +62,42 @@ const LAYER: Place = Place {
     json: r#"{"units": "mm", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1, "layer": V}}]}"#,
 };
 
+const SCALE: Place = Place {
+    name: "a hatch's scale",
+    yaml: "units: mm\nhatch_patterns: {P: {lines: [{delta: [0, 1]}]}}\nobjects:\n  - hatch: {pattern: P, scale: V, boundary: [{polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]}\n",
+    json: r#"{"units": "mm", "hatch_patterns": {"P": {"lines": [{"delta": [0, 1]}]}}, "objects": [{"hatch": {"pattern": "P", "scale": V, "boundary": [{"polyline": {"points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]}}]}"#,
+};
+
+const SOLID_SCALE: Place = Place {
+    name: "a solid hatch's scale",
+    yaml: "units: mm\nobjects:\n  - hatch: {pattern: SOLID, scale: V, boundary: [{polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]}\n",
+    json: r#"{"units": "mm", "objects": [{"hatch": {"pattern": "SOLID", "scale": V, "boundary": [{"polyline": {"points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]}}]}"#,
+};
+
+const PATTERN_NAME: Place = Place {
+    name: "a hatch pattern's name",
+    yaml: "units: mm\nhatch_patterns:\n  V: {lines: [{delta: [0, 1]}]}\nobjects: []\n",
+    json: r#"{"units": "mm", "hatch_patterns": {V: {"lines": [{"delta": [0, 1]}]}}, "objects": []}"#,
+};
+
+const DELTA: Place = Place {
+    name: "a pattern line's delta",
+    yaml: "units: mm\nhatch_patterns:\n  P: {lines: [{delta: V}]}\nobjects: []\n",
+    json: r#"{"units": "mm", "hatch_patterns": {"P": {"lines": [{"delta": V}]}}, "objects": []}"#,
+};
+
+const DASHES: Place = Place {
+    name: "a pattern line's dashes",
+    yaml: "units: mm\nhatch_patterns:\n  P: {lines: [{delta: [0, 1], dashes: V}]}\nobjects: []\n",
+    json: r#"{"units": "mm", "hatch_patterns": {"P": {"lines": [{"delta": [0, 1], "dashes": V}]}}, "objects": []}"#,
+};
+
+const BOUNDARY: Place = Place {
+    name: "a hatch's boundary",
+    yaml: "units: mm\nobjects:\n  - hatch: {pattern: SOLID, boundary: V}\n",
+    json: r#"{"units": "mm", "objects": [{"hatch": {"pattern": "SOLID", "boundary": V}}]}"#,
+};
+
 /// `(place, value as YAML, the same value as JSON, accepted)`.
 fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
     vec![
@@ -131,6 +167,89 @@ fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
         // A layer: 0 and '0' are one layer.
         (&LAYER, "0", json!(0), true),
         (&LAYER, "'0'", json!("0"), true),
+        // A hatch's scale: a number more than 0, with no unit.
+        (&SCALE, "2", json!(2), true),
+        (&SCALE, "'0.5'", json!("0.5"), true),
+        (&SCALE, "1e-3", json!(0.001), true),
+        (&SCALE, "0", json!(0), false),
+        (&SCALE, "-1.5", json!(-1.5), false),
+        (&SCALE, "'2 mm'", json!("2 mm"), false),
+        (&SCALE, "big", json!("big"), false),
+        // A solid hatch has no scale.
+        (&SOLID_SCALE, "1", json!(1), false),
+        (&SOLID_SCALE, "'1'", json!("1"), false),
+        // A hatch pattern's name: capitals, no spaces, at most 34 characters.
+        (&PATTERN_NAME, "FINE", json!("FINE"), true),
+        (&PATTERN_NAME, "'DASH-DOT_2'", json!("DASH-DOT_2"), true),
+        (&PATTERN_NAME, "ÅÉØ_1", json!("ÅÉØ_1"), true),
+        (
+            &PATTERN_NAME,
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ01234567",
+            json!("ABCDEFGHIJKLMNOPQRSTUVWXYZ01234567"),
+            true,
+        ),
+        (
+            &PATTERN_NAME,
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345678",
+            json!("ABCDEFGHIJKLMNOPQRSTUVWXYZ012345678"),
+            false,
+        ),
+        (&PATTERN_NAME, "fine", json!("fine"), false),
+        (&PATTERN_NAME, "Fine", json!("Fine"), false),
+        (&PATTERN_NAME, "éCLAT", json!("éCLAT"), false),
+        (&PATTERN_NAME, "SOLID", json!("SOLID"), false),
+        (&PATTERN_NAME, "_USER", json!("_USER"), false),
+        (&PATTERN_NAME, "'TWO WORDS'", json!("TWO WORDS"), false),
+        (&PATTERN_NAME, "'A|B'", json!("A|B"), false),
+        // A pattern line's delta: two lengths.
+        (&DELTA, "[0, 1]", json!([0, 1]), true),
+        (&DELTA, "['1 in', '2.5mm']", json!(["1 in", "2.5mm"]), true),
+        (&DELTA, "[1]", json!([1]), false),
+        (&DELTA, "[0, 1, 0]", json!([0, 1, 0]), false),
+        (&DELTA, "[0, 1 furlong]", json!([0, "1 furlong"]), false),
+        // A pattern line's dashes: at least two lengths.
+        (&DASHES, "[1, -1]", json!([1, -1]), true),
+        (&DASHES, "['0.5 mm', 0, -1]", json!(["0.5 mm", 0, -1]), true),
+        (&DASHES, "[-1]", json!([-1]), false),
+        (&DASHES, "[]", json!([]), false),
+        // A boundary: loops of the right shape.
+        (
+            &BOUNDARY,
+            "[{polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]",
+            json!([{"polyline": {"points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]),
+            true,
+        ),
+        (
+            &BOUNDARY,
+            "[{edges: [{line: {from: [0, 0, 0], to: [1, 0, 0]}}, {arc: {center: [0.5, 0, 0], radius: 0.5, start_angle: 0, end_angle: 180}}]}]",
+            json!([{"edges": [{"line": {"from": [0, 0, 0], "to": [1, 0, 0]}}, {"arc": {"center": [0.5, 0, 0], "radius": 0.5, "start_angle": 0, "end_angle": 180}}]}]),
+            true,
+        ),
+        (&BOUNDARY, "[]", json!([]), false),
+        (
+            &BOUNDARY,
+            "[{polyline: {points: [[0, 0, 0], [1, 0, 0]]}}]",
+            json!([{"polyline": {"points": [[0, 0, 0], [1, 0, 0]]}}]),
+            false,
+        ),
+        (
+            &BOUNDARY,
+            "[{polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]], closed: true}}]",
+            json!([{"polyline": {"points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]], "closed": true}}]),
+            false,
+        ),
+        (
+            &BOUNDARY,
+            "[{edges: [{line: {from: [0, 0, 0], to: [1, 0, 0]}}]}]",
+            json!([{"edges": [{"line": {"from": [0, 0, 0], "to": [1, 0, 0]}}]}]),
+            false,
+        ),
+        (
+            &BOUNDARY,
+            "[{circle: {center: [0, 0, 0], radius: 1}}]",
+            json!([{"circle": {"center": [0, 0, 0], "radius": 1}}]),
+            false,
+        ),
     ]
 }
 

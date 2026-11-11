@@ -182,7 +182,9 @@ fn schema_prints_the_sheet_descriptions_json_schema() {
         schema["properties"]["units"]["enum"],
         serde_json::json!(["mm", "cm", "m", "in", "ft"])
     );
-    for object_type in ["line", "polyline", "arc", "circle", "ellipse", "spline"] {
+    for object_type in [
+        "line", "polyline", "arc", "circle", "ellipse", "spline", "hatch",
+    ] {
         assert!(
             schema["$defs"][object_type]["properties"]["layer"].is_object(),
             "{object_type} takes a layer"
@@ -190,6 +192,7 @@ fn schema_prints_the_sheet_descriptions_json_schema() {
     }
     assert!(schema["$defs"]["layer"]["properties"]["lineweight"].is_object());
     assert!(schema["$defs"]["linetype"]["properties"]["pattern"].is_object());
+    assert!(schema["properties"]["hatch_patterns"].is_object());
 
     let (code, json) = agentdrafter(&["schema", "extra"], &dir);
     assert_eq!(code, 2, "{json}");
@@ -241,6 +244,44 @@ fn an_unknown_layer_is_reported_with_the_choices() {
     assert_eq!(
         error["message"],
         "unknown layer `hidden`; the sheet's layers: 0, outline"
+    );
+    assert!(!dir.join("sheet.dwg").exists());
+}
+
+#[test]
+fn the_hatch_example_builds_solid_and_patterned_hatches() {
+    let dir = scratch("hatch");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/hatch.yaml"),
+        dir.join("hatch.yaml"),
+    )
+    .unwrap();
+
+    let (code, json) = agentdrafter(&["build", "hatch.yaml"], &dir);
+
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["objects"]["hatch"], 8, "{json}");
+    assert!(dir.join("hatch.dwg").exists());
+}
+
+#[test]
+fn an_unknown_hatch_pattern_is_reported_with_the_choices() {
+    let dir = scratch("unknown-pattern");
+    fs::write(
+        dir.join("sheet.yaml"),
+        "units: mm\nhatch_patterns: {GRID: {lines: [{delta: [0, 5]}]}}\nobjects:\n  - hatch: {pattern: ANSI31, boundary: [{polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]}\n",
+    )
+    .unwrap();
+
+    let (code, json) = agentdrafter(&["build", "sheet.yaml"], &dir);
+
+    assert_eq!(code, 1, "{json}");
+    let error = &json["error"];
+    assert_eq!(error["code"], "unknown_name");
+    assert_eq!(error["field"], "objects[0].hatch.pattern");
+    assert_eq!(
+        error["message"],
+        "unknown hatch pattern `ANSI31`; the sheet's hatch patterns: SOLID, GRID"
     );
     assert!(!dir.join("sheet.dwg").exists());
 }

@@ -1,9 +1,10 @@
 //! The seam between AgentDrafter and its DWG library.
 //!
-//! This is the only module that names acadrust (ADR-0009). Everything else in
-//! the core works on its own model ([`crate::model`]), so moving the acadrust
-//! pin, or the library itself, changes this file and `Cargo.toml` only.
-//! Moving the pin means running the judge again.
+//! This module, with its submodules under `dwg/`, is the only code that
+//! names acadrust (ADR-0009). Everything else in the core works on its own
+//! model ([`crate::model`]), so moving the acadrust pin, or the library
+//! itself, changes these files and `Cargo.toml` only. Moving the pin means
+//! running the judge again. [`hatch`] carries hatches through the seam.
 //!
 //! Our own names here follow `CONTEXT.md`: a DWG file's contents are a
 //! drawing and the things in it are objects. acadrust's names, such as
@@ -29,6 +30,8 @@ use crate::model::{
     Polyline, Sheet, Spline, BUILT_IN_LINETYPES, FIT_DEGREE, LAYER_ZERO,
 };
 use crate::units::Unit;
+
+mod hatch;
 
 /// The DWG version a new sheet is written in: the 2018 format, AC1032 (ADR-0006).
 const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;
@@ -163,6 +166,7 @@ fn dwg_object(object: &Object) -> EntityType {
         )),
         Object::Ellipse(ellipse) => EntityType::Ellipse(dwg_ellipse(ellipse)),
         Object::Spline(spline) => EntityType::Spline(dwg_spline(spline)),
+        Object::Hatch(hatch) => EntityType::Hatch(Box::new(hatch::dwg_hatch(hatch))),
     };
     object
         .layer()
@@ -396,6 +400,7 @@ fn read_object(dwg_object: &EntityType) -> Option<Object> {
             })
         }
         EntityType::Spline(spline) => Object::Spline(read_spline(spline, layer)?),
+        EntityType::Hatch(dwg_hatch) => Object::Hatch(hatch::read_hatch(dwg_hatch, layer)?),
         _ => return None,
     };
     Some(object)
@@ -657,7 +662,12 @@ mod tests {
     /// say document and entity, are allowed; ours are not.
     #[test]
     fn our_names_in_the_seam_say_drawing_and_object() {
-        let source = include_str!("dwg.rs");
+        for source in [include_str!("dwg.rs"), include_str!("dwg/hatch.rs")] {
+            assert_our_names_say_drawing_and_object(source);
+        }
+    }
+
+    fn assert_our_names_say_drawing_and_object(source: &str) {
         let (code, _tests) = source.split_once("#[cfg(test)]").unwrap();
         let mut ours = code.to_owned();
         for acadrust_name in [

@@ -52,6 +52,14 @@ _Avoid_: line style, dash pattern
 The pen width a layer plots with, one of AutoCAD's standard widths in millimetres. It is a width on paper, so it is not in the declared unit.
 _Avoid_: line width, pen size, thickness (a thickness is AutoCAD's extrusion of an object)
 
+**Hatch**:
+An object that fills an area solid or with a hatch pattern, inside a boundary of closed loops, as in AutoCAD. It draws no outline of its own.
+_Avoid_: fill, shading, region (a region is AutoCAD's 2D solid object)
+
+**Hatch pattern**:
+A named set of families of parallel lines that a hatch fills its area with, as in an AutoCAD `.pat` file. Every hatch pattern but `SOLID` comes from a definition in the sheet description.
+_Avoid_: fill pattern, texture
+
 **Block**:
 A named group of objects defined once and inserted many times, as in AutoCAD.
 _Avoid_: symbol, component, cell

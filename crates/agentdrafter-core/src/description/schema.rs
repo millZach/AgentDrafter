@@ -25,12 +25,12 @@ use super::layers::{
     LONGEST_PATTERN,
 };
 use super::objects::{FEWEST_FIT_POINTS, HIGHEST_DEGREE, OBJECT_TYPES};
-use super::SHEET_KEYS;
+use super::{hatch_schema, SHEET_KEYS};
 use crate::model::{Lineweight, CONTINUOUS, FIT_DEGREE, LAYER_ZERO, WHITE};
 use crate::units::Unit;
 
 /// A plain decimal number, as `docs/sheet-description.md` defines it.
-const NUMBER: &str = "-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?";
+pub(super) const NUMBER: &str = "-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?";
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
@@ -342,8 +342,9 @@ pub fn sheet_description_schema() -> Value {
             spline
         },
     );
+    hatch_schema::add_defs(&mut defs);
 
-    let [units_key, linetypes_key, layers_key, objects_key] = SHEET_KEYS;
+    let [units_key, linetypes_key, layers_key, hatch_patterns_key, objects_key] = SHEET_KEYS;
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "AgentDrafter sheet description",
@@ -383,6 +384,7 @@ pub fn sheet_description_schema() -> Value {
                 "propertyNames": { "$ref": "#/$defs/name" },
                 "additionalProperties": { "$ref": "#/$defs/layer" },
             },
+            hatch_patterns_key: hatch_schema::hatch_patterns_property(),
             objects_key: {
                 "description": "The objects on the sheet, in drawing order. Each is a mapping \
                                 with one key, its type.",
@@ -395,7 +397,7 @@ pub fn sheet_description_schema() -> Value {
 }
 
 /// The definition of one object type: its own `properties` and `layer`.
-fn object_def(description: &str, required: &[&str], properties: Value) -> Value {
+pub(super) fn object_def(description: &str, required: &[&str], properties: Value) -> Value {
     let mut properties = properties;
     properties["layer"] = json!({ "$ref": "#/$defs/layer_name" });
     json!({
