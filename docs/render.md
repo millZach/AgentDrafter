@@ -43,7 +43,7 @@ The PNG goes beside the source with a `.png` extension unless `--output` names a
 
 ## The stamp
 
-Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of JSON. It lists every file the render read to draw the sheet: the record first, then the files it draws on.
+Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of JSON. It lists the drawing set's files the sheet is drawn from: the record first, then the files it draws on. Fonts are not in it: they belong to the machine that renders (AutoCAD's `Fonts` folder on one, a look-alike on another), not to the drawing set, so the same PNG checked on another machine is not stale for that.
 
 ```json
 {"stamp":1,"produced_by":"agentdrafter 0.0.0","sources":[{"kind":"sheet_description","path":"sheet-1.yaml","sha256":"…"},{"kind":"block_library","path":"blocks.yaml","sha256":"…"}]}

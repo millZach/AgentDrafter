@@ -40,8 +40,10 @@ mod text;
 
 use serde::Serialize;
 
-use crate::model::block::definition_text;
-use crate::model::{attribute_text, Block, Insert, Layer, Object, Sheet, CONTINUOUS, LAYER_ZERO};
+use crate::model::block::{definition_text, Placement};
+use crate::model::{
+    attribute_text, Block, Insert, Layer, Object, Point3, Sheet, CONTINUOUS, LAYER_ZERO,
+};
 use crate::text::placement::SheetFonts;
 
 pub use color::Color;
@@ -206,45 +208,21 @@ struct Drawn {
     cut_short: bool,
 }
 
-/// Where an insert puts its block's points: moved so that the block's base
-/// point sits at the insert's position, scaled about it and turned.
-struct Placed {
-    base: Point2,
-    position: Point2,
-    scale: f64,
-    sin: f64,
-    cos: f64,
-}
+/// Where an insert puts its block's points, by the one placement rule.
+struct Placed(Placement);
 
 impl Placed {
     fn of(insert: &Insert, block: &Block) -> Placed {
-        let (sin, cos) = insert.rotation.to_radians().sin_cos();
-        Placed {
-            base: flat(block.base_point),
-            position: flat(insert.position),
-            scale: insert.scale,
-            sin,
-            cos,
-        }
+        Placed(Placement::of(insert, block.base_point))
     }
 
     fn point(&self, p: Point2) -> Point2 {
-        let x = (p[0] - self.base[0]) * self.scale;
-        let y = (p[1] - self.base[1]) * self.scale;
-        [
-            self.position[0] + x * self.cos - y * self.sin,
-            self.position[1] + x * self.sin + y * self.cos,
-        ]
+        flat(self.0.point(Point3::new(p[0], p[1], 0.0)))
     }
 
     /// Where a placed point is in the block's own coordinates.
     fn back(&self, p: Point2) -> Point2 {
-        let x = p[0] - self.position[0];
-        let y = p[1] - self.position[1];
-        [
-            self.base[0] + (x * self.cos + y * self.sin) / self.scale,
-            self.base[1] + (y * self.cos - x * self.sin) / self.scale,
-        ]
+        self.0.back(p[0], p[1])
     }
 
     fn shape(&self, shape: Shape) -> Shape {
