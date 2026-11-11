@@ -15,7 +15,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use super::commit::{commit, Replacement};
 use super::operations::{op_error, read_change_set, AddTo, Body, Kind, Operation, Target};
@@ -24,10 +24,10 @@ use super::{
     mark_report, quoted_list, read_mark, ChangeReport, ChangeRequest, Fill, OperationOutcome,
     RowValueSet, SheetChange,
 };
-use crate::build::{prepare_sheet, PreparedSheet};
+use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::{
-    mark_text, read_file, read_set_settings, rows_at, template_at, AttributeSet, Listed,
-    MarkFailure, ObjectList, RecordFile, Row,
+    mark_text, read_file, read_set_settings, rows_at, template_at, template_path, AttributeSet,
+    Listed, MarkFailure, ObjectList, RecordFile, Row,
 };
 use crate::error::{Error, ErrorCode};
 use crate::set::{Notice, SET_SETTINGS_FILE};
@@ -68,10 +68,8 @@ impl SetFiles {
         let mut templates: Vec<TemplateFile> = Vec::new();
         let mut template_of = Vec::with_capacity(rows.len());
         for (k, row) in rows.iter().enumerate() {
-            let path = folder.join(&row.template);
-            let same = templates
-                .iter()
-                .position(|t| lexical(&t.path) == lexical(&path));
+            let path = template_path(folder, row);
+            let same = templates.iter().position(|t| one_file(&t.path, &path));
             let t = match same {
                 Some(t) => t,
                 None => {
@@ -115,12 +113,13 @@ impl SetFiles {
             .join(", ")
     }
 
-    /// The template the rows write as `written`.
+    /// The template the rows write as `written`, or name by another path
+    /// to the same file.
     fn template(&self, written: &str) -> Option<usize> {
-        let wanted = lexical(&self.folder.join(written));
+        let wanted = self.folder.join(written);
         self.templates
             .iter()
-            .position(|t| t.written == written || lexical(&t.path) == wanted)
+            .position(|t| t.written == written || one_file(&t.path, &wanted))
     }
 
     fn name(&self, k: usize) -> &str {
@@ -136,21 +135,11 @@ impl SetFiles {
     }
 }
 
-/// `path` with `.` and `..` worked out, without asking the file system.
-fn lexical(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
-                }
-            }
-            other => out.push(other),
-        }
-    }
-    out
+/// Whether two paths name one file: the file system says, so `..`, links
+/// and, where the file system ignores it, case are worked out as it works
+/// them out. Paths to no file are one only when they are written the same.
+fn one_file(a: &Path, b: &Path) -> bool {
+    a == b || is_same_file(a, b)
 }
 
 /// Which record an object is written in.

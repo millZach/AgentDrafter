@@ -191,7 +191,20 @@ fn refuse_unless_built(output: &Path) -> Result<(), Error> {
     .in_file(output))
 }
 
-fn is_same_file(a: &Path, b: &Path) -> bool {
+/// Whether `a` and `b` name one file that is there, as the file system
+/// sees it: through links, `..`, and case where the file system ignores
+/// case. On Unix the file's device and number say; elsewhere its full
+/// path as the system resolves it does.
+pub(crate) fn is_same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(a), fs::metadata(b)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
     match (fs::canonicalize(a), fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,

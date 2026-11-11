@@ -429,3 +429,42 @@ fn an_unknown_hatch_pattern_is_reported_with_the_choices() {
     );
     assert!(!dir.join("sheet.dwg").exists());
 }
+
+#[test]
+fn templates_are_grouped_by_the_file_their_path_names() {
+    // Two rows whose templates are two files, `../t.yaml` and
+    // `../../../t.yaml`, with the set named from the folder it is in. A
+    // change to one template reaches only the sheet built from it.
+    let root = scratch("template-files");
+    let cwd = root.join("a").join("b");
+    let set = cwd.join("set");
+    fs::create_dir_all(&set).unwrap();
+    let template = "units: mm\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1, id: c}\n";
+    fs::write(cwd.join("t.yaml"), template).unwrap();
+    fs::write(root.join("t.yaml"), template).unwrap();
+    fs::write(
+        set.join("set.yaml"),
+        "units: mm\noutput: dwg\nrows: rows.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        set.join("rows.yaml"),
+        "rows:\n  - sheet: S-1\n    template: ../t.yaml\n  - sheet: S-2\n    template: ../../../t.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        cwd.join("change.json"),
+        r#"{"operations": [{"op": "change", "target": {"id": "S-2/c"}, "set": {"radius": 2}}]}"#,
+    )
+    .unwrap();
+    let (code, json) = agentdrafter(&["change", "set", "change.json"], &cwd);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(
+        json["result"]["operations"][0]["sheets"],
+        serde_json::json!(["S-2"])
+    );
+    assert_eq!(fs::read_to_string(cwd.join("t.yaml")).unwrap(), template);
+    assert!(fs::read_to_string(root.join("t.yaml"))
+        .unwrap()
+        .contains("radius: 2"));
+}

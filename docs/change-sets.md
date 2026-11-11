@@ -14,6 +14,8 @@ Zach decided on 2026-11-11:
 4. **A template edit is all or nothing across its sheets.** It lands only if every sheet built from that template takes its whole part. Otherwise the template, those sheets' rows and their DWGs stay as they were, byte for byte. Sheets built from other templates still land. ADR-0005 stands.
 5. **A value the template takes from the row is set in that sheet's row.** Setting an attribute, or a text's contents, whose template value is `{row: NAME}` writes that sheet's row value `NAME`, on that sheet alone, and the reply names every place on the sheet the value fills.
 
+A sheet's template is the file its row's path names, as the file system resolves it, so rows that reach one file by different paths, such as `templates/t.yaml` and `templates/T.yaml` where the file system ignores case, share one template, and rows whose paths name two files, such as `../t.yaml` and `../../../t.yaml`, do not.
+
 ## A change set
 
 ```json

@@ -995,3 +995,46 @@ fn a_partial_change_whose_mark_cannot_be_written_does_not_land() {
     assert_eq!(snapshot(&set), before);
     assert!(fs::read_dir(&folder).unwrap().next().is_none());
 }
+
+#[test]
+fn two_spellings_of_one_template_file_are_one_template() {
+    // On a file system that ignores case, as Windows' and macOS's do,
+    // `templates/t.yaml` and `templates/T.yaml` are one file, so an edit to
+    // it reaches both sheets. Where case counts, as on Linux, they are two
+    // paths and there is nothing to show.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("core-change")
+        .join("template-case");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("templates")).unwrap();
+    fs::write(
+        dir.join("templates/t.yaml"),
+        "units: mm\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1, id: c}\n",
+    )
+    .unwrap();
+    if !dir.join("templates/T.yaml").exists() {
+        return;
+    }
+    fs::write(
+        dir.join("set.yaml"),
+        "units: mm\noutput: dwg\nrows: rows.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("rows.yaml"),
+        "rows:\n  - sheet: S-1\n    template: templates/t.yaml\n  - sheet: S-2\n    template: templates/T.yaml\n",
+    )
+    .unwrap();
+    let report = lands(
+        &dir,
+        json!({"operations": [{"op": "change", "target": {"id": "S-1/c"}, "set": {"radius": 2}}]}),
+    );
+    assert_eq!(report.operations[0].sheets, ["S-1", "S-2"]);
+    assert_eq!(report.landed, 2);
+    for sheet in ["S-1", "S-2"] {
+        let Object::Circle(c) = &built(&dir, sheet)[&format!("{sheet}/c")] else {
+            panic!()
+        };
+        close(c.radius, 2.0);
+    }
+}

@@ -28,7 +28,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::description::{
-    read_rows, read_set_settings, read_sheet_record, read_template, SheetRecord,
+    read_rows, read_set_settings, read_sheet_record, read_template, template_path, SheetRecord,
 };
 use crate::draw::{self, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
@@ -411,7 +411,7 @@ fn load(source: &Path, sheet: Option<&str>) -> Result<(Unit, Vec<SheetRecord>), 
     let records = looked_at
         .into_iter()
         .map(|row| {
-            let template = source.join(&row.template);
+            let template = template_path(source, row);
             read_template(&template, row, &rows_file, set.units, &mut Vec::new()).map_err(|e| {
                 Error {
                     message: format!(

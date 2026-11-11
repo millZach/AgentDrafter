@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::build::{build_sheet, BuildReport};
-use crate::description::{read_rows, read_set_settings, read_template};
+use crate::description::{read_rows, read_set_settings, read_template, template_path};
 use crate::error::{Error, ErrorCode};
 use crate::reply::Reply;
 use crate::settings::Settings;
@@ -165,7 +165,7 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
     let sheets: Vec<SheetOutcome> = rows
         .iter()
         .map(|row| {
-            let template = folder.join(&row.template);
+            let template = template_path(folder, row);
             let dwg = output.join(format!("{}.dwg", row.sheet));
             let mut notices = Vec::new();
             let built = read_template(&template, row, &rows_file, set.units, &mut notices)

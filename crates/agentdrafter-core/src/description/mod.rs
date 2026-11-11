@@ -49,7 +49,7 @@ pub(crate) use edit::{AttributeSet, Listed, ObjectList, RecordFile};
 pub(crate) use emit::number_text;
 pub(crate) use mark::{mark_text, parse_mark, MarkFailure};
 pub(crate) use records::{read_sheet_record, SheetRecord};
-pub(crate) use set::{read_rows, read_set_settings, rows_at, Row};
+pub(crate) use set::{read_rows, read_set_settings, rows_at, template_path, Row};
 pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
 pub(crate) use template::{read_template, template_at};
 

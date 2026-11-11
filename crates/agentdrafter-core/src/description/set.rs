@@ -8,7 +8,7 @@
 //! strict YAML as a sheet description, and `docs/drawing-set.md` sets them
 //! out.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::blocks::{relative_path, RelativePath};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
@@ -103,6 +103,13 @@ impl Row {
     pub(super) fn objects_path(&self) -> String {
         key_path(&index_path("rows", self.index), ROW_OBJECTS_KEY)
     }
+}
+
+/// The file `row`'s template is in, for a set whose folder is `folder`:
+/// the path the row writes, relative to the set's folder. Every reader of a
+/// set finds a sheet's template here.
+pub(crate) fn template_path(folder: &Path, row: &Row) -> PathBuf {
+    folder.join(&row.template)
 }
 
 /// Reads the drawing set's settings in the file at `path`.

@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::description::{read_set_settings, rows_at, template_at};
+use crate::description::{read_set_settings, rows_at, template_at, template_path};
 use crate::draw::{self, Bounds, HatchCutShort};
 use crate::error::{Error, ErrorCode};
 use crate::output::{
@@ -298,7 +298,7 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
     let sheets: Vec<PlottedSheet> = rows
         .iter()
         .map(|row| {
-            let template = folder.join(&row.template);
+            let template = template_path(folder, row);
             let pdf = output.join(format!("{}.pdf", row.sheet));
             let mut notices = Vec::new();
             let plotted = read_text(&template, "the template").and_then(|(bytes, text)| {
