@@ -97,7 +97,8 @@ fn help() -> serde_json::Value {
                 "does": "Builds a sheet description into a DWG in the 2018 format (AC1032). \
                          The DWG goes beside the sheet description with a .dwg extension unless \
                          --output names another path. An existing file is never replaced \
-                         without --overwrite.",
+                         without --overwrite, and --overwrite replaces only a DWG AgentDrafter \
+                         built.",
             },
         },
         "output": "One line of JSON on standard output: {\"ok\": true, \"result\": ...} or \

@@ -23,8 +23,9 @@ pub struct BuildRequest {
     /// description with the same name and a `.dwg` extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<PathBuf>,
-    /// Replace the file at the output path. Without it, an existing file is
-    /// never touched.
+    /// Replace the file at the output path, which is allowed only when it is
+    /// a DWG AgentDrafter built. Without it, an existing file is never
+    /// touched.
     #[serde(default)]
     pub overwrite: bool,
 }
@@ -79,6 +80,7 @@ pub fn build(request: &BuildRequest) -> Result<BuildReport, Error> {
             )
             .in_file(&output));
         }
+        refuse_unless_built(&output)?;
     }
 
     let bytes = dwg::write_new_sheet(&sheet).map_err(|e| e.in_file(&output))?;
@@ -96,6 +98,31 @@ pub fn build(request: &BuildRequest) -> Result<BuildReport, Error> {
         objects,
         bytes: bytes.len(),
     })
+}
+
+/// Refuses to replace the file at `output` unless it is a DWG AgentDrafter
+/// built, as its build mark shows. Anything else may be an original, and an
+/// original is never overwritten.
+fn refuse_unless_built(output: &Path) -> Result<(), Error> {
+    let why = match dwg::carries_build_mark(output) {
+        Ok(true) => return Ok(()),
+        Ok(false) => "the DWG at the output path was not built by AgentDrafter: it does not carry \
+                      AgentDrafter's build mark"
+            .to_owned(),
+        Err(e) => format!(
+            "the file at the output path cannot be read as a DWG, so nothing shows AgentDrafter \
+             built it ({})",
+            e.message
+        ),
+    };
+    Err(Error::new(
+        ErrorCode::NotABuild,
+        format!(
+            "{why}; it may be an original, and an original is never overwritten, so choose \
+             another output path"
+        ),
+    )
+    .in_file(output))
 }
 
 fn is_same_file(a: &Path, b: &Path) -> bool {

@@ -75,7 +75,11 @@ enum Frame {
 
 /// Reads `text` as the strict YAML subset. Returns `None` for a document
 /// that holds nothing.
+///
+/// A leading UTF-8 byte-order mark is dropped first, so every rule of the
+/// subset applies as if it were not there.
 pub(super) fn read(text: &str) -> Result<Option<Node>, Error> {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     refuse_directives(text)?;
     let mut stack: Vec<Frame> = Vec::new();
     let mut root: Option<Node> = None;

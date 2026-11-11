@@ -39,6 +39,10 @@ pub enum ErrorCode {
     BadNumber,
     /// The DWG to write already exists and replacing it was not asked for.
     OutputExists,
+    /// Replacing was asked for, but the file at the output path is not a DWG
+    /// AgentDrafter built, or cannot be read to tell. It may be an original,
+    /// and an original is never overwritten.
+    NotABuild,
     /// A file could not be written.
     WriteFailed,
     /// The DWG library could not write the drawing.

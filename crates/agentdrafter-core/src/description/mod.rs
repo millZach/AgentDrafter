@@ -115,7 +115,13 @@ fn length(node: &Node, path: &str, declared: Unit) -> Result<f64, Error> {
     };
     let error = match parse_length(text) {
         Ok((value, None)) => return Ok(value),
-        Ok((value, Some(own))) => return Ok(own.convert(value, declared)),
+        Ok((value, Some(own))) => match own.convert(value, declared) {
+            converted if converted.is_finite() => return Ok(converted),
+            _ => Error::new(
+                ErrorCode::BadNumber,
+                format!("`{text}` is too large once converted to {declared}"),
+            ),
+        },
         Err(LengthError::NotANumber) => Error::new(
             ErrorCode::BadNumber,
             format!("expected {SHAPE}, found {}", describe(node)),

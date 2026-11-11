@@ -74,6 +74,27 @@ fn a_number_with_its_own_unit_is_converted_to_the_declared_unit() {
 }
 
 #[test]
+fn a_huge_length_converts_when_its_result_is_finite_and_is_refused_when_not() {
+    let sheet = parse_sheet_description(
+        "units: m\nobjects:\n  - line: {from: [1e307 in, 0, 0], to: [1, 1, 0]}\n",
+    )
+    .unwrap();
+    let [Object::Line(line)] = sheet.objects.as_slice() else {
+        panic!("expected one line, read {:?}", sheet.objects);
+    };
+    assert!(line.from.x.is_finite(), "{:?}", line.from);
+
+    assert_error(
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [1, 1e308 m, 0]}\n",
+        ErrorCode::BadNumber,
+        Some("objects[0].line.to[1]"),
+        3,
+    );
+    let e = error("units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [1, 1e308 m, 0]}\n");
+    assert_eq!(e.message, "`1e308 m` is too large once converted to mm");
+}
+
+#[test]
 fn every_declared_unit_is_read() {
     for unit in Unit::ALL {
         let text = format!("units: {unit}\nobjects: []\n");
@@ -315,6 +336,24 @@ fn directives_are_refused() {
         None,
         1,
     );
+}
+
+#[test]
+fn a_leading_byte_order_mark_is_ignored_and_every_rule_still_applies() {
+    let with_mark = format!("\u{FEFF}{ONE_LINE}");
+    assert_eq!(
+        parse_sheet_description(&with_mark).unwrap(),
+        parse_sheet_description(ONE_LINE).unwrap()
+    );
+    assert_error(
+        "\u{FEFF}%YAML 1.2\n---\nunits: mm\nobjects: []\n",
+        ErrorCode::NotInSubset,
+        None,
+        1,
+    );
+    let e = error("\u{FEFF}units: furlong\nobjects: []\n");
+    assert_eq!(e.code, ErrorCode::UnknownUnit);
+    assert_eq!((e.line, e.column), (Some(1), Some(8)), "{e:?}");
 }
 
 #[test]

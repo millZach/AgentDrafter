@@ -125,13 +125,38 @@ fn an_existing_file_is_never_replaced_unless_asked() {
     assert_eq!(error.code, ErrorCode::OutputExists);
     assert_eq!(error.file, Some(dwg.display().to_string()));
     assert_eq!(fs::read(&dwg).unwrap(), b"not ours");
+}
 
-    build(&BuildRequest {
+#[test]
+fn overwrite_replaces_only_a_dwg_agentdrafter_built() {
+    let dir = scratch("overwrite");
+    let description = dir.join("sheet.yaml");
+    fs::write(&description, "units: mm\nobjects: []\n").unwrap();
+    let dwg = dir.join("sheet.dwg");
+    let overwrite = BuildRequest {
         overwrite: true,
         ..request(&description)
-    })
-    .unwrap();
-    assert_eq!(read_dwg(&dwg).unwrap().dwg_version, "AC1032");
+    };
+
+    // A file that cannot be read as a DWG cannot show that AgentDrafter built it.
+    fs::write(&dwg, b"not ours").unwrap();
+    let error = build(&overwrite).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotABuild);
+    assert_eq!(error.file, Some(dwg.display().to_string()));
+    assert!(
+        error.message.contains("cannot be read as a DWG"),
+        "{error:?}"
+    );
+    assert!(error.message.contains("never overwritten"), "{error:?}");
+    assert_eq!(fs::read(&dwg).unwrap(), b"not ours");
+    assert_eq!(files_in(&dir), ["sheet.dwg", "sheet.yaml"]);
+
+    // A DWG this build wrote is replaced.
+    fs::remove_file(&dwg).unwrap();
+    build(&request(&description)).unwrap();
+    fs::write(&description, "units: in\nobjects: []\n").unwrap();
+    build(&overwrite).unwrap();
+    assert_eq!(read_dwg(&dwg).unwrap().units, Some(Unit::In));
     assert_eq!(files_in(&dir), ["sheet.dwg", "sheet.yaml"]);
 }
 

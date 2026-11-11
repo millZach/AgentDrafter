@@ -78,6 +78,10 @@ _Avoid_: script, spec, source file
 Producing a DWG from a sheet description.
 _Avoid_: compile, render, export
 
+**Build mark**:
+A mark written inside every DWG that AgentDrafter builds, so that a later build knows the file is its own. A build replaces an existing DWG only when it carries the mark; any other file may be an original and is never overwritten.
+_Avoid_: stamp (a stamp records the revision an output came from), signature, watermark
+
 **Declared unit**:
 The unit a sheet description states for its numbers, such as `mm`. A number with no unit of its own is in the declared unit; a number that carries its own unit is converted to it. There is no default unit.
 _Avoid_: default unit, base unit

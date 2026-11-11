@@ -60,6 +60,10 @@ impl Unit {
     /// returned unchanged, bit for bit. Between metric units, and between
     /// inches and feet, the conversion is one multiplication or division by
     /// a whole number, so it rounds once.
+    ///
+    /// No step overflows on the way to a finite result, so the result is
+    /// infinite only when the converted value itself is too large for an
+    /// `f64`.
     pub fn convert(self, value: f64, to: Unit) -> f64 {
         let (from, to) = (self.micrometres(), to.micrometres());
         let common = gcd(from, to);
@@ -70,7 +74,14 @@ impl Unit {
         } else if numerator == 1.0 {
             value / denominator
         } else {
-            value * numerator / denominator
+            // Multiplying first can overflow for a huge value whose result is
+            // finite; dividing first then avoids it.
+            let product = value * numerator;
+            if product.is_finite() {
+                product / denominator
+            } else {
+                value / denominator * numerator
+            }
         }
     }
 
@@ -232,6 +243,16 @@ mod tests {
         assert_eq!(Unit::Mm.convert(2.5, Unit::M), 0.0025);
         assert_eq!(Unit::Cm.convert(2.0, Unit::Mm), 20.0);
         assert_eq!(Unit::Mm.convert(25.4, Unit::In), 1.0);
+    }
+
+    #[test]
+    fn a_huge_value_with_a_finite_result_converts_without_overflowing() {
+        let metres = Unit::In.convert(1e307, Unit::M);
+        assert!(metres.is_finite(), "{metres}");
+        assert!((metres / 2.54e305 - 1.0).abs() < 1e-15, "{metres}");
+        let metres = Unit::Ft.convert(f64::MAX, Unit::M);
+        assert!(metres.is_finite(), "{metres}");
+        assert!(Unit::M.convert(f64::MAX, Unit::Mm).is_infinite());
     }
 
     #[test]

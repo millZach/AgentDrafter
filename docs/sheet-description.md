@@ -17,6 +17,8 @@ objects:
 
 `agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON.
 
+Every DWG a build writes carries AgentDrafter's build mark: a custom drawing property, `AgentDrafter` with the value `build`, which AutoCAD shows under DWGPROPS. `--overwrite` replaces only a DWG that carries it.
+
 ## What it holds
 
 | Key | Required | What it is |
@@ -38,12 +40,15 @@ A **length** is a number, with or without its own unit:
 - `4 in` or `4in` is four inches, converted to the declared unit.
 - A number is an optional `-`, digits, an optional `.` followed by digits, and an optional exponent such as `e3` or `E-2`. Nothing else is a number: not `+1`, `.5`, `5.`, `1_000`, `0x10`, `inf` or `nan`.
 - A unit is one of `mm`, `cm`, `m`, `in`, `ft`, in lower case, after the number and at most one space.
+- A length that is too large to hold once converted to the declared unit, such as `1e308 m` on a sheet in `mm`, is an error.
 
 There is no default unit. A sheet with no `units` is an error, so that no number is ever read in a unit nobody stated.
 
 ## The YAML subset
 
 A sheet description is YAML 1.2 with these limits. Each one is checked, and breaking it is an error.
+
+A file may start with a UTF-8 byte-order mark. It is ignored: every rule below applies as if it were not there, and lines and columns are counted without it.
 
 1. **One document.** A leading `---` and a trailing `...` are allowed. A second document is an error.
 2. **No anchors or aliases.** `&name` and `*name` are errors. Write each value out.
@@ -77,8 +82,9 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 | `missing_unit` | The sheet declares no unit. |
 | `unknown_unit` | A unit that is not one of `mm`, `cm`, `m`, `in`, `ft`. |
 | `wrong_type` | A value of the wrong shape, such as a point without three coordinates. |
-| `bad_number` | A coordinate that is not a number. |
+| `bad_number` | A coordinate that is not a number, or too large to hold in the declared unit. |
 | `output_exists` | A file is already where the DWG would go, and `--overwrite` was not given. |
+| `not_a_build` | `--overwrite` was given, but the file where the DWG would go is not a DWG AgentDrafter built, or cannot be read to tell. It may be an original, and an original is never overwritten. |
 | `write_failed` | The DWG could not be written. |
 | `dwg_write` | The DWG library could not write the drawing. |
 | `dwg_read` | The DWG library could not read a drawing. |
