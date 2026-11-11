@@ -117,7 +117,7 @@ Operations sent together as one request. Each sheet takes its part of a change s
 _Avoid_: batch, transaction, commit
 
 **Journal**:
-The on-disk record of every change set and every failed attempt. A later session reads it to see what was done and to undo it.
+The on-disk record of every change set and every failed attempt. A later session reads it to see what was done and to undo it. Undo is a stack: undoing a change set also undoes every later one that is not issued.
 _Avoid_: history, log, undo stack
 
 **Inconsistent set**:
@@ -128,7 +128,7 @@ The state an agent's changes land on at once. It is not issued.
 _Avoid_: draft, staging
 
 **Issued**:
-Accepted by the reviewer. Nothing is issued until the reviewer accepts the working revision.
+Accepted by the reviewer. Nothing is issued until the reviewer accepts the working revision. The reviewer cannot accept while the set is inconsistent, and an issued change set cannot be undone.
 _Avoid_: released, approved, final
 
 **Check**:
