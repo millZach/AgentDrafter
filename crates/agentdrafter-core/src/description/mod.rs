@@ -6,9 +6,12 @@
 //! sheet description does not know. Every error names the field it is about,
 //! and an error about a choice lists the valid choices.
 //!
-//! [`layers`] reads linetypes and layers, [`objects`] reads the objects, and
-//! [`schema`] states the same keys as a JSON Schema for agents to read.
+//! [`layers`] reads linetypes and layers, [`objects`] reads the objects,
+//! [`hatch`] reads hatch patterns and hatches, and [`schema`] states the
+//! same keys as a JSON Schema for agents to read.
 
+mod hatch;
+mod hatch_schema;
 mod layers;
 mod objects;
 pub(crate) mod schema;
@@ -21,7 +24,8 @@ use crate::model::{Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 4] = ["units", "linetypes", "layers", "objects"];
+pub(crate) const SHEET_KEYS: [&str; 5] =
+    ["units", "linetypes", "layers", "hatch_patterns", "objects"];
 
 /// Reads the text of a sheet description into a [`Sheet`].
 ///
@@ -57,11 +61,23 @@ pub fn parse_sheet_description(text: &str) -> Result<Sheet, Error> {
         Some(node) => layers::layers(node, &linetypes)?,
         None => Vec::new(),
     };
+    let hatch_patterns = match fields.get("hatch_patterns") {
+        Some(node) => hatch::hatch_patterns(node, units)?,
+        None => Vec::new(),
+    };
     let list = sequence(fields.require("objects")?, "objects", "a list of objects")?;
     let objects = list
         .iter()
         .enumerate()
-        .map(|(i, node)| objects::object(node, &index_path("objects", i), units, &layers))
+        .map(|(i, node)| {
+            objects::object(
+                node,
+                &index_path("objects", i),
+                units,
+                &layers,
+                &hatch_patterns,
+            )
+        })
         .collect::<Result<_, _>>()?;
     Ok(Sheet {
         units,
@@ -339,3 +355,6 @@ mod tests;
 
 #[cfg(test)]
 mod geometry_tests;
+
+#[cfg(test)]
+mod hatch_tests;

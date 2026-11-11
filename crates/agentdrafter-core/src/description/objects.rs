@@ -1,5 +1,6 @@
 //! Reads the objects on a sheet: each is a mapping with one key, its type.
 
+use super::hatch::{self, HATCH_KEYS};
 use super::layers::layer_name;
 use super::strict_yaml::{index_path, key_path, Kind, Node};
 use super::{
@@ -8,18 +9,20 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arc, Circle, Ellipse, Layer, Line, Object, Polyline, Spline, FIT_DEGREE, LAYER_ZERO,
+    Arc, Circle, Ellipse, HatchPattern, Layer, Line, Object, Polyline, Spline, FIT_DEGREE,
+    LAYER_ZERO,
 };
 use crate::units::Unit;
 
 /// Every object type a sheet description can hold, and the keys each takes.
-pub(crate) const OBJECT_TYPES: [(&str, &[&str]); 6] = [
+pub(crate) const OBJECT_TYPES: [(&str, &[&str]); 7] = [
     ("line", &LINE_KEYS),
     ("polyline", &POLYLINE_KEYS),
     ("arc", &ARC_KEYS),
     ("circle", &CIRCLE_KEYS),
     ("ellipse", &ELLIPSE_KEYS),
     ("spline", &SPLINE_KEYS),
+    ("hatch", &HATCH_KEYS),
 ];
 
 const LINE_KEYS: [&str; 3] = ["from", "to", "layer"];
@@ -47,6 +50,7 @@ pub(super) fn object(
     path: &str,
     units: Unit,
     layers: &[Layer],
+    hatch_patterns: &[HatchPattern],
 ) -> Result<Object, Error> {
     const SHAPE: &str = "a mapping with one key naming the object's type, such as `line:`";
     let Kind::Mapping(entries) = &node.kind else {
@@ -101,6 +105,7 @@ pub(super) fn object(
         "circle" => circle(&fields, units, layer).map(Object::Circle),
         "ellipse" => ellipse(&fields, units, layer).map(Object::Ellipse),
         "spline" => spline(&fields, units, layer).map(Object::Spline),
+        "hatch" => hatch::hatch(&fields, units, layer, hatch_patterns).map(Object::Hatch),
         other => unreachable!("object type `{other}` is listed but not read"),
     }
 }
@@ -132,6 +137,20 @@ fn polyline(fields: &Fields, units: Unit, layer: String) -> Result<Polyline, Err
 fn arc(fields: &Fields, units: Unit, layer: String) -> Result<Arc, Error> {
     let center = point(fields.require("center")?, &fields.path_of("center"), units)?;
     let radius = radius(fields, units)?;
+    let (start_angle, end_angle) = arc_angles(fields, "for a whole circle use `circle`")?;
+    Ok(Arc {
+        center,
+        radius,
+        start_angle,
+        end_angle,
+        layer,
+    })
+}
+
+/// An arc's `start_angle` and `end_angle`, both required, which must differ
+/// once whole turns are taken off. `whole_circle` says what to write for a
+/// whole circle instead.
+pub(super) fn arc_angles(fields: &Fields, whole_circle: &str) -> Result<(f64, f64), Error> {
     let start_angle = angle(
         fields.require("start_angle")?,
         &fields.path_of("start_angle"),
@@ -142,16 +161,10 @@ fn arc(fields: &Fields, units: Unit, layer: String) -> Result<Arc, Error> {
         return Err(bad_value(
             end_node,
             &fields.path_of("end_angle"),
-            "an arc's end angle must differ from its start angle, counting whole turns as none; for a whole circle use `circle`",
+            format!("an arc's end angle must differ from its start angle, counting whole turns as none; {whole_circle}"),
         ));
     }
-    Ok(Arc {
-        center,
-        radius,
-        start_angle,
-        end_angle,
-        layer,
-    })
+    Ok((start_angle, end_angle))
 }
 
 fn circle(fields: &Fields, units: Unit, layer: String) -> Result<Circle, Error> {
@@ -163,7 +176,7 @@ fn circle(fields: &Fields, units: Unit, layer: String) -> Result<Circle, Error> 
 }
 
 /// A radius, a length more than 0.
-fn radius(fields: &Fields, units: Unit) -> Result<f64, Error> {
+pub(super) fn radius(fields: &Fields, units: Unit) -> Result<f64, Error> {
     let node = fields.require("radius")?;
     let path = fields.path_of("radius");
     let radius = length(node, &path, units)?;

@@ -143,7 +143,7 @@ fn an_unknown_object_type_is_named() {
     assert_eq!(e.field.as_deref(), Some("objects[0].hexagon"));
     assert_eq!(
         e.message,
-        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline"
+        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline, hatch"
     );
 }
 
