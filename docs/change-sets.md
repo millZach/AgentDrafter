@@ -150,7 +150,7 @@ Only what an operation touched is rewritten. Each record is read into the strict
 
 ## How it works
 
-`crates/agentdrafter-core/src/change/` holds the change set: `operations.rs` the operations, their schemas and reading a change set, `apply.rs` applying it sheet by sheet, and `mod.rs` the reply and the mark. `src/description/edit.rs` edits a record in place and `emit.rs` writes nodes back as text; `mark.rs` reads and writes the mark. Every sheet is read by the same code that reads it for a build, and built by the same code that builds it.
+`crates/agentdrafter-core/src/change/` holds the change set: `operations.rs` the operations, their schemas and reading a change set, `apply.rs` applying it sheet by sheet, `commit.rs` putting its records, DWGs and mark in place together or not at all, and `mod.rs` the reply and the mark. `src/description/edit.rs` edits a record in place and `emit.rs` writes nodes back as text; `mark.rs` reads and writes the mark. Every sheet is read by the same code that reads it for a build, and built by the same code that builds it.
 
 ## What is not offered yet
 
