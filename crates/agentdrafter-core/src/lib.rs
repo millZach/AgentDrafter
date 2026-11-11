@@ -52,7 +52,8 @@ pub use model::{
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use reply::Reply;
 pub use set::{
-    build_set, build_set_with, SetBuildRequest, SetReport, SheetOutcome, SET_SETTINGS_FILE,
+    build_set, build_set_with, Notice, NoticeCode, SetBuildRequest, SetReport, SheetOutcome,
+    SET_SETTINGS_FILE,
 };
 pub use settings::{Settings, FONTS_VARIABLE};
 pub use text::fonts::{FontSubstitution, FontUsed};

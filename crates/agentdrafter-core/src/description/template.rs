@@ -7,7 +7,8 @@
 //! replaced by the row's value `NAME`, read as a sheet description is read.
 //!
 //! A row that lacks a value the template needs is an error naming the sheet
-//! and the value; so is a value the template has no place for. A value the
+//! and the value. A value the template has no place for does not stop the
+//! sheet but is reported as a notice, as Zach decided on 2026-11-11. A value the
 //! sheet description's rules refuse where the template puts it, such as
 //! empty contents for a text, is an error at the value in the rows file.
 
@@ -18,6 +19,7 @@ use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
 use super::{bad_value, library_beside, read_file, scalar, sheet, Fields};
 use crate::error::{Error, ErrorCode};
 use crate::model::{BlockLibrary, Sheet};
+use crate::set::{Notice, NoticeCode};
 use crate::units::Unit;
 
 /// The one key of a value a template takes from a row: `{row: NAME}`.
@@ -41,28 +43,40 @@ struct Filled {
 ///
 /// An error about a row's value names the rows file; one in the template
 /// names the template, and one in the block library it names, the library.
+/// A value of the row the template has no place for is added to `notices`,
+/// whether or not the sheet is built.
 pub(crate) fn read_template(
     path: &Path,
     row: &Row,
     rows_file: &Path,
     set_units: Unit,
+    notices: &mut Vec<Notice>,
 ) -> Result<Sheet, Error> {
     let text = read_file(path, "the template")?;
-    fill(&text, row, rows_file, set_units, &mut library_beside(path))
-        .map_err(|e| e.or_in_file(path))
+    fill(
+        &text,
+        row,
+        rows_file,
+        set_units,
+        &mut library_beside(path),
+        notices,
+    )
+    .map_err(|e| e.or_in_file(path))
 }
 
 /// Reads the text of a template as the sheet `row` names, filled in with
 /// the row's values. `load` reads the block library the template names, as
 /// for a sheet description. An error about a row's value names `rows_file`;
 /// any other is left for the caller to place in the template's file, unless
-/// it names the block library's.
+/// it names the block library's. A value of the row the template has no
+/// place for is added to `notices`.
 pub(super) fn fill(
     text: &str,
     row: &Row,
     rows_file: &Path,
     set_units: Unit,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+    notices: &mut Vec<Notice>,
 ) -> Result<Sheet, Error> {
     let mut root = strict_yaml::read(text)?;
     let mut filled: Vec<Filled> = Vec::new();
@@ -86,37 +100,56 @@ pub(super) fn fill(
             Ok(())
         })?;
     }
+    notices.extend(unused_values(row, &filled, &missing, rows_file));
     if !missing.is_empty() {
         return Err(missing_values(row, &missing).in_file(rows_file));
     }
-    if let Some(unused) = row
-        .values
+    sheet(root, load, Some(set_units)).map_err(|e| at_row_value(e, &filled, row, rows_file))
+}
+
+/// A notice for each of the row's values its template has no place for.
+/// Such a value does not stop the sheet, as Zach decided on 2026-11-11, but
+/// is reported, so a stray or misspelt value stays in sight. `filled` and
+/// `missing` are the template's places, with the value's name of each.
+fn unused_values(
+    row: &Row,
+    filled: &[Filled],
+    missing: &[(String, String)],
+    rows_file: &Path,
+) -> Vec<Notice> {
+    let mut takes: Vec<&str> = Vec::new();
+    let names = filled
         .iter()
-        .find(|v| !filled.iter().any(|f| f.name == v.name))
-    {
-        let mut takes: Vec<&str> = Vec::new();
-        for f in &filled {
-            if !takes.contains(&f.name.as_str()) {
-                takes.push(&f.name);
-            }
+        .map(|f| f.name.as_str())
+        .chain(missing.iter().map(|(name, _)| name.as_str()));
+    for name in names {
+        if !takes.contains(&name) {
+            takes.push(name);
         }
-        let takes = if takes.is_empty() {
-            "it takes no values from a row".to_owned()
-        } else {
-            format!("it takes {}", takes.join(", "))
-        };
-        return Err(Error::new(
-            ErrorCode::UnknownName,
-            format!(
-                "sheet `{}` gives the value `{}`, which its template `{}` has no place for; {takes}",
+    }
+    let takes = if takes.is_empty() {
+        "it takes no values from a row".to_owned()
+    } else {
+        format!("it takes {}", takes.join(", "))
+    };
+    row.values
+        .iter()
+        .filter(|v| !filled.iter().any(|f| f.name == v.name))
+        .map(|unused| Notice {
+            code: NoticeCode::UnusedValue,
+            message: format!(
+                "sheet `{}` gives the value `{}`, which its template `{}` has no place for, so \
+                 it is not used; {takes}",
                 row.sheet, unused.name, row.template
             ),
-        )
-        .at_field(row.value_path(&unused.name))
-        .at_position(unused.key_at.line, unused.key_at.column)
-        .in_file(rows_file));
-    }
-    sheet(root, load, Some(set_units)).map_err(|e| at_row_value(e, &filled, row, rows_file))
+            sheet: row.sheet.clone(),
+            template: row.template.clone(),
+            field: row.value_path(&unused.name),
+            line: unused.key_at.line,
+            column: unused.key_at.column,
+            file: rows_file.display().to_string(),
+        })
+        .collect()
 }
 
 /// The names of the row's values a template's text takes, each once, in

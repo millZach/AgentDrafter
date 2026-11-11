@@ -4,7 +4,7 @@
 //!
 //! As everywhere in the schemas, what JSON Schema cannot see is left to the
 //! reader: whether two sheets share a name, whether a row gives every value
-//! its template needs and no other, and whether a value is allowed where
+//! its template needs, and whether a value is allowed where
 //! its template puts it.
 
 use serde_json::{json, Value};
@@ -97,7 +97,8 @@ pub(crate) fn rows_schema() -> Value {
                     values_key: {
                         "description": "The values the template takes from this row, from name \
                                         to text: one for each {row: NAME} the template writes, \
-                                        and no other. A name is ASCII letters, digits, _ and -. \
+                                        and a value it does not use is reported as a notice. A \
+                                        name is ASCII letters, digits, _ and -. \
                                         Without it, the row gives no values.",
                         "type": "object",
                         "propertyNames": { "pattern": VALUE_NAME },

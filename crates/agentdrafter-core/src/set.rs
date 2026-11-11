@@ -75,6 +75,40 @@ pub struct SheetOutcome {
     /// Why the sheet was not built, when it failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
+    /// What the build noticed about the sheet that did not stop it, such as
+    /// a value of its row its template does not use. Empty when there is
+    /// nothing to say.
+    pub notices: Vec<Notice>,
+}
+
+/// Something a build noticed about a sheet that did not stop it, placed in
+/// the file it is about.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Notice {
+    pub code: NoticeCode,
+    pub message: String,
+    /// The sheet it is about.
+    pub sheet: String,
+    /// The sheet's template, as its row writes its path.
+    pub template: String,
+    /// The path to what it is about in `file`, such as `rows[1].values.DATE`.
+    pub field: String,
+    /// The line in `file`, counted from 1.
+    pub line: usize,
+    /// The column in the line, counted from 1 in characters.
+    pub column: usize,
+    /// The file it is about.
+    pub file: String,
+}
+
+/// What kind of notice it is. Written in `snake_case` in JSON.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeCode {
+    /// A row gives a value its template has no place for. The sheet is
+    /// built without it, as Zach decided on 2026-11-11, and the notice keeps
+    /// a stray or misspelt value in sight.
+    UnusedValue,
 }
 
 /// Builds every sheet of a drawing set, reading fonts from the font folders
@@ -128,9 +162,11 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         .map(|row| {
             let template = folder.join(&row.template);
             let dwg = output.join(format!("{}.dwg", row.sheet));
-            let built = read_template(&template, row, &rows_file, set.units).and_then(|sheet| {
-                build_sheet(&sheet, &template, &dwg, request.overwrite, settings)
-            });
+            let mut notices = Vec::new();
+            let built = read_template(&template, row, &rows_file, set.units, &mut notices)
+                .and_then(|sheet| {
+                    build_sheet(&sheet, &template, &dwg, request.overwrite, settings)
+                });
             let (result, error) = match built {
                 Ok(report) => (Some(report), None),
                 Err(error) => (None, Some(error)),
@@ -141,6 +177,7 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
                 ok: result.is_some(),
                 result,
                 error,
+                notices,
             }
         })
         .collect();

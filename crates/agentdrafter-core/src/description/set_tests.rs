@@ -12,6 +12,7 @@ use super::template::{fill, names};
 use super::{parse_block_library, parse_sheet_description};
 use crate::error::{Error, ErrorCode};
 use crate::model::{Object, Sheet};
+use crate::set::{Notice, NoticeCode};
 use crate::units::Unit;
 
 /// A made-up block library with a title block of three attributes.
@@ -49,9 +50,19 @@ fn one_row(values: &str) -> Row {
 /// Fills `template` in from `row` as a sheet of a set in millimetres, with
 /// [`LIBRARY`] as its block library.
 fn fill_in(template: &str, row: &Row) -> Result<Sheet, Error> {
-    fill(template, row, Path::new("rows.yaml"), Unit::Mm, &mut |_| {
-        parse_block_library(LIBRARY)
-    })
+    fill_noting(template, row, &mut Vec::new())
+}
+
+/// As [`fill_in`], adding what the fill notices to `notices`.
+fn fill_noting(template: &str, row: &Row, notices: &mut Vec<Notice>) -> Result<Sheet, Error> {
+    fill(
+        template,
+        row,
+        Path::new("rows.yaml"),
+        Unit::Mm,
+        &mut |_| parse_block_library(LIBRARY),
+        notices,
+    )
 }
 
 #[track_caller]
@@ -252,14 +263,37 @@ fn a_row_that_lacks_a_value_is_an_error_naming_the_sheet_and_the_value() {
 }
 
 #[test]
-fn a_value_the_template_has_no_place_for_is_an_error_listing_the_ones_it_takes() {
-    let row = one_row("{TITLE: A, DWG_NO: B, DATE: '2026-11-11'}");
-    let e = error(fill_in(TEMPLATE, &row));
-    assert_eq!(e.code, ErrorCode::UnknownName);
-    assert_eq!(e.field.as_deref(), Some("rows[0].values.DATE"));
-    assert_eq!(e.file.as_deref(), Some("rows.yaml"));
-    assert!(e.message.contains("sheet `S-1`"), "{e:?}");
-    assert!(e.message.contains("it takes TITLE, DWG_NO"), "{e:?}");
+fn a_value_the_template_has_no_place_for_is_noticed_and_the_sheet_still_reads() {
+    let row = one_row("{TITLE: A, DWG_NO: B, DATE: '2026-11-11', CHECKED: ZM}");
+    let mut notices = Vec::new();
+    let sheet = fill_noting(TEMPLATE, &row, &mut notices).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(sheet.objects.len(), 3);
+    let fields: Vec<&str> = notices.iter().map(|n| n.field.as_str()).collect();
+    assert_eq!(fields, ["rows[0].values.DATE", "rows[0].values.CHECKED"]);
+    let notice = &notices[0];
+    assert_eq!(notice.code, NoticeCode::UnusedValue);
+    assert_eq!(
+        (notice.sheet.as_str(), notice.template.as_str()),
+        ("S-1", "t.yaml")
+    );
+    assert_eq!((notice.file.as_str(), notice.line), ("rows.yaml", 4));
+    assert!(notice.message.contains("`DATE`"), "{notice:?}");
+    assert!(
+        notice.message.contains("it takes TITLE, DWG_NO"),
+        "{notice:?}"
+    );
+
+    // A row that also lacks a value fails, and its unused value is still noticed.
+    let mut notices = Vec::new();
+    let e = error(fill_noting(
+        TEMPLATE,
+        &one_row("{TITLE: A, DATE: X}"),
+        &mut notices,
+    ));
+    assert_eq!(e.code, ErrorCode::MissingValue);
+    assert_eq!(e.field.as_deref(), Some("rows[0].values.DWG_NO"));
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].field, "rows[0].values.DATE");
 }
 
 #[test]

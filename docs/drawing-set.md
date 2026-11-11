@@ -78,7 +78,7 @@ The rows file holds one key, `rows`: a list of rows, one per sheet, in the order
 |---|---|---|
 | `sheet` | yes | The sheet's name, which names its DWG: `<output>/<sheet>.dwg`. |
 | `template` | yes | The sheet's template: the path of its file, relative to the set's folder. |
-| `values` | no | The values the template takes from this row: a mapping from each value's name to its text. One for each `{row: NAME}` the template writes, and no other. |
+| `values` | no | The values the template takes from this row: a mapping from each value's name to its text. One for each `{row: NAME}` the template writes; a value the template does not use is reported as a notice, and the sheet is still built (see [Building](#building)). |
 
 A sheet's name is a file name every system allows: 1 to 251 characters, so that with `.dwg` it is at most 255; not starting or ending with a space and not ending with `.`; holding none of `/ \ : * ? " < > |` and no control characters; and not, up to its first `.`, a name Windows keeps for a device (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`), in any case. Each name is given once in a set, and names that differ only in case are one name, since some systems would write them to one file.
 
@@ -108,18 +108,19 @@ A sheet description built on its own takes no value from a row: `{row: NAME}` in
 - **The other sheets are still built.** One bad row does not stop a long run. The reply says for each sheet what was built and what failed.
 - **Settings or rows that cannot be read stop the set** before anything is written, since without them there is nothing to build.
 - **An existing DWG is replaced only when asked.** Without `--overwrite`, a sheet whose DWG is already there fails with `output_exists`. With it, each sheet replaces only a DWG that carries AgentDrafter's build mark; any other file may be an original, so that sheet fails with `not_a_build` and the file is not touched.
+- **A value the template does not use is reported, not refused.** Zach decided this on 2026-11-11. The sheet is built without it, and its outcome's `notices` lists each such value, so a stray or misspelt one stays in sight: `{"code":"unused_value","message":...,"sheet":"DEMO-003","template":"templates/ansi-b.yaml","field":"rows[2].values.CHECKED","line":...,"column":...,"file":...}`, where the message lists the values the template takes. A value the template needs and the row lacks is still the `missing_value` error. A sheet with nothing to report has `"notices":[]`.
 - **Building twice gives the same DWGs.** Nothing in a built DWG depends on when, where or on which machine it was built, so the same set builds byte-identical DWGs, in the same folder or another. AutoCAD 2026 read two builds of the demo set as identical.
 
 The reply is one line of JSON. When every sheet was built:
 
 ```json
-{"ok":true,"result":{"set":"examples/demo-set","units":"in","output":"examples/demo-set/dwg","built":3,"failed":0,"sheets":[{"sheet":"DEMO-001","template":"templates/ansi-b.yaml","ok":true,"result":{"dwg":"examples/demo-set/dwg/DEMO-001.dwg","...":"..."}}]}}
+{"ok":true,"result":{"set":"examples/demo-set","units":"in","output":"examples/demo-set/dwg","built":3,"failed":0,"sheets":[{"sheet":"DEMO-001","template":"templates/ansi-b.yaml","ok":true,"result":{"dwg":"examples/demo-set/dwg/DEMO-001.dwg","...":"..."},"notices":[]}]}}
 ```
 
 Each sheet's `result` is what building one sheet description reports, with its template as `description`. When some sheets failed, the reply is not `ok`, carries the same `result`, and adds an error; the command exits with 1:
 
 ```json
-{"ok":false,"result":{"built":2,"failed":1,"sheets":[{"sheet":"DEMO-002","template":"templates/ansi-b.yaml","ok":false,"error":{"code":"missing_value","message":"sheet `DEMO-002` has no value `TITLE`, which its template `templates/ansi-b.yaml` fills in at `objects[2].insert.attributes.TITLE`, `objects[3].text.contents`; give it under the row's `values`","field":"rows[1].values.TITLE","line":15,"column":7,"file":"examples/demo-set/rows.yaml"}},"..."]},"error":{"code":"sheets_failed","message":"1 of the set's 3 sheets failed, and nothing was written for them; 2 built. Each sheet's outcome is under `sheets`"}}
+{"ok":false,"result":{"built":2,"failed":1,"sheets":[{"sheet":"DEMO-002","template":"templates/ansi-b.yaml","ok":false,"error":{"code":"missing_value","message":"sheet `DEMO-002` has no value `TITLE`, which its template `templates/ansi-b.yaml` fills in at `objects[2].insert.attributes.TITLE`, `objects[3].text.contents`; give it under the row's `values`","field":"rows[1].values.TITLE","line":15,"column":7,"file":"examples/demo-set/rows.yaml"},"notices":[]},"..."]},"error":{"code":"sheets_failed","message":"1 of the set's 3 sheets failed, and nothing was written for them; 2 built. Each sheet's outcome is under `sheets`"}}
 ```
 
 When the settings or the rows cannot be read, the reply is an error alone, as for one sheet description.
@@ -131,7 +132,6 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 | Code | In a set it means |
 |---|---|
 | `missing_value` | A row lacks a value its template needs. The message names the sheet, the value and where the template puts it; `field` is where the value belongs, such as `rows[1].values.TITLE`. |
-| `unknown_name` | A row gives a value its template has no place for. The message lists the values the template takes. |
 | `bad_value` | Besides a sheet description's meanings: a template in another unit than the set, a sheet's name no system allows, a value's name that is not ASCII letters, digits, `_` and `-`, a path that is not relative, or a row's value that the sheet description refuses where the template puts it. |
 | `duplicate_name` | Two rows name the same sheet, or names that differ only in case. |
 | `sheets_failed` | Some sheets failed and were not written; the others were built. Each sheet's error is under `sheets` in the result. |

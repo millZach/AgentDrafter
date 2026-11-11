@@ -8,8 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, read_dwg, DrawingContents, ErrorCode, Object, Reply, SetBuildRequest,
-    SetReport, Settings, Unit,
+    build_set_with, read_dwg, DrawingContents, ErrorCode, NoticeCode, Object, Reply,
+    SetBuildRequest, SetReport, Settings, Unit,
 };
 
 #[path = "support/demo_set.rs"]
@@ -196,6 +196,29 @@ fn the_sets_unit_and_output_folder_are_honoured() {
     );
     assert!(error.message.contains("drawing set in mm"), "{error:?}");
     assert!(files_in(&root.join("issued").join("mm")).is_empty());
+}
+
+#[test]
+fn a_value_the_template_does_not_use_is_reported_and_its_sheet_is_built() {
+    let set = demo_set("unused-value");
+    let rows = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    let rows = rows.replace("      REV: A\n", "      REV: A\n      CHECKED: ZM\n");
+    fs::write(set.join("rows.yaml"), rows).unwrap();
+
+    let report = build_all(&set);
+
+    assert_eq!((report.built, report.failed), (3, 0));
+    assert!(report.sheets[..2].iter().all(|s| s.notices.is_empty()));
+    let [notice] = report.sheets[2].notices.as_slice() else {
+        panic!("one notice, found {:#?}", report.sheets[2].notices);
+    };
+    assert_eq!(notice.code, NoticeCode::UnusedValue);
+    assert_eq!(notice.sheet, "DEMO-003");
+    assert_eq!(notice.template, "templates/ansi-b.yaml");
+    assert_eq!(notice.field, "rows[2].values.CHECKED");
+    assert_eq!(notice.file, set.join("rows.yaml").display().to_string());
+    assert!(notice.message.contains("`CHECKED`"), "{notice:?}");
+    assert!(set.join("dwg").join("DEMO-003.dwg").is_file());
 }
 
 #[test]
