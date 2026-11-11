@@ -37,6 +37,7 @@ use crate::model::{Layer, Object, Sheet, CONTINUOUS, LAYER_ZERO};
 use crate::text::placement::SheetFonts;
 
 pub use color::Color;
+pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
 
 /// AutoCAD's default lineweight, which a layer with none of its own plots
 /// with: 0.25 mm, AutoCAD's `LWDEFAULT` as installed.
@@ -55,6 +56,10 @@ pub struct DisplayList {
     /// its own: the boundaries of patterned hatches, whose lines may stop
     /// short of them. AutoCAD's extents take in a hatch's boundary.
     pub reach: Option<Bounds>,
+    /// The hatches whose pattern needed more lines or dashes than one hatch
+    /// draws, and so are not drawn in full: each one's place in the sheet's
+    /// objects, counted from 0.
+    pub hatches_cut_short: Vec<usize>,
 }
 
 /// One shape of one object.
@@ -158,8 +163,14 @@ struct Pen<'a> {
 
 /// Draws a sheet: every object, in drawing order, as AutoCAD plots it.
 /// Curves are drawn as chords that stray at most `tolerance` drawing units
-/// from them; text is drawn in the fonts `fonts` holds.
-pub fn draw_sheet(sheet: &Sheet, fonts: &SheetFonts, tolerance: f64) -> DisplayList {
+/// from them; text is drawn in the fonts `fonts` holds; each hatch draws
+/// at most `most_dashes` dashes, [`MOST_HATCH_DASHES`] but in tests.
+pub fn draw_sheet(
+    sheet: &Sheet,
+    fonts: &SheetFonts,
+    tolerance: f64,
+    most_dashes: usize,
+) -> DisplayList {
     let tolerance = if tolerance > 0.0 { tolerance } else { 1e-3 };
     let layer_zero = Layer::new(LAYER_ZERO);
     let pen_of = |name: &str| -> Pen<'_> {
@@ -258,11 +269,14 @@ pub fn draw_sheet(sheet: &Sheet, fonts: &SheetFonts, tolerance: f64) -> DisplayL
                 false,
             )),
             Object::Hatch(h) => {
-                let (shapes, boundary) = hatch::draw(h, pen.lineweight, tolerance);
+                let drawn = hatch::draw(h, pen.lineweight, tolerance, most_dashes);
                 let reach = list.reach.into_iter().flat_map(|b| [b.min, b.max]);
-                list.reach =
-                    Bounds::of(reach.chain(boundary.into_iter().flat_map(|b| [b.min, b.max])));
-                shapes
+                let boundary = drawn.bounds.into_iter().flat_map(|b| [b.min, b.max]);
+                list.reach = Bounds::of(reach.chain(boundary));
+                if drawn.cut_short {
+                    list.hatches_cut_short.push(index);
+                }
+                drawn.shapes
             }
             Object::Text(t) => text::draw_text(t, fonts, pen.lineweight, tolerance),
             Object::MText(t) => text::draw_mtext(t, fonts, pen.lineweight, tolerance),

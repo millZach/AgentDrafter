@@ -24,7 +24,7 @@ use crate::description::parse_sheet_description;
 use crate::draw::{self, Bounds};
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::Sheet;
+use crate::model::{Object, Sheet};
 use crate::raster::{self, View};
 use crate::settings::Settings;
 use crate::stamp::{self, SourceKind, Stamp};
@@ -148,8 +148,25 @@ pub struct RenderReport {
     /// The text styles whose fonts are not in the font folders, and the
     /// look-alike drawn in their place. Empty when every font was found.
     pub font_substitutions: Vec<FontSubstitution>,
+    /// The hatches not drawn in full, their pattern needing more lines or
+    /// dashes than one hatch draws. Empty when every hatch was drawn whole.
+    pub hatches_cut_short: Vec<HatchCutShort>,
     /// The stamp written into the PNG.
     pub stamp: Stamp,
+}
+
+/// A hatch whose pattern needed more lines or dashes than one hatch draws:
+/// the PNG holds only the first of them.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HatchCutShort {
+    /// The hatch's place in the sheet's objects, counted from 0.
+    pub object: usize,
+    /// Its pattern.
+    pub pattern: String,
+    /// Its layer.
+    pub layer: String,
+    /// Why it was not drawn in full.
+    pub why: String,
 }
 
 /// Renders a sheet to a PNG, reading fonts from the font folders the
@@ -161,12 +178,22 @@ pub fn render(request: &RenderRequest) -> Result<RenderReport, Error> {
 /// Renders a sheet to a PNG, reading fonts from the font folders `settings`
 /// names. The PNG is written whole or not at all.
 pub fn render_with(request: &RenderRequest, settings: &Settings) -> Result<RenderReport, Error> {
+    render_within(request, settings, draw::MOST_HATCH_DASHES)
+}
+
+/// Renders a sheet to a PNG as [`render_with`] does, each hatch drawing at
+/// most `most_dashes` dashes.
+fn render_within(
+    request: &RenderRequest,
+    settings: &Settings,
+    most_dashes: usize,
+) -> Result<RenderReport, Error> {
     check(request)?;
     let source = request.source.as_path();
     let bytes = fs::read(source).map_err(|e| {
         Error::new(
             ErrorCode::ReadFailed,
-            format!("could not read the {}: {e}", what(source)),
+            format!("could not read the {}: {e}", SourceKind::of(source).words()),
         )
         .in_file(source)
     })?;
@@ -215,7 +242,7 @@ pub fn render_with(request: &RenderRequest, settings: &Settings) -> Result<Rende
     // A coarse list first, curves to within a drawing unit, for the scale;
     // then the list drawn to a quarter of a pixel, finer than the eye sees,
     // whose extents the image covers.
-    let coarse = draw::draw_sheet(&sheet, &fonts, 1.0);
+    let coarse = draw::draw_sheet(&sheet, &fonts, 1.0, most_dashes);
     let (rough, _) = fit(
         request,
         area(&coarse),
@@ -223,7 +250,7 @@ pub fn render_with(request: &RenderRequest, settings: &Settings) -> Result<Rende
         millimetres_per_unit,
         margin,
     )?;
-    let list = draw::draw_sheet(&sheet, &fonts, 0.25 / rough);
+    let list = draw::draw_sheet(&sheet, &fonts, 0.25 / rough, most_dashes);
     let extents = list.extents();
     let (pixels_per_unit, size) = fit(
         request,
@@ -279,15 +306,29 @@ pub fn render_with(request: &RenderRequest, settings: &Settings) -> Result<Rende
         objects_not_drawn,
         bytes: png.len(),
         font_substitutions: fonts.substitutions(),
+        hatches_cut_short: cut_short(&sheet, &list, most_dashes),
         stamp,
     })
 }
 
-fn what(source: &Path) -> &'static str {
-    match SourceKind::of(source) {
-        SourceKind::SheetDescription => "sheet description",
-        SourceKind::Dwg => "DWG",
-    }
+/// The hatches the display list could not draw in full, and why.
+fn cut_short(sheet: &Sheet, list: &draw::DisplayList, most_dashes: usize) -> Vec<HatchCutShort> {
+    list.hatches_cut_short
+        .iter()
+        .filter_map(|&object| match sheet.objects.get(object) {
+            Some(Object::Hatch(hatch)) => Some(HatchCutShort {
+                object,
+                pattern: hatch.pattern.name.clone(),
+                layer: hatch.layer.clone(),
+                why: format!(
+                    "its pattern needs more than the {} lines or {most_dashes} dashes one \
+                     hatch draws; only the first are drawn",
+                    draw::MOST_HATCH_LINES
+                ),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Refuses a request that cannot be rendered as asked, naming its field.
@@ -478,4 +519,45 @@ fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), Error> {
         )
         .in_file(path)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hatch that reaches its budget of dashes partway is named in the
+    /// reply, as a font substitution is, not drawn short in silence.
+    #[test]
+    fn a_hatch_cut_short_is_named_in_the_reply() {
+        let dir = std::env::temp_dir()
+            .join(format!("agentdrafter-render-{}", std::process::id()))
+            .join("cut-short");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("sheet.yaml");
+        // Ten lines of five dashes each: fifty dashes.
+        fs::write(
+            &source,
+            "units: mm\nhatch_patterns:\n  DASHES:\n    lines:\n      - {angle: 0, origin: [0, 0.5], delta: [0, 1], dashes: [1, -1]}\nlayers:\n  fill: {color: 4}\nobjects:\n  - line: {from: [0, 0, 0], to: [10, 0, 0]}\n  - hatch: {pattern: DASHES, boundary: [{polyline: {points: [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]]}}], layer: fill}\n",
+        )
+        .unwrap();
+        let mut request = RenderRequest::new(&source);
+        let whole = render_within(&request, &Settings::default(), 50).unwrap();
+        assert_eq!(whole.hatches_cut_short, Vec::new());
+        request.overwrite = true;
+        let cut = render_within(&request, &Settings::default(), 20).unwrap();
+        assert_eq!(
+            cut.hatches_cut_short.len(),
+            1,
+            "{:?}",
+            cut.hatches_cut_short
+        );
+        let hatch = &cut.hatches_cut_short[0];
+        assert_eq!(
+            (hatch.object, hatch.pattern.as_str(), hatch.layer.as_str()),
+            (1, "DASHES", "fill")
+        );
+        assert!(hatch.why.contains("20 dashes"), "{}", hatch.why);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

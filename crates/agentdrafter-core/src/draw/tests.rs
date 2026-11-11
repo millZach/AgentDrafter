@@ -14,7 +14,7 @@ use crate::text::truetype::tests::made_up_font;
 fn draw(description: &str) -> DisplayList {
     let sheet = parse_sheet_description(description).unwrap_or_else(|e| panic!("{e}"));
     let fonts = SheetFonts::find(&sheet, &Settings::default());
-    draw_sheet(&sheet, &fonts, 0.001)
+    draw_sheet(&sheet, &fonts, 0.001, MOST_HATCH_DASHES)
 }
 
 fn items_of(list: &DisplayList, object: usize) -> Vec<&Item> {
@@ -191,13 +191,107 @@ fn a_truetype_font_draws_filled_outlines() {
         font_folders: vec![PathBuf::from(&dir)],
     };
     let fonts = SheetFonts::find(&sheet, &settings);
-    let list = draw_sheet(&sheet, &fonts, 0.001);
+    let list = draw_sheet(&sheet, &fonts, 0.001, MOST_HATCH_DASHES);
     let Shape::Fill { rule, contours } = &list.items[0].shape else {
         panic!("{:?}", list.items);
     };
     assert_eq!(*rule, FillRule::NonZero);
     let xs: Vec<f64> = contours[0].iter().map(|p| p[0]).collect();
     assert!(xs.iter().any(|x| (x - 10.0).abs() < 1e-9), "{xs:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Each line of multiline text lands on the box by the point of its ink as
+/// far across as the attachment is: its left edge, middle or right edge.
+#[test]
+fn multiline_text_aligns_each_line_by_its_ink_at_its_attachment() {
+    let attachments = ["top", "middle", "bottom"].into_iter().flat_map(|row| {
+        [("left", 0.0), ("center", 0.5), ("right", 1.0)]
+            .map(|(column, across)| (row, column, across))
+    });
+    for (row, column, across) in attachments {
+        let list = draw(&format!(
+            "units: mm\nobjects:\n  - mtext: {{contents: \"I\\nIII\", position: [100, 50, 0], height: 3, width: 30, justify: {row}_{column}}}\n"
+        ));
+        let points: Vec<Point2> = items_of(&list, 0).iter().flat_map(|i| i.points()).collect();
+        let top = points.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
+        // The first line reaches 3 down from the top, the second starts 5
+        // below the first.
+        for line in [true, false] {
+            let xs: Vec<f64> = points
+                .iter()
+                .filter(|p| (p[1] > top - 4.0) == line)
+                .map(|p| p[0])
+                .collect();
+            let left = xs.iter().copied().fold(f64::MAX, f64::min);
+            let right = xs.iter().copied().fold(f64::MIN, f64::max);
+            let at = left + (right - left) * across;
+            assert!(
+                (at - 100.0).abs() < 1e-9 && right > left - 1e-9,
+                "{row}_{column}, line {}: ink from {left} to {right}",
+                if line { 1 } else { 2 }
+            );
+        }
+    }
+}
+
+/// Text stretched along its line keeps within the tolerance across as well
+/// as up: a made-up SHX font's half circle, drawn eight times wider than it
+/// is high, strays no further from its true curve than the tolerance.
+#[test]
+fn stretched_text_keeps_within_the_tolerance_both_ways() {
+    let dir = std::env::temp_dir()
+        .join(format!("agentdrafter-draw-{}", std::process::id()))
+        .join("stretched");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // From the pen at (0, 0), a half circle of radius 5 (half the capitals'
+    // height of 10), from the west of its centre anticlockwise to its east.
+    fs::write(
+        dir.join("arc.shx"),
+        crate::text::shx::tests::unifont(10, &[(65, &[10, 5, 0x44, 0])]),
+    )
+    .unwrap();
+    let sheet = parse_sheet_description(
+        "units: mm\ntext_styles:\n  wide: {font: arc.shx, width_factor: 8}\nobjects:\n  - text: {contents: A, position: [0, 0, 0], height: 10, style: wide}\n",
+    )
+    .unwrap();
+    let settings = Settings {
+        font_folders: vec![PathBuf::from(&dir)],
+    };
+    let fonts = SheetFonts::find(&sheet, &settings);
+    let tolerance = 0.01;
+    let list = draw_sheet(&sheet, &fonts, tolerance, MOST_HATCH_DASHES);
+    // The true curve: centre (40, 0), 40 across and 5 up.
+    let curve: Vec<Point2> = (0..=20_000)
+        .map(|i| {
+            let t = std::f64::consts::PI * (1.0 + f64::from(i) / 20_000.0);
+            [40.0 + 40.0 * t.cos(), 5.0 * t.sin()]
+        })
+        .collect();
+    let from_curve = |p: Point2| {
+        curve
+            .windows(2)
+            .map(|s| {
+                let (d, e) = (
+                    [s[1][0] - s[0][0], s[1][1] - s[0][1]],
+                    [p[0] - s[0][0], p[1] - s[0][1]],
+                );
+                let f = ((d[0] * e[0] + d[1] * e[1]) / (d[0] * d[0] + d[1] * d[1])).clamp(0.0, 1.0);
+                (e[0] - f * d[0]).hypot(e[1] - f * d[1])
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let chords: Vec<[Point2; 2]> = runs(&list.items[0])
+        .iter()
+        .flat_map(|run| run.windows(2).map(|c| [c[0], c[1]]))
+        .collect();
+    assert!(chords.len() > 8, "{chords:?}");
+    let worst = chords
+        .iter()
+        .map(|[a, b]| from_curve([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]))
+        .fold(0.0, f64::max);
+    assert!(worst <= tolerance * 1.01, "a chord strays {worst}");
     let _ = fs::remove_dir_all(&dir);
 }
 

@@ -73,7 +73,8 @@ impl SourceKind {
         }
     }
 
-    fn words(self) -> &'static str {
+    /// What the kind is called in a message.
+    pub(crate) fn words(self) -> &'static str {
         match self {
             SourceKind::SheetDescription => "sheet description",
             SourceKind::Dwg => "DWG",

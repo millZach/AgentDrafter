@@ -103,8 +103,12 @@ pub(crate) fn spline(s: &Spline, tolerance: f64) -> Vec<Point2> {
         let knots = clamped_uniform_knots(degree, control.len());
         (degree, control, knots)
     } else {
-        let fit: Vec<Point2> = s.fit_points.iter().map(|p| [p.x, p.y]).collect();
+        // The curve is fitted in space, through the fit points as the DWG
+        // holds them, and then seen from above: projecting first would
+        // space the knots by the wrong distances.
+        let fit: Vec<Point3d> = s.fit_points.iter().map(|p| [p.x, p.y, p.z]).collect();
         let (control, knots) = fit_cubic(&fit);
+        let control = control.iter().map(|p| [p[0], p[1]]).collect();
         (usize::from(FIT_DEGREE), control, knots)
     };
     if control.len() <= degree {
@@ -135,14 +139,18 @@ fn clamped_uniform_knots(degree: usize, count: usize) -> Vec<f64> {
     knots
 }
 
+/// A point in space: `[x, y, z]`.
+type Point3d = [f64; 3];
+
 /// The control points and knots of the cubic AutoCAD fits through `fit`:
-/// knots spaced by chord length, natural end conditions.
-fn fit_cubic(fit: &[Point2]) -> (Vec<Point2>, Vec<f64>) {
+/// knots spaced by chord length in space, natural end conditions.
+fn fit_cubic(fit: &[Point3d]) -> (Vec<Point3d>, Vec<f64>) {
     let n = fit.len();
     let mut at = vec![0.0];
     for pair in fit.windows(2) {
         let last = at[at.len() - 1];
-        at.push(last + (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]));
+        let [dx, dy, dz] = [0, 1, 2].map(|i| pair[1][i] - pair[0][i]);
+        at.push(last + dx.hypot(dy).hypot(dz));
     }
     let end = at[n - 1];
     let mut knots = vec![0.0; 4];
@@ -152,7 +160,7 @@ fn fit_cubic(fit: &[Point2]) -> (Vec<Point2>, Vec<f64>) {
     // The rows: the first fit point, no bend at the start, the inner fit
     // points, no bend at the end, the last fit point. Each touches at most
     // four neighbouring control points.
-    let mut rows: Vec<(Vec<f64>, Point2)> = Vec::with_capacity(count);
+    let mut rows: Vec<(Vec<f64>, Point3d)> = Vec::with_capacity(count);
     let row = |entries: &[(usize, f64)]| {
         let mut r = vec![0.0; count];
         for &(i, v) in entries {
@@ -164,7 +172,7 @@ fn fit_cubic(fit: &[Point2]) -> (Vec<Point2>, Vec<f64>) {
     let (a, b) = (knots[4], knots[5]);
     rows.push((
         row(&[(0, 1.0 / a), (1, -1.0 / a - 1.0 / b), (2, 1.0 / b)]),
-        [0.0, 0.0],
+        [0.0; 3],
     ));
     for (k, &u) in at.iter().enumerate().take(n - 1).skip(1) {
         // Fit point k sits at knot k + 3, where three basis functions are not 0.
@@ -177,7 +185,7 @@ fn fit_cubic(fit: &[Point2]) -> (Vec<Point2>, Vec<f64>) {
     let (c, d) = (knots[m + 3] - knots[m], knots[m + 2] - knots[m - 1]);
     rows.push((
         row(&[(m, 1.0 / c), (m - 1, -1.0 / c - 1.0 / d), (m - 2, 1.0 / d)]),
-        [0.0, 0.0],
+        [0.0; 3],
     ));
     rows.push((row(&[(m, 1.0)]), fit[n - 1]));
     (solve(rows), knots)
@@ -186,7 +194,7 @@ fn fit_cubic(fit: &[Point2]) -> (Vec<Point2>, Vec<f64>) {
 /// Solves a square system whose rows each give a point, by elimination
 /// with partial pivoting. The systems here are banded, so most of each
 /// row is skipped.
-fn solve(mut rows: Vec<(Vec<f64>, Point2)>) -> Vec<Point2> {
+fn solve(mut rows: Vec<(Vec<f64>, Point3d)>) -> Vec<Point3d> {
     let n = rows.len();
     for col in 0..n {
         let pivot = (col..n.min(col + 8))
@@ -208,20 +216,22 @@ fn solve(mut rows: Vec<(Vec<f64>, Point2)>) -> Vec<Point2> {
             for c in col..reach {
                 dst.0[c] -= f * src.0[c];
             }
-            dst.1[0] -= f * src.1[0];
-            dst.1[1] -= f * src.1[1];
+            for (d, s) in dst.1.iter_mut().zip(src.1) {
+                *d -= f * s;
+            }
         }
     }
-    let mut x = vec![[0.0, 0.0]; n];
+    let mut x = vec![[0.0; 3]; n];
     for r in (0..n).rev() {
         let mut v = rows[r].1;
         let reach = n.min(r + 16);
         for (coefficient, solved) in rows[r].0[r + 1..reach].iter().zip(&x[r + 1..reach]) {
-            v[0] -= coefficient * solved[0];
-            v[1] -= coefficient * solved[1];
+            for (v, s) in v.iter_mut().zip(solved) {
+                *v -= coefficient * s;
+            }
         }
         let p = rows[r].0[r];
-        x[r] = if p == 0.0 { v } else { [v[0] / p, v[1] / p] };
+        x[r] = if p == 0.0 { v } else { v.map(|v| v / p) };
     }
     x
 }
@@ -340,7 +350,12 @@ mod tests {
     /// read from its DXF of a DWG the build wrote.
     #[test]
     fn a_spline_through_fit_points_has_autocads_control_points() {
-        let fit = [[180.0, 0.0], [200.0, 30.0], [220.0, 10.0], [240.0, 40.0]];
+        let fit = [
+            [180.0, 0.0, 0.0],
+            [200.0, 30.0, 0.0],
+            [220.0, 10.0, 0.0],
+            [240.0, 40.0, 0.0],
+        ];
         let (control, knots) = fit_cubic(&fit);
         let autocad = [
             [180.0, 0.0],
@@ -352,7 +367,8 @@ mod tests {
         ];
         assert_eq!(control.len(), autocad.len());
         for (mine, theirs) in control.iter().zip(autocad) {
-            close(*mine, theirs, 1e-9);
+            close([mine[0], mine[1]], theirs, 1e-9);
+            assert_eq!(mine[2], 0.0);
         }
         assert!((knots[4] - 36.055_512_754_64).abs() < 1e-9);
         assert!((knots[5] - 64.339_784_002_1).abs() < 1e-9);
@@ -387,6 +403,37 @@ mod tests {
         let points = spline(&by_control, 1e-4);
         close(points[0], [0.0, 95.0], 1e-12);
         close(*points.last().unwrap(), [90.0, 125.0], 1e-12);
+    }
+
+    /// A spline that rises out of the plane is fitted by its distances in
+    /// space, as the DWG defines it, and only then seen from above. Seen
+    /// from above first, the last two of these fit points would coincide.
+    #[test]
+    fn a_spline_out_of_the_plane_is_fitted_in_space_then_seen_from_above() {
+        let fit = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 10.0]];
+        let (control, knots) = fit_cubic(&fit);
+        assert_eq!(knots, [0.0, 0.0, 0.0, 0.0, 10.0, 20.0, 20.0, 20.0, 20.0]);
+        assert!(
+            control.iter().flatten().all(|c| c.is_finite()),
+            "{control:?}"
+        );
+        let s = Spline {
+            fit_points: fit.iter().map(|p| Point3::new(p[0], p[1], p[2])).collect(),
+            control_points: Vec::new(),
+            degree: 3,
+            layer: LAYER_ZERO.into(),
+        };
+        let points = spline(&s, 1e-4);
+        assert!(points.len() > 2, "{points:?}");
+        assert!(points.iter().flatten().all(|c| c.is_finite()), "{points:?}");
+        close(points[0], [0.0, 0.0], 1e-12);
+        close(*points.last().unwrap(), [10.0, 0.0], 1e-9);
+        // The curve passes through the middle fit point.
+        let nearest = points
+            .iter()
+            .map(|q| (q[0] - 10.0).hypot(q[1]))
+            .fold(f64::MAX, f64::min);
+        assert!(nearest < 1e-3, "{nearest}");
     }
 
     #[test]

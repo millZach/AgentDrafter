@@ -17,7 +17,7 @@ mod hershey;
 pub(crate) mod measure;
 pub(crate) mod outline;
 pub(crate) mod placement;
-mod shx;
+pub(crate) mod shx;
 pub(crate) mod truetype;
 
 use serde::{Deserialize, Serialize};

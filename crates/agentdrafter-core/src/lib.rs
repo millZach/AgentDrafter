@@ -51,7 +51,7 @@ pub use model::{
     Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
 };
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
-pub use render::{render, render_with, RenderReport, RenderRequest};
+pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;
 pub use settings::{Settings, FONTS_VARIABLE};
 pub use stamp::{check_stale, SourceKind, SourceStamp, StaleReport, StaleRequest, Stamp};

@@ -115,17 +115,9 @@ pub(super) fn draw_mtext(
         else {
             continue;
         };
-        let x = match text.justify {
-            Attachment::TopLeft | Attachment::MiddleLeft | Attachment::BottomLeft => {
-                left - ink_left
-            }
-            Attachment::TopCenter | Attachment::MiddleCenter | Attachment::BottomCenter => {
-                left + box_width / 2.0 - (ink_left + ink_right) / 2.0
-            }
-            Attachment::TopRight | Attachment::MiddleRight | Attachment::BottomRight => {
-                left + box_width - ink_right
-            }
-        };
+        // The point of the ink as far across as the position is across the
+        // box lands on the box at that point: its left edge, middle or right.
+        let x = left + box_width * across - (ink_left + (ink_right - ink_left) * across);
         place.line(font, line, [x, top + baseline], tolerance, &mut out);
     }
     out.shapes(lineweight)
@@ -237,7 +229,10 @@ impl Placement {
             ]
         };
         let mut pen = (0.0, 0.0);
-        let tolerance = tolerance / self.height.min(along).max(f64::MIN_POSITIVE);
+        // A glyph is enlarged by its height up and by `along` across, so
+        // its tolerance is divided by the larger to stay within the drawing
+        // units' tolerance both ways.
+        let tolerance = tolerance / self.height.max(along).max(f64::MIN_POSITIVE);
         for glyph in font.outlines(contents, tolerance) {
             for stroke in &glyph.strokes {
                 out.strokes
