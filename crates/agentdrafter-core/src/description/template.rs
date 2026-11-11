@@ -6,6 +6,10 @@
 //! mtext's contents. A sheet is the template with each `{row: NAME}`
 //! replaced by the row's value `NAME`, read as a sheet description is read.
 //!
+//! A row may also hold objects of its own, which are on its sheet alone,
+//! after the template's. They write their values themselves: a value from
+//! the row has no place in them.
+//!
 //! A row that lacks a value the template needs is an error naming the sheet
 //! and the value. A value the template has no place for does not stop the
 //! sheet but is reported as a notice, as Zach decided on 2026-11-11. A value the
@@ -18,7 +22,10 @@ use super::ids::ObjectRecord;
 use super::records::SheetRecord;
 use super::set::{value_name_problem, Row};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
-use super::{bad_value, library_beside, read_file, scalar, sheet_and_records, Fields, LibraryFile};
+use super::{
+    bad_value, library_beside, read_file, scalar, sheet_and_records, Fields, LibraryFile,
+    RowObjects,
+};
 use crate::error::{Error, ErrorCode};
 use crate::model::{BlockLibrary, Sheet};
 use crate::set::{Notice, NoticeCode};
@@ -88,6 +95,7 @@ pub(crate) fn template_at(
         file: path.to_owned(),
         sheet,
         objects,
+        rows_file: Some(rows_file.to_owned()),
     };
     Ok((record, library))
 }
@@ -147,7 +155,12 @@ pub(super) fn fill_with_records(
     if !missing.is_empty() {
         return Err(missing_values(row, &missing).in_file(rows_file));
     }
-    sheet_and_records(root, load, Some(set_units))
+    let row_objects = RowObjects {
+        items: &row.objects,
+        path: row.objects_path(),
+        file: rows_file,
+    };
+    sheet_and_records(root, load, Some(set_units), Some(row_objects))
         .map_err(|e| at_row_value(e, &filled, row, rows_file))
 }
 
@@ -234,6 +247,22 @@ pub(super) fn refuse_row_values(root: Option<&mut Node>) -> Result<(), Error> {
     })
 }
 
+/// Refuses `{row: NAME}` in one of a row's own objects, at `path` in the
+/// rows file: the row writes its own objects' values itself.
+pub(super) fn refuse_row_values_in(item: &Node, path: &str) -> Result<(), Error> {
+    let mut item = item.clone();
+    places_in(&mut item, path, &mut |node, place| match &node.kind {
+        Kind::Mapping(entries) if entries.iter().any(|e| e.key == ROW_KEY) => Err(Error::new(
+            ErrorCode::WrongType,
+            "a value from a row, `{row: NAME}`, belongs in a template; a row's own objects \
+             are on its sheet alone, so write the value itself here",
+        )
+        .at_field(place)
+        .at_position(node.at.line, node.at.column)),
+        _ => Ok(()),
+    })
+}
+
 /// Calls `visit` with each place in a sheet's tree where a template may put
 /// a value from a row, and the path of the place: each value under an
 /// insert's `attributes`, and the `contents` of each text and mtext. A tree
@@ -252,36 +281,48 @@ fn each_place(
         return Ok(());
     };
     for (i, item) in items.iter_mut().enumerate() {
-        let Kind::Mapping(types) = &mut item.kind else {
-            continue;
-        };
-        let [object] = types.as_mut_slice() else {
-            continue;
-        };
-        let object_path = key_path(&index_path("objects", i), &object.key);
-        let Kind::Mapping(keys) = &mut object.value.kind else {
-            continue;
-        };
-        match object.key.as_str() {
-            "insert" => {
-                let Some(attributes) = keys.iter_mut().find(|k| k.key == "attributes") else {
-                    continue;
-                };
-                let Kind::Mapping(values) = &mut attributes.value.kind else {
-                    continue;
-                };
-                let attributes_path = key_path(&object_path, "attributes");
-                for value in values {
-                    visit(&mut value.value, key_path(&attributes_path, &value.key))?;
-                }
+        places_in(item, &index_path("objects", i), visit)?;
+    }
+    Ok(())
+}
+
+/// Calls `visit` with each place in the object `item`, at `path`, where a
+/// template may put a value from a row, as [`each_place`] does for a
+/// sheet's objects.
+pub(super) fn places_in(
+    item: &mut Node,
+    path: &str,
+    visit: &mut dyn FnMut(&mut Node, String) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let Kind::Mapping(types) = &mut item.kind else {
+        return Ok(());
+    };
+    let [object] = types.as_mut_slice() else {
+        return Ok(());
+    };
+    let object_path = key_path(path, &object.key);
+    let Kind::Mapping(keys) = &mut object.value.kind else {
+        return Ok(());
+    };
+    match object.key.as_str() {
+        "insert" => {
+            let Some(attributes) = keys.iter_mut().find(|k| k.key == "attributes") else {
+                return Ok(());
+            };
+            let Kind::Mapping(values) = &mut attributes.value.kind else {
+                return Ok(());
+            };
+            let attributes_path = key_path(&object_path, "attributes");
+            for value in values {
+                visit(&mut value.value, key_path(&attributes_path, &value.key))?;
             }
-            "text" | "mtext" => {
-                if let Some(contents) = keys.iter_mut().find(|k| k.key == "contents") {
-                    visit(&mut contents.value, key_path(&object_path, "contents"))?;
-                }
-            }
-            _ => {}
         }
+        "text" | "mtext" => {
+            if let Some(contents) = keys.iter_mut().find(|k| k.key == "contents") {
+                visit(&mut contents.value, key_path(&object_path, "contents"))?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }

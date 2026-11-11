@@ -12,7 +12,7 @@ use crate::model::BlockLibrary;
 fn records(text: &str) -> Result<Vec<ObjectRecord>, Error> {
     let root = strict_yaml::read(text)?;
     let mut no_library = |_: &str| -> Result<BlockLibrary, Error> { unreachable!() };
-    sheet_and_records(root, &mut no_library, None).map(|(_, records)| records)
+    sheet_and_records(root, &mut no_library, None, None).map(|(_, records)| records)
 }
 
 #[test]
@@ -33,6 +33,7 @@ fn an_object_carries_the_id_its_record_gives_or_takes_its_place() {
                     column: 5
                 },
                 id_key: None,
+                in_row: false,
             },
             ObjectRecord {
                 id: "hole:A-1.2".into(),
@@ -47,6 +48,7 @@ fn an_object_carries_the_id_its_record_gives_or_takes_its_place() {
                     line: 4,
                     column: 48
                 }),
+                in_row: false,
             },
         ]
     );
@@ -58,7 +60,9 @@ fn an_id_holds_ascii_letters_digits_and_four_marks() {
         ("''", "cannot be empty"),
         ("'a b'", "not ` `"),
         ("'S-1/a'", "`/` joins a sheet's name to the ID"),
-        ("'objects[1]'", "an object with no ID takes its place"),
+        ("'objects[1'", "an object with no ID takes its place"),
+        ("'objects[01]'", "a place is written as an ID only whole"),
+        ("'rows[1].objects'", "an object with no ID takes its place"),
         ("état", "not `\\u{e9}`"),
     ] {
         let e = records(&format!(
@@ -76,6 +80,39 @@ fn an_id_holds_ascii_letters_digits_and_four_marks() {
     assert!(records(&ok).is_ok());
     let e = records(&ok.replace(&longest, &format!("{longest}a"))).unwrap_err();
     assert!(e.message.contains("at most 255 characters"), "{e:?}");
+}
+
+#[test]
+fn a_place_written_as_an_id_is_kept_and_never_taken_twice() {
+    // An operation that deletes an object writes the place of each later
+    // object without an `id` as its `id`, so its ID does not move.
+    let read = records(
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [1, 0, 0], id: 'objects[2]'}\n  - line: {from: [0, 0, 0], to: [0, 1, 0], id: 'rows[3].objects[0]'}\n",
+    )
+    .unwrap();
+    assert_eq!(read[0].id, "objects[2]");
+    assert_eq!(read[1].id, "rows[3].objects[0]");
+    let later = records(
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [1, 0, 0], id: 'objects[1]'}\n  - line: {from: [0, 0, 0], to: [0, 1, 0]}\n",
+    )
+    .unwrap_err();
+    assert_eq!(later.code, ErrorCode::DuplicateId);
+    assert_eq!(later.field.as_deref(), Some("objects[1]"));
+    assert!(later.message.contains("give this one an `id`"), "{later:?}");
+    let earlier = records(
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [1, 0, 0]}\n  - line: {from: [0, 0, 0], to: [0, 1, 0], id: 'OBJECTS[0]'}\n",
+    )
+    .unwrap_err();
+    assert_eq!(earlier.code, ErrorCode::BadValue, "{earlier:?}");
+    let earlier = records(
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [1, 0, 0]}\n  - line: {from: [0, 0, 0], to: [0, 1, 0], id: 'objects[0]'}\n",
+    )
+    .unwrap_err();
+    assert_eq!(earlier.code, ErrorCode::DuplicateId);
+    assert!(
+        earlier.message.contains("is the place of the object"),
+        "{earlier:?}"
+    );
 }
 
 #[test]

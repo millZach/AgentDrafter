@@ -17,10 +17,13 @@
 
 mod block_schema;
 pub(crate) mod blocks;
+pub(crate) mod edit;
+mod emit;
 mod hatch;
 mod hatch_schema;
 pub(crate) mod ids;
 mod layers;
+mod mark;
 mod objects;
 mod records;
 pub(crate) mod schema;
@@ -42,8 +45,11 @@ use crate::model::{BlockLibrary, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 pub use blocks::parse_block_library;
+pub(crate) use edit::{AttributeSet, Listed, ObjectList, RecordFile};
+pub(crate) use emit::number_text;
+pub(crate) use mark::{mark_text, parse_mark, MarkFailure};
 pub(crate) use records::{read_sheet_record, SheetRecord};
-pub(crate) use set::{read_rows, read_set_settings, rows_at};
+pub(crate) use set::{read_rows, read_set_settings, rows_at, Row};
 pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
 pub(crate) use template::{read_template, template_at};
 
@@ -57,6 +63,30 @@ pub(crate) const SHEET_KEYS: [&str; 7] = [
     "text_styles",
     "objects",
 ];
+
+/// The keys an object of type `object` takes on a sheet: its own, then its
+/// ID and its name. Empty for a type a sheet does not hold.
+pub(crate) fn objects_table(object: &str) -> Vec<&'static str> {
+    objects::OBJECT_TYPES
+        .iter()
+        .find(|(name, _)| *name == object)
+        .map(|(_, keys)| {
+            keys.iter()
+                .chain(&ids::SHEET_OBJECT_KEYS)
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every object type a sheet holds, in the order the schema lists them.
+#[cfg(test)]
+pub(crate) fn object_types() -> Vec<&'static str> {
+    objects::OBJECT_TYPES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect()
+}
 
 /// Reads the text of a sheet description into a [`Sheet`].
 ///
@@ -117,7 +147,16 @@ fn on_its_own_with_records(
 ) -> Result<(Sheet, Vec<ObjectRecord>), Error> {
     let mut root = strict_yaml::read(text)?;
     template::refuse_row_values(root.as_mut())?;
-    sheet_and_records(root, load, None)
+    sheet_and_records(root, load, None, None)
+}
+
+/// A row's own objects, which a sheet of a drawing set holds after its
+/// template's: where they are in the rows file, and the file.
+struct RowObjects<'a> {
+    pub(super) items: &'a [Node],
+    /// Their path in the rows file, such as `rows[1].objects`.
+    pub(super) path: String,
+    pub(super) file: &'a Path,
 }
 
 /// The text of the file at `path`. `what` names it in the error, such as
@@ -171,7 +210,7 @@ fn sheet(
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
     set_units: Option<Unit>,
 ) -> Result<Sheet, Error> {
-    sheet_and_records(root, load, set_units).map(|(sheet, _)| sheet)
+    sheet_and_records(root, load, set_units, None).map(|(sheet, _)| sheet)
 }
 
 /// Reads a sheet description, or a template once a row has filled it in,
@@ -181,11 +220,14 @@ fn sheet(
 /// returns about a file is the library's own, and one about no file is
 /// placed at `block_library`. `set_units` is the declared unit of the
 /// drawing set the sheet is built in, if it is built in one: the sheet must
-/// be in it too.
+/// be in it too. `row_objects` are the sheet's row's own objects, if it has
+/// any: they follow the template's, name what the template defines, and an
+/// error in one is placed in the rows file.
 fn sheet_and_records(
     root: Option<Node>,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
     set_units: Option<Unit>,
+    row_objects: Option<RowObjects>,
 ) -> Result<(Sheet, Vec<ObjectRecord>), Error> {
     let Some(root) = root else {
         return Err(Error::new(
@@ -270,17 +312,31 @@ fn sheet_and_records(
         library: library.as_ref(),
         objects: Vec::new(),
     };
-    let objects = list
+    let mut objects = list
         .iter()
         .enumerate()
         .map(|(i, node)| objects::object(node, &index_path("objects", i), &tables, &mut place))
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
+    let in_template = objects.len();
+    if let Some(row) = row_objects {
+        for (j, node) in row.items.iter().enumerate() {
+            let path = index_path(&row.path, j);
+            template::refuse_row_values_in(node, &path).map_err(|e| e.in_file(row.file))?;
+            let object = objects::object(node, &path, &tables, &mut place)
+                .map_err(|e| e.or_in_file(row.file))?;
+            objects.push(object);
+        }
+    }
     let Place::Sheet {
-        objects: records, ..
+        objects: mut records,
+        ..
     } = place
     else {
         unreachable!("a sheet's objects are read on a sheet")
     };
+    for record in &mut records[in_template..] {
+        record.in_row = true;
+    }
     let mut sheet = Sheet {
         units,
         block_library,
@@ -579,3 +635,6 @@ mod set_tests;
 
 #[cfg(test)]
 mod id_tests;
+
+#[cfg(test)]
+mod edit_tests;

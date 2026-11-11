@@ -188,6 +188,10 @@ pub struct PlotSetReport {
     pub failed: usize,
     /// Each sheet, in the order its rows give them.
     pub sheets: Vec<PlottedSheet>,
+    /// The set's inconsistent mark, when a change set landed on some of its
+    /// sheets and failed on others: the PDFs plot the sheets as they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inconsistent: Option<crate::change::Inconsistent>,
 }
 
 /// What became of one sheet of a drawing set's plot.
@@ -346,6 +350,7 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
         plotted,
         failed: sheets.len() - plotted,
         sheets,
+        inconsistent: crate::change::inconsistent(folder),
     })
 }
 

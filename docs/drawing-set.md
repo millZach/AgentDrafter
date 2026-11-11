@@ -79,10 +79,33 @@ The rows file holds one key, `rows`: a list of rows, one per sheet, in the order
 | `sheet` | yes | The sheet's name, which names its DWG: `<output>/<sheet>.dwg`. |
 | `template` | yes | The sheet's template: the path of its file, relative to the set's folder. |
 | `values` | no | The values the template takes from this row: a mapping from each value's name to its text. One for each `{row: NAME}` the template writes; a value the template does not use is reported as a notice, and the sheet is still built (see [Building](#building)). |
+| `objects` | no | The sheet's own objects, on this sheet alone: a list of objects as a sheet description writes them. See [A row's own objects](#a-rows-own-objects). |
 
 A sheet's name is a file name every system allows: 1 to 251 characters, so that with `.dwg` it is at most 255; not starting or ending with a space and not ending with `.`; holding none of `/ \ : * ? " < > |` and no control characters; and not, up to its first `.`, a name Windows keeps for a device (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`), in any case. Each name is given once in a set, and names that differ only in case are one name, since some systems would write them to one file.
 
 A value's name is one or more ASCII letters, digits, `_` and `-`, such as `TITLE` or `dwg-no`, and is matched exactly, case and all. A value is text, as every scalar is: `REV: 0` and `REV: '0'` are the same value. Whether a value is allowed where its template puts it is the sheet description's rule for that place: one line for an attribute, something that shows for a text's contents.
+
+### A row's own objects
+
+A row may hold objects of its own, which are on its sheet alone. Zach decided on 2026-11-11 that an object added to one sheet goes in that sheet's row, so the template stays shared: an operation that adds an object to a sheet writes it here ([Change sets](change-sets.md)), and a generator or a person may write them too.
+
+```yaml
+rows:
+  - sheet: DEMO-002
+    template: templates/ansi-b.yaml
+    values:
+      TITLE: AREA 200 GENERAL ARRANGEMENT
+      ...
+    objects:
+      - circle: {center: [8, 5, 0], radius: 1, layer: notes, id: tank}
+      - text: {contents: TANK, position: [8, 5, 0], height: 0.2, style: notes}
+```
+
+- **They are part of the sheet** for building, rendering, plotting and querying, drawn after the template's objects, in the order the row lists them.
+- **They are written as a sheet description writes its objects**, with the same keys and rules, and the [schema](#the-rows) of the rows takes exactly what the reader takes. They name the layers, linetypes, text styles and hatch patterns the template defines and the blocks of the template's block library.
+- **They write their values themselves.** A value from the row, `{row: NAME}`, belongs in a template; in a row's own object it is an error.
+- **IDs.** Each `id` is given once on the sheet, the template's objects and the row's together, so `DEMO-002/tank` is unique in the set. An object without an `id` takes its place in the rows file, such as `DEMO-002/rows[1].objects[1]`.
+- **Errors** in a row's own object are placed in the rows file, at the object's place, such as `rows[1].objects[0].circle.layer`.
 
 ## Templates
 
@@ -110,6 +133,7 @@ A sheet description built on its own takes no value from a row: `{row: NAME}` in
 - **Settings or rows that cannot be read stop the set** before anything is written, since without them there is nothing to build.
 - **An existing DWG is replaced only when asked.** Without `--overwrite`, a sheet whose DWG is already there fails with `output_exists`. With it, each sheet replaces only a DWG that carries AgentDrafter's build mark; any other file may be an original, so that sheet fails with `not_a_build` and the file is not touched.
 - **A value the template does not use is reported, not refused.** Zach decided this on 2026-11-11. The sheet is built without it, and its outcome's `notices` lists each such value, so a stray or misspelt one stays in sight: `{"code":"unused_value","message":...,"sheet":"DEMO-003","template":"templates/ansi-b.yaml","field":"rows[2].values.CHECKED","line":...,"column":...,"file":...}`, where the message lists the values the template takes. A value the template needs and the row lacks is still the `missing_value` error. A sheet with nothing to report has `"notices":[]`.
+- **An inconsistent set is reported.** While a change set has landed on some of the set's sheets and failed on others, the reply carries the set's mark under `inconsistent` ([Change sets](change-sets.md#an-inconsistent-set)). The build builds each sheet as its records are.
 - **Building twice gives the same DWGs.** Nothing in a built DWG depends on when, where or on which machine it was built, so the same set builds byte-identical DWGs, in the same folder or another. AutoCAD 2026 read two builds of the demo set as identical.
 
 The reply is one line of JSON. When every sheet was built:
@@ -140,14 +164,14 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 
 ## How it is read
 
-`crates/agentdrafter-core/src/description/set.rs` reads the settings and the rows, `template.rs` fills a template in from a row and hands it to the sheet description's reader, and `set_schema.rs` writes the three schemas. `crates/agentdrafter-core/src/set.rs` builds a set, sheet by sheet, through the same code that builds one sheet description.
+`crates/agentdrafter-core/src/description/set.rs` reads the settings and the rows, `template.rs` fills a template in from a row and hands it to the sheet description's reader with the row's own objects, and `set_schema.rs` writes the three schemas. `crates/agentdrafter-core/src/set.rs` builds a set, sheet by sheet, through the same code that builds one sheet description.
 
 ## What is not offered yet
 
 - Paper-space layouts and viewports: a sheet is drawn in model space.
 - More than one sheet in one DWG.
 - Stamping an output with its revision. A set's sheets plot to PDF with `agentdrafter plot <folder>` ([plotting](plot.md#where-it-goes)), each stamped with its template, its rows file and its block library.
-- The journal, change sets and undo across the set. Stable IDs and [queries](query.md) across the set are built.
+- The journal and undo across the set. Stable IDs, [queries](query.md) and [change sets](change-sets.md) across the set are built.
 - A value from the row spliced into other text, such as `SHEET {n} OF {m}`, or put anywhere but an attribute's value or a text's contents, such as a position or a layer; and a default for a value a row leaves out.
 - More than one rows file in a set.
 - One block library enforced for the whole set: each template names its own, in the set's unit.

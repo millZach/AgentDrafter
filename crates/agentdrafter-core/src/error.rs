@@ -74,6 +74,10 @@ pub enum ErrorCode {
     /// Two objects in one sheet description or template carry the same ID,
     /// or IDs that differ only in case.
     DuplicateId,
+    /// A sheet of a change set was left as it was because a template edit
+    /// in its part could not land on another sheet built from the same
+    /// template: a template edit lands on all of them or on none.
+    SharedEditFailed,
 }
 
 /// An error from the core, ready to report through any interface.

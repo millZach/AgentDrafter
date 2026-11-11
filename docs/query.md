@@ -6,7 +6,7 @@ A query is what an agent asks a drawing set about what is on its sheets, to chec
 
 ## What a query reads
 
-A query reads the records: each sheet description, and each template filled in from its row of the set, as a build reads them. It does not read the built DWGs. The records are each sheet's truth (ADR-0003), so a query needs no build, cannot read a DWG that has gone stale, and answers in the set's declared unit exactly as the record gives each length. That is the smallest thing that answers every question here: the IDs, names, blocks, attribute values and text are all in the records, and a sheet's extents come from the one drawing pipeline (ADR-0011) the PNG is drawn by. Every object a build writes carries its ID into the DWG as well, so a later query of a built or revised DWG can find it again; querying DWGs is not offered yet.
+A query reads the records: each sheet description, and each template filled in from its row of the set, with the row's [own objects](drawing-set.md#a-rows-own-objects), as a build reads them. It does not read the built DWGs. The records are each sheet's truth (ADR-0003), so a query needs no build, cannot read a DWG that has gone stale, and answers in the set's declared unit exactly as the record gives each length. That is the smallest thing that answers every question here: the IDs, names, blocks, attribute values and text are all in the records, and a sheet's extents come from the one drawing pipeline (ADR-0011) the PNG is drawn by. Every object a build writes carries its ID into the DWG as well, so a later query of a built or revised DWG can find it again; querying DWGs is not offered yet.
 
 A sheet that cannot be read stops the query with its error, placed in its file: an answer that left a sheet out could say nothing matched when something did.
 
@@ -22,7 +22,7 @@ Every answer has the same frame, then what its kind found:
 | `message` | What was found, in words. When nothing matched, it starts `nothing matches:` and says what was looked for and where. |
 | `kind` | The query's kind. |
 
-`--sheet <sheet>` looks at the one sheet of that name, in any case; a sheet the set does not hold is the `unknown_name` error, which lists its sheets.
+`--sheet <sheet>` looks at the one sheet of that name, in any case; a sheet the set does not hold is the `unknown_name` error, which lists its sheets. While a change set has landed on some of the set's sheets and failed on others, the reply also carries the set's mark under `inconsistent` ([Change sets](change-sets.md#an-inconsistent-set)).
 
 **A query that matches nothing is not an error.** Its reply is `ok`, its `count` is 0 and its `message` says so:
 
@@ -45,7 +45,7 @@ Every answer has the same frame, then what its kind found:
 
 **How each matches.** An ID, a name, a block and an attribute tag are identifiers, and no two of a kind differ only in case, so each matches the whole of it in any case: `--name TITLE-BLOCK` finds `title-block`. A value and a text match the whole of it, case and all. With `--contains`, every option matches a value that holds it, in any case: `--id border --contains` finds the border on every sheet, and `--text made-up --contains` the notes.
 
-Each object found comes with its sheet, its ID, whether the record writes that ID (`id_written`; an ID the record does not write is the object's place and moves when an object is added before it), where it is written (`file`, `field`, `line`, `column`), and the object as the sheet holds it:
+Each object found comes with its sheet, its ID, whether the record writes that ID (`id_written`; an ID the record does not write is the object's place and moves when an object is added before it), where it is written (`file`, `field`, `line`, `column`: the rows file and a place such as `rows[1].objects[0]` for a row's own object), and the object as the sheet holds it:
 
 ```json
 {"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-002"],"message":"1 object has the ID `DEMO-002/border`, on sheet `DEMO-002`","kind":"find","count":1,"objects":[{"sheet":"DEMO-002","id":"DEMO-002/border","id_written":true,"file":"examples/demo-set/templates/ansi-b.yaml","field":"objects[1]","line":18,"column":5,"object":{"type":"polyline","points":[[0.5,0.5,0.0],[16.5,0.5,0.0],[16.5,10.5,0.0],[0.5,10.5,0.0]],"closed":true,"layer":"border"}}]}}

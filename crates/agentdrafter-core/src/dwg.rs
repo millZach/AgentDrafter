@@ -701,6 +701,7 @@ mod tests {
             file: PathBuf::from("sheet.yaml"),
             sheet,
             objects: Vec::new(),
+            rows_file: None,
         }
     }
 

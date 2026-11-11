@@ -10,7 +10,14 @@
 //! it, and each sheet's name is given once in a set, so an `id` given once
 //! in its file is unique in the set. The reader refuses an `id` given twice
 //! in one file, naming both places. Building never writes an `id` into a
-//! file; the operations of a later ticket will.
+//! file; an operation does (`crate::change`): it gives every object it adds
+//! an `id`, and when it deletes an object it writes the place of each later
+//! object that has none as its `id`, such as `objects[3]`, so that no
+//! object's ID moves. An `id` may be written as a place for that reason,
+//! and a place that is another object's written `id` is refused.
+//!
+//! A row of a drawing set may hold objects of its own; one without an `id`
+//! takes its place in the rows file, such as `rows[1].objects[0]`.
 //!
 //! Every object may also carry a `name`, a label an agent selects it by,
 //! given once on a sheet. It is never a tag.
@@ -63,6 +70,9 @@ pub(crate) struct ObjectRecord {
     /// takes its place, which moves when an object is added or taken away
     /// before it.
     pub id_key: Option<Written>,
+    /// Whether the object is one of its row's own, written in the rows
+    /// file, rather than in the sheet description or template.
+    pub in_row: bool,
 }
 
 /// Where something is written in a file.
@@ -103,11 +113,29 @@ pub(super) fn object_record(
         column: node.at.column,
     };
     let Some(id_node) = fields.get(ID_KEY) else {
+        // An object without an `id` takes its place, which is no other
+        // object's written `id`.
+        if let Some((first, first_key)) = written_before(before, field) {
+            return Err(at(
+                Error::new(
+                    ErrorCode::DuplicateId,
+                    format!(
+                        "the object at `{field}` has no `id`, so its ID is its place, `{field}`, \
+                         which the object at `{}` is given at line {} already; give this one an \
+                         `id`",
+                        first.object.field, first_key.line
+                    ),
+                ),
+                field,
+                node.at,
+            ));
+        }
         return Ok(ObjectRecord {
             id: field.to_owned(),
             name,
             object,
             id_key: None,
+            in_row: false,
         });
     };
     let path = fields.path_of(ID_KEY);
@@ -115,23 +143,22 @@ pub(super) fn object_record(
     if let Some(problem) = id_problem(id) {
         return Err(bad_value(id_node, &path, problem));
     }
-    let first = before.iter().find_map(|r| {
-        r.id_key
-            .as_ref()
-            .filter(|_| r.id.eq_ignore_ascii_case(id))
-            .map(|key| (r, key))
-    });
-    if let Some((first, first_key)) = first {
-        return Err(at(
-            Error::new(
-                ErrorCode::DuplicateId,
-                format!(
-                    "the ID `{id}` is given at line {} already, to the object at `{}`; an ID is \
-                     unique in the drawing set, so each is given once in a file, and IDs that \
-                     differ only in case are one ID",
-                    first_key.line, first.object.field
-                ),
+    if let Some(first) = before.iter().find(|r| r.id.eq_ignore_ascii_case(id)) {
+        let message = match &first.id_key {
+            Some(first_key) => format!(
+                "the ID `{id}` is given at line {} already, to the object at `{}`; an ID is \
+                 unique in the drawing set, so each is given once in a file, and IDs that \
+                 differ only in case are one ID",
+                first_key.line, first.object.field
             ),
+            None => format!(
+                "the ID `{id}` is the place of the object at `{}`, line {}, which has no `id` \
+                 and takes its place as its ID; an ID is unique in the drawing set",
+                first.object.field, first.object.line
+            ),
+        };
+        return Err(at(
+            Error::new(ErrorCode::DuplicateId, message),
             &path,
             id_node.at,
         ));
@@ -145,7 +172,48 @@ pub(super) fn object_record(
             line: id_node.at.line,
             column: id_node.at.column,
         }),
+        in_row: false,
     })
+}
+
+/// The first object of `before` whose written `id` is `place`, in any
+/// case, with where it is written.
+fn written_before<'a>(
+    before: &'a [ObjectRecord],
+    place: &str,
+) -> Option<(&'a ObjectRecord, &'a Written)> {
+    before.iter().find_map(|r| {
+        r.id_key
+            .as_ref()
+            .filter(|_| r.id.eq_ignore_ascii_case(place))
+            .map(|key| (r, key))
+    })
+}
+
+/// Whether `id` is written as a place: `objects[N]` or
+/// `rows[N].objects[N]`, each number written as digits with no leading 0.
+/// An operation writes an object's place as its `id` so that it keeps it.
+pub(crate) fn is_place(id: &str) -> bool {
+    fn index(text: &str) -> Option<&str> {
+        let rest = text.strip_prefix('[')?;
+        let end = rest.find(']')?;
+        let digits = &rest[..end];
+        let canonical = !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && (digits == "0" || !digits.starts_with('0'));
+        canonical.then_some(&rest[end + 1..])
+    }
+    let objects = |text: &str| {
+        text.strip_prefix("objects")
+            .and_then(index)
+            .is_some_and(str::is_empty)
+    };
+    objects(id)
+        || id
+            .strip_prefix("rows")
+            .and_then(index)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(objects)
 }
 
 /// Why `id` cannot be an object's `id`, if it cannot: it is 1 to
@@ -153,6 +221,9 @@ pub(super) fn object_record(
 pub(crate) fn id_problem(id: &str) -> Option<String> {
     if id.is_empty() {
         return Some("an ID cannot be empty".to_owned());
+    }
+    if is_place(id) {
+        return None;
     }
     if let Some(c) = id
         .chars()
@@ -162,7 +233,10 @@ pub(crate) fn id_problem(id: &str) -> Option<String> {
             ID_SEPARATOR => format!(
                 "; `{ID_SEPARATOR}` joins a sheet's name to the ID, and is not written in the ID"
             ),
-            '[' | ']' => "; an object with no ID takes its place, such as `objects[3]`".to_owned(),
+            '[' | ']' => "; an object with no ID takes its place, such as `objects[3]`, and a \
+                           place is written as an ID only whole, as `objects[3]` or \
+                           `rows[1].objects[0]`"
+                .to_owned(),
             _ => String::new(),
         };
         return Some(format!(

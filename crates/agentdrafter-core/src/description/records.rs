@@ -27,12 +27,25 @@ pub(crate) struct SheetRecord {
     /// Each of the sheet's objects as its file writes it, in the order of
     /// `sheet.objects`.
     pub objects: Vec<ObjectRecord>,
+    /// The rows file of the drawing set the sheet is in, which holds its
+    /// row's own objects, if it is a sheet of a set.
+    pub rows_file: Option<PathBuf>,
 }
 
 impl SheetRecord {
     /// The ID of the sheet's object at `index` in its objects.
     pub(crate) fn id(&self, index: usize) -> String {
         object_id(&self.name, &self.objects[index])
+    }
+
+    /// The file the sheet's object at `index` is written in: the rows file
+    /// for one of its row's own objects, or else the sheet description or
+    /// template.
+    pub(crate) fn file_of(&self, index: usize) -> &Path {
+        match &self.rows_file {
+            Some(rows) if self.objects[index].in_row => rows,
+            _ => &self.file,
+        }
     }
 }
 
@@ -53,5 +66,6 @@ pub(crate) fn read_sheet_record(path: &Path) -> Result<SheetRecord, Error> {
         file: path.to_owned(),
         sheet,
         objects,
+        rows_file: None,
     })
 }

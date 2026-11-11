@@ -10,7 +10,8 @@
 use serde_json::{json, Value};
 
 use super::block_schema::{relative_path_property, CONTROL};
-use super::schema::{sheet_description_schema, SUBSET};
+use super::objects::OBJECT_TYPES;
+use super::schema::{object_choices, sheet_description_schema, SUBSET};
 use super::set::{
     DEVICE_NAMES, FORBIDDEN_IN_SHEET_NAMES, LONGEST_SHEET_NAME, ROWS_FILE_KEYS, ROW_KEYS,
     SETTINGS_KEYS,
@@ -61,8 +62,8 @@ pub(crate) fn set_schema() -> Value {
 /// The schema of a drawing set's rows file.
 pub(crate) fn rows_schema() -> Value {
     let [rows_key] = ROWS_FILE_KEYS;
-    let [sheet_key, template_key, values_key] = ROW_KEYS;
-    json!({
+    let [sheet_key, template_key, values_key, objects_key] = ROW_KEYS;
+    let mut schema = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "AgentDrafter drawing set rows",
         "description": format!(
@@ -110,11 +111,37 @@ pub(crate) fn rows_schema() -> Value {
                             "type": ["string", "number", "boolean", "null"],
                         },
                     },
+                    objects_key: {
+                        "description": "The sheet's own objects, on this sheet alone: drawn \
+                                        after its template's, each written as a sheet \
+                                        description writes an object. They name the layers, \
+                                        text styles, hatch patterns and blocks the template \
+                                        defines or names, and write their values themselves: \
+                                        a value from the row, {row: NAME}, belongs in a \
+                                        template. An object's id is given once on the sheet, \
+                                        the template's included; one without an id takes its \
+                                        place in this file, such as rows[1].objects[0]. An \
+                                        object an operation adds to one sheet goes here. \
+                                        Without it, the sheet has only its template's objects.",
+                        "type": "array",
+                        "items": { "oneOf": object_choices(&OBJECT_TYPES) },
+                    },
                 },
             },
             "sheet_name": sheet_name_def(),
         },
-    })
+    });
+    // A row's own objects are a sheet description's objects, with the
+    // definitions they refer to.
+    if let (Some(defs), Value::Object(sheet_defs)) = (
+        schema["$defs"].as_object_mut(),
+        sheet_description_schema()["$defs"].take(),
+    ) {
+        for (name, def) in sheet_defs {
+            defs.entry(name).or_insert(def);
+        }
+    }
+    schema
 }
 
 /// The schema of a sheet's name, which names its DWG.

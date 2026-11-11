@@ -589,6 +589,94 @@ fn the_rows_schema_accepts_exactly_the_rows_the_reader_accepts() {
     assert_reader_and_schema_agree(&rows_schema(), cases, |yaml| parse_rows(yaml).map(|_| ()));
 }
 
+const ROW_OBJECTS: Place = Place {
+    name: "a row's own objects",
+    yaml: "rows:\n  - sheet: S-1\n    template: t.yaml\n    objects: V\n",
+    json: r#"{"rows": [{"sheet": "S-1", "template": "t.yaml", "objects": V}]}"#,
+};
+
+#[test]
+fn the_rows_schema_accepts_exactly_the_objects_a_row_holds() {
+    // A row's own objects are read with its sheet, once its template says
+    // what they may name, so the reader here reads the rows and fills a
+    // template in from the row, as a build does.
+    let template = "units: mm\nblock_library: blocks.yaml\nlayers:\n  notes: {color: cyan}\nobjects:\n  - line: {from: [0, 0, 0], to: [1, 0, 0], id: edge}\n";
+    let cases: Vec<Case> = vec![
+        (&ROW_OBJECTS, "[]", json!([]), true),
+        (
+            &ROW_OBJECTS,
+            "[{line: {from: [0, 0, 0], to: [1, 1, 0], id: a}}]",
+            json!([{"line": {"from": [0, 0, 0], "to": [1, 1, 0], "id": "a"}}]),
+            true,
+        ),
+        (
+            &ROW_OBJECTS,
+            "[{circle: {center: [0, 0, 0], radius: '2 mm', layer: notes, name: n}}]",
+            json!([{"circle": {"center": [0, 0, 0], "radius": "2 mm", "layer": "notes", "name": "n"}}]),
+            true,
+        ),
+        (
+            &ROW_OBJECTS,
+            "[{circle: {center: [0, 0, 0], radius: 1, id: 'rows[0].objects[0]'}}]",
+            json!([{"circle": {"center": [0, 0, 0], "radius": 1, "id": "rows[0].objects[0]"}}]),
+            true,
+        ),
+        (
+            &ROW_OBJECTS,
+            "[{insert: {block: TB, position: [0, 0, 0], attributes: {TITLE: A}}}]",
+            json!([{"insert": {"block": "TB", "position": [0, 0, 0], "attributes": {"TITLE": "A"}}}]),
+            true,
+        ),
+        (
+            &ROW_OBJECTS,
+            "[{line: {from: [0, 0, 0]}}]",
+            json!([{"line": {"from": [0, 0, 0]}}]),
+            false,
+        ),
+        (
+            &ROW_OBJECTS,
+            "[{circle: {center: [0, 0, 0], radius: 1, colour: 1}}]",
+            json!([{"circle": {"center": [0, 0, 0], "radius": 1, "colour": 1}}]),
+            false,
+        ),
+        (
+            &ROW_OBJECTS,
+            "[{attdef: {tag: A, position: [0, 0, 0], height: 1}}]",
+            json!([{"attdef": {"tag": "A", "position": [0, 0, 0], "height": 1}}]),
+            false,
+        ),
+        (
+            &ROW_OBJECTS,
+            "[{text: {contents: {row: T}, position: [0, 0, 0], height: 1}}]",
+            json!([{"text": {"contents": {"row": "T"}, "position": [0, 0, 0], "height": 1}}]),
+            false,
+        ),
+        (
+            &ROW_OBJECTS,
+            "[{circle: {center: [0, 0, 0], radius: 1, id: 'objects[02]'}}]",
+            json!([{"circle": {"center": [0, 0, 0], "radius": 1, "id": "objects[02]"}}]),
+            false,
+        ),
+        (&ROW_OBJECTS, "A", json!("A"), false),
+        (&ROW_OBJECTS, "{line: {}}", json!({"line": {}}), false),
+    ];
+    assert_reader_and_schema_agree(&rows_schema(), cases, |yaml| {
+        let rows = parse_rows(yaml)?;
+        fill_in(template, &rows[0]).map(|_| ())
+    });
+    // What the schema cannot see the reader still refuses: a name the
+    // template does not define, or an id the template gives.
+    for objects in [
+        "[{circle: {center: [0, 0, 0], radius: 1, layer: nope}}]",
+        "[{circle: {center: [0, 0, 0], radius: 1, id: EDGE}}]",
+    ] {
+        let rows = rows(&ROW_OBJECTS.yaml.replace('V', objects));
+        let e = fill_in(template, &rows[0]).unwrap_err();
+        assert!(e.field.unwrap().starts_with("rows[0].objects[0].circle."));
+        assert_eq!(e.file.as_deref(), Some("rows.yaml"));
+    }
+}
+
 const ATTRIBUTE_VALUE: Place = Place {
     name: "an insert's attribute value in a template",
     yaml: "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {block: TB, position: [0, 0, 0], attributes: {TITLE: V}}\n",

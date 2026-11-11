@@ -115,14 +115,21 @@ fn sheet_defs() -> Map<String, Value> {
                  written into the DWG with the object. Each ID is given once in a file, and IDs \
                  that differ only in case are one ID. Without it, the object's ID is its place \
                  in the file, such as objects[3], which moves when an object is added or taken \
-                 away before it. A plain number, true, false or null is read as its text, as \
-                 every scalar is."
+                 away before it. A place may be written whole as the id, such as objects[3] or \
+                 rows[1].objects[0]: an operation that deletes an object writes the place of \
+                 each later object that has no id so, and it keeps that ID wherever it moves; \
+                 an object without an id whose place is another's written id is an error. A \
+                 plain number, true, false or null is read as its text, as every scalar is."
             ),
             "anyOf": [
                 {
                     "type": "string",
                     "pattern": format!("^[A-Za-z0-9{}]+$", regex_class(ID_PUNCTUATION)),
                     "maxLength": LONGEST_ID,
+                },
+                {
+                    "type": "string",
+                    "pattern": "^(rows\\[(0|[1-9][0-9]*)\\]\\.)?objects\\[(0|[1-9][0-9]*)\\]$",
                 },
                 { "type": ["number", "boolean", "null"] },
             ],
