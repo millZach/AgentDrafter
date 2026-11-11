@@ -49,8 +49,9 @@ A pull request merges only when these jobs of the `CI` workflow (`.github/workfl
 - `check (ubuntu-latest)`
 - `check (windows-latest)`
 - `check (macos-latest)`
+- `demo plant (the same on every system)`
 
-Each runs formatting, lints with warnings as errors, and tests. A pull request that touches DWG reading or writing also states the judge's result before it merges.
+Each `check` job runs formatting, lints with warnings as errors, and tests, and builds, plots and checks the demo plant; the last job compares the demo plant's DWGs and PDFs from the three systems byte for byte (Zach decided on 2026-11-11 that it joins the merge bar). A pull request that touches DWG reading or writing also states the judge's result before it merges.
 
 ## Agent skills
 
