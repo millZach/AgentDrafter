@@ -159,14 +159,20 @@ def _say(name, log, text):
     log("[%s] %s %s" % (name, time.strftime("%H:%M:%S"), text))
 
 
+def driver_timeout(n: int) -> int:
+    """How long the ssh call running the driver on n drawings may take. The driver may wait up to
+    MAX_WAIT_SEC for its turn before every drawing, then gives each up to TIMEOUT_SEC and 10 s to stop;
+    30 s per drawing covers that and its own checks, so busy drawings end as not judged, not in a timeout."""
+    return n * (MAX_WAIT_SEC + TIMEOUT_SEC + 30) + 300
+
+
 def _run_driver(remote: Remote, jobs_file: Path, results: str, n: int) -> None:
     remote.put([jobs_file], "lanes", SLOT)
-    timeout = n * (TIMEOUT_SEC + 20) + MAX_WAIT_SEC + 300
     remote.ps_file("driver.ps1", ["-Jobs", remote.win("lanes", SLOT, jobs_file.name),
                                   "-Results", remote.win("lanes", SLOT, results),
                                   "-Accore", remote.accore,
                                   "-TimeoutSec", str(TIMEOUT_SEC), "-MaxWaitSec", str(MAX_WAIT_SEC)],
-                   timeout=timeout)
+                   timeout=driver_timeout(n))
 
 
 def read_drawings(remote: Remote, files: dict, out: Path, name: str, log=print) -> None:

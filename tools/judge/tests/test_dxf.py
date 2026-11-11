@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from judgelib import dxf  # noqa: E402
-from dxfmaker import dxf_text, line, text  # noqa: E402
+from dxfmaker import compound_file, dxf_text, line, ole2frame, text  # noqa: E402
 
 
 def parse(s: str) -> dxf.Dxf:
@@ -26,7 +26,7 @@ class TagReading(unittest.TestCase):
 
 class Parsing(unittest.TestCase):
     def test_records_know_their_section_space_handle_and_owner(self):
-        d = parse(dxf_text(entities=[line("A1")], block_entities=[line("A2", owner="B1")],
+        d = parse(dxf_text(drawn=[line("A1")], in_block=[line("A2", owner="B1")],
                            objects=[["DICTIONARY", (5, "C"), (330, "0"), (100, "AcDbDictionary")]]))
         by_h = {r.handle: r for r in d.recs}
         self.assertEqual((by_h["A1"].section, by_h["A1"].space, by_h["A1"].owner), ("ENTITIES", "model", "1F"))
@@ -34,8 +34,8 @@ class Parsing(unittest.TestCase):
         self.assertEqual(by_h["C"].section, "OBJECTS")
         self.assertEqual(d.header["$ACADVER"], ((1, "AC1032"),))
 
-    def test_paper_space_entities_are_marked(self):
-        d = parse(dxf_text(entities=[line("A1", extra=[(67, "1")])]))
+    def test_paper_space_objects_are_marked(self):
+        d = parse(dxf_text(drawn=[line("A1", extra=[(67, "1")])]))
         self.assertEqual(d.recs[-1].space, "paper")
 
 
@@ -45,7 +45,7 @@ class Normalizing(unittest.TestCase):
             return [(5, "D1"), (330, "1F"), (100, "AcDbEntity"), (8, "0"), (100, "AcDbBlockReference"),
                     (2, "DEMO"), (1001, "AcDbDynamicBlockGUID"), (1000, guid)]
         self.assertEqual(dxf.normalize("INSERT", "ENTITIES", insert("{A}")), dxf.normalize("INSERT", "ENTITIES", insert("{B}")))
-        # proxy graphics and OLE bytes on entities: only their length counts
+        # proxy graphics: only their length counts
         a = dxf.normalize("ACAD_TABLE", "ENTITIES", [(5, "E"), (310, "00FF")])
         self.assertEqual(a, dxf.normalize("ACAD_TABLE", "ENTITIES", [(5, "E"), (310, "FF00")]))
         self.assertNotEqual(a, dxf.normalize("ACAD_TABLE", "ENTITIES", [(5, "E"), (310, "FF0000")]))
@@ -65,9 +65,9 @@ class Normalizing(unittest.TestCase):
 
 class DrawnObjects(unittest.TestCase):
     def test_identical_lost_and_changed_are_counted_by_handle_and_content(self):
-        orig = parse(dxf_text(entities=[line("A1"), line("A2"), text("A3", "PUMP 1")], block_entities=[line("A4", owner="B1")]))
-        lane = parse(dxf_text(entities=[line("A1"), line("A2", x2="11.0")],
-                              block_entities=[line("A4", owner="B1", x2="10.000000000001")]))
+        orig = parse(dxf_text(drawn=[line("A1"), line("A2"), text("A3", "PUMP 1")], in_block=[line("A4", owner="B1")]))
+        lane = parse(dxf_text(drawn=[line("A1"), line("A2", x2="11.0")],
+                              in_block=[line("A4", owner="B1", x2="10.000000000001")]))
         r = dxf.drawn_objects(orig, lane)
         # A1 same; A4 same within 1e-9; A2 moved; A3 gone. BLOCK and ENDBLK are not drawn objects.
         self.assertEqual((r["drawn"], r["identical"], r["lost"], r["changed"]), (4, 2, 1, 1))
@@ -76,29 +76,38 @@ class DrawnObjects(unittest.TestCase):
         self.assertEqual(r["changed_by_type"], {"LINE": 1})
 
     def test_an_object_saved_under_a_new_handle_is_lost_and_found(self):
-        orig = parse(dxf_text(entities=[line("A1"), text("A3", "PUMP 1")]))
-        lane = parse(dxf_text(entities=[line("A1"), text("A9", "PUMP 1")]))
+        orig = parse(dxf_text(drawn=[line("A1"), text("A3", "PUMP 1")]))
+        lane = parse(dxf_text(drawn=[line("A1"), text("A9", "PUMP 1")]))
         r = dxf.drawn_objects(orig, lane)
         self.assertEqual((r["lost"], r["added"], r["lost_found_under_new_handle"]), (1, 1, 1))
 
+    def test_an_ole_objects_data_is_compared_except_the_stamp_autocad_rewrites(self):
+        def reading(payload, modified):
+            return parse(dxf_text(drawn=[ole2frame("A5", compound_file(payload, modified))]))
+        orig = reading(b"picture one", b"\x01" * 8)
+        # AutoCAD stamps the root storage's modified time on every write: not a change
+        self.assertEqual(dxf.drawn_objects(orig, reading(b"picture one", b"\x02" * 8))["identical"], 1)
+        # the same length with other content is a change
+        self.assertEqual(dxf.drawn_objects(orig, reading(b"picture two", b"\x01" * 8))["changed_by_type"], {"OLE2FRAME": 1})
+
     def test_a_reading_against_itself_is_identical(self):
-        s = dxf_text(entities=[line("A1"), text("A3", "PUMP 1")], block_entities=[line("A4", owner="B1")])
+        s = dxf_text(drawn=[line("A1"), text("A3", "PUMP 1")], in_block=[line("A4", owner="B1")])
         r = dxf.drawn_objects(parse(s), parse(s))
         self.assertEqual((r["identical"], r["drawn"]), (3, 3))
 
 
 class AllRecords(unittest.TestCase):
     def test_header_changes_count_except_the_ones_every_save_makes(self):
-        orig = parse(dxf_text(entities=[line("A1")]))
-        lane = parse(dxf_text(entities=[line("A1")], header={"$ACADVER": [(1, "AC1032")], "$HANDSEED": [(5, "1")]}))
+        orig = parse(dxf_text(drawn=[line("A1")]))
+        lane = parse(dxf_text(drawn=[line("A1")], header={"$ACADVER": [(1, "AC1032")], "$HANDSEED": [(5, "1")]}))
         self.assertEqual(dxf.compare(orig, lane)["header_vars_changed"], [])
-        lane = parse(dxf_text(entities=[line("A1")], header={"$ACADVER": [(1, "AC1027")], "$HANDSEED": [(5, "1")]}))
+        lane = parse(dxf_text(drawn=[line("A1")], header={"$ACADVER": [(1, "AC1027")], "$HANDSEED": [(5, "1")]}))
         self.assertEqual(dxf.compare(orig, lane)["header_vars_changed"], ["$ACADVER"])
 
     def test_a_lost_dictionary_shows_outside_drawn_objects(self):
         d = ["DICTIONARY", (5, "C"), (330, "0"), (100, "AcDbDictionary")]
-        orig = parse(dxf_text(entities=[line("A1")], objects=[d]))
-        lane = parse(dxf_text(entities=[line("A1")]))
+        orig = parse(dxf_text(drawn=[line("A1")], objects=[d]))
+        lane = parse(dxf_text(drawn=[line("A1")]))
         self.assertEqual(dxf.drawn_objects(orig, lane)["lost"], 0)
         self.assertEqual(dxf.compare(orig, lane)["lost_by_type"], {"DICTIONARY": 1})
 

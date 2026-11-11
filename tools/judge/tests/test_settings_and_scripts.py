@@ -1,4 +1,7 @@
+import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -40,6 +43,26 @@ class Settings(unittest.TestCase):
                 settings.load(env, repo_root=Path(t, "repo"))
             self.assertIsNotNone(settings.load(env, repo_root=Path(t, "elsewhere")).dir)
 
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    def test_the_judge_folder_may_not_be_inside_any_working_tree_of_the_repository(self):
+        with tempfile.TemporaryDirectory() as t:
+            main, linked = Path(t, "main"), Path(t, "linked")
+            main.mkdir()
+            Path(t, "gitconfig").write_text("")
+            who = {"GIT_%s_%s" % (r, k): v for r in ("AUTHOR", "COMMITTER")
+                   for k, v in (("NAME", "judge test"), ("EMAIL", "judge-test@example.invalid"))}
+            env = {**os.environ, **who, "GIT_CONFIG_GLOBAL": str(Path(t, "gitconfig")), "GIT_CONFIG_NOSYSTEM": "1"}
+            for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "first"],
+                         ["worktree", "add", "-q", str(linked)]):
+                subprocess.run(["git", *args], cwd=main, env=env, check=True, capture_output=True)
+            base = {"AGENTDRAFTER_JUDGE_CONFIG": str(Path(t, "none.toml"))}
+            # run from the linked worktree, a folder in the main checkout is refused, and the other way round
+            for repo_root, other in ((linked, main), (main, linked)):
+                with self.assertRaises(settings.SettingsError):
+                    settings.load({**base, "AGENTDRAFTER_JUDGE_DIR": str(other / "judge")}, repo_root=repo_root)
+            self.assertIsNotNone(settings.load({**base, "AGENTDRAFTER_JUDGE_DIR": str(Path(t, "judge"))},
+                                               repo_root=linked).dir)
+
     def test_a_scratch_folder_the_judge_cannot_quote_is_refused(self):
         with tempfile.TemporaryDirectory() as t:
             base = {"AGENTDRAFTER_JUDGE_CONFIG": str(Path(t, "none.toml"))}
@@ -71,6 +94,44 @@ class Scripts(unittest.TestCase):
         scr = autocad.recover_script("C:/Temp/judge/lanes/judging", "m001")
         self.assertIn("_.RECOVER\r\nC:/Temp/judge/lanes/judging/m001.dwg\r\n", scr)
         self.assertIn('"MODE\\trecovered"', scr)
+
+
+class Budgets(unittest.TestCase):
+    def test_the_ssh_call_outlasts_a_full_wait_before_every_drawing(self):
+        class Machine:
+            accore = "accoreconsole.exe"
+
+            def __init__(self):
+                self.timeouts = []
+
+            def put(self, files, *parts):
+                pass
+
+            def win(self, *parts):
+                return "\\".join(("C:\\Temp\\judge",) + parts)
+
+            def ps_file(self, script, args, timeout=180):
+                self.timeouts.append(timeout)
+                return ""
+
+        for n in (1, 2, 13):
+            m = Machine()
+            autocad._run_driver(m, Path("jobs1.tsv"), "results1.tsv", n)
+            # each drawing: the wait for its turn, its time limit, and 10 s to stop it
+            self.assertEqual(len(m.timeouts), 1)
+            self.assertGreaterEqual(m.timeouts[0], n * (autocad.MAX_WAIT_SEC + autocad.TIMEOUT_SEC + 10))
+
+
+class Glossary(unittest.TestCase):
+    def test_our_own_words_say_object(self):
+        # CONTEXT.md says object; literal DXF and AutoCAD names (the ENTITIES section, AcDbEntity) stay
+        rx = re.compile(r"(?<![A-Za-z])[Ee]ntit(?:y|ies)")
+        texts = {p.name: p.read_text(encoding="utf-8") for p in JUDGE.rglob("*")
+                 if p.is_file() and p.suffix in (".py", ".ps1", ".lsp", ".md")}
+        context = (JUDGE.parents[1] / "CONTEXT.md").read_text(encoding="utf-8")
+        texts["CONTEXT.md: Drawn object"] = context.split("**Drawn object**:", 1)[1].split("\n_Avoid_", 1)[0]
+        for name, text in texts.items():
+            self.assertIsNone(rx.search(text), name)
 
 
 class NothingPrivate(unittest.TestCase):

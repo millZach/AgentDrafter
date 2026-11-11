@@ -34,6 +34,30 @@ POINTER_CODES = ({5, 105, 320, 330, 340, 350, 360, 390, 480, 481, 1005} | set(ra
 # Records in ENTITIES and BLOCKS that mark structure rather than draw anything.
 NOT_DRAWN = {"BLOCK", "ENDBLK", "SEQEND"}
 
+# Subclasses whose binary group 310 is an embedded OLE object's own data, compared as content (ole_digest).
+OLE_SUBCLASSES = {"AcDbOle2Frame", "AcDbOleFrame"}
+CFB_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")  # an OLE compound file's first 8 bytes
+
+
+def ole_digest(hex_lines: list) -> str:
+    """An embedded OLE object's data as one comparable value: a digest of all its bytes except the
+    modified time of its compound file's root storage, which AutoCAD stamps each time it writes the
+    object (two reads of the same unchanged drawing differ there and nowhere else)."""
+    text = "".join(hex_lines)
+    try:
+        data = bytearray(bytes.fromhex(text))
+    except ValueError:
+        return "<OLE data, not hex, sha1 %s>" % hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+    s = data.find(CFB_MAGIC, 0, 4096)
+    if s >= 0 and len(data) >= s + 52:
+        shift = int.from_bytes(data[s + 30:s + 32], "little")        # sector size is 1 << shift
+        first_dir = int.from_bytes(data[s + 48:s + 52], "little")    # sector of the first directory entries
+        if 9 <= shift <= 12:
+            root = s + ((first_dir + 1) << shift)                    # entry 0: the root storage
+            if root + 116 <= len(data):
+                data[root + 108:root + 116] = bytes(8)               # its modified time
+    return "<OLE data, %d bytes, sha1 %s>" % (len(data), hashlib.sha1(data).hexdigest())
+
 
 class DxfError(Exception):
     pass
@@ -99,9 +123,13 @@ def normalize(type_, section, tags) -> tuple:
     """Remove differences that AutoCAD itself produces when it reads the same unchanged DWG twice
     (found by judging the originals against themselves). Applied to both sides when parsing."""
     out = []
-    app = None
+    app = subclass = None
     in_value = seen_value = False
+    ole_lines: list = []   # an OLE object's binary data, compared as one digest (see ole_digest)
+    ole_at = None
     for code, val in tags:
+        if code == 100:
+            subclass = val
         if code == 1001:
             app = val
         elif app in VOLATILE_XDATA_APPS and code == 1000:
@@ -120,11 +148,20 @@ def normalize(type_, section, tags) -> tuple:
                 continue
             if seen_value and code in (301, 98):
                 continue
+        if code == 310 and section in ("ENTITIES", "BLOCKS") and subclass in OLE_SUBCLASSES:
+            # an embedded OLE object's data is its content: compared, less the one stamp AutoCAD rewrites
+            if ole_at is None:
+                ole_at = len(out)
+                out.append(None)
+            ole_lines.append(val)
+            continue
         if code == 310 and section in ("ENTITIES", "BLOCKS") and type_ != "ACAD_PROXY_ENTITY":
-            # proxy graphics (display cache AutoCAD writes for tables, multileaders, ...) and OLE object
-            # bytes: rebuilt on every write with uninitialised padding and timestamps
+            # proxy graphics (the display cache AutoCAD writes for tables, multileaders, ...): rebuilt on
+            # every save with uninitialised padding and timestamps, so only its length counts
             val = "<binary %d>" % len(val)
         out.append((code, val))
+    if ole_at is not None:
+        out[ole_at] = (310, ole_digest(ole_lines))
     if type_ == "BLOCK_RECORD":
         out = _sort_groups(out, 331, ())
     elif type_ == "SORTENTSTABLE":
@@ -189,7 +226,7 @@ def parse_stream(stream) -> Dxf:
     section = None
     cur_type = None
     cur_tags: list = []
-    block_space = None   # space for entities in the current BLOCKS block
+    block_space = None   # space for the records in the current BLOCKS block
 
     def flush():
         nonlocal cur_type, cur_tags, block_space
@@ -366,7 +403,7 @@ def drawn_objects(orig: Dxf, lane: Dxf) -> dict:
 
 
 def compare(orig: Dxf, lane: Dxf, volatile_header_extra=()) -> dict:
-    """Every record with a handle (entities, table entries, dictionaries, layouts, ...), not only
+    """Every record with a handle (drawn objects, table entries, dictionaries, layouts, ...), not only
     drawn objects: kept, identical, lost, added and changed, plus header variables and classes."""
     o_by_h = {r.handle: r for r in orig.recs}
     l_by_h = {r.handle: r for r in lane.recs}
@@ -397,7 +434,7 @@ def compare(orig: Dxf, lane: Dxf, volatile_header_extra=()) -> dict:
             c["codes"][code] += 1
     added = collections.Counter(r.type for h, r in l_by_h.items() if h not in o_by_h)
 
-    # entity order inside each owner (block record or layout), over handles kept in both
+    # object order inside each owner (block record or layout), over handles kept in both
     o_order = collections.defaultdict(list)
     l_order = collections.defaultdict(list)
     for r in orig.recs:
@@ -439,7 +476,7 @@ def compare(orig: Dxf, lane: Dxf, volatile_header_extra=()) -> dict:
         "added_by_type": dict(added.most_common()),
         "changed_by_type": {t: {"n": v["n"], "codes": {str(k): n for k, n in v["codes"].most_common(12)}}
                             for t, v in sorted(changed.items(), key=lambda kv: -kv[1]["n"])},
-        "entity_order_changed_in_owners": order_changed,
+        "object_order_changed_in_owners": order_changed,
         "header_vars_changed": hdr_changed,
         "classes_lost": dict(o_cls - l_cls),
         "classes_added": dict(l_cls - o_cls),

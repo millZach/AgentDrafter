@@ -38,7 +38,7 @@ class Built(unittest.TestCase):
             reading(d, "b002", audit=3)
             reading(d, "b003", mode="recovered")
             # b004 never opened: no status; b005 never started: low memory
-            doc = report.score_built(d, {i: "sheet-%s" % i for i in ids})
+            doc = report.score_built(d)
             got = {i: (e["opened"], e["audit_errors"], e["pass"]) for i, e in doc["files"].items()}
             self.assertEqual(got, {
                 "b001": ("yes", 0, True),
@@ -48,10 +48,10 @@ class Built(unittest.TestCase):
                 "b005": ("not judged: low memory", None, False),
             })
             self.assertEqual((doc["totals"]["pass"], doc["totals"]["drawings"]), (1, 5))
-            md = report.render_built("demo", "now", doc, show_names=False)
+            md = report.render_built("demo", "now", doc)
             self.assertIn("| b002 | AC1032 | yes | 3 | FAIL |", md)
-            self.assertNotIn("sheet-", md)
-            self.assertIn("| sheet-b001 |", report.render_built("demo", "now", doc, show_names=True))
+            named = report.score_built(d, {i: "sheet-%s" % i for i in ids})
+            self.assertIn("| sheet-b001 |", report.render_built("demo", "now", named))
 
     def test_autocad_working_on_some_other_drawing_is_not_an_open(self):
         with tempfile.TemporaryDirectory() as t:
@@ -68,15 +68,15 @@ class RoundTrip(unittest.TestCase):
             ref.mkdir()
             lane.mkdir()
             sample = ["m001", "m002", "m003", "m004"]
-            orig1 = dxf_text(entities=[line("A1"), line("A2"), text("A3", "TT-101")])
-            orig2 = dxf_text(entities=[line("A1")], block_entities=[line("A4", owner="B1")])
+            orig1 = dxf_text(drawn=[line("A1"), line("A2"), text("A3", "TT-101")])
+            orig2 = dxf_text(drawn=[line("A1")], in_block=[line("A4", owner="B1")])
             reading(ref, "m001", dxf=orig1)
             reading(ref, "m002", audit=1, dxf=orig2)
             reading(ref, "m004", dxf=orig1)
             # m003: AutoCAD could not read the original, so there is no reference reading
             ids = ["m001", "m002", "m003"]
             run_files(lane, ids, {i: ("AC1032", "AC1032") for i in ids}, {})
-            reading(lane, "m001", dxf=dxf_text(entities=[line("A1"), line("A2", y2="5.0")]))   # 1 changed, 1 lost
+            reading(lane, "m001", dxf=dxf_text(drawn=[line("A1"), line("A2", y2="5.0")]))   # 1 changed, 1 lost
             reading(lane, "m002", audit=2, dxf=orig2)                                         # identical, audit worse
             doc = report.score_roundtrip(ref, lane, sample)
             f = doc["files"]
@@ -99,7 +99,7 @@ class RoundTrip(unittest.TestCase):
             ref, lane = Path(t, "ref"), Path(t, "lane")
             ref.mkdir()
             lane.mkdir()
-            reading(ref, "m001", dxf=dxf_text(entities=[line("A1")]))
+            reading(ref, "m001", dxf=dxf_text(drawn=[line("A1")]))
             run_files(lane, ["m001"], {"m001": ("AC1032", "AC1032")}, {})
             doc = report.score_roundtrip(ref, lane, ["m001"])
             self.assertEqual(doc["files"]["m001"]["opened"], "no")

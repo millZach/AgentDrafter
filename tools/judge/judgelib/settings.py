@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,9 +60,25 @@ def config_path(environ=os.environ) -> Path:
     return Path(base) / "agentdrafter" / "judge.toml"
 
 
+def working_trees(repo_root: Path) -> list[Path]:
+    """Every working tree of the repository `repo_root` belongs to: the main checkout and each linked
+    worktree, as git lists them. Only `repo_root` itself when git cannot say."""
+    trees = [repo_root.resolve()]
+    try:
+        r = subprocess.run(["git", "-C", str(repo_root), "worktree", "list", "--porcelain"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return trees
+    if r.returncode == 0:
+        trees += [Path(line[len("worktree "):]).resolve() for line in r.stdout.splitlines()
+                  if line.startswith("worktree ")]
+    return trees
+
+
 def load(environ=os.environ, repo_root: Path | None = None) -> Settings:
     """Settings from the config file, overridden by the environment. Checks that the judge's folder is
-    outside the repository, so AutoCAD's readings of private drawings can never land in it."""
+    outside every working tree of the repository (the main checkout and each linked worktree), so
+    AutoCAD's readings of private drawings can never land in one."""
     values: dict = {}
     path = config_path(environ)
     source = ""
@@ -84,10 +101,10 @@ def load(environ=os.environ, repo_root: Path | None = None) -> Settings:
             values[key] = environ[var]
     d = Path(values["dir"]).expanduser().resolve() if values.get("dir") else None
     if d is not None and repo_root is not None:
-        root = repo_root.resolve()
-        if d == root or root in d.parents:
-            raise SettingsError("%s points inside the repository; the judge's folder holds private drawings "
-                                "and must be outside it" % ENV["dir"])
+        for root in working_trees(repo_root):
+            if d == root or root in d.parents:
+                raise SettingsError("%s points inside a working tree of this repository; the judge's folder "
+                                    "holds private drawings and must be outside every checkout" % ENV["dir"])
     scratch = values.get("scratch") or None
     if scratch is not None:
         scratch = scratch.rstrip("\\")

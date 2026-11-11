@@ -91,8 +91,40 @@ def _lane_ids(d: Path) -> list[str]:
     return p.read_text().split() if p.exists() else []
 
 
+def skipped(d: Path, ids) -> dict:
+    """The drawings among `ids` the driver never had AutoCAD read (AutoCAD busy or memory low) and that
+    have no reading: id -> the driver's status."""
+    runs = read_runs(d)
+    out = {}
+    for i in ids:
+        last = [r["status"] for r in runs.get(i, []) if r["status"] in NOT_JUDGED]
+        if last and not (d / (i + ".dxf.gz")).exists():
+            out[i] = last[-1]
+    return out
+
+
+def read_skipped(ref_dir: Path) -> dict:
+    """Originals skipped while the reference was read, id -> the driver's status, from ref/SKIPPED.
+    The next roundtrip reads them; the reference is complete only when there are none."""
+    p = ref_dir / "SKIPPED"
+    if not p.exists():
+        return {}
+    return dict(line.split("\t", 1) for line in p.read_text().splitlines() if "\t" in line)
+
+
+def read_names(d: Path) -> dict:
+    """A built run's map from neutral ID to file name: names.tsv in its readings folder, which the
+    reports never embed. (Runs stored before names.tsv kept the map in run.json.)"""
+    p = d / "names.tsv"
+    if p.exists():
+        return dict(line.split("\t", 1) for line in p.read_text().splitlines() if "\t" in line)
+    run = d / "run.json"
+    return dict(json.loads(run.read_text()).get("names") or {}) if run.exists() else {}
+
+
 def score_built(lane_dir: Path, names: dict | None = None) -> dict:
-    """For each built DWG: did AutoCAD open it without recovery, and how many audit errors."""
+    """For each built DWG: did AutoCAD open it without recovery, and how many audit errors. File names
+    go into the result only when `names` is given (--show-names); otherwise it holds neutral IDs."""
     runs = read_runs(lane_dir)
     versions = read_versions(lane_dir)
     files = {}
@@ -124,13 +156,19 @@ def score_roundtrip(ref_dir: Path, lane_dir: Path, sample_ids: list[str]) -> dic
     lane_ids = set(_lane_ids(lane_dir))
     runs = read_runs(lane_dir)
     versions = read_versions(lane_dir)
+    ref_skipped = read_skipped(ref_dir)
     files = {}
     for i in sample_ids:
         rst = read_status(ref_dir, i)
-        e = {"ref_opened": opened(rst, i), "ref_audit_errors": audit_errors(ref_dir, i, rst)}
+        ref_runs = [{"status": ref_skipped[i]}] if i in ref_skipped else ()
+        e = {"ref_opened": opened(rst, i, ref_runs), "ref_audit_errors": audit_errors(ref_dir, i, rst)}
         files[i] = e
         if i not in lane_ids:
             e["opened"] = "not supplied"
+            continue
+        if i in ref_skipped:
+            e["opened"] = e["ref_opened"]
+            e["note"] = "the original has not been read yet; the next run reads it"
             continue
         ref_dxf = ref_dir / (i + ".dxf.gz")
         if not ref_dxf.exists() or not gz_ok(ref_dxf):
@@ -211,7 +249,8 @@ def _version(e: dict) -> str:
     return a if a == b else "%s -> %s" % (a, b)
 
 
-def render_built(name: str, started: str, doc: dict, show_names: bool) -> str:
+def render_built(name: str, started: str, doc: dict) -> str:
+    """The Markdown report. It shows file names only when the scored result holds them (--show-names)."""
     t = doc["totals"]
     lines = [
         "# Judge: built %s" % name,
@@ -222,7 +261,7 @@ def render_built(name: str, started: str, doc: dict, show_names: bool) -> str:
         "|---|---|---|---|---|",
     ]
     for i, e in doc["files"].items():
-        shown = e.get("name", i) if show_names else i
+        shown = e.get("name", i)
         ae = "-" if e["audit_errors"] is None else str(e["audit_errors"])
         lines.append("| %s | %s | %s | %s | %s |" % (shown, e["dwg_version"], e["opened"], ae, "pass" if e["pass"] else "FAIL"))
     lines += ["", "%d of %d pass. Opened clean %d, with RECOVER %d, failed %d, not judged %d; with audit errors %d." % (

@@ -17,6 +17,7 @@ import contextlib
 import datetime
 import json
 import re
+import shutil
 import signal
 import sys
 import time
@@ -95,12 +96,38 @@ def write_run(work: Path, kind: str, name: str, started: str, versions: dict, ex
 
 
 def ensure_reference(remote: autocad.Remote, judge_dir: Path, ids: list[str]) -> None:
+    """AutoCAD's reading of every original, in ref/. An original the AutoCAD machine skipped (AutoCAD
+    busy, memory low) is listed in ref/SKIPPED and read on the next run; ref/COMPLETE is written only
+    when none was skipped."""
     ref = judge_dir / "ref"
     if (ref / "COMPLETE").exists():
         return
-    say("building the reference first: AutoCAD's reading of every original")
-    autocad.read_drawings(remote, {i: judge_dir / "orig" / (i + ".dwg") for i in ids}, ref, "reference", log=print_flush)
-    (ref / "COMPLETE").touch()
+    pending = report.read_skipped(ref)
+    todo = [i for i in ids if i in pending] if pending else list(ids)
+    if pending:
+        say("reading the %d originals the reference skipped last time" % len(todo))
+    else:
+        say("building the reference first: AutoCAD's reading of every original")
+    ref.mkdir(parents=True, exist_ok=True)
+    reading = ref / "_reading"   # read apart, so readings already in ref/ stay as they are
+    shutil.rmtree(reading, ignore_errors=True)
+    if todo:
+        autocad.read_drawings(remote, {i: judge_dir / "orig" / (i + ".dwg") for i in todo}, reading, "reference",
+                              log=print_flush)
+    left = report.skipped(reading, todo)
+    for i in todo:
+        for f in ref.glob(i + ".*"):
+            f.unlink()
+        if i not in left:
+            for f in reading.glob(i + ".*"):
+                f.replace(ref / f.name)
+    shutil.rmtree(reading, ignore_errors=True)
+    if left:
+        (ref / "SKIPPED").write_text("".join("%s\t%s\n" % kv for kv in sorted(left.items())))
+        say("%d originals were not read (AutoCAD busy or low memory); the next run reads them" % len(left))
+    else:
+        (ref / "SKIPPED").unlink(missing_ok=True)
+        (ref / "COMPLETE").touch()
 
 
 def print_flush(text: str) -> None:
@@ -121,13 +148,14 @@ def cmd_built(args, cfg) -> int:
     if not dwgs:
         raise UsageError("no DWG files in that folder")
     name = run_name(args.name, "built")
-    # neutral IDs on the AutoCAD machine and in the report; the map stays in the private folder
+    # neutral IDs on the AutoCAD machine and in the reports; the map to file names is names.tsv in the
+    # run's readings folder, which the reports never embed
     files = {"b%03d" % n: p for n, p in enumerate(dwgs, 1)}
-    names = {i: p.stem for i, p in files.items()}
     work = prepare_work(cfg.dir, name, args.overwrite)
     started = datetime.datetime.now().isoformat(timespec="seconds")
     say("[%s] started: %d built drawings to judge" % (name, len(files)))
-    write_run(work, "built", name, started, {i: ("-", dwg_version(p)) for i, p in files.items()}, {"names": names})
+    write_run(work, "built", name, started, {i: ("-", dwg_version(p)) for i, p in files.items()})
+    (work / "names.tsv").write_text("".join("%s\t%s\n" % (i, p.stem) for i, p in files.items()))
     remote = autocad.Remote(cfg.host, cfg.scratch, cfg.accoreconsole)
     with judge_lock(cfg.dir):
         autocad.read_drawings(remote, files, work, name, log=print_flush)
@@ -156,8 +184,12 @@ def cmd_roundtrip(args, cfg) -> int:
         ensure_reference(remote, cfg.dir, ids)
         # a drawing whose original AutoCAD cannot read is not scored, so it is not sent either
         readable = {i: p for i, p in files.items() if (cfg.dir / "ref" / (i + ".dxf.gz")).exists()}
-        if len(readable) < len(files):
-            say("[%s] %d not sent: AutoCAD cannot read their originals" % (name, len(files) - len(readable)))
+        unread = [i for i in files if i not in readable]
+        pending = sum(1 for i in unread if i in report.read_skipped(cfg.dir / "ref"))
+        if pending:
+            say("[%s] %d not sent: their originals have not been read yet; the next run reads them" % (name, pending))
+        if len(unread) > pending:
+            say("[%s] %d not sent: AutoCAD cannot read their originals" % (name, len(unread) - pending))
         if readable:
             autocad.read_drawings(remote, readable, work, name, log=print_flush)
     return score_and_finish(cfg, name, "roundtrip", started, work, ids, show_names=False)
@@ -165,12 +197,11 @@ def cmd_roundtrip(args, cfg) -> int:
 
 def score_and_finish(cfg, name, kind, started, work, ids, show_names) -> int:
     """Score the readings in `work`, write the results and print the report. A built run exits 1
-    when any drawing fails."""
+    when any drawing fails. Both reports hold neutral IDs; file names only with `show_names`."""
     say("[%s] scoring" % name)
     if kind == "built":
-        run = json.loads((work / "run.json").read_text())
-        doc = report.score_built(work, run.get("names"))
-        finish(cfg.dir, name, started, doc, report.render_built(name, started, doc, show_names))
+        doc = report.score_built(work, report.read_names(work) if show_names else None)
+        finish(cfg.dir, name, started, doc, report.render_built(name, started, doc))
         return 0 if doc["totals"]["pass"] == doc["totals"]["drawings"] else 1
     doc = report.score_roundtrip(cfg.dir / "ref", work, ids)
     finish(cfg.dir, name, started, doc, report.render_roundtrip(name, started, doc))

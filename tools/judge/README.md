@@ -14,7 +14,7 @@ python3 tools/judge/judge.py roundtrip <folder>   [--name <run>] [--overwrite]
 python3 tools/judge/judge.py rescore <run>        [--show-names]
 ```
 
-- **`built`** judges every DWG in the folder: did AutoCAD open it without recovery, and how many errors did its audit find. A drawing passes with both: opened `yes` and 0 audit errors. The command exits 1 when any drawing fails. Drawings are shown as neutral IDs (`b001`, ...); the map to file names stays in the private folder. `--show-names` prints file names instead and is only for public drawings, such as the demo plant.
+- **`built`** judges every DWG in the folder: did AutoCAD open it without recovery, and how many errors did its audit find. A drawing passes with both: opened `yes` and 0 audit errors. The command exits 1 when any drawing fails. Both reports, Markdown and JSON, name drawings by neutral ID (`b001`, ...); the map to file names is `work/<run>/names.tsv` in the private folder, and no report embeds it. `--show-names` puts file names in both reports instead and is only for public drawings, such as the demo plant.
 - **`roundtrip`** judges a revision or a round trip. The folder holds `<id>.dwg` files, each named after a drawing in the sample. AutoCAD reads each one, and its reading is compared with its reading of the original (the reference) in drawn objects: identical, lost and changed, per drawing and pooled, beside opened and audit errors. Every other record with a handle (table entries, dictionaries, layouts) is compared as well, as a second view.
 - **`rescore`** scores a run again from its stored readings, without AutoCAD.
 
@@ -32,7 +32,7 @@ Nothing private has a default. Each setting comes from an environment variable o
 
 | Config key | Environment variable | What it is |
 |---|---|---|
-| `dir` | `AGENTDRAFTER_JUDGE_DIR` | The judge's private folder on this machine. Refused if it is inside the repository. |
+| `dir` | `AGENTDRAFTER_JUDGE_DIR` | The judge's private folder on this machine. Refused if it is inside any working tree of the repository: the main checkout or any linked worktree. |
 | `host` | `AGENTDRAFTER_JUDGE_HOST` | The ssh name of the Windows machine that has AutoCAD. |
 | `scratch` | `AGENTDRAFTER_JUDGE_SCRATCH` | A scratch folder on that machine, such as `C:\Users\<you>\AppData\Local\Temp\agentdrafter-judge`: letters, digits, `.`, `_`, `-` and backslashes. |
 | `accoreconsole` | `AGENTDRAFTER_JUDGE_ACCORECONSOLE` | The AutoCAD console. Default: `C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe`. |
@@ -44,7 +44,7 @@ The private folder holds:
 | Path | What |
 |---|---|
 | `orig/<id>.dwg` | The sample: one original per neutral ID. Read-only. |
-| `ref/` | AutoCAD's reading of every original. The first `roundtrip` builds it; delete `ref/COMPLETE` to build it again. |
+| `ref/` | AutoCAD's reading of every original. The first `roundtrip` builds it. An original skipped because AutoCAD was busy or memory was low is listed in `ref/SKIPPED` and read by the next `roundtrip`; `ref/COMPLETE` is written once none is left. Delete `ref/COMPLETE` to build it again. |
 | `work/<run>/` | AutoCAD's readings for one run: its DXF of each drawing, the console log with the audit report, and status files. |
 | `results/<run>.md`, `.json` | The reports. |
 | `judge.lock` | Held while a run uses AutoCAD. |
@@ -52,7 +52,7 @@ The private folder holds:
 ## One AutoCAD at a time
 
 - A run holds `judge.lock` in the private folder while it uses AutoCAD. A second run prints that the judge is busy and waits for it.
-- On the AutoCAD machine, before each drawing, it waits until no AutoCAD console is running, because other programs use AutoCAD there too. Then it checks that at least 3 GB of memory is free and waits while it is not. A drawing that cannot start within 20 minutes is reported as `not judged` rather than failed.
+- On the AutoCAD machine, before each drawing, it waits until no AutoCAD console is running, because other programs use AutoCAD there too. Then it checks that at least 3 GB of memory is free and waits while it is not. A drawing that cannot start within 20 minutes is reported as `not judged` rather than failed. The run's ssh call allows that wait before every drawing, so a busy machine never ends a run early.
 - Each AutoCAD console is started and stopped by its process ID, with a 120-second limit per drawing.
 - If a run is stopped (an error, Ctrl-C, `kill`), it stops its own AutoCAD console and empties its work folder there. Stop a run with a plain `kill`, not `kill -9`, so this can happen.
 
@@ -74,8 +74,8 @@ Read the numbers against what AutoCAD alone does, not against 100. AutoCAD's own
 1. **AutoCAD's view, not the bytes.** Anything AutoCAD repairs or rebuilds silently when it opens a file shows only in the audit count. A file only AutoCAD's forgiving reader accepts can still score well.
 2. **Only what DXF carries.** The preview image, file security and signatures, and the DWG's internal layout are not compared.
 3. **Floats to 16 places**, and "identical" forgives a 1e-9 relative difference. The JSON has the byte-exact share beside it.
-4. **Opaque binary**, such as proxy data and 3D solid data, is compared as bytes: a change is seen, its meaning is not.
-5. **Ignored on purpose**, because AutoCAD changes them between two reads of the same unchanged DWG: the header dates, `$HANDSEED`, `$VERSIONGUID`, `$FINGERPRINTGUID` of R13 and R14 files, `AcDbDynamicBlockGUID` xdata, the cached value inside a field, binary group 310 on entities other than proxies (only its length counts), and handle lists AutoCAD keeps as sets.
+4. **Opaque binary**, such as proxy data, 3D solid data and the data of embedded OLE objects, is compared as bytes: a change is seen, its meaning is not.
+5. **Ignored on purpose**, because AutoCAD changes them between two reads of the same unchanged DWG: the header dates, `$HANDSEED`, `$VERSIONGUID`, `$FINGERPRINTGUID` of R13 and R14 files, `AcDbDynamicBlockGUID` xdata, the cached value inside a field, the proxy graphics (binary group 310) AutoCAD writes for tables, multileaders and other objects that are not proxies (only their length counts), the modified time of an embedded OLE object's root storage, and handle lists AutoCAD keeps as sets.
 6. **Not looked at**: plots and on-screen appearance, external files such as xref targets and fonts, record order outside each block or layout, and the DWG version written (shown, not scored).
 7. **One AutoCAD.** This is AutoCAD 2026's console with the object enablers that machine has. Another release, or the full AutoCAD, could read some files differently.
 
