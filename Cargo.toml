@@ -13,3 +13,8 @@ publish = false
 # acadrust is pinned to the commit the DWG bake-off judged (ADR-0009).
 # Moving this pin means running the judge again.
 acadrust = { git = "https://github.com/hakanaktt/acadrust", rev = "4d07b528552ff06b7ddeafdd745d21dddb019ef2" }
+# JSON, read with every number correctly rounded (float_roundtrip), so a
+# number reaches the core as the same value through every interface, and a
+# reply read back, as the MCP server's structured content is, keeps every
+# digit of the reply it was written from (ADR-0007).
+serde_json = { version = "1", features = ["float_roundtrip"] }

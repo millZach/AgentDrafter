@@ -314,5 +314,27 @@ class Interfaces(unittest.TestCase):
             )
 
 
+class Digits(unittest.TestCase):
+    def test_a_number_reaches_the_core_with_every_digit_through_the_library_as_through_the_command(self):
+        # A height with every digit an f64 holds, which a reader that does
+        # not round correctly moves by its last digit.
+        height = 100.12345678901235
+        input = {"contents": "P", "font": "romans.shx", "height": height}
+        args = ["measure-text", "P", "--font", "romans.shx", "--height", repr(height)]
+        with tempfile.TemporaryDirectory(prefix="agentdrafter-digits-") as folder:
+            done = subprocess.run([COMMAND, *args], cwd=folder, capture_output=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done)
+        by_command = done.stdout.rstrip(b"\r\n")
+
+        # The library's reply is the command's, byte for byte, as the core
+        # gives it; and the dict it is read into holds the same numbers.
+        by_library = _native.run("measure-text", json.dumps(input)).encode("utf-8")
+        self.assertEqual(by_library, by_command)
+        reply = agentdrafter.measure_text(**input)
+        self.assertEqual(reply, json.loads(by_command))
+        self.assertEqual(reply["result"]["top"], height)
+        self.assertIn(b'"top":100.12345678901235,', by_command)
+
+
 if __name__ == "__main__":
     unittest.main()

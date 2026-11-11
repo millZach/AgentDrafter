@@ -157,15 +157,21 @@ impl Mcp {
 
     /// Sends a request and returns its answer, which carries its ID.
     fn request(&mut self, method: &str, params: Value) -> Value {
+        let line = self.request_line(method, params);
+        let answer: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(answer["jsonrpc"], "2.0");
+        assert_eq!(answer["id"], self.next_id, "{answer}");
+        answer
+    }
+
+    /// Sends a request and returns its answer as the line it came in.
+    fn request_line(&mut self, method: &str, params: Value) -> String {
         self.next_id += 1;
         let id = self.next_id;
         self.write(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
         let mut line = String::new();
         self.output.read_line(&mut line).unwrap();
-        let answer: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(answer["jsonrpc"], "2.0");
-        assert_eq!(answer["id"], id, "{answer}");
-        answer
+        line
     }
 
     fn notify(&mut self, method: &str) {
@@ -541,4 +547,71 @@ fn the_mcp_handshake_works_and_tools_are_listed_and_called() {
         mcp.finish().success(),
         "the MCP server stops when its input closes"
     );
+}
+
+#[test]
+fn the_mcp_server_s_structured_content_keeps_every_digit_of_its_text() {
+    /// A reply's result, each field as the bytes it was sent in.
+    #[derive(serde::Deserialize)]
+    struct RawReply {
+        result: BTreeMap<String, Box<serde_json::value::RawValue>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Answer {
+        result: ToolResult,
+    }
+    #[derive(serde::Deserialize)]
+    struct ToolResult {
+        content: Vec<Text>,
+        #[serde(rename = "structuredContent")]
+        structured: RawReply,
+    }
+    #[derive(serde::Deserialize)]
+    struct Text {
+        text: String,
+    }
+
+    let dir = scratch("mcp-digits");
+    demo_set::copy_demo_set(&dir.join("demo-set"));
+    let mut mcp = Mcp::start(&dir);
+    mcp.initialize();
+    // A number the core writes, the checker's tolerance of 0.01 mm in
+    // inches, and one it is given with every digit an f64 holds.
+    let calls = [
+        (
+            "check",
+            json!({"source": "demo-set"}),
+            "tolerance",
+            "0.00039370078740157485",
+        ),
+        (
+            "measure-text",
+            json!({"contents": "P", "font": "romans.shx", "height": 100.12345678901235}),
+            "top",
+            "100.12345678901235",
+        ),
+    ];
+    for (tool, arguments, field, digits) in calls {
+        let line = mcp.request_line("tools/call", json!({"name": tool, "arguments": arguments}));
+        let answer: Answer = serde_json::from_str(&line).unwrap();
+        let text: RawReply = serde_json::from_str(&answer.result.content[0].text).unwrap();
+        assert_eq!(text.result[field].get(), digits, "{tool}: {line}");
+        // Every number, text and flag of the result is the same bytes in
+        // the structured content as in the text. (A list or object's keys
+        // may come in another order.)
+        let mut compared = 0;
+        for (key, sent) in &text.result {
+            if sent.get().starts_with(['{', '[']) {
+                continue;
+            }
+            assert_eq!(
+                answer.result.structured.result[key].get(),
+                sent.get(),
+                "{tool}: `{key}` in the structured content and in the text"
+            );
+            compared += 1;
+        }
+        assert!(compared > 2, "{tool}: {line}");
+    }
+    assert!(mcp.finish().success());
 }
