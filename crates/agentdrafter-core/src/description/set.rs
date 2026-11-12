@@ -152,7 +152,7 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         }
     };
     let output = relative_path(
-        fields.require("output")?,
+        fields.require_text("output")?,
         "output",
         &RelativePath {
             shape: "the folder the set's DWGs go to, such as `dwg`",
@@ -162,7 +162,7 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         },
     )?;
     let rows = relative_path(
-        fields.require("rows")?,
+        fields.require_text("rows")?,
         "rows",
         &RelativePath {
             shape: "the path of the file the set's rows are in, such as `rows.yaml`",
@@ -217,9 +217,13 @@ pub(super) fn parse_rows(text: &str) -> Result<Vec<Row>, Error> {
 fn row(node: &Node, index: usize, sheets: &mut Vec<(String, Pos)>) -> Result<Row, Error> {
     let path = index_path("rows", index);
     let fields = Fields::of(node, &path, &ROW_KEYS, "a row")?;
-    let sheet = sheet_name(fields.require("sheet")?, &fields.path_of("sheet"), sheets)?;
+    let sheet = sheet_name(
+        fields.require_text("sheet")?,
+        &fields.path_of("sheet"),
+        sheets,
+    )?;
     let template = relative_path(
-        fields.require("template")?,
+        fields.require_text("template")?,
         &fields.path_of("template"),
         &RelativePath {
             shape: "the path of the sheet's template, such as `templates/border.yaml`",
@@ -259,24 +263,27 @@ fn row_values(node: &Node, path: &str) -> Result<Vec<RowValue>, Error> {
             "a mapping from the names of values to their text",
         ));
     };
-    entries
-        .iter()
-        .map(|entry| {
-            let value_path = key_path(path, &entry.key);
-            if let Some(problem) = value_name_problem(&entry.key) {
-                return Err(Error::new(ErrorCode::BadValue, problem)
-                    .at_field(&value_path)
-                    .at_position(entry.key_at.line, entry.key_at.column));
-            }
-            let text = scalar(&entry.value, &value_path, "the value's text")?;
-            Ok(RowValue {
-                name: entry.key.clone(),
-                text: text.to_owned(),
-                key_at: entry.key_at,
-                at: entry.value.at,
-            })
-        })
-        .collect()
+    let mut values = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let value_path = key_path(path, &entry.key);
+        if let Some(problem) = value_name_problem(&entry.key) {
+            return Err(Error::new(ErrorCode::BadValue, problem)
+                .at_field(&value_path)
+                .at_position(entry.key_at.line, entry.key_at.column));
+        }
+        // A bare null leaves the value out: the row does not give it.
+        if entry.value.is_bare_null() {
+            continue;
+        }
+        let text = scalar(&entry.value, &value_path, "the value's text")?;
+        values.push(RowValue {
+            name: entry.key.clone(),
+            text: text.to_owned(),
+            key_at: entry.key_at,
+            at: entry.value.at,
+        });
+    }
+    Ok(values)
 }
 
 /// Why `name` cannot name a value of a row, if it cannot: a name is one or

@@ -141,7 +141,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                     "`{SOLID}` for a solid hatch, or the name of a pattern under `hatch_patterns`, \
                      written exactly as it is there."
                 ),
-                "type": ["string", "number", "boolean", "null"],
+                "type": super::schema::TEXT_TYPES,
             },
             "scale": {
                 "description": format!(

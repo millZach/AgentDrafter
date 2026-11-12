@@ -250,7 +250,7 @@ pub(super) fn attribute_definition(
     layer: String,
     tags: &mut Vec<(String, Pos)>,
 ) -> Result<AttributeDefinition, Error> {
-    let tag_node = fields.require("tag")?;
+    let tag_node = fields.require_text("tag")?;
     let tag_path = fields.path_of("tag");
     let tag = scalar(tag_node, &tag_path, "an attribute tag")?;
     if let Some(problem) = tag_problem(tag) {
@@ -270,7 +270,7 @@ pub(super) fn attribute_definition(
         ));
     }
     tags.push((tag.to_owned(), tag_node.at));
-    let prompt = match fields.get("prompt") {
+    let prompt = match fields.text("prompt") {
         Some(node) => {
             let path = fields.path_of("prompt");
             let prompt = scalar(node, &path, "the prompt, one line of text")?;
@@ -281,7 +281,7 @@ pub(super) fn attribute_definition(
         }
         None => String::new(),
     };
-    let default = match fields.get("default") {
+    let default = match fields.text("default") {
         Some(node) => value(node, &fields.path_of("default"))?,
         None => String::new(),
     };
@@ -359,7 +359,7 @@ pub(super) fn insert(
 
 /// The block an insert names, from the sheet's block library.
 fn block_named<'a>(fields: &Fields, library: Option<&'a BlockLibrary>) -> Result<&'a Block, Error> {
-    let node = fields.require("block")?;
+    let node = fields.require_text("block")?;
     let path = fields.path_of("block");
     let listed = match library {
         Some(library) if library.blocks.is_empty() => {
@@ -429,7 +429,10 @@ fn attributes(fields: &Fields, block: &Block) -> Result<Vec<Attribute>, Error> {
                 .at_field(key_path(&path, &entry.key))
                 .at_position(entry.key_at.line, entry.key_at.column));
             };
-            values[i] = Some(value(&entry.value, &key_path(&path, &entry.key))?);
+            // A bare null leaves the value out, so the definition's default holds.
+            if !entry.value.is_bare_null() {
+                values[i] = Some(value(&entry.value, &key_path(&path, &entry.key))?);
+            }
         }
     }
     Ok(definitions

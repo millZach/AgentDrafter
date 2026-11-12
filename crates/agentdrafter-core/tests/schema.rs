@@ -183,6 +183,12 @@ const INSERT_NAME: Place = Place {
     json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"insert": {"block": "B", "position": [0, 0, 0], "name": V}}]}"#,
 };
 
+const INSERT_BLOCK: Place = Place {
+    name: "an insert's block",
+    yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - insert: {block: V, position: [0, 0, 0]}\n",
+    json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"insert": {"block": V, "position": [0, 0, 0]}}]}"#,
+};
+
 const LIBRARY_PATH: Place = Place {
     name: "a sheet's block library",
     yaml: "units: mm\nblock_library: V\nobjects: []\n",
@@ -195,6 +201,37 @@ const PAPER: Place = Place {
     json: r#"{"units": "mm", "paper": V, "objects": []}"#,
 };
 
+const MTEXT_CONTENTS: Place = Place {
+    name: "an mtext's contents",
+    yaml: "units: mm\nobjects:\n  - mtext: {contents: V, position: [0, 0, 0], height: 1}\n",
+    json: r#"{"units": "mm", "objects": [{"mtext": {"contents": V, "position": [0, 0, 0], "height": 1}}]}"#,
+};
+
+const TEXT_STYLE: Place = Place {
+    name: "a text's style",
+    yaml:
+        "units: mm\nobjects:\n  - text: {contents: A, position: [0, 0, 0], height: 1, style: V}\n",
+    json: r#"{"units": "mm", "objects": [{"text": {"contents": "A", "position": [0, 0, 0], "height": 1, "style": V}}]}"#,
+};
+
+const LINETYPE_DESCRIPTION: Place = Place {
+    name: "a linetype's description",
+    yaml: "units: mm\nlinetypes:\n  L: {pattern: [1, -1], description: V}\nobjects: []\n",
+    json: r#"{"units": "mm", "linetypes": {"L": {"pattern": [1, -1], "description": V}}, "objects": []}"#,
+};
+
+const LAYER_LINETYPE: Place = Place {
+    name: "a layer's linetype",
+    yaml: "units: mm\nlayers:\n  a: {linetype: V}\nobjects: []\n",
+    json: r#"{"units": "mm", "layers": {"a": {"linetype": V}}, "objects": []}"#,
+};
+
+const HATCH_PATTERN: Place = Place {
+    name: "a hatch's pattern",
+    yaml: "units: mm\nobjects:\n  - hatch: {pattern: V, boundary: [{polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]}\n",
+    json: r#"{"units": "mm", "objects": [{"hatch": {"pattern": V, "boundary": [{"polyline": {"points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]}}]}"#,
+};
+
 const SHEET_TEXT_CELL: Place = Place {
     name: "a sheet's text's cell",
     yaml: "units: mm\nobjects:\n  - text: {contents: A, position: [0, 0, 0], height: 1, cell: V}\n",
@@ -202,8 +239,55 @@ const SHEET_TEXT_CELL: Place = Place {
 };
 
 /// `(place, value as YAML, the same value as JSON, accepted)`.
-fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
-    vec![
+type Case = (&'static Place, &'static str, Value, bool);
+
+/// The cases of a bare null on the text or path field at `place`: `null`,
+/// `Null`, `NULL`, `~` and a value left empty, which a type-guessing YAML
+/// reader makes null. Zach decided on 2026-11-11 that a bare null leaves
+/// the field out, as if it were not written, so an `optional` field takes
+/// it and a required one refuses it. Then, unless the field names
+/// something JSON Schema cannot look up, such as a layer, the `quoted`
+/// word, which is text, accepted where that text is.
+fn bare_null(
+    place: &'static Place,
+    optional: bool,
+    quoted: Option<(&'static str, bool)>,
+) -> Vec<Case> {
+    let mut cases: Vec<Case> = ["null", "Null", "NULL", "~", ""]
+        .into_iter()
+        .map(|written| (place, written, json!(null), optional))
+        .collect();
+    if let Some((written, accepted)) = quoted {
+        let text = written.trim_matches(['\'', '"']);
+        cases.push((place, written, json!(text), accepted));
+    }
+    cases
+}
+
+/// A bare null on every text and path field of a sheet description.
+fn bare_null_cases() -> Vec<Case> {
+    [
+        bare_null(&OBJECT_ID, true, Some(("'null'", true))),
+        bare_null(&OBJECT_NAME, true, Some(("'null'", true))),
+        bare_null(&INSERT_NAME, true, Some(("\"~\"", true))),
+        bare_null(&LAYER, true, None),
+        bare_null(&TEXT_STYLE, true, None),
+        bare_null(&LAYER_LINETYPE, true, None),
+        bare_null(&LINETYPE_DESCRIPTION, true, Some(("'null'", true))),
+        bare_null(&LIBRARY_PATH, true, None),
+        bare_null(&ATTRIBUTE_VALUE, true, Some(("'NULL'", true))),
+        bare_null(&CONTENTS, false, Some(("'null'", true))),
+        bare_null(&MTEXT_CONTENTS, false, Some(("'~'", true))),
+        bare_null(&FONT, false, Some(("'null'", false))),
+        bare_null(&INSERT_BLOCK, false, None),
+        bare_null(&HATCH_PATTERN, false, None),
+    ]
+    .concat()
+}
+
+fn cases() -> Vec<Case> {
+    let mut cases = bare_null_cases();
+    cases.extend(vec![
         // A paper: two lengths more than 0, or a standard size and the way
         // it lies, written exactly.
         (&PAPER, "[297, 210]", json!([297, 210]), true),
@@ -240,7 +324,6 @@ fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
         (&ATTRIBUTE_VALUE, "100", json!(100), true),
         (&ATTRIBUTE_VALUE, "'yes'", json!("yes"), true),
         (&ATTRIBUTE_VALUE, "''", json!(""), true),
-        (&ATTRIBUTE_VALUE, "", json!(null), true),
         (&ATTRIBUTE_VALUE, "'50%'", json!("50%"), true),
         (&ATTRIBUTE_VALUE, "\"A\\nB\"", json!("A\nB"), false),
         (&ATTRIBUTE_VALUE, "'\\U+00B0'", json!("\\U+00B0"), false),
@@ -255,7 +338,6 @@ fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
         (&INSERT_NAME, "42", json!(42), true),
         (&INSERT_NAME, "' jb'", json!(" jb"), false),
         (&INSERT_NAME, "''", json!(""), false),
-        (&INSERT_NAME, "", json!(null), false),
         (&INSERT_NAME, "[jb]", json!(["jb"]), false),
         // A block library's path: relative, with / between folders.
         (&LIBRARY_PATH, "lib.yaml", json!("lib.yaml"), true),
@@ -487,7 +569,8 @@ fn cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
         (&MTEXT_WIDTH, "80", json!(80), true),
         (&MTEXT_WIDTH, "'3 in'", json!("3 in"), true),
         (&MTEXT_WIDTH, "wide", json!("wide"), false),
-    ]
+    ]);
+    cases
 }
 
 /// Reads a sheet description as `agentdrafter build` does. One that names a
@@ -571,8 +654,14 @@ const MTEXT_CELL: Place = Place {
 };
 
 /// `(place in a block library, value as YAML, the same value as JSON, accepted)`.
-fn library_cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
-    vec![
+fn library_cases() -> Vec<Case> {
+    let mut cases = [
+        bare_null(&TAG, false, Some(("'NULL'", true))),
+        bare_null(&DEFAULT, true, Some(("'null'", true))),
+        bare_null(&PROMPT, true, Some(("'null'", true))),
+    ]
+    .concat();
+    cases.extend(vec![
         // A cell: two opposite corners, each a point.
         (
             &ATTDEF_CELL,
@@ -638,7 +727,6 @@ fn library_cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
         (&DEFAULT, "\"A\\tB\"", json!("A\tB"), false),
         // A prompt: one line of text.
         (&PROMPT, "Enter the tag", json!("Enter the tag"), true),
-        (&PROMPT, "", json!(null), true),
         (&PROMPT, "\"A\\nB\"", json!("A\nB"), false),
         // A block's name: as a layer's name.
         (&BLOCK_NAME, "MARKER", json!("MARKER"), true),
@@ -676,7 +764,8 @@ fn library_cases() -> Vec<(&'static Place, &'static str, Value, bool)> {
             json!([{"circle": {"center": [0, 0, 0], "radius": 1, "name": "a"}}]),
             false,
         ),
-    ]
+    ]);
+    cases
 }
 
 #[test]
@@ -690,7 +779,7 @@ fn the_block_library_schema_accepts_exactly_the_values_the_reader_accepts() {
 /// marked accepted, and lists every case where either disagrees.
 fn assert_reader_and_schema_agree(
     schema: &Value,
-    cases: Vec<(&'static Place, &'static str, Value, bool)>,
+    cases: Vec<Case>,
     read: impl Fn(&str) -> Result<(), Error>,
 ) {
     let validator = jsonschema::validator_for(schema).expect("the schema is a valid JSON Schema");

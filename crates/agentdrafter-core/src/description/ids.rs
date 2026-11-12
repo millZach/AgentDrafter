@@ -63,6 +63,8 @@ pub(crate) struct ObjectRecord {
     pub id: String,
     /// The name the object carries, if it has one.
     pub name: Option<String>,
+    /// Where its `name` key is written, if it has one.
+    pub name_key: Option<Written>,
     /// Where the object is written in its file; its `field` is its place,
     /// such as `objects[3]`.
     pub object: Written,
@@ -103,16 +105,25 @@ pub(super) fn object_record(
     field: &str,
     before: &[ObjectRecord],
 ) -> Result<ObjectRecord, Error> {
-    let name = match fields.get(NAME_KEY) {
-        Some(node) => Some(object_name(node, &fields.path_of(NAME_KEY), before)?),
-        None => None,
+    let (name, name_key) = match (fields.text(NAME_KEY), fields.key_at(NAME_KEY)) {
+        (Some(node), Some(key_at)) => {
+            let path = fields.path_of(NAME_KEY);
+            let name = object_name(node, &path, before)?;
+            let key = Written {
+                field: path,
+                line: key_at.line,
+                column: key_at.column,
+            };
+            (Some(name), Some(key))
+        }
+        _ => (None, None),
     };
     let object = Written {
         field: field.to_owned(),
         line: node.at.line,
         column: node.at.column,
     };
-    let Some(id_node) = fields.get(ID_KEY) else {
+    let Some(id_node) = fields.text(ID_KEY) else {
         // An object without an `id` takes its place, which is no other
         // object's written `id`.
         if let Some((first, first_key)) = written_before(before, field) {
@@ -133,6 +144,7 @@ pub(super) fn object_record(
         return Ok(ObjectRecord {
             id: field.to_owned(),
             name,
+            name_key,
             object,
             id_key: None,
             in_row: false,
@@ -166,6 +178,7 @@ pub(super) fn object_record(
     Ok(ObjectRecord {
         id: id.to_owned(),
         name,
+        name_key,
         object,
         id_key: Some(Written {
             field: path,
@@ -277,12 +290,11 @@ fn object_name(node: &Node, path: &str, before: &[ObjectRecord]) -> Result<Strin
         return Err(bad_value(node, path, problem));
     }
     let folded = name.to_lowercase();
-    let first = before.iter().find(|r| {
-        r.name
-            .as_deref()
-            .is_some_and(|n| n.to_lowercase() == folded)
+    let first = before.iter().find_map(|r| {
+        let (name, key) = (r.name.as_deref()?, r.name_key.as_ref()?);
+        (name.to_lowercase() == folded).then_some((r, key))
     });
-    if let Some(first) = first {
+    if let Some((first, first_key)) = first {
         return Err(at(
             Error::new(
                 ErrorCode::DuplicateName,
@@ -290,7 +302,7 @@ fn object_name(node: &Node, path: &str, before: &[ObjectRecord]) -> Result<Strin
                     "the name `{name}` is given at line {} already, to the object at `{}`; an \
                      agent selects an object by its name, so each name is given once on a \
                      sheet, and names that differ only in case are one name",
-                    first.object.line, first.object.field
+                    first_key.line, first.object.field
                 ),
             ),
             path,

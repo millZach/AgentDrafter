@@ -300,7 +300,7 @@ fn sheet_and_records(
             ),
         ));
     }
-    let (block_library, library) = match fields.get("block_library") {
+    let (block_library, library) = match fields.text("block_library") {
         Some(node) => {
             let path = "block_library";
             let written = blocks::library_path(node, path)?;
@@ -611,6 +611,44 @@ impl<'a> Fields<'a> {
                 .at_field(key_path(self.path, key))
                 .at_position(self.at.line, self.at.column)
         })
+    }
+
+    /// The value of the optional text or path field `key`: `None` when it
+    /// is not written or is a bare null ([`Node::is_bare_null`]), which
+    /// Zach decided on 2026-11-11 means the field is left out.
+    fn text(&self, key: &str) -> Option<&'a Node> {
+        self.get(key).filter(|node| !node.is_bare_null())
+    }
+
+    /// The value of the required text or path field `key`. Not written, or
+    /// a bare null, which means it is left out, it is the `missing_key`
+    /// error.
+    fn require_text(&self, key: &str) -> Result<&'a Node, Error> {
+        let node = self.require(key)?;
+        if !node.is_bare_null() {
+            return Ok(node);
+        }
+        let Kind::Scalar(written) = &node.kind else {
+            unreachable!("a bare null is a scalar")
+        };
+        let message = if written.is_empty() {
+            format!("`{key}` is left empty, which leaves it out, and it is required")
+        } else {
+            format!(
+                "`{key}` is a bare `{written}`, which leaves it out, and it is required; to \
+                 mean the text `{written}`, quote it: `'{written}'`"
+            )
+        };
+        Err(at(
+            Error::new(ErrorCode::MissingKey, message),
+            &self.path_of(key),
+            node.at,
+        ))
+    }
+
+    /// Where `key` itself is written, if it is.
+    fn key_at(&self, key: &str) -> Option<Pos> {
+        self.entries.iter().find(|e| e.key == key).map(|e| e.key_at)
     }
 
     /// The path of the value under `key`.

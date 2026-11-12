@@ -61,7 +61,7 @@ pub(super) fn text_styles(node: &Node) -> Result<Vec<TextStyle>, Error> {
         }
         let path = key_path("text_styles", &entry.key);
         let fields = Fields::of(&entry.value, &path, &TEXT_STYLE_KEYS, "a text style")?;
-        let font = font(fields.require("font")?, &fields.path_of("font"))?;
+        let font = font(fields.require_text("font")?, &fields.path_of("font"))?;
         let mut style = TextStyle::new(entry.key.clone(), font);
         if let Some(node) = fields.get("width_factor") {
             style.width_factor = width_factor(node, &fields.path_of("width_factor"))?;
@@ -77,7 +77,7 @@ pub(super) fn text(
     layer: String,
     styles: &[TextStyle],
 ) -> Result<Text, Error> {
-    let contents_node = fields.require("contents")?;
+    let contents_node = fields.require_text("contents")?;
     let contents_path = fields.path_of("contents");
     let contents = scalar(contents_node, &contents_path, "the text, one line")?;
     let problem = if contents.contains(['\n', '\r']) {
@@ -115,7 +115,7 @@ pub(super) fn mtext(
     layer: String,
     styles: &[TextStyle],
 ) -> Result<MText, Error> {
-    let contents_node = fields.require("contents")?;
+    let contents_node = fields.require_text("contents")?;
     let contents_path = fields.path_of("contents");
     let written = scalar(contents_node, &contents_path, "the text")?;
     // A block scalar ends with a line break; text does not end with an empty line.
@@ -250,7 +250,7 @@ pub(super) fn rotation(fields: &Fields) -> Result<f64, Error> {
 
 /// The style the text draws with: `Standard` or one of the sheet's.
 pub(super) fn style_name(fields: &Fields, styles: &[TextStyle]) -> Result<String, Error> {
-    let Some(node) = fields.get("style") else {
+    let Some(node) = fields.text("style") else {
         return Ok(STANDARD.to_owned());
     };
     let path = fields.path_of("style");
