@@ -18,7 +18,19 @@
 //            whole sheet, at phone and laptop sizes;
 // - tabs:    back to a sheet already drawn shows it, whatever the sheet
 //            asked for meanwhile is doing;
-// - look:    screenshots at phone and laptop sizes.
+// - look:    screenshots at phone and laptop sizes;
+// - live:    a change set the command line sends, in another process,
+//            shows in the open page without a reload, named by a toast,
+//            its object marked, on the sheet shown and on another;
+// - journal: stepping back through the journal shows the set as it was at
+//            each entry, read-only; an entry whose undo state is pruned
+//            says it cannot be shown; back to live returns;
+// - pick:    a tap on an insert, at phone size, shows its ID, name, layer
+//            and attributes in the inspector;
+// - undo:    Undo last undoes the newest change set, as one;
+// - accept:  refused while the set is inconsistent; warns of failed checks
+//            and lists them; then issues the change sets, which can no
+//            longer be undone, and the journal says the viewer accepted.
 //
 // It writes results.json, the screenshots and each compared image into
 // --out (target/viewer-e2e by default), and exits 1 when any check fails.
@@ -94,9 +106,59 @@ function agentdrafter(...args) {
   return reply.result;
 }
 
-/** `agentdrafter serve` in the scratch folder, with every line it printed. */
-async function serve(listen) {
-  const child = spawn(bin, ['serve', '--listen', listen], { cwd: scratch, stdio: ['ignore', 'pipe', 'pipe'] });
+/**
+ * Runs the command line in `cwd`, as an agent in another process does, and
+ * gives its whole reply, ok or not.
+ */
+function agentIn(cwd, ...args) {
+  try {
+    return JSON.parse(execFileSync(bin, args, { cwd, encoding: 'utf8' }));
+  } catch (e) {
+    // A reply that is not ok exits 1, its line still printed.
+    return JSON.parse(String(e.stdout));
+  }
+}
+
+/** Sends a change set from the command line in `cwd`, from a file, and gives its reply. */
+function sendChange(cwd, changeSet) {
+  const file = join(cwd, 'change-set.json');
+  writeFileSync(file, JSON.stringify(changeSet));
+  return agentIn(cwd, 'change', 'demo-plant', file);
+}
+
+/** A copy of the demo plant, built, for one check to change: its folder, which holds `demo-plant`. */
+function freshPlant(name) {
+  const folder = join(scratch, name);
+  rmSync(folder, { recursive: true, force: true });
+  cpSync(join(root, 'examples', 'demo-plant'), join(folder, 'demo-plant'), {
+    recursive: true,
+    filter: (path) => !path.includes(`${join('demo-plant', 'dwg')}`) && !path.includes('.agentdrafter'),
+  });
+  const built = agentIn(folder, 'build', 'demo-plant');
+  if (!built.ok) throw new Error(`the demo plant did not build: ${JSON.stringify(built.error)}`);
+  return folder;
+}
+
+/** Moves an object of the demo plant by `dx` inches. */
+const move = (id, dx) => ({ operations: [{ op: 'move', target: { id }, by: [dx, 0, 0] }] });
+
+/** The object at this ID on the sheet shown: its place and its box in drawing units. */
+async function objectOf(page, id) {
+  return page.evaluate((wanted) => {
+    const probe = window.agentdrafterViewer;
+    const place = probe.summary.objects.findIndex((o) => o.id === wanted);
+    return { place, bounds: place >= 0 ? probe.bounds([place]) : [] };
+  }, id);
+}
+
+/** Waits until the page's live stream is open. */
+async function live(page) {
+  await page.waitForSelector('.va-agent.working', { timeout: 30000 });
+}
+
+/** `agentdrafter serve` in the scratch folder, or `cwd`, with every line it printed. */
+async function serve(listen, cwd = scratch) {
+  const child = spawn(bin, ['serve', '--listen', listen], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   const lines = [];
   const errors = [];
   child.stderr.on('data', (d) => errors.push(String(d)));
@@ -132,7 +194,10 @@ async function browser(extra = []) {
 
 /** Opens the viewer and waits until a sheet is drawn. */
 async function open(context, url, sheet) {
-  const page = await context.newPage();
+  return openPage(await context.newPage(), url, sheet);
+}
+
+async function openPage(page, url, sheet) {
   const problems = [];
   page.on('pageerror', (e) => problems.push(`page error: ${e.message}`));
   page.on('console', (m) => m.type() === 'error' && problems.push(`console: ${m.text()}`));
@@ -702,6 +767,314 @@ const checks = {
     }
   },
 
+  /**
+   * A change set the command line sends, in another process, shows in the
+   * open page without a reload: a toast names it, the sheet shown is drawn
+   * again with its object marked, and a sheet it landed on that is not
+   * shown is drawn anew when its tab is opened.
+   */
+  async live() {
+    const folder = freshPlant('live');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    try {
+      const shots = [];
+      for (const [name, device] of [
+        ['laptop', LAPTOP],
+        ['phone', PHONE],
+      ]) {
+        const context = await b.newContext(device);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        const before = await objectOf(page, 'DP-LD-101/device');
+        assert(before.place >= 0 && before.bounds.length === 4, 'the device is on the sheet');
+        const sent = performance.now();
+        const reply = sendChange(folder, move('DP-LD-101/device', 0.5));
+        assert(reply.ok, `the change set lands: ${JSON.stringify(reply.error)}`);
+        const n = reply.result.journal_entry;
+        await page.waitForFunction((title) => document.querySelector('.va-toast')?.textContent?.includes(title), `Change set ${n} landed on DP-LD-101`, { timeout: 15000 });
+        await page.waitForFunction(
+          ([place, left]) => {
+            const probe = window.agentdrafterViewer;
+            return probe.bounds([place])[0] > left + 0.4 && probe.marked?.places.includes(place);
+          },
+          [before.place, before.bounds[0]],
+          { timeout: 15000 },
+        );
+        const shown = performance.now() - sent;
+        const marked = await page.evaluate(() => window.agentdrafterViewer.marked);
+        assert(marked.added[marked.places.indexOf(before.place)] === false, 'the moved device is marked changed');
+        await sleep(400);
+        await page.screenshot({ path: join(out, `live-${name}.png`) });
+        shots.push(`live-${name}.png`);
+
+        // A change set on another sheet: named by the toast, and drawn anew
+        // when its tab is opened.
+        const other = sendChange(folder, {
+          operations: [{ op: 'insert_block', sheet: 'DP-LD-102', block: 'TRANSMITTER', position: [2, 3, 0], attributes: { FUNC: 'LI', LOOP: '102' }, id: `added-${name}`, name: `LI-102-${name}` }],
+        });
+        assert(other.ok, `the second change set lands: ${JSON.stringify(other.error)}`);
+        await page.waitForFunction((title) => document.querySelector('.va-toast')?.textContent?.includes(title), `landed on DP-LD-102`, { timeout: 15000 });
+        await page.click('.tab:has-text("DP-LD-102")');
+        await page.waitForFunction(
+          (id) => window.agentdrafterViewer?.summary?.sheet === 'DP-LD-102' && window.agentdrafterViewer.summary.objects.some((o) => o.id === id),
+          `DP-LD-102/added-${name}`,
+          { timeout: 15000 },
+        );
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+        // The next size starts from the set as it is now.
+        if (name === 'laptop') {
+          assert(agentIn(folder, 'undo', 'demo-plant', String(n)).ok, 'the set is put back');
+        }
+        if (name === 'laptop') results_live.ms_to_show = Math.round(shown);
+      }
+      return { screenshots: shots, ms_from_change_to_drawn: results_live.ms_to_show };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * Stepping through the journal shows the set as it was at each entry,
+   * read-only; an entry whose undo state is pruned says it cannot be
+   * shown; back to live returns to the set as it is.
+   */
+  async journal() {
+    const folder = freshPlant('journal');
+    // 51 change sets on another sheet's row, then two moves of the device:
+    // 53 change sets, so the oldest three have had their undo states pruned.
+    for (let i = 0; i < 51; i++) {
+      const reply = sendChange(folder, move('DP-LD-104/io-channel', 0.001));
+      assert(reply.ok, `filler ${i}: ${JSON.stringify(reply.error)}`);
+    }
+    assert(sendChange(folder, move('DP-LD-101/device', 0.5)).ok, 'entry 52');
+    assert(sendChange(folder, move('DP-LD-101/device', 0.5)).ok, 'entry 53');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    try {
+      const context = await b.newContext(LAPTOP);
+      const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+      await live(page);
+      const now = await objectOf(page, 'DP-LD-101/device');
+      const left = (entry) =>
+        page.waitForFunction(
+          ([entry, place]) => {
+            const probe = window.agentdrafterViewer;
+            return probe.summary.entry === entry ? probe.bounds([place])[0] : false;
+          },
+          [entry, now.place],
+          { timeout: 15000 },
+        ).then((h) => h.jsonValue());
+      // Back one: entry 53, the newest, as it was; then entry 52.
+      await page.click('button[aria-label="Older"]');
+      const at53 = await left(53);
+      assert(Math.abs(at53 - now.bounds[0]) < 1e-6, 'entry 53 is the set as it is');
+      assert((await page.textContent('.va-banner')).includes('Entry 53, as it was'), 'the banner says which entry is shown');
+      await page.click('button[aria-label="Older"]');
+      const at52 = await left(52);
+      assert(Math.abs(at53 - at52 - 0.5) < 1e-6, `entry 52 has the device half an inch left of 53: ${at52}, ${at53}`);
+      const marked = await page.evaluate(() => window.agentdrafterViewer.marked);
+      assert(marked.places.includes(now.place), 'the entry\'s change is marked');
+      await sleep(700);
+      await page.screenshot({ path: join(out, 'journal-step.png') });
+      // A journal of 53 entries scrolls in its panel: the drawing keeps the
+      // screen's height, and the entry's change is in sight.
+      const shown = await page.evaluate((place) => {
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        const v = window.agentdrafterViewer.view();
+        const [x0, y0, x1, y1] = window.agentdrafterViewer.bounds([place]);
+        return { height: r.height, inner: innerHeight, x: ((x0 + x1) / 2 - v.left) * v.scale, y: (v.top - (y0 + y1) / 2) * v.scale, width: r.width };
+      }, now.place);
+      assert(shown.height < shown.inner, `the drawing is no taller than the screen: ${shown.height}`);
+      assert(shown.x > 0 && shown.x < shown.width && shown.y > 0 && shown.y < shown.height, `the change is in sight: ${JSON.stringify(shown)}`);
+      // The oldest entry, a change set on DP-LD-104: its undo state is
+      // pruned, and it cannot be shown.
+      await page.click('li[data-entry="1"] .je-head');
+      await page.waitForSelector('.va-cannot', { timeout: 15000 });
+      const said = await page.textContent('.va-cannot');
+      assert(said.includes('Entry 1 cannot be shown') && said.includes('pruned'), `the pruned entry says so: ${said}`);
+      await page.screenshot({ path: join(out, 'journal-pruned.png') });
+      // Back to live.
+      await page.click('.va-banner button');
+      await page.waitForFunction(() => window.agentdrafterViewer.summary.entry === null && !document.querySelector('.va-cannot') && !document.querySelector('.va-banner'));
+      await page.click('.tab:has-text("DP-LD-101")');
+      await page.waitForFunction(() => window.agentdrafterViewer.summary.sheet === 'DP-LD-101' && window.agentdrafterViewer.summary.entry === null);
+      const back = await objectOf(page, 'DP-LD-101/device');
+      assert(Math.abs(back.bounds[0] - now.bounds[0]) < 1e-6, 'back to the set as it is');
+      // Nothing was written: the journal still holds 53 entries.
+      const journal = agentIn(folder, 'journal', 'demo-plant');
+      assert(journal.result.entries.length === 53, 'stepping writes nothing');
+      assert(problems.filter((p) => !p.includes('422')).length === 0, problems.join('; '));
+      return { entries: 53, pruned: journal.result.entries.filter((e) => e.undo_state === 'pruned').map((e) => e.entry), screenshots: ['journal-step.png', 'journal-pruned.png'] };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /** A tap on an insert, at phone size, shows its ID, name, layer and attributes. */
+  async pick() {
+    const folder = freshPlant('pick');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    try {
+      const context = await b.newContext(PHONE);
+      const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+      const device = await objectOf(page, 'DP-LD-101/device');
+      const [x0, y0, x1, y1] = device.bounds;
+      const at = await page.evaluate(
+        ([x, y]) => {
+          const v = window.agentdrafterViewer.view();
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+        },
+        [(x0 + x1) / 2, (y0 + y1) / 2],
+      );
+      await page.touchscreen.tap(at[0], at[1]);
+      await page.waitForSelector('.va-inspect', { timeout: 15000 });
+      const shown = await page.evaluate(() => {
+        const rows = {};
+        for (const tr of document.querySelectorAll('.va-inspect .kv tr')) {
+          const th = tr.querySelector('th')?.textContent;
+          if (th) rows[th] = tr.querySelector('td')?.textContent;
+        }
+        return rows;
+      });
+      assert(shown.ID === 'DP-LD-101/device', `the inspector shows its ID: ${JSON.stringify(shown)}`);
+      assert(shown.Name === 'FT-101', 'its name');
+      assert(shown.Layer === '0', 'its layer');
+      assert(shown.Type === 'Insert of TRANSMITTER', 'its block');
+      assert(shown.FUNC === 'FT' && shown.LOOP === '101', 'its attributes');
+      const marked = await page.evaluate(() => window.agentdrafterViewer.marked);
+      assert(marked.picked === device.place, 'the picked object is marked');
+      await sleep(300);
+      await page.screenshot({ path: join(out, 'pick-phone.png') });
+      // A tap where nothing is drawn, above the paper, picks nothing, and
+      // the journal comes back.
+      const bare = await page.evaluate(() => {
+        const v = window.agentdrafterViewer.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        return [r.left + (8.5 - v.left) * v.scale, r.top + (v.top - 11) * v.scale - 40];
+      });
+      await page.touchscreen.tap(bare[0], bare[1]);
+      await page.waitForFunction(() => !document.querySelector('.va-inspect'));
+      assert(problems.length === 0, problems.join('; '));
+      return { picked: shown, screenshot: 'pick-phone.png' };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /** Undo last, from the page, undoes the newest change set as one, through the undo command. */
+  async undo() {
+    const folder = freshPlant('undo');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    try {
+      const context = await b.newContext(LAPTOP);
+      const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+      await live(page);
+      const before = await objectOf(page, 'DP-LD-101/device');
+      // A template edit, which lands on every sheet built from it, as one.
+      const reply = sendChange(folder, {
+        operations: [
+          { op: 'move', target: { id: 'DP-LD-101/device' }, by: [0.5, 0, 0] },
+          { op: 'move', target: { id: 'DP-LD-101/border' }, by: [0.05, 0, 0] },
+        ],
+      });
+      assert(reply.ok, JSON.stringify(reply.error));
+      await page.waitForSelector('button[data-act="undo"]:not([disabled])');
+      assert((await page.textContent('button[data-act="undo"]')).includes('#1'), 'Undo last names the change set');
+      await page.click('button[data-act="undo"]');
+      await page.waitForFunction(() => document.querySelector('.va-toast')?.textContent?.includes('Undid change set 1'), null, { timeout: 15000 });
+      await page.waitForFunction(
+        ([place, left]) => Math.abs(window.agentdrafterViewer.bounds([place])[0] - left) < 1e-6,
+        [before.place, before.bounds[0]],
+        { timeout: 15000 },
+      );
+      const journal = agentIn(folder, 'journal', 'demo-plant').result;
+      const last = journal.entries.at(-1);
+      assert(last.kind === 'undo' && JSON.stringify(last.undid) === '[1]', `the journal records the undo: ${JSON.stringify(last)}`);
+      const restored = new Set(last.files.map((f) => f.path));
+      assert(restored.has('rows.yaml') && restored.has('templates/loop-2-wire.yaml') && restored.has('dwg/DP-LD-302.dwg'), 'every file of the change set went back, every sheet with it');
+      await page.waitForSelector('button[data-act="undo"][disabled]');
+      await page.screenshot({ path: join(out, 'undo-laptop.png') });
+      assert(problems.length === 0, problems.join('; '));
+      return { undid: last.undid, files: last.files.length, screenshot: 'undo-laptop.png' };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * Accept from the page: refused while the set is inconsistent; asks,
+   * listing the failed checks; then issues every change set in place, which
+   * the journal records as the viewer's, and undo can no longer take.
+   */
+  async accept() {
+    const folder = freshPlant('accept');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    try {
+      const context = await b.newContext(PHONE);
+      const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+      await live(page);
+      const toast = (text) => page.waitForFunction((t) => document.querySelector('.va-toast')?.textContent?.includes(t), text, { timeout: 15000 });
+
+      // Inconsistent: lands on one sheet, fails on another.
+      const partial = sendChange(folder, {
+        operations: [
+          { op: 'move', target: { id: 'DP-LD-101/device' }, by: [0.2, 0, 0] },
+          { op: 'move', target: { id: 'DP-LD-102/nothing-here' }, by: [0.2, 0, 0] },
+        ],
+      });
+      assert(!partial.ok && partial.result?.landed === 1, `lands on one sheet only: ${JSON.stringify(partial.error)}`);
+      await toast('failed on DP-LD-102');
+      await page.click('button[data-act="accept"]');
+      await toast('Can’t accept yet');
+      assert((await page.textContent('.va-toast')).includes('inconsistent'), 'the refusal says why');
+      assert(!(await page.$('.va-modal')), 'no dialog: nothing to confirm');
+      await page.screenshot({ path: join(out, 'accept-refused.png') });
+
+      // Undone from the page, then a change set that fails a check.
+      await page.click('button[data-act="undo"]');
+      await toast('Undid change set 1');
+      const off = sendChange(folder, {
+        operations: [{ op: 'add_circle', sheet: 'DP-LD-101', center: [17.2, 5, 0], radius: 0.4, layer: 'notes', id: 'past-the-edge' }],
+      });
+      assert(off.ok, JSON.stringify(off.error));
+      await toast('check');
+      await page.click('button[data-act="accept"]');
+      await page.waitForSelector('.va-modal .dialog', { timeout: 15000 });
+      const dialog = await page.textContent('.va-modal .dialog');
+      assert(dialog.includes('Accept the working revision?'), 'Accept asks for confirmation');
+      assert(dialog.includes('change set') && dialog.includes('#3'), `it names what it issues: ${dialog}`);
+      assert(dialog.includes('failing') && dialog.includes('DP-LD-101/past-the-edge'), `it lists the failed checks: ${dialog}`);
+      await page.screenshot({ path: join(out, 'accept-dialog.png') });
+      const entries = () => agentIn(folder, 'journal', 'demo-plant').result.entries;
+      assert(!entries().some((e) => e.kind === 'accept'), 'nothing is issued before the reviewer confirms');
+      await page.click('.va-modal [data-ok]');
+      await toast('Accepted through the viewer');
+      const accept = entries().at(-1);
+      assert(accept.kind === 'accept' && accept.via === 'viewer', `the journal says the viewer accepted: ${JSON.stringify(accept)}`);
+      assert(JSON.stringify(accept.issued) === '[3]' && accept.failed_checks.length > 0, 'it issued change set 3, despite the failed checks it lists');
+      await page.waitForSelector('button[data-act="undo"][disabled]');
+      const refused = agentIn(folder, 'undo', 'demo-plant', '3');
+      assert(refused.error?.code === 'issued', `undo refuses an issued change set: ${JSON.stringify(refused)}`);
+      await sleep(300);
+      await page.screenshot({ path: join(out, 'accept-issued.png') });
+      assert(problems.filter((p) => !p.includes('422')).length === 0, problems.join('; '));
+      return { journal_entry: accept.entry, issued: accept.issued, via: accept.via, screenshots: ['accept-refused.png', 'accept-dialog.png', 'accept-issued.png'] };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
   /** Screenshots at phone and laptop sizes. */
   async look() {
     const server = await serve('127.0.0.1:0');
@@ -726,6 +1099,7 @@ const checks = {
 };
 
 const results = {};
+const results_live = {};
 let failed = 0;
 for (const [name, check] of Object.entries(checks)) {
   if (only && !only.includes(name)) continue;

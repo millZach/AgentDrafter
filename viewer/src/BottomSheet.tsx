@@ -1,11 +1,10 @@
 // The bottom sheet of the picked look (variant A): on a phone it peeks up
 // from the bottom with Undo last and Accept always in reach, and drags up
-// to half or nearly all of the screen for the journal; on a laptop it is a
-// panel on the right. The journal, Undo last and Accept themselves come
-// with the next part of the viewer (#18): here they hold their places,
-// switched off.
+// to half or nearly all of the screen for the journal or the inspector; on
+// a laptop it is a panel on the right. What it holds is the page's: the
+// peek and the body come in as they are.
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
 type Snap = 'peek' | 'half' | 'full';
 
@@ -14,20 +13,26 @@ export interface BottomSheetProps {
   wide: boolean;
   /** Says how many pixels at the bottom of the drawing the peek covers. */
   onCovers(pixels: number): void;
+  /** What is always in reach: the status, the newest entry, Undo last and Accept. */
+  peek: ReactNode;
+  /** The journal, or the inspector. */
+  body: ReactNode;
+  /** A new value raises a peeking sheet to half the screen, to show what the body now holds. */
+  raise: number;
 }
 
 const clamp = (v: number, low: number, high: number) => Math.min(high, Math.max(low, v));
 
-export function BottomSheet({ wide, onCovers }: BottomSheetProps) {
+export function BottomSheet({ wide, onCovers, peek, body, raise }: BottomSheetProps) {
   const sheet = useRef<HTMLElement>(null);
   const grab = useRef<HTMLDivElement>(null);
-  const peek = useRef<HTMLDivElement>(null);
+  const peekBox = useRef<HTMLDivElement>(null);
   const [snap, setSnap] = useState<Snap>('peek');
   const drag = useRef<{ y0: number; s0: number; t: number; last: number; v: number; moved: boolean } | null>(null);
   const y = useRef(0);
 
   const room = () => sheet.current?.parentElement?.clientHeight ?? 0;
-  const peekHeight = () => (grab.current?.offsetHeight ?? 0) + (peek.current?.offsetHeight ?? 0);
+  const peekHeight = () => (grab.current?.offsetHeight ?? 0) + (peekBox.current?.offsetHeight ?? 0);
   const snapY = (name: Snap) => {
     const height = room();
     return name === 'peek' ? height - peekHeight() : name === 'half' ? Math.round(height * 0.45) : Math.round(height * 0.08);
@@ -50,10 +55,10 @@ export function BottomSheet({ wide, onCovers }: BottomSheetProps) {
     place(snapY(name), animate);
   };
 
-  // Placed at its snap whenever the screen changes size.
+  // Placed at its snap whenever the screen, or the peek, changes size.
   useLayoutEffect(() => {
     const fit = () => {
-      place(snapY(snap), false);
+      if (!drag.current) place(snapY(snap), false);
       onCovers(wide ? 0 : peekHeight());
     };
     fit();
@@ -61,9 +66,16 @@ export function BottomSheet({ wide, onCovers }: BottomSheetProps) {
     if (!parent) return;
     const resized = new ResizeObserver(fit);
     resized.observe(parent);
+    if (peekBox.current) resized.observe(peekBox.current);
     return () => resized.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wide, snap]);
+
+  // A pick, or a step to an entry, raises a peeking sheet to show it.
+  useEffect(() => {
+    if (raise && !wide && snap === 'peek') snapTo('half');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [raise]);
 
   useEffect(() => {
     const el = sheet.current;
@@ -117,30 +129,10 @@ export function BottomSheet({ wide, onCovers }: BottomSheetProps) {
       <div className="va-grab" ref={grab}>
         <span />
       </div>
-      <div className="va-peek" ref={peek}>
-        <div className="va-agent">
-          <i />
-          Watching change sets land comes next
-        </div>
-        <div className="va-actions">
-          <button type="button" className="btn" disabled title="Comes with the journal (#18)">
-            &#x21B6; Undo last
-          </button>
-          <button type="button" className="btn primary" disabled title="Comes with the journal (#18)">
-            Accept&hellip;
-          </button>
-        </div>
+      <div className="va-peek" ref={peekBox}>
+        {peek}
       </div>
-      <div className="va-body">
-        <div className="va-jhead">
-          <b>Journal</b>
-        </div>
-        <p className="muted">
-          The journal, Undo last and Accept come with the next part of the viewer (#18): change sets landing live,
-          stepping through them, and accepting or undoing. Until then the viewer shows the drawing set&rsquo;s sheets
-          as they are saved.
-        </p>
-      </div>
+      <div className="va-body">{body}</div>
     </section>
   );
 }

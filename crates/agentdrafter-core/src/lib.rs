@@ -43,6 +43,9 @@
 //! - [`journal`] reads a drawing set's journal, the record in its folder of
 //!   every change set and failed attempt, and [`undo`] undoes a change set,
 //!   with every later one, from it, in a later session as in the same one.
+//! - [`accept_with`] issues a drawing set's working revision: every change
+//!   set still in place, which can then no longer be undone, recorded in
+//!   the journal with the [`Interface`] it came through.
 //! - [`check`] re-reads a drawing set's saved files, or one sheet
 //!   description, and reports each default check a sheet fails: the exact
 //!   paper size, nothing off the sheet, no text overflowing its cell and no
@@ -68,6 +71,7 @@ mod display_list;
 mod draw;
 mod dwg;
 mod error;
+mod interface;
 mod model;
 mod output;
 mod pdf;
@@ -87,6 +91,10 @@ use std::path::Path;
 
 pub use build::{build, build_with, BuildReport, BuildRequest};
 pub use change::{
+    accept_with, AcceptReport, AcceptRequest, CheckFailed, FileIssued, HowChanged, ObjectChanged,
+    StampRevision,
+};
+pub use change::{
     change, change_set_schema, change_with, operations, ChangeReport, ChangeRequest, Failure, Fill,
     Inconsistent, OperationInfo, OperationList, OperationOutcome, RowValueSet, SheetChange,
     MARK_FILE,
@@ -103,10 +111,14 @@ pub use check::{
 pub use commands::{commands, find_command, Command, CommandInfo, JsonReply};
 pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
 pub use display_list::{
-    display_list, display_list_with, DisplayListReport, DisplayListRequest, DISPLAY_LIST_TOLERANCE,
+    display_list, display_list_with, DisplayListReport, DisplayListRequest, SheetObject,
+    DISPLAY_LIST_TOLERANCE,
 };
-pub use draw::{Bounds, Color, DisplayList, FillRule, Item, Point2, Shape, TextRun};
+pub use draw::{
+    object_bounds, pick, Bounds, Color, DisplayList, FillRule, Item, Point2, Shape, TextRun,
+};
 pub use error::{Error, ErrorCode};
+pub use interface::Interface;
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use model::{
     Arc, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype, Lineweight, Object,

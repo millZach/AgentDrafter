@@ -92,6 +92,22 @@ pub enum ErrorCode {
     /// A server could not listen on the address it was given, such as a
     /// port another program holds.
     ListenFailed,
+    /// An accept was refused because the drawing set is inconsistent: a
+    /// change set landed on some of its sheets and failed on others.
+    Inconsistent,
+    /// An accept found failed checks and was not told to accept despite
+    /// them: the reply lists them, and nothing was issued.
+    ChecksFailed,
+    /// An accept was refused because the journal has moved on since the
+    /// newest entry the caller said it had seen: a change set may have
+    /// landed that the reviewer has not looked at.
+    MovedOn,
+    /// An accept found nothing to issue: the working revision is the one
+    /// an earlier accept issued, byte for byte.
+    NothingToAccept,
+    /// An undo was refused because a change set it would undo is issued:
+    /// an issued change set cannot be undone.
+    Issued,
 }
 
 /// An error from the core, ready to report through any interface.

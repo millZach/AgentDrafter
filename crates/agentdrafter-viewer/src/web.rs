@@ -25,6 +25,11 @@
 //!   times faster.
 //! - Fills are drawn as one draw of their triangles, their edges smoothed
 //!   by the multisampling.
+//! - Over the ink, a halo marks each object a change set added or changed,
+//!   green or amber, and the object the reviewer picked, blue, as the
+//!   picked prototype marks them; the page fades the change set's halos in
+//!   and out as it lands. A halo is a box round what the object draws,
+//!   found by the core from the display list, as a pick is.
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -32,6 +37,8 @@ use web_sys::{
     HtmlCanvasElement, WebGl2RenderingContext as Gl, WebGlBuffer, WebGlProgram, WebGlShader,
     WebGlUniformLocation, WebGlVertexArrayObject,
 };
+
+use agentdrafter_core::{object_bounds, pick, Bounds, DisplayList};
 
 use crate::mesh::{read_reply, Kind, Mesh, Run};
 
@@ -148,10 +155,10 @@ void main() {
 
 const RECT_FRAGMENT: &str = r#"#version 300 es
 precision highp float;
-uniform vec3 u_color;
+uniform vec4 u_color;
 out vec4 o_color;
 void main() {
-  o_color = vec4(u_color, 1.0);
+  o_color = u_color;
 }
 "#;
 
@@ -172,6 +179,34 @@ const MOST_RUNS: usize = 64;
 
 /// How far the paper's shadow falls, in CSS pixels.
 const SHADOW_OFFSET: f64 = 6.0;
+
+/// How far a halo reaches past what its object draws, in CSS pixels.
+const HALO_PAD: f64 = 6.0;
+
+/// How wide a halo's edge is drawn, in CSS pixels.
+const HALO_EDGE: f64 = 2.0;
+
+/// A halo's fill and edge, as the picked prototype draws them: an object a
+/// change set added, one it changed, and the one the reviewer picked.
+const HALOS: [([f32; 4], [f32; 4]); 3] = [
+    ([0.133, 0.773, 0.369, 0.24], [0.086, 0.639, 0.290, 1.0]),
+    ([0.961, 0.620, 0.043, 0.28], [0.851, 0.467, 0.024, 1.0]),
+    ([0.231, 0.510, 0.965, 0.12], [0.145, 0.388, 0.922, 1.0]),
+];
+
+/// What a halo marks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Halo {
+    Added = 0,
+    Changed = 1,
+    Picked = 2,
+}
+
+/// A halo round one object's drawing.
+struct Mark {
+    bounds: Bounds,
+    halo: Halo,
+}
 
 /// A program and the places of its uniforms.
 struct Program {
@@ -199,6 +234,8 @@ impl Program {
 
 /// A sheet held by the GPU.
 struct Loaded {
+    /// The display list, which picks and halos are found in.
+    list: DisplayList,
     origin: [f64; 2],
     paper: [f64; 4],
     millimetres_per_unit: f64,
@@ -223,6 +260,11 @@ pub struct Viewer {
     multisampled: bool,
     surround: [f32; 3],
     sheet: Option<Loaded>,
+    /// The halos over the ink.
+    marks: Vec<Mark>,
+    /// How strongly a change set's halos show, from 0 to 1, as the page
+    /// fades them.
+    pulse: f32,
 }
 
 #[wasm_bindgen]
@@ -289,6 +331,8 @@ impl Viewer {
             multisampled,
             surround: SURROUND,
             sheet: None,
+            marks: Vec::new(),
+            pulse: 1.0,
         })
     }
 
@@ -301,8 +345,76 @@ impl Viewer {
         let summary = serde_json::to_string(&mesh.summary(&sheet))
             .map_err(|e| JsError::new(&e.to_string()))?;
         self.unload();
-        self.sheet = Some(self.upload(&mesh, sheet.millimetres_per_unit)?);
+        self.marks.clear();
+        self.sheet = Some(self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?);
         Ok(summary)
+    }
+
+    /// The place in the sheet's objects of the object drawn nearest the
+    /// drawing point `(x, y)`, within `reach` drawing units, as the core
+    /// picks it from the display list; -1 when nothing is drawn that near.
+    pub fn pick(&self, x: f64, y: f64, reach: f64) -> i32 {
+        self.sheet
+            .as_ref()
+            .and_then(|sheet| pick(&sheet.list, [x, y], reach, sheet.millimetres_per_unit))
+            .and_then(|object| i32::try_from(object).ok())
+            .unwrap_or(-1)
+    }
+
+    /// Marks with halos the objects at `changed`, places in the sheet's
+    /// objects, each added when its `added` is 1 and changed otherwise, and
+    /// the object at `picked`, unless it is -1. An object that draws nothing
+    /// is not marked.
+    pub fn set_marks(&mut self, changed: &[u32], added: &[u8], picked: i32) {
+        self.marks.clear();
+        let Some(sheet) = &self.sheet else {
+            return;
+        };
+        for (i, &object) in changed.iter().enumerate() {
+            if let Some(bounds) = object_bounds(&sheet.list, object as usize) {
+                let halo = if added.get(i) == Some(&1) {
+                    Halo::Added
+                } else {
+                    Halo::Changed
+                };
+                self.marks.push(Mark { bounds, halo });
+            }
+        }
+        if let Some(bounds) = usize::try_from(picked)
+            .ok()
+            .and_then(|object| object_bounds(&sheet.list, object))
+        {
+            self.marks.push(Mark {
+                bounds,
+                halo: Halo::Picked,
+            });
+        }
+    }
+
+    /// How strongly a change set's halos show, from 0 to 1.
+    pub fn set_pulse(&mut self, strength: f64) {
+        self.pulse = strength.clamp(0.0, 1.0) as f32;
+    }
+
+    /// The box round the objects at `objects`, places in the sheet's
+    /// objects, `[left, bottom, right, top]` in drawing units; empty when
+    /// none of them draws anything.
+    pub fn bounds_of(&self, objects: &[u32]) -> Vec<f64> {
+        let Some(sheet) = &self.sheet else {
+            return Vec::new();
+        };
+        let boxes: Vec<Bounds> = objects
+            .iter()
+            .filter_map(|&object| object_bounds(&sheet.list, object as usize))
+            .collect();
+        let Some(first) = boxes.first() else {
+            return Vec::new();
+        };
+        let all = boxes.iter().fold(*first, |a, b| Bounds {
+            min: [a.min[0].min(b.min[0]), a.min[1].min(b.min[1])],
+            max: [a.max[0].max(b.max[0]), a.max[1].max(b.max[1])],
+        });
+        vec![all.min[0], all.min[1], all.max[0], all.max[1]]
     }
 
     /// Draws white round the paper, as a PNG's paper is everywhere, or,
@@ -353,13 +465,13 @@ impl Viewer {
                     right_px + shadow,
                     bottom_px + shadow,
                 ],
-                SHADOW,
+                [SHADOW[0], SHADOW[1], SHADOW[2], 1.0],
                 size,
             );
         }
         self.rect(
             [left_px, top_px, right_px, bottom_px],
-            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
             size,
         );
 
@@ -428,6 +540,36 @@ impl Viewer {
         }
         gl.disable(Gl::DEPTH_TEST);
         gl.bind_vertex_array(None);
+
+        // The halos, over the ink, blended.
+        if !self.marks.is_empty() {
+            gl.enable(Gl::BLEND);
+            gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
+            let pad = HALO_PAD * ratio;
+            let edge = (HALO_EDGE * ratio).max(1.0);
+            for mark in &self.marks {
+                let (left_px, top_px) = device(mark.bounds.min[0], mark.bounds.max[1]);
+                let (right_px, bottom_px) = device(mark.bounds.max[0], mark.bounds.min[1]);
+                let [l, t, r, b] = [left_px - pad, top_px - pad, right_px + pad, bottom_px + pad];
+                let (fill, line) = HALOS[mark.halo as usize];
+                let strength = if mark.halo == Halo::Picked {
+                    1.0
+                } else {
+                    self.pulse
+                };
+                let faded = |[r, g, b, a]: [f32; 4]| [r, g, b, a * strength];
+                self.rect([l, t, r, b], faded(fill), size);
+                for side in [
+                    [l, t, r, t + edge],
+                    [l, b - edge, r, b],
+                    [l, t, l + edge, b],
+                    [r - edge, t, r, b],
+                ] {
+                    self.rect(side, faded(line), size);
+                }
+            }
+            gl.disable(Gl::BLEND);
+        }
     }
 
     /// The canvas's pixels as drawn last, RGBA, rows from the top. Read it
@@ -457,7 +599,7 @@ impl Viewer {
 }
 
 impl Viewer {
-    fn rect(&self, rect: [f64; 4], color: [f32; 3], size: (f32, f32)) {
+    fn rect(&self, rect: [f64; 4], color: [f32; 4], size: (f32, f32)) {
         let gl = &self.gl;
         gl.use_program(Some(&self.rect.program));
         gl.uniform4f(
@@ -468,12 +610,23 @@ impl Viewer {
             rect[3] as f32,
         );
         gl.uniform2f(self.rect.at("u_size"), size.0, size.1);
-        gl.uniform3f(self.rect.at("u_color"), color[0], color[1], color[2]);
+        gl.uniform4f(
+            self.rect.at("u_color"),
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+        );
         gl.draw_arrays(Gl::TRIANGLE_STRIP, 0, 4);
     }
 
     /// Gives the GPU the mesh's buffers.
-    fn upload(&self, mesh: &Mesh, millimetres_per_unit: f64) -> Result<Loaded, JsError> {
+    fn upload(
+        &self,
+        mesh: &Mesh,
+        millimetres_per_unit: f64,
+        list: DisplayList,
+    ) -> Result<Loaded, JsError> {
         let gl = &self.gl;
         let mut buffers = Vec::new();
         let mut buffer = |target: u32, bytes: &[u8]| -> Result<(), JsError> {
@@ -546,6 +699,7 @@ impl Viewer {
         gl.bind_vertex_array(None);
 
         Ok(Loaded {
+            list,
             origin: mesh.origin,
             paper: mesh.paper,
             millimetres_per_unit,

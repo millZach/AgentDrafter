@@ -8,11 +8,12 @@
 //! unless a build is told otherwise. Neither holds the ID separator, `/`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::ids::{object_id, ObjectRecord};
 use super::{
-    library_beside, on_its_own_with_records, read_file, read_rows, read_set_settings,
-    read_template, template_path, Row,
+    library_beside, on_its_own_with_records, read_file, read_rows_in, read_set_settings_in,
+    read_template_in, template_path, Disk, ReadFiles, Row,
 };
 use crate::error::Error;
 use crate::model::Sheet;
@@ -63,20 +64,33 @@ pub(crate) struct SavedSet {
     rows_file: PathBuf,
     /// The set's rows, in its order.
     pub rows: Vec<Row>,
+    /// Where its files are read from.
+    files: Arc<dyn ReadFiles + Send + Sync>,
 }
 
 impl SavedSet {
     /// Reads the settings and the rows of the drawing set whose folder is
     /// `folder`.
     pub(crate) fn read(folder: &Path) -> Result<SavedSet, Error> {
-        let settings = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
+        Self::read_from(folder, Arc::new(Disk))
+    }
+
+    /// Reads the settings and the rows of the drawing set whose folder is
+    /// `folder` from `files`, and its sheets from them too: the set as it
+    /// was at an entry of its journal, say.
+    pub(crate) fn read_from(
+        folder: &Path,
+        files: Arc<dyn ReadFiles + Send + Sync>,
+    ) -> Result<SavedSet, Error> {
+        let settings = read_set_settings_in(files.as_ref(), &folder.join(SET_SETTINGS_FILE))?;
         let rows_file = folder.join(&settings.rows);
-        let rows = read_rows(&rows_file)?;
+        let rows = read_rows_in(files.as_ref(), &rows_file)?;
         Ok(SavedSet {
             folder: folder.to_owned(),
             units: settings.units,
             rows_file,
             rows,
+            files,
         })
     }
 
@@ -89,7 +103,14 @@ impl SavedSet {
     /// row, with the block library the template names.
     pub(crate) fn sheet(&self, row: &Row) -> Result<SheetRecord, Error> {
         let template = template_path(&self.folder, row);
-        read_template(&template, row, &self.rows_file, self.units, &mut Vec::new())
+        read_template_in(
+            self.files.as_ref(),
+            &template,
+            row,
+            &self.rows_file,
+            self.units,
+            &mut Vec::new(),
+        )
     }
 }
 

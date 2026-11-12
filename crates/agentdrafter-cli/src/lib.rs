@@ -26,10 +26,11 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use agentdrafter_core::{commands, find_command, Error, ErrorCode, Reply, Settings};
+use agentdrafter_core::{commands, find_command, Error, ErrorCode, Interface, Reply, Settings};
 use agentdrafter_core::{
-    ChangeRequest, CheckRequest, DisplayListRequest, JournalRequest, MeasureTextRequest,
-    RenderRequest, StaleRequest, UndoRequest, FONTS_VARIABLE, PLOT_STYLES_VARIABLE,
+    AcceptRequest, ChangeRequest, CheckRequest, DisplayListRequest, JournalRequest,
+    MeasureTextRequest, RenderRequest, StaleRequest, UndoRequest, FONTS_VARIABLE,
+    PLOT_STYLES_VARIABLE,
 };
 use agentdrafter_core::{End, Matching, Measure, Query, QueryRequest, Selection};
 use serde::Serialize;
@@ -43,9 +44,10 @@ const OPERATIONS_USAGE: &str = "agentdrafter operations";
 const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder> <change-set.json | -> [--dry-run] [--fonts <folder>]...";
 const JOURNAL_USAGE: &str = "agentdrafter journal <drawing-set-folder>";
 const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [--dry-run]";
+const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]...";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...";
-const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--tolerance <length>] [--fonts <folder>]...";
+const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--tolerance <length>] [--entry <journal-entry>] [--fonts <folder>]...";
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]...";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
@@ -93,6 +95,7 @@ fn cli_form(command: &str) -> Option<(&'static str, Parse)> {
         "change" => (CHANGE_USAGE, parse_change),
         "journal" => (JOURNAL_USAGE, parse_journal),
         "undo" => (UNDO_USAGE, parse_undo),
+        "accept" => (ACCEPT_USAGE, parse_accept),
         "check" => (CHECK_USAGE, parse_check),
         _ => return None,
     })
@@ -136,7 +139,7 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
         ))));
     };
     match parse(args) {
-        Ok(input) => send(command.run(input, &Settings::from_env())),
+        Ok(input) => send(command.run(input, &Settings::from_env(), Interface::Cli)),
         Err(error) => reply::<()>(Err(error)),
     }
 }
@@ -321,6 +324,19 @@ fn parse_display_list(mut args: Args) -> Result<Value, Error> {
                     .is_some()
                 {
                     return Err(Error::usage("--tolerance is given twice"));
+                }
+            }
+            Some("--entry") => {
+                let text = value("--entry", args.next())?;
+                let entry = entry_number(&text).ok_or_else(|| {
+                    Error::usage(format!(
+                        "--entry takes a journal entry by its number, such as 3, not `{}`; usage: \
+                         {DISPLAY_LIST_USAGE}",
+                        text.to_string_lossy()
+                    ))
+                })?;
+                if request.entry.replace(entry).is_some() {
+                    return Err(Error::usage("--entry is given twice"));
                 }
             }
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
@@ -574,6 +590,59 @@ fn parse_undo(args: Args) -> Result<Value, Error> {
         dry_run,
     };
     input_of(request, Vec::new())
+}
+
+/// A journal entry's number, as an argument gives it.
+fn entry_number(text: &OsString) -> Option<u64> {
+    text.to_str().and_then(|n| n.parse::<u64>().ok())
+}
+
+fn parse_accept(mut args: Args) -> Result<Value, Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {ACCEPT_USAGE}"));
+    let mut set: Option<OsString> = None;
+    let mut request = AcceptRequest {
+        set: PathBuf::new(),
+        despite_failed_checks: false,
+        newest_seen: None,
+        dry_run: false,
+    };
+    let mut fonts = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--dry-run") => request.dry_run = true,
+            Some("--despite-failed-checks") => request.despite_failed_checks = true,
+            Some("--newest-seen") => {
+                let text = args
+                    .next()
+                    .ok_or_else(|| usage("--newest-seen needs a journal entry's number".into()))?;
+                let entry = entry_number(&text).ok_or_else(|| {
+                    usage(format!(
+                        "--newest-seen takes the journal's newest entry the caller has seen, by \
+                         its number, such as 7, not `{}`",
+                        text.to_string_lossy()
+                    ))
+                })?;
+                if request.newest_seen.replace(entry).is_some() {
+                    return Err(usage("--newest-seen is given twice".into()));
+                }
+            }
+            Some("--fonts") => fonts.push(PathBuf::from(
+                args.next()
+                    .ok_or_else(|| usage("--fonts needs a folder".into()))?,
+            )),
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("accept takes no option `{flag}`")))
+            }
+            _ => {
+                if set.replace(arg).is_some() {
+                    return Err(usage("accept takes one drawing set's folder".into()));
+                }
+            }
+        }
+    }
+    request.set =
+        PathBuf::from(set.ok_or_else(|| usage("accept needs a drawing set's folder".into()))?);
+    input_of(request, fonts)
 }
 
 fn parse_query(mut args: Args) -> Result<Value, Error> {

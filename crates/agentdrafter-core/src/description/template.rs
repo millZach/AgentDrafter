@@ -23,8 +23,8 @@ use super::records::SheetRecord;
 use super::set::{value_name_problem, Row};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
 use super::{
-    bad_value, library_beside, read_file, scalar, sheet_and_records, Fields, LibraryFile,
-    RowObjects,
+    bad_value, library_beside_in, read_file_in, scalar, sheet_and_records, Disk, Fields,
+    LibraryFile, ReadFiles, RowObjects,
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{BlockLibrary, Sheet};
@@ -64,8 +64,21 @@ pub(crate) fn read_template(
     set_units: Unit,
     notices: &mut Vec<Notice>,
 ) -> Result<SheetRecord, Error> {
-    let text = read_file(path, "the template")?;
-    template_at(&text, path, row, rows_file, set_units, notices).map(|(record, _)| record)
+    read_template_in(&Disk, path, row, rows_file, set_units, notices)
+}
+
+/// Reads a template as [`read_template`] does, and the block library it
+/// names, from `files`.
+pub(crate) fn read_template_in(
+    files: &dyn ReadFiles,
+    path: &Path,
+    row: &Row,
+    rows_file: &Path,
+    set_units: Unit,
+    notices: &mut Vec<Notice>,
+) -> Result<SheetRecord, Error> {
+    let text = read_file_in(files, path, "the template")?;
+    template_in(files, &text, path, row, rows_file, set_units, notices).map(|(record, _)| record)
 }
 
 /// Reads `text`, the template in the file at `path`, as [`read_template`]
@@ -80,13 +93,27 @@ pub(crate) fn template_at(
     set_units: Unit,
     notices: &mut Vec<Notice>,
 ) -> Result<(SheetRecord, Option<LibraryFile>), Error> {
+    template_in(&Disk, text, path, row, rows_file, set_units, notices)
+}
+
+/// Reads a template's text as [`template_at`] does, with the block library
+/// it names read from `files`.
+fn template_in(
+    files: &dyn ReadFiles,
+    text: &str,
+    path: &Path,
+    row: &Row,
+    rows_file: &Path,
+    set_units: Unit,
+    notices: &mut Vec<Notice>,
+) -> Result<(SheetRecord, Option<LibraryFile>), Error> {
     let mut library = None;
     let (sheet, objects) = fill_with_records(
         text,
         row,
         rows_file,
         set_units,
-        &mut library_beside(path, &mut library),
+        &mut library_beside_in(files, path, &mut library),
         notices,
     )
     .map_err(|e| e.or_in_file(path))?;

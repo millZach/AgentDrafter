@@ -88,10 +88,16 @@ def journal(set_folder):
 
 
 def without_times(value):
-    """`value` with every journal time taken out, the one thing two runs of
-    the same change set may differ in."""
+    """`value` with every journal time and the interface an accept came
+    through taken out, the only things the same command through two
+    interfaces may differ in; the test checks each accept's interface on its
+    own."""
     if isinstance(value, dict):
-        return {key: without_times(item) for key, item in value.items() if key != "at"}
+        return {
+            key: without_times(item)
+            for key, item in value.items()
+            if key not in ("at", "via", "accepted_at")
+        }
     if isinstance(value, list):
         return [without_times(item) for item in value]
     return value
@@ -272,6 +278,11 @@ class Interfaces(unittest.TestCase):
                     f"`{name}` through the library and the {interface}",
                 )
         self.assertEqual(mcp.finish(), 0, "the MCP server stops when its input closes")
+
+        # Each accept is recorded with the interface it came through.
+        for interface, via in (("library", "python"), ("cli", "cli"), ("http", "http"), ("mcp", "mcp")):
+            accepts = [e for e in journal(self.folders[interface] / "demo-set") if e["kind"] == "accept"]
+            self.assertEqual([e["via"] for e in accepts], [via], interface)
 
         # Every file of the set is the same after the same commands.
         by_library = snapshot(self.folders["library"] / "demo-set")

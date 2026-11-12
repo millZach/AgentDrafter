@@ -4,7 +4,7 @@ The checker re-reads a drawing set's saved files, or one sheet description, and 
 
 `agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...` checks every sheet of a set, or only those `--sheet` names, in any case, and prints one line of JSON. It is a thin layer over the core's `check_with`, which takes a request and returns the report as plain data (ADR-0007). A change set's reply carries the checker's reply too ([below](#after-a-change-set)).
 
-A failed check is reported, not refused. The reply is `ok`, with each failed check under `findings`; it does not stop a change set from landing, and the reviewer can accept a set after a warning that lists them (`docs/plan.md`). A sheet that cannot be read stops the check with its error, placed in its file, as a query does: a report that left a sheet out could say it passed.
+A failed check is reported, not refused. The reply is `ok`, with each failed check under `findings`; it does not stop a change set from landing, and the reviewer can accept a set after a warning that lists them (`docs/plan.md`): [`accept`](journal.md#accept) checks every sheet first, lists what fails, and issues nothing until told to accept despite it. A sheet that cannot be read stops the check with its error, placed in its file, as a query does: a report that left a sheet out could say it passed.
 
 ## What the checker reads
 

@@ -4,7 +4,8 @@
 
 use agentdrafter_core::{
     block_library_schema, change_set_schema, commands, find_command, operations, rows_schema,
-    set_schema, sheet_description_schema, template_schema, ErrorCode, JsonReply, Settings,
+    set_schema, sheet_description_schema, template_schema, ErrorCode, Interface, JsonReply,
+    Settings,
 };
 use serde_json::{json, Value};
 
@@ -22,7 +23,7 @@ fn run(command: &str, input: Value) -> Value {
     plain(
         &find_command(command)
             .unwrap()
-            .run(input, &Settings::default()),
+            .run(input, &Settings::default(), Interface::Cli),
     )
 }
 
@@ -45,7 +46,7 @@ fn samples() -> Vec<(&'static str, Value)> {
         ),
         (
             "display-list",
-            json!({"source": "missing", "sheet": "DEMO-001", "tolerance": 0.01, "fonts": ["f"]}),
+            json!({"source": "missing", "sheet": "DEMO-001", "tolerance": 0.01, "entry": 2, "fonts": ["f"]}),
         ),
         (
             "plot",
@@ -68,6 +69,10 @@ fn samples() -> Vec<(&'static str, Value)> {
         (
             "undo",
             json!({"set": "missing", "change_set": 3, "dry_run": true}),
+        ),
+        (
+            "accept",
+            json!({"set": "missing", "despite_failed_checks": true, "newest_seen": 4, "dry_run": true, "fonts": ["f"]}),
         ),
         (
             "check",
@@ -272,6 +277,7 @@ fn a_command_gives_what_the_core_entry_point_gives() {
     let reply = find_command("measure-text").unwrap().run(
         json!({"contents": "PUMP 101", "font": "missing.ttf", "height": 2.5}),
         &Settings::default(),
+        Interface::Cli,
     );
     let text = serde_json::to_string(&reply).unwrap();
     assert!(

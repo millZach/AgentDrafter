@@ -25,8 +25,10 @@
 //! A dry run does all of this but write: it reports what would land, what
 //! would fail and what the records would become, and changes nothing.
 
+mod accept;
 mod apply;
 mod commit;
+mod history;
 mod journal;
 mod operations;
 mod undo;
@@ -48,9 +50,13 @@ use crate::units::Unit;
 
 pub use operations::{change_set_schema, operations, OperationInfo, OperationList};
 
+pub(crate) use accept::stamp_revision;
+pub use accept::{accept_with, AcceptReport, AcceptRequest, StampRevision};
+pub(crate) use history::FilesAsOf;
 pub use journal::{
-    journal, Entry, EntryKind, FileState, JournalEntry, JournalReport, JournalRequest, Refusal,
-    SheetFailed, UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
+    journal, CheckFailed, Entry, EntryKind, FileIssued, FileState, HowChanged, JournalEntry,
+    JournalReport, JournalRequest, ObjectChanged, Refusal, SheetFailed, UndoState, JOURNAL_FILE,
+    KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
 };
 pub use undo::{undo, FileUndone, UndoAction, UndoReport, UndoRequest};
 

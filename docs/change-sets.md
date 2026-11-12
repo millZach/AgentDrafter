@@ -98,7 +98,7 @@ failures:
       - '{"center":[5,5,0],"layer":"note","op":"add_circle","radius":0.5,"sheet":"DEMO-002"}'
 ```
 
-**It is reported until fixed**, under `inconsistent`, by every reply that reads the set's folder: a change set's, a dry run's, and those of `agentdrafter build`, `plot` and `query` given the folder. The reviewer cannot accept a set while it is marked.
+**It is reported until fixed**, under `inconsistent`, by every reply that reads the set's folder: a change set's, a dry run's, and those of `agentdrafter build`, `plot` and `query` given the folder. The reviewer cannot accept a set while it is marked: [`accept`](journal.md#accept) is refused with the error `inconsistent`.
 
 **A sheet is cleared by a change set that names it under `fixes` and lands on it.** The change set may hold operations for the sheet or none; either way the sheet is read and built again, and cleared only when it takes its part. A `fixes` naming a sheet the mark does not hold refuses the change set. When the last failure is cleared, the mark is taken away, and its folder when nothing else is in it. **Undoing the change set** puts the mark back as it was before it ([the journal](journal.md#undo)), which clears the failures that change set marked.
 

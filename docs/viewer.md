@@ -1,6 +1,6 @@
 # The viewer
 
-The viewer is the browser window where the reviewer looks at a drawing set (see [`CONTEXT.md`](../CONTEXT.md)). This first part draws a set's sheets in the page, with the same Rust drawing pipeline that makes the PNG and the PDF, compiled to WebAssembly, with TypeScript and React around it (ADR-0011); the reviewer pans and zooms on a laptop and on a phone. Watching change sets land, the journal, Undo and Accept come next (#18).
+The viewer is the browser window where the reviewer watches a drawing set change, steps through its journal, and accepts or undoes (see [`CONTEXT.md`](../CONTEXT.md)). It draws a set's sheets in the page, with the same Rust drawing pipeline that makes the PNG and the PDF, compiled to WebAssembly, with TypeScript and React around it (ADR-0011); the reviewer pans and zooms on a laptop and on a phone. A change set an agent sends shows as it lands, named by a toast, its objects marked; the journal steps back through the set as it was; a tap picks an object to inspect; and Undo last and Accept are always in reach. It has no drawing tools.
 
 ## Opening it
 
@@ -66,7 +66,36 @@ The sheet can zoom out to half its fitted size and in to 32 times it, and is nev
 
 ## The look
 
-The look follows variant A of the prototype the reviewer picked (#16): the drawing fills the screen, the set's sheets are tabs across the top, and the journal's sheet peeks up from the bottom on a phone, dragging up to half or nearly all of the screen, and is a panel on the right on a laptop (900 CSS pixels wide or more). Undo last and Accept are in the peek, always in reach. Until #18 they hold their places switched off, and the journal's sheet says what is coming; nothing in it does anything yet.
+The look follows variant A of the prototype the reviewer picked (#16): the drawing fills the screen and follows the working revision live, the set's sheets are tabs across the top, and the journal's sheet peeks up from the bottom on a phone, dragging up to half or nearly all of the screen, and is a panel on the right on a laptop (900 CSS pixels wide or more). The peek always holds the stream's state, the newest entry of the journal, and Undo last and Accept. The header says how many change sets are not issued, or which accept issued the set, whether the set is inconsistent, and how many checks fail; a tab's dot says its sheet is marked inconsistent (!), fails a check (red) or has change sets not issued (blue).
+
+## Watching change sets land
+
+The page watches the set's journal through the server's event stream, `POST /events` ([servers.md](servers.md#watching-a-set)), which sends the `journal` command's reply when it opens and again each time the journal changes on disk. Every change set, failed attempt, undo and accept adds to the journal, so the page sees each one whichever process sent it and through whichever interface: an agent's command line in another terminal, its MCP server, the Python library or the HTTP API. A browser's `EventSource` sends no headers, so the page reads the stream with `fetch`, which sends the token as every command does; a stream that ends is opened again, a second later and then more slowly.
+
+For each new entry:
+
+- **The sheets it touched are drawn again**: those a change set landed on, and those of the change sets an undo undid. A sheet shown is asked for at once and drawn in place, keeping the reviewer's view; another is asked for when its tab is opened. A failed attempt and an accept change no file a sheet is drawn from.
+- **A toast names it**, as the picked prototype's does: a change set that landed and on which sheets, one that landed on some sheets and failed on others, with the set inconsistent until they are fixed, one that failed whole, one that landed and failed checks, with the first failed check, an undo, and an accept, with the interface it came through. A change set's toast has a Show button, which shows the change.
+- **Its objects are marked.** The change set's journal entry names each object it added, changed or moved on each sheet it landed on ([journal.md](journal.md#what-it-records)); on the sheet shown, each gets a halo round what it draws, green for added and amber for changed, which pulses three times as it lands and then holds, as the prototype's do. A deleted object draws nothing to mark.
+- **The checks are run again** on the sheets it touched, from the saved files, for the header, the tabs and the toast.
+
+The reviewer looking at the set as it was at an entry ([below](#stepping-through-the-journal)) is not moved: the toast still comes, and Show takes them back to the set as it is.
+
+## Stepping through the journal
+
+The bottom sheet lists the journal's entries, the newest first: change sets, failed attempts, undos and accepts, each with its number, what it did in a few words, the sheets it landed (✓) and failed (✕) on, its time and what has become of it: landed, failed check, inconsistent, undone, issued, failed attempt, undo or accept, and through which interface. Opening one shows its details: why it failed, its operations, what issued or undid it, and Undo for a change set an undo can take, with every later one.
+
+Stepping to an entry, with the arrows or by opening it, **shows the set as it was just after that entry, read-only**: the page asks `display-list` for the sheet with the entry (`entry`), which the server rebuilds in memory from the undo states and never writes ([journal.md](journal.md#the-set-as-it-was-at-an-entry)). The view moves to a sheet the entry touched and zooms in on its marked objects. A banner over the drawing says which entry is shown; **Back to live** returns to the set as it is. An entry whose files are no longer kept, because the undo state that held them was pruned (only the 50 newest change sets keep theirs) or the change set was undone, says it cannot be shown, and why, over the drawing. Undo last and Accept stay in reach, and act on the set as it is.
+
+## Picking
+
+A tap, or a click, picks the object drawn nearest it, within 16 CSS pixels: the core picks it from the display list the page draws, in WebAssembly (`pick` in `src/draw/pick.rs`), so what is picked is what is drawn there, an insert for everything its block draws, and the page holds no hit-test of its own. The bottom sheet turns into the inspector, as the prototype's does: the object's name, its type (an insert's block), ID, name, layer and sheet, an insert's attributes, the checks it fails, and the change sets that changed it. The picked object gets a blue halo. A tap on nothing, or the Journal button, goes back to the journal. The `display-list` reply says what each object is, by its place, which is what the inspector shows.
+
+## Undo and accept
+
+**Undo last** undoes the newest change set an undo can take, through the same `undo` command every interface reaches, as one ([journal.md](journal.md#undo)); the button names it. An issued change set cannot be undone, so after an accept Undo last is off until a change set lands.
+
+**Accept** issues the working revision through the `accept` command ([journal.md](journal.md#accept)). It asks first, as the prototype's does: the page runs the accept as a dry run and shows what it would issue, the change sets and their sheets, and every failed check, or that all checks pass; **Accept and issue** accepts, despite the failed checks it listed, and only if the journal has not moved on since the dialog opened (`newest_seen`). An accept that cannot be made, the set inconsistent, or nothing to accept, says why in a toast and asks nothing. The journal records the accept as the viewer's.
 
 A tab shows its sheet at once when the page has drawn it before; the server is asked for each sheet once. Going back to a sheet already drawn shows it with nothing said of the sheet asked for meanwhile, whether that one is still coming (its reply is kept for later) or failed.
 
@@ -91,7 +120,7 @@ The page's packages, all permissive or MPL-2.0 (ADR-0010): `react`, `react-dom` 
 ## Tests
 
 - `cargo test -p agentdrafter-viewer`: the mesh, natively: strokes into segments with their pens and colours on paper, fills into triangles by their rule, each with its item's place, the runs of one kind in order, and a demo plant sheet read from the core's own reply.
-- `npm test` in `viewer/`: the view's arithmetic (fit, zoom about a point, pinch, keeping the sheet in sight), taking the token from the fragment and sending it as a bearer, and the image comparison below.
+- `npm test` in `viewer/`: the view's arithmetic (fit, zoom about a point, pinch, keeping the sheet in sight, zooming in on a change, the pulse), taking the token from the fragment and sending it as a bearer, reading the event stream, what the page makes of the journal (each entry's name and state, the sheets it touched, the objects it changed, what Undo last takes), and the image comparison below.
 - `node e2e/run.mjs` in `viewer/` (after `npm run build` and `cargo build -p agentdrafter-cli`): the page in headless Chromium against `agentdrafter serve`, each check starting and stopping its own server. `--chrome` names the browser; `--gl gpu` draws with the machine's GPU instead of software WebGL. It writes `results.json`, the screenshots and the compared images into `target/viewer-e2e/`.
   - `png`: the canvas matches its PNG, in ink and in colour (below).
   - `token`: a server listening on `0.0.0.0` serves the page and its files without the token and refuses commands without it, with another or with it in a query string; the page with no token says how to open it; from the printed address it draws, takes the token off the address, keeps it for the tab and still draws after a reload; the server printed one line.
@@ -100,6 +129,11 @@ The page's packages, all permissive or MPL-2.0 (ADR-0010): `react`, `react-dom` 
   - `mouse`: the wheel zooms, a drag pans, a double click zooms in, fit and the zoom buttons work, and a tab shows its sheet and names it in the address.
   - `fit`: the first load shows the whole sheet, at phone and laptop sizes, and so does another tab; a page laid out at 1000 by 700 and then narrowed to 390 by 844, and then given 3 device pixels to a CSS pixel, is fitted to each; a view the reviewer zoomed keeps its scale through a change of size; and a change of size during the fit button's glide, from phone to laptop width, ends fitted to the new size.
   - `tabs`: with the server's replies held back or failed at will, going back to a sheet already drawn while another is still coming, or after another failed, shows it and says nothing more; the late reply changes nothing; a sheet drawn before is not asked for again.
+  - `live`: at laptop and phone sizes, a change set the command line sends, in another process, shows in the open page without a reload: a toast names it, the sheet shown is drawn again with the moved insert marked, and a sheet it landed on that is not shown is drawn anew when its tab is opened.
+  - `journal`: with 53 change sets in the journal, stepping back shows the set as it was at entries 53 and 52, its change marked and in sight, the drawing no taller than the screen; entry 1, whose undo state is pruned, says it cannot be shown; Back to live returns; nothing is written.
+  - `pick`: at phone size, a tap on an insert shows its ID, name, layer, block and attributes, and marks it; a tap on nothing goes back to the journal.
+  - `undo`: Undo last undoes a template edit, every file on every sheet it reached put back, through the undo command, and is off once nothing is left to undo.
+  - `accept`: at phone size, Accept is refused while the set is inconsistent; undone from the page, then a change set that fails checks: Accept asks, listing them, issues nothing until confirmed, then issues the change set; the journal records the viewer's accept and the failed checks, and undo refuses the issued change set.
   - `look`: screenshots at phone size (390 by 844 CSS pixels at 3 device pixels each, touch) and laptop size (1440 by 900).
 
 ### Measured against the PNG

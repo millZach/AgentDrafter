@@ -18,7 +18,7 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use super::commit::Replacement;
-use super::journal::{commit_change_set, Landing, SheetFailed};
+use super::journal::{commit_change_set, HowChanged, Landing, ObjectChanged, SheetFailed};
 use super::operations::{op_error, read_change_set, AddTo, Body, Kind, Operation, Target};
 use super::MARK_FILE;
 use super::{
@@ -28,7 +28,7 @@ use super::{
 use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::{
     article, mark_text, read_file, read_set_settings, rows_at, template_at, template_path,
-    AttributeSet, Listed, MarkFailure, ObjectList, RecordFile, Row,
+    AttributeSet, Listed, MarkFailure, ObjectList, RecordFile, Row, ID_SEPARATOR,
 };
 use crate::error::{Error, ErrorCode};
 use crate::set::{Notice, SET_SETTINGS_FILE};
@@ -258,6 +258,52 @@ struct Done {
     message: String,
 }
 
+/// Each object the operations that landed added, changed, moved or
+/// deleted, on each sheet they reached, for the change set's journal entry:
+/// an object of a template on every sheet built from it, and each place a
+/// row's value fills.
+fn objects_changed(
+    ops: &[Operation],
+    included: &[bool],
+    done: &[Option<Done>],
+    op_sheets: &[Vec<usize>],
+    files: &SetFiles,
+) -> Vec<ObjectChanged> {
+    let mut objects: Vec<ObjectChanged> = Vec::new();
+    let mut add = |id: String, how: HowChanged| {
+        match objects.iter_mut().find(|o| o.id == id) {
+            // An object added, then changed, was added; one changed, then
+            // deleted, was deleted.
+            Some(seen) if seen.how == HowChanged::Added && how == HowChanged::Changed => {}
+            Some(seen) => seen.how = how,
+            None => objects.push(ObjectChanged { id, how }),
+        }
+    };
+    for op in ops {
+        let i = op.index;
+        let Some(d) = done[i].as_ref().filter(|_| included[i]) else {
+            continue;
+        };
+        let how = match op.spec.name {
+            "delete" => HowChanged::Deleted,
+            name if name.starts_with("add_") || name == "insert_block" => HowChanged::Added,
+            _ => HowChanged::Changed,
+        };
+        if let Some(id) = &d.id {
+            // The ID on the sheet named; the same object on every sheet the
+            // operation reaches carries it after that sheet's name.
+            let local = id.split_once(ID_SEPARATOR).map_or(id.as_str(), |(_, l)| l);
+            for &k in &op_sheets[i] {
+                add(format!("{}{ID_SEPARATOR}{local}", files.name(k)), how);
+            }
+        }
+        for fill in d.row_value.iter().flat_map(|row| &row.fills) {
+            add(fill.id.clone(), HowChanged::Changed);
+        }
+    }
+    objects
+}
+
 /// Applies the change set. `attempted` is given what it did to its sheets
 /// before its files are put in place, so a commit that fails is recorded as
 /// a failed attempt with the sheets it touched.
@@ -461,6 +507,7 @@ pub(super) fn apply(
             });
         }
         let landing = Landing {
+            objects: objects_changed(ops, &included, &done, &op_sheets, &files),
             landed_on: files.names(&landed),
             failed_on: failed
                 .iter()

@@ -24,11 +24,12 @@ use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 
 use crate::build::{build_with, BuildRequest};
+use crate::change::{accept_with, AcceptRequest, JournalRequest, UndoRequest};
 use crate::change::{change_set_schema, change_with, journal, operations, undo, ChangeRequest};
-use crate::change::{JournalRequest, UndoRequest};
 use crate::check::{check_with, CheckRequest};
 use crate::display_list::{display_list_with, DisplayListRequest};
 use crate::error::Error;
+use crate::interface::Interface;
 use crate::plot::{plot_set_with, plot_with, PlotRequest, PlotSetRequest, BUILT_IN_PLOT_STYLE};
 use crate::query::{query_with, QueryRequest};
 use crate::render::{render_with, RenderRequest};
@@ -45,8 +46,8 @@ use crate::{template_schema, JOURNAL_FILE, KEPT_UNDO_STATES};
 pub type JsonReply = Reply<Box<RawValue>>;
 
 /// How the core carries a command out on its input, an object, with the
-/// machine's settings.
-type Run = fn(Map<String, Value>, &Settings) -> Result<JsonReply, Error>;
+/// machine's settings, for the interface it came through.
+type Run = fn(Map<String, Value>, &Settings, Interface) -> Result<JsonReply, Error>;
 
 /// One command of the registry: its name, what it does, the schema of its
 /// input, and how the core carries it out.
@@ -77,11 +78,12 @@ impl Command {
 
     /// Carries the command out on `input`, a JSON object its input schema
     /// describes, with `settings` saying where the machine keeps its fonts
-    /// and plot styles. The reply is the one the command line prints. An
-    /// input that does not fit the schema is a `usage` error.
-    pub fn run(&self, input: Value, settings: &Settings) -> JsonReply {
+    /// and plot styles, for the interface `via` it came through, which an
+    /// accept records in the journal. The reply is the one the command line
+    /// prints. An input that does not fit the schema is a `usage` error.
+    pub fn run(&self, input: Value, settings: &Settings, via: Interface) -> JsonReply {
         let outcome = match input {
-            Value::Object(input) => (self.run)(input, settings),
+            Value::Object(input) => (self.run)(input, settings, via),
             other => Err(Error::usage(format!(
                 "the input to `{}` is a JSON object, not {}",
                 self.name,
@@ -194,6 +196,12 @@ const COMMANDS: &[Command] = &[
         run: run_undo,
     },
     Command {
+        name: "accept",
+        does: accept_does,
+        input: accept_input,
+        run: run_accept,
+    },
+    Command {
         name: "check",
         does: check_does,
         input: check_input,
@@ -240,7 +248,11 @@ fn build_input() -> Value {
     )
 }
 
-fn run_build(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply, Error> {
+fn run_build(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let BuildInput {
         source,
@@ -300,7 +312,7 @@ fn schema_input() -> Value {
     )
 }
 
-fn run_schema(input: Map<String, Value>, _: &Settings) -> Result<JsonReply, Error> {
+fn run_schema(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<JsonReply, Error> {
     let SchemaInput { kind } = parse("schema", input)?;
     let schema = match kind.as_deref().unwrap_or(SCHEMA_KINDS[0]) {
         "sheet-description" => sheet_description_schema(),
@@ -342,7 +354,11 @@ fn measure_input() -> Value {
     )
 }
 
-fn run_measure(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply, Error> {
+fn run_measure(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: MeasureTextRequest = parse("measure-text", input)?;
     Ok(done(measure_text_with(&request, &settings)))
@@ -379,7 +395,11 @@ fn render_input() -> Value {
     )
 }
 
-fn run_render(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply, Error> {
+fn run_render(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: RenderRequest = parse("render", input)?;
     Ok(done(render_with(&request, &settings)))
@@ -394,8 +414,11 @@ fn display_list_does() -> String {
      filled contours, in drawing units, with each line of text as the characters it reads. \
      `source` is a sheet description, a DWG or a drawing set's folder, whose sheet `sheet` \
      names (its first without it); the reply lists the set's sheets, the paper, the extents \
-     and how many millimetres of paper a drawing unit spans. Curves are drawn within \
-     `tolerance` drawing units, by default a 100,000th of the sheet's larger side. A loop \
+     and how many millimetres of paper a drawing unit spans, and what each of the sheet's \
+     objects is: its ID, name, type and layer, and an insert's block and attributes. Curves \
+     are drawn within `tolerance` drawing units, by default a 100,000th of the sheet's larger \
+     side. With `entry`, a drawing set is drawn as it was just after that entry of its journal, \
+     rebuilt in memory from the undo states, or the reply says why it cannot be. A loop \
      sheet's display list runs to megabytes: it is for the viewer to draw, not to read."
         .to_owned()
 }
@@ -406,13 +429,22 @@ fn display_list_input() -> Value {
             "source": text("The record to draw: a sheet description, a DWG when the file ends .dwg, or a drawing set's folder."),
             "sheet": text("Which of the drawing set's sheets to draw, by name. Without it, the set's first."),
             "tolerance": number("How far, in drawing units, a curve's chords may stray from it. Without it, a 100,000th of the sheet's larger side."),
+            "entry": {
+                "description": "Draw the drawing set as it was just after this entry of its journal, by its number, rebuilt in memory from the undo states; nothing is written. Without it, as it is now.",
+                "type": "integer",
+                "minimum": 1,
+            },
             "fonts": fonts(),
         }),
         &["source"],
     )
 }
 
-fn run_display_list(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply, Error> {
+fn run_display_list(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: DisplayListRequest = parse("display-list", input)?;
     Ok(done(display_list_with(&request, &settings)))
@@ -464,7 +496,11 @@ fn plot_input() -> Value {
     )
 }
 
-fn run_plot(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply, Error> {
+fn run_plot(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, true)?;
     let PlotInput {
         source,
@@ -514,7 +550,7 @@ fn stale_input() -> Value {
     )
 }
 
-fn run_stale(input: Map<String, Value>, _: &Settings) -> Result<JsonReply, Error> {
+fn run_stale(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<JsonReply, Error> {
     let request: StaleRequest = parse("stale", input)?;
     Ok(done(check_stale(&request)))
 }
@@ -614,7 +650,11 @@ fn query_schema() -> Value {
     })
 }
 
-fn run_query(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply, Error> {
+fn run_query(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: QueryRequest = parse("query", input)?;
     Ok(done(query_with(&request, &settings)))
@@ -636,7 +676,11 @@ fn operations_input() -> Value {
     input(json!({}), &[])
 }
 
-fn run_operations(input: Map<String, Value>, _: &Settings) -> Result<JsonReply, Error> {
+fn run_operations(
+    input: Map<String, Value>,
+    _: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
     let NoInput {} = parse("operations", input)?;
     Ok(done(Ok(operations())))
 }
@@ -683,7 +727,11 @@ fn change_input() -> Value {
     schema
 }
 
-fn run_change(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply, Error> {
+fn run_change(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: ChangeRequest = parse("change", input)?;
     Ok(sent(change_with(&request, &settings)))
@@ -709,7 +757,7 @@ fn journal_input() -> Value {
     )
 }
 
-fn run_journal(input: Map<String, Value>, _: &Settings) -> Result<JsonReply, Error> {
+fn run_journal(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<JsonReply, Error> {
     let request: JournalRequest = parse("journal", input)?;
     Ok(sent(journal(&request)))
 }
@@ -741,9 +789,51 @@ fn undo_input() -> Value {
     )
 }
 
-fn run_undo(input: Map<String, Value>, _: &Settings) -> Result<JsonReply, Error> {
+fn run_undo(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<JsonReply, Error> {
     let request: UndoRequest = parse("undo", input)?;
     Ok(sent(undo(&request)))
+}
+
+// accept
+
+fn accept_does() -> String {
+    "Accepts the working revision of the drawing set in the folder `set`, as the reviewer does \
+     in the viewer: every change set still in place is marked issued, and an issued change set \
+     cannot be undone; the journal records the accept, the interface it came through, the \
+     change sets it issued and the fingerprint of each file of the set, so a PNG or a PDF made \
+     from those files says it came from an issued revision. It is refused while the set is \
+     inconsistent. It checks every sheet first, and when checks fail it lists them and issues \
+     nothing unless `despite_failed_checks` says to accept anyway. `newest_seen` refuses it \
+     when the journal has moved on past the entry the caller last looked at. With `dry_run` \
+     it reports what it would do and writes nothing."
+        .to_owned()
+}
+
+fn accept_input() -> Value {
+    input(
+        json!({
+            "set": text("The drawing set's folder."),
+            "despite_failed_checks": flag("Accept even when checks fail, once the caller has seen them: without it, an accept that finds failed checks lists them and issues nothing."),
+            "newest_seen": {
+                "description": "The journal's newest entry the caller has looked at, by its number, such as 7, or 0 for an empty journal: the accept is refused if the journal holds a newer one, so a change set that landed meanwhile is not issued unseen.",
+                "type": "integer",
+                "minimum": 0,
+            },
+            "dry_run": flag("Report what the accept would do, and write nothing."),
+            "fonts": fonts(),
+        }),
+        &["set"],
+    )
+}
+
+fn run_accept(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    via: Interface,
+) -> Result<JsonReply, Error> {
+    let settings = take_settings(&mut input, base, false)?;
+    let request: AcceptRequest = parse("accept", input)?;
+    Ok(sent(accept_with(&request, &settings, via)))
 }
 
 // check
@@ -777,7 +867,11 @@ fn check_input() -> Value {
     )
 }
 
-fn run_check(mut input: Map<String, Value>, base: &Settings) -> Result<JsonReply, Error> {
+fn run_check(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: CheckRequest = parse("check", input)?;
     Ok(done(check_with(&request, &settings)))
