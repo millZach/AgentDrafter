@@ -45,7 +45,7 @@ The code is one Cargo workspace. `crates/agentdrafter-core` is the core, the lib
 
 ## The merge bar
 
-A pull request merges only when these jobs of the `CI` workflow (`.github/workflows/ci.yml`) are green on its latest commit:
+A pull request merges only when these jobs are green on its latest commit, all of the `CI` workflow (`.github/workflows/ci.yml`) but the last:
 
 - `check (ubuntu-latest)`
 - `check (windows-latest)`
@@ -54,8 +54,9 @@ A pull request merges only when these jobs of the `CI` workflow (`.github/workfl
 - `wheel (ubuntu-latest)`
 - `wheel (windows-latest)`
 - `wheel (macos-latest)`
+- `viewer (build, unit tests, browser tests)`, of the `Viewer` workflow (`.github/workflows/viewer.yml`)
 
-Each `check` job runs formatting, lints with warnings as errors, and tests, and builds, plots and checks the demo plant. The `demo plant` job compares the demo plant's DWGs and PDFs from the three systems byte for byte, and each `wheel` job builds the pip package, installs it in a clean virtual environment and runs it (Zach decided on 2026-11-11 that both join the merge bar). The ruleset `main merge bar` on GitHub requires these jobs and a branch up to date with `main`. A pull request that touches DWG reading or writing also states the judge's result before it merges.
+Each `check` job runs formatting, lints with warnings as errors, and tests, and builds, plots and checks the demo plant. The `demo plant` job compares the demo plant's DWGs and PDFs from the three systems byte for byte, and each `wheel` job builds the pip package, installs it in a clean virtual environment and runs it The `viewer` job builds the viewer's page, runs its unit tests and checks the page in headless Chromium (`docs/viewer.md`). Zach decided on 2026-11-11 that all three kinds join the merge bar. The ruleset `main merge bar` on GitHub requires these jobs and a branch up to date with `main`. A pull request that touches DWG reading or writing also states the judge's result before it merges.
 
 ## Agent skills
 
