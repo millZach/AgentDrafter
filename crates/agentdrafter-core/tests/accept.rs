@@ -463,6 +463,7 @@ fn issued_outside(dir: &Path) -> PathBuf {
 
 /// Whether `dwg`'s bytes hold the build mark `value`, whole, as the DWG
 /// writes its drawing properties: in UTF-16, closed by a nul.
+#[cfg(unix)]
 fn holds_mark(dwg: &Path, value: &str) -> bool {
     let bytes = fs::read(dwg).unwrap();
     let text: Vec<u8> = value
