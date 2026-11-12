@@ -55,12 +55,14 @@ It needs WebGL2 and nothing newer. It never asks for WebGPU, which Linux's syste
 As the picked prototype does:
 
 - **Touch**: one finger drags the sheet and flings it on release; two fingers pinch, keeping the point between them under them, and pan as they move; a double tap zooms in where it lands.
-- **Mouse and trackpad**: drag to pan; the wheel zooms where the pointer is, as AutoCAD's wheel does; a trackpad's pinch zooms faster; a double click zooms in.
+- **Mouse and trackpad**: drag to pan; the wheel zooms where the pointer is, as AutoCAD's wheel does; a trackpad's pinch zooms faster; a double click zooms in. Zach decided on 2026-11-11, after trying the viewer, that the wheel zooms.
 - **Buttons**: zoom in, zoom out and fit at the top right; a phone shows only fit.
 
 The sheet can zoom out to half its fitted size and in to 32 times it, and is never flung out of sight.
 
-**The fit.** A sheet is fitted to the screen when it is first shown and on every change of tab: the whole paper, 10 pixels in from the edges, above a phone's bottom sheet. Until the reviewer pans or zooms, the view follows the fit: when the canvas changes size, as a browser may while it settles, or the pixel ratio changes, or the bottom sheet's peek does, the sheet is fitted again. Once the reviewer has moved it, a change of size keeps the point at the middle of the screen where it was, and the fit button fits it again. On a laptop the zoom buttons sit over the fitted sheet's top right corner, as they do in the picked prototype.
+**The fit.** A sheet is fitted to the screen when it is first shown and on every change of tab: the whole paper, 10 pixels in from the edges, above a phone's bottom sheet. Until the reviewer pans or zooms, the view follows the fit: when the canvas changes size, as a browser may while it settles, or the pixel ratio changes, or the bottom sheet's peek does, the sheet is fitted again. Once the reviewer has moved it, a change of size keeps the point at the middle of the screen where it was, and the fit button fits it again. On a laptop the zoom buttons sit over the fitted sheet's top right corner, as they do in the picked prototype. A fit, or a change of size or tab that fits the sheet, stops a glide still running, so the glide's next frame cannot put back the view it was heading for.
+
+**Line weights.** A line is drawn at its pen's width on paper, so it grows as the sheet is zoomed in, as the plot would look under a magnifier; the thinnest line is one CSS pixel, so it stays visible on a phone. Zach decided on 2026-11-11, after trying the viewer on his phone, to keep lines like paper rather than thin hairlines at every zoom.
 
 ## The look
 
@@ -96,7 +98,7 @@ The page's packages, all permissive or MPL-2.0 (ADR-0010): `react`, `react-dom` 
   - `frames`: draws and frame times at phone size (below).
   - `webgl2`: the built page never names WebGPU, and the viewer draws in a browser with WebGPU switched off and `navigator.gpu` taken away; in a browser with no WebGL at all, the page says it cannot draw there, and why.
   - `mouse`: the wheel zooms, a drag pans, a double click zooms in, fit and the zoom buttons work, and a tab shows its sheet and names it in the address.
-  - `fit`: the first load shows the whole sheet, at phone and laptop sizes, and so does another tab; a page laid out at 1000 by 700 and then narrowed to 390 by 844, and then given 3 device pixels to a CSS pixel, is fitted to each; a view the reviewer zoomed keeps its scale through a change of size.
+  - `fit`: the first load shows the whole sheet, at phone and laptop sizes, and so does another tab; a page laid out at 1000 by 700 and then narrowed to 390 by 844, and then given 3 device pixels to a CSS pixel, is fitted to each; a view the reviewer zoomed keeps its scale through a change of size; and a change of size during the fit button's glide, from phone to laptop width, ends fitted to the new size.
   - `tabs`: with the server's replies held back or failed at will, going back to a sheet already drawn while another is still coming, or after another failed, shows it and says nothing more; the late reply changes nothing; a sheet drawn before is not asked for again.
   - `look`: screenshots at phone size (390 by 844 CSS pixels at 3 device pixels each, touch) and laptop size (1440 by 900).
 

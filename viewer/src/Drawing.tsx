@@ -96,7 +96,12 @@ export function Drawing({ reply, coveredBelow, compact, onLoaded, onError, onUna
     if (!target) return;
     bounds.current = limits(target);
     if (ms > 0 && glide.current) glide.current.to(target, ms, middle());
-    else show(target);
+    else {
+      // An immediate fit ends any glide still running, or its next frame
+      // would put back the view it was heading for.
+      glide.current?.stop();
+      show(target);
+    }
   };
   const zoomBy = (factor: number) => {
     followFit.current = false;

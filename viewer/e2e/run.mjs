@@ -621,6 +621,15 @@ const checks = {
       await settle(page);
       const kept = await where(page);
       assert(Math.abs(kept.scale - zoomed.scale) < 1e-9 && zoomed.scale > seen.ratio.scale * 1.1, `a view the reviewer zoomed is not fitted again: ${JSON.stringify({ fitted: seen.ratio.scale, zoomed: zoomed.scale, kept: kept.scale })}`);
+      // The fit button's glide still running when the screen changes size:
+      // the sheet ends fitted to the new screen, not where the glide was going.
+      // Phone to laptop width, so the new fit's scale differs from the glide's.
+      await page.click('[aria-label="Fit the sheet"]');
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
+      await settle(page);
+      await page.evaluate(() => new Promise((done) => setTimeout(done, 600)));
+      seen.glide = await where(page);
+      inSight(seen.glide, 'after a change of size during the fit glide');
       assert(problems.length === 0, problems.join('; '));
       return seen;
     } finally {
