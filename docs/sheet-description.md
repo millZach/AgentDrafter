@@ -291,7 +291,16 @@ AgentDrafter reads SHX fonts in the `AutoCAD-86 shapes` and `AutoCAD-86 unifont`
 
 `agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...` measures one line of text as AutoCAD measures a text object (AutoLISP's `textbox`): `width` is from the left edge of what the text draws to the right edge, and `left`, `right`, `bottom` and `top` say where that is from the start of the line, in the unit of the height. `advance` is how far the pen moves. `--font` names a font as a text style does, by its file name alone, and is read only from the font folders. `font` says which font was used and, when it was a look-alike, why. A space at either end draws nothing, so it adds nothing to the width.
 
-Measured against AutoCAD 2026 with its own fonts, on the machine that has them: the widths of 139 made-up strings in `romans.shx`, `simplex.shx`, `txt.shx`, `isocp.shx`, Arial and Times New Roman, 0.1 to 7 units high, match AutoCAD's to within 1e-12 of the unit, and the box of each of the 1,151 characters of the four SHX fonts, 100 high, matches to the eight decimal places AutoCAD printed, but for the ogonek letters Ą, ą, Ę and ę in `romans.shx` and Ą in `simplex.shx`, which AutoCAD boxes up to 0.12 of the height wider or deeper. AutoCAD does not kern.
+Measured against AutoCAD 2026 with its own fonts, on the machine that has them: the widths of 139 made-up strings in `romans.shx`, `simplex.shx`, `txt.shx`, `isocp.shx`, Arial and Times New Roman, 0.1 to 7 units high, match AutoCAD's to within 1e-12 of the unit, and the box of each of the 1,151 characters of the four SHX fonts, 100 high, matches to the eight decimal places AutoCAD printed. AutoCAD does not kern.
+
+An SHX character's box is not always the box of the strokes it draws. AutoCAD's box, which AgentDrafter follows, reaches past them in four ways:
+
+- An arc of up to half a turn is boxed by its chord and the chord moved out to the arc's middle, which reaches past a quarter arc; a longer arc is boxed by its whole circle.
+- An octant arc (shape code 10) of half a turn that passes through the point of its circle at 180°, the side to the left of its centre, between its ends is boxed by its whole circle. One that only starts or ends there is not, and neither is a bulge arc.
+- An octant arc is boxed when the pen is up too, though it draws nothing.
+- When the pen comes down, AutoCAD counts the point the pen last moved to as drawn, even when a pop (shape code 6) has put the pen somewhere else since.
+
+The last three were found from the ogonek letters Ą, ą, Ę and ę in `romans.shx` and Ą in `simplex.shx`, which AutoCAD boxed up to 0.12 of the height wider or deeper than their strokes (#28). They were confirmed on 20 made-up shapes in AutoCAD 2026: half circles through 180° and not, clockwise and anticlockwise, at three scales, with the pen down and up, and pops followed by the pen coming down and not. The four fonts draw no other character these rules change. Not measured: a fractional arc (shape code 11) of half a turn, and a fractional or bulge arc with the pen up. AgentDrafter boxes those by the first rule alone, and only when the pen is down.
 
 ## Values
 
