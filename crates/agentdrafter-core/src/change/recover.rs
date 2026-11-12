@@ -29,7 +29,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::commit::{add_line, cut_back, moved_aside, restore, Before};
 use super::journal::{
@@ -77,7 +77,14 @@ pub struct RolledBack {
 /// journal cannot be read (`read_failed`). Every file is then as it found
 /// them.
 pub(crate) fn recover(folder: &Path) -> Result<Option<RolledBack>, Error> {
-    if !worth_a_look(folder)? {
+    // Read whole, as `journal` reads it, so that a line which is not an
+    // entry anywhere but at the end stops every command on the set; and it
+    // says whether a commit is left pending, or a last line in part, before
+    // the lock is taken and the journal read again.
+    let Some(read) = read_journal_file(folder)? else {
+        return Ok(None);
+    };
+    if pending(&read.entries).is_none() && read.torn.is_none() {
         return Ok(None);
     }
     let _lock = lock(folder).map_err(|e| cannot(folder, None, &e.message))?;
@@ -263,11 +270,12 @@ pub(crate) fn recover(folder: &Path) -> Result<Option<RolledBack>, Error> {
 /// left it when it holds the bytes the entry records for it before, which
 /// the commit had not replaced yet, or after, which it had; or when it is
 /// missing where the commit leaves it so: one it had not made yet, one it
-/// takes away, or one it had moved aside, which waits beside it. Anything
-/// else was changed by hand or by another program.
+/// takes away, or one it had moved aside, which waits beside it under a
+/// name that is that file's own. Anything else was changed by hand or by
+/// another program.
 fn changed_since(folder: &Path, entry: &Entry) -> Result<Vec<String>, Error> {
     let mut changed = Vec::new();
-    for file in &entry.files {
+    for (j, file) in entry.files.iter().enumerate() {
         let path = folder.join(&file.path);
         let found = match fs::read(&path) {
             Ok(bytes) => Some(fingerprint(&bytes)),
@@ -292,7 +300,7 @@ fn changed_since(folder: &Path, entry: &Entry) -> Result<Vec<String>, Error> {
             .flatten()
             .map(String::as_str)
             .collect();
-        if found.is_none() && moved_aside(entry.entry, &path, &prints) {
+        if found.is_none() && moved_aside(entry.entry, &path, j, &prints) {
             continue;
         }
         let how = if found.is_some() {
@@ -307,49 +315,6 @@ fn changed_since(folder: &Path, entry: &Entry) -> Result<Vec<String>, Error> {
         ));
     }
     Ok(changed)
-}
-
-/// Whether the set's journal may hold an entry left pending, or a last
-/// line written in part: a quick look at its last line, before the lock is
-/// taken and the journal read whole. A journal that cannot be read is
-/// refused, as `journal` refuses it.
-fn worth_a_look(folder: &Path) -> Result<bool, Error> {
-    #[derive(Deserialize)]
-    struct Line {
-        #[serde(default)]
-        kind: Option<EntryKind>,
-        #[serde(default)]
-        state: Option<CommitState>,
-    }
-    let path = folder.join(JOURNAL_FILE);
-    let text = match fs::read(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => {
-            return Err(Error::new(
-                ErrorCode::ReadFailed,
-                format!(
-                    "could not read the set's journal to see whether a commit is left pending: \
-                     {e}"
-                ),
-            )
-            .in_file(&path))
-        }
-    };
-    let ends_whole = text.last().is_none_or(|&b| b == b'\n');
-    let Some(last) = text
-        .split(|&b| b == b'\n')
-        .rev()
-        .find(|line| !line.trim_ascii().is_empty())
-    else {
-        return Ok(false);
-    };
-    Ok(match serde_json::from_slice::<Line>(last) {
-        Ok(line) => line.kind.is_some() && line.state == Some(CommitState::Pending),
-        // A last line that is no JSON and ends with no line break was
-        // written only in part.
-        Err(_) => !ends_whole,
-    })
 }
 
 /// What an entry is, in words.

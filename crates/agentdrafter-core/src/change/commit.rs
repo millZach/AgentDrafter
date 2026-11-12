@@ -32,9 +32,12 @@
 //! put back; one that may stand in part is left for the next command, which
 //! cuts a line written in part off the journal and rolls the entry back.
 //!
-//! The files a commit writes beside their places are named by its entry,
-//! `.agentdrafter-entry-<entry>-<n>.tmp` and `.old`, so a rollback knows
-//! what a killed commit left and takes it away.
+//! The files a commit writes beside their places are named by its entry and
+//! by the file they stand for, `.agentdrafter-entry-<entry>-f<j>.tmp` and
+//! `.old` for the entry's file `j`, as the journal lists its files
+//! (`back-f<j>` for a rollback's own, `s<i>` for an undo state), so a
+//! rollback knows what a killed commit left beside each file, and whose it
+//! is, and takes it away.
 
 use std::cmp::Reverse;
 use std::fs::{self, File, OpenOptions};
@@ -127,7 +130,19 @@ pub(super) fn commit(ahead: &Ahead, replacements: &[Replacement]) -> Result<(), 
         Err(failed) => return Err(not_added(ahead, failed)),
     };
     seam.passed(|| "its entry was written, pending".to_owned());
-    let names = Names::new(ahead.entry, "");
+    // Each file of the entry by its place in the entry; an undo state by its
+    // own.
+    let keys = replacements
+        .iter()
+        .enumerate()
+        .map(
+            |(i, r)| match ahead.before.iter().position(|b| b.path == r.path) {
+                Some(j) => format!("f{j}"),
+                None => format!("s{i}"),
+            },
+        )
+        .collect();
+    let names = Names::new(ahead.entry, keys);
     let placed = match put_in_place(replacements, &names, &mut seam) {
         Ok(placed) => placed,
         Err(unplaced) => return Err(not_finished(ahead, length, *unplaced)),
@@ -275,8 +290,9 @@ pub(super) fn restore(
     folders_made: &[PathBuf],
 ) -> Result<Vec<Restored>, Error> {
     let mut replacements: Vec<Replacement> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
     let mut restored: Vec<Restored> = Vec::new();
-    for file in before {
+    for (j, file) in before.iter().enumerate() {
         let found = match fs::read(&file.path) {
             Ok(bytes) => Some(fingerprint(&bytes)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
@@ -321,10 +337,11 @@ pub(super) fn restore(
             bytes,
             what: "a file the rollback puts back",
         });
+        keys.push(format!("back-f{j}"));
     }
     let placed = put_in_place(
         &replacements,
-        &Names::new(entry, "back-"),
+        &Names::new(entry, keys),
         &mut Seam::restore(),
     )
     .map_err(|unplaced| {
@@ -349,7 +366,7 @@ pub(super) fn restore(
     let mut beside: Vec<&Path> = before.iter().filter_map(|f| f.path.parent()).collect();
     beside.push(states);
     beside.extend(folders.iter().map(PathBuf::as_path));
-    let prefix = Names::new(entry, "").prefix;
+    let prefix = prefix(entry);
     for folder in beside {
         let Ok(listed) = fs::read_dir(folder) else {
             continue;
@@ -367,21 +384,14 @@ pub(super) fn restore(
 }
 
 /// Whether the commit of `entry`, or a rollback of it, moved the file at
-/// `path` aside, holding bytes whose SHA-256 is one of `prints`, and
-/// stopped before it put another in its place: so a missing file is one a
-/// commit left so, not one taken away by hand.
-pub(super) fn moved_aside(entry: u64, path: &Path, prints: &[&str]) -> bool {
-    let prefix = Names::new(entry, "").prefix;
-    let Some(Ok(listed)) = path.parent().map(fs::read_dir) else {
-        return false;
-    };
-    listed.flatten().any(|item| {
-        let name = item.file_name();
-        let name = name.to_string_lossy();
-        name.starts_with(&prefix)
-            && name.ends_with(".old")
-            && fs::read(item.path())
-                .is_ok_and(|bytes| prints.contains(&fingerprint(&bytes).as_str()))
+/// `path`, its file `j`, aside, holding bytes whose SHA-256 is one of
+/// `prints`, and stopped before it put another in its place: so a missing
+/// file is one a commit left so, not one taken away by hand. Only that
+/// file's own, named after `j`, counts, never another file's.
+pub(super) fn moved_aside(entry: u64, path: &Path, j: usize, prints: &[&str]) -> bool {
+    [format!("f{j}"), format!("back-f{j}")].iter().any(|key| {
+        let aside = path.with_file_name(format!("{}{key}.old", prefix(entry)));
+        fs::read(aside).is_ok_and(|bytes| prints.contains(&fingerprint(&bytes).as_str()))
     })
 }
 
@@ -422,23 +432,29 @@ pub(super) fn add_line(path: &Path, line: &[u8], what: &str) -> Result<(), Error
         })
 }
 
+/// What every file a commit of `entry` writes beside a file begins with.
+fn prefix(entry: u64) -> String {
+    format!(".agentdrafter-entry-{entry}-")
+}
+
 /// The names a commit's files take beside their places: by its entry, and
-/// for a rollback's own after `back-`.
+/// by each replacement's key, which names the file it stands for.
 struct Names {
     prefix: String,
+    keys: Vec<String>,
 }
 
 impl Names {
-    fn new(entry: u64, part: &str) -> Self {
+    fn new(entry: u64, keys: Vec<String>) -> Self {
         Self {
-            prefix: format!(".agentdrafter-entry-{entry}-{part}"),
+            prefix: prefix(entry),
+            keys,
         }
     }
 
-    /// The name beside `path` of the file `n` of the commit, ending in
-    /// `ending`.
+    /// The name beside `path` of replacement `n`, ending in `ending`.
     fn beside(&self, path: &Path, n: usize, ending: &str) -> PathBuf {
-        path.with_file_name(format!("{}{n}.{ending}", self.prefix))
+        path.with_file_name(format!("{}{}.{ending}", self.prefix, self.keys[n]))
     }
 }
 

@@ -979,3 +979,132 @@ fn a_done_line_taken_back_keeps_the_entry_pending_while_the_files_go_back() {
     assert_eq!(agree(&set), CommitState::RolledBack);
     assert!(snapshot(&set) == before);
 }
+
+#[test]
+fn a_line_written_in_part_in_the_middle_of_the_journal_stops_every_command_on_the_set() {
+    let set = demo_set("torn-middle", true);
+    lands(&set, &add_circle("DEMO-001", "tank"));
+    lands(&set, &add_circle("DEMO-002", "drum"));
+    let journal = set.join(JOURNAL_FILE);
+    let text = fs::read_to_string(&journal).unwrap();
+    let mut lines: Vec<&str> = text.lines().collect();
+    // Between change set 1's done line and change set 2's entry, so the
+    // journal's last line, change set 2's done line, is whole.
+    lines.insert(2, r#"{"entry":2,"kind":"change_set","state":"pend"#);
+    fs::write(&journal, lines.join("\n") + "\n").unwrap();
+    let damaged = fs::read(&journal).unwrap();
+    let before = snapshot(&set);
+    let commands: [(&str, Value); 10] = [
+        (
+            "query",
+            json!({"source": &set, "query": {"kind": "blocks"}}),
+        ),
+        ("check", json!({"source": &set})),
+        ("build", json!({"source": &set, "overwrite": true})),
+        ("plot", json!({"source": &set})),
+        ("display-list", json!({"source": &set})),
+        ("render", json!({"source": set.join("dwg/DEMO-001.dwg")})),
+        ("journal", json!({"set": &set})),
+        (
+            "change",
+            json!({"set": &set, "change_set": add_circle("DEMO-003", "x")}),
+        ),
+        ("undo", json!({"set": &set, "change_set": 1})),
+        (
+            "accept",
+            json!({"set": &set, "despite_failed_checks": true}),
+        ),
+    ];
+    let interfaces = [
+        Interface::Cli,
+        Interface::Http,
+        Interface::Mcp,
+        Interface::Python,
+        Interface::Viewer,
+    ];
+    for (i, (name, input)) in commands.into_iter().enumerate() {
+        let reply = find_command(name).unwrap().run(
+            input,
+            &Settings::default(),
+            interfaces[i % interfaces.len()],
+        );
+        assert!(reply.result.is_none(), "`{name}` did nothing");
+        let error = reply.error.unwrap_or_else(|| panic!("`{name}` refuses"));
+        assert_eq!(error.code, ErrorCode::ReadFailed, "`{name}`: {error:?}");
+        assert_eq!(error.line, Some(3), "`{name}`");
+        assert!(snapshot(&set) == before, "`{name}` wrote nothing");
+        assert_eq!(fs::read(&journal).unwrap(), damaged, "`{name}`");
+    }
+}
+
+#[test]
+fn a_file_moved_aside_never_vouches_for_another_taken_away_by_hand() {
+    // Two templates of the same bytes, each edited the same way by one
+    // change set: before it, and after, they are byte for byte alike.
+    let set = demo_set("two-alike", true);
+    let a = set.join("templates/ansi-b.yaml");
+    let b = set.join("templates/ansi-b-copy.yaml");
+    fs::copy(&a, &b).unwrap();
+    let rows = set.join("rows.yaml");
+    let text = fs::read_to_string(&rows).unwrap();
+    let third = "  - sheet: DEMO-003\n    template: templates/ansi-b.yaml\n";
+    assert!(text.contains(third));
+    fs::write(
+        &rows,
+        text.replace(
+            third,
+            "  - sheet: DEMO-003\n    template: templates/ansi-b-copy.yaml\n",
+        ),
+    )
+    .unwrap();
+    let built = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: true,
+        },
+        &Settings::default(),
+    );
+    assert!(built.ok, "{:#?}", built.error);
+    let both = json!({"operations": [
+        {"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]},
+        {"op": "move", "target": {"id": "DEMO-003/border"}, "by": [0.1, 0, 0]},
+    ]});
+    // Stopped once A is moved aside, before B is touched.
+    assert!(stopped_at(14, || apply(&set, &both, None)));
+    let entry = read_entries(&set).unwrap().pop().unwrap();
+    let files: Vec<&str> = entry.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        &files[..2],
+        ["templates/ansi-b.yaml", "templates/ansi-b-copy.yaml"]
+    );
+    assert_eq!(entry.files[0].before, entry.files[1].before, "alike before");
+    assert_eq!(entry.files[0].after, entry.files[1].after, "alike after");
+    assert!(!a.exists(), "A is moved aside");
+    assert!(b.is_file(), "B is not touched yet");
+
+    // B is taken away by hand: A's backup holds the same bytes, but is
+    // not B's.
+    fs::remove_file(&b).unwrap();
+    let stopped = snapshot(&set);
+    let reply = command(
+        "query",
+        json!({"source": &set, "query": {"kind": "blocks"}}),
+    );
+    assert!(reply.rolled_back.is_none());
+    let error = reply.error.expect("the rollback refuses");
+    assert_eq!(error.code, ErrorCode::ChangedByHand);
+    assert!(
+        error.message.contains(&format!(
+            "`{}` (taken away since entry 1's commit stopped)",
+            b.display()
+        )),
+        "{}",
+        error.message
+    );
+    assert!(
+        !error.message.contains(&format!("`{}`", a.display())),
+        "A is as its commit left it: {}",
+        error.message
+    );
+    assert!(snapshot(&set) == stopped, "nothing was changed");
+}
