@@ -8,16 +8,21 @@
 //! file back byte for byte, marks the entry rolled back and says so, and a
 //! further change set lands as it would have. So for an undo and an accept.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::commit::{Stopped, FAIL_AT, FAIL_SYNC, STOP_AT};
-use super::journal::{lock, read_entries, state_line, CommitState, EntryKind, LOCK_FILE};
+use super::commit::{Stopped, FAIL_AT, FAIL_DONE, FAIL_SYNC, STOP_AT, STOP_RESTORE_AT};
+use super::journal::{
+    lock, read_entries, state_line, CommitState, EntryKind, FileState, LOCK_FILE,
+};
+use super::undo::AFTER_PLAN;
 use super::{
     accept_with, change_with, undo, AcceptRequest, ChangeRequest, UndoRequest, JOURNAL_FILE,
     UNDO_STATES_FOLDER,
@@ -27,6 +32,7 @@ use crate::error::ErrorCode;
 use crate::interface::Interface;
 use crate::set::{build_set_with, SetBuildRequest};
 use crate::settings::Settings;
+use crate::stamp::fingerprint;
 
 /// A copy of the demo set's records in a folder of its own, built when
 /// `built` says so.
@@ -285,7 +291,10 @@ fn a_journal_that_cannot_be_cut_back_keeps_the_entry_pending_for_the_next_comman
     let reply = apply(&set, &template_move(), None);
     FAIL_SYNC.with(|f| f.set(None));
     let rolled = reply.rolled_back.expect("entry 1 was rolled back first");
-    assert_eq!((rolled.entry, rolled.kind), (1, EntryKind::ChangeSet));
+    assert_eq!(
+        (rolled.entry, rolled.kind),
+        (Some(1), Some(EntryKind::ChangeSet))
+    );
     assert!(rolled.files.is_empty(), "no file had been put in place");
     let error = reply.error.unwrap();
     assert!(
@@ -392,7 +401,11 @@ fn every_stopped_step_is_rolled_back(
         let Some(rolled) = reply.rolled_back.clone() else {
             panic!("step {step}: `{name}` rolled back first: {reply:?}");
         };
-        assert_eq!((rolled.entry, rolled.kind), (entry, kind), "step {step}");
+        assert_eq!(
+            (rolled.entry, rolled.kind),
+            (Some(entry), Some(kind)),
+            "step {step}"
+        );
         assert!(
             rolled
                 .message
@@ -612,7 +625,7 @@ fn every_command_that_reads_the_set_rolls_back_first_through_any_interface() {
         let rolled = reply
             .rolled_back
             .unwrap_or_else(|| panic!("`{name}` rolled back first"));
-        assert_eq!(rolled.kind, EntryKind::ChangeSet);
+        assert_eq!(rolled.kind, Some(EntryKind::ChangeSet));
         assert_eq!(rolled.files.len(), 1, "`{name}`: the template was put back");
         assert!(outputs(snapshot(&set)) == before, "`{name}`");
     }
@@ -678,7 +691,7 @@ fn a_rollback_that_cannot_complete_refuses_names_the_set_and_the_entry_and_chang
     // With the undo state back, the next command rolls it back.
     fs::rename(set.join("lost"), &lost).unwrap();
     let reply = command("check", json!({"source": &set}));
-    assert_eq!(reply.rolled_back.unwrap().entry, entry);
+    assert_eq!(reply.rolled_back.unwrap().entry, Some(entry));
     assert!(snapshot(&set) == before);
 }
 
@@ -709,7 +722,7 @@ fn a_command_waits_for_a_commit_still_running_and_does_not_roll_it_back() {
     // The commit finishes, marks its entry done, and lets the lock go.
     let journal = set.join(JOURNAL_FILE);
     let mut text = fs::read(&journal).unwrap();
-    text.extend(state_line(entry, CommitState::Done, Vec::new()));
+    text.extend(state_line(None, entry, CommitState::Done, Vec::new()));
     fs::write(&journal, text).unwrap();
     drop(held);
     let reply = reader.join().unwrap();
@@ -718,4 +731,251 @@ fn a_command_waits_for_a_commit_still_running_and_does_not_roll_it_back() {
     assert!(snapshot(&set) == landed);
     let entries = read_entries(&set).unwrap();
     assert_eq!(entries.last().unwrap().state, Some(CommitState::Done));
+}
+
+#[test]
+fn a_rollback_refuses_when_a_file_was_changed_by_hand_since_the_commit_stopped() {
+    // Zach's decision of 2026-11-11: the rollback refuses as undo does, and
+    // changes nothing.
+    let set = demo_set("hand-after-stop", true);
+    let before = snapshot(&set);
+    // The template and DEMO-001's DWG in place, the other DWGs not yet.
+    assert!(stopped_at(16, || apply(&set, &template_move(), None)));
+    let template = set.join("templates/ansi-b.yaml");
+    let as_left = fs::read(&template).unwrap();
+    fs::write(&template, [&as_left[..], b"# by hand\n"].concat()).unwrap();
+    let edited = snapshot(&set);
+    let journal = set.join(JOURNAL_FILE);
+    let journal_before = fs::read(&journal).unwrap();
+
+    let reply = command(
+        "query",
+        json!({"source": &set, "query": {"kind": "blocks"}}),
+    );
+    assert!(reply.rolled_back.is_none() && reply.result.is_none());
+    let error = reply.error.unwrap();
+    assert_eq!(error.code, ErrorCode::ChangedByHand);
+    assert!(
+        error.message.contains(&format!(
+            "entry 1, a change set, of its journal is pending, since the process writing it \
+             stopped before its commit finished, and rolling it back would lose changes made \
+             since, by hand or by another program: `{}` (changed since entry 1's commit \
+             stopped); nothing was changed",
+            template.display()
+        )),
+        "{}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("DEMO-00"),
+        "the DWGs are as the commit left them: {}",
+        error.message
+    );
+    assert!(snapshot(&set) == edited, "nothing was changed");
+    assert_eq!(fs::read(&journal).unwrap(), journal_before);
+    // Put back as its commit left it, the next command rolls it back.
+    fs::write(&template, &as_left).unwrap();
+    let reply = command("check", json!({"source": &set}));
+    assert_eq!(reply.rolled_back.unwrap().entry, Some(1));
+    assert!(snapshot(&set) == before);
+}
+
+#[test]
+fn an_undo_is_worked_out_and_committed_holding_the_lock_so_no_change_set_lands_between() {
+    let set = demo_set("undo-holds-lock", true);
+    let first = lands(&set, &template_move());
+    let template = set.join("templates/ansi-b.yaml");
+    let as_first_left = fs::read(&template).unwrap();
+    let other = json!({"operations": [
+        {"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.2, 0, 0]},
+    ]});
+
+    // Once the undo is worked out, another process sends a change set to
+    // the same template, and the undo is killed once its entry is written.
+    type Sent = (
+        bool,
+        std::thread::JoinHandle<super::Reply<super::ChangeReport>>,
+    );
+    let sent: Rc<RefCell<Option<Sent>>> = Rc::default();
+    let hook = {
+        let sent = Rc::clone(&sent);
+        let set = set.clone();
+        let other = other.clone();
+        move || {
+            let handle = std::thread::spawn(move || apply(&set, &other, None));
+            for _ in 0..30 {
+                if handle.is_finished() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            *sent.borrow_mut() = Some((handle.is_finished(), handle));
+        }
+    };
+    AFTER_PLAN.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    let undoes = || {
+        undo(&UndoRequest {
+            set: set.clone(),
+            change_set: first,
+            dry_run: false,
+        })
+    };
+    assert!(stopped_at(0, undoes));
+    let (landed_between, handle) = sent.borrow_mut().take().unwrap();
+    assert!(
+        !landed_between,
+        "no change set lands between an undo's working out and its commit"
+    );
+    // It waited for the lock, then found the undo pending, and changed
+    // nothing.
+    let refused = handle.join().unwrap();
+    assert_eq!(refused.error.unwrap().code, ErrorCode::RollbackFailed);
+    assert_eq!(fs::read(&template).unwrap(), as_first_left);
+
+    // The next command rolls the undo back, and loses nothing.
+    let reply = command("journal", json!({"set": &set}));
+    let rolled = reply.rolled_back.unwrap();
+    assert_eq!(rolled.kind, Some(EntryKind::Undo));
+    assert!(rolled.files.is_empty(), "the undo had replaced nothing");
+    assert_eq!(fs::read(&template).unwrap(), as_first_left);
+    // The other change set, sent again, lands.
+    lands(&set, &other);
+}
+
+#[test]
+fn a_last_line_written_in_part_is_cut_off_and_the_pending_entry_before_it_rolled_back() {
+    let set = demo_set("torn-done", true);
+    let before = snapshot(&set);
+    // Every file in place, and the process killed half-way through the
+    // line that marks the entry done.
+    assert!(stopped_at(21, || apply(&set, &template_move(), None)));
+    let journal = set.join(JOURNAL_FILE);
+    let pending = fs::read(&journal).unwrap();
+    let done = state_line(None, 1, CommitState::Done, Vec::new());
+    fs::write(&journal, [&pending[..], &done[..done.len() / 2]].concat()).unwrap();
+
+    // `query`, which reads no entry, rolls it back as `journal` would.
+    let reply = command(
+        "query",
+        json!({"source": &set, "query": {"kind": "blocks"}}),
+    );
+    let rolled = reply.rolled_back.expect("rolled back first");
+    assert_eq!(rolled.entry, Some(1));
+    assert_eq!(rolled.cut_off_line, Some(2));
+    assert_eq!(rolled.files.len(), 4, "every file was in place");
+    assert!(
+        rolled
+            .message
+            .contains("line 2 of the journal, written only in part after it, was cut off"),
+        "{}",
+        rolled.message
+    );
+    assert!(snapshot(&set) == before);
+    let text = fs::read(&journal).unwrap();
+    assert!(text.starts_with(&pending));
+    let marked: Value = serde_json::from_slice(&text[pending.len()..]).unwrap();
+    assert_eq!(
+        (&marked["entry"], &marked["state"]),
+        (&json!(1), &json!("rolled_back"))
+    );
+    let reply = command("journal", json!({"set": &set}));
+    assert!(reply.ok && reply.rolled_back.is_none());
+    lands(&set, &template_move());
+}
+
+#[test]
+fn a_line_written_in_part_alone_is_cut_off_and_one_in_the_middle_is_refused() {
+    let set = demo_set("torn-alone", true);
+    lands(&set, &add_circle("DEMO-001", "tank"));
+    let before = snapshot(&set);
+    let journal = set.join(JOURNAL_FILE);
+    let whole = fs::read(&journal).unwrap();
+    // Killed while it wrote a change set's entry, before any file changed.
+    let part = br#"{"entry":2,"kind":"change_set","state":"pend"#;
+    fs::write(&journal, [&whole[..], &part[..]].concat()).unwrap();
+    let reply = command("check", json!({"source": &set}));
+    let rolled = reply.rolled_back.expect("the line was cut off");
+    assert_eq!((rolled.entry, rolled.cut_off_line), (None, Some(3)));
+    assert!(rolled.files.is_empty());
+    assert!(snapshot(&set) == before);
+    assert_eq!(fs::read(&journal).unwrap(), whole);
+
+    // A line in part in the middle is left by no stop: refused, unread.
+    fs::write(&journal, [&part[..], b"\n", &whole[..]].concat()).unwrap();
+    let error = command("journal", json!({"set": &set})).error.unwrap();
+    assert_eq!(error.code, ErrorCode::ReadFailed);
+    assert_eq!(error.line, Some(1));
+    let reply = apply(&set, &add_circle("DEMO-002", "drum"), None);
+    assert_eq!(reply.error.unwrap().code, ErrorCode::ReadFailed);
+    assert!(snapshot(&set) == before);
+}
+
+/// Whether the journal and the files agree on the newest change set: done,
+/// with every file as it left them, or rolled back, with every file as it
+/// found them.
+fn agree(set: &Path) -> CommitState {
+    let entries = read_entries(set).unwrap();
+    let entry = entries
+        .iter()
+        .rev()
+        .find(|e| e.kind == EntryKind::ChangeSet)
+        .unwrap();
+    let now = |f: &FileState| fs::read(set.join(&f.path)).ok().map(|b| fingerprint(&b));
+    let state = entry.state.unwrap();
+    for file in &entry.files {
+        let wanted = match state {
+            CommitState::Done => &file.after,
+            CommitState::RolledBack => &file.before,
+            CommitState::Pending => panic!("entry {} is still pending", entry.entry),
+        };
+        assert_eq!(
+            &now(file),
+            wanted,
+            "{} disagrees with the journal",
+            file.path
+        );
+    }
+    state
+}
+
+#[test]
+fn a_done_line_written_whole_that_cannot_be_synced_nor_taken_back_stands_with_every_file() {
+    let set = demo_set("done-stands", true);
+    // The done line's sync fails, and so does taking it back; a kill while
+    // the files were put back would leave a journal that says done beside
+    // them, so none is put back.
+    FAIL_DONE.with(|f| f.set(Some(true)));
+    STOP_RESTORE_AT.with(|s| s.set(Some(5)));
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| apply(&set, &template_move(), None)));
+    FAIL_DONE.with(|f| f.set(None));
+    STOP_RESTORE_AT.with(|s| s.set(None));
+    let reply =
+        outcome.unwrap_or_else(|_| panic!("files were put back while the journal said done"));
+    let report = reply.result.unwrap_or_else(|| panic!("{:#?}", reply.error));
+    assert_eq!(report.journal_entry, Some(1));
+    let next = command("journal", json!({"set": &set}));
+    assert!(next.rolled_back.is_none());
+    assert_eq!(agree(&set), CommitState::Done);
+}
+
+#[test]
+fn a_done_line_taken_back_keeps_the_entry_pending_while_the_files_go_back() {
+    let set = demo_set("done-taken-back", true);
+    let before = snapshot(&set);
+    // The done line's sync fails and it is taken back: the files go back
+    // with the entry pending, and the process is killed half-way.
+    FAIL_DONE.with(|f| f.set(Some(false)));
+    STOP_RESTORE_AT.with(|s| s.set(Some(5)));
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| apply(&set, &template_move(), None)));
+    FAIL_DONE.with(|f| f.set(None));
+    STOP_RESTORE_AT.with(|s| s.set(None));
+    assert!(outcome.is_err(), "stopped while it put the files back");
+    assert_eq!(
+        read_entries(&set).unwrap().last().unwrap().state,
+        Some(CommitState::Pending)
+    );
+    let reply = command("journal", json!({"set": &set}));
+    assert_eq!(reply.rolled_back.unwrap().entry, Some(1));
+    assert_eq!(agree(&set), CommitState::RolledBack);
+    assert!(snapshot(&set) == before);
 }

@@ -23,6 +23,15 @@
 //! lags the sheets. A journal that cannot be cut back keeps the entry
 //! pending, and the next command rolls it back.
 //!
+//! The journal never says done unless every file is in place: files are put
+//! back only while the journal holds the entry pending, so a process killed
+//! while it puts them back leaves the entry for the next command to roll
+//! back. When the line that marks it done cannot be written, what the
+//! journal holds decides: a done line that stands whole, every file being in
+//! place, stands; one taken back leaves the entry pending, and the files are
+//! put back; one that may stand in part is left for the next command, which
+//! cuts a line written in part off the journal and rolls the entry back.
+//!
 //! The files a commit writes beside their places are named by its entry,
 //! `.agentdrafter-entry-<entry>-<n>.tmp` and `.old`, so a rollback knows
 //! what a killed commit left and takes it away.
@@ -113,7 +122,7 @@ struct Unplaced {
 /// changed. On failure the error says what is left.
 pub(super) fn commit(ahead: &Ahead, replacements: &[Replacement]) -> Result<(), Error> {
     let mut seam = Seam::commit();
-    let length = match add_to_end(ahead.journal, ahead.pending, true) {
+    let length = match add_to_end(ahead.journal, ahead.pending, Sync::Pending) {
         Ok(length) => length,
         Err(failed) => return Err(not_added(ahead, failed)),
     };
@@ -128,26 +137,71 @@ pub(super) fn commit(ahead: &Ahead, replacements: &[Replacement]) -> Result<(), 
     let done = seam
         .fail(replacements.len())
         .map_err(AddFailed::from)
-        .and_then(|()| add_to_end(ahead.journal, ahead.done, false).map(|_| ()));
-    if let Err(failed) = done {
-        let error = Error::new(
-            ErrorCode::WriteFailed,
-            format!(
-                "could not mark entry {} done in the set's journal ({})",
-                ahead.entry, failed.error
-            ),
-        )
-        .in_file(ahead.journal);
-        return Err(not_finished(
+        .and_then(|()| add_to_end(ahead.journal, ahead.done, Sync::Done).map(|_| ()));
+    let Err(failed) = done else {
+        return Ok(());
+    };
+    let base = format!(
+        "could not mark entry {} done in the set's journal ({})",
+        ahead.entry, failed.error
+    );
+    match marked(ahead, length) {
+        // Written whole, and only its sync failed and could not be taken
+        // back: every file is in place, so the entry is done.
+        Marked::Done => Ok(()),
+        // Taken back: the entry is pending, so the files can be put back.
+        Marked::Pending => Err(not_finished(
             ahead,
             length,
             Unplaced {
-                error,
+                error: Error::new(ErrorCode::WriteFailed, base).in_file(ahead.journal),
                 not_back: Vec::new(),
             },
-        ));
+        )),
+        // It may stand in part: putting the files back now could leave a
+        // journal that says done beside them, so they are left in place.
+        Marked::Unknown => Err(Error::new(
+            ErrorCode::WriteFailed,
+            format!(
+                "{base}, and it could not be taken back ({}): every file is in place, and the \
+                 journal may hold the line in part; the next command cuts a line written in part \
+                 off and rolls entry {} back",
+                failed
+                    .left
+                    .map_or_else(|| "it could not be read".to_owned(), |e| e.to_string()),
+                ahead.entry
+            ),
+        )
+        .in_file(ahead.journal)),
     }
-    Ok(())
+}
+
+/// What the journal holds of `ahead`'s entry, written from `length`, once
+/// the line that marks it done could not be written.
+enum Marked {
+    /// The entry and its done line, whole, and nothing after.
+    Done,
+    /// The entry, and nothing after it.
+    Pending,
+    /// Something else, such as part of the done line, or a journal that
+    /// cannot be read.
+    Unknown,
+}
+
+fn marked(ahead: &Ahead, length: u64) -> Marked {
+    let Ok(bytes) = fs::read(ahead.journal) else {
+        return Marked::Unknown;
+    };
+    let Some(after) = usize::try_from(length).ok().and_then(|at| bytes.get(at..)) else {
+        return Marked::Unknown;
+    };
+    if after == ahead.pending {
+        Marked::Pending
+    } else if after.strip_prefix(ahead.pending) == Some(ahead.done) {
+        Marked::Done
+    } else {
+        Marked::Unknown
+    }
 }
 
 /// The error for an entry that could not be added to the journal: nothing
@@ -271,7 +325,7 @@ pub(super) fn restore(
     let placed = put_in_place(
         &replacements,
         &Names::new(entry, "back-"),
-        &mut Seam::none(),
+        &mut Seam::restore(),
     )
     .map_err(|unplaced| {
         let Unplaced { error, not_back } = *unplaced;
@@ -312,6 +366,25 @@ pub(super) fn restore(
     Ok(restored)
 }
 
+/// Whether the commit of `entry`, or a rollback of it, moved the file at
+/// `path` aside, holding bytes whose SHA-256 is one of `prints`, and
+/// stopped before it put another in its place: so a missing file is one a
+/// commit left so, not one taken away by hand.
+pub(super) fn moved_aside(entry: u64, path: &Path, prints: &[&str]) -> bool {
+    let prefix = Names::new(entry, "").prefix;
+    let Some(Ok(listed)) = path.parent().map(fs::read_dir) else {
+        return false;
+    };
+    listed.flatten().any(|item| {
+        let name = item.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with(&prefix)
+            && name.ends_with(".old")
+            && fs::read(item.path())
+                .is_ok_and(|bytes| prints.contains(&fingerprint(&bytes).as_str()))
+    })
+}
+
 /// Adds `line` to the end of the journal at `path`, making it if it is not
 /// there, and syncs it, in a step of its own, such as a failed attempt's
 /// entry or the line that marks an entry rolled back. When it cannot all be
@@ -326,25 +399,27 @@ pub(super) fn add_line(path: &Path, line: &[u8], what: &str) -> Result<(), Error
             .in_file(parent)
         })?;
     }
-    add_to_end(path, line, false).map(|_| ()).map_err(|failed| {
-        let left = failed
-            .left
-            .map(|left| {
-                format!(
+    add_to_end(path, line, Sync::Plain)
+        .map(|_| ())
+        .map_err(|failed| {
+            let left = failed
+                .left
+                .map(|left| {
+                    format!(
                     ", and it could not be cut back ({left}), so it may hold part of {what}; take \
                      it out"
                 )
-            })
-            .unwrap_or_default();
-        Error::new(
-            ErrorCode::WriteFailed,
-            format!(
-                "could not add {what} to the set's journal ({}){left}",
-                failed.error
-            ),
-        )
-        .in_file(path)
-    })
+                })
+                .unwrap_or_default();
+            Error::new(
+                ErrorCode::WriteFailed,
+                format!(
+                    "could not add {what} to the set's journal ({}){left}",
+                    failed.error
+                ),
+            )
+            .in_file(path)
+        })
 }
 
 /// The names a commit's files take beside their places: by its entry, and
@@ -474,12 +549,23 @@ fn make_folder(path: &Path, what: &str, made: &mut Vec<PathBuf>) -> Result<(), E
     Ok(())
 }
 
+/// Which line of a commit an append writes, so a test can fail its sync.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sync {
+    /// The entry, pending.
+    Pending,
+    /// The line that marks it done.
+    Done,
+    /// A line of its own, such as a failed attempt's.
+    Plain,
+}
+
 /// Adds `bytes` to the end of the file at `path`, making the file if it is
 /// not there, and syncs it, and gives the file's length before. When they
 /// cannot all be written, the file is cut back to its length before, or
 /// taken away if it was not there; when that fails too, the failure says
 /// why. `seam` lets a test fail the sync.
-fn add_to_end(path: &Path, bytes: &[u8], seam: bool) -> Result<u64, AddFailed> {
+fn add_to_end(path: &Path, bytes: &[u8], seam: Sync) -> Result<u64, AddFailed> {
     let existed = fs::symlink_metadata(path).is_ok();
     // Opened to write, not only to append, so that Windows lets it be cut
     // back.
@@ -491,10 +577,10 @@ fn add_to_end(path: &Path, bytes: &[u8], seam: bool) -> Result<u64, AddFailed> {
     let length = file.seek(SeekFrom::End(0))?;
     let written = file
         .write_all(bytes)
-        .and_then(|()| if seam { fail_sync() } else { Ok(()) })
+        .and_then(|()| fail_sync(seam))
         .and_then(|()| file.sync_all());
     if let Err(error) = written {
-        let back = (if seam { fail_cut_back() } else { Ok(()) })
+        let back = fail_cut_back(seam)
             .and_then(|()| file.set_len(length))
             .and_then(|()| file.sync_all());
         drop(file);
@@ -514,8 +600,8 @@ fn add_to_end(path: &Path, bytes: &[u8], seam: bool) -> Result<u64, AddFailed> {
 }
 
 /// Cuts the journal at `path` back to `length`, its length before an entry
-/// that is taken out again.
-fn cut_back(path: &Path, length: u64) -> io::Result<()> {
+/// that is taken out again, or before a line written in part.
+pub(super) fn cut_back(path: &Path, length: u64) -> io::Result<()> {
     let file = OpenOptions::new().write(true).open(path)?;
     file.set_len(length)?;
     file.sync_all()
@@ -587,34 +673,36 @@ fn clean(staged: &[Option<PathBuf>], made: &[PathBuf]) {
 
 /// Where a test can fail a commit, or stop it as a killed process stops:
 /// each step a commit passes, after its entry is written pending and
-/// before it is marked done, is counted from 0. A rollback's own steps are
-/// not counted.
+/// before it is marked done, is counted from 0, and so is each step of a
+/// restore, apart.
 struct Seam {
     next: usize,
-    counted: bool,
+    /// Whether these are a restore's steps, not a commit's.
+    restoring: bool,
 }
 
 impl Seam {
     fn commit() -> Self {
         Self {
             next: 0,
-            counted: true,
+            restoring: false,
         }
     }
 
-    fn none() -> Self {
+    fn restore() -> Self {
         Self {
             next: 0,
-            counted: false,
+            restoring: true,
         }
     }
 
-    /// Fails replacement `index`, or the line that marks the entry done
-    /// after the last, once, when a test asks for it, so a test can show a
-    /// failed commit puts every file back.
+    /// Fails replacement `index` of a commit, or the line that marks the
+    /// entry done after the last, once, when a test asks for it, so a test
+    /// can show a failed commit puts every file back.
     fn fail(&self, index: usize) -> io::Result<()> {
         #[cfg(test)]
-        if self.counted && FAIL_AT.with(|f| f.get() == Some(index) && f.replace(None).is_some()) {
+        if !self.restoring && FAIL_AT.with(|f| f.get() == Some(index) && f.replace(None).is_some())
+        {
             return Err(io::Error::other("a failure the test asked for"));
         }
         let _ = index;
@@ -630,19 +718,24 @@ impl Seam {
     fn passed(&mut self, what: impl Fn() -> String) {
         let step = self.next;
         self.next += 1;
-        if !self.counted {
-            return;
-        }
         #[cfg(test)]
-        if STOP_AT.with(|s| s.get() == Some(step)) {
-            STOP_AT.with(|s| s.set(None));
-            std::panic::resume_unwind(Box::new(Stopped(step)));
+        {
+            let stop = if self.restoring {
+                &STOP_RESTORE_AT
+            } else {
+                &STOP_AT
+            };
+            if stop.with(|s| s.get() == Some(step)) {
+                stop.with(|s| s.set(None));
+                std::panic::resume_unwind(Box::new(Stopped(step)));
+            }
         }
         #[cfg(feature = "test-seams")]
-        if std::env::var(STOP_VARIABLE)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            == Some(step)
+        if !self.restoring
+            && std::env::var(STOP_VARIABLE)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                == Some(step)
         {
             eprintln!(
                 "agentdrafter: stopped the commit at step {step}, once {}",
@@ -652,7 +745,7 @@ impl Seam {
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }
         }
-        let _ = (step, what);
+        let _ = (step, what, self.restoring);
     }
 }
 
@@ -676,22 +769,38 @@ thread_local! {
     pub(super) static FAIL_SYNC: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// The step a test asks a commit to stop at, as a killed process stops.
     pub(super) static STOP_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// As [`FAIL_SYNC`], for the line that marks the entry done.
+    pub(super) static FAIL_DONE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// The step a test asks a restore to stop at, as a killed process stops.
+    pub(super) static STOP_RESTORE_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// The seam that fails the sync of `line`, and cutting it back, for a test.
+#[cfg(test)]
+fn sync_seam(line: Sync) -> Option<&'static std::thread::LocalKey<std::cell::Cell<Option<bool>>>> {
+    match line {
+        Sync::Pending => Some(&FAIL_SYNC),
+        Sync::Done => Some(&FAIL_DONE),
+        Sync::Plain => None,
+    }
 }
 
 /// Fails the append's sync once a test asks for it.
-fn fail_sync() -> io::Result<()> {
+fn fail_sync(line: Sync) -> io::Result<()> {
     #[cfg(test)]
-    if FAIL_SYNC.with(std::cell::Cell::get).is_some() {
+    if sync_seam(line).is_some_and(|seam| seam.with(std::cell::Cell::get).is_some()) {
         return Err(io::Error::other("a failed sync the test asked for"));
     }
+    let _ = line;
     Ok(())
 }
 
 /// Fails cutting the append back once, when a test asks for it.
-fn fail_cut_back() -> io::Result<()> {
+fn fail_cut_back(line: Sync) -> io::Result<()> {
     #[cfg(test)]
-    if FAIL_SYNC.with(|f| f.replace(None)) == Some(true) {
+    if sync_seam(line).is_some_and(|seam| seam.with(|f| f.replace(None)) == Some(true)) {
         return Err(io::Error::other("a failed cut the test asked for"));
     }
+    let _ = line;
     Ok(())
 }

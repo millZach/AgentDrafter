@@ -21,7 +21,10 @@
 //! asked for, is refused, and changes nothing.
 //!
 //! Its entry is written ahead of its files, as a change set's is, and an
-//! undo whose commit never finished is rolled back by the next command.
+//! undo whose commit never finished is rolled back by the next command. It
+//! holds the set's journal lock from before it reads the journal and the
+//! files until its entry is done, so its entry records the files as they
+//! are when it commits: no other process's change set lands between.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -31,8 +34,8 @@ use serde::{Deserialize, Serialize};
 
 use super::commit::Replacement;
 use super::journal::{
-    commit_undo, fates, listed, read_entries, read_state, undo_state, undoable, Entry, EntryKind,
-    Fate, FileState, KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
+    commit_undo, fates, listed, lock, read_entries, read_state, undo_state, undoable, Entry,
+    EntryKind, Fate, FileState, KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
 };
 use super::recover::recover;
 use super::{inconsistent, mark_report, Inconsistent, MARK_FILE};
@@ -126,6 +129,14 @@ struct Plan {
 fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
     let folder = &request.set;
     read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
+    // Held until the undo's entry is done, so the files it reads to work it
+    // out are the files it puts back: a dry run writes nothing, and needs
+    // no lock.
+    let locked = if request.dry_run {
+        None
+    } else {
+        Some(lock(folder)?)
+    };
     let entries = read_entries(folder)?;
     let fates = fates(&entries);
     let wanted = request.change_set;
@@ -372,7 +383,12 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
             inconsistent: mark,
         });
     }
-    let number = commit_undo(folder, undid.clone(), states, replacements)?;
+    #[cfg(test)]
+    if let Some(hook) = AFTER_PLAN.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let locked = locked.expect("an undo that writes holds the lock");
+    let number = commit_undo(folder, &locked, undid.clone(), states, replacements)?;
     let mut folders_removed = Vec::new();
     for made in folders {
         let path = folder.join(made);
@@ -435,4 +451,11 @@ fn message(dry_run: bool, undid: &[u64], files: usize) -> String {
              byte"
         )
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test runs once an undo is worked out, before it commits.
+    pub(super) static AFTER_PLAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
