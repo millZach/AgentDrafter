@@ -19,6 +19,9 @@
 //! An issued change set cannot be undone: once an accept has issued it, an
 //! undo that would take it, itself or as a change set later than the one
 //! asked for, is refused, and changes nothing.
+//!
+//! Its entry is written ahead of its files, as a change set's is, and an
+//! undo whose commit never finished is rolled back by the next command.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -31,6 +34,7 @@ use super::journal::{
     commit_undo, fates, listed, read_entries, read_state, undo_state, undoable, Entry, EntryKind,
     Fate, FileState, KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
 };
+use super::recover::recover;
 use super::{inconsistent, mark_report, Inconsistent, MARK_FILE};
 use crate::description::{parse_mark, read_set_settings};
 use crate::error::{Error, ErrorCode};
@@ -97,9 +101,14 @@ pub enum UndoAction {
 /// that would do in a dry run.
 ///
 /// The reply is `ok` with the report when every file was put back, and not
-/// `ok`, with an error and nothing changed, when the undo is refused.
+/// `ok`, with an error and nothing changed, when the undo is refused. An
+/// entry a commit that never finished left pending is rolled back first,
+/// and the reply says so under `rolled_back`.
 pub fn undo(request: &UndoRequest) -> Reply<UndoReport> {
-    Reply::from(undo_set(request))
+    match recover(&request.set) {
+        Ok(rolled_back) => Reply::from(undo_set(request)).after(rolled_back),
+        Err(error) => Reply::from(Err(error)),
+    }
 }
 
 /// What one file goes back to.
@@ -129,6 +138,15 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
             format!("the set's journal has no entry {wanted}"),
         ));
     };
+    if !entry.finished() {
+        return Err(refuse(
+            ErrorCode::BadValue,
+            format!(
+                "entry {wanted} was rolled back, since its commit never finished, so it changed \
+                 nothing and there is nothing to undo"
+            ),
+        ));
+    }
     match entry.kind {
         EntryKind::ChangeSet => {}
         EntryKind::FailedAttempt => {
@@ -168,6 +186,7 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
         .iter()
         .filter(|e| {
             e.kind == EntryKind::ChangeSet
+                && e.finished()
                 && e.entry >= wanted
                 && fates.get(&e.entry).is_none_or(|f| f.undone_by.is_none())
         })
@@ -353,7 +372,7 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
             inconsistent: mark,
         });
     }
-    let number = commit_undo(folder, undid.clone(), states, &replacements)?;
+    let number = commit_undo(folder, undid.clone(), states, replacements)?;
     let mut folders_removed = Vec::new();
     for made in folders {
         let path = folder.join(made);

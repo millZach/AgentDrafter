@@ -108,6 +108,11 @@ pub enum ErrorCode {
     /// An undo was refused because a change set it would undo is issued:
     /// an issued change set cannot be undone.
     Issued,
+    /// The drawing set's journal holds an entry left pending, by a commit
+    /// whose process stopped before it finished, and it could not be rolled
+    /// back: the error names the set and the entry, and nothing more was
+    /// changed.
+    RollbackFailed,
 }
 
 /// An error from the core, ready to report through any interface.

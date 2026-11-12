@@ -60,9 +60,10 @@ impl FilesAsOf {
             .at_field("entry"));
         }
         let fates = fates(&entries);
-        // Each file a later entry wrote, as the first of them found it.
+        // Each file a later entry wrote, as the first of them found it. An
+        // entry rolled back changed nothing.
         let mut wanted: BTreeMap<&str, (Option<&str>, u64, EntryKind)> = BTreeMap::new();
-        for later in entries.iter().filter(|e| e.entry > entry) {
+        for later in entries.iter().filter(|e| e.entry > entry && e.finished()) {
             for file in &later.files {
                 wanted.entry(file.path.as_str()).or_insert((
                     file.before.as_deref(),

@@ -504,7 +504,9 @@ fn the_same_change_set_gives_the_same_reply_and_journal_entry_through_every_inte
             .collect()
     };
     let by_cli = journal(&cli_dir);
-    assert_eq!(by_cli.len(), 2);
+    // Two entries, and the lines that mark a change set's done.
+    let entries = by_cli.iter().filter(|line| line.get("kind").is_some());
+    assert_eq!(entries.count(), 2);
     for entry in &by_cli {
         assert!(entry["at"].as_str().unwrap().ends_with('Z'), "{entry}");
     }
@@ -565,7 +567,8 @@ fn an_accept_records_the_interface_it_came_through_and_issued_change_sets_cannot
             fs::read_to_string(dir.join("demo-set").join(agentdrafter_core::JOURNAL_FILE))
                 .unwrap()
                 .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|line| line.get("kind").is_some())
                 .collect();
         let accept = &entries[1];
         assert_eq!(accept["kind"], "accept");
@@ -625,6 +628,81 @@ fn an_open_event_stream_sends_the_journal_when_another_process_changes_the_set()
     let (status, refused) = http.send("POST", "/events", Some(&json!({"folder": "demo-set"})));
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["error"]["code"], "usage");
+}
+
+/// Starts `agentdrafter change demo-set move.json` in `dir`, waits for the
+/// core's test-only seam to stop its commit with the template and one DWG
+/// in place and the others not, and kills it there.
+fn killed_mid_commit(dir: &Path) {
+    let mut child = Command::new(BIN)
+        .args(["change", "demo-set", "move.json"])
+        .current_dir(dir)
+        .env("AGENTDRAFTER_TEST_STOP_COMMIT_AT", "16")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = String::new();
+    BufReader::new(child.stderr.take().unwrap())
+        .read_line(&mut said)
+        .unwrap();
+    assert!(said.contains("stopped the commit at step 16"), "{said}");
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn a_change_killed_mid_commit_is_rolled_back_by_the_next_command_through_any_server() {
+    let dir = interface_folder("killed", "servers");
+    let (code, built) = cli(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{built}");
+    let set = dir.join("demo-set");
+    let start = snapshot::snapshot(&set);
+    let http = Http::start(&dir, &["--listen", "127.0.0.1:0"]);
+    let mut mcp = Mcp::start(&dir);
+    mcp.initialize();
+
+    // The HTTP API's next command rolls back the change set first.
+    killed_mid_commit(&dir);
+    assert!(snapshot::snapshot(&set) != start, "killed half-way");
+    let (status, queried) = http.run(
+        "query",
+        &json!({"source": "demo-set", "query": {"kind": "blocks"}}),
+    );
+    assert_eq!(status, 200, "{queried}");
+    assert_eq!(queried["rolled_back"]["entry"], 1, "{queried}");
+    assert_eq!(queried["rolled_back"]["kind"], "change_set");
+    assert!(snapshot::snapshot(&set) == start, "every file as it was");
+
+    // So does the MCP server's.
+    killed_mid_commit(&dir);
+    let checked = mcp.call("check", &json!({"source": "demo-set"}));
+    assert_eq!(checked["structuredContent"]["rolled_back"]["entry"], 2);
+    assert!(snapshot::snapshot(&set) == start);
+
+    // And an event stream the viewer opens, whose first journal says so.
+    killed_mid_commit(&dir);
+    let mut events = http.events("demo-set");
+    let first = events.next_journal(Duration::from_secs(30));
+    assert_eq!(first["rolled_back"]["entry"], 3, "{first}");
+    let states: Vec<&Value> = first["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["state"])
+        .collect();
+    assert_eq!(states, [&json!("rolled_back"); 3]);
+    assert!(snapshot::snapshot(&set) == start);
+
+    // A further change set lands, through the HTTP API.
+    let (status, landed) = http.run(
+        "change",
+        &json!({"set": "demo-set", "change_set": change_set("move.json")}),
+    );
+    assert_eq!(status, 200, "{landed}");
+    assert!(landed.get("rolled_back").is_none());
+    assert_eq!(landed["result"]["journal_entry"], 4);
+    assert!(mcp.finish().success());
 }
 
 #[test]

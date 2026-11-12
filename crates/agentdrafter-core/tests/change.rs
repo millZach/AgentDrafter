@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use agentdrafter_core::{
     build_set_with, change_set_schema, change_with, operations, query_with, read_dwg, Answer,
     ChangeReport, ChangeRequest, ErrorCode, Object, Query, QueryRequest, Reply, Selection,
-    SetBuildRequest, Settings, JOURNAL_FILE, MARK_FILE,
+    SetBuildRequest, Settings, JOURNAL_FILE, LOCK_FILE, MARK_FILE,
 };
 use serde_json::{json, Value};
 
@@ -105,9 +105,11 @@ fn recorded(set: &Path) -> BTreeMap<String, Object> {
 }
 
 /// Every file in `folder` and below, with its bytes, but the journal, which
-/// records every change set and failed attempt.
+/// records every change set and failed attempt, and its lock, which every
+/// one takes.
 fn snapshot(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let journal = folder.join(JOURNAL_FILE);
+    let lock = folder.join(LOCK_FILE);
     let mut files = BTreeMap::new();
     let mut stack = vec![folder.to_owned()];
     while let Some(dir) = stack.pop() {
@@ -115,7 +117,7 @@ fn snapshot(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path != journal {
+            } else if path != journal && path != lock {
                 files.insert(path.clone(), fs::read(&path).unwrap());
             }
         }
@@ -968,9 +970,10 @@ fn a_partial_change_whose_mark_has_a_file_in_its_folders_place_does_not_land() {
     assert_eq!(snapshot(&set), before);
 }
 
-/// A folder no one may write in holds the mark: only Unix keeps a folder
-/// from being written in this way. The commit's own tests fail the mark's
-/// step on every system.
+/// A folder no one may write in holds the mark, and the journal and its
+/// lock, which a change set takes before it writes anything: only Unix
+/// keeps a folder from being written in this way. The commit's own tests
+/// fail the mark's step on every system.
 #[cfg(unix)]
 #[test]
 fn a_partial_change_whose_mark_cannot_be_written_does_not_land() {
@@ -992,7 +995,7 @@ fn a_partial_change_whose_mark_cannot_be_written_does_not_land() {
     let error = reply.error.unwrap();
     assert_eq!(error.code, ErrorCode::WriteFailed);
     assert!(
-        error.message.contains("inconsistent mark"),
+        error.message.contains("the set's journal lock"),
         "{}",
         error.message
     );

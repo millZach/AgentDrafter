@@ -184,6 +184,10 @@ _Avoid_: failed change set, error entry
 The saved bytes a change set's undo needs: each file it wrote, as it was before. Only the newest change sets keep theirs; an older one's is pruned, and that change set can no longer be undone.
 _Avoid_: snapshot, backup, checkpoint
 
+**Pending entry**:
+A journal entry of a change set, an undo or an accept, written before any of its files is put in place and not yet marked done. One a killed process left is **rolled back** by the next command that reads the set: every file goes back as it was before, from the undo state, and the journal marks the entry rolled back. A rolled-back entry changed nothing.
+_Avoid_: transaction, write-ahead log, dirty entry
+
 **Inconsistent set**:
 A drawing set in which a change set landed on some sheets and failed on others. It stays marked, in a file in the set's folder, until the failed sheets are fixed or the change set is undone as one.
 

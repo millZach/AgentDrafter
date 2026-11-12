@@ -25,3 +25,6 @@ getrandom = "0.3.4"
 [dev-dependencies]
 # The servers' tests read a reply's numbers as the bytes they were sent in.
 serde_json = { workspace = true, features = ["raw_value"] }
+# The journal's tests kill the command mid-commit, at a step the core's
+# test-only seam stops it at; the binary built for them has it, no other.
+agentdrafter-core = { path = "../agentdrafter-core", features = ["test-seams"] }

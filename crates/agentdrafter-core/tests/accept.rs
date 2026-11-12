@@ -84,11 +84,14 @@ fn undo_code(set: &Path, change_set: u64) -> Option<ErrorCode> {
     reply.error.map(|e| e.code)
 }
 
+/// The journal's lines that hold an entry, in order: not those that mark an
+/// earlier entry done.
 fn journal_lines(set: &Path) -> Vec<Value> {
     fs::read_to_string(set.join(JOURNAL_FILE))
         .unwrap()
         .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|line| line.get("kind").is_some())
         .collect()
 }
 

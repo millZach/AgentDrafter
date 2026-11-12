@@ -25,5 +25,12 @@ sha2 = "0.11.1"
 pdf-writer = "0.15.0"
 miniz_oxide = "0.8.9"
 
+[features]
+# Only for tests: a process whose environment holds
+# AGENTDRAFTER_TEST_STOP_COMMIT_AT=<step> stops a commit at that step and
+# waits there, so a test can kill it mid-commit. The command line's tests turn
+# it on through their dev-dependency; nothing that ships has it.
+test-seams = []
+
 [dev-dependencies]
 jsonschema = { version = "0.61.1", default-features = false }

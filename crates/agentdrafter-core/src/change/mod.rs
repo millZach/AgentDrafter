@@ -24,6 +24,11 @@
 //!
 //! A dry run does all of this but write: it reports what would land, what
 //! would fail and what the records would become, and changes nothing.
+//!
+//! A change set's entry in the journal is written ahead of its files and
+//! marked done once they are all in place; an entry a killed process left
+//! pending is rolled back by the next command that reads the set, a dry run
+//! among them (`recover.rs`).
 
 mod accept;
 mod apply;
@@ -31,6 +36,7 @@ mod commit;
 mod history;
 mod journal;
 mod operations;
+mod recover;
 mod undo;
 
 use std::fs;
@@ -54,10 +60,12 @@ pub(crate) use accept::stamp_revision;
 pub use accept::{accept_with, AcceptReport, AcceptRequest, StampRevision};
 pub(crate) use history::FilesAsOf;
 pub use journal::{
-    journal, CheckFailed, Entry, EntryKind, FileIssued, FileState, HowChanged, JournalEntry,
-    JournalReport, JournalRequest, ObjectChanged, Refusal, SheetFailed, UndoState, JOURNAL_FILE,
-    KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
+    journal, CheckFailed, CommitState, Entry, EntryKind, FileIssued, FileState, HowChanged,
+    JournalEntry, JournalReport, JournalRequest, ObjectChanged, Refusal, RollBack, SheetFailed,
+    UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, LOCK_FILE, UNDO_STATES_FOLDER,
 };
+pub(crate) use recover::recover;
+pub use recover::RolledBack;
 pub use undo::{undo, FileUndone, UndoAction, UndoReport, UndoRequest};
 
 /// The file, relative to a drawing set's folder, that marks the set
@@ -244,7 +252,17 @@ pub fn change(request: &ChangeRequest) -> Reply<ChangeReport> {
 /// Every change set but a dry run is recorded in the set's journal: one
 /// that landed in the same step as its files, and one that changed nothing
 /// as a failed attempt.
+///
+/// An entry a commit that never finished left pending is rolled back first,
+/// and the reply says so under `rolled_back`.
 pub fn change_with(request: &ChangeRequest, settings: &Settings) -> Reply<ChangeReport> {
+    match recover(&request.set) {
+        Ok(rolled_back) => change_set(request, settings).after(rolled_back),
+        Err(error) => Reply::from(Err(error)),
+    }
+}
+
+fn change_set(request: &ChangeRequest, settings: &Settings) -> Reply<ChangeReport> {
     let mut attempted = None;
     let mut outcome = apply::apply(request, settings, &mut attempted);
     journal::record_failed_attempt(request, &mut outcome, attempted);

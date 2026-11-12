@@ -1209,8 +1209,11 @@ const checks = {
       await page.waitForFunction(() => document.querySelector('.va-jhead')?.textContent?.includes('2 entries'));
       await sleep(500);
       const asked = drawnLive.length;
+      // The first entry's lines: the entry, written pending, and the line
+      // that marks it done.
       const lines = readFileSync(journalFile, 'utf8').split('\n');
-      writeFileSync(journalFile, lines.slice(1).join('\n'));
+      const first = JSON.parse(lines[0]).entry;
+      writeFileSync(journalFile, lines.filter((line) => line === '' || JSON.parse(line).entry !== first).join('\n'));
       await page.waitForFunction(() => document.querySelector('.va-jhead')?.textContent?.includes('1 entry'), null, { timeout: 15000 });
       for (let waited = 0; drawnLive.length <= asked && waited < 15000; waited += 100) await sleep(100);
       assert(drawnLive.length > asked, `the sheet shown is asked for again once the journal's first entry is gone: ${drawnLive.length} after ${asked}`);

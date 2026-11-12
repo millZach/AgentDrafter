@@ -1,13 +1,17 @@
 //! The journal and undo through the command: a change set applied by one
 //! process is undone by another, from the journal in the set's folder, and
 //! every file comes back byte for byte, DWGs included; and none of it needs
-//! git, or the set's folder to be a repository.
+//! git, or the set's folder to be a repository. A process killed mid-commit
+//! leaves its entry pending, and the next command rolls it back.
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[path = "../../agentdrafter-core/tests/support/demo_set.rs"]
 mod demo_set;
@@ -150,6 +154,117 @@ fn nothing_depends_on_the_sets_folder_being_a_git_repository() {
     change_then_undo_in_new_processes(&dir, Some(&no_programs));
     assert!(!dir.join("demo-set/.git").exists());
     fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_change_whose_process_is_killed_mid_commit_is_rolled_back_by_the_next_command() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("cli-journal")
+        .join("killed");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let set = dir.join("demo-set");
+    demo_set::copy_demo_set(&set);
+    fs::write(dir.join("move.json"), MOVE).unwrap();
+    let (code, json) = agentdrafter(&["build", "demo-set"], &dir, None);
+    assert_eq!(code, 0, "{json}");
+    let start = snapshot(&set);
+    let template = set.join("templates/ansi-b.yaml");
+    let dwg = |sheet: &str| set.join(format!("dwg/{sheet}.dwg"));
+
+    // The test-only seam stops the commit at step 16, once the template and
+    // DEMO-001's DWG are in place and before the other DWGs are, and the
+    // process waits there; then it is killed.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentdrafter"))
+        .args(["change", "demo-set", "move.json"])
+        .current_dir(&dir)
+        .env("AGENTDRAFTER_TEST_STOP_COMMIT_AT", "16")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (said, heard) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = said.send(line);
+        }
+    });
+    let line = heard
+        .recv_timeout(Duration::from_secs(120))
+        .expect("the command stops at the seam");
+    assert!(
+        line.starts_with("agentdrafter: stopped the commit at step 16, once "),
+        "{line}"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    // Killed mid-commit: the template is new, the DWGs disagree with it,
+    // and the journal holds the change set's entry pending.
+    assert_ne!(
+        fs::read(&template).unwrap(),
+        start[&template].clone().unwrap()
+    );
+    assert_ne!(
+        fs::read(dwg("DEMO-001")).unwrap(),
+        start[&dwg("DEMO-001")].clone().unwrap()
+    );
+    assert_eq!(
+        fs::read(dwg("DEMO-002")).unwrap(),
+        start[&dwg("DEMO-002")].clone().unwrap()
+    );
+    let text = fs::read_to_string(set.join(".agentdrafter/journal.jsonl")).unwrap();
+    assert_eq!(text.lines().count(), 1);
+    let pending: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(pending["entry"], 1);
+    assert_eq!(pending["state"], "pending");
+
+    // The next command, from a new process, puts every file back byte for
+    // byte, says so, and the journal marks the entry rolled back.
+    let (code, json) = agentdrafter(&["journal", "demo-set"], &dir, None);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["rolled_back"]["entry"], 1);
+    assert_eq!(json["rolled_back"]["kind"], "change_set");
+    // Named as a reply names a file of the set, from the folder given.
+    let files: Vec<(String, &Value)> = json["rolled_back"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            let file = Path::new(f["file"].as_str().unwrap());
+            let name = file.file_name().unwrap().to_str().unwrap().to_owned();
+            assert!(file.starts_with("demo-set"), "{}", file.display());
+            (name, &f["action"])
+        })
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ("ansi-b.yaml".to_owned(), &json!("restored")),
+            ("DEMO-001.dwg".to_owned(), &json!("restored"))
+        ]
+    );
+    assert!(
+        snapshot(&set) == start,
+        "every file as it was, byte for byte"
+    );
+    assert_eq!(json["result"]["entries"][0]["state"], "rolled_back");
+    assert_eq!(json["result"]["can_undo"], serde_json::json!([]));
+    let text = fs::read_to_string(set.join(".agentdrafter/journal.jsonl")).unwrap();
+    let marked: Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(marked["entry"], 1);
+    assert_eq!(marked["state"], "rolled_back");
+
+    // A further change set lands normally.
+    let (code, json) = agentdrafter(&["change", "demo-set", "move.json"], &dir, None);
+    assert_eq!(code, 0, "{json}");
+    assert!(json.get("rolled_back").is_none());
+    assert_eq!(json["result"]["journal_entry"], 2);
+    let (code, json) = agentdrafter(&["journal", "demo-set"], &dir, None);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["entries"][1]["state"], "done");
+    assert_eq!(json["result"]["can_undo"], serde_json::json!([2]));
 }
 
 #[test]
