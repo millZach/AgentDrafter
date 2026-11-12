@@ -613,8 +613,8 @@ def machine(work: Path) -> dict:
             info["ram_gb"] = round(int(run_text(["sysctl", "-n", "hw.memsize"]) or 0) / 2**30, 1) or None
             info["os"] = "macOS %s" % platform.mac_ver()[0]
             disk = run_text(["diskutil", "info", "/"])
-            solid = re.search(r"Solid State:\s*(\w+)", disk)
-            proto = re.search(r"Protocol:\s*(.+)", disk)
+            solid = re.search(r"Solid State:[ \t]*(\w+)", disk)
+            proto = re.search(r"Protocol:[ \t]*(\S[^\n]*)", disk)
             info["disk"] = " ".join(x for x in ((proto.group(1).strip() if proto else ""),
                                                 ("SSD" if solid and solid.group(1) == "Yes" else "")) if x) or "unknown"
     except Exception as e:  # what the machine is never stops the bench

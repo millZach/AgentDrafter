@@ -34,25 +34,28 @@ The machine is described with no hostname, user name or path: the processor, its
 
 ## On the laptop
 
-`laptop.py` runs the bench once on Zach's Windows laptop from forge, as the speed baseline is measured at a release or when Zach asks ([`docs/speed.md`](../../docs/speed.md)). It is never run in CI. It takes the Windows wheel from CI's `wheel (windows-latest)` job, not a build of its own:
+`laptop.py` runs the bench once on Zach's Windows laptop from forge, as the speed baseline is measured at a release or when Zach asks ([`docs/speed.md`](../../docs/speed.md)). It is never run in CI, and builds nothing on the laptop. It measures a Windows `agentdrafter.exe` that CI built, with the viewer's page in: the artifact `agentdrafter-windows-latest` of the `Windows binary` workflow (`.github/workflows/windows-binary.yml`), which runs on each push to `main` and when asked, and is not on the merge bar. CI's wheel is built without the page, since the required jobs need no Node ([`docs/viewer.md`](../../docs/viewer.md#building-it)), so it cannot measure the viewer; given too, the wheel is measured for the cold command and the set through the pip package's command.
 
 ```
+run=$(gh run list -R millZach/AgentDrafter --workflow "Windows binary" --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run download "$run" -R millZach/AgentDrafter --name agentdrafter-windows-latest --dir target/bench-binary
 run=$(gh run list -R millZach/AgentDrafter --workflow CI --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
 gh run download "$run" -R millZach/AgentDrafter --name wheel-windows-latest --dir target/bench-wheel
-python3 tools/bench/laptop.py --wheel target/bench-wheel/agentdrafter-*-win_amd64.whl > target/bench-laptop.json 2> target/bench-laptop.log
+python3 tools/bench/laptop.py --binary target/bench-binary/agentdrafter.exe --wheel target/bench-wheel/agentdrafter-*-win_amd64.whl \
+  > target/bench-laptop.json 2> target/bench-laptop.log
 ```
 
-It reaches the laptop as the judge does, with the judge's settings (`host`, and `dir` for its lock; [`tools/judge/README.md`](../judge/README.md)), and keeps the laptop to one job at a time as the judge does:
+(`gh workflow run "Windows binary" -R millZach/AgentDrafter --ref main` builds it when main's newest run has expired; artifacts are kept seven days.) It reaches the laptop as the judge does, with the judge's settings (`host`, and `dir` for its lock; [`tools/judge/README.md`](../judge/README.md)), and keeps the laptop to one job at a time as the judge does:
 
 - It holds the judge's lock while it runs, so no judge run starts meanwhile, and waits for a judge run that holds it.
 - It waits until no AutoCAD console runs on the laptop and at least 3 GB of memory is free, 20 minutes at most (`--wait`); after that it runs nothing and says why.
-- It makes one temporary folder on the laptop and puts everything in it: the bench, the demo plant, the wheel, a virtual environment made with the laptop's own Python that the wheel is installed into from the file alone, without the network or pip's cache, and the bench's working folder, the browser's profile among it. It builds nothing there and installs nothing outside that folder.
-- It runs the bench with the laptop's own Edge (`--browser chrome` for Chrome), headless.
+- It makes one temporary folder on the laptop and puts everything in it: the bench, the demo plant, the binary, the wheel, a virtual environment made with the laptop's own Python that the wheel is installed into from the file alone, without the network or pip's cache, and the bench's working folders, the browser's profile among them. It installs nothing outside that folder.
+- It runs the bench with the laptop's own Python and its own Edge (`--browser chrome` for Chrome), headless: all three numbers against the binary, then the cold command and the set against the wheel's command.
 - At the end, whatever happened, it stops anything still running from that folder and removes it, and says whether it could.
 
-It prints the bench's JSON, with `laptop`: how long it waited, the memory free when it began, whether an AutoCAD console was running when it ended, the wheel's name and whether the folder was removed. Options after `--` go to the bench, such as `-- --only cold,set`.
+It prints the binary's JSON, with the wheel's `cold` and `set` under `wheel`, and `laptop`: how long it waited, the memory free when it began, whether an AutoCAD console was running when it ended, what it measured and whether the folder was removed. Options after `--` go to the bench, such as `-- --runs 20`.
 
-The wheel's command is a Python entry point that runs the command line's code inside the extension ([`docs/python.md`](../../docs/python.md#the-command)), so each command it runs starts Python first; forge's numbers are of the plain binary. The wheel CI builds has no viewer's page in it, since CI's required jobs build without Node ([`docs/viewer.md`](../../docs/viewer.md#building-it)), so on the laptop the viewer's number needs an `agentdrafter` with the page built in.
+The wheel's command is a Python entry point that runs the command line's code inside the extension ([`docs/python.md`](../../docs/python.md#the-command)), so each command it runs starts Python first. The binary's numbers are the baseline, as forge's are of the plain binary.
 
 ## In CI
 

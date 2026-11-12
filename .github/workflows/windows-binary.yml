@@ -1,0 +1,85 @@
+name: Windows binary
+
+# agentdrafter.exe for Windows with the viewer's page built in, kept as this run's artifact, for
+# the speed baseline's run on the laptop (docs/speed.md, tools/bench/README.md). CI's wheel is
+# built without the page, since the required jobs need no Node, so this is the Windows build that
+# carries the viewer. It is not on the merge bar. Zach decided on 2026-11-11 that it runs when
+# asked (workflow_dispatch); it also runs on each push to main, so main's newest build is at hand,
+# and on a pull request that changes this file, which is the only way such a pull request can run
+# it: GitHub dispatches only workflows already on the default branch.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/windows-binary.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-binary-${{ github.ref }}
+  # A newer push to a pull request replaces the older run; runs on main and asked for all finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows-binary:
+    name: Windows binary with the viewer (not on the merge bar)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the toolchain named in rust-toolchain.toml, and its WebAssembly target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-binary
+
+      # The crate pins wasm-bindgen; its command-line tool must be the same version.
+      - name: wasm-bindgen-cli, the version the viewer crate pins
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.130
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
+
+      - name: Build the page (the renderer to WebAssembly, type checks, Vite)
+        working-directory: viewer
+        run: |
+          npm ci
+          npm run build
+
+      # Release, as forge's speed baseline is built.
+      - name: Build agentdrafter in release, with the page built in
+        run: cargo build --release -p agentdrafter-cli --locked
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The page is in the binary and the viewer draws a change set in Edge, as on the laptop;
+      # the speed bench measures it small. No number is held.
+      - name: The binary serves the viewer, which shows a change in Edge (no number is held)
+        shell: bash
+        run: python tools/bench/bench.py --bin target/release/agentdrafter.exe --only viewer --changes 3 --browser edge
+
+      - name: Keep the binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: agentdrafter-windows-latest
+          path: target/release/agentdrafter.exe
+          if-no-files-found: error
+          retention-days: 7
