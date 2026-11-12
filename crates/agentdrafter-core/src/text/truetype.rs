@@ -120,7 +120,7 @@ impl TrueTypeFont {
 ///
 /// A font encoded as a Windows symbol font, whose character map has a
 /// Windows symbol table, (3, 0), holds its characters at U+F000 plus their
-/// code: `I`, 0x49, at U+F049. Its Unicode table, when it has one, holds
+/// code: `I`, 0x49, at U+F049. Its Unicode table, when it has one, may hold
 /// them there too. A character such a font holds no glyph for in its
 /// Unicode tables is looked up in its symbol table, at its own code and
 /// then, below U+0100, at U+F000 plus its code, as Windows and AutoCAD do.
