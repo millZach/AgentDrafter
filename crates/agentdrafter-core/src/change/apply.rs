@@ -44,6 +44,9 @@ struct SetFiles {
     folder: PathBuf,
     units: Unit,
     output: PathBuf,
+    /// The build mark the set's DWGs carry, naming the set as `build`
+    /// names it.
+    mark: BuildMark,
     rows_path: PathBuf,
     rows_text: String,
     rows: Vec<Row>,
@@ -101,6 +104,9 @@ impl SetFiles {
             folder: folder.to_owned(),
             units: settings.units,
             output: folder.join(&settings.output),
+            mark: BuildMark {
+                set: set_in_mark(folder, &settings.output),
+            },
             rows_path,
             rows_text,
             rows,
@@ -144,14 +150,6 @@ impl SetFiles {
 
     fn dwg(&self, k: usize) -> PathBuf {
         self.output.join(format!("{}.dwg", self.rows[k].sheet))
-    }
-
-    /// The build mark the set's DWGs carry, naming the set as `build`
-    /// names it.
-    fn mark(&self) -> BuildMark {
-        BuildMark {
-            set: set_in_mark(&self.folder, &self.output),
-        }
     }
 }
 
@@ -1196,7 +1194,7 @@ fn validate(
     )?;
     let dwg = files.dwg(k);
     writable(&dwg)?;
-    prepare_sheet(&record, &template.path, &dwg, &files.mark(), true, settings)
+    prepare_sheet(&record, &template.path, &dwg, &files.mark, true, settings)
 }
 
 /// Refuses a DWG that is there but cannot be written, such as one open in
@@ -1356,7 +1354,7 @@ fn before_change(files: &SetFiles, k: usize, settings: &Settings) -> Result<Resu
     .and_then(|(record, _)| {
         let dwg = files.dwg(k);
         writable(&dwg)?;
-        prepare_sheet(&record, &template.path, &dwg, &files.mark(), true, settings).map(|_| ())
+        prepare_sheet(&record, &template.path, &dwg, &files.mark, true, settings).map(|_| ())
     });
     Ok(outcome)
 }

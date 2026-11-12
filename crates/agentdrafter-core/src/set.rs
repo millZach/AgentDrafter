@@ -177,7 +177,7 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         .in_file(&output)
     })?;
     let mark = BuildMark {
-        set: set_in_mark(folder, &output),
+        set: set_in_mark(folder, &set.output),
     };
     let sheets: Vec<SheetOutcome> = rows
         .iter()
@@ -216,24 +216,61 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
     })
 }
 
-/// The drawing set's folder `set` as the build marks of the DWGs it writes
-/// to `outputs`, its output folder joined onto it, record it: the way back
-/// from the output folder to the set, as the set writes the one, with `/`
-/// between folders on every system, such as `..` for `output: dwg`,
+/// The drawing set whose folder is `set` as the build marks of the DWGs it
+/// writes to its output folder, `output` as its settings write it, record
+/// it: the way back from the output folder to the set, with `/` between
+/// folders on every system, such as `..` for `output: dwg`,
 /// `../demo-plant` for `output: ../issued` from a set in `demo-plant`, and
-/// `.` for `output: .`.
+/// `.` for `output: .`. See [`way_back`].
 ///
-/// It is worked out from the paths as written, made whole from the
-/// working folder, and no link is followed, so it holds nothing of where
-/// the set is on this machine beyond the set's own folder's name, and is
-/// the same on every machine. None when the way back would name a folder
-/// above the set, as from `output: ../../issued`, or no relative path
-/// leads there at all, as from another drive on Windows: the mark never
-/// holds a path in full.
-pub(crate) fn set_in_mark(set: &Path, outputs: &Path) -> Option<String> {
-    let back = relative_path(&lexical(outputs)?, &lexical(set)?)?;
-    let names = back.split('/').filter(|part| *part != "..").count();
-    (names <= 1).then_some(back)
+/// The set's folder gives its own name alone, and only when the output
+/// folder is beside the set: the name of the folder the file system
+/// resolves it to, through links, which is where `..` from the output
+/// folder leads.
+pub(crate) fn set_in_mark(set: &Path, output: &str) -> Option<String> {
+    way_back(output, || {
+        let real = fs::canonicalize(set).ok()?;
+        Some(real.file_name()?.to_str()?.to_owned())
+    })
+}
+
+/// The way back from the output folder `output`, as a set's settings write
+/// it, to the set: each folder name it goes down into is a `..` back, and
+/// a `..` up out of the set is the set's own folder's name, `set_name`,
+/// back. Nothing but `output` and that name reaches it, so it holds nothing
+/// of where the set is on a machine and is the same on every machine.
+///
+/// None when the way back would name a folder above the set, as from
+/// `output: ../../issued`, or `output` is not relative: a build mark never
+/// holds those.
+fn way_back(output: &str, set_name: impl FnOnce() -> Option<String>) -> Option<String> {
+    if output.starts_with('/') {
+        return None;
+    }
+    let mut up = 0;
+    let mut down: Vec<&str> = Vec::new();
+    for part in output.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if down.pop().is_none() {
+                    up += 1;
+                }
+            }
+            name => down.push(name),
+        }
+    }
+    let mut back = vec!["..".to_owned(); down.len()];
+    match up {
+        0 => {}
+        1 => back.push(set_name()?),
+        _ => return None,
+    }
+    Some(if back.is_empty() {
+        ".".to_owned()
+    } else {
+        back.join("/")
+    })
 }
 
 /// Why the DWGs of a set whose output folder is `output`, as its settings
@@ -391,34 +428,6 @@ fn physical(path: &Path) -> Option<PathBuf> {
     Some(resolved)
 }
 
-/// The path from the folder `from` to the folder `to`, both in full with
-/// no `.` or `..`, with `/` between folders, such as `../demo-plant`; `.`
-/// when they are one. None when they do not share a root, as two drives on
-/// Windows do not, or a folder's name is not Unicode.
-fn relative_path(from: &Path, to: &Path) -> Option<String> {
-    let from: Vec<Component> = from.components().collect();
-    let to: Vec<Component> = to.components().collect();
-    let root = |path: &[Component]| {
-        path.iter()
-            .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
-            .count()
-    };
-    let start = root(&from);
-    if start == 0 || root(&to) != start || from[..start] != to[..start] {
-        return None;
-    }
-    let shared = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
-    let mut parts: Vec<&str> = vec![".."; from.len() - shared];
-    for part in &to[shared..] {
-        parts.push(part.as_os_str().to_str()?);
-    }
-    Some(if parts.is_empty() {
-        ".".to_owned()
-    } else {
-        parts.join("/")
-    })
-}
-
 /// The folder a build mark's `written` path leads to from the folder
 /// `from`, which is in full with no `.` or `..`: each `..` goes up a
 /// folder. None when `written` is not a relative path of folder names, or
@@ -528,50 +537,11 @@ mod tests {
         let _ = fs::remove_dir_all(dir.parent().unwrap());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_set_s_folder_is_named_from_the_dwg_s_on_unix() {
-        let from = |a: &str, b: &str| relative_path(Path::new(a), Path::new(b));
-        assert_eq!(
-            from("/jobs/plant/dwg", "/jobs/plant").as_deref(),
-            Some("..")
-        );
-        assert_eq!(
-            from("/jobs/issued", "/jobs/demo-plant").as_deref(),
-            Some("../demo-plant")
-        );
-        assert_eq!(from("/jobs/plant", "/jobs/plant").as_deref(), Some("."));
-        assert_eq!(
-            from("/jobs/plant/out/a/b", "/jobs/plant").as_deref(),
-            Some("../../..")
-        );
-        assert_eq!(from("/a", "/b/c").as_deref(), Some("../b/c"));
-        assert_eq!(from("/", "/jobs").as_deref(), Some("jobs"));
-        assert_eq!(from("jobs/issued", "/jobs/plant"), None, "not in full");
-    }
-
-    /// The mark is relative on Windows too, with `/` between folders, and
-    /// none is recorded across drives, since it would be a path in full.
+    /// A mark is followed on Windows paths as on any other, `/` between its
+    /// folders, and a mark that is not folder names leads nowhere.
     #[cfg(windows)]
     #[test]
-    fn a_set_s_folder_is_named_from_the_dwg_s_on_windows() {
-        let from = |a: &str, b: &str| relative_path(Path::new(a), Path::new(b));
-        assert_eq!(
-            from(r"C:\jobs\issued", r"C:\jobs\demo-plant").as_deref(),
-            Some("../demo-plant")
-        );
-        assert_eq!(
-            from(r"\\?\C:\jobs\plant\dwg", r"\\?\C:\jobs\plant").as_deref(),
-            Some("..")
-        );
-        assert_eq!(
-            from(r"\\server\share\issued", r"\\server\share\plant").as_deref(),
-            Some("../plant")
-        );
-        assert_eq!(from(r"C:\jobs\issued", r"D:\jobs\plant"), None);
-        assert_eq!(from(r"\\?\C:\jobs", r"\\?\D:\jobs"), None);
-        assert_eq!(from(r"C:\jobs", r"\\?\C:\jobs"), None, "resolved alike");
-        // What it leads to from the DWG's folder, resolved.
+    fn a_mark_s_path_is_followed_on_windows() {
         assert_eq!(
             follow(Path::new(r"\\?\C:\jobs\issued"), "../demo-plant"),
             Some(PathBuf::from(r"\\?\C:\jobs\demo-plant"))
@@ -609,31 +579,52 @@ mod tests {
         assert_eq!(folder_of(Path::new("A.dwg")), Path::new("."));
     }
 
-    /// The mark is the way back from the output folder to the set, as the
-    /// set writes the one, and never names a folder above the set.
+    /// The mark is the way back from the output folder to the set, worked
+    /// out from `output` as written and the set's own folder's name alone,
+    /// and never names a folder above the set.
     #[test]
     fn a_mark_is_the_way_back_from_the_output_folder_as_the_set_writes_it() {
-        let mark =
-            |set: &str, output: &str| set_in_mark(Path::new(set), &Path::new(set).join(output));
-        let set = "jobs/demo-set";
-        assert_eq!(mark(set, "dwg").as_deref(), Some(".."));
-        assert_eq!(mark(set, "../issued").as_deref(), Some("../demo-set"));
-        assert_eq!(mark(set, "out/a/b").as_deref(), Some("../../.."));
-        assert_eq!(mark(set, ".").as_deref(), Some("."));
-        assert_eq!(mark(set, "..").as_deref(), Some("demo-set"));
-        assert_eq!(mark(set, "../demo-set/dwg").as_deref(), Some(".."));
+        let mark = |output: &str| way_back(output, || Some("demo-set".to_owned()));
+        assert_eq!(mark("dwg").as_deref(), Some(".."));
+        assert_eq!(mark("../issued").as_deref(), Some("../demo-set"));
+        assert_eq!(mark("out/a/b").as_deref(), Some("../../.."));
+        assert_eq!(mark(".").as_deref(), Some("."));
+        assert_eq!(mark("./dwg").as_deref(), Some(".."));
+        assert_eq!(mark("dwg/../out").as_deref(), Some(".."));
+        assert_eq!(mark("..").as_deref(), Some("demo-set"));
+        assert_eq!(mark("../shared/issued").as_deref(), Some("../../demo-set"));
+        // The way back would name the folder above the set: no set.
+        assert_eq!(mark("../../issued"), None);
+        assert_eq!(mark("../../../x/issued"), None);
+        assert_eq!(mark("/srv/issued"), None);
+        // The set's name is asked for only when the way back needs it.
         assert_eq!(
-            mark(set, "../shared/issued").as_deref(),
-            Some("../../demo-set")
+            way_back("dwg", || panic!("not needed")).as_deref(),
+            Some("..")
         );
-        // The way back would name `jobs`, above the set: no set.
-        assert_eq!(mark(set, "../../issued"), None);
-        assert_eq!(mark(set, "../../../x/issued"), None);
-        // Wherever the working folder is, the mark is the same.
+        assert_eq!(way_back("../issued", || None), None, "a set with no name");
+        assert!(no_set_in_marks("../../issued").contains("`../../issued`"));
+    }
+
+    /// The set's name is its real folder's: a set reached as `link/..`,
+    /// where `link` leads into the set, is named as the set, never by the
+    /// folder the path goes through.
+    #[cfg(unix)]
+    #[test]
+    fn a_set_reached_through_a_link_is_named_by_its_real_folder() {
+        let dir =
+            std::env::temp_dir().join(format!("agentdrafter-set-name-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let set = dir.join("srv").join("demo-set");
+        fs::create_dir_all(set.join("child")).unwrap();
+        fs::create_dir_all(dir.join("home").join("zach")).unwrap();
+        std::os::unix::fs::symlink(set.join("child"), dir.join("home/zach/link")).unwrap();
+        let reached = dir.join("home/zach/link/..");
         assert_eq!(
-            mark("demo-set", "../issued").as_deref(),
+            set_in_mark(&reached, "../issued").as_deref(),
             Some("../demo-set")
         );
-        assert!(no_set_in_marks("../../issued").contains("`../../issued`"));
+        assert_eq!(set_in_mark(&reached, "dwg").as_deref(), Some(".."));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

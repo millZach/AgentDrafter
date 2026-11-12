@@ -516,29 +516,21 @@ fn dwg_revision(dwg: &Path, bytes: &[u8]) -> StampRevision {
                 .to_owned(),
         ));
     };
-    let path = recorded_as(&entries, &set.folder, set.path, dwg);
-    issued_by(&entries, &[(path, fingerprint(bytes))])
-}
-
-/// The name an accept among `entries` recorded the file at `dwg` by, in
-/// the set whose folder is `folder`: `path`, its name as the DWG is named,
-/// when an accept recorded that; otherwise the name of a file an accept
-/// recorded that is the same file, as the file system tells it, such as
-/// `dwg/DEMO-001.dwg` for `demo-001.dwg` where letter case is ignored.
-fn recorded_as(entries: &[Entry], folder: &Path, path: String, dwg: &Path) -> String {
-    let mut recorded = entries
-        .iter()
-        .rev()
-        .filter(|e| e.kind == EntryKind::Accept)
-        .flat_map(|e| &e.revision)
-        .map(|f| &f.path);
-    if recorded.clone().any(|p| *p == path) {
-        return path;
-    }
-    recorded
-        .find(|p| is_same_file(&folder.join(p), dwg))
-        .cloned()
-        .unwrap_or(path)
+    // The newest accept that issued this file with these bytes, the file
+    // named in it as the DWG is named, or by another name of the same file
+    // as the file system tells it, such as `dwg/DEMO-001.dwg` for
+    // `demo-001.dwg` where letter case is ignored. Each accept is asked in
+    // turn, newest first, so no older accept's name for it shadows a newer.
+    let print = fingerprint(bytes);
+    let accept = entries.iter().rev().find(|e| {
+        e.kind == EntryKind::Accept
+            && e.finished()
+            && e.revision.iter().any(|f| {
+                f.sha256 == print
+                    && (f.path == set.path || is_same_file(&set.folder.join(&f.path), dwg))
+            })
+    });
+    issued(accept)
 }
 
 /// What a stamp says of the revision a sheet description or a template
@@ -581,6 +573,11 @@ fn issued_by(entries: &[Entry], read: &[(String, String)]) -> StampRevision {
                     .any(|f| &f.path == path && &f.sha256 == print)
             })
     });
+    issued(accept)
+}
+
+/// Issued by `accept`, when there is one; otherwise not issued.
+fn issued(accept: Option<&Entry>) -> StampRevision {
     match accept {
         Some(accept) => StampRevision {
             issued: true,

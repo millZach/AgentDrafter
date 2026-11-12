@@ -748,6 +748,28 @@ fn an_output_folder_that_is_a_link_gives_the_same_mark_as_a_plain_one() {
     assert_eq!(rendered(&plain_dwg, &dir.join("plain.png")).accept, Some(1));
 }
 
+/// A set built by a path that goes through a link, `home/zach/link/..`
+/// where `link` leads to `srv/demo-set/child`, is the set in
+/// `srv/demo-set`: its DWGs name it by its real folder's name, and nothing
+/// of the path it was reached by reaches them.
+#[cfg(unix)]
+#[test]
+fn a_set_built_by_a_path_through_a_link_is_named_by_its_real_folder() {
+    let dir = scratch("set-through-link");
+    let set = outside_output(&dir.join("srv"));
+    fs::create_dir_all(set.join("child")).unwrap();
+    fs::create_dir_all(dir.join("home").join("zach")).unwrap();
+    std::os::unix::fs::symlink(set.join("child"), dir.join("home/zach/link")).unwrap();
+    let reached = dir.join("home/zach/link/..");
+    build(&reached);
+    let dwg = dir.join("srv").join("issued").join("DEMO-001.dwg");
+    assert!(holds_mark(&dwg, "build; set=../demo-set"));
+    assert!(!holds_mark(&dwg, "build; set=../zach"));
+    // Accepted by the path it was built by, it is issued.
+    accept(&reached, false, None, false).result.unwrap();
+    assert_eq!(rendered(&dwg, &dir.join("issued.png")).accept, Some(1));
+}
+
 /// The same file under another spelling, such as other letter case where
 /// the file system ignores case, is the file the accept recorded.
 #[test]
@@ -768,6 +790,46 @@ fn a_dwg_named_in_other_letter_case_is_the_file_the_accept_issued() {
     let revision = rendered(&other_case, &dir.join("other-case.png"));
     assert!(revision.issued, "{revision:?}");
     assert_eq!(revision.accept, Some(1));
+}
+
+/// The newest accept that issued the file counts, however each accept
+/// named it: a sheet accepted as `DEMO-001`, renamed `demo-001`, built and
+/// accepted again, is issued by the second accept when drawn through the
+/// first name, which names the same file where letter case is ignored.
+#[test]
+fn the_newest_accept_of_a_file_counts_whatever_an_older_one_named_it() {
+    let set = demo_set("newest-accept");
+    accept(&set, false, None, false).result.unwrap();
+    let rows = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    assert!(rows.contains("sheet: DEMO-001"), "{rows}");
+    fs::write(
+        set.join("rows.yaml"),
+        rows.replace("sheet: DEMO-001", "sheet: demo-001"),
+    )
+    .unwrap();
+    fs::remove_file(set.join("dwg").join("DEMO-001.dwg")).unwrap();
+    let reply = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: true,
+        },
+        &Settings::default(),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    let second = accept(&set, false, None, false).result.unwrap();
+    assert_eq!(second.journal_entry, Some(2));
+
+    let upper = set.join("dwg").join("DEMO-001.dwg");
+    if fs::metadata(&upper).is_err() {
+        // A file system that keeps case: the first name is a link to it.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("demo-001.dwg", &upper).unwrap();
+        #[cfg(not(unix))]
+        panic!("Windows ignores letter case in file names");
+    }
+    let revision = rendered(&upper, &set.join("upper.png"));
+    assert!(revision.issued, "{revision:?}");
+    assert_eq!(revision.accept, Some(2));
 }
 
 /// A set given by its resolved path, which on Windows is a `\\?\` path, is
