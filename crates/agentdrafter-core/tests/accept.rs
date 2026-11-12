@@ -423,9 +423,10 @@ fn scratch(test: &str) -> PathBuf {
     dir
 }
 
-/// A built copy of the demo set at `<dir>/demo-set` whose output folder is
-/// outside it, `output: ../issued`, so its DWGs are in `<dir>/issued`.
-fn issued_outside(dir: &Path) -> PathBuf {
+/// A copy of the demo set at `<dir>/demo-set` whose output folder is
+/// outside it, `output: ../issued`, so its DWGs go to `<dir>/issued`. Not
+/// built yet.
+fn outside_output(dir: &Path) -> PathBuf {
     let set = dir.join("demo-set");
     demo_set::copy_demo_set(&set);
     let settings = fs::read_to_string(set.join("set.yaml")).unwrap();
@@ -435,16 +436,41 @@ fn issued_outside(dir: &Path) -> PathBuf {
         settings.replace("output: dwg", "output: ../issued"),
     )
     .unwrap();
+    set
+}
+
+/// Builds the set at `set`.
+fn build(set: &Path) {
     let reply = build_set_with(
         &SetBuildRequest {
-            set: set.clone(),
+            set: set.to_owned(),
             overwrite: false,
         },
         &Settings::default(),
     );
     assert!(reply.ok, "{:#?}", reply.error);
+    assert_eq!(reply.result.unwrap().no_set_in_marks, None);
+}
+
+/// A built copy of the demo set at `<dir>/demo-set` whose output folder is
+/// outside it, `output: ../issued`, so its DWGs are in `<dir>/issued`.
+fn issued_outside(dir: &Path) -> PathBuf {
+    let set = outside_output(dir);
+    build(&set);
     assert!(dir.join("issued").join("DEMO-001.dwg").is_file());
     set
+}
+
+/// Whether `dwg`'s bytes hold the build mark `value`, whole, as the DWG
+/// writes its drawing properties: in UTF-16, closed by a nul.
+fn holds_mark(dwg: &Path, value: &str) -> bool {
+    let bytes = fs::read(dwg).unwrap();
+    let text: Vec<u8> = value
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    bytes.windows(text.len()).any(|w| w == text)
 }
 
 /// What the stamp of a PNG of `dwg`, rendered on its own to `png`, says of
@@ -677,6 +703,93 @@ fn a_command_on_a_dwg_outside_its_set_rolls_back_the_set_its_mark_names() {
         .expect("the set the DWG's build mark names was read, and its line cut off");
     assert_eq!((rolled.entry, rolled.cut_off_line), (None, Some(3)));
     assert_eq!(fs::read(&journal).unwrap(), whole);
+}
+
+/// The mark is worked out from what the set writes, not from where a link
+/// leads: an output folder that is a link to a folder elsewhere gives the
+/// same mark, byte for byte, as a plain folder, and holds nothing of the
+/// folders the link leads through.
+#[cfg(unix)]
+#[test]
+fn an_output_folder_that_is_a_link_gives_the_same_mark_as_a_plain_one() {
+    let dir = scratch("output-link");
+    // `jobs/issued` is a link to `elsewhere/issued`.
+    let linked = outside_output(&dir.join("jobs"));
+    fs::create_dir_all(dir.join("elsewhere").join("issued")).unwrap();
+    std::os::unix::fs::symlink(
+        dir.join("elsewhere").join("issued"),
+        dir.join("jobs").join("issued"),
+    )
+    .unwrap();
+    build(&linked);
+    let through_link = dir.join("jobs").join("issued").join("DEMO-001.dwg");
+    assert!(dir.join("elsewhere/issued/DEMO-001.dwg").is_file());
+    assert!(
+        holds_mark(&through_link, "build; set=../demo-set"),
+        "the way back as the set writes its output folder"
+    );
+
+    // The same set with a plain output folder: the same bytes.
+    let plain = issued_outside(&dir.join("plain"));
+    let plain_dwg = dir.join("plain").join("issued").join("DEMO-001.dwg");
+    assert_eq!(
+        fs::read(&through_link).unwrap(),
+        fs::read(&plain_dwg).unwrap()
+    );
+
+    // Found from the DWG reached through the link, and issued once accepted.
+    accept(&linked, false, None, false).result.unwrap();
+    assert_eq!(
+        rendered(&through_link, &dir.join("link.png")).accept,
+        Some(1)
+    );
+    accept(&plain, false, None, false).result.unwrap();
+    assert_eq!(rendered(&plain_dwg, &dir.join("plain.png")).accept, Some(1));
+}
+
+/// The same file under another spelling, such as other letter case where
+/// the file system ignores case, is the file the accept recorded.
+#[test]
+fn a_dwg_named_in_other_letter_case_is_the_file_the_accept_issued() {
+    let dir = scratch("letter-case");
+    let set = issued_outside(&dir);
+    accept(&set, false, None, false).result.unwrap();
+    let issued = dir.join("issued");
+    let other_case = issued.join("demo-001.dwg");
+    if fs::metadata(&other_case).is_err() {
+        // A file system that keeps case: the same file under another name
+        // is a link to it.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("DEMO-001.dwg", &other_case).unwrap();
+        #[cfg(not(unix))]
+        panic!("Windows ignores letter case in file names");
+    }
+    let revision = rendered(&other_case, &dir.join("other-case.png"));
+    assert!(revision.issued, "{revision:?}");
+    assert_eq!(revision.accept, Some(1));
+}
+
+/// A set given by its resolved path, which on Windows is a `\\?\` path, is
+/// accepted with its files named as by any other path, so a DWG in its
+/// output folder outside it is issued.
+#[test]
+fn a_set_accepted_by_its_resolved_path_issues_its_dwgs_outside_it() {
+    let dir = scratch("resolved-path");
+    let set = issued_outside(&dir);
+    let resolved = fs::canonicalize(&set).unwrap();
+    accept(&resolved, false, None, false).result.unwrap();
+    let names: Vec<String> = journal_lines(&set)[0]["revision"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        names.contains(&"../issued/DEMO-001.dwg".to_owned()),
+        "{names:?}"
+    );
+    let dwg = dir.join("issued").join("DEMO-001.dwg");
+    assert_eq!(rendered(&dwg, &dir.join("resolved.png")).accept, Some(1));
 }
 
 /// A built copy of the demo set whose template, or whose rows file, is kept

@@ -30,8 +30,9 @@ use crate::description::{
     article, mark_text, read_file, read_set_settings, rows_at, template_at, template_path,
     AttributeSet, Listed, MarkFailure, ObjectList, RecordFile, Row, ID_SEPARATOR,
 };
+use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
-use crate::set::{Notice, SET_SETTINGS_FILE};
+use crate::set::{set_in_mark, Notice, SET_SETTINGS_FILE};
 use crate::settings::Settings;
 use crate::units::Unit;
 
@@ -143,6 +144,14 @@ impl SetFiles {
 
     fn dwg(&self, k: usize) -> PathBuf {
         self.output.join(format!("{}.dwg", self.rows[k].sheet))
+    }
+
+    /// The build mark the set's DWGs carry, naming the set as `build`
+    /// names it.
+    fn mark(&self) -> BuildMark {
+        BuildMark {
+            set: set_in_mark(&self.folder, &self.output),
+        }
     }
 }
 
@@ -1184,14 +1193,7 @@ fn validate(
     )?;
     let dwg = files.dwg(k);
     writable(&dwg)?;
-    prepare_sheet(
-        &record,
-        &template.path,
-        &dwg,
-        Some(&files.folder),
-        true,
-        settings,
-    )
+    prepare_sheet(&record, &template.path, &dwg, &files.mark(), true, settings)
 }
 
 /// Refuses a DWG that is there but cannot be written, such as one open in
@@ -1351,15 +1353,7 @@ fn before_change(files: &SetFiles, k: usize, settings: &Settings) -> Result<Resu
     .and_then(|(record, _)| {
         let dwg = files.dwg(k);
         writable(&dwg)?;
-        prepare_sheet(
-            &record,
-            &template.path,
-            &dwg,
-            Some(&files.folder),
-            true,
-            settings,
-        )
-        .map(|_| ())
+        prepare_sheet(&record, &template.path, &dwg, &files.mark(), true, settings).map(|_| ())
     });
     Ok(outcome)
 }

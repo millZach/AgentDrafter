@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use crate::description::{read_sheet_record, SheetRecord};
 use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
-use crate::set::set_in_mark;
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -83,11 +82,12 @@ pub fn build_with(request: &BuildRequest, settings: &Settings) -> Result<BuildRe
         .output
         .clone()
         .unwrap_or_else(|| description.with_extension("dwg"));
+    let alone = BuildMark { set: None };
     build_sheet(
         &record,
         description,
         &output,
-        None,
+        &alone,
         request.overwrite,
         settings,
     )
@@ -95,20 +95,20 @@ pub fn build_with(request: &BuildRequest, settings: &Settings) -> Result<BuildRe
 
 /// Builds the sheet `record` holds, read from the sheet description or
 /// template at `description`, into a DWG at `output`, written whole or not
-/// at all, each object carrying the ID and name its record gives it. The
-/// DWG's build mark names the drawing set whose folder is `set`, for a
-/// sheet of a set, and no set for a sheet built on its own. An existing
-/// file there is replaced only when `overwrite` is asked for and it
-/// carries AgentDrafter's build mark.
+/// at all, each object carrying the ID and name its record gives it, and
+/// carrying the build mark `mark`: naming its drawing set, for a sheet of
+/// a set, and no set for a sheet built on its own. An existing file there
+/// is replaced only when `overwrite` is asked for and it carries
+/// AgentDrafter's build mark.
 pub(crate) fn build_sheet(
     record: &SheetRecord,
     description: &Path,
     output: &Path,
-    set: Option<&Path>,
+    mark: &BuildMark,
     overwrite: bool,
     settings: &Settings,
 ) -> Result<BuildReport, Error> {
-    let prepared = prepare_sheet(record, description, output, set, overwrite, settings)?;
+    let prepared = prepare_sheet(record, description, output, mark, overwrite, settings)?;
     write_whole(output, &prepared.bytes)?;
     Ok(prepared.report)
 }
@@ -126,7 +126,7 @@ pub(crate) fn prepare_sheet(
     record: &SheetRecord,
     description: &Path,
     output: &Path,
-    set: Option<&Path>,
+    mark: &BuildMark,
     overwrite: bool,
     settings: &Settings,
 ) -> Result<PreparedSheet, Error> {
@@ -149,10 +149,7 @@ pub(crate) fn prepare_sheet(
 
     let sheet = &record.sheet;
     let fonts = SheetFonts::find(sheet, settings);
-    let mark = BuildMark {
-        set: set.and_then(|set| set_in_mark(output, set)),
-    };
-    let bytes = dwg::write_new_sheet(record, &|text| fonts.start(text), &mark)
+    let bytes = dwg::write_new_sheet(record, &|text| fonts.start(text), mark)
         .map_err(|e| e.in_file(output))?;
 
     let mut objects = BTreeMap::new();

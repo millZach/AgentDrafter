@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::build::{build_sheet, is_same_file, BuildReport};
 use crate::change::relative_to;
 use crate::description::{read_rows, read_set_settings, read_template, template_path};
-use crate::dwg;
+use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
 use crate::reply::Reply;
 use crate::settings::Settings;
@@ -66,6 +66,12 @@ pub struct SetReport {
     pub failed: usize,
     /// Each sheet, in the order its rows give them.
     pub sheets: Vec<SheetOutcome>,
+    /// Why the set's DWGs name no set in their build marks, when they
+    /// cannot: the way back to the set from its output folder would name a
+    /// folder above the set. A render or a plot of one of them on its own
+    /// then says it was not issued.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_set_in_marks: Option<String>,
     /// The set's inconsistent mark, when a change set landed on some of its
     /// sheets and failed on others: the build builds the sheets as their
     /// records are.
@@ -170,6 +176,9 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         )
         .in_file(&output)
     })?;
+    let mark = BuildMark {
+        set: set_in_mark(folder, &output),
+    };
     let sheets: Vec<SheetOutcome> = rows
         .iter()
         .map(|row| {
@@ -178,14 +187,7 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
             let mut notices = Vec::new();
             let built = read_template(&template, row, &rows_file, set.units, &mut notices)
                 .and_then(|record| {
-                    build_sheet(
-                        &record,
-                        &template,
-                        &dwg,
-                        Some(folder),
-                        request.overwrite,
-                        settings,
-                    )
+                    build_sheet(&record, &template, &dwg, &mark, request.overwrite, settings)
                 });
             let (result, error) = match built {
                 Ok(report) => (Some(report), None),
@@ -209,25 +211,48 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         built,
         failed: sheets.len() - built,
         sheets,
+        no_set_in_marks: mark.set.is_none().then(|| no_set_in_marks(&set.output)),
         inconsistent: crate::change::inconsistent(folder),
     })
 }
 
-/// The drawing set's folder `set` as the build mark of a DWG written to
-/// `dwg` records it: relative to the DWG's folder, as the file system
-/// resolves both, with `/` between folders on every system, such as `..`
-/// for a DWG in the set's `dwg` folder or `../demo-plant` for one in
-/// `../issued`; `.` when the DWG is in the set's own folder. None when no
-/// relative path leads there, as from a folder on another drive on
-/// Windows: the mark never holds a path in full.
-pub(crate) fn set_in_mark(dwg: &Path, set: &Path) -> Option<String> {
-    relative_path(&physical(folder_of(dwg))?, &physical(set)?)
+/// The drawing set's folder `set` as the build marks of the DWGs it writes
+/// to `outputs`, its output folder joined onto it, record it: the way back
+/// from the output folder to the set, as the set writes the one, with `/`
+/// between folders on every system, such as `..` for `output: dwg`,
+/// `../demo-plant` for `output: ../issued` from a set in `demo-plant`, and
+/// `.` for `output: .`.
+///
+/// It is worked out from the paths as written, made whole from the
+/// working folder, and no link is followed, so it holds nothing of where
+/// the set is on this machine beyond the set's own folder's name, and is
+/// the same on every machine. None when the way back would name a folder
+/// above the set, as from `output: ../../issued`, or no relative path
+/// leads there at all, as from another drive on Windows: the mark never
+/// holds a path in full.
+pub(crate) fn set_in_mark(set: &Path, outputs: &Path) -> Option<String> {
+    let back = relative_path(&lexical(outputs)?, &lexical(set)?)?;
+    let names = back.split('/').filter(|part| *part != "..").count();
+    (names <= 1).then_some(back)
+}
+
+/// Why the DWGs of a set whose output folder is `output`, as its settings
+/// write it, name no set in their build marks.
+fn no_set_in_marks(output: &str) -> String {
+    format!(
+        "the set's DWGs name no set in their build marks: the way back to the set from its output \
+         folder, `{output}`, would name a folder above the set, which a build mark never holds. \
+         A render or a plot of one of these DWGs on its own says it was not issued; the set's own \
+         plot still says so. An output folder inside the set, or beside it, such as `dwg` or \
+         `../issued`, is named"
+    )
 }
 
 /// The drawing set a DWG was built from, found from its build mark.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DwgSet {
-    /// The set's folder, as the file system resolves it.
+    /// The set's folder, in full: as reached from the DWG's folder as it
+    /// was given, or as the file system resolves it.
     pub folder: PathBuf,
     /// The DWG's path in the set as an accept records it, such as
     /// `dwg/DEMO-001.dwg`, or `../issued/DEMO-001.dwg` for a set whose
@@ -237,7 +262,10 @@ pub(crate) struct DwgSet {
 
 /// The drawing set the DWG at `dwg` was built from: the folder its build
 /// mark names, from the DWG's folder, when that folder holds a drawing set
-/// whose DWG of the sheet the DWG is named for is this very file.
+/// whose DWG of the sheet the DWG is named for is this very file. The mark
+/// is followed from the DWG's folder as it is given, as the set writes its
+/// output folder, and failing that from the folder as the file system
+/// resolves it, through links.
 ///
 /// Otherwise, why not, in words: the DWG carries no build mark, its mark
 /// names no set, the set is not there, or it is no longer the set the DWG
@@ -250,17 +278,35 @@ pub(crate) fn set_of_dwg(dwg: &Path) -> Result<DwgSet, String> {
     let Some(written) = mark.set else {
         return Err(NO_SET.to_owned());
     };
+    let from = folder_of(dwg);
+    let mut folders: Vec<PathBuf> = [lexical(from), physical(from)]
+        .into_iter()
+        .flatten()
+        .filter_map(|from| follow(&from, &written))
+        .collect();
+    folders.dedup();
+    let mut why = None;
+    for folder in folders {
+        match set_at(folder, dwg, &written) {
+            Ok(set) => return Ok(set),
+            Err(not) => {
+                why.get_or_insert(not);
+            }
+        }
+    }
+    Err(why.unwrap_or_else(|| {
+        format!(
+            "the DWG's build mark names its drawing set as `{written}`, which leads to no folder \
+             from the DWG's: a build mark names the set's folder relative to the DWG's"
+        )
+    }))
+}
+
+/// The drawing set at `folder`, which the build mark of the DWG at `dwg`
+/// names as `written`, if it is the set the DWG was built from.
+fn set_at(folder: PathBuf, dwg: &Path, written: &str) -> Result<DwgSet, String> {
     let named =
         format!("the drawing set the DWG's build mark names, `{written}` from the DWG's folder,");
-    let folder = physical(folder_of(dwg))
-        .and_then(|from| follow(&from, &written))
-        .ok_or_else(|| {
-            format!(
-                "the DWG's build mark names its drawing set as `{written}`, which leads to no \
-                 folder from the DWG's: a build mark names the set's folder relative to the \
-                 DWG's"
-            )
-        })?;
     let settings_file = folder.join(SET_SETTINGS_FILE);
     if !settings_file.is_file() {
         return Err(format!(
@@ -274,7 +320,8 @@ pub(crate) fn set_of_dwg(dwg: &Path) -> Result<DwgSet, String> {
         "{}.dwg",
         dwg.file_stem().unwrap_or_default().to_string_lossy()
     );
-    if !is_same_file(&folder.join(&settings.output).join(&name), dwg) {
+    let built = folder.join(&settings.output).join(&name);
+    if !is_same_file(&built, dwg) {
         return Err(format!(
             "{named} is no longer the set the DWG was built from: its DWGs go to its output \
              folder, `{}`, and this DWG is not its `{name}` there, so the DWG has been copied or \
@@ -282,10 +329,11 @@ pub(crate) fn set_of_dwg(dwg: &Path) -> Result<DwgSet, String> {
             settings.output
         ));
     }
-    // Worked out from the settings as written, as an accept works it out:
-    // joined onto the folder, resolved, `..` would be taken up on Windows.
-    let path = relative_to(Path::new(""), &Path::new(&settings.output).join(&name));
-    Ok(DwgSet { path, folder })
+    // Named in the set as an accept names it, by the same rule.
+    Ok(DwgSet {
+        path: relative_to(&folder, &built),
+        folder,
+    })
 }
 
 /// Why a DWG that carries no build mark names no drawing set.
@@ -294,8 +342,8 @@ const NO_MARK: &str = "the DWG carries no build mark AgentDrafter can read, so i
 
 /// Why a DWG whose build mark records no set names none.
 const NO_SET: &str = "the DWG's build mark names no drawing set: it was built from a sheet \
-                      description on its own, not from a set, or into a folder from which no \
-                      relative path leads to its set, such as one on another drive";
+                      description on its own, not from a set, or by a set whose output folder \
+                      the way back to the set from would name a folder above the set";
 
 /// The folder a file at `path` is in: `.` for a bare file name.
 fn folder_of(path: &Path) -> &Path {
@@ -303,6 +351,23 @@ fn folder_of(path: &Path) -> &Path {
         Some(folder) if !folder.as_os_str().is_empty() => folder,
         _ => Path::new("."),
     }
+}
+
+/// `path` in full, made whole from the working folder, with `.` and `..`
+/// worked out as written: no link is followed.
+fn lexical(path: &Path) -> Option<PathBuf> {
+    let absolute = std::path::absolute(path).ok()?;
+    let mut whole = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                whole.pop();
+            }
+            other => whole.push(other.as_os_str()),
+        }
+    }
+    Some(whole)
 }
 
 /// `path` as the file system resolves it: in full, through links, with
@@ -326,9 +391,9 @@ fn physical(path: &Path) -> Option<PathBuf> {
     Some(resolved)
 }
 
-/// The path from the folder `from` to the folder `to`, both in full and
-/// resolved, with `/` between folders, such as `../demo-plant`; `.` when
-/// they are one. None when they do not share a root, as two drives on
+/// The path from the folder `from` to the folder `to`, both in full with
+/// no `.` or `..`, with `/` between folders, such as `../demo-plant`; `.`
+/// when they are one. None when they do not share a root, as two drives on
 /// Windows do not, or a folder's name is not Unicode.
 fn relative_path(from: &Path, to: &Path) -> Option<String> {
     let from: Vec<Component> = from.components().collect();
@@ -355,9 +420,9 @@ fn relative_path(from: &Path, to: &Path) -> Option<String> {
 }
 
 /// The folder a build mark's `written` path leads to from the folder
-/// `from`, which is resolved: each `..` goes up a folder, as the file
-/// system would take it from there. None when `written` is not a relative
-/// path of folder names, or goes up past the root.
+/// `from`, which is in full with no `.` or `..`: each `..` goes up a
+/// folder. None when `written` is not a relative path of folder names, or
+/// goes up past the root.
 fn follow(from: &Path, written: &str) -> Option<PathBuf> {
     if written.starts_with('/') {
         return None;
@@ -423,6 +488,7 @@ mod tests {
             ("../issued", "../demo-set", "../issued/DEMO-002.dwg"),
             ("out/a/b", "../../..", "out/a/b/DEMO-002.dwg"),
             (".", ".", "DEMO-002.dwg"),
+            ("../../issued", "", ""),
         ] {
             fs::write(
                 set.join(SET_SETTINGS_FILE),
@@ -438,6 +504,16 @@ mod tests {
             );
             assert!(reply.ok, "{output}: {:#?}", reply.error);
             let dwg = set.join(output).join("DEMO-002.dwg");
+            let said = reply.result.unwrap().no_set_in_marks;
+            if written.is_empty() {
+                // The way back would name `jobs`, above the set: the DWG
+                // names no set, and the reply says why.
+                assert_eq!(dwg::build_mark(&dwg), Some(BuildMark { set: None }));
+                assert!(said.unwrap().contains("`../../issued`"));
+                assert_eq!(set_of_dwg(&dwg).unwrap_err(), NO_SET);
+                continue;
+            }
+            assert_eq!(said, None, "{output}");
             assert_eq!(
                 dwg::build_mark(&dwg),
                 Some(BuildMark {
@@ -531,9 +607,33 @@ mod tests {
             Some(here.join("out"))
         );
         assert_eq!(folder_of(Path::new("A.dwg")), Path::new("."));
+    }
+
+    /// The mark is the way back from the output folder to the set, as the
+    /// set writes the one, and never names a folder above the set.
+    #[test]
+    fn a_mark_is_the_way_back_from_the_output_folder_as_the_set_writes_it() {
+        let mark =
+            |set: &str, output: &str| set_in_mark(Path::new(set), &Path::new(set).join(output));
+        let set = "jobs/demo-set";
+        assert_eq!(mark(set, "dwg").as_deref(), Some(".."));
+        assert_eq!(mark(set, "../issued").as_deref(), Some("../demo-set"));
+        assert_eq!(mark(set, "out/a/b").as_deref(), Some("../../.."));
+        assert_eq!(mark(set, ".").as_deref(), Some("."));
+        assert_eq!(mark(set, "..").as_deref(), Some("demo-set"));
+        assert_eq!(mark(set, "../demo-set/dwg").as_deref(), Some(".."));
         assert_eq!(
-            set_in_mark(Path::new("not-there-yet/issued/A.dwg"), Path::new(".")).as_deref(),
-            Some("../..")
+            mark(set, "../shared/issued").as_deref(),
+            Some("../../demo-set")
         );
+        // The way back would name `jobs`, above the set: no set.
+        assert_eq!(mark(set, "../../issued"), None);
+        assert_eq!(mark(set, "../../../x/issued"), None);
+        // Wherever the working folder is, the mark is the same.
+        assert_eq!(
+            mark("demo-set", "../issued").as_deref(),
+            Some("../demo-set")
+        );
+        assert!(no_set_in_marks("../../issued").contains("`../../issued`"));
     }
 }

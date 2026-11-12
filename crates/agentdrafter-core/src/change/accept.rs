@@ -34,6 +34,7 @@ use super::journal::{
     FileIssued,
 };
 use super::recover::recover;
+use crate::build::is_same_file;
 use crate::check::{check_with, CheckReport, CheckRequest};
 use crate::description::{read_set_settings, SavedSet};
 use crate::error::{Error, ErrorCode};
@@ -388,24 +389,53 @@ fn revision(folder: &Path, set: &SavedSet) -> Result<Vec<FileIssued>, Error> {
 
 /// `path`, which is inside the set's `folder` or written from it, relative
 /// to it, with `.` and `..` worked out as written and `/` between folders,
-/// such as `blocks.yaml` for `folder/templates/../blocks.yaml`.
+/// such as `blocks.yaml` for `folder/templates/../blocks.yaml` and
+/// `../issued/A.dwg` for `folder/../issued/A.dwg`.
+///
+/// This is the one rule an accept names the set's files by and a stamp
+/// looks them up by. It gives the same name whether `path` still holds its
+/// `..`, as a path joined onto the folder does on most systems, or the join
+/// already took it up, as joining onto a Windows `\\?\` path does, since
+/// both paths are worked out before one is taken from the other.
 pub(crate) fn relative_to(folder: &Path, path: &Path) -> String {
-    let inside = path.strip_prefix(folder).unwrap_or(path);
+    let (folder, folder_roots) = as_written(folder);
+    let (path, path_roots) = as_written(path);
+    let shared = folder.iter().zip(&path).take_while(|(a, b)| a == b).count();
+    let up = &folder[shared..];
+    if folder_roots != path_roots || shared < folder_roots || up.iter().any(|p| p == "..") {
+        // No way from the folder to the path as written: the path itself.
+        return path.join("/");
+    }
+    let mut parts: Vec<&str> = vec![".."; up.len()];
+    parts.extend(path[shared..].iter().map(String::as_str));
+    parts.join("/")
+}
+
+/// The parts of `path`, with `.` and `..` worked out as written, and how
+/// many of them at the start are its root: a drive or a share on Windows,
+/// and `/`. A `..` takes off the folder before it, if there is one, and
+/// stays when there is none, except at the root.
+fn as_written(path: &Path) -> (Vec<String>, usize) {
     let mut parts: Vec<String> = Vec::new();
-    for component in inside.components() {
+    let mut roots = 0;
+    for component in path.components() {
         match component {
             Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir => {
+                parts.push(component.as_os_str().to_string_lossy().into_owned());
+                roots += 1;
+            }
             Component::ParentDir => {
-                if parts.last().is_some_and(|p| p != "..") {
+                if parts.len() > roots && parts.last().is_some_and(|p| p != "..") {
                     parts.pop();
-                } else {
+                } else if roots == 0 {
                     parts.push("..".to_owned());
                 }
             }
-            other => parts.push(other.as_os_str().to_string_lossy().into_owned()),
+            Component::Normal(name) => parts.push(name.to_string_lossy().into_owned()),
         }
     }
-    parts.join("/")
+    (parts, roots)
 }
 
 /// A check's rule as JSON writes it, such as `off_sheet`.
@@ -486,7 +516,29 @@ fn dwg_revision(dwg: &Path, bytes: &[u8]) -> StampRevision {
                 .to_owned(),
         ));
     };
-    issued_by(&entries, &[(set.path, fingerprint(bytes))])
+    let path = recorded_as(&entries, &set.folder, set.path, dwg);
+    issued_by(&entries, &[(path, fingerprint(bytes))])
+}
+
+/// The name an accept among `entries` recorded the file at `dwg` by, in
+/// the set whose folder is `folder`: `path`, its name as the DWG is named,
+/// when an accept recorded that; otherwise the name of a file an accept
+/// recorded that is the same file, as the file system tells it, such as
+/// `dwg/DEMO-001.dwg` for `demo-001.dwg` where letter case is ignored.
+fn recorded_as(entries: &[Entry], folder: &Path, path: String, dwg: &Path) -> String {
+    let mut recorded = entries
+        .iter()
+        .rev()
+        .filter(|e| e.kind == EntryKind::Accept)
+        .flat_map(|e| &e.revision)
+        .map(|f| &f.path);
+    if recorded.clone().any(|p| *p == path) {
+        return path;
+    }
+    recorded
+        .find(|p| is_same_file(&folder.join(p), dwg))
+        .cloned()
+        .unwrap_or(path)
 }
 
 /// What a stamp says of the revision a sheet description or a template
@@ -571,6 +623,49 @@ mod tests {
         assert_eq!(
             relative_to(set, &set.join("..").join("shared.yaml")),
             "../shared.yaml"
+        );
+    }
+
+    /// A path whose `..` the join already took up, as joining onto a
+    /// Windows `\\?\` path does, is named as the same path with its `..`.
+    #[test]
+    fn a_path_outside_the_set_is_named_alike_however_it_was_joined() {
+        let set = Path::new("/jobs/demo-set");
+        for joined in [
+            set.join("..").join("issued").join("DEMO-001.dwg"),
+            PathBuf::from("/jobs/issued/DEMO-001.dwg"),
+        ] {
+            assert_eq!(relative_to(set, &joined), "../issued/DEMO-001.dwg");
+        }
+        assert_eq!(
+            relative_to(set, Path::new("/jobs/demo-set/dwg/DEMO-001.dwg")),
+            "dwg/DEMO-001.dwg"
+        );
+        assert_eq!(
+            relative_to(Path::new("/"), Path::new("/../x.yaml")),
+            "x.yaml"
+        );
+        assert_eq!(
+            relative_to(Path::new(""), Path::new("dwg/A.dwg")),
+            "dwg/A.dwg"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_set_given_as_a_verbatim_path_names_its_files_as_any_other() {
+        let set = Path::new(r"\\?\C:\jobs\demo-set");
+        // Joined onto a `\\?\` path, `..` is taken up at once.
+        let dwg = set.join("../issued").join("DEMO-001.dwg");
+        assert_eq!(dwg, Path::new(r"\\?\C:\jobs\issued\DEMO-001.dwg"));
+        assert_eq!(relative_to(set, &dwg), "../issued/DEMO-001.dwg");
+        assert_eq!(
+            relative_to(set, &set.join("../outside/ansi-b.yaml")),
+            "../outside/ansi-b.yaml"
+        );
+        assert_eq!(
+            relative_to(set, &set.join("dwg").join("DEMO-001.dwg")),
+            "dwg/DEMO-001.dwg"
         );
     }
 }
