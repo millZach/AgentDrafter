@@ -113,10 +113,6 @@ impl Stamp {
     /// one's kind, where it was read from and the bytes read, the record
     /// first.
     pub(crate) fn new(files: &[(SourceKind, &Path, &[u8])], output: &Path) -> Stamp {
-        let read: Vec<(&Path, &[u8])> = files
-            .iter()
-            .map(|&(_, path, bytes)| (path, bytes))
-            .collect();
         Stamp {
             stamp: STAMP_FORMAT,
             produced_by: format!("agentdrafter {}", env!("CARGO_PKG_VERSION")),
@@ -128,7 +124,7 @@ impl Stamp {
                     sha256: fingerprint(bytes),
                 })
                 .collect(),
-            revision: Some(stamp_revision(&read)),
+            revision: Some(stamp_revision(files)),
         }
     }
 
@@ -230,6 +226,7 @@ pub fn check_stale(request: &StaleRequest) -> Result<StaleReport, Error> {
             accept,
             accepted_at,
             via,
+            ..
         }) => format!(
             "the output was made from an issued revision: the one the accept in entry {} of the \
              set's journal issued{}{}",
@@ -239,6 +236,9 @@ pub fn check_stale(request: &StaleRequest) -> Result<StaleReport, Error> {
                 .as_ref()
                 .map_or_else(String::new, |at| format!(", at {at}"))
         ),
+        Some(StampRevision { why: Some(why), .. }) => {
+            format!("the output was not made from an issued revision: {why}")
+        }
         Some(_) => "the output was made from the working revision, which was not issued: no \
                     accept had issued the files it was made from"
             .to_owned(),
@@ -412,6 +412,7 @@ mod tests {
                 accept: Some(4),
                 accepted_at: Some("2026-11-11T18:57:46Z".into()),
                 via: Some(crate::Interface::Viewer),
+                why: None,
             }),
         };
         let png = |stamp: &Stamp| {

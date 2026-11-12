@@ -44,8 +44,30 @@ const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;
 
 /// The build mark: a custom drawing property, as AutoCAD's DWGPROPS shows
 /// it, written into every DWG AgentDrafter builds. A build replaces an
-/// existing DWG only when it carries this property with this value.
-const BUILD_MARK: (&str, &str) = ("AgentDrafter", "build");
+/// existing DWG only when it carries it. Its value is [`BUILT`] for a sheet
+/// built on its own, and [`BUILT_FROM_SET`] followed by the drawing set's
+/// folder for a sheet of a set, such as `build; set=..`.
+const BUILD_MARK: &str = "AgentDrafter";
+
+/// The build mark's value for a sheet built on its own.
+const BUILT: &str = "build";
+
+/// How the build mark's value starts for a sheet of a drawing set: the
+/// set's folder follows, relative to the DWG's folder, with `/` between
+/// folders, to the end of the value.
+const BUILT_FROM_SET: &str = "build; set=";
+
+/// The section of a DWG that holds its drawing properties, DWGPROPS.
+const SUMMARY_SECTION: &str = "AcDb:SummaryInfo";
+
+/// What a DWG's build mark says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BuildMark {
+    /// The folder of the drawing set the DWG was built from, relative to
+    /// the DWG's folder, as the mark writes it: `/` between folders, such
+    /// as `..` or `../demo-plant`. None for a sheet built on its own.
+    pub set: Option<String>,
+}
 
 /// AutoCAD's own knot spacing for a curve through fit points: by the chord
 /// length between them.
@@ -61,13 +83,14 @@ pub(crate) fn new_sheet_version() -> String {
 }
 
 /// Writes a new sheet as the bytes of a DWG in the 2018 format, carrying the
-/// build mark. `record` holds the sheet with the record of each of its
-/// objects, and each object is written with its ID and name from its
+/// build mark `mark`. `record` holds the sheet with the record of each of
+/// its objects, and each object is written with its ID and name from its
 /// record. `start_of` gives where each single line of text starts, which
 /// the DWG records beside the point it is justified at.
 pub(crate) fn write_new_sheet(
     record: &SheetRecord,
     start_of: &dyn Fn(&TextObject) -> Point3,
+    mark: &BuildMark,
 ) -> Result<Vec<u8>, Error> {
     let sheet = &record.sheet;
     if record.objects.len() != sheet.objects.len() {
@@ -85,11 +108,10 @@ pub(crate) fn write_new_sheet(
     let mut drawing = CadDocument::with_version(NEW_SHEET_VERSION);
     drawing.header.insertion_units = insertion_units(sheet.units);
     drawing.header.measurement = i16::from(sheet.units.is_metric());
-    let (name, value) = BUILD_MARK;
     drawing
         .summary_info
         .custom_properties
-        .push((name.to_owned(), value.to_owned()));
+        .push((BUILD_MARK.to_owned(), mark_value(mark)));
     for linetype in &sheet.linetypes {
         drawing
             .line_types
@@ -598,16 +620,93 @@ fn read_spline(spline: &DwgSpline, layer: String) -> Option<Spline> {
 /// Whether the DWG at `path` carries the build mark, that is, whether
 /// AgentDrafter built it. A file that cannot be read as a DWG is an error.
 pub(crate) fn carries_build_mark(path: &Path) -> Result<bool, Error> {
-    read_drawing(path).map(|drawing| has_build_mark(&drawing))
+    read_drawing(path).map(|drawing| mark_in(&drawing.summary_info.custom_properties).is_some())
 }
 
-fn has_build_mark(drawing: &CadDocument) -> bool {
-    let (name, value) = BUILD_MARK;
-    drawing
-        .summary_info
-        .custom_properties
+/// What the build mark of the DWG at `path` says, read from its drawing
+/// properties alone, without reading the drawing: none when the file
+/// carries no build mark, or cannot be read as a DWG in a format
+/// AgentDrafter builds in, the 2007 format or later.
+pub(crate) fn build_mark(path: &Path) -> Option<BuildMark> {
+    let properties = catch_unwind(AssertUnwindSafe(|| drawing_properties(path))).ok()??;
+    mark_in(&properties)
+}
+
+/// The custom drawing properties of the DWG at `path`, each its name and
+/// its value, read from its summary section alone.
+fn drawing_properties(path: &Path) -> Option<Vec<(String, String)>> {
+    let mut reader = DwgReader::from_file(path).ok()?;
+    let header = reader.read_file_header().ok()?;
+    if !header.version.r2007_plus() {
+        return None;
+    }
+    let section = reader.get_section_buffer(SUMMARY_SECTION, &header).ok()?;
+    custom_properties(&section)
+}
+
+/// The custom properties in a summary section of the 2007 format or later:
+/// eight texts (the title, the subject, the author, the keywords, the
+/// comments, who saved it last, the revision number and the hyperlink
+/// base), three times of 8 bytes each, then the count of custom properties
+/// and each one's name and value. Each text is a count of UTF-16 units,
+/// its closing nul among them, then the units.
+fn custom_properties(section: &[u8]) -> Option<Vec<(String, String)>> {
+    fn count(rest: &mut &[u8]) -> Option<usize> {
+        let bytes = rest.get(..2)?;
+        let count = usize::from(u16::from_le_bytes([bytes[0], bytes[1]]));
+        *rest = &rest[2..];
+        Some(count)
+    }
+    fn text(rest: &mut &[u8]) -> Option<String> {
+        let length = count(rest)? * 2;
+        let units: Vec<u16> = rest
+            .get(..length)?
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair))
+            .collect();
+        *rest = &rest[length..];
+        Some(
+            String::from_utf16_lossy(&units)
+                .trim_end_matches('\0')
+                .to_owned(),
+        )
+    }
+    let mut rest = section;
+    for _ in 0..8 {
+        text(&mut rest)?;
+    }
+    rest = rest.get(24..)?;
+    let properties = count(&mut rest)?;
+    (0..properties)
+        .map(|_| Some((text(&mut rest)?, text(&mut rest)?)))
+        .collect()
+}
+
+/// The build mark's value for `mark`.
+fn mark_value(mark: &BuildMark) -> String {
+    match &mark.set {
+        Some(set) => format!("{BUILT_FROM_SET}{set}"),
+        None => BUILT.to_owned(),
+    }
+}
+
+/// The build mark among a drawing's custom properties, if one of them is
+/// it.
+fn mark_in(properties: &[(String, String)]) -> Option<BuildMark> {
+    properties
         .iter()
-        .any(|(n, v)| n == name && v == value)
+        .filter(|(name, _)| name == BUILD_MARK)
+        .find_map(|(_, value)| {
+            if value == BUILT {
+                return Some(BuildMark { set: None });
+            }
+            let set = value.strip_prefix(BUILT_FROM_SET)?;
+            (!set.is_empty()).then(|| BuildMark {
+                set: Some(set.to_owned()),
+            })
+        })
 }
 
 fn read_drawing(path: &Path) -> Result<CadDocument, Error> {
@@ -707,16 +806,87 @@ mod tests {
         }
     }
 
+    const ON_ITS_OWN: BuildMark = BuildMark { set: None };
+
     #[test]
     fn a_built_dwg_carries_the_build_mark() {
         let dir = scratch("marked");
-        let dwg = dir.join("sheet.dwg");
-        fs::write(
-            &dwg,
-            write_new_sheet(&record(empty_sheet()), &|t| t.position).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(carries_build_mark(&dwg), Ok(true));
+        for (name, mark, value) in [
+            ("alone.dwg", ON_ITS_OWN, "build"),
+            (
+                "of-a-set.dwg",
+                BuildMark {
+                    set: Some("..".into()),
+                },
+                "build; set=..",
+            ),
+            (
+                "far.dwg",
+                BuildMark {
+                    set: Some("../../plants/démo plant; 2".into()),
+                },
+                "build; set=../../plants/démo plant; 2",
+            ),
+        ] {
+            let dwg = dir.join(name);
+            fs::write(
+                &dwg,
+                write_new_sheet(&record(empty_sheet()), &|t| t.position, &mark).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(carries_build_mark(&dwg), Ok(true), "{name}");
+            // The mark is one drawing property, as AutoCAD's DWGPROPS shows it.
+            let drawing = read_drawing(&dwg).unwrap();
+            assert_eq!(
+                drawing.summary_info.custom_properties,
+                [("AgentDrafter".to_owned(), value.to_owned())],
+                "{name}"
+            );
+            // Read from the drawing properties alone, as from the drawing.
+            assert_eq!(build_mark(&dwg), Some(mark), "{name}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_agentdrafter_property_saying_build_is_the_build_mark() {
+        let mark = |properties: &[(&str, &str)]| {
+            let properties: Vec<(String, String)> = properties
+                .iter()
+                .map(|&(n, v)| (n.to_owned(), v.to_owned()))
+                .collect();
+            mark_in(&properties)
+        };
+        assert_eq!(mark(&[("AgentDrafter", "build")]), Some(ON_ITS_OWN));
+        assert_eq!(
+            mark(&[("Client", "x"), ("AgentDrafter", "build; set=../a b")]),
+            Some(BuildMark {
+                set: Some("../a b".into())
+            })
+        );
+        for not_a_mark in [
+            &[("AgentDrafter", "built")][..],
+            &[("AgentDrafter", "build; set=")],
+            &[("AgentDrafter", "Build")],
+            &[("agentdrafter", "build")],
+            &[("Author", "build")],
+            &[],
+        ] {
+            assert_eq!(mark(not_a_mark), None, "{not_a_mark:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_dwg_carries_no_build_mark() {
+        let dir = scratch("not-a-dwg");
+        let file = dir.join("sheet.dwg");
+        fs::write(&file, b"AC1032 but nothing after").unwrap();
+        assert_eq!(build_mark(&file), None);
+        assert_eq!(build_mark(&dir.join("gone.dwg")), None);
+        // A DWG of the 2018 format with no drawing properties of its own.
+        let bytes = DwgWriter::write_to_vec(&CadDocument::with_version(NEW_SHEET_VERSION)).unwrap();
+        fs::write(&file, bytes).unwrap();
+        assert_eq!(build_mark(&file), None);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -730,7 +900,7 @@ mod tests {
             to: Point3::new(1.0, 0.0, 0.0),
             layer: LAYER_ZERO.to_owned(),
         }));
-        let error = write_new_sheet(&record(sheet), &|t| t.position).unwrap_err();
+        let error = write_new_sheet(&record(sheet), &|t| t.position, &ON_ITS_OWN).unwrap_err();
         assert_eq!(error.code, ErrorCode::DwgWrite);
         assert!(error.message.contains("with its ID"), "{error:?}");
     }

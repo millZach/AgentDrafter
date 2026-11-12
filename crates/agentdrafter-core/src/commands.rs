@@ -40,9 +40,9 @@ use crate::plot::{plot_set_with, plot_with, PlotRequest, PlotSetRequest, BUILT_I
 use crate::query::{query_with, QueryRequest};
 use crate::render::{render_with, RenderRequest};
 use crate::reply::Reply;
-use crate::set::{build_set_with, SetBuildRequest, SET_SETTINGS_FILE};
+use crate::set::{build_set_with, set_of_dwg, SetBuildRequest, SET_SETTINGS_FILE};
 use crate::settings::{Settings, FONTS_VARIABLE, PLOT_STYLES_VARIABLE};
-use crate::stamp::{check_stale, StaleRequest};
+use crate::stamp::{check_stale, SourceKind, StaleRequest};
 use crate::text::measure::{measure_text_with, MeasureTextRequest};
 use crate::{block_library_schema, rows_schema, set_schema, sheet_description_schema};
 use crate::{template_schema, JOURNAL_FILE, KEPT_UNDO_STATES};
@@ -899,13 +899,20 @@ fn run_check(
 
 /// The drawing set a command's input reads, if it names one: the folder its
 /// `set` names; or the set its `source`, or with none its `output`, is, or
-/// is in, the nearest folder above it that holds a set's settings.
+/// is in, the nearest folder above it that holds a set's settings. A DWG
+/// its build mark names the set of, when it is still that set's, is that
+/// set's wherever its output folder is.
 fn set_read(input: &Value) -> Option<PathBuf> {
     let named = ["set", "source", "output"]
         .iter()
         .find_map(|key| input.get(key))?
         .as_str()?;
     let path = Path::new(named);
+    if SourceKind::of(path) == SourceKind::Dwg && path.is_file() {
+        if let Ok(set) = set_of_dwg(path) {
+            return Some(set.folder);
+        }
+    }
     let set = path
         .ancestors()
         .find(|folder| folder.join(SET_SETTINGS_FILE).is_file())?;

@@ -1184,7 +1184,14 @@ fn validate(
     )?;
     let dwg = files.dwg(k);
     writable(&dwg)?;
-    prepare_sheet(&record, &template.path, &dwg, true, settings)
+    prepare_sheet(
+        &record,
+        &template.path,
+        &dwg,
+        Some(&files.folder),
+        true,
+        settings,
+    )
 }
 
 /// Refuses a DWG that is there but cannot be written, such as one open in
@@ -1344,7 +1351,15 @@ fn before_change(files: &SetFiles, k: usize, settings: &Settings) -> Result<Resu
     .and_then(|(record, _)| {
         let dwg = files.dwg(k);
         writable(&dwg)?;
-        prepare_sheet(&record, &template.path, &dwg, true, settings).map(|_| ())
+        prepare_sheet(
+            &record,
+            &template.path,
+            &dwg,
+            Some(&files.folder),
+            true,
+            settings,
+        )
+        .map(|_| ())
     });
     Ok(outcome)
 }

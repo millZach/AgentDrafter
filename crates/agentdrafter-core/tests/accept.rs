@@ -3,18 +3,20 @@
 //! despite them; marks every change set in place issued, after which undo
 //! refuses them; records the interface it came through; and outputs made
 //! after it say, in their stamps, that they came from an issued revision.
-//! Then the set drawn as it was at each entry of its journal, rebuilt from
-//! the undo states, and the entries that can no longer be shown.
+//! A DWG drawn on its own finds its set from its build mark, wherever the
+//! set's output folder is, and says why when it cannot. Then the set drawn
+//! as it was at each entry of its journal, rebuilt from the undo states,
+//! and the entries that can no longer be shown.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    accept_with, build_set_with, change_with, check_stale, display_list_with, journal,
-    plot_set_with, render_with, undo, AcceptReport, AcceptRequest, ChangeRequest,
-    DisplayListRequest, EntryKind, ErrorCode, Interface, JournalRequest, PlotSetRequest,
-    RenderRequest, Reply, SetBuildRequest, Settings, StaleRequest, UndoRequest, JOURNAL_FILE,
-    KEPT_UNDO_STATES,
+    accept_with, build_set_with, build_with, change_with, check_stale, display_list_with,
+    find_command, journal, plot_set_with, plot_with, render_with, undo, AcceptReport,
+    AcceptRequest, BuildRequest, ChangeRequest, DisplayListRequest, EntryKind, ErrorCode,
+    Interface, JournalRequest, PlotRequest, PlotSetRequest, RenderRequest, Reply, SetBuildRequest,
+    Settings, StaleRequest, StampRevision, UndoRequest, JOURNAL_FILE, KEPT_UNDO_STATES,
 };
 use serde_json::{json, Value};
 
@@ -409,6 +411,272 @@ fn outputs_made_after_an_accept_say_in_their_stamps_that_they_came_from_an_issue
     );
     let pdf_now = plot();
     assert!(!stale(&pdf_now).issued);
+}
+
+/// An empty folder for one test under Cargo's scratch folder in `target/`.
+fn scratch(test: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("core-accept")
+        .join(test);
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A built copy of the demo set at `<dir>/demo-set` whose output folder is
+/// outside it, `output: ../issued`, so its DWGs are in `<dir>/issued`.
+fn issued_outside(dir: &Path) -> PathBuf {
+    let set = dir.join("demo-set");
+    demo_set::copy_demo_set(&set);
+    let settings = fs::read_to_string(set.join("set.yaml")).unwrap();
+    assert!(settings.contains("output: dwg"), "{settings}");
+    fs::write(
+        set.join("set.yaml"),
+        settings.replace("output: dwg", "output: ../issued"),
+    )
+    .unwrap();
+    let reply = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: false,
+        },
+        &Settings::default(),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    assert!(dir.join("issued").join("DEMO-001.dwg").is_file());
+    set
+}
+
+/// What the stamp of a PNG of `dwg`, rendered on its own to `png`, says of
+/// the revision it came from.
+fn rendered(dwg: &Path, png: &Path) -> StampRevision {
+    let mut request = RenderRequest::new(dwg);
+    request.output = Some(png.to_owned());
+    request.overwrite = true;
+    request.width = Some(200);
+    let report = render_with(&request, &Settings::default()).unwrap();
+    report.stamp.revision.unwrap()
+}
+
+/// What the stamp of a PDF of `dwg`, plotted on its own to `pdf`, says of
+/// the revision it came from.
+fn plotted(dwg: &Path, pdf: &Path) -> StampRevision {
+    let mut request = PlotRequest::new(dwg);
+    request.output = Some(pdf.to_owned());
+    request.overwrite = true;
+    let report = plot_with(&request, &Settings::default()).unwrap();
+    report.stamp.revision.unwrap()
+}
+
+/// Why a revision was not issued, which it must say.
+fn why(revision: StampRevision) -> String {
+    assert!(!revision.issued, "{revision:?}");
+    revision.why.expect("it says why it was not issued")
+}
+
+#[test]
+fn a_dwg_in_an_output_folder_outside_its_set_drawn_on_its_own_says_it_was_issued() {
+    let dir = scratch("issued-outside");
+    let set = issued_outside(&dir);
+    let dwg = dir.join("issued").join("DEMO-001.dwg");
+
+    // Before any accept, the DWG's set is found, and its revision is the
+    // working revision, with nothing more to say.
+    let before = rendered(&dwg, &dir.join("before.png"));
+    assert!(!before.issued && before.why.is_none(), "{before:?}");
+
+    let accepted = accept(&set, false, None, false).result.unwrap();
+    assert_eq!(accepted.journal_entry, Some(1));
+    let png = dir.join("after.png");
+    let pdf = dir.join("after.pdf");
+    for revision in [rendered(&dwg, &png), plotted(&dwg, &pdf)] {
+        assert!(revision.issued, "{revision:?}");
+        assert_eq!(revision.accept, Some(1));
+        assert_eq!(revision.via, Some(Interface::Viewer));
+        assert_eq!(revision.why, None);
+    }
+    for output in [&png, &pdf] {
+        let report = check_stale(&StaleRequest {
+            output: output.clone(),
+            source: None,
+        })
+        .unwrap();
+        assert!(report.issued && !report.stale, "{report:?}");
+        assert!(report.revision.contains("the accept in entry 1"));
+    }
+    // The set's own plot, from its template, says so too, as it did.
+    let reply = plot_set_with(
+        &PlotSetRequest {
+            set: set.clone(),
+            overwrite: false,
+            plot_style: None,
+        },
+        &Settings::default(),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    let plotted_set = reply.result.unwrap();
+    let revision = plotted_set.sheets[0]
+        .result
+        .as_ref()
+        .unwrap()
+        .stamp
+        .revision
+        .clone();
+    assert_eq!(revision.map(|r| r.accept), Some(Some(1)));
+
+    // A change set builds the DWG again where the set's outputs go, naming
+    // its set as a build does: not issued until it is accepted, then issued.
+    assert_eq!(apply(&set, moved(0.1)), 2);
+    let changed = rendered(&dwg, &dir.join("changed.png"));
+    assert!(!changed.issued && changed.why.is_none(), "{changed:?}");
+    let accepted = accept(&set, false, Some(2), false).result.unwrap();
+    assert_eq!(accepted.journal_entry, Some(3));
+    assert_eq!(rendered(&dwg, &dir.join("again.png")).accept, Some(3));
+}
+
+#[test]
+fn a_set_moved_with_its_output_folder_is_found_and_one_moved_away_or_gone_says_why() {
+    let dir = scratch("set-moved");
+    let set = issued_outside(&dir.join("first"));
+    accept(&set, false, None, false).result.unwrap();
+
+    // The set and its output folder moved together: the DWG's mark still
+    // leads to its set.
+    let moved = dir.join("second");
+    fs::rename(dir.join("first"), &moved).unwrap();
+    let dwg = moved.join("issued").join("DEMO-001.dwg");
+    let png = moved.join("DEMO-001.png");
+    let pdf = moved.join("DEMO-001.pdf");
+    for revision in [rendered(&dwg, &png), plotted(&dwg, &pdf)] {
+        assert_eq!(revision.accept, Some(1), "{revision:?}");
+    }
+
+    // The set moved away from its output folder: the DWG says it is not
+    // there, naming it as its mark does, never by its path in full.
+    fs::create_dir_all(moved.join("archive")).unwrap();
+    fs::rename(
+        moved.join("demo-set"),
+        moved.join("archive").join("demo-set"),
+    )
+    .unwrap();
+    for revision in [rendered(&dwg, &png), plotted(&dwg, &pdf)] {
+        let why = why(revision);
+        assert!(
+            why.contains("`../demo-set` from the DWG's folder") && why.contains("is not there"),
+            "{why}"
+        );
+        assert!(!why.contains(&*dir.to_string_lossy()), "{why}");
+    }
+    let report = check_stale(&StaleRequest {
+        output: png.clone(),
+        source: None,
+    })
+    .unwrap();
+    assert!(!report.issued);
+    assert!(
+        report
+            .revision
+            .starts_with("the output was not made from an issued revision: ")
+            && report.revision.contains("is not there"),
+        "{}",
+        report.revision
+    );
+
+    // The set taken away: the same.
+    fs::remove_dir_all(moved.join("archive")).unwrap();
+    assert!(why(rendered(&dwg, &png)).contains("is not there"));
+}
+
+#[test]
+fn a_dwg_copied_out_of_its_set_s_output_folder_says_why_it_is_not_issued() {
+    let dir = scratch("dwg-copied");
+    let set = issued_outside(&dir);
+    accept(&set, false, None, false).result.unwrap();
+    let dwg = dir.join("issued").join("DEMO-001.dwg");
+
+    // Copied deeper: its mark's path from there leads to no set.
+    let deep = dir.join("sent").join("plant").join("DEMO-001.dwg");
+    fs::create_dir_all(deep.parent().unwrap()).unwrap();
+    fs::copy(&dwg, &deep).unwrap();
+    let why_deep = why(rendered(&deep, &dir.join("deep.png")));
+    assert!(
+        why_deep.contains("`../demo-set`") && why_deep.contains("is not there"),
+        "{why_deep}"
+    );
+
+    // Copied beside the output folder: its mark still leads to the set,
+    // which does not write this DWG, so it is no longer that set's.
+    let beside = dir.join("copy").join("DEMO-001.dwg");
+    fs::create_dir_all(beside.parent().unwrap()).unwrap();
+    fs::copy(&dwg, &beside).unwrap();
+    let png = dir.join("beside.png");
+    let why_beside = why(rendered(&beside, &png));
+    assert!(
+        why_beside.contains("is no longer the set the DWG was built from")
+            && why_beside.contains("`../issued`"),
+        "{why_beside}"
+    );
+    assert!(why(plotted(&beside, &dir.join("beside.pdf"))).contains("is no longer the set"));
+    let report = check_stale(&StaleRequest {
+        output: png,
+        source: None,
+    })
+    .unwrap();
+    assert!(!report.issued && report.revision.contains("is no longer the set"));
+
+    // The DWG in the set's output folder is issued all the same.
+    assert_eq!(rendered(&dwg, &dir.join("issued.png")).accept, Some(1));
+}
+
+#[test]
+fn a_sheet_built_on_its_own_names_no_set_and_its_dwg_says_so() {
+    let dir = scratch("built-alone");
+    // Even inside a set's folder, a sheet built on its own is no sheet of
+    // the set.
+    let set = issued_outside(&dir);
+    accept(&set, false, None, false).result.unwrap();
+    let description = set.join("alone.yaml");
+    fs::write(
+        &description,
+        "units: in\nobjects:\n  - line: {from: [0, 0, 0], to: [2, 1, 0]}\n",
+    )
+    .unwrap();
+    let built = build_with(
+        &BuildRequest {
+            description,
+            output: None,
+            overwrite: false,
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let why = why(rendered(Path::new(&built.dwg), &dir.join("alone.png")));
+    assert!(why.contains("names no drawing set"), "{why}");
+}
+
+#[test]
+fn a_command_on_a_dwg_outside_its_set_rolls_back_the_set_its_mark_names() {
+    let dir = scratch("dwg-rollback");
+    let set = issued_outside(&dir);
+    assert_eq!(apply(&set, moved(0.1)), 1);
+    let journal = set.join(JOURNAL_FILE);
+    let whole = fs::read(&journal).unwrap();
+    // A process killed while it wrote a change set's entry, before any file
+    // changed, leaves the journal's last line written in part.
+    let part = br#"{"entry":2,"kind":"change_set","state":"pend"#;
+    fs::write(&journal, [&whole[..], &part[..]].concat()).unwrap();
+
+    let dwg = dir.join("issued").join("DEMO-001.dwg");
+    let input = serde_json::json!({"source": dwg, "output": dir.join("r.png"), "width": 200});
+    let reply = find_command("render")
+        .unwrap()
+        .run(input, &Settings::default(), Interface::Cli);
+    assert!(reply.ok, "{:?}", reply.error);
+    let rolled = reply
+        .rolled_back
+        .expect("the set the DWG's build mark names was read, and its line cut off");
+    assert_eq!((rolled.entry, rolled.cut_off_line), (None, Some(3)));
+    assert_eq!(fs::read(&journal).unwrap(), whole);
 }
 
 /// A built copy of the demo set whose template, or whose rows file, is kept

@@ -56,8 +56,8 @@ use crate::units::Unit;
 
 pub use operations::{change_set_schema, operations, OperationInfo, OperationList};
 
-pub(crate) use accept::stamp_revision;
 pub use accept::{accept_with, AcceptReport, AcceptRequest, StampRevision};
+pub(crate) use accept::{relative_to, stamp_revision};
 pub(crate) use history::FilesAsOf;
 pub use journal::{
     journal, CheckFailed, CommitState, Entry, EntryKind, FileIssued, FileState, HowChanged,

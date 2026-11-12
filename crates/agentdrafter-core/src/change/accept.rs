@@ -39,9 +39,9 @@ use crate::description::{read_set_settings, SavedSet};
 use crate::error::{Error, ErrorCode};
 use crate::interface::Interface;
 use crate::reply::Reply;
-use crate::set::SET_SETTINGS_FILE;
+use crate::set::{set_of_dwg, SET_SETTINGS_FILE};
 use crate::settings::Settings;
-use crate::stamp::fingerprint;
+use crate::stamp::{fingerprint, SourceKind};
 
 /// A request to accept a drawing set's working revision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -431,20 +431,70 @@ pub struct StampRevision {
     /// The interface the accept came through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<Interface>,
+    /// Why an output drawn from a DWG on its own cannot be from an issued
+    /// revision, when the drawing set the DWG's build mark names cannot be
+    /// found: the DWG names no set, the set is not there, or it is no
+    /// longer the set the DWG was built from. None otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
-/// What a stamp says of the revision files were read from: issued, by the
-/// newest accept of their drawing set whose revision holds every one of
-/// them with the bytes read, or not issued. The set is the nearest folder
-/// above the first file that holds a set's settings.
-pub(crate) fn stamp_revision(files: &[(&Path, &[u8])]) -> StampRevision {
-    let not_issued = StampRevision {
-        issued: false,
-        accept: None,
-        accepted_at: None,
-        via: None,
+impl StampRevision {
+    /// Not issued, and why when there is more to say than that no accept
+    /// issued the files.
+    fn not_issued(why: Option<String>) -> StampRevision {
+        StampRevision {
+            issued: false,
+            accept: None,
+            accepted_at: None,
+            via: None,
+            why,
+        }
+    }
+}
+
+/// What a stamp says of the revision files were read from, each with its
+/// kind, the record first: issued, by the newest accept of their drawing
+/// set whose revision holds every one of them with the bytes read, or not
+/// issued.
+///
+/// A DWG drawn on its own names its set in its build mark, as Zach decided
+/// on 2026-11-11, so its set is found wherever its output folder is
+/// ([`set_of_dwg`]), and when it cannot be, the revision says why. For any
+/// other record, the set is the nearest folder above it that holds a set's
+/// settings.
+pub(crate) fn stamp_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevision {
+    match files {
+        [(SourceKind::Dwg, dwg, bytes)] => dwg_revision(dwg, bytes),
+        _ => files_revision(files),
+    }
+}
+
+/// What a stamp says of the revision the DWG at `dwg` came from, its bytes
+/// as read: issued when the set its build mark names is still the set it
+/// was built from, and an accept of the set issued the DWG, at its place in
+/// the set's output folder, with these bytes.
+fn dwg_revision(dwg: &Path, bytes: &[u8]) -> StampRevision {
+    let set = match set_of_dwg(dwg) {
+        Ok(set) => set,
+        Err(why) => return StampRevision::not_issued(Some(why)),
     };
-    let Some(&(first, _)) = files.first() else {
+    let Ok(entries) = read_entries(&set.folder) else {
+        return StampRevision::not_issued(Some(
+            "the journal of the drawing set the DWG's build mark names cannot be read, so no \
+             accept of the set can be found"
+                .to_owned(),
+        ));
+    };
+    issued_by(&entries, &[(set.path, fingerprint(bytes))])
+}
+
+/// What a stamp says of the revision a sheet description or a template
+/// and the files it draws on came from, their set the nearest folder above
+/// the first.
+fn files_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevision {
+    let not_issued = StampRevision::not_issued(None);
+    let Some(&(_, first, _)) = files.first() else {
         return not_issued;
     };
     let Some(folder) = set_folder_of(first) else {
@@ -454,7 +504,7 @@ pub(crate) fn stamp_revision(files: &[(&Path, &[u8])]) -> StampRevision {
         return not_issued;
     };
     let mut read: Vec<(String, String)> = Vec::with_capacity(files.len());
-    for &(path, bytes) in files {
+    for &(_, path, bytes) in files {
         let Ok(path) = path.canonicalize() else {
             return not_issued;
         };
@@ -463,6 +513,13 @@ pub(crate) fn stamp_revision(files: &[(&Path, &[u8])]) -> StampRevision {
         };
         read.push((relative_to(Path::new(""), inside), fingerprint(bytes)));
     }
+    issued_by(&entries, &read)
+}
+
+/// Issued by the newest finished accept among `entries` whose revision
+/// holds every file `read` lists, by its path in the set and its
+/// fingerprint; not issued when none does.
+fn issued_by(entries: &[Entry], read: &[(String, String)]) -> StampRevision {
     let accept = entries.iter().rev().find(|e| {
         e.kind == EntryKind::Accept
             && e.finished()
@@ -478,8 +535,9 @@ pub(crate) fn stamp_revision(files: &[(&Path, &[u8])]) -> StampRevision {
             accept: Some(accept.entry),
             accepted_at: Some(accept.at.clone()),
             via: accept.via,
+            why: None,
         },
-        None => not_issued,
+        None => StampRevision::not_issued(None),
     }
 }
 

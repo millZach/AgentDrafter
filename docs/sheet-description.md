@@ -19,7 +19,7 @@ objects:
 
 `agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on. `examples/blocks/` holds a block library and two sheets that insert its blocks.
 
-Every DWG a build writes carries AgentDrafter's build mark: a custom drawing property, `AgentDrafter` with the value `build`, which AutoCAD shows under DWGPROPS. `--overwrite` replaces only a DWG that carries it.
+Every DWG a build writes carries AgentDrafter's build mark: a custom drawing property, `AgentDrafter` with the value `build`, which AutoCAD shows under DWGPROPS. `--overwrite` replaces only a DWG that carries it. A sheet built from a drawing set records its set in the same property, as `build; set=` and the set's folder relative to the DWG ([the drawing set](drawing-set.md#the-build-mark-names-the-set)); a sheet description built on its own records none.
 
 A layer and a linetype:
 
