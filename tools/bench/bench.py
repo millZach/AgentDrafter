@@ -502,11 +502,9 @@ def measure_viewer(tool: Agentdrafter, plant: Path, work: Path, browser_path: st
         page.call("Page.navigate", {"url": "%s/?source=demo-plant&sheet=%s" % (server.base, SHEET)})
         page.wait_for("window.agentdrafterViewer?.summary?.sheet === %r && !!document.querySelector('.va-agent.working')"
                       % SHEET, "draw the sheet and open its live stream")
+        # The browser's own name for its version; a user agent string hides all but the first number.
         about = {"name": Path(browser_path).stem, "product": browser.version.get("Browser", ""),
                  "webgl": page.eval(WEBGL) or "none"}
-        ua = browser.version.get("User-Agent", "")
-        if "Edg/" in ua:
-            about["product"] = "Microsoft Edge " + ua.split("Edg/")[1].split()[0]
         say("viewer: 1 change to warm up, then %d" % changes)
         shown, sent, sending = [], [], []
         for k in range(changes + 1):
