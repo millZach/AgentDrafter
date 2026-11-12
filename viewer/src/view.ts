@@ -131,3 +131,33 @@ export function between(from: View, to: View, t: number, middle: [number, number
 
 /** Eases in and out over 0 to 1. */
 export const ease = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+
+/**
+ * The view that shows `box`, a part of the sheet such as the objects a
+ * change set touched, `pad` pixels inside `area`: zoomed in no less than
+ * the fitted view and no more than `most` times it, its middle at the
+ * area's middle.
+ */
+export function focusOn(box: Paper, area: Area, fitted: View, most = 3.2, pad = 50): View {
+  const [left, bottom, right, top] = box;
+  const wanted = fit(box, area, pad);
+  const scale = clamp(wanted.scale, fitted.scale, fitted.scale * most);
+  const cx = (left + right) / 2;
+  const cy = (bottom + top) / 2;
+  const sx = area.x + area.width / 2;
+  const sy = area.y + area.height / 2;
+  return { left: cx - sx / scale, top: cy + sy / scale, scale };
+}
+
+/** How long a change set's halos pulse after it lands, in milliseconds. */
+export const PULSE_MS = 3600;
+
+/**
+ * How strongly a change set's halos show `ms` after it landed: three
+ * slow pulses, from full to a quarter and back, as the picked prototype
+ * pulses them, then full.
+ */
+export function pulseStrength(ms: number): number {
+  if (!(ms >= 0) || ms >= PULSE_MS) return 1;
+  return 1 - 0.75 * ((1 - Math.cos((2 * Math.PI * ms) / 1200)) / 2);
+}

@@ -10,9 +10,14 @@
 //! fingerprint of its bytes. An output is stale when any listed file's
 //! bytes no longer have that fingerprint, or the file is gone.
 //!
-//! The list is open: the working revision (ticket #9) adds entries of its
-//! own kind. A stamp is JSON with a format number; a reader that meets a
-//! number it does not know says so rather than guessing.
+//! A stamp also says whether the revision the output was made from was
+//! issued, and which accept issued it, as Zach decided on 2026-11-11: the
+//! output is from an issued revision when every file it lists is, byte for
+//! byte, a file an accept of its drawing set issued. The drawing itself is
+//! the same either way: the stamp alone says it.
+//!
+//! A stamp is JSON with a format number; a reader that meets a number it
+//! does not know says so rather than guessing.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -20,6 +25,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::change::{stamp_revision, StampRevision};
 use crate::error::{Error, ErrorCode};
 use crate::{pdf, raster};
 
@@ -36,6 +42,11 @@ pub struct Stamp {
     /// Every file read to produce the output: the record first, then the
     /// files it draws on.
     pub sources: Vec<SourceStamp>,
+    /// Whether the revision those files were read from was issued, and by
+    /// which accept. A stamp written before revisions were issued does not
+    /// say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<StampRevision>,
 }
 
 /// A file an output was produced from, as its stamp names it.
@@ -102,6 +113,10 @@ impl Stamp {
     /// one's kind, where it was read from and the bytes read, the record
     /// first.
     pub(crate) fn new(files: &[(SourceKind, &Path, &[u8])], output: &Path) -> Stamp {
+        let read: Vec<(&Path, &[u8])> = files
+            .iter()
+            .map(|&(_, path, bytes)| (path, bytes))
+            .collect();
         Stamp {
             stamp: STAMP_FORMAT,
             produced_by: format!("agentdrafter {}", env!("CARGO_PKG_VERSION")),
@@ -113,6 +128,7 @@ impl Stamp {
                     sha256: fingerprint(bytes),
                 })
                 .collect(),
+            revision: Some(stamp_revision(&read)),
         }
     }
 
@@ -157,6 +173,12 @@ pub struct StaleReport {
     pub why: String,
     /// Each file the stamp lists, as it was checked.
     pub sources: Vec<SourceCheck>,
+    /// Whether the output was made from an issued revision, as its stamp
+    /// says: false too when the stamp does not say.
+    pub issued: bool,
+    /// What the stamp says of the revision the output was made from, in
+    /// words: issued, and by which accept, or the working revision.
+    pub revision: String,
     /// The output's stamp.
     pub stamp: Stamp,
 }
@@ -201,11 +223,36 @@ pub fn check_stale(request: &StaleRequest) -> Result<StaleReport, Error> {
     } else {
         moved_on.join("; ")
     };
+    let issued = stamp.revision.as_ref().is_some_and(|r| r.issued);
+    let revision = match &stamp.revision {
+        Some(StampRevision {
+            issued: true,
+            accept,
+            accepted_at,
+            via,
+        }) => format!(
+            "the output was made from an issued revision: the one the accept in entry {} of the \
+             set's journal issued{}{}",
+            accept.map_or_else(|| "?".to_owned(), |a| a.to_string()),
+            via.map_or_else(String::new, |via| format!(", through {}", via.words())),
+            accepted_at
+                .as_ref()
+                .map_or_else(String::new, |at| format!(", at {at}"))
+        ),
+        Some(_) => "the output was made from the working revision, which was not issued: no \
+                    accept had issued the files it was made from"
+            .to_owned(),
+        None => "the output's stamp does not say whether its revision was issued: it was made \
+                 before outputs said so"
+            .to_owned(),
+    };
     Ok(StaleReport {
         output: output.display().to_string(),
         stale: !moved_on.is_empty(),
         why,
         sources,
+        issued,
+        revision,
         stamp,
     })
 }
@@ -360,6 +407,12 @@ mod tests {
                 path: "a.dwg".into(),
                 sha256: fingerprint(b""),
             }],
+            revision: Some(StampRevision {
+                issued: true,
+                accept: Some(4),
+                accepted_at: Some("2026-11-11T18:57:46Z".into()),
+                via: Some(crate::Interface::Viewer),
+            }),
         };
         let png = |stamp: &Stamp| {
             let pixmap = tiny_skia::Pixmap::new(2, 2).unwrap();

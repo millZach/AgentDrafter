@@ -15,7 +15,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-use agentdrafter_core::{commands, find_command, CommandInfo, Settings};
+use agentdrafter_core::{commands, find_command, CommandInfo, Interface, Settings};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::Value;
@@ -39,7 +39,7 @@ fn run(py: Python<'_>, name: &str, input: &str) -> PyResult<String> {
         .ok_or_else(|| PyValueError::new_err(format!("no command `{name}` in the registry")))?;
     let input: Value = serde_json::from_str(input)
         .map_err(|e| PyValueError::new_err(format!("the input is not JSON: {e}")))?;
-    let reply = py.detach(|| command.run(input, &Settings::from_env()));
+    let reply = py.detach(|| command.run(input, &Settings::from_env(), Interface::Python));
     // A reply holds only strings, numbers, lists and string-keyed maps.
     Ok(serde_json::to_string(&reply).expect("a reply serializes to JSON"))
 }

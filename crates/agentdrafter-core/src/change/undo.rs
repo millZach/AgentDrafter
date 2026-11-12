@@ -16,8 +16,9 @@
 //! undo would lose. A file a change set made that has since been taken away
 //! counts as changed. The refusal names the files.
 //!
-//! Nothing is issued yet, so every change set still in place can be undone.
-//! Once the reviewer can accept, an issued change set cannot be undone.
+//! An issued change set cannot be undone: once an accept has issued it, an
+//! undo that would take it, itself or as a change set later than the one
+//! asked for, is refused, and changes nothing.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -27,8 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use super::commit::Replacement;
 use super::journal::{
-    commit_undo, fates, keeps_state, listed, read_entries, read_state, undo_state, Entry,
-    EntryKind, Fate, FileState, KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
+    commit_undo, fates, listed, read_entries, read_state, undo_state, undoable, Entry, EntryKind,
+    Fate, FileState, KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
 };
 use super::{inconsistent, mark_report, Inconsistent, MARK_FILE};
 use crate::description::{parse_mark, read_set_settings};
@@ -145,6 +146,15 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
                 format!("entry {wanted} is an undo, and an undo is not undone"),
             ))
         }
+        EntryKind::Accept => {
+            return Err(refuse(
+                ErrorCode::BadValue,
+                format!(
+                    "entry {wanted} is an accept, which issued the change sets before it; an \
+                     accept is not undone"
+                ),
+            ))
+        }
     }
     if let Some(by) = fates.get(&wanted).and_then(|f| f.undone_by) {
         return Err(refuse(
@@ -162,6 +172,30 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
                 && fates.get(&e.entry).is_none_or(|f| f.undone_by.is_none())
         })
         .collect();
+    let issued: Vec<(u64, u64)> = stack
+        .iter()
+        .filter_map(|e| Some((e.entry, fates.get(&e.entry)?.issued_by?)))
+        .collect();
+    if let Some(&(newest, by)) = issued.last() {
+        let via = entries
+            .iter()
+            .find(|e| e.entry == by)
+            .and_then(|e| e.via)
+            .map_or_else(String::new, |via| format!(", through {}", via.words()));
+        let why = if newest == wanted {
+            format!(
+                "change set {wanted} cannot be undone: it was issued by the accept in entry \
+                 {by}{via}, and an issued change set cannot be undone; nothing was changed"
+            )
+        } else {
+            format!(
+                "change set {wanted} cannot be undone: undoing it undoes every later change set \
+                 too, and change set {newest} was issued by the accept in entry {by}{via}, and \
+                 an issued change set cannot be undone; nothing was changed"
+            )
+        };
+        return Err(refuse(ErrorCode::Issued, why));
+    }
     let pruned: Vec<(u64, u64)> = stack
         .iter()
         .filter_map(|e| Some((e.entry, fates.get(&e.entry)?.pruned_by?)))
@@ -341,11 +375,7 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
 
 /// The change sets an undo can take, in words.
 fn can_undo(entries: &[Entry], fates: &BTreeMap<u64, Fate>) -> String {
-    let can: Vec<u64> = entries
-        .iter()
-        .filter(|e| keeps_state(e, fates))
-        .map(|e| e.entry)
-        .collect();
+    let can = undoable(entries, fates);
     if can.is_empty() {
         "no change set of the set can be undone".to_owned()
     } else {

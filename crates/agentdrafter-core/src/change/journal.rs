@@ -34,6 +34,7 @@ use super::commit::{commit, Append, Replacement};
 use super::{inconsistent, ChangeReport, ChangeRequest, Inconsistent};
 use crate::description::read_set_settings;
 use crate::error::{Error, ErrorCode};
+use crate::interface::Interface;
 use crate::reply::Reply;
 use crate::set::SET_SETTINGS_FILE;
 use crate::stamp::fingerprint;
@@ -63,6 +64,9 @@ pub enum EntryKind {
     FailedAttempt,
     /// An undo of change sets, the newest first.
     Undo,
+    /// The reviewer's accept, or an agent's on their behalf: every change
+    /// set still in place is issued, and can no longer be undone.
+    Accept,
 }
 
 /// One entry of the journal, as its line holds it.
@@ -102,6 +106,90 @@ pub struct Entry {
     /// The change sets whose undo states were pruned when this one landed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pruned: Vec<u64>,
+    /// Each object a change set added, changed, moved or deleted, on each
+    /// sheet it reached, so the viewer can show what it changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<ObjectChanged>,
+    /// The interface an accept came through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<Interface>,
+    /// The change sets an accept issued: every one still in place that an
+    /// earlier accept had not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issued: Vec<u64>,
+    /// The failed checks an accept was told to accept despite.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_checks: Vec<CheckFailed>,
+    /// Each file of the set as an accept issued it: its path, relative to
+    /// the set's folder, and the SHA-256 of its bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revision: Vec<FileIssued>,
+}
+
+impl Entry {
+    /// An entry of `kind` numbered `entry`, made now, with nothing else
+    /// recorded yet.
+    fn new(entry: u64, kind: EntryKind) -> Self {
+        Self {
+            entry,
+            kind,
+            at: now(),
+            change_set: None,
+            landed_on: Vec::new(),
+            failed_on: Vec::new(),
+            error: None,
+            undid: Vec::new(),
+            files: Vec::new(),
+            folders_made: Vec::new(),
+            pruned: Vec::new(),
+            objects: Vec::new(),
+            via: None,
+            issued: Vec::new(),
+            failed_checks: Vec::new(),
+            revision: Vec::new(),
+        }
+    }
+}
+
+/// One object a change set touched, by its ID on one sheet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectChanged {
+    /// The object's ID, such as `DEMO-002/border`.
+    pub id: String,
+    /// What the change set did to it.
+    pub how: HowChanged,
+}
+
+/// What a change set did to an object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HowChanged {
+    Added,
+    Changed,
+    Deleted,
+}
+
+/// A failed check an accept was told to accept despite, as the checker
+/// found it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CheckFailed {
+    pub sheet: String,
+    /// The check, such as `off_sheet`.
+    pub rule: String,
+    /// The object that fails it, by its ID; none for a check of the whole
+    /// sheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub message: String,
+}
+
+/// One file of the set as an accept issued it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIssued {
+    /// Its path, relative to the set's folder, with `/` between folders.
+    pub path: String,
+    /// The SHA-256 of its bytes.
+    pub sha256: String,
 }
 
 /// One sheet a change set failed on.
@@ -189,6 +277,9 @@ pub struct JournalEntry {
     /// The entry of the change set whose landing pruned its undo state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pruned_by: Option<u64>,
+    /// The accept that issued a change set, which can no longer be undone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_by: Option<u64>,
 }
 
 /// Reads a drawing set's journal: every change set and failed attempt, and
@@ -201,20 +292,22 @@ fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
     read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
     let entries = read_entries(folder)?;
     let fates = fates(&entries);
-    let can_undo: Vec<u64> = entries
-        .iter()
-        .filter(|e| keeps_state(e, &fates))
-        .map(|e| e.entry)
-        .collect();
+    let can_undo = undoable(&entries, &fates);
     let count = |kind: EntryKind| entries.iter().filter(|e| e.kind == kind).count();
     let message = if entries.is_empty() {
         "the journal is empty: no change set has been applied to the set".to_owned()
     } else {
+        let undos = counted(count(EntryKind::Undo), "undo");
+        let accepts = count(EntryKind::Accept);
+        let rest = if accepts == 0 {
+            format!(" and {undos}")
+        } else {
+            format!(", {undos} and {}", counted(accepts, "accept"))
+        };
         format!(
-            "the journal records {}, {} and {}. {}",
+            "the journal records {}, {}{rest}. {}",
             counted(count(EntryKind::ChangeSet), "change set"),
             counted(count(EntryKind::FailedAttempt), "failed attempt"),
-            counted(count(EntryKind::Undo), "undo"),
             match can_undo.as_slice() {
                 [] => "No change set can be undone".to_owned(),
                 [one] => format!("Change set {one} can be undone"),
@@ -243,6 +336,7 @@ fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
                 undo_state,
                 undone_by: fate.undone_by,
                 pruned_by: fate.pruned_by,
+                issued_by: fate.issued_by,
             }
         })
         .collect();
@@ -281,6 +375,7 @@ fn counted(n: usize, thing: &str) -> String {
 pub(super) struct Fate {
     pub undone_by: Option<u64>,
     pub pruned_by: Option<u64>,
+    pub issued_by: Option<u64>,
 }
 
 /// What became of each change set, by its entry.
@@ -293,8 +388,33 @@ pub(super) fn fates(entries: &[Entry]) -> BTreeMap<u64, Fate> {
         for &pruned in &entry.pruned {
             fates.entry(pruned).or_default().pruned_by = Some(entry.entry);
         }
+        for &issued in &entry.issued {
+            fates.entry(issued).or_default().issued_by = Some(entry.entry);
+        }
     }
     fates
+}
+
+/// The change sets an undo can take now, the oldest first: those that keep
+/// their undo state and are not issued.
+pub(super) fn undoable(entries: &[Entry], fates: &BTreeMap<u64, Fate>) -> Vec<u64> {
+    entries
+        .iter()
+        .filter(|e| keeps_state(e, fates))
+        .filter(|e| fates.get(&e.entry).is_none_or(|f| f.issued_by.is_none()))
+        .map(|e| e.entry)
+        .collect()
+}
+
+/// The change sets still in place, the oldest first: every change set that
+/// has not been undone.
+pub(super) fn in_place<'a>(
+    entries: &'a [Entry],
+    fates: &'a BTreeMap<u64, Fate>,
+) -> impl Iterator<Item = &'a Entry> + 'a {
+    entries.iter().filter(move |e| {
+        e.kind == EntryKind::ChangeSet && fates.get(&e.entry).is_none_or(|f| f.undone_by.is_none())
+    })
 }
 
 /// Whether `entry` is a change set that still keeps its undo state.
@@ -373,6 +493,8 @@ fn next_number(entries: &[Entry]) -> u64 {
 pub(super) struct Landing {
     pub landed_on: Vec<String>,
     pub failed_on: Vec<SheetFailed>,
+    /// The objects it added, changed or deleted, on each sheet it landed on.
+    pub objects: Vec<ObjectChanged>,
 }
 
 /// Puts a change set's files in place with its undo state and its entry
@@ -430,17 +552,14 @@ pub(super) fn commit_change_set(
         .collect();
 
     let entry = Entry {
-        entry: number,
-        kind: EntryKind::ChangeSet,
-        at: now(),
         change_set: Some(change_set.clone()),
         landed_on: landing.landed_on,
         failed_on: landing.failed_on,
-        error: None,
-        undid: Vec::new(),
         files,
         folders_made,
         pruned,
+        objects: landing.objects,
+        ..Entry::new(number, EntryKind::ChangeSet)
     };
     commit(
         &replacements,
@@ -472,6 +591,7 @@ pub(super) fn record_failed_attempt(
     let (landing, error) = match outcome {
         Ok(report) if report.journal_entry.is_none() => (
             Landing {
+                objects: Vec::new(),
                 landed_on: Vec::new(),
                 failed_on: report
                     .sheets
@@ -490,6 +610,7 @@ pub(super) fn record_failed_attempt(
         Ok(_) => return,
         Err(error) => (
             Landing {
+                objects: Vec::new(),
                 landed_on: Vec::new(),
                 failed_on: attempted
                     .map(|landing| {
@@ -518,17 +639,11 @@ pub(super) fn record_failed_attempt(
     let (text, entries) = read.unzip();
     let number = next_number(entries.as_deref().unwrap_or_default());
     let entry = Entry {
-        entry: number,
-        kind: EntryKind::FailedAttempt,
-        at: now(),
         change_set: Some(request.change_set.clone()),
         landed_on: landing.landed_on,
         failed_on: landing.failed_on,
         error,
-        undid: Vec::new(),
-        files: Vec::new(),
-        folders_made: Vec::new(),
-        pruned: Vec::new(),
+        ..Entry::new(number, EntryKind::FailedAttempt)
     };
     if commit(&[], Some(&append_of(folder, text.as_deref(), &entry))).is_ok() {
         if let Ok(report) = outcome {
@@ -549,17 +664,9 @@ pub(super) fn commit_undo(
     let mut entries = entries.unwrap_or_default();
     let number = next_number(&entries);
     let entry = Entry {
-        entry: number,
-        kind: EntryKind::Undo,
-        at: now(),
-        change_set: None,
-        landed_on: Vec::new(),
-        failed_on: Vec::new(),
-        error: None,
         undid,
         files,
-        folders_made: Vec::new(),
-        pruned: Vec::new(),
+        ..Entry::new(number, EntryKind::Undo)
     };
     commit(
         replacements,
@@ -567,6 +674,48 @@ pub(super) fn commit_undo(
     )?;
     entries.push(entry);
     prune(folder, &entries);
+    Ok(number)
+}
+
+/// What an accept records: the change sets it issues, the failed checks it
+/// was told to accept despite, and each file of the set as it issues it.
+pub(super) struct Accepting {
+    pub via: Interface,
+    pub issued: Vec<u64>,
+    pub failed_checks: Vec<CheckFailed>,
+    pub revision: Vec<FileIssued>,
+}
+
+/// Adds an accept to the journal, and gives its entry's number. It writes
+/// no file of the set: what it issues is recorded in its entry. It is
+/// refused when the journal's newest entry is no longer `newest`, the one
+/// the accept was worked out from.
+pub(super) fn commit_accept(
+    folder: &Path,
+    newest: u64,
+    accepting: Accepting,
+) -> Result<u64, Error> {
+    let (text, entries) = read_text(folder)?.unzip();
+    let entries = entries.unwrap_or_default();
+    let number = next_number(&entries);
+    if number != newest + 1 {
+        return Err(Error::new(
+            ErrorCode::MovedOn,
+            format!(
+                "the journal moved on while the accept was being worked out: its newest entry is \
+                 now {}; nothing was issued",
+                number - 1
+            ),
+        ));
+    }
+    let entry = Entry {
+        via: Some(accepting.via),
+        issued: accepting.issued,
+        failed_checks: accepting.failed_checks,
+        revision: accepting.revision,
+        ..Entry::new(number, EntryKind::Accept)
+    };
+    commit(&[], Some(&append_of(folder, text.as_deref(), &entry)))?;
     Ok(number)
 }
 
@@ -615,7 +764,7 @@ pub(super) fn undo_state(folder: &Path, print: &str) -> Option<Vec<u8>> {
 }
 
 /// `path` relative to the set's `folder`, with `/` between folders.
-fn relative(folder: &Path, path: &Path) -> String {
+pub(super) fn relative(folder: &Path, path: &Path) -> String {
     let inside = path.strip_prefix(folder).unwrap_or(path);
     let parts: Vec<String> = inside
         .components()
@@ -706,8 +855,6 @@ mod tests {
     #[test]
     fn an_entry_reads_back_as_written() {
         let entry = Entry {
-            entry: 3,
-            kind: EntryKind::ChangeSet,
             at: "2026-11-11T18:57:46Z".into(),
             change_set: Some(serde_json::json!({"operations": [{"op": "move"}]})),
             landed_on: vec!["DEMO-001".into()],
@@ -725,6 +872,11 @@ mod tests {
             }],
             folders_made: vec!["dwg".into()],
             pruned: vec![1],
+            objects: vec![ObjectChanged {
+                id: "DEMO-001/line-1".into(),
+                how: HowChanged::Added,
+            }],
+            ..Entry::new(3, EntryKind::ChangeSet)
         };
         let append = append_of(Path::new("set"), Some("{}"), &entry);
         let text = String::from_utf8(append.bytes).unwrap();

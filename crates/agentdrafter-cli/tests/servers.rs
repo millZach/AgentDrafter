@@ -1,8 +1,10 @@
 //! The HTTP API and the MCP server over the same core as the command line:
 //! every command of the registry is reachable through all three, and gives
 //! the same reply through each; the same change set gives the same journal
-//! entry, apart from its time; the HTTP API listens on the local machine
-//! unless told otherwise; and the MCP handshake works.
+//! entry, apart from its time; an accept records the interface it came
+//! through; the HTTP API listens on the local machine unless told
+//! otherwise, and streams a set's journal as it changes, whichever process
+//! changed it; and the MCP handshake works.
 //!
 //! Every server a test starts listens on the local machine only and is
 //! stopped by the test, when the value that holds it is dropped.
@@ -13,6 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -112,6 +115,109 @@ impl Http {
 
     fn run(&self, command: &str, input: &Value) -> (u16, Value) {
         self.send("POST", &format!("/commands/{command}"), Some(input))
+    }
+
+    /// Runs a command as the viewer's page sends it: the browser marks a
+    /// request its page makes to its own server `Sec-Fetch-Site:
+    /// same-origin`.
+    fn run_as_viewer(&self, command: &str, input: &Value) -> (u16, Value) {
+        let body = input.to_string();
+        let mut stream = TcpStream::connect(self.address).unwrap();
+        write!(
+            stream,
+            "POST /commands/{command} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+             Origin: http://{}\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: cors\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            self.address,
+            self.address,
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+        (status, serde_json::from_str(body).unwrap())
+    }
+
+    /// Opens the event stream of the drawing set `set`.
+    fn events(&self, set: &str) -> Events {
+        let body = json!({ "set": set }).to_string();
+        let mut stream = TcpStream::connect(self.address).unwrap();
+        write!(
+            stream,
+            "POST /events HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            self.address,
+            body.len()
+        )
+        .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut events = Events {
+            stream,
+            read: String::new(),
+        };
+        let head = events.until("\r\n\r\n", Duration::from_secs(30));
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        assert!(
+            head.contains("Content-Type: text/event-stream\r\n"),
+            "{head}"
+        );
+        events
+    }
+}
+
+/// An open event stream of a drawing set.
+struct Events {
+    stream: TcpStream,
+    read: String,
+}
+
+impl Events {
+    /// What came up to and with `end`, waiting no longer than `within`.
+    fn until(&mut self, end: &str, within: Duration) -> String {
+        let began = Instant::now();
+        let mut chunk = [0u8; 8192];
+        loop {
+            if let Some(at) = self.read.find(end) {
+                let taken: String = self.read.drain(..at + end.len()).collect();
+                return taken;
+            }
+            assert!(
+                began.elapsed() < within,
+                "nothing ended with {end:?} within {within:?}: {}",
+                self.read
+            );
+            match self.stream.read(&mut chunk) {
+                Ok(0) => panic!("the stream ended: {}", self.read),
+                Ok(n) => self
+                    .read
+                    .push_str(std::str::from_utf8(&chunk[..n]).unwrap()),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    /// The next journal the stream sends, as the `journal` command replies,
+    /// passing over comments.
+    fn next_journal(&mut self, within: Duration) -> Value {
+        loop {
+            let event = self.until("\n\n", within);
+            if event.starts_with(':') {
+                continue;
+            }
+            let mut lines = event.lines();
+            assert_eq!(lines.next(), Some("event: journal"), "{event}");
+            let data = lines.next().unwrap().strip_prefix("data: ").unwrap();
+            return serde_json::from_str(data).unwrap();
+        }
     }
 }
 
@@ -217,13 +323,15 @@ impl Drop for Mcp {
     }
 }
 
-/// `value` with every journal time taken out, the one thing two runs of the
-/// same change set may differ in.
+/// `value` with every journal time and the interface an accept came
+/// through taken out, the only things the same command through two
+/// interfaces may differ in. A test of its own holds each accept to its
+/// interface.
 fn without_times(value: &Value) -> Value {
     match value {
         Value::Object(map) => map
             .iter()
-            .filter(|(key, _)| key.as_str() != "at")
+            .filter(|(key, _)| !matches!(key.as_str(), "at" | "via" | "accepted_at"))
             .map(|(key, value)| (key.clone(), without_times(value)))
             .collect::<serde_json::Map<_, _>>()
             .into(),
@@ -408,6 +516,115 @@ fn the_same_change_set_gives_the_same_reply_and_journal_entry_through_every_inte
             "the same journal entries, apart from their times"
         );
     }
+}
+
+#[test]
+fn an_accept_records_the_interface_it_came_through_and_issued_change_sets_cannot_be_undone() {
+    for via in ["cli", "http", "viewer", "mcp"] {
+        let dir = interface_folder("accept-via", via);
+        let (code, built) = cli(&["build", "demo-set"], &dir);
+        assert_eq!(code, 0, "{built}");
+        let (code, landed) = cli(&["change", "demo-set", "move.json"], &dir);
+        assert_eq!(code, 0, "{landed}");
+        let input = json!({"set": "demo-set", "newest_seen": 1});
+        let (accepted, refused) = match via {
+            "cli" => (
+                cli(&["accept", "demo-set", "--newest-seen", "1"], &dir).1,
+                cli(&["undo", "demo-set", "1"], &dir).1,
+            ),
+            "http" | "viewer" => {
+                let http = Http::start(&dir, &["--listen", "127.0.0.1:0"]);
+                let accepted = if via == "viewer" {
+                    http.run_as_viewer("accept", &input).1
+                } else {
+                    http.run("accept", &input).1
+                };
+                let (status, refused) =
+                    http.run("undo", &json!({"set": "demo-set", "change_set": 1}));
+                assert_eq!(status, 422, "{refused}");
+                (accepted, refused)
+            }
+            _ => {
+                let mut mcp = Mcp::start(&dir);
+                mcp.initialize();
+                let accepted = mcp.call("accept", &input)["structuredContent"].clone();
+                let refused = mcp.call("undo", &json!({"set": "demo-set", "change_set": 1}))
+                    ["structuredContent"]
+                    .clone();
+                (accepted, refused)
+            }
+        };
+        assert_eq!(accepted["ok"], true, "{via}: {accepted}");
+        assert_eq!(accepted["result"]["via"], via);
+        assert_eq!(accepted["result"]["issued"], json!([1]));
+        assert_eq!(accepted["result"]["journal_entry"], 2);
+        assert_eq!(refused["ok"], false, "{via}: {refused}");
+        assert_eq!(refused["error"]["code"], "issued", "{via}: {refused}");
+
+        let entries: Vec<Value> =
+            fs::read_to_string(dir.join("demo-set").join(agentdrafter_core::JOURNAL_FILE))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+        let accept = &entries[1];
+        assert_eq!(accept["kind"], "accept");
+        assert_eq!(
+            accept["via"], via,
+            "the journal records the interface: {accept}"
+        );
+        assert_eq!(accept["issued"], json!([1]));
+        assert_eq!(entries.len(), 2, "a refused undo is not recorded");
+    }
+}
+
+#[test]
+fn an_open_event_stream_sends_the_journal_when_another_process_changes_the_set() {
+    let dir = interface_folder("events", "http");
+    let (code, built) = cli(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{built}");
+    let http = Http::start(&dir, &["--listen", "127.0.0.1:0"]);
+    let mut events = http.events("demo-set");
+    let first = events.next_journal(Duration::from_secs(30));
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(
+        first["result"]["entries"],
+        json!([]),
+        "an empty journal at first"
+    );
+
+    // A change set sent by the command line, another process.
+    let (code, landed) = cli(&["change", "demo-set", "move.json"], &dir);
+    assert_eq!(code, 0, "{landed}");
+    let next = events.next_journal(Duration::from_secs(10));
+    let entries = next["result"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{next}");
+    assert_eq!(entries[0]["kind"], "change_set");
+    assert_eq!(
+        entries[0]["landed_on"],
+        json!(["DEMO-001", "DEMO-002", "DEMO-003"])
+    );
+    assert!(
+        entries[0]["objects"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"id": "DEMO-002/border", "how": "changed"})),
+        "the objects it changed, on each sheet: {next}"
+    );
+
+    // Commands go on being answered while the stream is open, and an undo
+    // through the HTTP API reaches the stream too.
+    let (status, undone) = http.run("undo", &json!({"set": "demo-set", "change_set": 1}));
+    assert_eq!(status, 200, "{undone}");
+    let next = events.next_journal(Duration::from_secs(10));
+    assert_eq!(next["result"]["entries"][1]["kind"], "undo", "{next}");
+
+    // The stream asks for its set in a JSON body, as a command does.
+    let (status, refused) = http.send("GET", "/events", None);
+    assert_eq!(status, 405, "{refused}");
+    let (status, refused) = http.send("POST", "/events", Some(&json!({"folder": "demo-set"})));
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["error"]["code"], "usage");
 }
 
 #[test]

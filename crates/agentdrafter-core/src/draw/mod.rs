@@ -40,6 +40,7 @@ pub(crate) mod color;
 pub(crate) mod curves;
 mod hatch;
 mod linetype;
+mod pick;
 mod text;
 
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,7 @@ use crate::text::placement::SheetFonts;
 
 pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
+pub use pick::{object_bounds, pick};
 
 /// AutoCAD's default lineweight, which a layer with none of its own plots
 /// with: 0.25 mm, AutoCAD's `LWDEFAULT` as installed.

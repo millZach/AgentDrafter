@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 
 use super::blocks::{relative_path, RelativePath};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
-use super::{at, bad_value, read_file, scalar, sequence, unit, wrong_type, Fields};
+use super::{
+    at, bad_value, read_file_in, scalar, sequence, unit, wrong_type, Disk, Fields, ReadFiles,
+};
 use crate::error::{Error, ErrorCode};
 use crate::units::Unit;
 
@@ -114,7 +116,15 @@ pub(crate) fn template_path(folder: &Path, row: &Row) -> PathBuf {
 
 /// Reads the drawing set's settings in the file at `path`.
 pub(crate) fn read_set_settings(path: &Path) -> Result<SetSettings, Error> {
-    let text = read_file(path, "the drawing set's settings")?;
+    read_set_settings_in(&Disk, path)
+}
+
+/// Reads the drawing set's settings in the file at `path`, from `files`.
+pub(crate) fn read_set_settings_in(
+    files: &dyn ReadFiles,
+    path: &Path,
+) -> Result<SetSettings, Error> {
+    let text = read_file_in(files, path, "the drawing set's settings")?;
     parse_set_settings(&text).map_err(|e| e.or_in_file(path))
 }
 
@@ -170,7 +180,12 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
 
 /// Reads the rows in the file at `path`.
 pub(crate) fn read_rows(path: &Path) -> Result<Vec<Row>, Error> {
-    let text = read_file(path, "the drawing set's rows")?;
+    read_rows_in(&Disk, path)
+}
+
+/// Reads the rows in the file at `path`, from `files`.
+pub(crate) fn read_rows_in(files: &dyn ReadFiles, path: &Path) -> Result<Vec<Row>, Error> {
+    let text = read_file_in(files, path, "the drawing set's rows")?;
     parse_rows(&text).map_err(|e| e.or_in_file(path))
 }
 

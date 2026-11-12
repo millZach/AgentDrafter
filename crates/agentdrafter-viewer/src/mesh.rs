@@ -45,6 +45,15 @@ pub struct SheetReply {
     pub paper: Option<Paper>,
     #[serde(default)]
     pub extents: Option<Bounds>,
+    /// The journal's entry the set is drawn as it was at, if one was asked
+    /// for.
+    #[serde(default)]
+    pub entry: Option<u64>,
+    /// What each of the sheet's objects is, by its place, passed to the
+    /// page as the core gives it: its ID, name, type and layer, and an
+    /// insert's block and attributes.
+    #[serde(default)]
+    pub objects: Vec<serde_json::Value>,
     pub display_list: DisplayList,
 }
 
@@ -114,6 +123,11 @@ pub struct Summary {
     pub segments: usize,
     pub triangles: usize,
     pub fills_not_drawn: usize,
+    /// The journal's entry the set is drawn as it was at, if one was asked
+    /// for.
+    pub entry: Option<u64>,
+    /// What each of the sheet's objects is, by its place.
+    pub objects: Vec<serde_json::Value>,
 }
 
 /// Reads a `display-list` reply. A reply that is not ok gives its error's
@@ -262,6 +276,8 @@ impl Mesh {
             segments: self.segments.len(),
             triangles: self.triangles.len(),
             fills_not_drawn: self.fills_not_drawn,
+            entry: sheet.entry,
+            objects: sheet.objects.clone(),
         }
     }
 }
@@ -316,6 +332,8 @@ mod tests {
             millimetres_per_unit: 1.0,
             paper,
             extents: display_list.extents(),
+            entry: None,
+            objects: Vec::new(),
             display_list,
         }
     }

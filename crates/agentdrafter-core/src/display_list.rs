@@ -6,15 +6,24 @@
 //! folders, and sends the display list to the page, where the same Rust
 //! code, compiled to WebAssembly, turns it into pixels. Nothing here writes
 //! a file.
+//!
+//! The reply also says what each of the sheet's objects is, by its place:
+//! its ID, name, type and layer, and an insert's block and attributes, so
+//! the page can show the object the reviewer picks from what the core's
+//! pick finds in the display list. A drawing set can be drawn as it was at
+//! an entry of its journal, rebuilt in memory from the undo states.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::description::SavedSet;
+use std::sync::Arc;
+
+use crate::change::FilesAsOf;
+use crate::description::{read_sheet_record, SavedSet};
 use crate::draw::{self, Bounds, DisplayList, HatchCutShort};
 use crate::error::{Error, ErrorCode};
-use crate::model::{Paper, Sheet};
+use crate::model::{Attribute, Object, Paper, Sheet};
 use crate::output::read_record;
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
@@ -41,6 +50,10 @@ pub struct DisplayListRequest {
     /// Without it, [`DISPLAY_LIST_TOLERANCE`] of the sheet's larger side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tolerance: Option<f64>,
+    /// Draw a drawing set as it was just after this entry of its journal,
+    /// rebuilt in memory from the undo states. Without it, as it is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<u64>,
 }
 
 impl DisplayListRequest {
@@ -50,8 +63,33 @@ impl DisplayListRequest {
             source: source.into(),
             sheet: None,
             tolerance: None,
+            entry: None,
         }
     }
+}
+
+/// What one of the sheet's objects is, for the reviewer who picks it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SheetObject {
+    /// Its ID, such as `DEMO-001/border`; none for an object of a DWG,
+    /// whose IDs the core does not read yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Its name, if it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its type, such as `insert`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The layer it sits on.
+    pub layer: String,
+    /// The block an insert places.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block: Option<String>,
+    /// An insert's attributes, each its tag and value, in the order its
+    /// block defines them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<Attribute>,
 }
 
 /// A sheet's display list, with what the viewer needs to show it.
@@ -94,6 +132,13 @@ pub struct DisplayListReport {
     /// The hatches not drawn in full. Empty when every hatch was drawn
     /// whole.
     pub hatches_cut_short: Vec<HatchCutShort>,
+    /// The journal's entry the set is drawn as it was just after, when it
+    /// was asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<u64>,
+    /// Each of the sheet's objects, by its place, which each item of the
+    /// display list names as its `object`.
+    pub objects: Vec<SheetObject>,
     /// What the sheet draws.
     pub display_list: DisplayList,
 }
@@ -122,7 +167,7 @@ pub fn display_list_with(
         }
     }
     let source = request.source.as_path();
-    let drawn = read(source, request.sheet.as_deref())?;
+    let drawn = read(source, request.sheet.as_deref(), request.entry)?;
     let sheet = &drawn.sheet;
     let fonts = SheetFonts::find(sheet, settings);
     let tolerance = match request.tolerance {
@@ -158,6 +203,8 @@ pub fn display_list_with(
         objects_not_drawn: drawn.objects_not_drawn,
         font_substitutions: fonts.substitutions(),
         hatches_cut_short: list.hatches_cut_short.clone(),
+        entry: request.entry,
+        objects: drawn.objects,
         display_list: list,
     })
 }
@@ -169,26 +216,67 @@ struct Drawn {
     sheet: Sheet,
     units: Option<Unit>,
     objects_not_drawn: usize,
+    objects: Vec<SheetObject>,
 }
 
-/// Reads the sheet `sheet` names from `source`: a drawing set's folder, or
-/// one sheet description or DWG, whose one sheet is named by its file.
-fn read(source: &Path, sheet: Option<&str>) -> Result<Drawn, Error> {
+/// What each of `sheet`'s objects is, with its ID and name when `ids`
+/// gives them, by the same places.
+fn objects_of(sheet: &Sheet, ids: &[(String, Option<String>)]) -> Vec<SheetObject> {
+    sheet
+        .objects
+        .iter()
+        .enumerate()
+        .map(|(i, object)| {
+            let (block, attributes) = match object {
+                Object::Insert(insert) => (Some(insert.block.clone()), insert.attributes.clone()),
+                _ => (None, Vec::new()),
+            };
+            SheetObject {
+                id: ids.get(i).map(|(id, _)| id.clone()),
+                name: ids.get(i).and_then(|(_, name)| name.clone()),
+                kind: object.type_name().to_owned(),
+                layer: object.layer().to_owned(),
+                block,
+                attributes,
+            }
+        })
+        .collect()
+}
+
+/// Reads the sheet `sheet` names from `source`: a drawing set's folder, as
+/// it was just after its journal's entry `entry` when one is given, or one
+/// sheet description or DWG, whose one sheet is named by its file.
+fn read(source: &Path, sheet: Option<&str>, entry: Option<u64>) -> Result<Drawn, Error> {
     let named = |name: &str| sheet.is_none_or(|s| s.to_lowercase() == name.to_lowercase());
     if source.is_dir() {
-        let set = SavedSet::read(source)?;
+        let set = match entry {
+            Some(entry) => SavedSet::read_from(source, Arc::new(FilesAsOf::read(source, entry)?))?,
+            None => SavedSet::read(source)?,
+        };
         let names: Vec<String> = set.names().into_iter().map(str::to_owned).collect();
         let Some(row) = set.rows.iter().find(|row| named(&row.sheet)) else {
             return Err(no_such_sheet(sheet, &names));
         };
         let record = set.sheet(row)?;
+        let ids: Vec<(String, Option<String>)> = (0..record.objects.len())
+            .map(|i| (record.id(i), record.objects[i].name.clone()))
+            .collect();
         return Ok(Drawn {
             name: record.name,
             names,
             units: Some(record.sheet.units),
+            objects: objects_of(&record.sheet, &ids),
             sheet: record.sheet,
             objects_not_drawn: 0,
         });
+    }
+    if entry.is_some() {
+        return Err(Error::new(
+            ErrorCode::BadValue,
+            "a sheet is drawn as it was at an entry of the journal only from a drawing set's \
+             folder, whose journal it is",
+        )
+        .at_field("entry"));
     }
     let name = source
         .file_stem()
@@ -198,13 +286,30 @@ fn read(source: &Path, sheet: Option<&str>) -> Result<Drawn, Error> {
         return Err(no_such_sheet(sheet, std::slice::from_ref(&name)));
     }
     let record = read_record(source)?;
+    let ids: Vec<(String, Option<String>)> = if record.units.is_some() && !is_dwg(source) {
+        let described = read_sheet_record(source)?;
+        (0..described.objects.len())
+            .map(|i| (described.id(i), described.objects[i].name.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(Drawn {
         names: vec![name.clone()],
         name,
+        objects: objects_of(&record.sheet, &ids),
         sheet: record.sheet,
         units: record.units,
         objects_not_drawn: record.objects_not_drawn,
     })
+}
+
+/// Whether `source` is read as a DWG: its name ends `.dwg`, in any case.
+fn is_dwg(source: &Path) -> bool {
+    source
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("dwg"))
 }
 
 /// The error for a sheet to draw that is not among `names`, the sheets

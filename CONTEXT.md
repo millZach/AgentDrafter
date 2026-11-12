@@ -195,6 +195,10 @@ _Avoid_: draft, staging
 Accepted by the reviewer. Nothing is issued until the reviewer accepts the working revision. The reviewer cannot accept while the set is inconsistent, and an issued change set cannot be undone.
 _Avoid_: released, approved, final
 
+**Accept**:
+The command that issues the working revision: every change set still in place, and the set's files as they stand. The reviewer accepts in the viewer, or asks an agent to accept for them through any interface; the journal records each accept with the interface it came through. It is refused while the set is inconsistent, and warns, listing them, when checks fail.
+_Avoid_: approve, sign off, release
+
 **Query**:
 A question an agent asks a drawing set about what is on its sheets, such as which objects carry a tag, which blocks a sheet inserts, or how far apart two objects are. It reads the records, changes nothing, and selects objects by ID, name, block, attribute or text, never by coordinates. A query that matches nothing says so.
 _Avoid_: search, lookup, select
@@ -262,7 +266,7 @@ The Rust library that knows drawings. Every interface is a thin layer over it, a
 _Avoid_: backend, server
 
 **Interface**:
-One of the four ways in: the command line, the MCP server, the Python library and the local HTTP API. All four expose the same operations with the same behaviour.
+One of the four ways in: the command line, the MCP server, the Python library and the local HTTP API. All four expose the same operations with the same behaviour. The journal records which one an accept came through, and counts the viewer's page apart from the HTTP API it reaches the core through.
 _Avoid_: door, adapter, front end
 
 **Command**:
@@ -274,7 +278,7 @@ The secret every request to the HTTP API carries when it listens beyond the loca
 _Avoid_: password, API key
 
 **Viewer**:
-The browser window where the reviewer watches a drawing set change, steps through its journal, and accepts or undoes.
+The browser window where the reviewer watches a drawing set change, steps through its journal, and accepts or undoes. It learns of every change set from the set's journal, whichever interface sent it.
 _Avoid_: app, editor, UI
 
 ### Material

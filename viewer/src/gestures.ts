@@ -14,6 +14,8 @@ export interface Surface {
   limits(): Limits;
   /** The reviewer took the view in hand: it no longer follows the fit. */
   touched(): void;
+  /** A tap or a click, not a drag, at a point of the element: a pick. */
+  tapped?(at: [number, number]): void;
 }
 
 type Point = [number, number];
@@ -154,6 +156,7 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
         glide.to(zoomAt(view, p[0], p[1], view.scale * 2.2, surface.limits()), 260, p);
       } else {
         lastTap = { p, t: now };
+        surface.tapped?.(p);
       }
       return;
     }

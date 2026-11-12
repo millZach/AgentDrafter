@@ -48,12 +48,15 @@ use crate::units::{parse_length, LengthError, Unit};
 pub use blocks::parse_block_library;
 pub(crate) use edit::{AttributeSet, Listed, ObjectList, RecordFile};
 pub(crate) use emit::number_text;
+pub(crate) use ids::ID_SEPARATOR;
 pub(crate) use mark::{mark_text, parse_mark, MarkFailure};
 pub(crate) use objects::article;
 pub(crate) use records::{read_sheet_record, SavedSet, SheetRecord};
-pub(crate) use set::{read_rows, read_set_settings, rows_at, template_path, Row};
+pub(crate) use set::{
+    read_rows, read_rows_in, read_set_settings, read_set_settings_in, rows_at, template_path, Row,
+};
 pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
-pub(crate) use template::{read_template, template_at};
+pub(crate) use template::{read_template, read_template_in, template_at};
 
 /// The keys at the top of a sheet description.
 pub(crate) const SHEET_KEYS: [&str; 8] = [
@@ -162,10 +165,35 @@ struct RowObjects<'a> {
     pub(super) file: &'a Path,
 }
 
+/// Where a drawing set's files are read from: the disk, or, for the set as
+/// it was at an entry of its journal, the files as they were then.
+pub(crate) trait ReadFiles {
+    /// The text of the file at `path`.
+    fn text(&self, path: &Path) -> std::io::Result<String>;
+}
+
+/// The files as they are on disk.
+pub(crate) struct Disk;
+
+impl ReadFiles for Disk {
+    fn text(&self, path: &Path) -> std::io::Result<String> {
+        fs::read_to_string(path)
+    }
+}
+
 /// The text of the file at `path`. `what` names it in the error, such as
 /// "the sheet description".
 pub(crate) fn read_file(path: &Path, what: &str) -> Result<String, Error> {
-    fs::read_to_string(path).map_err(|e| {
+    read_file_in(&Disk, path, what)
+}
+
+/// The text of the file at `path`, read from `files`.
+pub(crate) fn read_file_in(
+    files: &dyn ReadFiles,
+    path: &Path,
+    what: &str,
+) -> Result<String, Error> {
+    files.text(path).map_err(|e| {
         Error::new(ErrorCode::ReadFailed, format!("could not read {what}: {e}")).in_file(path)
     })
 }
@@ -185,10 +213,19 @@ fn library_beside<'a>(
     path: &'a Path,
     read: &'a mut Option<LibraryFile>,
 ) -> impl FnMut(&str) -> Result<BlockLibrary, Error> + 'a {
+    library_beside_in(&Disk, path, read)
+}
+
+/// A loader as [`library_beside`] gives, that reads from `files`.
+fn library_beside_in<'a>(
+    files: &'a dyn ReadFiles,
+    path: &'a Path,
+    read: &'a mut Option<LibraryFile>,
+) -> impl FnMut(&str) -> Result<BlockLibrary, Error> + 'a {
     let folder = path.parent().unwrap_or(Path::new(""));
     move |written| {
         let file = folder.join(written);
-        let text = fs::read_to_string(&file).map_err(|e| {
+        let text = files.text(&file).map_err(|e| {
             Error::new(
                 ErrorCode::ReadFailed,
                 format!(

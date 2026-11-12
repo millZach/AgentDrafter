@@ -13,6 +13,22 @@
 //! - `GET /` is the viewer's page, and `GET /assets/...` its files
 //!   (`page.rs`), which draw a drawing set's sheets in the browser from the
 //!   display list the page asks `display-list` for.
+//! - `POST /events` watches a drawing set for the viewer: the body names
+//!   the set, `{"set": "..."}`, and the response is a stream of
+//!   Server-Sent Events that stays open, each event the `journal`
+//!   command's reply, sent when the stream opens and again each time the
+//!   set's journal changes on disk, whichever process changed it. Every
+//!   change set and undo, and every accept, adds to the journal, so a
+//!   change set an agent sends from another process, through any
+//!   interface, reaches an open viewer without a reload. It is a POST with
+//!   a JSON body, and carries the token beyond the local machine as every
+//!   command does, because a page reads the stream with `fetch`, which
+//!   sends headers, where `EventSource` sends none.
+//!
+//! A command the viewer's page sends is recorded as the viewer's, not the
+//! HTTP API's, where it records the interface, as an accept does: the
+//! browser marks a request its page makes to its own server
+//! `Sec-Fetch-Site: same-origin`, a header no script can set.
 //!
 //! It is an open port to guard (ADR-0007). It listens on the local machine
 //! unless `--listen` names another address. Zach decided on 2026-11-11 that
@@ -38,14 +54,21 @@
 //! of another. A connection has 30 seconds to send its whole request and
 //! 30 to take its reply, however slowly it sends, and a refused request is
 //! closed unread, so no client can hold the server. Requests are taken one
-//! at a time, so two change sets never run on a set at once.
+//! at a time, so two change sets never run on a set at once. An event
+//! stream is the one response that stays open: each is watched on a thread
+//! of its own, which only reads, at most [`MOST_WATCHERS`] at once.
 
+use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
-use agentdrafter_core::{commands, find_command, Error, ErrorCode, Reply, Settings};
+use agentdrafter_core::{
+    commands, find_command, Error, ErrorCode, Interface, Reply, Settings, JOURNAL_FILE,
+};
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 
@@ -81,6 +104,19 @@ const MOST_BODY: usize = 64 * 1024 * 1024;
 /// How long a connection has to send its whole request, and then to take
 /// its whole reply. However slowly a client sends, it is cut off then.
 const DEADLINE: Duration = Duration::from_secs(30);
+
+/// The most event streams open at once; one more is refused with 503.
+pub const MOST_WATCHERS: usize = 16;
+
+/// How often an event stream looks at its set's journal.
+const WATCH_EVERY: Duration = Duration::from_millis(200);
+
+/// How long an event stream may say nothing before it sends a comment, so
+/// a connection the page has let go of is found closed.
+const KEEP_ALIVE: Duration = Duration::from_secs(15);
+
+/// The event streams open now.
+static WATCHERS: AtomicUsize = AtomicUsize::new(0);
 
 /// The time by which a connection must have sent its request, or taken
 /// its reply.
@@ -290,41 +326,176 @@ fn started(address: SocketAddr, guard: &Guard) -> Value {
 /// must arrive within `limit`, and the reply be taken within it.
 fn handle(mut stream: TcpStream, guard: &Guard, settings: &Settings, limit: Duration) {
     let arrive_by = Deadline::after(limit);
-    if let Some(response) = respond(&mut stream, guard, settings, arrive_by) {
-        let _ = Deadline::after(limit).write(&mut stream, &response.bytes());
+    match respond(&mut stream, guard, settings, arrive_by) {
+        Some(Answer::Reply(response)) => {
+            let _ = Deadline::after(limit).write(&mut stream, &response.bytes());
+        }
+        Some(Answer::Watch(set)) => return watch(stream, set, settings.clone(), limit),
+        None => {}
     }
     // A refused request's body is not read: the connection is closed with
     // whatever the client is still sending.
     let _ = stream.shutdown(Shutdown::Write);
 }
 
-/// The response to the request on `stream`, or none when the connection
+/// How a request is answered: with one response, or with an event stream
+/// that watches a drawing set.
+enum Answer {
+    Reply(Response),
+    Watch(PathBuf),
+}
+
+/// The answer to the request on `stream`, or none when the connection
 /// closed, or fell silent, before a request came.
 fn respond(
     stream: &mut TcpStream,
     guard: &Guard,
     settings: &Settings,
     arrive_by: Deadline,
-) -> Option<Response> {
+) -> Option<Answer> {
     let head = match read_head(stream, arrive_by) {
         Ok(Some(head)) => head,
         Ok(None) => return None,
-        Err(response) => return Some(response),
+        Err(response) => return Some(Answer::Reply(response)),
     };
     // The viewer's page needs no token, but on the local machine is served
     // only to a request addressed to it.
     if let Some(file) = page::file(head.route()) {
         if let Guard::Local = guard {
             if let Err(response) = addressed_locally(&head) {
-                return Some(response);
+                return Some(Answer::Reply(response));
             }
         }
-        return Some(serve_page(&head, file));
+        return Some(Answer::Reply(serve_page(&head, file)));
     }
     if let Err(response) = admit(&head, guard) {
-        return Some(response);
+        return Some(Answer::Reply(response));
     }
-    Some(route(stream, head, settings, arrive_by).unwrap_or_else(|response| response))
+    if head.route() == "/events" {
+        return Some(match events(stream, head, arrive_by) {
+            Ok(set) => Answer::Watch(set),
+            Err(response) => Answer::Reply(response),
+        });
+    }
+    Some(Answer::Reply(
+        route(stream, head, settings, arrive_by).unwrap_or_else(|response| response),
+    ))
+}
+
+/// The drawing set a request for an event stream names, or why it is
+/// refused.
+fn events(stream: &mut TcpStream, head: Head, arrive_by: Deadline) -> Result<PathBuf, Response> {
+    if head.method != "POST" {
+        return Err(Response::usage(
+            405,
+            "POST /events watches the drawing set its body names, {\"set\": \"<folder>\"}",
+        )
+        .allow("POST"));
+    }
+    let body = read_body(stream, head, arrive_by)?;
+    let named = serde_json::from_slice::<serde_json::Map<String, Value>>(&body)
+        .ok()
+        .filter(|body| body.len() == 1)
+        .and_then(|body| body.get("set").and_then(Value::as_str).map(PathBuf::from));
+    let Some(set) = named else {
+        return Err(Response::usage(
+            400,
+            "the body of POST /events names the drawing set to watch, {\"set\": \"<folder>\"}, \
+             and nothing else",
+        ));
+    };
+    if WATCHERS.load(Ordering::SeqCst) >= MOST_WATCHERS {
+        return Err(Response::usage(
+            503,
+            format!("at most {MOST_WATCHERS} event streams are open at once; close one first"),
+        ));
+    }
+    Ok(set)
+}
+
+/// Streams the journal of the drawing set in `set` on `stream`, on a
+/// thread of its own: the `journal` command's reply as an event when the
+/// stream opens, and again each time the journal changes on disk, until
+/// the page lets the stream go.
+fn watch(mut stream: TcpStream, set: PathBuf, settings: Settings, limit: Duration) {
+    WATCHERS.fetch_add(1, Ordering::SeqCst);
+    let spawned = std::thread::Builder::new()
+        .name("agentdrafter-events".into())
+        .spawn(move || {
+            let _ = stream_journal(&mut stream, &set, &settings, limit);
+            let _ = stream.shutdown(Shutdown::Both);
+            WATCHERS.fetch_sub(1, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        WATCHERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn stream_journal(
+    stream: &mut TcpStream,
+    set: &Path,
+    settings: &Settings,
+    limit: Duration,
+) -> io::Result<()> {
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\
+                X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
+    Deadline::after(limit).write(stream, head.as_bytes())?;
+    let journal = find_command("journal").expect("the registry holds `journal`");
+    let mut seen: Option<Option<(u64, SystemTime)>> = None;
+    let mut said = Instant::now();
+    loop {
+        let now = journal_state(set);
+        if seen != Some(now) {
+            seen = Some(now);
+            let reply = journal.run(serde_json::json!({ "set": set }), settings, Interface::Http);
+            // A reply holds only strings, numbers, lists and string-keyed
+            // maps, which always serialize, and JSON escapes every line
+            // break, so it is one line of data.
+            let data = serde_json::to_string(&reply).expect("a reply serializes to JSON");
+            let event = format!("event: journal\ndata: {data}\n\n");
+            Deadline::after(limit).write(stream, event.as_bytes())?;
+            said = Instant::now();
+        } else if said.elapsed() >= KEEP_ALIVE {
+            Deadline::after(limit).write(stream, b": still watching\n\n")?;
+            said = Instant::now();
+        }
+        if closed(stream) {
+            return Ok(());
+        }
+        std::thread::sleep(WATCH_EVERY);
+    }
+}
+
+/// The journal's length and when it was last written, which change when an
+/// entry is added; none when there is no journal.
+fn journal_state(set: &Path) -> Option<(u64, SystemTime)> {
+    let metadata = fs::metadata(set.join(JOURNAL_FILE)).ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
+}
+
+/// Whether the client has closed the connection.
+fn closed(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return true;
+    }
+    let mut byte = [0u8; 1];
+    let gone = match stream.peek(&mut byte) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) => e.kind() != ErrorKind::WouldBlock,
+    };
+    let _ = stream.set_nonblocking(false);
+    gone
+}
+
+/// Which interface a request let in came through: the viewer, when the
+/// browser says its page sent it to its own server, which no script can
+/// say for it, or else the HTTP API.
+fn interface_of(head: &Head) -> Interface {
+    match head.header("sec-fetch-site") {
+        Some(site) if site.trim().eq_ignore_ascii_case("same-origin") => Interface::Viewer,
+        _ => Interface::Http,
+    }
 }
 
 /// One of the viewer's page's files, to a GET, or its headers alone to a
@@ -540,7 +711,7 @@ fn route(
             404,
             format!(
                 "no route `{path}`: GET /commands lists the commands, POST /commands/<name> \
-                 runs one, and GET / is the viewer"
+                 runs one, POST /events watches a drawing set's journal, and GET / is the viewer"
             ),
         ));
     };
@@ -558,6 +729,7 @@ fn route(
         )
         .allow("POST"));
     }
+    let via = interface_of(&head);
     let body = read_body(stream, head, arrive_by)?;
     let input = if body.is_empty() {
         json!({})
@@ -565,7 +737,7 @@ fn route(
         serde_json::from_slice(&body)
             .map_err(|e| Response::usage(400, format!("the body is not JSON: {e}")))?
     };
-    let reply = command.run(input, settings);
+    let reply = command.run(input, settings, via);
     let status = match &reply.error {
         _ if reply.ok => 200,
         Some(error) if error.code == ErrorCode::Usage => 400,
@@ -696,6 +868,7 @@ impl Response {
             415 => "Unsupported Media Type",
             422 => "Unprocessable Content",
             431 => "Request Header Fields Too Large",
+            503 => "Service Unavailable",
             _ => "Error",
         };
         let mut head = format!(
@@ -1133,11 +1306,118 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// A request for the event stream, with `headers`.
+    fn events_request(headers: &str, body: &str) -> Vec<u8> {
+        format!(
+            "POST /events HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn beyond_the_local_machine_the_event_stream_needs_the_token_as_every_command_does() {
+        let token = "e".repeat(64);
+        let right = format!("{JSON}Authorization: Bearer {token}\r\n");
+        let responses = exchange(
+            Guard::Token(token.clone()),
+            vec![
+                events_request(JSON, r#"{"set": "demo-set"}"#),
+                events_request(
+                    &format!("{JSON}Authorization: Bearer {}\r\n", "f".repeat(64)),
+                    r#"{"set": "demo-set"}"#,
+                ),
+                events_request(&right, r#"{"folder": "demo-set"}"#),
+                events_request(&right, r#"{"set": "demo-set", "more": 1}"#),
+                events_request("Content-Type: text/plain\r\n", r#"{"set": "demo-set"}"#),
+                format!("GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n")
+                    .into_bytes(),
+            ],
+        );
+        for (status, _, json) in &responses[..2] {
+            assert_eq!(*status, 401, "{json}");
+            assert_eq!(json["error"]["code"], "unauthorized");
+        }
+        for (status, _, json) in &responses[2..4] {
+            assert_eq!(*status, 400, "{json}");
+            assert!(json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("{\"set\""));
+        }
+        assert_eq!(responses[4].0, 401, "no token, whatever the body");
+        assert_eq!(responses[5].0, 405, "the stream is asked for with POST");
+
+        // With the token, the stream opens and its first event is the
+        // journal command's reply on the set named.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let guard = Guard::Token(token);
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle(stream, &guard, &Settings::default(), DEADLINE);
+        });
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .write_all(&events_request(&right, r#"{"set": "no-such-set"}"#))
+            .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let mut read = String::new();
+        let mut chunk = [0u8; 4096];
+        while !read.contains("data: ") || !read.ends_with("\n\n") {
+            let n = stream.read(&mut chunk).unwrap();
+            assert!(n > 0, "the stream stays open: {read}");
+            read.push_str(std::str::from_utf8(&chunk[..n]).unwrap());
+        }
+        assert!(read.starts_with("HTTP/1.1 200 OK\r\n"), "{read}");
+        assert!(
+            read.contains("Content-Type: text/event-stream\r\n"),
+            "{read}"
+        );
+        let data = read
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let reply: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(reply["ok"], false, "no set there: {reply}");
+        assert_eq!(reply["error"]["code"], "read_failed");
+        drop(stream);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_request_the_viewers_page_sends_is_the_viewers_and_any_other_the_http_apis() {
+        let head = |headers: &[(&str, &str)]| Head {
+            method: "POST".into(),
+            path: "/commands/accept".into(),
+            headers: headers
+                .iter()
+                .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+                .collect(),
+            body_start: Vec::new(),
+        };
+        assert_eq!(
+            interface_of(&head(&[("sec-fetch-site", "same-origin")])),
+            Interface::Viewer
+        );
+        for other in [
+            &[][..],
+            &[("sec-fetch-site", "cross-site")],
+            &[("sec-fetch-site", "none")],
+            &[("origin", "http://127.0.0.1:7316")],
+        ] {
+            assert_eq!(interface_of(&head(other)), Interface::Http, "{other:?}");
+        }
+    }
+
     #[test]
     fn the_server_reaches_the_core_only_through_its_registry() {
         // No drawing logic lives in a server (ADR-0007): all it takes from
-        // the core is the registry, the reply and its error, and the
-        // settings it hands on.
+        // the core is the registry, the reply and its error, the settings
+        // and the interface it hands on, and, for the HTTP API's event
+        // stream, where a set keeps its journal, which it watches.
         // The crate's name, written so that this test's own lines do not
         // hold it.
         let core = concat!("agentdrafter", "_core");
@@ -1148,20 +1428,24 @@ mod tests {
                 .filter(|line| !line.trim_start().starts_with("//"))
                 .collect();
             assert_eq!(uses.len(), 1, "one use of the core: {uses:?}");
-            let named = uses[0]
-                .trim()
-                .strip_prefix(&format!("use {core}::{{"))
-                .and_then(|rest| rest.strip_suffix("};"))
+            let start = source.find(uses[0]).unwrap();
+            let named = source[start..]
+                .split_once("};")
+                .map(|(used, _)| used)
+                .and_then(|used| used.split_once('{'))
+                .map(|(_, named)| named)
                 .unwrap();
-            for item in named.split(',').map(str::trim) {
+            for item in named.split(',').map(str::trim).filter(|i| !i.is_empty()) {
                 assert!(
                     [
                         "commands",
                         "find_command",
                         "Error",
                         "ErrorCode",
+                        "Interface",
                         "Reply",
-                        "Settings"
+                        "Settings",
+                        "JOURNAL_FILE"
                     ]
                     .contains(&item),
                     "a server uses `{item}` from the core"

@@ -1,14 +1,43 @@
 // The drawing: a canvas the Rust renderer draws on with WebGL2, from the
 // display list the server sent. This component only says where the sheet
 // sits (the view) and when to draw; what is drawn, and how, is the
-// renderer's (crates/agentdrafter-viewer).
+// renderer's (crates/agentdrafter-viewer), and so is what a tap picks: the
+// core finds the object drawn nearest the point in the display list, so the
+// page holds no hit-test of its own.
 
 import { useEffect, useRef, useState } from 'react';
 
 import { Viewer } from './wasm/agentdrafter_viewer.js';
 import { attachGestures, Glide, type Surface } from './gestures.ts';
-import { fit, keepInSight, limits, zoomAt, type Area, type Limits, type Paper, type View } from './view.ts';
+import {
+  fit,
+  focusOn,
+  keepInSight,
+  limits,
+  PULSE_MS,
+  pulseStrength,
+  toDrawing,
+  zoomAt,
+  type Area,
+  type Limits,
+  type Paper,
+  type View,
+} from './view.ts';
 import { installProbe, type Draw, type Summary } from './probe.ts';
+
+/** An object a halo marks: its place in the sheet's objects, and whether it was added. */
+export interface Mark {
+  place: number;
+  added: boolean;
+}
+
+/** A request to show a part of a sheet: the places of its objects, or the whole sheet when none. */
+export interface Focus {
+  /** A new key asks again. */
+  key: number;
+  sheet: string;
+  places: number[];
+}
 
 export interface DrawingProps {
   /** The text of the `display-list` reply to draw; null before one comes. */
@@ -17,18 +46,43 @@ export interface DrawingProps {
   coveredBelow: number;
   /** Only the fit button, as on a phone, where fingers zoom. */
   compact: boolean;
+  /** The objects a change set touched, marked with halos. */
+  marks: Mark[];
+  /** The object the reviewer picked, marked blue; null for none. */
+  picked: number | null;
+  /** When the marked change set landed, by performance.now(), so its halos pulse; null to hold them still. */
+  pulseSince: number | null;
+  /** Shows a part of the sheet once it is drawn. */
+  focus: Focus | null;
   onLoaded(summary: Summary): void;
   /** A sheet could not be drawn. */
   onError(message: string): void;
   /** The renderer could not start, as where there is no WebGL2: nothing can be drawn. */
   onUnavailable(message: string): void;
+  /** A tap or a click picked the object at this place, or nothing. */
+  onPick(place: number | null): void;
 }
+
+/** How near a tap must come to an object to pick it, in CSS pixels. */
+const PICK_REACH = 16;
 
 /** Device pixels to a CSS pixel: the canvas's backing size over its size. */
 const ratioOf = (canvas: HTMLCanvasElement): number =>
   canvas.clientWidth > 0 ? canvas.width / canvas.clientWidth : window.devicePixelRatio || 1;
 
-export function Drawing({ reply, coveredBelow, compact, onLoaded, onError, onUnavailable }: DrawingProps) {
+export function Drawing({
+  reply,
+  coveredBelow,
+  compact,
+  marks,
+  picked,
+  pulseSince,
+  focus,
+  onLoaded,
+  onError,
+  onUnavailable,
+  onPick,
+}: DrawingProps) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewer = useRef<Viewer | null>(null);
@@ -43,8 +97,14 @@ export function Drawing({ reply, coveredBelow, compact, onLoaded, onError, onUna
   const glide = useRef<Glide | null>(null);
   const covered = useRef(coveredBelow);
   const loadedReply = useRef<string | null>(null);
+  const loadedSheet = useRef<string | null>(null);
+  const shownMarks = useRef({ marks, picked });
+  const pendingFocus = useRef<Focus | null>(null);
+  const pick = useRef(onPick);
   const [, setReady] = useState(false);
   covered.current = coveredBelow;
+  shownMarks.current = { marks, picked };
+  pick.current = onPick;
 
   const draw = () => {
     frame.current = 0;
@@ -85,6 +145,13 @@ export function Drawing({ reply, coveredBelow, compact, onLoaded, onError, onUna
     touched: () => {
       followFit.current = false;
     },
+    tapped: ([sx, sy]) => {
+      const v = viewer.current;
+      if (!v || !loadedReply.current) return;
+      const [x, y] = toDrawing(view.current, sx, sy);
+      const place = v.pick(x, y, PICK_REACH / view.current.scale);
+      pick.current(place >= 0 ? place : null);
+    },
   };
   const middle = (): [number, number] => {
     const a = area();
@@ -108,18 +175,55 @@ export function Drawing({ reply, coveredBelow, compact, onLoaded, onError, onUna
     const [x, y] = middle();
     glide.current?.to(zoomAt(view.current, x, y, view.current.scale * factor, bounds.current), 220, [x, y]);
   };
+  const applyMarks = () => {
+    const v = viewer.current;
+    if (!v) return;
+    const { marks: m, picked: p } = shownMarks.current;
+    // Two lists, as the renderer takes them.
+    const places = m.map((mark) => mark.place);
+    const added = m.map((mark) => mark.added);
+    v.set_marks(Uint32Array.from(places), Uint8Array.from(added.map((a) => (a ? 1 : 0))), p ?? -1);
+    const probe = window.agentdrafterViewer;
+    if (probe) probe.marked = { places, added, picked: p };
+    redraw();
+  };
+  // Shows the part of the sheet a focus asks for, once that sheet is drawn.
+  const applyFocus = () => {
+    const f = pendingFocus.current;
+    const v = viewer.current;
+    if (!f || !v || f.sheet.toUpperCase() !== loadedSheet.current?.toUpperCase()) return;
+    pendingFocus.current = null;
+    const whole = fitted();
+    if (!whole) return;
+    const b = f.places.length ? v.bounds_of(Uint32Array.from(f.places)) : [];
+    if (b.length !== 4) {
+      fitSheet(450);
+      return;
+    }
+    followFit.current = false;
+    bounds.current = limits(whole);
+    const target = focusOn([b[0], b[1], b[2], b[3]] as unknown as Paper, area(), whole);
+    glide.current?.to(target, 450, middle());
+  };
 
   const load = (text: string): boolean => {
     const v = viewer.current;
     if (!v) return false;
     try {
       const summary = JSON.parse(v.load(text)) as Summary;
+      const sameSheet = loadedSheet.current?.toUpperCase() === summary.sheet.toUpperCase();
       loadedReply.current = text;
+      loadedSheet.current = summary.sheet;
       paper.current = summary.paper;
-      fitSheet(0);
+      // The same sheet drawn again, as a change set lands on it or the
+      // journal is stepped through, keeps the reviewer's view.
+      if (!sameSheet || followFit.current) fitSheet(0);
+      else redraw();
       const probe = window.agentdrafterViewer;
       if (probe) probe.summary = summary;
       onLoaded(summary);
+      applyMarks();
+      applyFocus();
       return true;
     } catch (e) {
       onError(String((e as Error).message ?? e));
@@ -216,11 +320,49 @@ export function Drawing({ reply, coveredBelow, compact, onLoaded, onError, onUna
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // A new sheet: drawn, and fitted to the screen.
+  // A new sheet, or the same sheet drawn anew: drawn, and fitted to the
+  // screen when it is another sheet.
   useEffect(() => {
     if (reply && viewer.current && reply !== loadedReply.current) load(reply);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reply]);
+
+  // The halos follow what the page marks.
+  useEffect(() => {
+    applyMarks();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marks, picked]);
+
+  // A change set that just landed pulses its halos, then holds them.
+  useEffect(() => {
+    const v = viewer.current;
+    if (!v) return;
+    if (pulseSince === null) {
+      v.set_pulse(1);
+      redraw();
+      return;
+    }
+    let pulsing = 0;
+    const step = () => {
+      const ms = performance.now() - pulseSince;
+      viewer.current?.set_pulse(pulseStrength(ms));
+      redraw();
+      pulsing = ms < PULSE_MS ? requestAnimationFrame(step) : 0;
+    };
+    pulsing = requestAnimationFrame(step);
+    return () => {
+      if (pulsing) cancelAnimationFrame(pulsing);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pulseSince]);
+
+  // A part of a sheet to show, now or once its sheet is drawn.
+  useEffect(() => {
+    if (!focus) return;
+    pendingFocus.current = focus;
+    applyFocus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.key]);
 
   // The bottom sheet's peek changes the room the fitted sheet has.
   useEffect(() => {

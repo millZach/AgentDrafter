@@ -19,7 +19,7 @@
 use std::io::{BufRead, Read, Write};
 use std::process::ExitCode;
 
-use agentdrafter_core::{commands, find_command, Error, Reply, Settings};
+use agentdrafter_core::{commands, find_command, Error, Interface, Reply, Settings};
 use serde_json::{json, Value};
 
 use crate::{send, Args};
@@ -269,7 +269,7 @@ impl Server {
                 ))
             }
         };
-        let reply = command.run(arguments, settings);
+        let reply = command.run(arguments, settings, Interface::Mcp);
         // A reply holds only strings, numbers, lists and string-keyed maps,
         // which always serialize.
         let text = serde_json::to_string(&reply).expect("a reply serializes to JSON");

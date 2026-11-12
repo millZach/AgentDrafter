@@ -19,6 +19,27 @@ export interface Summary {
   segments: number;
   triangles: number;
   fills_not_drawn: number;
+  /** The journal's entry the set is drawn as it was at, or null for the set as it is. */
+  entry: number | null;
+  /** What each of the sheet's objects is, by its place. */
+  objects: SheetObject[];
+}
+
+/** One of the sheet's objects, as the core says what it is. */
+export interface SheetObject {
+  id?: string;
+  name?: string;
+  type: string;
+  layer: string;
+  block?: string;
+  attributes?: { tag: string; value: string }[];
+}
+
+/** What the halos mark now. */
+export interface Marked {
+  places: number[];
+  added: boolean[];
+  picked: number | null;
 }
 
 /** One draw of the canvas: when it began, and how long the call took. */
@@ -40,6 +61,10 @@ export interface Capture {
 
 export interface Probe {
   summary: Summary | null;
+  /** What the halos mark, once a sheet is drawn. */
+  marked?: Marked;
+  /** The box round the objects at these places, [left, bottom, right, top] in drawing units; empty when they draw nothing. */
+  bounds(places: number[]): number[];
   view(): View;
   /** Shows `view` from the next frame, as a pan or a zoom does. */
   show(view: View): void;
@@ -68,6 +93,9 @@ interface Parts {
 export function installProbe(parts: Parts): () => void {
   const probe: Probe = {
     summary: null,
+    bounds(places) {
+      return [...(parts.viewer()?.bounds_of(Uint32Array.from(places)) ?? [])];
+    },
     view: parts.view,
     show: parts.show,
     takeDraws() {

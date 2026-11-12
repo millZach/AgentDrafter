@@ -52,6 +52,10 @@
       "args": ["undo", "demo-set", "1"],
       "input": {"set": "demo-set", "change_set": 1}
     },
+    "accept": {
+      "args": ["accept", "demo-set", "--newest-seen", "2"],
+      "input": {"set": "demo-set", "newest_seen": 2}
+    },
     "check": {
       "args": ["check", "demo-set", "--sheet", "DEMO-002"],
       "input": {"source": "demo-set", "sheets": ["DEMO-002"]}
