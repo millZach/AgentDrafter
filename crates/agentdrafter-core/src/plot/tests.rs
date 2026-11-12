@@ -179,3 +179,67 @@ fn a_pdf_whose_text_shows_a_stamp_is_not_one_agentdrafter_plotted() {
     assert_eq!(error.code, ErrorCode::NotAnOutput, "{error:?}");
     assert_eq!(fs::read(&theirs).unwrap(), bytes);
 }
+
+#[test]
+fn a_plot_saved_again_with_object_streams_is_still_ours() {
+    let dir = scratch("object-streams");
+    let source = dir.join("sheet.yaml");
+    fs::write(
+        &source,
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [100, 50, 0]}\n",
+    )
+    .unwrap();
+    plot_with(&PlotRequest::new(&source), &Settings::default()).unwrap();
+    let plotted = fs::read(dir.join("sheet.pdf")).unwrap();
+    // Our PDF as a reader that saves with object streams writes it: its
+    // trailer in a cross-reference stream, its document information inside
+    // an object stream.
+    let saved = reader::with_object_streams(&plotted);
+    assert!(!saved.windows(7).any(|w| w == b"trailer"));
+    assert!(!saved.windows(13).any(|w| w == b"/AgentDrafter"));
+    let again = dir.join("saved.pdf");
+    fs::write(&again, &saved).unwrap();
+    assert_eq!(crate::pdf::stamp_in(&saved), crate::pdf::stamp_in(&plotted));
+    let fresh = crate::check_stale(&crate::StaleRequest {
+        output: again.clone(),
+        source: Some(source.clone()),
+    })
+    .unwrap();
+    assert!(!fresh.stale, "{}", fresh.why);
+    // So `--overwrite` replaces it, as one of ours.
+    plot_with(
+        &PlotRequest {
+            output: Some(again.clone()),
+            overwrite: true,
+            ..PlotRequest::new(&source)
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(fs::read(&again).unwrap(), plotted);
+
+    // A stamp shown in the page's text is still no stamp when the PDF is
+    // saved so: only the document information's entry is read.
+    let shown = format!(
+        "/AgentDrafter ({})",
+        crate::pdf::stamp_in(&plotted).unwrap()
+    );
+    let theirs = reader::with_object_streams(&crate::pdf::tests::their_pdf(
+        &shown,
+        &[("Title", "How a PDF is stamped")],
+    ));
+    assert_eq!(crate::pdf::stamp_in(&theirs), None);
+    let theirs_path = dir.join("theirs.pdf");
+    fs::write(&theirs_path, &theirs).unwrap();
+    let error = plot_with(
+        &PlotRequest {
+            output: Some(theirs_path.clone()),
+            overwrite: true,
+            ..PlotRequest::new(&source)
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotAnOutput, "{error:?}");
+    assert_eq!(fs::read(&theirs_path).unwrap(), theirs);
+}

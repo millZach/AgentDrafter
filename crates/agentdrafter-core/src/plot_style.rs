@@ -313,8 +313,17 @@ impl Section {
             } else if let Some(name) = line.strip_suffix('{') {
                 stack.push((name.trim().to_owned(), Section::default()));
             } else if let Some((key, value)) = line.split_once('=') {
-                // A text value opens with a quote that is never closed.
-                let value = value.strip_prefix('"').unwrap_or(value);
+                let value = match value.strip_prefix('"') {
+                    // A text value opens with a quote that is never closed.
+                    Some(text) => text,
+                    // Any other value may carry an appendix after a space,
+                    // in brackets, such as `0.0076200000000 (+7.Z+"8V?S_LC )`
+                    // in a lineweight table (ezdxf's issue #1069). What it
+                    // means is not known; the value is what comes before
+                    // it, as ezdxf reads it.
+                    None if value.ends_with(')') => value.split(' ').next().unwrap_or(value),
+                    None => value,
+                };
                 let section = &mut stack.last_mut().expect("the root").1;
                 section
                     .entries
@@ -453,6 +462,26 @@ mod tests {
         assert_eq!(style.color(Color(1)), [0, 0, 255]);
         assert_eq!(style.color(Color(2)), [0, 128, 0]);
         assert_eq!(style.color(Color(3)), Color(3).on_paper());
+    }
+
+    #[test]
+    fn a_value_with_an_appendix_is_read_as_the_value_before_it() {
+        // As ezdxf's issue #1069 shows them in a lineweight table: the
+        // table's place 19, 0.9 mm, and place 20, 1 mm, carry appendices,
+        // and pens 1 and 2 plot with them.
+        let text = made_up_ctb_text(&[(1, rgb(0, 0, 255), 20), (2, BLACK, 21)], "")
+            .replacen(" 19=0.9\n", " 19=0.9000000000 (+7.Z+\"8V?S_LC )\n", 1)
+            .replacen(" 20=1.0\n", " 20=1.0000000000 (44F=@\";\"QC\\SM0)\n", 1);
+        assert_eq!(text.matches(" (").count(), 2, "both appendices written");
+        let style = PlotStyle::parse_ctb(&ctb_file(&text)).unwrap();
+        assert_eq!(style.lineweight(Color(1), 0.25), 0.9);
+        assert_eq!(style.lineweight(Color(2), 0.25), 1.0);
+        assert_eq!(style.color(Color(1)), [0, 0, 255]);
+        // A value whose brackets do not follow a space is still refused.
+        let glued = made_up_ctb_text(&[], "").replacen(" 19=0.9\n", " 19=0.9(x)\n", 1);
+        assert!(PlotStyle::parse_ctb(&ctb_file(&glued))
+            .unwrap_err()
+            .contains("19=0.9(x)"));
     }
 
     #[test]

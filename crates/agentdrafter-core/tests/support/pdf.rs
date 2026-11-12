@@ -356,6 +356,114 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// `bytes`, a PDF with a cross-reference table, such as a plot writes,
+/// saved again as `qpdf --object-streams=generate` saves it: every object
+/// that is not a stream moved into one object stream, and the table and
+/// its trailer replaced by a cross-reference stream, packed with deflate
+/// through PNG's Up predictor, whose dictionary is the trailer. The objects
+/// keep their numbers.
+pub fn with_object_streams(bytes: &[u8]) -> Vec<u8> {
+    let start = bytes.windows(9).rposition(|w| w == b"startxref").unwrap();
+    let words = |at: usize| {
+        String::from_utf8_lossy(&bytes[at..])
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let table: usize = words(start + 9)[0].parse().unwrap();
+    let table_words = words(table);
+    assert_eq!(table_words[0], "xref", "a cross-reference table");
+    let trailer = table_words.iter().position(|w| w == "trailer").unwrap();
+    // Where each object in use starts, by its number.
+    let first: u32 = table_words[1].parse().unwrap();
+    let mut starts: Vec<(usize, u32)> = table_words[3..trailer]
+        .chunks(3)
+        .zip(first..)
+        .filter(|(entry, _)| entry[2] == "n")
+        .map(|(entry, number)| (entry[0].parse().unwrap(), number))
+        .collect();
+    starts.sort();
+    let trailer_text = table_words[trailer..].join(" ");
+    let reference = |key: &str| Pdf::reference_after(&trailer_text, key);
+    let (root, info) = (reference("/Root"), reference("/Info"));
+    // Each object's body, between `N 0 obj` and `endobj`, as written.
+    let mut objects: Vec<(u32, &[u8])> = Vec::new();
+    for (i, &(at, number)) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).map_or(table, |&(next, _)| next);
+        let whole = &bytes[at..end];
+        let heading = format!("{number} 0 obj");
+        assert!(whole.starts_with(heading.as_bytes()), "object {number}");
+        let body = whole[heading.len()..].trim_ascii_end();
+        objects.push((number, body.strip_suffix(b"endobj").unwrap()));
+    }
+    let size = objects.iter().map(|(n, _)| n + 1).max().unwrap();
+    let (stream_number, xref_number) = (size, size + 1);
+    // Each object's row: its type, then its place or object stream, then
+    // its generation or index.
+    let mut rows = vec![(0u8, 0u32, 0u16); xref_number as usize + 1];
+    let mut out = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let (streams, plain): (Vec<_>, Vec<_>) = objects
+        .iter()
+        .partition(|(_, body)| body.trim_ascii_end().ends_with(b"endstream"));
+    for &(number, body) in streams {
+        rows[number as usize] = (1, out.len() as u32, 0);
+        out.extend(format!("{number} 0 obj").as_bytes());
+        out.extend(body);
+        out.extend(b"endobj\n");
+    }
+    let mut heading = String::new();
+    let mut data = Vec::new();
+    for (i, &&(number, body)) in plain.iter().enumerate() {
+        heading.push_str(&format!("{number} {} ", data.len()));
+        data.extend(body.trim_ascii());
+        data.push(b'\n');
+        rows[number as usize] = (2, stream_number, i as u16);
+    }
+    let first = heading.len();
+    let mut unpacked = heading.into_bytes();
+    unpacked.extend(data);
+    let packed = miniz_oxide::deflate::compress_to_vec_zlib(&unpacked, 6);
+    rows[stream_number as usize] = (1, out.len() as u32, 0);
+    out.extend(
+        format!(
+            "{stream_number} 0 obj\n<< /Type /ObjStm /N {} /First {first} /Filter /FlateDecode \
+             /Length {} >>\nstream\n",
+            plain.len(),
+            packed.len()
+        )
+        .as_bytes(),
+    );
+    out.extend(packed);
+    out.extend(b"\nendstream\nendobj\n");
+    let xref_at = out.len();
+    rows[xref_number as usize] = (1, xref_at as u32, 0);
+    let mut predicted = Vec::new();
+    let mut above = [0u8; 7];
+    for (kind, second, third) in rows {
+        let mut row = [0u8; 7];
+        row[0] = kind;
+        row[1..5].copy_from_slice(&second.to_be_bytes());
+        row[5..].copy_from_slice(&third.to_be_bytes());
+        predicted.push(2);
+        predicted.extend(row.iter().zip(above).map(|(b, up)| b.wrapping_sub(up)));
+        above = row;
+    }
+    let packed = miniz_oxide::deflate::compress_to_vec_zlib(&predicted, 6);
+    out.extend(
+        format!(
+            "{xref_number} 0 obj\n<< /Type /XRef /Size {} /W [1 4 2] /Root {root} 0 R /Info \
+             {info} 0 R /Filter /FlateDecode /DecodeParms << /Columns 7 /Predictor 12 >> \
+             /Length {} >>\nstream\n",
+            xref_number + 1,
+            packed.len()
+        )
+        .as_bytes(),
+    );
+    out.extend(packed);
+    out.extend(format!("\nendstream\nendobj\nstartxref\n{xref_at}\n%%EOF\n").as_bytes());
+    out
+}
+
 /// The tokens of a content stream.
 fn tokens(bytes: &[u8]) -> Vec<Token> {
     let mut out = Vec::new();

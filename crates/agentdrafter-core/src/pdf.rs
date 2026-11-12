@@ -404,10 +404,9 @@ fn ascii_json(json: &str) -> String {
 
 /// The stamp written in a PDF's document information, if it has one: the
 /// string under the key `AgentDrafter` in the dictionary the PDF's last
-/// trailer names as `/Info`, found through its cross-reference tables. The
-/// same text anywhere else, such as in a page's text, is not a stamp; nor
-/// is anything in a PDF whose trailer is kept in a cross-reference stream,
-/// which a plot never writes.
+/// trailer names as `/Info`, found through its cross-reference sections,
+/// tables or streams. The same text anywhere else, such as in a page's
+/// text, is not a stamp.
 pub(crate) fn stamp_in(bytes: &[u8]) -> Option<String> {
     if !bytes.starts_with(b"%PDF-") {
         return None;
@@ -422,54 +421,100 @@ pub(crate) fn stamp_in(bytes: &[u8]) -> Option<String> {
 /// the last to find the document information.
 const MOST_SECTIONS: usize = 100;
 
+/// The most bytes a stream the stamp is read through, a cross-reference
+/// stream or an object stream, may unpack to.
+const MOST_STREAM: usize = 64 * 1024 * 1024;
+
+/// How deep arrays and dictionaries inside one another are read.
+const DEEPEST: usize = 32;
+
 /// A PDF's document information: the dictionary its last trailer names as
 /// `/Info`, at the place the newest cross-reference section that lists it
-/// gives.
-fn document_information(bytes: &[u8]) -> Option<Dictionary<'_>> {
+/// gives. A section is a table and the trailer after it, or a
+/// cross-reference stream, whose dictionary is the trailer, as a PDF saved
+/// with object streams keeps it; the document information may then be
+/// inside an object stream.
+fn document_information(bytes: &[u8]) -> Option<Dictionary> {
     let keyword = b"startxref";
     let at = bytes.windows(keyword.len()).rposition(|w| w == keyword)?;
-    let mut section = Lexer::at(bytes, at + keyword.len()).offset();
-    let mut info = None;
-    for _ in 0..MOST_SECTIONS {
-        let (objects, trailer) = cross_reference(bytes, section?)?;
-        let (number, generation) = match info {
-            Some(info) => info,
-            None => *info.insert(match trailer.get(b"Info")? {
-                Value::Reference(number, generation) => (*number, *generation),
-                _ => return None,
-            }),
-        };
-        if let Some(&(_, _, offset)) = objects
-            .iter()
-            .find(|&&(n, g, _)| (n, g) == (number, generation))
-        {
-            let mut lexer = Lexer::at(bytes, offset);
-            let heading = (lexer.number()?, lexer.number()?, lexer.next()?);
-            return (heading == (number, generation, Token::Word(b"obj")))
-                .then(|| lexer.dictionary())
-                .flatten();
+    let mut next = Lexer::at(bytes, at + keyword.len()).offset();
+    let mut sections = Vec::new();
+    while let Some(at) = next {
+        if sections.len() == MOST_SECTIONS {
+            break;
         }
+        let section = cross_reference(bytes, at)?;
         // An update lists only what it changed; the section before it
         // lists the rest.
-        section = match trailer.get(b"Prev")? {
-            Value::Number(at) => usize::try_from(*at).ok(),
+        next = match section.trailer.get(b"Prev") {
+            Some(Value::Number(at)) => Some(usize::try_from(*at).ok()?),
             _ => None,
         };
+        sections.push(section);
     }
-    None
+    let (number, generation) = match sections.first()?.trailer.get(b"Info")? {
+        Value::Reference(number, generation) => (*number, *generation),
+        _ => return None,
+    };
+    // Where the newest section that lists object `number` of generation
+    // `generation` puts it.
+    let place = |number: u64, generation: u64| {
+        sections.iter().find_map(|section| {
+            section
+                .places
+                .iter()
+                .find(|(n, place)| *n == number && place.generation() == generation)
+                .map(|&(_, place)| place)
+        })
+    };
+    match place(number, generation)? {
+        Place::At { offset, .. } => {
+            let mut lexer = Lexer::at(bytes, offset);
+            lexer.object_heading(number, generation)?;
+            lexer.dictionary()
+        }
+        Place::In { stream } => match place(stream, 0)? {
+            Place::At { offset, .. } => object_in_stream(bytes, offset, stream, number),
+            Place::In { .. } => None,
+        },
+    }
 }
 
-/// Where each object in use starts, by its number and generation.
-type Places = Vec<(u64, u64, usize)>;
+/// Where an object in use is: at a place in the bytes, or inside the
+/// object stream of that number.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Place {
+    At { generation: u64, offset: usize },
+    In { stream: u64 },
+}
 
-/// The cross-reference table at `at`, as where each object it lists
-/// starts, and the trailer after it.
-fn cross_reference(bytes: &[u8], at: usize) -> Option<(Places, Dictionary<'_>)> {
-    let mut lexer = Lexer::at(bytes, at);
-    if lexer.next()? != Token::Word(b"xref") {
-        return None;
+impl Place {
+    /// The object's generation: an object in an object stream has 0.
+    fn generation(self) -> u64 {
+        match self {
+            Place::At { generation, .. } => generation,
+            Place::In { .. } => 0,
+        }
     }
-    let mut objects = Vec::new();
+}
+
+/// One cross-reference section: where each object in use it lists is, by
+/// its number, and its trailer.
+struct Section {
+    places: Vec<(u64, Place)>,
+    trailer: Dictionary,
+}
+
+/// The cross-reference section at `at`: a table and the trailer after it,
+/// or a cross-reference stream.
+fn cross_reference(bytes: &[u8], at: usize) -> Option<Section> {
+    let mut lexer = Lexer::at(bytes, at);
+    match lexer.next()? {
+        Token::Word(b"xref") => {}
+        Token::Word(_) => return cross_reference_stream(bytes, at),
+        _ => return None,
+    }
+    let mut places = Vec::new();
     loop {
         match lexer.next()? {
             Token::Word(b"trailer") => break,
@@ -480,14 +525,204 @@ fn cross_reference(bytes: &[u8], at: usize) -> Option<(Places, Dictionary<'_>)> 
                     let offset = lexer.offset()?;
                     let generation = lexer.number()?;
                     if lexer.next()? == Token::Word(b"n") {
-                        objects.push((number, generation, offset));
+                        places.push((number, Place::At { generation, offset }));
                     }
                 }
             }
             _ => return None,
         }
     }
-    Some((objects, lexer.dictionary()?))
+    Some(Section {
+        places,
+        trailer: lexer.dictionary()?,
+    })
+}
+
+/// The cross-reference stream whose object starts at `at`. Its dictionary
+/// is the section's trailer. Its data is a row for each object it lists,
+/// in fields of the widths its `/W` gives: the row's type, 1 for an object
+/// at a place and 2 for one in an object stream, then the object's place
+/// and its generation, or the object stream's number and the object's
+/// index in it.
+fn cross_reference_stream(bytes: &[u8], at: usize) -> Option<Section> {
+    let mut lexer = Lexer::at(bytes, at);
+    let (_, _) = (lexer.number()?, lexer.number()?);
+    if lexer.next()? != Token::Word(b"obj") {
+        return None;
+    }
+    let dictionary = lexer.dictionary()?;
+    if dictionary.get(b"Type") != Some(&Value::Name(b"XRef".to_vec())) {
+        return None;
+    }
+    let data = lexer.stream(&dictionary)?;
+    let widths: Vec<usize> = dictionary
+        .numbers(b"W")?
+        .into_iter()
+        .map(|w| usize::try_from(w).ok().filter(|w| *w <= 8))
+        .collect::<Option<_>>()?;
+    let [type_width, second_width, third_width] = widths[..] else {
+        return None;
+    };
+    let index = match dictionary.get(b"Index") {
+        None => vec![0, dictionary.number(b"Size")?],
+        Some(_) => dictionary.numbers(b"Index")?,
+    };
+    if index.len() % 2 != 0 {
+        return None;
+    }
+    let width = type_width + second_width + third_width;
+    if width == 0 {
+        return None;
+    }
+    let mut rows = data.chunks_exact(width);
+    let field = |bytes: &[u8]| bytes.iter().fold(0u64, |n, &b| n << 8 | u64::from(b));
+    let mut places = Vec::new();
+    for pair in index.chunks(2) {
+        let (first, count) = (pair[0], pair[1]);
+        for number in first..first.checked_add(count)? {
+            let row = rows.next()?;
+            let (kind, rest) = row.split_at(type_width);
+            let (second, third) = rest.split_at(second_width);
+            // With no width for the type, every row is of type 1.
+            let kind = if type_width == 0 { 1 } else { field(kind) };
+            match kind {
+                1 => places.push((
+                    number,
+                    Place::At {
+                        generation: field(third),
+                        offset: usize::try_from(field(second)).ok()?,
+                    },
+                )),
+                2 => places.push((
+                    number,
+                    Place::In {
+                        stream: field(second),
+                    },
+                )),
+                // A free object, or a type a reader does not know.
+                _ => {}
+            }
+        }
+    }
+    Some(Section {
+        places,
+        trailer: dictionary,
+    })
+}
+
+/// The dictionary that is object `number` inside the object stream
+/// `stream`, whose object starts at `at`. The stream's data starts with a
+/// number and a place for each object it holds, the places counted from
+/// its `/First` byte.
+fn object_in_stream(bytes: &[u8], at: usize, stream: u64, number: u64) -> Option<Dictionary> {
+    let mut lexer = Lexer::at(bytes, at);
+    lexer.object_heading(stream, 0)?;
+    let dictionary = lexer.dictionary()?;
+    if dictionary.get(b"Type") != Some(&Value::Name(b"ObjStm".to_vec())) {
+        return None;
+    }
+    let data = lexer.stream(&dictionary)?;
+    let first = usize::try_from(dictionary.number(b"First")?).ok()?;
+    let mut heading = Lexer::at(&data, 0);
+    for _ in 0..dictionary.number(b"N")? {
+        let (n, offset) = (heading.number()?, heading.offset()?);
+        if n == number {
+            return Lexer::at(&data, first.checked_add(offset)?).dictionary();
+        }
+    }
+    None
+}
+
+/// The data of a stream, unpacked: by deflate, the filter cross-reference
+/// and object streams are packed with, with or without a PNG predictor, or
+/// by no filter. A stream packed any other way is not read.
+fn unpacked(packed: &[u8], dictionary: &Dictionary) -> Option<Vec<u8>> {
+    // A filter and its parameters are written alone or in a list of one.
+    let alone = |value: Option<&Value>| match value {
+        Some(Value::Array(items)) => match &items[..] {
+            [one] => Some(one.clone()),
+            _ => Some(Value::Other),
+        },
+        other => other.cloned(),
+    };
+    let data = match alone(dictionary.get(b"Filter")) {
+        None => return Some(packed.to_vec()),
+        Some(Value::Name(name)) if name == b"FlateDecode" => {
+            miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(packed, MOST_STREAM).ok()?
+        }
+        Some(_) => return None,
+    };
+    let parameters = match alone(dictionary.get(b"DecodeParms")) {
+        None => return Some(data),
+        Some(Value::Dictionary(parameters)) => parameters,
+        Some(_) => return None,
+    };
+    let number = |key: &[u8], default: u64| match parameters.get(key) {
+        None => Some(default),
+        Some(Value::Number(n)) => Some(*n),
+        Some(_) => None,
+    };
+    match number(b"Predictor", 1)? {
+        1 => Some(data),
+        10..=15 if number(b"BitsPerComponent", 8)? == 8 => {
+            let pixel = usize::try_from(number(b"Colors", 1)?)
+                .ok()
+                .filter(|c| (1..=32).contains(c))?;
+            let width = usize::try_from(number(b"Columns", 1)?)
+                .ok()?
+                .checked_mul(pixel)?;
+            png_unpredicted(&data, width, pixel)
+        }
+        _ => None,
+    }
+}
+
+/// `data` with its PNG predictors undone: rows of `width` bytes, each after
+/// a byte naming how it was predicted, `pixel` bytes to a pixel.
+fn png_unpredicted(data: &[u8], width: usize, pixel: usize) -> Option<Vec<u8>> {
+    if width == 0 {
+        return None;
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(data.len());
+    let mut above = vec![0u8; width];
+    for row in data.chunks(width + 1) {
+        let (&predictor, row) = row.split_first()?;
+        if row.len() != width {
+            return None;
+        }
+        let mut line = vec![0u8; width];
+        for i in 0..width {
+            let left = if i >= pixel { line[i - pixel] } else { 0 };
+            let up = above[i];
+            let corner = if i >= pixel { above[i - pixel] } else { 0 };
+            let guess = match predictor {
+                0 => 0,
+                1 => left,
+                2 => up,
+                3 => ((u16::from(left) + u16::from(up)) / 2) as u8,
+                4 => paeth(left, up, corner),
+                _ => return None,
+            };
+            line[i] = row[i].wrapping_add(guess);
+        }
+        out.extend_from_slice(&line);
+        above = line;
+    }
+    Some(out)
+}
+
+/// PNG's Paeth predictor: of the byte to the left, the one above and the
+/// one above to the left, the one nearest to `left + up - corner`.
+fn paeth(left: u8, up: u8, corner: u8) -> u8 {
+    let guess = i16::from(left) + i16::from(up) - i16::from(corner);
+    let near = |b: u8| (guess - i16::from(b)).abs();
+    if near(left) <= near(up) && near(left) <= near(corner) {
+        left
+    } else if near(up) <= near(corner) {
+        up
+    } else {
+        corner
+    }
 }
 
 /// A token of a PDF's syntax, as far as reading its stamp needs.
@@ -510,24 +745,50 @@ enum Token<'a> {
 }
 
 /// A value in a dictionary, as far as reading a stamp needs.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Value {
     String(Vec<u8>),
     /// An indirect reference, `number generation R`.
     Reference(u64, u64),
     /// A whole number.
     Number(u64),
-    /// Anything else: a name, an array, a dictionary, a keyword.
+    /// A name, without its slash.
+    Name(Vec<u8>),
+    Array(Vec<Value>),
+    Dictionary(Dictionary),
+    /// Anything else: a keyword, or a number that is not whole.
     Other,
 }
 
 /// A dictionary's keys, without their slashes, and values.
-#[derive(Debug)]
-struct Dictionary<'a>(Vec<(&'a [u8], Value)>);
+#[derive(Clone, Debug, PartialEq)]
+struct Dictionary(Vec<(Vec<u8>, Value)>);
 
-impl Dictionary<'_> {
+impl Dictionary {
     fn get(&self, key: &[u8]) -> Option<&Value> {
-        self.0.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+        self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// The whole number under `key`.
+    fn number(&self, key: &[u8]) -> Option<u64> {
+        match self.get(key)? {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// The list of whole numbers under `key`.
+    fn numbers(&self, key: &[u8]) -> Option<Vec<u64>> {
+        match self.get(key)? {
+            Value::Array(items) => items
+                .iter()
+                .map(|item| match item {
+                    Value::Number(n) => Some(*n),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
     }
 }
 
@@ -596,24 +857,40 @@ impl<'a> Lexer<'a> {
         usize::try_from(self.number()?).ok()
     }
 
+    /// The heading of object `number` of generation `generation`, `number
+    /// generation obj`, or `None`.
+    fn object_heading(&mut self, number: u64, generation: u64) -> Option<()> {
+        let heading = (self.number()?, self.number()?, self.next()?);
+        (heading == (number, generation, Token::Word(b"obj"))).then_some(())
+    }
+
     /// The dictionary that starts at the next token.
-    fn dictionary(&mut self) -> Option<Dictionary<'a>> {
+    fn dictionary(&mut self) -> Option<Dictionary> {
         if self.next()? != Token::DictionaryStart {
             return None;
         }
+        self.rest_of_dictionary(0)
+    }
+
+    /// The rest of a dictionary whose `<<` has been read, inside `depth`
+    /// others.
+    fn rest_of_dictionary(&mut self, depth: usize) -> Option<Dictionary> {
         let mut entries = Vec::new();
         loop {
             match self.next()? {
                 Token::DictionaryEnd => return Some(Dictionary(entries)),
-                Token::Name(key) => entries.push((key, self.value()?)),
+                Token::Name(key) => {
+                    let value = self.value(depth)?;
+                    entries.push((key.to_vec(), value));
+                }
                 _ => return None,
             }
         }
     }
 
-    /// The value that starts at the next token. An array or a dictionary
-    /// inside is passed over whole, without reading what it holds.
-    fn value(&mut self) -> Option<Value> {
+    /// The value that starts at the next token, inside `depth` arrays and
+    /// dictionaries.
+    fn value(&mut self, depth: usize) -> Option<Value> {
         Some(match self.next()? {
             Token::String(text) => Value::String(text),
             Token::Word(word) => match whole_number(word) {
@@ -629,20 +906,51 @@ impl<'a> Lexer<'a> {
                 }
                 None => Value::Other,
             },
-            Token::Name(_) => Value::Other,
-            Token::DictionaryStart | Token::ArrayStart => {
-                let mut depth = 1usize;
-                while depth > 0 {
-                    match self.next()? {
-                        Token::DictionaryStart | Token::ArrayStart => depth += 1,
-                        Token::DictionaryEnd | Token::ArrayEnd => depth -= 1,
-                        _ => {}
-                    }
-                }
-                Value::Other
+            Token::Name(name) => Value::Name(name.to_vec()),
+            Token::DictionaryStart if depth < DEEPEST => {
+                Value::Dictionary(self.rest_of_dictionary(depth + 1)?)
             }
-            Token::DictionaryEnd | Token::ArrayEnd => return None,
+            Token::ArrayStart if depth < DEEPEST => {
+                let mut items = Vec::new();
+                loop {
+                    let mut ahead = Lexer::at(self.bytes, self.at);
+                    if ahead.next()? == Token::ArrayEnd {
+                        self.at = ahead.at;
+                        break Value::Array(items);
+                    }
+                    items.push(self.value(depth + 1)?);
+                }
+            }
+            Token::DictionaryStart | Token::ArrayStart | Token::DictionaryEnd | Token::ArrayEnd => {
+                return None
+            }
         })
+    }
+
+    /// The data of the stream whose dictionary, `dictionary`, has just been
+    /// read, unpacked: the bytes after the keyword `stream` and its line
+    /// break, as many as its `/Length` says, or up to `endstream` when its
+    /// length is not written as a number there.
+    fn stream(&mut self, dictionary: &Dictionary) -> Option<Vec<u8>> {
+        if self.next()? != Token::Word(b"stream") {
+            return None;
+        }
+        let rest = match self.bytes.get(self.at..)? {
+            [b'\r', b'\n', rest @ ..] | [b'\n', rest @ ..] => rest,
+            _ => return None,
+        };
+        let packed = match dictionary.number(b"Length") {
+            Some(length) => rest.get(..usize::try_from(length).ok()?)?,
+            None => {
+                let end = rest.windows(9).position(|w| w == b"endstream")?;
+                let mut packed = &rest[..end];
+                while let [before @ .., b'\r' | b'\n'] = packed {
+                    packed = before;
+                }
+                packed
+            }
+        };
+        unpacked(packed, dictionary)
     }
 }
 
@@ -852,6 +1160,68 @@ pub(crate) mod tests {
             .as_bytes(),
         );
         assert_eq!(stamp_in(&bytes).as_deref(), Some(stamp));
+    }
+
+    #[test]
+    fn each_png_predictor_is_undone() {
+        // Two bytes to a pixel, rows of four bytes, the first row
+        // [1, 2, 3, 4] and the second [5, 7, 9, 11], each row written once
+        // with each of the five predictors: none, sub, up, average, Paeth.
+        let first = [1u8, 2, 3, 4];
+        let rows: [(u8, [u8; 4]); 5] = [
+            (0, [5, 7, 9, 11]),
+            // Less the byte a pixel to the left.
+            (1, [5, 7, 4, 4]),
+            // Less the byte above.
+            (2, [4, 5, 6, 7]),
+            // Less the mean of left and above, rounded down: 5 - 1 / 2,
+            // 7 - 2 / 2, 9 - (5 + 3) / 2, 11 - (7 + 4) / 2.
+            (3, [5, 6, 5, 6]),
+            // Less Paeth's choice: above at first, then left (5 and 7).
+            (4, [4, 5, 4, 4]),
+        ];
+        for (predictor, row) in rows {
+            let mut data = vec![0];
+            data.extend(first);
+            data.push(predictor);
+            data.extend(row);
+            assert_eq!(
+                png_unpredicted(&data, 4, 2).unwrap(),
+                [1, 2, 3, 4, 5, 7, 9, 11],
+                "predictor {predictor}"
+            );
+        }
+        assert_eq!(png_unpredicted(&[5, 1, 2, 3, 4], 4, 2), None);
+        assert_eq!(png_unpredicted(&[0, 1, 2], 4, 2), None);
+    }
+
+    #[test]
+    fn a_stream_packed_another_way_is_not_read() {
+        let stream = |dictionary: &str, data: &[u8]| {
+            let mut bytes =
+                format!("<< {dictionary} /Length {} >>\nstream\n", data.len()).into_bytes();
+            bytes.extend(data);
+            bytes.extend(b"\nendstream");
+            let mut lexer = Lexer::at(&bytes, 0);
+            let dictionary = lexer.dictionary().unwrap();
+            lexer.stream(&dictionary)
+        };
+        let packed = miniz_oxide::deflate::compress_to_vec_zlib(b"1 2 3", 6);
+        assert_eq!(stream("", b"1 2 3").unwrap(), b"1 2 3");
+        assert_eq!(stream("/Filter /FlateDecode", &packed).unwrap(), b"1 2 3");
+        assert_eq!(stream("/Filter [/FlateDecode]", &packed).unwrap(), b"1 2 3");
+        assert_eq!(stream("/Filter /LZWDecode", b"1 2 3"), None);
+        assert_eq!(
+            stream("/Filter [/ASCIIHexDecode /FlateDecode]", &packed),
+            None
+        );
+        assert_eq!(
+            stream(
+                "/Filter /FlateDecode /DecodeParms << /Predictor 2 >>",
+                &packed
+            ),
+            None
+        );
     }
 
     #[test]
