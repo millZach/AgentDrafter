@@ -743,7 +743,9 @@ fn a_query_finds_text_an_inserted_block_draws() {
         let text = &object.block_text[0];
         assert_eq!(text.field, "blocks.TITLE_BLOCK.objects[7]");
         assert_eq!(text.contents, "DEMO PLANT");
-        assert!(text.file.ends_with("blocks.yaml"), "{text:?}");
+        // The template names it as `../blocks.yaml`; it is the set's
+        // `blocks.yaml`, worked out (#35).
+        assert_eq!(text.file, set.join("blocks.yaml").display().to_string());
     }
     // Text on the sheet itself carries no block text.
     let heading = find(

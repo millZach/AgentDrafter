@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use super::block_schema::{relative_path_property, CONTROL};
 use super::objects::OBJECT_TYPES;
-use super::schema::{object_choices, sheet_description_schema, SUBSET};
+use super::schema::{object_choices, optional_text, sheet_description_schema, SUBSET, TEXT_TYPES};
 use super::set::{
     DEVICE_NAMES, FORBIDDEN_IN_SHEET_NAMES, LONGEST_SHEET_NAME, ROWS_FILE_KEYS, ROW_KEYS,
     SETTINGS_KEYS,
@@ -103,13 +103,15 @@ pub(crate) fn rows_schema() -> Value {
                                         Without it, the row gives no values.",
                         "type": "object",
                         "propertyNames": { "pattern": VALUE_NAME },
-                        "additionalProperties": {
+                        "additionalProperties": optional_text(json!({
                             "description": "The value's text, exactly as the sheet shows it \
                                             where the template puts it. Whether it is allowed \
                                             there, such as one line for an attribute, is the \
-                                            sheet description's rule for that place.",
-                            "type": ["string", "number", "boolean", "null"],
-                        },
+                                            sheet description's rule for that place. A bare \
+                                            null leaves the value out, as if the row did not \
+                                            give it.",
+                            "type": TEXT_TYPES,
+                        })),
                     },
                     objects_key: {
                         "description": "The sheet's own objects, on this sheet alone: drawn \
@@ -169,8 +171,8 @@ fn sheet_name_def() -> Value {
              starting or ending with a space, not ending with ., holding none of \
              {FORBIDDEN_IN_SHEET_NAMES} and no control characters, and not, up to its first ., \
              one of the names Windows keeps for devices: {}, in any case. Each name is given once \
-             in a set; names that differ only in case are one name. A plain number, true, false \
-             or null is read as its text.",
+             in a set; names that differ only in case are one name. A plain number, true or \
+             false is read as its text.",
             DEVICE_NAMES.join(", ")
         ),
         "anyOf": [
@@ -186,7 +188,7 @@ fn sheet_name_def() -> Value {
                     ],
                 },
             },
-            { "type": ["number", "boolean", "null"] },
+            { "type": ["number", "boolean"] },
         ],
     })
 }
@@ -223,11 +225,11 @@ pub(crate) fn template_schema() -> Value {
     });
     defs["value_name"] = json!({
         "description": "The name of one of the row's values: ASCII letters, digits, _ and -, \
-                        such as TITLE or dwg-no. A plain whole number such as 100, true, false or \
-                        null is read as its text, as every scalar is.",
+                        such as TITLE or dwg-no. A plain whole number such as 100, true or false \
+                        is read as its text, as every scalar is.",
         "anyOf": [
             { "type": "string", "pattern": VALUE_NAME },
-            { "type": ["integer", "boolean", "null"] },
+            { "type": ["integer", "boolean"] },
         ],
     });
     let attributes = &mut defs["insert"]["properties"]["attributes"];

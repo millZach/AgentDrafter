@@ -22,7 +22,7 @@
 //! that cannot be answered as asked is an error, and so is a sheet that
 //! cannot be read: an answer must not leave a sheet out.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
@@ -618,11 +618,7 @@ fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) 
         .block_library
         .as_ref()
         .map(|written| {
-            record
-                .file
-                .parent()
-                .unwrap_or(Path::new(""))
-                .join(written)
+            worked_out(&record.file.parent().unwrap_or(Path::new("")).join(written))
                 .display()
                 .to_string()
         })
@@ -644,6 +640,25 @@ fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) 
             })
         })
         .collect()
+}
+
+/// `path` with its `.` and `..` worked out as written, so that the block
+/// library a template in `templates/` names as `../blocks.yaml` is
+/// `blocks.yaml` in the set's folder, as the set's other files are given.
+fn worked_out(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// One object a selection matched, on one of the sheets looked at.

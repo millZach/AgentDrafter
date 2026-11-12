@@ -11,25 +11,26 @@ use serde_json::{json, Map, Value};
 
 use super::blocks::{BLOCK_KEYS, CELL_KEY, FORBIDDEN_IN_PATHS, LONGEST_TAG};
 use super::ids::LONGEST_NAME;
-use super::schema::{object_def, NUMBER};
+use super::schema::{object_def, optional_text, NUMBER, TEXT_TYPES};
 use crate::model::LAYER_ZERO;
 use crate::text::Justify;
 
 /// Control characters, as a regular expression's character class holds them.
 pub(super) const CONTROL: &str = "\\x00-\\x1f\\x7f-\\x9f";
 
-/// The schema of a sheet's `block_library` key.
+/// The schema of a sheet's `block_library` key, which may be left out.
 pub(super) fn block_library_property() -> Value {
-    relative_path_property(format!(
+    optional_text(relative_path_property(format!(
         "The block library the sheet's inserts draw their blocks from: the path of its file, \
          relative to the sheet description's folder, with / between folders, such as \
          blocks.yaml or ../library/blocks.yaml. It holds none of {FORBIDDEN_IN_PATHS}. The \
          library is in the sheet's declared unit."
-    ))
+    )))
 }
 
 /// The schema of a path written relative to a folder, with `/` between
-/// folders, as `blocks.rs` reads one, with `description`.
+/// folders, as `blocks.rs` reads one, with `description`, where it is
+/// required.
 pub(super) fn relative_path_property(description: String) -> Value {
     let forbidden = FORBIDDEN_IN_PATHS.replace('\\', "\\\\");
     let part = format!("[^/{forbidden}{CONTROL}]+");
@@ -37,7 +38,7 @@ pub(super) fn relative_path_property(description: String) -> Value {
         "description": description,
         "anyOf": [
             { "type": "string", "pattern": format!("^{part}(/{part})*$") },
-            { "type": ["number", "boolean", "null"] },
+            { "type": ["number", "boolean"] },
         ],
     })
 }
@@ -88,13 +89,13 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                     "maxLength": LONGEST_TAG,
                     "pattern": format!("^[^\\s\\p{{Lowercase}}{CONTROL}]+$"),
                 },
-                { "type": ["number", "boolean", "null"] },
+                { "type": ["number", "boolean"] },
             ],
         }),
     );
     defs.insert(
         "attribute_value".into(),
-        json!({
+        optional_text(json!({
             "description": "An attribute's value: one line of text, exactly as it shows, which \
                             may be empty. No control characters, and no \\U+ with four \
                             hexadecimal digits or \\M+ with five, which AutoCAD reads as a \
@@ -105,14 +106,14 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                     "pattern": format!("^[^{CONTROL}]*$"),
                     "not": { "pattern": "\\\\[Uu]\\+[0-9A-Fa-f]{4}|\\\\[Mm]\\+[0-9A-Fa-f]{5}" },
                 },
-                { "type": ["number", "boolean", "null"] },
+                { "type": ["number", "boolean"] },
             ],
-        }),
+        })),
     );
     let end = format!("[^\\s{CONTROL}]");
     defs.insert(
         "object_name".into(),
-        json!({
+        optional_text(json!({
             "description": format!(
                 "A name an agent selects the object by later, such as jb: 1 to {LONGEST_NAME} \
                  characters, not starting or ending with a space, with no control characters. \
@@ -128,7 +129,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                 },
                 { "type": ["number", "boolean"] },
             ],
-        }),
+        })),
     );
     defs.insert(
         "insert".into(),
@@ -141,7 +142,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                 "block": {
                     "description": "The name of a block in the block library, written exactly as \
                                     it is there.",
-                    "type": ["string", "number", "boolean", "null"],
+                    "type": TEXT_TYPES,
                 },
                 "position": {
                     "$ref": "#/$defs/point",
@@ -178,15 +179,15 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
             &["tag", "position", "height"],
             json!({
                 "tag": { "$ref": "#/$defs/attribute_tag" },
-                "prompt": {
+                "prompt": optional_text(json!({
                     "description": "What AutoCAD asks for when a person inserts the block: one \
                                     line of text with no control characters. Without it, empty, \
                                     and AutoCAD asks with the tag.",
                     "anyOf": [
                         { "type": "string", "pattern": format!("^[^{CONTROL}]*$") },
-                        { "type": ["number", "boolean", "null"] },
+                        { "type": ["number", "boolean"] },
                     ],
-                },
+                })),
                 "default": {
                     "$ref": "#/$defs/attribute_value",
                     "description": "The value an insert takes when it gives none. Without it, \

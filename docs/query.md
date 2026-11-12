@@ -54,7 +54,7 @@ Each object found comes with its sheet, its ID, whether the record writes that I
 **Text an insert's block draws.** `--text` also looks at the text and multiline text in the block each insert draws, as its block library defines the block. The object found is the insert, and its `block_text` lists each text of the block that matched: the block library's `file`, the text's place in the block definition (`field`) and what it says. The demo set's title block says `DEMO PLANT` on every sheet:
 
 ```json
-{"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-001"],"message":"1 object has the text `DEMO PLANT`, on sheet `DEMO-001`","kind":"find","count":1,"objects":[{"sheet":"DEMO-001","id":"DEMO-001/objects[2]","id_written":false,"file":"examples/demo-set/templates/ansi-b.yaml","field":"objects[2]","line":19,"column":5,"object":{"type":"insert","...":"..."},"block_text":[{"file":"examples/demo-set/templates/../blocks.yaml","field":"blocks.TITLE_BLOCK.objects[7]","contents":"DEMO PLANT"}]}]}}
+{"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-001"],"message":"1 object has the text `DEMO PLANT`, on sheet `DEMO-001`","kind":"find","count":1,"objects":[{"sheet":"DEMO-001","id":"DEMO-001/objects[2]","id_written":false,"file":"examples/demo-set/templates/ansi-b.yaml","field":"objects[2]","line":19,"column":5,"object":{"type":"insert","...":"..."},"block_text":[{"file":"examples/demo-set/blocks.yaml","field":"blocks.TITLE_BLOCK.objects[7]","contents":"DEMO PLANT"}]}]}}
 ```
 
 An attribute's value is not text the block draws: it is found with `--value`.

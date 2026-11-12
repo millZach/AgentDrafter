@@ -55,7 +55,7 @@ pub(super) fn linetypes(node: &Node, units: Unit) -> Result<Vec<Linetype>, Error
         }
         let path = key_path("linetypes", &entry.key);
         let fields = Fields::of(&entry.value, &path, &LINETYPE_KEYS, "a linetype")?;
-        let description = match fields.get("description") {
+        let description = match fields.text("description") {
             Some(node) => description(node, &fields.path_of("description"))?,
             None => String::new(),
         };
@@ -83,7 +83,7 @@ pub(super) fn layers(node: &Node, linetypes: &[Linetype]) -> Result<Vec<Layer>, 
         if let Some(node) = fields.get("color") {
             layer.color = colour(node, &fields.path_of("color"))?;
         }
-        if let Some(node) = fields.get("linetype") {
+        if let Some(node) = fields.text("linetype") {
             layer.linetype = linetype_name(node, &fields.path_of("linetype"), linetypes)?;
         }
         if let Some(node) = fields.get("lineweight") {

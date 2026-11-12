@@ -13,7 +13,7 @@
 //! the tree the edit made, so a mistake here refuses the edit rather than
 //! changing a record unseen.
 
-use super::strict_yaml::{Kind, Node, Style};
+use super::strict_yaml::{reads_as_null, Kind, Node, Style};
 
 /// The widest line a node an edit made is written on in braces or brackets,
 /// in characters, before it is written a key to a line instead.
@@ -75,6 +75,8 @@ impl Emitter<'_> {
                 Style::Plain if one_line && raw == value && plain_ok(value, context) => {
                     return raw.to_owned()
                 }
+                // A bare null stays one: quoted, it would be text.
+                Style::Plain if node.is_bare_null() && raw == value => return raw.to_owned(),
                 _ => {}
             }
         }
@@ -92,8 +94,13 @@ impl Emitter<'_> {
     fn write_after_key(&self, node: &Node, column: usize, out: &mut String) {
         match &node.kind {
             Kind::Scalar(_) => {
-                out.push(' ');
-                out.push_str(&self.scalar(node, Context::Block, column + 2));
+                // A value left empty is written as it was: nothing after
+                // the key.
+                let text = self.scalar(node, Context::Block, column + 2);
+                if !text.is_empty() {
+                    out.push(' ');
+                    out.push_str(&text);
+                }
             }
             _ if self.is_flow(node, column + 2) => {
                 out.push(' ');
@@ -247,6 +254,10 @@ pub(super) fn scalar_text(value: &str, context: Context, indent: usize, newline:
 /// Whether `value` reads back as itself written plain in `context`. Kept
 /// narrow on purpose: anything doubtful is quoted.
 pub(super) fn plain_ok(value: &str, context: Context) -> bool {
+    // Written plain, `null` or `~` would read back as a bare null.
+    if reads_as_null(value) {
+        return false;
+    }
     let Some(first) = value.chars().next() else {
         return false;
     };
@@ -398,6 +409,10 @@ mod tests {
             ("4 in", "4 in"),
             ("-0.5", "-0.5"),
             ("", "''"),
+            ("null", "'null'"),
+            ("NULL", "'NULL'"),
+            ("~", "'~'"),
+            ("nullable", "nullable"),
             ("- item", "'- item'"),
             ("a: b", "'a: b'"),
             ("it's", "it's"),
@@ -450,6 +465,25 @@ mod tests {
         let written = format!("objects:{}\n", emitter.after_key(&entries[0].value, 0));
         assert!(read(&written).same_as(&root), "{written}");
         assert_eq!(written, text);
+    }
+
+    #[test]
+    fn a_bare_null_is_written_back_bare_and_the_text_null_quoted() {
+        let text = "objects:\n  - circle: {center: [0, 0, 0], radius: 1, name: ~, layer: 'null', id: }\n  - text:\n      contents: A\n      style: null\n      id:\n";
+        let root = read(text);
+        let Kind::Mapping(entries) = &root.kind else {
+            panic!()
+        };
+        let emitter = Emitter {
+            text,
+            newline: "\n",
+        };
+        let written = format!("objects:{}\n", emitter.after_key(&entries[0].value, 0));
+        assert!(read(&written).same_as(&root), "{written}");
+        assert_eq!(written, text);
+        // Text an edit made is quoted where it would read as a bare null.
+        assert!(!read("name: null\n").same_as(&read("name: 'null'\n")));
+        assert_eq!(scalar_text("null", Context::Flow, 0, "\n"), "'null'");
     }
 
     #[test]

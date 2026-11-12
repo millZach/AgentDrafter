@@ -27,6 +27,7 @@ fn an_object_carries_the_id_its_record_gives_or_takes_its_place() {
             ObjectRecord {
                 id: "objects[0]".into(),
                 name: None,
+                name_key: None,
                 object: Written {
                     field: "objects[0]".into(),
                     line: 3,
@@ -38,6 +39,7 @@ fn an_object_carries_the_id_its_record_gives_or_takes_its_place() {
             ObjectRecord {
                 id: "hole:A-1.2".into(),
                 name: None,
+                name_key: None,
                 object: Written {
                     field: "objects[1]".into(),
                     line: 4,

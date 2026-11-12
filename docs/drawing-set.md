@@ -81,7 +81,7 @@ The rows file holds one key, `rows`: a list of rows, one per sheet, in the order
 |---|---|---|
 | `sheet` | yes | The sheet's name, which names its DWG: `<output>/<sheet>.dwg`. |
 | `template` | yes | The sheet's template: the path of its file, relative to the set's folder. |
-| `values` | no | The values the template takes from this row: a mapping from each value's name to its text. One for each `{row: NAME}` the template writes; a value the template does not use is reported as a notice, and the sheet is still built (see [Building](#building)). |
+| `values` | no | The values the template takes from this row: a mapping from each value's name to its text. One for each `{row: NAME}` the template writes; a value the template does not use is reported as a notice, and the sheet is still built (see [Building](#building)). A value that is a bare null, such as `REV:` or `REV: null`, is left out, as if the row did not give it ([the YAML subset](sheet-description.md#the-yaml-subset), rule 8); empty text is written `''`. |
 | `objects` | no | The sheet's own objects, on this sheet alone: a list of objects as a sheet description writes them. See [A row's own objects](#a-rows-own-objects). |
 
 A sheet's name is a file name every system allows: 1 to 251 characters, so that with `.dwg` it is at most 255; not starting or ending with a space and not ending with `.`; holding none of `/ \ : * ? " < > |` and no control characters; and not, up to its first `.`, a name Windows keeps for a device (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`), in any case. Each name is given once in a set, and names that differ only in case are one name, since some systems would write them to one file.

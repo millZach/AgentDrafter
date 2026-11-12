@@ -42,10 +42,42 @@ pub(super) const SUBSET: &str =
     "It is written in a strict subset of YAML 1.2: one document; no anchors, \
                       aliases, tags or directives; every key is text and appears once in its \
                       mapping; a key not in this schema is an error that lists the keys allowed \
-                      there. Every scalar is read as text and given its meaning here, so `yes`, \
-                      `null` and `0x10` are never booleans, nulls or numbers. Comments, block \
-                      style and flow style are all allowed. Lengths are in the declared unit; \
-                      angles are in degrees, anticlockwise; a lineweight is in millimetres.";
+                      there. Every scalar is read as text and given its meaning here, so `yes` \
+                      and `0x10` are never booleans or numbers. A bare null (`null`, `Null`, \
+                      `NULL` or `~` unquoted, or a value left empty) on a text or path field \
+                      leaves the field out: an optional one takes its default and a required one \
+                      is an error; quoted, 'null' is the text. Comments, block style and flow \
+                      style are all allowed. Lengths are in the declared unit; angles are in \
+                      degrees, anticlockwise; a lineweight is in millimetres.";
+
+/// The JSON types a type-guessing YAML reader makes of a text field's
+/// plain scalars: a string, or a number or `true` or `false`, which the
+/// reader reads as its text. Not null: see [`optional_text`].
+pub(super) const TEXT_TYPES: [&str; 3] = ["string", "number", "boolean"];
+
+/// The schema of an optional text or path field from `schema`, the forms
+/// its text takes: it takes a bare null too, which a type-guessing YAML
+/// reader makes of `null`, `~` or a value left empty, and which the reader
+/// reads as the field left out, as Zach decided on 2026-11-11. A required
+/// field's schema is `schema` alone, and takes no null.
+pub(super) fn optional_text(mut schema: Value) -> Value {
+    if let Some(choices) = schema.get_mut("anyOf").and_then(Value::as_array_mut) {
+        choices.push(json!({ "type": "null" }));
+        return schema;
+    }
+    if let Some(types) = schema.get_mut("type").and_then(Value::as_array_mut) {
+        types.push(json!("null"));
+        return schema;
+    }
+    let description = schema
+        .as_object_mut()
+        .and_then(|own| own.remove("description"));
+    let mut optional = json!({ "anyOf": [schema, { "type": "null" }] });
+    if let Some(description) = description {
+        optional["description"] = description;
+    }
+    optional
+}
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
@@ -108,7 +140,7 @@ fn sheet_defs() -> Map<String, Value> {
         .join(", ");
     defs.insert(
         "object_id".into(),
-        json!({
+        optional_text(json!({
             "description": format!(
                 "The object's ID, which a generator may write: 1 to {LONGEST_ID} ASCII letters, \
                  digits and {punctuation}, such as pump-1. The object's ID in the drawing set is \
@@ -120,7 +152,7 @@ fn sheet_defs() -> Map<String, Value> {
                  rows[1].objects[0]: an operation that deletes an object writes the place of \
                  each later object that has no id so, and it keeps that ID wherever it moves; \
                  an object without an id whose place is another's written id is an error. A \
-                 plain number, true, false or null is read as its text, as every scalar is."
+                 plain number, true or false is read as its text, as every scalar is."
             ),
             "anyOf": [
                 {
@@ -132,9 +164,9 @@ fn sheet_defs() -> Map<String, Value> {
                     "type": "string",
                     "pattern": "^(rows\\[(0|[1-9][0-9]*)\\]\\.)?objects\\[(0|[1-9][0-9]*)\\]$",
                 },
-                { "type": ["number", "boolean", "null"] },
+                { "type": ["number", "boolean"] },
             ],
-        }),
+        })),
     );
     defs
 }
@@ -331,14 +363,14 @@ fn defs() -> Map<String, Value> {
     );
     defs.insert(
         "layer_name".into(),
-        json!({
+        optional_text(json!({
             "description": format!(
                 "The layer the object sits on: `{LAYER_ZERO}`, which every drawing has, or a \
                  name under `layers`, written exactly as it is there. Without it the object \
                  sits on layer `{LAYER_ZERO}`."
             ),
-            "type": ["string", "number", "boolean", "null"],
-        }),
+            "type": TEXT_TYPES,
+        })),
     );
     defs.insert(
         "linetype".into(),
@@ -348,13 +380,13 @@ fn defs() -> Map<String, Value> {
             "required": ["pattern"],
             "additionalProperties": false,
             "properties": {
-                "description": {
+                "description": optional_text(json!({
                     "description": format!(
                         "What AutoCAD's linetype manager shows beside the name, at most \
                          {LONGEST_DESCRIPTION} characters."
                     ),
-                    "type": ["string", "number", "boolean", "null"],
-                },
+                    "type": TEXT_TYPES,
+                })),
                 "pattern": {
                     "description": format!(
                         "2 to {LONGEST_PATTERN} lengths, repeated along each object: a positive \
@@ -391,13 +423,13 @@ fn defs() -> Map<String, Value> {
                         { "enum": colours },
                     ],
                 },
-                "linetype": {
+                "linetype": optional_text(json!({
                     "description": format!(
                         "`{CONTINUOUS}`, the solid line every drawing has, or a name under \
                          `linetypes`, written exactly as it is there. Without it, `{CONTINUOUS}`."
                     ),
-                    "type": ["string", "number", "boolean", "null"],
-                },
+                    "type": TEXT_TYPES,
+                })),
                 "lineweight": {
                     "description": format!(
                         "The pen width the layer plots with, in millimetres whatever the \
@@ -608,14 +640,14 @@ fn text_defs(defs: &mut Map<String, Value>) {
     );
     defs.insert(
         "style_name".into(),
-        json!({
+        optional_text(json!({
             "description": format!(
                 "The text style the text draws with: `{STANDARD}`, which every drawing has, or a \
                  name under `text_styles`, written exactly as it is there. Without it, \
                  `{STANDARD}`."
             ),
-            "type": ["string", "number", "boolean", "null"],
-        }),
+            "type": TEXT_TYPES,
+        })),
     );
     defs.insert(
         "height".into(),
@@ -634,7 +666,7 @@ fn text_defs(defs: &mut Map<String, Value>) {
                     "description": "What the text says, exactly as it shows: one line, not \
                                     empty, with no control characters. `%` shows as a percent \
                                     sign, however many there are.",
-                    "type": ["string", "number", "boolean", "null"],
+                    "type": TEXT_TYPES,
                 },
                 "position": {
                     "$ref": "#/$defs/point",
@@ -671,7 +703,7 @@ fn text_defs(defs: &mut Map<String, Value>) {
                                     break starts a new line, and line breaks at the end are \
                                     dropped. No control characters but line breaks. A \\, { or } \
                                     shows as itself; formatting codes are not read.",
-                    "type": ["string", "number", "boolean", "null"],
+                    "type": TEXT_TYPES,
                 },
                 "position": {
                     "$ref": "#/$defs/point",

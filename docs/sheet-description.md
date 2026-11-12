@@ -232,7 +232,7 @@ A block is defined once, in the block library of the drawing set, and inserted o
 | `position` | yes | Where the block's base point sits: a point. |
 | `scale` | no | How much the block is enlarged, the same along every axis: a number more than 0, with no unit. Without it, 1. |
 | `rotation` | no | An angle: degrees anticlockwise from the X axis. Without it, 0. |
-| `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty. An attribute the insert leaves out takes its definition's default. |
+| `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty, written `''`. An attribute the insert leaves out takes its definition's default, and so does one whose value is a bare null, such as `TAG:` ([the YAML subset](#the-yaml-subset), rule 8). |
 | `layer` | no | The layer the insert sits on, as for every object. |
 
 An insert takes an `id` and a `name` as every object does ([IDs and names](#ids-and-names)).
@@ -334,7 +334,8 @@ A file may start with a UTF-8 byte-order mark. It is ignored: every rule below a
 4. **No directives.** A line starting with `%`, such as `%YAML 1.2` or `%TAG`, is an error.
 5. **Keys are text, and each appears once.** A list or mapping used as a key is an error. The same key twice in one mapping is an error, even in flow style.
 6. **No unknown keys.** A key the sheet description does not define is an error, and the error lists the keys that are allowed there.
-7. **Every scalar is text; the sheet description gives it its meaning.** YAML's guessing of types is off: `yes`, `no`, `null`, `~`, `0x10` and `.inf` are not booleans, nulls or numbers. A coordinate is read as a length and nothing else, so `null` there is an error. Quoted and plain scalars mean the same: `'mm'`, `"mm"` and `mm` are one unit, and `layer: 0` and `layer: '0'` are one layer.
+7. **Every scalar is text; the sheet description gives it its meaning.** YAML's guessing of types is off: `yes`, `no`, `0x10` and `.inf` are not booleans or numbers. A coordinate is read as a length and nothing else, so `null` there is an error. Quoted and plain scalars mean the same: `'mm'`, `"mm"` and `mm` are one unit, and `layer: 0` and `layer: '0'` are one layer.
+8. **A bare null leaves a text field out.** Zach decided on 2026-11-11 that on a field whose value is text or a path, a bare null means the field is not written. A bare null is `null`, `Null`, `NULL` or `~`, unquoted, or a value left empty, as in `name:`. An optional field written so takes its default, as if it were left out: `layer: ~` puts an object on layer `0`, and an attribute written `TAG:` takes its definition's default. A required field written so is the `missing_key` error, such as `contents: null` on a text or `block:` on an insert. Quoted, it is text: `'null'` is the word null, and `''` is empty text. The reader can tell `name:` from `name: null`, but a YAML reader that guesses types makes both null, so the schema cannot, and the two mean the same. The rule is the same for every text and path field of every kind of file: a sheet description, a template, a block library, a set's settings and its rows. Elsewhere `null` is read as the text it is, so `closed: null` is an error, as `closed: maybe` is.
 
 Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are all allowed.
 
@@ -359,10 +360,10 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 | `yaml_syntax` | The text is not well-formed YAML. |
 | `not_in_subset` | An anchor, alias, tag, directive, second document or key that is not text. |
 | `duplicate_key` | A key appears twice in one mapping, two layer, linetype, hatch pattern or block names differ only in case, or a block defines one attribute tag twice. The message gives the line of the first. |
-| `duplicate_name` | Two objects on a sheet carry the same name, or names that differ only in case. The message gives the line of the first. |
+| `duplicate_name` | Two objects on a sheet carry the same name, or names that differ only in case. The message gives the line of the first's `name`. |
 | `duplicate_id` | Two objects in one sheet description or template carry the same `id`, or IDs that differ only in case, or an object without an `id` sits at a place another object's `id` is written as. The message gives the line and place of the first. |
 | `unknown_key` | A key the sheet description does not define, including an unknown object type, an attribute definition on a sheet or an insert in a block. |
-| `missing_key` | A required key is missing, or the file is empty. |
+| `missing_key` | A required key is missing or is a bare null, or the file is empty. |
 | `missing_unit` | The sheet declares no unit. |
 | `unknown_unit` | A unit that is not one of `mm`, `cm`, `m`, `in`, `ft`. |
 | `wrong_type` | A value of the wrong shape, such as a point without three coordinates, a polyline with too few points, a hatch with no loops, or `closed: yes`. |
