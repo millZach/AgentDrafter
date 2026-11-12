@@ -20,6 +20,7 @@
 
 mod http;
 mod mcp;
+mod page;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -27,8 +28,8 @@ use std::process::ExitCode;
 
 use agentdrafter_core::{commands, find_command, Error, ErrorCode, Reply, Settings};
 use agentdrafter_core::{
-    ChangeRequest, CheckRequest, JournalRequest, MeasureTextRequest, RenderRequest, StaleRequest,
-    UndoRequest, FONTS_VARIABLE, PLOT_STYLES_VARIABLE,
+    ChangeRequest, CheckRequest, DisplayListRequest, JournalRequest, MeasureTextRequest,
+    RenderRequest, StaleRequest, UndoRequest, FONTS_VARIABLE, PLOT_STYLES_VARIABLE,
 };
 use agentdrafter_core::{End, Matching, Measure, Query, QueryRequest, Selection};
 use serde::Serialize;
@@ -44,6 +45,7 @@ const JOURNAL_USAGE: &str = "agentdrafter journal <drawing-set-folder>";
 const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [--dry-run]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...";
+const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--tolerance <length>] [--fonts <folder>]...";
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]...";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
@@ -83,6 +85,7 @@ fn cli_form(command: &str) -> Option<(&'static str, Parse)> {
         "schema" => (SCHEMA_USAGE, parse_schema),
         "measure-text" => (MEASURE_USAGE, parse_measure),
         "render" => (RENDER_USAGE, parse_render),
+        "display-list" => (DISPLAY_LIST_USAGE, parse_display_list),
         "plot" => (PLOT_USAGE, parse_plot),
         "stale" => (STALE_USAGE, parse_stale),
         "query" => (QUERY_USAGE, parse_query),
@@ -282,6 +285,66 @@ fn parse_render(mut args: Args) -> Result<Value, Error> {
     if let Some(margin) = margin {
         request.margin = margin;
     }
+    input_of(request, fonts)
+}
+
+fn parse_display_list(mut args: Args) -> Result<Value, Error> {
+    let mut request = DisplayListRequest::new(PathBuf::new());
+    let mut source: Option<PathBuf> = None;
+    let mut fonts = Vec::new();
+    let value = |flag: &str, value: Option<OsString>| -> Result<OsString, Error> {
+        value.ok_or_else(|| {
+            Error::usage(format!("{flag} needs a value; usage: {DISPLAY_LIST_USAGE}"))
+        })
+    };
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--sheet") => {
+                let sheet = value("--sheet", args.next())?
+                    .into_string()
+                    .map_err(|_| Error::usage("the sheet's name is not valid text"))?;
+                if request.sheet.replace(sheet).is_some() {
+                    return Err(Error::usage("--sheet is given twice"));
+                }
+            }
+            Some("--tolerance") => {
+                let text = value("--tolerance", args.next())?;
+                let text = text.to_string_lossy();
+                let length: f64 = text.parse().map_err(|_| {
+                    Error::usage(format!(
+                        "--tolerance takes a number, found `{text}`; usage: {DISPLAY_LIST_USAGE}"
+                    ))
+                })?;
+                if request
+                    .tolerance
+                    .replace(float("--tolerance", length)?)
+                    .is_some()
+                {
+                    return Err(Error::usage("--tolerance is given twice"));
+                }
+            }
+            Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(Error::usage(format!(
+                    "unknown option `{flag}`; usage: {DISPLAY_LIST_USAGE}"
+                )))
+            }
+            _ => {
+                if source.replace(arg.into()).is_some() {
+                    return Err(Error::usage(format!(
+                        "display-list takes one sheet description, DWG or drawing set's folder; \
+                         usage: {DISPLAY_LIST_USAGE}"
+                    )));
+                }
+            }
+        }
+    }
+    request.source = source.ok_or_else(|| {
+        Error::usage(format!(
+            "display-list needs a sheet description, a DWG or a drawing set's folder; usage: \
+             {DISPLAY_LIST_USAGE}"
+        ))
+    })?;
     input_of(request, fonts)
 }
 

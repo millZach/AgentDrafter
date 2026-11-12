@@ -10,6 +10,9 @@
 //!   `{}`. The reply is the one the command line prints, with status 200
 //!   when it is ok, 400 when the request is wrong and 422 when the core
 //!   reports an error, as the command line exits 0, 2 and 1.
+//! - `GET /` is the viewer's page, and `GET /assets/...` its files
+//!   (`page.rs`), which draw a drawing set's sheets in the browser from the
+//!   display list the page asks `display-list` for.
 //!
 //! It is an open port to guard (ADR-0007). It listens on the local machine
 //! unless `--listen` names another address. Zach decided on 2026-11-11 that
@@ -22,6 +25,13 @@
 //! web page in the reviewer's browser cannot reach it under another name,
 //! and a body must be sent as JSON, which a page cannot send to another
 //! site without asking first.
+//!
+//! The viewer's page and its files are served without the token, since a
+//! browser cannot send one to open a page: they are the page's own built
+//! files, embedded in the binary, and give nothing of the machine's. On
+//! the local machine they are still served only to requests addressed to
+//! it. The page takes the token from the address the start line prints,
+//! whose fragment holds it, and sends it with every command.
 //!
 //! HTTP is read plainly: one request on each connection, its body sized by
 //! `Content-Length` and no chunked body, so no request can be read as part
@@ -39,7 +49,7 @@ use agentdrafter_core::{commands, find_command, Error, ErrorCode, Reply, Setting
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 
-use crate::{send, Args};
+use crate::{page, send, Args};
 
 /// The port `serve` listens on when `--listen` names none.
 pub const DEFAULT_PORT: u16 = 7316;
@@ -53,10 +63,12 @@ pub fn serve_does() -> String {
          names another address and port. GET /commands lists the commands, each with what it does \
          and its input's JSON Schema; POST /commands/<name> runs one, its body the command's \
          input as JSON (Content-Type: application/json), and replies with the JSON the command \
-         line prints. Paths are taken from the folder the server started in. It prints one line \
-         of JSON when it starts, saying where it listens. On an address beyond the local \
-         machine every request needs the token that line gives, as Authorization: Bearer \
-         <token>. It runs until it is stopped."
+         line prints. Paths are taken from the folder the server started in. GET / is the \
+         viewer, which draws the drawing set in that folder in a browser. It prints one line \
+         of JSON when it starts, saying where it listens and the viewer's address. On an \
+         address beyond the local machine every command needs the token that line gives, as \
+         Authorization: Bearer <token>; the viewer's address carries it. It runs until it is \
+         stopped."
     )
 }
 
@@ -255,16 +267,20 @@ fn is_local(ip: IpAddr) -> bool {
     ip.to_canonical().is_loopback()
 }
 
-/// The line `serve` starts with: where it listens, and the token when it
-/// needs one.
+/// The line `serve` starts with: where it listens, the viewer's address,
+/// and the token when it needs one. The viewer's address carries the token
+/// in its fragment, which a browser never sends: this line is the only
+/// place the server writes it.
 fn started(address: SocketAddr, guard: &Guard) -> Value {
     let mut started = json!({
         "listening": format!("http://{address}"),
         "address": address.to_string(),
         "local_only": *guard == Guard::Local,
         "token_required": *guard != Guard::Local,
+        "viewer": format!("http://{address}/"),
     });
     if let Guard::Token(token) = guard {
+        started["viewer"] = json!(format!("http://{address}/#token={token}"));
         started["token"] = json!(token);
     }
     started
@@ -295,10 +311,41 @@ fn respond(
         Ok(None) => return None,
         Err(response) => return Some(response),
     };
+    // The viewer's page needs no token, but on the local machine is served
+    // only to a request addressed to it.
+    if let Some(file) = page::file(head.route()) {
+        if let Guard::Local = guard {
+            if let Err(response) = addressed_locally(&head) {
+                return Some(response);
+            }
+        }
+        return Some(serve_page(&head, file));
+    }
     if let Err(response) = admit(&head, guard) {
         return Some(response);
     }
     Some(route(stream, head, settings, arrive_by).unwrap_or_else(|response| response))
+}
+
+/// One of the viewer's page's files, to a GET, or its headers alone to a
+/// HEAD.
+fn serve_page(head: &Head, file: page::File) -> Response {
+    if !matches!(head.method.as_str(), "GET" | "HEAD") {
+        return Response::usage(405, "the viewer's page is had with GET").allow("GET, HEAD");
+    }
+    Response {
+        status: 200,
+        body: file.bytes.to_vec(),
+        content_type: file.content_type,
+        cache: if file.fingerprinted {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-store"
+        },
+        page: file.content_type.starts_with("text/html"),
+        headers_only: head.method == "HEAD",
+        allow: None,
+    }
 }
 
 /// A request's line and headers, and what was read of its body with them.
@@ -311,6 +358,11 @@ struct Head {
 }
 
 impl Head {
+    /// The request's path without its query.
+    fn route(&self) -> &str {
+        self.path.split('?').next().unwrap_or_default()
+    }
+
     fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -402,34 +454,39 @@ fn admit(head: &Head, guard: &Guard) -> Result<(), Response> {
                 ));
             }
         }
-        Guard::Local => {
-            if let Some(host) = head.header("host") {
-                if !is_local_name(host_name(host)) {
-                    return Err(Response::refused(
-                        403,
-                        format!(
-                            "this server listens on the local machine only and takes requests \
-                             addressed to it, as localhost, 127.0.0.1 or [::1], not `{host}`"
-                        ),
-                    ));
-                }
-            }
-            if let Some(origin) = head.header("origin") {
-                let local = ["http://", "https://"].iter().any(|scheme| {
-                    origin
-                        .strip_prefix(scheme)
-                        .is_some_and(|rest| is_local_name(host_name(rest)))
-                });
-                if !local {
-                    return Err(Response::refused(
-                        403,
-                        format!(
-                            "this server listens on the local machine only and takes requests \
-                             from pages of the local machine only, not from `{origin}`"
-                        ),
-                    ));
-                }
-            }
+        Guard::Local => addressed_locally(head)?,
+    }
+    Ok(())
+}
+
+/// Lets a request addressed to the local machine through, by its `Host` and
+/// any `Origin`, or refuses it.
+fn addressed_locally(head: &Head) -> Result<(), Response> {
+    if let Some(host) = head.header("host") {
+        if !is_local_name(host_name(host)) {
+            return Err(Response::refused(
+                403,
+                format!(
+                    "this server listens on the local machine only and takes requests addressed \
+                     to it, as localhost, 127.0.0.1 or [::1], not `{host}`"
+                ),
+            ));
+        }
+    }
+    if let Some(origin) = head.header("origin") {
+        let local = ["http://", "https://"].iter().any(|scheme| {
+            origin
+                .strip_prefix(scheme)
+                .is_some_and(|rest| is_local_name(host_name(rest)))
+        });
+        if !local {
+            return Err(Response::refused(
+                403,
+                format!(
+                    "this server listens on the local machine only and takes requests from pages \
+                     of the local machine only, not from `{origin}`"
+                ),
+            ));
         }
     }
     Ok(())
@@ -482,8 +539,8 @@ fn route(
         return Err(Response::usage(
             404,
             format!(
-                "no route `{path}`: GET /commands lists the commands and POST /commands/<name> \
-                 runs one"
+                "no route `{path}`: GET /commands lists the commands, POST /commands/<name> \
+                 runs one, and GET / is the viewer"
             ),
         ));
     };
@@ -578,10 +635,19 @@ fn read_body(stream: &mut TcpStream, head: Head, arrive_by: Deadline) -> Result<
     Ok(body)
 }
 
-/// A response: its status and the JSON reply it carries.
+/// A response: its status and what it carries, a JSON reply or one of the
+/// viewer's page's files.
 struct Response {
     status: u16,
-    body: String,
+    body: Vec<u8>,
+    content_type: &'static str,
+    /// Its Cache-Control.
+    cache: &'static str,
+    /// Whether it is the viewer's page, which is sent with what the page
+    /// may do.
+    page: bool,
+    /// Whether it answers a HEAD: its headers, without the body they size.
+    headers_only: bool,
     allow: Option<&'static str>,
 }
 
@@ -591,7 +657,11 @@ impl Response {
             status,
             // A reply holds only strings, numbers, lists and string-keyed
             // maps, which always serialize.
-            body: serde_json::to_string(reply).expect("a reply serializes to JSON"),
+            body: serde_json::to_vec(reply).expect("a reply serializes to JSON"),
+            content_type: "application/json",
+            cache: "no-store",
+            page: false,
+            headers_only: false,
             allow: None,
         }
     }
@@ -629,10 +699,12 @@ impl Response {
             _ => "Error",
         };
         let mut head = format!(
-            "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
-             Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n",
+            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\
+             Cache-Control: {}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n",
             self.status,
-            self.body.len()
+            self.content_type,
+            self.body.len(),
+            self.cache,
         );
         if let Some(methods) = self.allow {
             head.push_str(&format!("Allow: {methods}\r\n"));
@@ -640,9 +712,18 @@ impl Response {
         if self.status == 401 {
             head.push_str("WWW-Authenticate: Bearer\r\n");
         }
+        if self.page {
+            head.push_str(&format!(
+                "Content-Security-Policy: {}\r\nReferrer-Policy: no-referrer\r\n\
+                 X-Frame-Options: DENY\r\n",
+                page::POLICY
+            ));
+        }
         head.push_str("\r\n");
         let mut bytes = head.into_bytes();
-        bytes.extend_from_slice(self.body.as_bytes());
+        if !self.headers_only {
+            bytes.extend_from_slice(&self.body);
+        }
         bytes
     }
 }
@@ -709,16 +790,24 @@ mod tests {
         assert_eq!(line["token"], "t".repeat(64));
         assert_eq!(line["token_required"], true);
         assert_eq!(line["local_only"], false);
+        // The viewer's address carries the token in its fragment, which a
+        // browser never sends.
+        assert_eq!(
+            line["viewer"],
+            format!("http://0.0.0.0:7316/#token={}", "t".repeat(64))
+        );
         let line = started("127.0.0.1:7316".parse().unwrap(), &Guard::Local);
         assert_eq!(line["listening"], "http://127.0.0.1:7316");
+        assert_eq!(line["viewer"], "http://127.0.0.1:7316/");
         assert_eq!(line["token_required"], false);
         assert!(line.get("token").is_none());
     }
 
     /// Serves `requests`, each raw bytes on its own connection, with
     /// `guard`, on a loopback port of its own, and returns each response's
-    /// status and JSON. The server stops when the last is answered.
-    fn exchange(guard: Guard, requests: Vec<Vec<u8>>) -> Vec<(u16, String, Value)> {
+    /// status, head and body as they came. The server stops when the last
+    /// is answered.
+    fn exchange_raw(guard: Guard, requests: Vec<Vec<u8>>) -> Vec<(u16, String, Vec<u8>)> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         assert!(is_local(address.ip()));
@@ -737,14 +826,117 @@ mod tests {
                 stream.write_all(&request).unwrap();
                 let mut response = Vec::new();
                 stream.read_to_end(&mut response).unwrap();
-                let response = String::from_utf8(response).unwrap();
-                let (head, body) = response.split_once("\r\n\r\n").unwrap();
+                let split = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+                let head = String::from_utf8(response[..split].to_vec()).unwrap();
                 let status = head.split(' ').nth(1).unwrap().parse().unwrap();
-                (status, head.to_owned(), serde_json::from_str(body).unwrap())
+                (status, head, response[split + 4..].to_vec())
             })
             .collect();
         server.join().unwrap();
         responses
+    }
+
+    fn get(method: &str, path: &str, host: &str, more: &str) -> Vec<u8> {
+        format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\n{more}\r\n").into_bytes()
+    }
+
+    #[test]
+    fn beyond_the_local_machine_the_viewers_page_needs_no_token_but_commands_do() {
+        let token = "c".repeat(64);
+        let host = "100.64.0.7:7316";
+        let responses = exchange_raw(
+            Guard::Token(token.clone()),
+            vec![
+                get("GET", "/", host, ""),
+                get("GET", "/index.html?source=demo-plant", "forge.example", ""),
+                get("HEAD", "/", host, ""),
+                get("POST", "/", host, "Content-Length: 0\r\n"),
+                get("GET", "/commands", host, ""),
+                get("GET", "/nowhere", host, ""),
+                get("GET", "/../Cargo.toml", host, ""),
+                get(
+                    "GET",
+                    "/commands",
+                    host,
+                    &format!("Authorization: Bearer {token}\r\n"),
+                ),
+            ],
+        );
+        let statuses: Vec<u16> = responses.iter().map(|(s, _, _)| *s).collect();
+        assert_eq!(statuses, [200, 200, 200, 405, 401, 401, 401, 200]);
+        let (_, head, body) = &responses[0];
+        assert!(
+            head.contains("Content-Type: text/html; charset=utf-8"),
+            "{head}"
+        );
+        assert!(head.contains("Cache-Control: no-store"), "{head}");
+        assert!(head.contains(&format!("Content-Security-Policy: {}", page::POLICY)));
+        assert!(head.contains("Referrer-Policy: no-referrer"));
+        assert_eq!(body.as_slice(), page::file("/").unwrap().bytes);
+        assert_eq!(responses[1].2, responses[0].2, "the page has its query");
+        // A HEAD gives the headers, sized as a GET's body, and no body.
+        let (_, head, body) = &responses[2];
+        assert!(head.contains(&format!("Content-Length: {}", responses[0].2.len())));
+        assert!(body.is_empty());
+        assert!(responses[3].1.contains("Allow: GET, HEAD"));
+        for (_, _, body) in &responses[4..7] {
+            let json: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(json["error"]["code"], "unauthorized");
+        }
+    }
+
+    #[test]
+    fn each_of_the_pages_files_is_served_with_its_type() {
+        let requests = page::VIEWER_FILES
+            .iter()
+            .map(|(route, _, _)| get("GET", route, "127.0.0.1", ""))
+            .collect();
+        let responses = exchange_raw(Guard::Token("d".repeat(64)), requests);
+        for ((route, content_type, bytes), (status, head, body)) in
+            page::VIEWER_FILES.iter().zip(&responses)
+        {
+            assert_eq!(*status, 200, "{route}");
+            assert!(
+                head.contains(&format!("Content-Type: {content_type}\r\n")),
+                "{head}"
+            );
+            assert_eq!(body.as_slice(), *bytes, "{route}");
+            let fingerprinted = page::VIEWER_BUILT && route.starts_with("/assets/");
+            assert_eq!(
+                head.contains("Cache-Control: public, max-age=31536000, immutable"),
+                fingerprinted,
+                "{route}"
+            );
+        }
+    }
+
+    #[test]
+    fn on_the_local_machine_the_page_is_served_only_to_requests_addressed_to_it() {
+        let responses = exchange_raw(
+            Guard::Local,
+            vec![
+                get("GET", "/", "localhost:7316", ""),
+                get("GET", "/", "[::1]:7316", ""),
+                get("GET", "/", "rebound.example:7316", ""),
+                get(
+                    "GET",
+                    "/",
+                    "127.0.0.1",
+                    "Origin: https://elsewhere.example\r\n",
+                ),
+            ],
+        );
+        let statuses: Vec<u16> = responses.iter().map(|(s, _, _)| *s).collect();
+        assert_eq!(statuses, [200, 200, 403, 403]);
+    }
+
+    /// Serves `requests` as [`exchange_raw`] does, and returns each
+    /// response's status, head and JSON.
+    fn exchange(guard: Guard, requests: Vec<Vec<u8>>) -> Vec<(u16, String, Value)> {
+        exchange_raw(guard, requests)
+            .into_iter()
+            .map(|(status, head, body)| (status, head, serde_json::from_slice(&body).unwrap()))
+            .collect()
     }
 
     fn post(name: &str, headers: &str, body: &str) -> Vec<u8> {

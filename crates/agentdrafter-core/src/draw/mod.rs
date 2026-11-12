@@ -42,7 +42,7 @@ mod hatch;
 mod linetype;
 mod text;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::block::{definition_text, Placement};
 use crate::model::{
@@ -63,7 +63,7 @@ pub type Point2 = [f64; 2];
 /// What a sheet draws: shapes in drawing order, each with the colour and
 /// pen it draws with. Coordinates are in the drawing's units; lineweights
 /// are millimetres on paper.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DisplayList {
     pub items: Vec<Item>,
     /// Each line of text the items draw, as the characters it reads, laid
@@ -88,7 +88,7 @@ pub struct DisplayList {
 
 /// A hatch whose pattern needed more lines or dashes than one hatch draws:
 /// only the first of them are drawn.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HatchCutShort {
     /// The place in the sheet's objects, counted from 0, of the hatch, or
     /// of the insert whose block holds it.
@@ -110,7 +110,7 @@ pub struct HatchCutShort {
 /// The line's frame maps the font's own units to drawing units: a point
 /// `(u, v)` of the font, `u` along the line in the font's advances and `v`
 /// up in heights of its capitals, is at `origin + u * across + v * up`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextRun {
     /// Which object of the sheet draws it: its place in the sheet's
     /// objects, counted from 0.
@@ -138,7 +138,7 @@ pub struct TextRun {
 }
 
 /// One shape of one object.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     /// Which object of the sheet draws it: its place in the sheet's
     /// objects, counted from 0.
@@ -154,7 +154,7 @@ pub struct Item {
 }
 
 /// A shape: lines drawn with a pen, or an area filled.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Shape {
     /// Lines drawn with a pen `lineweight` millimetres wide on paper, with
@@ -173,7 +173,7 @@ pub enum Shape {
 }
 
 /// Which points of a fill's contours are inside.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FillRule {
     /// Inside an odd number of contours: a hatch's islands.
@@ -184,7 +184,7 @@ pub enum FillRule {
 }
 
 /// The box around drawn geometry, in drawing units.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bounds {
     pub min: Point2,
     pub max: Point2,

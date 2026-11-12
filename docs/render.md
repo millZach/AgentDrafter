@@ -63,6 +63,8 @@ Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of 
 - `crates/agentdrafter-core/src/draw/` turns a sheet into a display list: strokes with their colour index, lineweight and dashes already laid out, and fills, in drawing units, with each line of text also as a run of its characters along its baseline, which draws nothing and lets the PDF keep the text searchable. `curves.rs` turns arcs, circles, ellipses and splines into chords (a spline through fit points is fitted as AutoCAD fits it), `linetype.rs` lays out linetypes, `hatch.rs` hatches, `text.rs` text, and `color.rs` holds the colour each index plots in. `src/text/outline.rs` gives what each character of a font draws.
 - `src/raster.rs` draws the display list on the CPU with [tiny-skia](https://crates.io/crates/tiny-skia) (BSD-3-Clause) and writes the PNG with [png](https://crates.io/crates/png) (MIT or Apache-2.0). `src/stamp.rs` makes and checks stamps, with [sha2](https://crates.io/crates/sha2) (MIT or Apache-2.0). `src/render.rs` is the entry point, and `src/output.rs` holds what it shares with the PDF: reading the record and writing the output safely.
 
+- The viewer draws the same display list in the page ([viewer.md](viewer.md)): the `display-list` command gives it as JSON, and `crates/agentdrafter-viewer`, compiled to WebAssembly, draws it with WebGL2; held to the PNG pixel for pixel, its ink lies within one pixel of the PNG's.
+
 The display list and the rasteriser are plain computation: no window, GPU, file system, thread or clock. A test keeps their source that way, and CI builds the core for `wasm32-unknown-unknown`, as the viewer will run it.
 
 ## Measured against AutoCAD

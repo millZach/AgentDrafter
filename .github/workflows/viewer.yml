@@ -1,0 +1,94 @@
+name: Viewer
+
+# The viewer (docs/viewer.md): its renderer built to WebAssembly, its page
+# built with Vite, its unit tests, and the page in headless Chrome against
+# `agentdrafter serve`, with the page built in. Its own workflow, beside CI's
+# required jobs, which build the binary without the page.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: viewer-${{ github.ref }}
+  # A newer push to a pull request replaces the older run; runs on main all finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  viewer:
+    name: viewer (build, unit tests, browser tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the toolchain named in rust-toolchain.toml, and its WebAssembly target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: viewer
+
+      # The crate pins wasm-bindgen; its command-line tool must be the same version.
+      - name: wasm-bindgen-cli, the version the viewer crate pins
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.130
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
+
+      - name: The renderer's lints for WebAssembly, warnings as errors
+        run: cargo clippy -p agentdrafter-viewer --target wasm32-unknown-unknown --locked --no-deps -- -D warnings
+
+      - name: Install the page's packages
+        working-directory: viewer
+        run: npm ci
+
+      - name: Build the page (the renderer to WebAssembly, type checks, Vite)
+        working-directory: viewer
+        run: npm run build
+
+      - name: The page's unit tests
+        working-directory: viewer
+        run: npm test
+
+      - name: The command line's tests, with the page built in
+        run: cargo test -p agentdrafter-cli --locked
+
+      - name: Build agentdrafter with the page built in
+        run: cargo build -p agentdrafter-cli --locked
+
+      # The PNG match in ink and colour, the token beyond the local machine,
+      # draws and frame times at phone size with the CPU throttled 4x, WebGL2
+      # with no WebGPU, mouse, the fit, tabs and screenshots; software WebGL,
+      # as the runner has no GPU. With four cores and no GPU, the runner fills
+      # the phone's canvas slower than a phone's GPU does, so the frames check
+      # holds that every gesture draws and the page's own draw is small, and
+      # reports the times (docs/viewer.md).
+      - name: The page in headless Chrome
+        working-directory: viewer
+        run: node e2e/run.mjs --chrome "$(command -v google-chrome)" --smooth draw
+
+      - name: Keep the numbers, the screenshots and the compared images
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: viewer-e2e
+          path: |
+            target/viewer-e2e/results.json
+            target/viewer-e2e/*.png
+          if-no-files-found: ignore
+          retention-days: 7

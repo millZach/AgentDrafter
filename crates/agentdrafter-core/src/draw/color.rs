@@ -1,12 +1,12 @@
 //! AutoCAD's colours: the colour index every layer names, and the colour
 //! each index plots in.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// An AutoCAD colour index, 1 to 255, as a layer names it.
 ///
 /// It is written as the number in JSON.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Color(pub u8);
 

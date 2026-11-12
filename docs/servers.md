@@ -12,6 +12,7 @@ The core keeps one registry of commands, and every interface takes its commands 
 | `schema` | Gives the JSON Schema of a kind of file. | [sheet-description.md](sheet-description.md) |
 | `measure-text` | Measures how wide a line of text draws. | [sheet-description.md](sheet-description.md) |
 | `render` | Draws a sheet to a PNG. | [render.md](render.md) |
+| `display-list` | Draws a sheet to its display list, as JSON, for the viewer. | [viewer.md](viewer.md) |
 | `plot` | Plots a sheet, a DWG or a drawing set to PDF. | [plot.md](plot.md) |
 | `stale` | Says whether a PNG or PDF is stale. | [render.md](render.md) |
 | `query` | Asks a drawing set what is on its sheets. | [query.md](query.md) |
@@ -35,22 +36,23 @@ The core keeps one registry of commands, and every interface takes its commands 
 agentdrafter serve [--listen <address:port>]
 ```
 
-`agentdrafter serve` listens on `127.0.0.1:7316`, the local machine only, unless `--listen` names another address and port, such as `0.0.0.0:7316` for every network or `127.0.0.1:0` for any free port. It prints one line of JSON when it starts, then serves until it is stopped:
+`agentdrafter serve` listens on `127.0.0.1:7316`, the local machine only, unless `--listen` names another address and port, such as `0.0.0.0:7316` for every network or `127.0.0.1:0` for any free port. It prints one line of JSON when it starts, with the viewer's address under `viewer`, then serves until it is stopped:
 
 ```json
-{"ok":true,"result":{"address":"127.0.0.1:7316","listening":"http://127.0.0.1:7316","local_only":true,"token_required":false}}
+{"ok":true,"result":{"address":"127.0.0.1:7316","listening":"http://127.0.0.1:7316","local_only":true,"token_required":false,"viewer":"http://127.0.0.1:7316/"}}
 ```
 
 | Route | What it does |
 |---|---|
 | `GET /commands` | Lists every command: its `name`, what it `does` and its `input_schema`. |
 | `POST /commands/<name>` | Runs the command. The body is its input, sent with `Content-Type: application/json`; an empty body is `{}`. |
+| `GET /`, `GET /assets/<file>` | The viewer's page and its files ([viewer.md](viewer.md)), embedded in the binary. `HEAD` gives their headers. |
 
 ```
 curl -s -H 'Content-Type: application/json' -d '{"set": "examples/demo-set"}' http://127.0.0.1:7316/commands/journal
 ```
 
-The status says what the command line's exit code says, and every response, a refused one too, is a JSON reply:
+The status says what the command line's exit code says, and every response but the viewer's files, a refused one too, is a JSON reply:
 
 | Status | When |
 |---|---|
@@ -66,7 +68,8 @@ The status says what the command line's exit code says, and every response, a re
 The HTTP API is an open port to guard (ADR-0007). Zach decided on 2026-11-11 that **a token is needed only when the HTTP API listens beyond the local machine**:
 
 - **On the local machine** (a loopback address such as `127.0.0.1` or `::1`), no token is needed. A request must still be addressed to the local machine: its `Host` names `localhost` or a loopback address, and an `Origin`, when a browser sends one, is a page of the local machine. A body must be sent as `application/json`, which a web page cannot send to another site without the browser asking it first. So a web page the reviewer opens cannot reach the API, by a name of its own or from its own site.
-- **On any other address**, the unspecified address `0.0.0.0` among them, every request carries a token. A new one is made from the system's randomness each time the server starts, and printed in the line it starts with, under `token`. A request carries it as `Authorization: Bearer <token>`; it is compared in constant time, and a request without it, or with another, is refused with status 401 and the error `unauthorized`.
+- **On any other address**, the unspecified address `0.0.0.0` among them, every request carries a token. A new one is made from the system's randomness each time the server starts, and printed in the line it starts with, under `token`, and in the fragment of the `viewer` address, `#token=…`. A request carries it as `Authorization: Bearer <token>`; it is compared in constant time, and a request without it, or with another, is refused with status 401 and the error `unauthorized`. The line the server starts with is the only one it writes the token in.
+- **The viewer's page** and its files are served without the token, since a browser cannot send one to open a page: they are the page's own files, embedded in the binary, and give nothing of the machine's, and the page sends the token with every command it runs ([viewer.md](viewer.md#the-token)). On the local machine they too are served only to a request addressed to it.
 
 ### How HTTP is read
 

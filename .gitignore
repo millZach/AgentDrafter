@@ -28,3 +28,7 @@ dist/
 __pycache__/
 *.pyc
 .venv/
+
+# The viewer's WebAssembly module and its glue, built by `npm run build`
+# in viewer/ (viewer/dist/ is ignored above, as dist/).
+viewer/src/wasm/

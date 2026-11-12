@@ -421,6 +421,15 @@ fn serve_listens_on_the_local_machine_and_needs_no_token_there() {
         assert_eq!(started["token_required"], false);
         assert!(started.get("token").is_none());
         assert_eq!(started["listening"], format!("http://{}", http.address));
+        assert_eq!(started["viewer"], format!("http://{}/", http.address));
+        // The viewer's page, which the binary carries, built or not.
+        let mut stream = TcpStream::connect(http.address).unwrap();
+        write!(stream, "GET / HTTP/1.1\r\nHost: {}\r\n\r\n", http.address).unwrap();
+        let mut page = String::new();
+        stream.read_to_string(&mut page).unwrap();
+        assert!(page.starts_with("HTTP/1.1 200 OK\r\n"), "{page}");
+        assert!(page.contains("Content-Type: text/html; charset=utf-8\r\n"));
+        assert!(page.contains("Content-Security-Policy: "));
         let (status, json) = http.send("GET", "/commands", None);
         assert_eq!(
             status, 200,

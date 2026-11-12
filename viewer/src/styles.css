@@ -1,0 +1,106 @@
+/* The viewer's look: variant A of the picked prototype (#16), its palette
+   and layout. The drawing fills the screen; sheets are tabs across the top;
+   the journal's sheet peeks up from the bottom on a phone and is a panel on
+   the right on a laptop. */
+:root {
+  --bg: #15171a;
+  --chrome: #1f2226;
+  --chrome2: #2a2e33;
+  --line: #3a3f45;
+  --text: #e8eaed;
+  --muted: #9aa0a6;
+  --accent: #3b82f6;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --bad: #ef4444;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 15px/1.35 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  overflow: hidden; -webkit-text-size-adjust: 100%;
+}
+body { touch-action: manipulation; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+button { cursor: pointer; font: inherit; }
+button:disabled { cursor: default; }
+#app { position: fixed; inset: 0; overflow: hidden; }
+
+/* the drawing */
+.viewport {
+  position: absolute; inset: 0; overflow: hidden; touch-action: none; background: var(--bg);
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+}
+.stage { display: block; width: 100%; height: 100%; }
+.zoombtns { position: absolute; right: 10px; top: 10px; display: flex; flex-direction: column; gap: 6px; z-index: 3; }
+.zoombtns button {
+  width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line);
+  background: rgba(31, 34, 38, .92); color: var(--text); font-size: 20px; line-height: 1; padding: 0;
+}
+
+/* shared bits */
+.btn {
+  appearance: none; border: 1px solid var(--line); background: var(--chrome2); color: var(--text);
+  border-radius: 10px; padding: 9px 14px; font-weight: 600; min-height: 44px; font-size: 14px;
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn:disabled { opacity: .45; }
+.muted { color: var(--muted); }
+p.muted { margin: 6px 0; font-size: 13px; line-height: 1.45; }
+
+/* variant A: live drawing + bottom sheet */
+.va { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.va-top {
+  flex: none; background: var(--chrome); border-bottom: 1px solid var(--line);
+  padding: calc(8px + env(safe-area-inset-top)) 12px 0;
+}
+.va-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; min-height: 22px; }
+.va-set b { font-size: 15px; }
+.va-set span { color: var(--muted); font-size: 12px; margin-left: 6px; }
+.va-tabs { display: flex; gap: 2px; overflow-x: auto; margin-top: 4px; scrollbar-width: none; }
+.va-tabs::-webkit-scrollbar { display: none; }
+.tab {
+  appearance: none; background: none; border: none; color: var(--muted); padding: 8px 12px 10px;
+  border-bottom: 2px solid transparent; display: flex; align-items: center; gap: 6px; white-space: nowrap; flex: none;
+}
+.tab b { color: #cbd5e1; font-size: 14px; }
+.tab.on { border-bottom-color: var(--accent); }
+.tab.on b { color: #fff; }
+.va-main { position: relative; flex: 1; min-height: 0; }
+.va-vp { position: absolute; inset: 0; }
+.va-note {
+  position: absolute; left: 50%; top: 30%; transform: translateX(-50%); z-index: 4;
+  max-width: min(460px, calc(100% - 32px)); padding: 12px 16px; border-radius: 12px;
+  background: rgba(24, 27, 31, .97); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .5); font-size: 14px; line-height: 1.45; pointer-events: none;
+}
+.va-note.failed { border-left-color: var(--bad); pointer-events: auto; }
+.va-sheet {
+  position: absolute; left: 0; right: 0; top: 0; z-index: 6; background: var(--chrome);
+  border-radius: 16px 16px 0 0; box-shadow: 0 -8px 30px rgba(0, 0, 0, .5);
+  display: flex; flex-direction: column; will-change: transform;
+}
+.va-grab { flex: none; height: 22px; display: grid; place-items: center; touch-action: none; cursor: grab; }
+.va-grab span { width: 40px; height: 5px; border-radius: 3px; background: #4b5158; }
+.va-peek { flex: none; padding: 0 14px calc(12px + env(safe-area-inset-bottom)); touch-action: none; }
+.va-agent {
+  font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.va-agent i { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
+.va-actions { display: flex; gap: 8px; margin-top: 8px; }
+.va-actions .btn { flex: 1; }
+.va-body { flex: 1; min-height: 0; overflow: auto; padding: 0 14px 24px; overscroll-behavior: contain; border-top: 1px solid var(--line); }
+.va-jhead { display: flex; align-items: center; gap: 8px; padding: 10px 0 8px; position: sticky; top: 0; background: var(--chrome); z-index: 1; }
+@media (max-width: 899px) {
+  .va-sheet { height: 100%; }
+}
+@media (min-width: 900px) {
+  .va-main { display: grid; grid-template-columns: 1fr 400px; }
+  .va-vp { position: relative; inset: auto; }
+  .va-sheet {
+    position: relative; transform: none !important; height: auto !important; border-radius: 0;
+    box-shadow: none; border-left: 1px solid var(--line); z-index: 1;
+  }
+  .va-grab { display: none; }
+  .va-peek { padding-top: 12px; touch-action: auto; }
+}
