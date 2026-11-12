@@ -11,8 +11,11 @@
 //! give, and text in Arial, whose `A` is as tall as its `H`, to the top of
 //! `H`. The font's own cap height, a separate figure in the font, is a unit
 //! taller than Arial's `A`.)
+//!
+//! Every character is looked up in the font by [`glyph_index`], which reads
+//! a font encoded as a Windows symbol font as Windows and AutoCAD read it.
 
-use ttf_parser::{Face, GlyphId};
+use ttf_parser::{Face, GlyphId, PlatformId};
 
 use super::fonts::{Glyph, Rect};
 
@@ -31,8 +34,7 @@ impl TrueTypeFont {
     pub(crate) fn parse(bytes: Vec<u8>) -> Result<Self, String> {
         let face =
             Face::parse(&bytes, 0).map_err(|e| format!("it is not a TrueType font ({e})"))?;
-        let capitals = face
-            .glyph_index('A')
+        let capitals = glyph_index(&face, 'A')
             .and_then(|h| face.glyph_bounding_box(h))
             .map(|b| f64::from(b.y_max))
             .filter(|top| *top > 0.0)
@@ -72,7 +74,7 @@ impl TrueTypeFont {
         let scale = 1.0 / self.capitals;
         text.chars()
             .map(|c| {
-                let id = face.glyph_index(c).unwrap_or(GlyphId(0));
+                let id = glyph_index(&face, c).unwrap_or(GlyphId(0));
                 let advance = face.glyph_hor_advance(id).map_or(0.0, f64::from);
                 let ink = face.glyph_bounding_box(id).map(|b| Rect {
                     left: f64::from(b.x_min) * scale,
@@ -100,7 +102,7 @@ impl TrueTypeFont {
         let scale = 1.0 / self.capitals;
         text.chars()
             .map(|c| {
-                let id = face.glyph_index(c).unwrap_or(GlyphId(0));
+                let id = glyph_index(&face, c).unwrap_or(GlyphId(0));
                 let advance = face.glyph_hor_advance(id).map_or(0.0, f64::from) * scale;
                 let mut contours = Contours {
                     scale,
@@ -111,6 +113,35 @@ impl TrueTypeFont {
                 (advance, contours.contours)
             })
             .collect()
+    }
+}
+
+/// The glyph `face` draws `c` with; none when it holds no glyph for it.
+///
+/// A font encoded as a Windows symbol font, whose character map has a
+/// Windows symbol table, (3, 0), holds its characters at U+F000 plus their
+/// code: `I`, 0x49, at U+F049. Its Unicode table, when it has one, may hold
+/// them there too. A character such a font holds no glyph for in its
+/// Unicode tables is looked up in its symbol table, at its own code and
+/// then, below U+0100, at U+F000 plus its code, as Windows and AutoCAD do.
+/// ttf-parser reads only Unicode tables, so the symbol table is read here.
+/// A font with no symbol table is read as ttf-parser reads it.
+fn glyph_index(face: &Face, c: char) -> Option<GlyphId> {
+    if let Some(id) = face.glyph_index(c) {
+        return Some(id);
+    }
+    let symbol = face
+        .tables()
+        .cmap?
+        .subtables
+        .into_iter()
+        .find(|s| s.platform_id == PlatformId::Windows && s.encoding_id == 0)?;
+    // A code mapped to glyph 0 is mapped to the missing glyph: not found.
+    let found = |code: u32| symbol.glyph_index(code).filter(|id| id.0 != 0);
+    let code = u32::from(c);
+    match found(code) {
+        None if code < 0x100 => found(0xF000 + code),
+        id => id,
     }
 }
 
@@ -217,6 +248,19 @@ pub(crate) mod tests {
     /// filling its box, with 1000 units to the em. Glyph 0 is the missing
     /// glyph, 500 wide. Written here; no real font is copied.
     pub(crate) fn made_up_font(glyphs: &[MadeUpGlyph]) -> Vec<u8> {
+        made_up(glyphs, false)
+    }
+
+    /// The bytes of a font as [`made_up_font`] writes them, encoded as a
+    /// Windows symbol font: a Windows symbol table, (3, 0), and a Unicode
+    /// table, (0, 0), both hold each character at U+F000 plus its code, and
+    /// a Mac table, (1, 0), at its own code, as AutoCAD's twins of its
+    /// PostScript fonts carry them. Its characters are below U+0100.
+    fn made_up_symbol_font(glyphs: &[MadeUpGlyph]) -> Vec<u8> {
+        made_up(glyphs, true)
+    }
+
+    fn made_up(glyphs: &[MadeUpGlyph], symbol: bool) -> Vec<u8> {
         let mut all: Vec<(Option<char>, u16, [i16; 4])> = vec![(None, 500, [50, 0, 450, 700])];
         all.extend(glyphs.iter().map(|&(c, a, b)| (Some(c), a, b)));
         let count = all.len() as u16;
@@ -286,41 +330,71 @@ pub(crate) mod tests {
             hmtx.extend(x0.to_be_bytes());
         }
 
-        // A format 4 character map: one segment per character, then the end.
         let mut mapped: Vec<(u16, u16)> = all
             .iter()
             .enumerate()
             .filter_map(|(id, (c, _, _))| c.map(|c| (c as u16, id as u16)))
             .collect();
         mapped.sort();
-        let segments = mapped.len() as u16 + 1;
-        let mut format4 = Vec::new();
-        format4.extend(4u16.to_be_bytes());
-        format4.extend((16 + 8 * segments).to_be_bytes());
-        format4.extend(0u16.to_be_bytes());
-        format4.extend((segments * 2).to_be_bytes());
-        format4.extend([0u8; 6]); // search hints, which readers do not need
-        for (code, _) in &mapped {
-            format4.extend(code.to_be_bytes());
-        }
-        format4.extend(0xFFFFu16.to_be_bytes());
-        format4.extend(0u16.to_be_bytes());
-        for (code, _) in &mapped {
-            format4.extend(code.to_be_bytes());
-        }
-        format4.extend(0xFFFFu16.to_be_bytes());
-        for (code, id) in &mapped {
-            format4.extend(id.wrapping_sub(*code).to_be_bytes());
-        }
-        format4.extend(1u16.to_be_bytes());
-        format4.extend(vec![0u8; usize::from(segments) * 2]);
+        // A format 4 character map: one segment per character, then the end.
+        let format4 = |offset: u16| {
+            let segments = mapped.len() as u16 + 1;
+            let mut format4 = Vec::new();
+            format4.extend(4u16.to_be_bytes());
+            format4.extend((16 + 8 * segments).to_be_bytes());
+            format4.extend(0u16.to_be_bytes());
+            format4.extend((segments * 2).to_be_bytes());
+            format4.extend([0u8; 6]); // search hints, which readers do not need
+            for (code, _) in &mapped {
+                format4.extend((offset + code).to_be_bytes());
+            }
+            format4.extend(0xFFFFu16.to_be_bytes());
+            format4.extend(0u16.to_be_bytes());
+            for (code, _) in &mapped {
+                format4.extend((offset + code).to_be_bytes());
+            }
+            format4.extend(0xFFFFu16.to_be_bytes());
+            for (code, id) in &mapped {
+                format4.extend(id.wrapping_sub(offset + code).to_be_bytes());
+            }
+            format4.extend(1u16.to_be_bytes());
+            format4.extend(vec![0u8; usize::from(segments) * 2]);
+            format4
+        };
+        // Each character map's platform, encoding and table, in that order.
+        let maps: Vec<(u16, u16, Vec<u8>)> = if symbol {
+            // A format 0 map: the glyph of each of the 256 codes.
+            let mut format0 = Vec::new();
+            format0.extend(0u16.to_be_bytes());
+            format0.extend(262u16.to_be_bytes());
+            format0.extend(0u16.to_be_bytes());
+            let mut ids = [0u8; 256];
+            for (code, id) in &mapped {
+                ids[usize::from(*code)] = *id as u8;
+            }
+            format0.extend(ids);
+            // Unicode, Mac, Windows symbol.
+            vec![
+                (0, 0, format4(0xF000)),
+                (1, 0, format0),
+                (3, 0, format4(0xF000)),
+            ]
+        } else {
+            vec![(3, 1, format4(0))] // Windows Unicode BMP
+        };
         let mut cmap = Vec::new();
         cmap.extend(0u16.to_be_bytes());
-        cmap.extend(1u16.to_be_bytes());
-        cmap.extend(3u16.to_be_bytes()); // Windows
-        cmap.extend(1u16.to_be_bytes()); // Unicode BMP
-        cmap.extend(12u32.to_be_bytes());
-        cmap.extend(format4);
+        cmap.extend((maps.len() as u16).to_be_bytes());
+        let mut at = 4 + 8 * maps.len() as u32;
+        for (platform, encoding, table) in &maps {
+            cmap.extend(platform.to_be_bytes());
+            cmap.extend(encoding.to_be_bytes());
+            cmap.extend(at.to_be_bytes());
+            at += table.len() as u32;
+        }
+        for (_, _, table) in maps {
+            cmap.extend(table);
+        }
 
         let mut loca_bytes = Vec::new();
         for offset in loca {
@@ -385,6 +459,32 @@ pub(crate) mod tests {
         // Z has no glyph, so it takes the missing glyph's.
         close(glyphs[3].advance.0, 500.0 / 640.0);
         close(glyphs[3].ink.unwrap().right, 450.0 / 640.0);
+    }
+
+    #[test]
+    fn a_symbol_font_draws_its_characters_from_u_f000_on() {
+        // A font encoded as a Windows symbol font holds `A` at U+F041 and
+        // `I` at U+F049, in its Unicode table as in its symbol table (#62).
+        let font = TrueTypeFont::parse(made_up_symbol_font(&[
+            ('A', 700, [0, 0, 700, 640]),
+            ('I', 300, [100, 0, 200, 640]),
+        ]))
+        .unwrap();
+        // `I` measures as its own glyph, scaled to the top of `A`.
+        let glyphs = font.glyphs("IZ");
+        close(glyphs[0].advance.0, 300.0 / 640.0);
+        let i = glyphs[0].ink.unwrap();
+        close(i.left, 100.0 / 640.0);
+        close(i.right, 200.0 / 640.0);
+        close(i.top, 1.0);
+        // Z has no glyph at U+005A or U+F05A, so it takes the missing glyph's.
+        close(glyphs[1].advance.0, 500.0 / 640.0);
+        // And `I` draws as it measures.
+        let (advance, contours) = &font.outlines("I", 0.001)[0];
+        close(*advance, 300.0 / 640.0);
+        let xs = contours.iter().flatten().map(|p| p[0]);
+        close(xs.clone().fold(f64::INFINITY, f64::min), 100.0 / 640.0);
+        close(xs.fold(f64::NEG_INFINITY, f64::max), 200.0 / 640.0);
     }
 
     #[test]
