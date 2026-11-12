@@ -31,12 +31,14 @@ export interface PeekProps {
   /** Whether Accept can do nothing now, for a reason the server will give. */
   blocked: boolean;
   busy: string | null;
+  /** Whether the reviewer is looking at the set as it was: Undo and Accept are off until they are back to live. */
+  stepping: boolean;
   onShow(entry: number): void;
   onUndo(): void;
   onAccept(): void;
 }
 
-export function Peek({ line, live, journal, failing, undoable, blocked, busy, onShow, onUndo, onAccept }: PeekProps) {
+export function Peek({ line, live, journal, failing, undoable, blocked, busy, stepping, onShow, onUndo, onAccept }: PeekProps) {
   const last = journal?.entries.at(-1);
   const state = last && journal ? entryState(last, journal, failing) : null;
   return (
@@ -55,14 +57,20 @@ export function Peek({ line, live, journal, failing, undoable, blocked, busy, on
         <div className="va-last empty">{journal ? 'No change sets yet.' : 'No journal to show.'}</div>
       )}
       <div className="va-actions">
-        <button type="button" className="btn" data-act="undo" disabled={!undoable || busy !== null} onClick={onUndo}>
+        <button
+          type="button"
+          className="btn"
+          data-act="undo"
+          disabled={!undoable || busy !== null || stepping}
+          onClick={onUndo}
+        >
           &#x21B6; Undo last{undoable ? ` (#${undoable})` : ''}
         </button>
         <button
           type="button"
           className={`btn primary${blocked ? ' blocked' : ''}`}
           data-act="accept"
-          disabled={!journal || busy !== null}
+          disabled={!journal || busy !== null || stepping}
           onClick={onAccept}
         >
           {busy === 'accept' ? 'Checking…' : 'Accept…'}
@@ -186,7 +194,7 @@ export function JournalList({ journal, failing, at, focused, busy, onStep, onSho
                       <button
                         type="button"
                         className="btn sm danger"
-                        disabled={busy !== null}
+                        disabled={busy !== null || at !== null}
                         onClick={() => onUndo(e.entry)}
                       >
                         Undo{later ? ` this and ${later} later` : ''}

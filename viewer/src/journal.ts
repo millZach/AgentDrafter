@@ -163,6 +163,29 @@ export function sheetsTouched(entry: Entry, report: JournalReport): string[] {
   return [];
 }
 
+/** What an entry recorded, apart from what has become of it since, to tell it from another of its number. */
+export const recorded = (e: Entry): string =>
+  JSON.stringify([e.kind, e.at, e.change_set ?? null, e.files ?? null, e.undid ?? null, e.issued ?? null]);
+
+/** What each entry of the journal recorded, by its number. */
+export const recordedEntries = (report: JournalReport): Map<number, string> =>
+  new Map(report.entries.map((e) => [e.entry, recorded(e)]));
+
+/**
+ * Whether `report` is not the journal the entries in `seen` came from, but
+ * one cut back or rewritten: an entry seen is gone, as when a commit is
+ * rolled back or the journal's first lines are taken away, or an entry of
+ * a number seen now records something else. A journal that only grew is
+ * the same journal.
+ */
+export function journalReplaced(seen: ReadonlyMap<number, string>, report: JournalReport): boolean {
+  const now = recordedEntries(report);
+  for (const [entry, was] of seen) {
+    if (now.get(entry) !== was) return true;
+  }
+  return false;
+}
+
 /** The entries that came after `seen`, the oldest first. */
 export const since = (report: JournalReport, seen: number): Entry[] => report.entries.filter((e) => e.entry > seen);
 

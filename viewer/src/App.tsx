@@ -19,6 +19,8 @@ import {
   changedOn,
   entryTitle,
   firstSheet,
+  journalReplaced,
+  recordedEntries,
   lastUndoable,
   newest,
   notIssued,
@@ -100,9 +102,6 @@ const upper = (s: string) => s.toUpperCase();
 /** The version that counts every change that touched a sheet, for a sheet not yet named. */
 const ANY = '*';
 
-/** What an entry recorded, apart from what has become of it since, to tell it from another of its number. */
-const recorded = (e: Entry): string =>
-  JSON.stringify([e.kind, e.at, e.change_set ?? null, e.files ?? null, e.undid ?? null, e.issued ?? null]);
 
 function useWide(): boolean {
   const [wide, setWide] = useState(() => window.matchMedia(WIDE).matches);
@@ -349,15 +348,13 @@ export function App({ token, source, sheet }: AppProps) {
         setNoJournal(null);
         setJournal(report);
         const before = seen.current;
-        const kept = seenEntries.current;
         // A journal cut back, as a commit rolled back cuts it, or whose
-        // entries seen were replaced, is not the one the drawings came
-        // from: every drawing kept is dropped, and drawn again.
-        const replaced =
-          before !== null &&
-          (newest(report) < before || report.entries.some((e) => e.entry <= before && kept.get(e.entry) !== recorded(e)));
+        // entries seen were taken away or replaced, is not the one the
+        // drawings came from: every drawing kept is dropped, and drawn
+        // again.
+        const replaced = before !== null && journalReplaced(seenEntries.current, report);
         seen.current = newest(report);
-        seenEntries.current = new Map(report.entries.map((e) => [e.entry, recorded(e)]));
+        seenEntries.current = recordedEntries(report);
         if (before === null || replaced) {
           if (replaced) {
             replies.current.clear();
@@ -574,6 +571,7 @@ export function App({ token, source, sheet }: AppProps) {
       undoable={undoable}
       blocked={blocked}
       busy={busy}
+      stepping={at !== null}
       onShow={(n) => showEntry(n)}
       onUndo={() => void undo(undoable)}
       onAccept={() => void askAccept()}
@@ -621,7 +619,15 @@ export function App({ token, source, sheet }: AppProps) {
             <b>{name}</b>
             {summary && <span>{plural(sheets.length, 'sheet')}</span>}
           </div>
-          {journal && (
+          {journal && at !== null ? (
+            <div className="va-status">
+              {/* Stepping back: the chip says which entry is shown, and goes back to live. */}
+              <button type="button" className="pill past" data-act="live" onClick={backToLive}>
+                Entry {at} of {newest(journal)} &middot; Live &rsaquo;
+              </button>
+            </div>
+          ) : (
+            journal && (
             <div className="va-status">
               <span className="pill">
                 {pending.length ? (
@@ -638,6 +644,7 @@ export function App({ token, source, sheet }: AppProps) {
               {journal.inconsistent && <span className="pill warn">Inconsistent set</span>}
               {failCount > 0 && <span className="pill bad">{plural(failCount, 'failed check')}</span>}
             </div>
+            )
           )}
         </div>
         <nav className="va-tabs" ref={tabs} aria-label="Sheets">
@@ -669,7 +676,7 @@ export function App({ token, source, sheet }: AppProps) {
         </nav>
       </header>
       <div className="va-main">
-        <div className="va-vp">
+        <div className={`va-vp${at !== null ? ' past' : ''}`}>
           <Drawing
             reply={reply?.text ?? null}
             coveredBelow={covered}
@@ -684,17 +691,6 @@ export function App({ token, source, sheet }: AppProps) {
             onPick={pick}
           />
           <div className="va-overlays">
-            {at !== null && (
-              <div className="va-banner" role="status">
-                <div>
-                  <b>Entry {at}, as it was</b>
-                  <small>Read-only: rebuilt from the journal&rsquo;s undo states</small>
-                </div>
-                <button type="button" className="btn sm primary" onClick={backToLive}>
-                  Back to live
-                </button>
-              </div>
-            )}
             {toast && (
               <div key={toast.key} className={`va-toast in ${toast.tone}`} role="status">
                 <span className={`dot ${toast.tone}`} />

@@ -877,7 +877,20 @@ const checks = {
       await page.click('button[aria-label="Older"]');
       const at53 = await left(53);
       assert(Math.abs(at53 - now.bounds[0]) < 1e-6, 'entry 53 is the set as it is');
-      assert((await page.textContent('.va-banner')).includes('Entry 53, as it was'), 'the banner says which entry is shown');
+      // The header's status chip, amber, says which entry is shown; nothing
+      // is drawn over the drawing, which looks a little warmer; Undo and
+      // Accept are off.
+      const stepping = await page.evaluate(() => ({
+        chip: document.querySelector('.pill.past')?.textContent ?? null,
+        over: [...document.querySelectorAll('.va-overlays > :not(.va-toast)')].length,
+        filter: getComputedStyle(document.querySelector('.stage')).filter,
+        undo: document.querySelector('button[data-act="undo"]').disabled,
+        accept: document.querySelector('button[data-act="accept"]').disabled,
+      }));
+      assert(stepping.chip === 'Entry 53 of 53 · Live ›', `the chip says which entry is shown: ${stepping.chip}`);
+      assert(stepping.over === 0, 'nothing but a toast is over the drawing');
+      assert(stepping.filter.includes('sepia'), `the drawing looks warmer: ${stepping.filter}`);
+      assert(stepping.undo && stepping.accept, 'Undo and Accept are off while stepping');
       await page.click('button[aria-label="Older"]');
       const at52 = await left(52);
       assert(Math.abs(at53 - at52 - 0.5) < 1e-6, `entry 52 has the device half an inch left of 53: ${at52}, ${at53}`);
@@ -902,9 +915,13 @@ const checks = {
       const said = await page.textContent('.va-cannot');
       assert(said.includes('Entry 1 cannot be shown') && said.includes('pruned'), `the pruned entry says so: ${said}`);
       await page.screenshot({ path: join(out, 'journal-pruned.png') });
-      // Back to live.
-      await page.click('.va-banner button');
-      await page.waitForFunction(() => window.agentdrafterViewer.summary.entry === null && !document.querySelector('.va-cannot') && !document.querySelector('.va-banner'));
+      // Back to live, from the chip.
+      await page.click('.pill.past');
+      await page.waitForFunction(() => window.agentdrafterViewer.summary.entry === null && !document.querySelector('.va-cannot') && !document.querySelector('.pill.past'));
+      assert(
+        await page.evaluate(() => !document.querySelector('button[data-act="accept"]').disabled && !getComputedStyle(document.querySelector('.stage')).filter.includes('sepia')),
+        'live again: Accept is on and the drawing as it is',
+      );
       await page.click('.tab:has-text("DP-LD-101")');
       await page.waitForFunction(() => window.agentdrafterViewer.summary.sheet === 'DP-LD-101' && window.agentdrafterViewer.summary.entry === null);
       const back = await objectOf(page, 'DP-LD-101/device');
@@ -1152,6 +1169,13 @@ const checks = {
     const b = await browser();
     try {
       const context = await b.newContext(LAPTOP);
+      // Each time the set as it is now is asked for its DP-LD-101.
+      const drawnLive = [];
+      await context.route('**/commands/display-list', async (route) => {
+        const input = route.request().postDataJSON() ?? {};
+        if (input.sheet === 'DP-LD-101' && input.entry === undefined) drawnLive.push(performance.now());
+        await route.continue();
+      });
       const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
       await live(page);
       const start = await objectOf(page, 'DP-LD-101/device');
@@ -1176,8 +1200,22 @@ const checks = {
       writeFileSync(journalFile, journalAfterFirst);
       await page.waitForFunction(() => document.querySelector('.va-jhead')?.textContent?.includes('1 entry'), null, { timeout: 15000 });
       await at(start.bounds[0] + 0.5);
+
+      // A journal whose first entry is taken away, its newest still the
+      // same number: [1, 2] to [2]. The drawings kept are dropped too, and
+      // the sheet shown is asked for again.
+      assert(sendChange(folder, move('DP-LD-101/device', 0.5)).ok, 'change set 2, again');
+      await at(start.bounds[0] + 1);
+      await page.waitForFunction(() => document.querySelector('.va-jhead')?.textContent?.includes('2 entries'));
+      await sleep(500);
+      const asked = drawnLive.length;
+      const lines = readFileSync(journalFile, 'utf8').split('\n');
+      writeFileSync(journalFile, lines.slice(1).join('\n'));
+      await page.waitForFunction(() => document.querySelector('.va-jhead')?.textContent?.includes('1 entry'), null, { timeout: 15000 });
+      for (let waited = 0; drawnLive.length <= asked && waited < 15000; waited += 100) await sleep(100);
+      assert(drawnLive.length > asked, `the sheet shown is asked for again once the journal's first entry is gone: ${drawnLive.length} after ${asked}`);
       assert(problems.length === 0, problems.join('; '));
-      return { cut_back_to: 1 };
+      return { cut_back_to: 1, first_entry_taken_away: true };
     } finally {
       await b.close();
       await server.stop();

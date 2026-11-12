@@ -7,9 +7,11 @@ import {
   changedOn,
   entryState,
   entryTitle,
+  journalReplaced,
   lastUndoable,
   newest,
   notIssued,
+  recordedEntries,
   sheetsTouched,
   since,
   undoneWith,
@@ -141,6 +143,21 @@ test('the sheets an entry touched are drawn again, and its changes on a sheet ar
     changedBy(report, 'dp-ld-101/border').map((e) => e.entry),
     [1],
   );
+});
+
+test('a journal cut back, or whose entries seen were taken away or rewritten, is not the journal seen', () => {
+  const seen = recordedEntries(report);
+  const only = (numbers: number[]): JournalReport => ({ ...report, entries: report.entries.filter((e) => numbers.includes(e.entry)) });
+  assert.equal(journalReplaced(seen, report), false, 'the same journal');
+  const grown = { ...report, entries: [...report.entries, { entry: 7, kind: 'undo' as const, at: '2026-11-11T20:11:00Z', undid: [6] }] };
+  assert.equal(journalReplaced(seen, grown), false, 'a journal that only grew');
+  // What has become of an entry since is not what it recorded.
+  const later = { ...report, entries: report.entries.map((e) => (e.entry === 6 ? { ...e, undo_state: 'undone' as const, undone_by: 7 } : e)) };
+  assert.equal(journalReplaced(seen, later), false, 'an entry undone since is the same entry');
+  assert.equal(journalReplaced(seen, only([1, 2, 3, 4, 5])), true, 'cut back: the newest entry is gone');
+  assert.equal(journalReplaced(seen, only([2, 3, 4, 5, 6])), true, 'the first entry taken away: the newest is still 6');
+  const rewritten = { ...report, entries: report.entries.map((e) => (e.entry === 3 ? { ...e, at: '2026-11-12T08:00:00Z' } : e)) };
+  assert.equal(journalReplaced(seen, rewritten), true, 'an entry of a number seen rewritten');
 });
 
 test('a change set\'s marks pulse three times as it lands, then hold', () => {
