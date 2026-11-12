@@ -135,7 +135,7 @@ Producing a DWG from a sheet description.
 _Avoid_: compile, render, export
 
 **Build mark**:
-A mark written inside every DWG that AgentDrafter builds, so that a later build knows the file is its own. A build replaces an existing DWG only when it carries the mark; any other file may be an original and is never overwritten.
+A mark written inside every DWG that AgentDrafter builds, so that a later build knows the file is its own. A build replaces an existing DWG only when it carries the mark; any other file may be an original and is never overwritten. A sheet built from a drawing set records the set's folder in its mark, relative to the DWG and never in full, so that an output drawn from the DWG alone finds its set wherever the DWG is.
 _Avoid_: stamp (a stamp records the revision an output came from), signature, watermark
 
 **Declared unit**:

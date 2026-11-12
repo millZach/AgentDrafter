@@ -34,14 +34,15 @@ use super::journal::{
     FileIssued,
 };
 use super::recover::recover;
+use crate::build::is_same_file;
 use crate::check::{check_with, CheckReport, CheckRequest};
 use crate::description::{read_set_settings, SavedSet};
 use crate::error::{Error, ErrorCode};
 use crate::interface::Interface;
 use crate::reply::Reply;
-use crate::set::SET_SETTINGS_FILE;
+use crate::set::{set_of_dwg, SET_SETTINGS_FILE};
 use crate::settings::Settings;
-use crate::stamp::fingerprint;
+use crate::stamp::{fingerprint, SourceKind};
 
 /// A request to accept a drawing set's working revision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -388,24 +389,53 @@ fn revision(folder: &Path, set: &SavedSet) -> Result<Vec<FileIssued>, Error> {
 
 /// `path`, which is inside the set's `folder` or written from it, relative
 /// to it, with `.` and `..` worked out as written and `/` between folders,
-/// such as `blocks.yaml` for `folder/templates/../blocks.yaml`.
+/// such as `blocks.yaml` for `folder/templates/../blocks.yaml` and
+/// `../issued/A.dwg` for `folder/../issued/A.dwg`.
+///
+/// This is the one rule an accept names the set's files by and a stamp
+/// looks them up by. It gives the same name whether `path` still holds its
+/// `..`, as a path joined onto the folder does on most systems, or the join
+/// already took it up, as joining onto a Windows `\\?\` path does, since
+/// both paths are worked out before one is taken from the other.
 pub(crate) fn relative_to(folder: &Path, path: &Path) -> String {
-    let inside = path.strip_prefix(folder).unwrap_or(path);
+    let (folder, folder_roots) = as_written(folder);
+    let (path, path_roots) = as_written(path);
+    let shared = folder.iter().zip(&path).take_while(|(a, b)| a == b).count();
+    let up = &folder[shared..];
+    if folder_roots != path_roots || shared < folder_roots || up.iter().any(|p| p == "..") {
+        // No way from the folder to the path as written: the path itself.
+        return path.join("/");
+    }
+    let mut parts: Vec<&str> = vec![".."; up.len()];
+    parts.extend(path[shared..].iter().map(String::as_str));
+    parts.join("/")
+}
+
+/// The parts of `path`, with `.` and `..` worked out as written, and how
+/// many of them at the start are its root: a drive or a share on Windows,
+/// and `/`. A `..` takes off the folder before it, if there is one, and
+/// stays when there is none, except at the root.
+fn as_written(path: &Path) -> (Vec<String>, usize) {
     let mut parts: Vec<String> = Vec::new();
-    for component in inside.components() {
+    let mut roots = 0;
+    for component in path.components() {
         match component {
             Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir => {
+                parts.push(component.as_os_str().to_string_lossy().into_owned());
+                roots += 1;
+            }
             Component::ParentDir => {
-                if parts.last().is_some_and(|p| p != "..") {
+                if parts.len() > roots && parts.last().is_some_and(|p| p != "..") {
                     parts.pop();
-                } else {
+                } else if roots == 0 {
                     parts.push("..".to_owned());
                 }
             }
-            other => parts.push(other.as_os_str().to_string_lossy().into_owned()),
+            Component::Normal(name) => parts.push(name.to_string_lossy().into_owned()),
         }
     }
-    parts.join("/")
+    (parts, roots)
 }
 
 /// A check's rule as JSON writes it, such as `off_sheet`.
@@ -431,20 +461,84 @@ pub struct StampRevision {
     /// The interface the accept came through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<Interface>,
+    /// Why an output drawn from a DWG on its own cannot be from an issued
+    /// revision, when the drawing set the DWG's build mark names cannot be
+    /// found: the DWG names no set, the set is not there, or it is no
+    /// longer the set the DWG was built from. None otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
-/// What a stamp says of the revision files were read from: issued, by the
-/// newest accept of their drawing set whose revision holds every one of
-/// them with the bytes read, or not issued. The set is the nearest folder
-/// above the first file that holds a set's settings.
-pub(crate) fn stamp_revision(files: &[(&Path, &[u8])]) -> StampRevision {
-    let not_issued = StampRevision {
-        issued: false,
-        accept: None,
-        accepted_at: None,
-        via: None,
+impl StampRevision {
+    /// Not issued, and why when there is more to say than that no accept
+    /// issued the files.
+    fn not_issued(why: Option<String>) -> StampRevision {
+        StampRevision {
+            issued: false,
+            accept: None,
+            accepted_at: None,
+            via: None,
+            why,
+        }
+    }
+}
+
+/// What a stamp says of the revision files were read from, each with its
+/// kind, the record first: issued, by the newest accept of their drawing
+/// set whose revision holds every one of them with the bytes read, or not
+/// issued.
+///
+/// A DWG drawn on its own names its set in its build mark, as Zach decided
+/// on 2026-11-11, so its set is found wherever its output folder is
+/// ([`set_of_dwg`]), and when it cannot be, the revision says why. For any
+/// other record, the set is the nearest folder above it that holds a set's
+/// settings.
+pub(crate) fn stamp_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevision {
+    match files {
+        [(SourceKind::Dwg, dwg, bytes)] => dwg_revision(dwg, bytes),
+        _ => files_revision(files),
+    }
+}
+
+/// What a stamp says of the revision the DWG at `dwg` came from, its bytes
+/// as read: issued when the set its build mark names is still the set it
+/// was built from, and an accept of the set issued the DWG, at its place in
+/// the set's output folder, with these bytes.
+fn dwg_revision(dwg: &Path, bytes: &[u8]) -> StampRevision {
+    let set = match set_of_dwg(dwg) {
+        Ok(set) => set,
+        Err(why) => return StampRevision::not_issued(Some(why)),
     };
-    let Some(&(first, _)) = files.first() else {
+    let Ok(entries) = read_entries(&set.folder) else {
+        return StampRevision::not_issued(Some(
+            "the journal of the drawing set the DWG's build mark names cannot be read, so no \
+             accept of the set can be found"
+                .to_owned(),
+        ));
+    };
+    // The newest accept that issued this file with these bytes, the file
+    // named in it as the DWG is named, or by another name of the same file
+    // as the file system tells it, such as `dwg/DEMO-001.dwg` for
+    // `demo-001.dwg` where letter case is ignored. Each accept is asked in
+    // turn, newest first, so no older accept's name for it shadows a newer.
+    let print = fingerprint(bytes);
+    let accept = entries.iter().rev().find(|e| {
+        e.kind == EntryKind::Accept
+            && e.finished()
+            && e.revision.iter().any(|f| {
+                f.sha256 == print
+                    && (f.path == set.path || is_same_file(&set.folder.join(&f.path), dwg))
+            })
+    });
+    issued(accept)
+}
+
+/// What a stamp says of the revision a sheet description or a template
+/// and the files it draws on came from, their set the nearest folder above
+/// the first.
+fn files_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevision {
+    let not_issued = StampRevision::not_issued(None);
+    let Some(&(_, first, _)) = files.first() else {
         return not_issued;
     };
     let Some(folder) = set_folder_of(first) else {
@@ -454,7 +548,7 @@ pub(crate) fn stamp_revision(files: &[(&Path, &[u8])]) -> StampRevision {
         return not_issued;
     };
     let mut read: Vec<(String, String)> = Vec::with_capacity(files.len());
-    for &(path, bytes) in files {
+    for &(_, path, bytes) in files {
         let Ok(path) = path.canonicalize() else {
             return not_issued;
         };
@@ -463,6 +557,13 @@ pub(crate) fn stamp_revision(files: &[(&Path, &[u8])]) -> StampRevision {
         };
         read.push((relative_to(Path::new(""), inside), fingerprint(bytes)));
     }
+    issued_by(&entries, &read)
+}
+
+/// Issued by the newest finished accept among `entries` whose revision
+/// holds every file `read` lists, by its path in the set and its
+/// fingerprint; not issued when none does.
+fn issued_by(entries: &[Entry], read: &[(String, String)]) -> StampRevision {
     let accept = entries.iter().rev().find(|e| {
         e.kind == EntryKind::Accept
             && e.finished()
@@ -472,14 +573,20 @@ pub(crate) fn stamp_revision(files: &[(&Path, &[u8])]) -> StampRevision {
                     .any(|f| &f.path == path && &f.sha256 == print)
             })
     });
+    issued(accept)
+}
+
+/// Issued by `accept`, when there is one; otherwise not issued.
+fn issued(accept: Option<&Entry>) -> StampRevision {
     match accept {
         Some(accept) => StampRevision {
             issued: true,
             accept: Some(accept.entry),
             accepted_at: Some(accept.at.clone()),
             via: accept.via,
+            why: None,
         },
-        None => not_issued,
+        None => StampRevision::not_issued(None),
     }
 }
 
@@ -513,6 +620,49 @@ mod tests {
         assert_eq!(
             relative_to(set, &set.join("..").join("shared.yaml")),
             "../shared.yaml"
+        );
+    }
+
+    /// A path whose `..` the join already took up, as joining onto a
+    /// Windows `\\?\` path does, is named as the same path with its `..`.
+    #[test]
+    fn a_path_outside_the_set_is_named_alike_however_it_was_joined() {
+        let set = Path::new("/jobs/demo-set");
+        for joined in [
+            set.join("..").join("issued").join("DEMO-001.dwg"),
+            PathBuf::from("/jobs/issued/DEMO-001.dwg"),
+        ] {
+            assert_eq!(relative_to(set, &joined), "../issued/DEMO-001.dwg");
+        }
+        assert_eq!(
+            relative_to(set, Path::new("/jobs/demo-set/dwg/DEMO-001.dwg")),
+            "dwg/DEMO-001.dwg"
+        );
+        assert_eq!(
+            relative_to(Path::new("/"), Path::new("/../x.yaml")),
+            "x.yaml"
+        );
+        assert_eq!(
+            relative_to(Path::new(""), Path::new("dwg/A.dwg")),
+            "dwg/A.dwg"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_set_given_as_a_verbatim_path_names_its_files_as_any_other() {
+        let set = Path::new(r"\\?\C:\jobs\demo-set");
+        // Joined onto a `\\?\` path, `..` is taken up at once.
+        let dwg = set.join("../issued").join("DEMO-001.dwg");
+        assert_eq!(dwg, Path::new(r"\\?\C:\jobs\issued\DEMO-001.dwg"));
+        assert_eq!(relative_to(set, &dwg), "../issued/DEMO-001.dwg");
+        assert_eq!(
+            relative_to(set, &set.join("../outside/ansi-b.yaml")),
+            "../outside/ansi-b.yaml"
+        );
+        assert_eq!(
+            relative_to(set, &set.join("dwg").join("DEMO-001.dwg")),
+            "dwg/DEMO-001.dwg"
         );
     }
 }

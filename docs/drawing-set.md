@@ -68,7 +68,7 @@ The settings are the file `set.yaml` at the top of the set's folder. `agentdraft
 | Key | Required | What it is |
 |---|---|---|
 | `units` | yes | The set's declared unit: `mm`, `cm`, `m`, `in` or `ft`. Every template, sheet description and block library in the set is in it, and every DWG the set builds is in it. There is no default. |
-| `output` | yes | The folder the set's outputs go to, relative to the set's folder, such as `dwg` or `../issued`: its DWGs, and its PDFs when it is plotted. A build or a plot makes it if it is not there. |
+| `output` | yes | The folder the set's outputs go to, relative to the set's folder, such as `dwg` or `../issued`: its DWGs, and its PDFs when it is plotted. A build or a plot makes it if it is not there. Each DWG names the set in its build mark, so a render or a plot of it alone finds the set wherever this folder is ([below](#the-build-mark-names-the-set)). |
 | `rows` | yes | The file the set's rows are in, relative to the set's folder, such as `rows.yaml`. |
 
 A path in a set is written as a sheet description writes its block library's: relative, with `/` between folders on every system, not starting with `/`, and holding none of `\ : < > " | ? *`.
@@ -129,7 +129,7 @@ A sheet description built on its own takes no value from a row: `{row: NAME}` in
 
 ## Building
 
-`agentdrafter build <folder> [--overwrite] [--fonts <folder>]...` reads the settings and the rows, makes the output folder, then builds each row's sheet in turn into `<output>/<sheet>.dwg`, in the 2018 format, with the build mark. `--output` is refused for a set: its settings say where its DWGs go.
+`agentdrafter build <folder> [--overwrite] [--fonts <folder>]...` reads the settings and the rows, makes the output folder, then builds each row's sheet in turn into `<output>/<sheet>.dwg`, in the 2018 format, with the build mark, which names the set ([below](#the-build-mark-names-the-set)). `--output` is refused for a set: its settings say where its DWGs go.
 
 - **Each sheet is built fully or not at all** (ADR-0005). A sheet that fails, because its row lacks a value, its template has a mistake or its DWG cannot be written, writes nothing; a DWG an earlier build left at its path stays as it was.
 - **The other sheets are still built.** One bad row does not stop a long run. The reply says for each sheet what was built and what failed.
@@ -137,7 +137,7 @@ A sheet description built on its own takes no value from a row: `{row: NAME}` in
 - **An existing DWG is replaced only when asked.** Without `--overwrite`, a sheet whose DWG is already there fails with `output_exists`. With it, each sheet replaces only a DWG that carries AgentDrafter's build mark; any other file may be an original, so that sheet fails with `not_a_build` and the file is not touched.
 - **A value the template does not use is reported, not refused.** Zach decided this on 2026-11-11. The sheet is built without it, and its outcome's `notices` lists each such value, so a stray or misspelt one stays in sight: `{"code":"unused_value","message":...,"sheet":"DEMO-003","template":"templates/ansi-b.yaml","field":"rows[2].values.CHECKED","line":...,"column":...,"file":...}`, where the message lists the values the template takes. A value the template needs and the row lacks is still the `missing_value` error. A sheet with nothing to report has `"notices":[]`.
 - **An inconsistent set is reported.** While a change set has landed on some of the set's sheets and failed on others, the reply carries the set's mark under `inconsistent` ([Change sets](change-sets.md#an-inconsistent-set)). The build builds each sheet as its records are.
-- **Building twice gives the same DWGs.** Nothing in a built DWG depends on when, where or on which machine it was built, so the same set builds byte-identical DWGs, in the same folder or another. AutoCAD 2026 read two builds of the demo set as identical.
+- **Building twice gives the same DWGs.** Nothing in a built DWG depends on when, where or on which machine it was built, so the same set builds byte-identical DWGs, in the same folder or another. AutoCAD 2026 read two builds of the demo set as identical. The one thing a DWG holds of where it is, the way back to the set in its build mark, is worked out from the set's `output` as written, so it is the same wherever the set is built; for an output folder beside the set, such as `../issued`, it holds the set's folder's name too ([below](#the-build-mark-names-the-set)).
 
 The reply is one line of JSON. When every sheet was built:
 
@@ -153,6 +153,17 @@ Each sheet's `result` is what building one sheet description reports, with its t
 
 When the settings or the rows cannot be read, the reply is an error alone, as for one sheet description.
 
+### The build mark names the set
+
+Zach decided on 2026-11-11 that **a DWG's build mark records the folder of the set it was built from, relative to the DWG, and never as a path in full**, since these DWGs go to plants. The mark is the custom drawing property `AgentDrafter` that every build writes ([the sheet description](sheet-description.md)), which AutoCAD shows under DWGPROPS; a sheet of a set gives it the value `build; set=` followed by the set's folder, such as `build; set=..` for `examples/demo-set/dwg/DEMO-001.dwg`, or `build; set=../demo-plant` for a DWG in `../issued` of a set in `demo-plant`. Nothing else is added to the DWG: no registered application, no object.
+
+- **The path is the way back from the output folder, as the set writes it**, with `/` between folders on every system: `..` for `output: dwg`, `../../..` for `output: out/a/b`, `.` for `output: .`, and for an output folder beside the set, such as `output: ../issued`, `..` and the set's folder's name. It is worked out from two things alone: `output` as the settings write it, each folder name in it a `..` back; and, for a `..` out of the set, the set's own folder's name, the real one, of the folder the set's path leads to through any link, since that is where `..` from the output folder leads. No other part of any path reaches it, whatever path the set was built by or wherever a link leads, so it holds nothing of where the set is on a machine, and a set's DWGs are the same bytes on Windows, Linux and macOS, whether or not the output folder is a link to a folder elsewhere.
+- **A mark never names a folder above the set.** When the way back would, as from `output: ../../issued`, the DWGs name no set: their mark stays `build`, and a render or a plot of one on its own says it was not issued, as before the mark named the set. The build's reply says so under `no_set_in_marks`, with the set's `output`; the set's own plot, stamped from its template, still says whether it was issued. Since a set's paths are relative ([above](#the-settings)), this is the one case.
+- **A sheet built on its own names no set**: its mark stays `build`, even when its sheet description is in a set's folder.
+- **A change set** builds a sheet's DWG again with the same mark, since it builds it as `build` does.
+- **A render, a plot and `stale`** of the DWG on its own find its set from the mark, wherever the DWG is, an output folder outside the set among them, and stamp `issued` as for the set's own files ([the stamp](render.md#the-stamp)). The mark is followed from the DWG's folder as it is given, and failing that from the folder as the file system resolves it, through links. The DWG is from an issued revision when it is the DWG the set writes, `<output>/<sheet>.dwg`, and an accept issued that file with the same bytes, however it is named: in other letter case where the file system ignores case, say. Every command that reads the set, such as rolling back a commit that never finished ([the journal](journal.md#a-commit-that-never-finished)), finds it the same way.
+- **When the set cannot be found**, the stamp says `issued: false` and why, under `why`: the DWG names no set; the set its mark names is not there, since the DWG or the set has been moved apart, or the set taken away; or the folder holds a set that does not write this DWG, since the DWG was copied or moved out of the set's output folder, or the set's output folder changed. The words name the set as the mark writes it, never by its path in full. A set and its output folder moved together are still found.
+
 ## Errors
 
 Errors take the shape and codes a sheet description's do ([Errors](sheet-description.md#errors)). An error about a row's value is placed at the value in the rows file and names the sheet; an error in a template is placed in the template; an error in the block library, in the library.
@@ -167,7 +178,7 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 
 ## How it is read
 
-`crates/agentdrafter-core/src/description/set.rs` reads the settings and the rows, `template.rs` fills a template in from a row and hands it to the sheet description's reader with the row's own objects, and `set_schema.rs` writes the three schemas. `crates/agentdrafter-core/src/set.rs` builds a set, sheet by sheet, through the same code that builds one sheet description.
+`crates/agentdrafter-core/src/description/set.rs` reads the settings and the rows, `template.rs` fills a template in from a row and hands it to the sheet description's reader with the row's own objects, and `set_schema.rs` writes the three schemas. `crates/agentdrafter-core/src/set.rs` builds a set, sheet by sheet, through the same code that builds one sheet description, works out the set's folder each DWG's build mark records (`set_in_mark`), and finds the set a DWG's mark names (`set_of_dwg`). `src/dwg.rs` writes the mark, and reads it from the DWG's drawing properties alone, without reading the drawing.
 
 ## What is not offered yet
 
