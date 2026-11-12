@@ -143,7 +143,7 @@ The unit a sheet description states for its numbers, such as `mm`. A number with
 _Avoid_: default unit, base unit
 
 **Bare null**:
-An unquoted `null`, `Null`, `NULL` or `~`, or a value left empty, as in `name:`, in a sheet description or another file of a drawing set. On a field whose value is text or a path it means the field is not written: an optional field takes its default and a required one is an error. Quoted, `'null'` is text.
+An unquoted `null`, `Null`, `NULL` or `~`, or a value left empty, as in `name:`, in a sheet description or another file of a drawing set, and JSON's `null` on a key of an object a change set adds. On a field whose value is text or a path it means the field is not written: an optional field takes its default and a required one is an error. Quoted, `'null'` is text.
 _Avoid_: null value, empty value
 
 **Original**:

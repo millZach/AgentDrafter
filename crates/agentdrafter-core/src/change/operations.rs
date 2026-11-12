@@ -148,7 +148,8 @@ fn does(spec: &Spec) -> String {
              to one sheet's row with sheet, or to a template with template, so that it is on \
              every sheet built from it. It is drawn after the objects already there. Without \
              an id it is given one, {object}-1 or the next number free, so that its ID is \
-             fixed for its life. AutoCAD's {}.",
+             fixed for its life. A key sent as null is read as a sheet description reads a \
+             bare null: it leaves an optional text key, such as layer, out. AutoCAD's {}.",
             article(object),
             article(object),
             spec.alias
@@ -716,18 +717,15 @@ fn operation(
                         ))
                     }
                 };
+            // A key sent as `null` is kept: the record writes it as a bare
+            // null, and the sheet's reader reads it as it reads one in any
+            // file (rule 8 of the YAML subset), so it leaves an optional text
+            // or path field out and is an error anywhere else.
             let keys: Map<String, Value> = map
                 .iter()
                 .filter(|(k, _)| !matches!(k.as_str(), OP_KEY | "sheet" | "template"))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            if let Some((key, _)) = keys.iter().find(|(_, v)| v.is_null()) {
-                return Err(fail(
-                    ErrorCode::WrongType,
-                    format!("`{key}` is null; leave a key out to leave it unset"),
-                    key,
-                ));
-            }
             Body::Add { to, keys }
         }
         Kind::Change => {

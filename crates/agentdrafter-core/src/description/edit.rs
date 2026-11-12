@@ -258,7 +258,7 @@ impl RecordFile {
         ordered.sort_by_key(|(key, _)| order.iter().position(|k| k == key).unwrap_or(order.len()));
         let mut entries = Vec::with_capacity(ordered.len());
         for (key, value) in ordered {
-            entries.push(new_entry(key, node_of(value, key)?));
+            entries.push(new_entry(key, node_of(value)));
         }
         let object = Node::new(Kind::Mapping(vec![new_entry(
             kind,
@@ -409,8 +409,8 @@ impl RecordFile {
                     keys.remove(p);
                 }
                 (Value::Null, None) => continue,
-                (value, Some(p)) => keys[p].value = node_of(value, &field)?,
-                (value, None) => keys.push(new_entry(key, node_of(value, &field)?)),
+                (value, Some(p)) => keys[p].value = node_of(value),
+                (value, None) => keys.push(new_entry(key, node_of(value))),
             }
             edited = true;
         }
@@ -1046,33 +1046,23 @@ fn new_entry(key: &str, value: Node) -> Entry {
 }
 
 /// The node a JSON value writes: text for a string, a number or `true` and
-/// `false`, a list for an array and a mapping for an object. `field` says
-/// where it is, for the error that refuses a `null`.
-fn node_of(value: &Value, field: &str) -> Result<Node, Error> {
-    Ok(match value {
+/// `false`, a list for an array, a mapping for an object, and a bare null
+/// for `null`, which the file's reader then reads as it reads its own
+/// (rule 8 of the YAML subset): an optional text or path field so written
+/// is left out, and a required one, or any other, is an error.
+fn node_of(value: &Value) -> Node {
+    match value {
         Value::String(text) => Node::scalar(text.clone()),
         Value::Number(number) => Node::scalar(number.to_string()),
         Value::Bool(b) => Node::scalar(b.to_string()),
-        Value::Null => {
-            return Err(Error::new(
-                ErrorCode::WrongType,
-                "expected a value, found null; leave a key out to leave it unset",
-            )
-            .at_field(field))
-        }
-        Value::Array(items) => Node::new(Kind::Sequence(
-            items
-                .iter()
-                .enumerate()
-                .map(|(i, item)| node_of(item, &index_path(field, i)))
-                .collect::<Result<_, _>>()?,
-        )),
+        Value::Null => Node::bare_null(),
+        Value::Array(items) => Node::new(Kind::Sequence(items.iter().map(node_of).collect())),
         Value::Object(map) => Node::new(Kind::Mapping(
             map.iter()
-                .map(|(key, item)| Ok(new_entry(key, node_of(item, &key_path(field, key))?)))
-                .collect::<Result<_, Error>>()?,
+                .map(|(key, item)| new_entry(key, node_of(item)))
+                .collect(),
         )),
-    })
+    }
 }
 
 fn move_point(node: &mut Node, by: [f64; 3], units: Unit, field: &str) -> Result<(), Error> {

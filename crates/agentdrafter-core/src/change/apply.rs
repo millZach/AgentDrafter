@@ -754,7 +754,10 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
             return refusal;
         }
         let mut keys = keys.clone();
-        if !keys.contains_key("id") {
+        // An `id` sent as `null` is a bare null, which leaves the id out
+        // (rule 8 of the YAML subset), so the object is given one, as an
+        // object added without an `id` is.
+        if keys.get("id").is_none_or(serde_json::Value::is_null) {
             let mut taken: BTreeSet<String> = BTreeSet::new();
             for &k in &sheets {
                 match at.objects(k) {
