@@ -320,9 +320,17 @@ impl Section {
                     // in brackets, such as `0.0076200000000 (+7.Z+"8V?S_LC )`
                     // in a lineweight table (ezdxf's issue #1069). What it
                     // means is not known; the value is what comes before
-                    // it, as ezdxf reads it.
-                    None if value.ends_with(')') => value.split(' ').next().unwrap_or(value),
-                    None => value,
+                    // it, as ezdxf reads it. Anything else after a space
+                    // stays in the value, which then does not read.
+                    None => match value.split_once(' ') {
+                        Some((before, appendix))
+                            if appendix.trim_start().starts_with('(')
+                                && appendix.ends_with(')') =>
+                        {
+                            before
+                        }
+                        _ => value,
+                    },
                 };
                 let section = &mut stack.last_mut().expect("the root").1;
                 section
@@ -477,11 +485,17 @@ mod tests {
         assert_eq!(style.lineweight(Color(1), 0.25), 0.9);
         assert_eq!(style.lineweight(Color(2), 0.25), 1.0);
         assert_eq!(style.color(Color(1)), [0, 0, 255]);
-        // A value whose brackets do not follow a space is still refused.
-        let glued = made_up_ctb_text(&[], "").replacen(" 19=0.9\n", " 19=0.9(x)\n", 1);
-        assert!(PlotStyle::parse_ctb(&ctb_file(&glued))
-            .unwrap_err()
-            .contains("19=0.9(x)"));
+        // Anything else after the value is still refused: brackets that do
+        // not follow a space, and words that are not in brackets.
+        for written in ["0.9(x)", "0.9 garbage)", "0.9 (x) garbage", "0.9 x (y)"] {
+            let text =
+                made_up_ctb_text(&[], "").replacen(" 19=0.9\n", &format!(" 19={written}\n"), 1);
+            let error = PlotStyle::parse_ctb(&ctb_file(&text)).unwrap_err();
+            assert!(
+                error.contains(&format!("19={written}")),
+                "{written}: {error}"
+            );
+        }
     }
 
     #[test]

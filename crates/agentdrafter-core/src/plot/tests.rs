@@ -181,6 +181,38 @@ fn a_pdf_whose_text_shows_a_stamp_is_not_one_agentdrafter_plotted() {
 }
 
 #[test]
+fn a_hostile_pdf_is_not_stamped_and_overwrite_refuses_it() {
+    let dir = scratch("hostile");
+    let source = dir.join("sheet.yaml");
+    fs::write(
+        &source,
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [100, 50, 0]}\n",
+    )
+    .unwrap();
+    // The PDF the review of #57 crashed `stale` with.
+    let hostile = dir.join("hostile.pdf");
+    let bytes = crate::pdf::tests::crashing_pdf();
+    fs::write(&hostile, &bytes).unwrap();
+    let error = crate::check_stale(&crate::StaleRequest {
+        output: hostile.clone(),
+        source: None,
+    })
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotStamped, "{error:?}");
+    let error = plot_with(
+        &PlotRequest {
+            output: Some(hostile.clone()),
+            overwrite: true,
+            ..PlotRequest::new(&source)
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotAnOutput, "{error:?}");
+    assert_eq!(fs::read(&hostile).unwrap(), bytes);
+}
+
+#[test]
 fn a_plot_saved_again_with_object_streams_is_still_ours() {
     let dir = scratch("object-streams");
     let source = dir.join("sheet.yaml");

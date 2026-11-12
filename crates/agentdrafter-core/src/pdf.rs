@@ -406,7 +406,8 @@ fn ascii_json(json: &str) -> String {
 /// string under the key `AgentDrafter` in the dictionary the PDF's last
 /// trailer names as `/Info`, found through its cross-reference sections,
 /// tables or streams. The same text anywhere else, such as in a page's
-/// text, is not a stamp.
+/// text, is not a stamp. A PDF that cannot be read so, however it is
+/// broken, has no stamp.
 pub(crate) fn stamp_in(bytes: &[u8]) -> Option<String> {
     if !bytes.starts_with(b"%PDF-") {
         return None;
@@ -421,8 +422,8 @@ pub(crate) fn stamp_in(bytes: &[u8]) -> Option<String> {
 /// the last to find the document information.
 const MOST_SECTIONS: usize = 100;
 
-/// The most bytes a stream the stamp is read through, a cross-reference
-/// stream or an object stream, may unpack to.
+/// The most bytes the streams the stamp is read through, cross-reference
+/// streams and an object stream, may unpack to, all of them together.
 const MOST_STREAM: usize = 64 * 1024 * 1024;
 
 /// How deep arrays and dictionaries inside one another are read.
@@ -435,46 +436,21 @@ const DEEPEST: usize = 32;
 /// with object streams keeps it; the document information may then be
 /// inside an object stream.
 fn document_information(bytes: &[u8]) -> Option<Dictionary> {
-    let keyword = b"startxref";
-    let at = bytes.windows(keyword.len()).rposition(|w| w == keyword)?;
-    let mut next = Lexer::at(bytes, at + keyword.len()).offset();
-    let mut sections = Vec::new();
-    while let Some(at) = next {
-        if sections.len() == MOST_SECTIONS {
-            break;
-        }
-        let section = cross_reference(bytes, at)?;
-        // An update lists only what it changed; the section before it
-        // lists the rest.
-        next = match section.trailer.get(b"Prev") {
-            Some(Value::Number(at)) => Some(usize::try_from(*at).ok()?),
-            _ => None,
-        };
-        sections.push(section);
-    }
-    let (number, generation) = match sections.first()?.trailer.get(b"Info")? {
+    let mut references = CrossReferences::new(bytes)?;
+    let (number, generation) = match references.sections[0].trailer.get(b"Info")? {
         Value::Reference(number, generation) => (*number, *generation),
         _ => return None,
     };
-    // Where the newest section that lists object `number` of generation
-    // `generation` puts it.
-    let place = |number: u64, generation: u64| {
-        sections.iter().find_map(|section| {
-            section
-                .places
-                .iter()
-                .find(|(n, place)| *n == number && place.generation() == generation)
-                .map(|&(_, place)| place)
-        })
-    };
-    match place(number, generation)? {
+    match references.place(number, generation)? {
         Place::At { offset, .. } => {
             let mut lexer = Lexer::at(bytes, offset);
             lexer.object_heading(number, generation)?;
             lexer.dictionary()
         }
-        Place::In { stream } => match place(stream, 0)? {
-            Place::At { offset, .. } => object_in_stream(bytes, offset, stream, number),
+        Place::In { stream } => match references.place(stream, 0)? {
+            Place::At { offset, .. } => {
+                object_in_stream(bytes, offset, stream, number, &mut references.budget)
+            }
             Place::In { .. } => None,
         },
     }
@@ -498,20 +474,145 @@ impl Place {
     }
 }
 
-/// One cross-reference section: where each object in use it lists is, by
-/// its number, and its trailer.
+/// A PDF's cross-reference sections, read from the newest back as far as
+/// a lookup needs, within one budget of unpacked bytes.
+struct CrossReferences<'a> {
+    bytes: &'a [u8],
+    /// The sections read so far, the newest first.
+    sections: Vec<Section>,
+    /// Where the next older section starts, if there is one.
+    older: Option<usize>,
+    /// How many more bytes streams may unpack to.
+    budget: usize,
+}
+
+impl<'a> CrossReferences<'a> {
+    /// The PDF's cross-references, with its newest section, the one its
+    /// last `startxref` names, read.
+    fn new(bytes: &'a [u8]) -> Option<CrossReferences<'a>> {
+        let keyword = b"startxref";
+        let at = bytes.windows(keyword.len()).rposition(|w| w == keyword)?;
+        let mut references = CrossReferences {
+            bytes,
+            sections: Vec::new(),
+            older: Lexer::at(bytes, at + keyword.len()).offset(),
+            budget: MOST_STREAM,
+        };
+        references.read_older()?;
+        Some(references)
+    }
+
+    /// Reads the next older section. `None` when there is none, or it
+    /// cannot be read.
+    fn read_older(&mut self) -> Option<()> {
+        if self.sections.len() == MOST_SECTIONS {
+            return None;
+        }
+        let section = cross_reference(self.bytes, self.older?, &mut self.budget)?;
+        // An update lists only what it changed; the section before it
+        // lists the rest.
+        self.older = match section.trailer.get(b"Prev") {
+            Some(Value::Number(at)) => Some(usize::try_from(*at).ok()?),
+            _ => None,
+        };
+        self.sections.push(section);
+        Some(())
+    }
+
+    /// Where the newest section that lists object `number` of generation
+    /// `generation` in use puts it.
+    fn place(&mut self, number: u64, generation: u64) -> Option<Place> {
+        let mut i = 0;
+        loop {
+            if i == self.sections.len() {
+                self.read_older()?;
+            }
+            if let Some(place) = self.sections[i].places.find(number, generation) {
+                return Some(place);
+            }
+            i += 1;
+        }
+    }
+}
+
+/// One cross-reference section: where the objects in use it lists are, and
+/// its trailer.
 struct Section {
-    places: Vec<(u64, Place)>,
+    places: Places,
     trailer: Dictionary,
 }
 
+/// Where a section's objects in use are: a table's, each by its number, or
+/// a cross-reference stream's rows, looked up as they are asked for.
+enum Places {
+    Table(Vec<(u64, Place)>),
+    Stream(Rows),
+}
+
+impl Places {
+    fn find(&self, number: u64, generation: u64) -> Option<Place> {
+        let place = match self {
+            Places::Table(places) => places
+                .iter()
+                .find(|(n, place)| *n == number && place.generation() == generation)
+                .map(|&(_, place)| place),
+            Places::Stream(rows) => rows.find(number),
+        }?;
+        (place.generation() == generation).then_some(place)
+    }
+}
+
+/// A cross-reference stream's rows: one for each object it lists, in
+/// fields of the widths its `/W` gives, for the runs of object numbers its
+/// `/Index` gives. Every row is in the data, as checked when it was read.
+struct Rows {
+    data: Vec<u8>,
+    widths: [usize; 3],
+    /// Each run's first object number and how many it holds.
+    runs: Vec<(u64, u64)>,
+}
+
+impl Rows {
+    /// Where the row of object `number` puts it, if the stream lists it in
+    /// use: type 1, at a place, with its generation, or type 2, in an
+    /// object stream. A free row, or one of a type a reader does not know,
+    /// lists nothing.
+    fn find(&self, number: u64) -> Option<Place> {
+        let [type_width, second_width, third_width] = self.widths;
+        let width = type_width + second_width + third_width;
+        let mut before = 0u64;
+        for &(first, count) in &self.runs {
+            if let Some(into) = number.checked_sub(first).filter(|into| *into < count) {
+                let at = usize::try_from(before + into).ok()?.checked_mul(width)?;
+                let row = self.data.get(at..at.checked_add(width)?)?;
+                let field = |bytes: &[u8]| bytes.iter().fold(0u64, |n, &b| n << 8 | u64::from(b));
+                let (kind, rest) = row.split_at(type_width);
+                let (second, third) = rest.split_at(second_width);
+                // With no width for the type, every row is of type 1.
+                return match if type_width == 0 { 1 } else { field(kind) } {
+                    1 => Some(Place::At {
+                        generation: field(third),
+                        offset: usize::try_from(field(second)).ok()?,
+                    }),
+                    2 => Some(Place::In {
+                        stream: field(second),
+                    }),
+                    _ => None,
+                };
+            }
+            before += count;
+        }
+        None
+    }
+}
+
 /// The cross-reference section at `at`: a table and the trailer after it,
-/// or a cross-reference stream.
-fn cross_reference(bytes: &[u8], at: usize) -> Option<Section> {
+/// or a cross-reference stream, whose data unpacks within `budget`.
+fn cross_reference(bytes: &[u8], at: usize, budget: &mut usize) -> Option<Section> {
     let mut lexer = Lexer::at(bytes, at);
     match lexer.next()? {
         Token::Word(b"xref") => {}
-        Token::Word(_) => return cross_reference_stream(bytes, at),
+        Token::Word(_) => return cross_reference_stream(bytes, at, budget),
         _ => return None,
     }
     let mut places = Vec::new();
@@ -533,18 +634,20 @@ fn cross_reference(bytes: &[u8], at: usize) -> Option<Section> {
         }
     }
     Some(Section {
-        places,
+        places: Places::Table(places),
         trailer: lexer.dictionary()?,
     })
 }
 
-/// The cross-reference stream whose object starts at `at`. Its dictionary
-/// is the section's trailer. Its data is a row for each object it lists,
-/// in fields of the widths its `/W` gives: the row's type, 1 for an object
-/// at a place and 2 for one in an object stream, then the object's place
-/// and its generation, or the object stream's number and the object's
-/// index in it.
-fn cross_reference_stream(bytes: &[u8], at: usize) -> Option<Section> {
+/// The cross-reference stream whose object starts at `at`, whose data
+/// unpacks within `budget`. Its dictionary is the section's trailer, and
+/// its data a row for each object its `/Index` lists, in fields of the
+/// widths its `/W` gives, none wider than 8 bytes: the row's type, 1 for
+/// an object at a place and 2 for one in an object stream, then the
+/// object's place and its generation, or the object stream's number and
+/// the object's index in it. A stream whose rows the data does not hold
+/// is not read.
+fn cross_reference_stream(bytes: &[u8], at: usize, budget: &mut usize) -> Option<Section> {
     let mut lexer = Lexer::at(bytes, at);
     let (_, _) = (lexer.number()?, lexer.number()?);
     if lexer.next()? != Token::Word(b"obj") {
@@ -554,77 +657,61 @@ fn cross_reference_stream(bytes: &[u8], at: usize) -> Option<Section> {
     if dictionary.get(b"Type") != Some(&Value::Name(b"XRef".to_vec())) {
         return None;
     }
-    let data = lexer.stream(&dictionary)?;
     let widths: Vec<usize> = dictionary
         .numbers(b"W")?
         .into_iter()
         .map(|w| usize::try_from(w).ok().filter(|w| *w <= 8))
         .collect::<Option<_>>()?;
-    let [type_width, second_width, third_width] = widths[..] else {
-        return None;
-    };
+    let widths: [usize; 3] = widths.try_into().ok()?;
+    let width: usize = widths.iter().sum();
     let index = match dictionary.get(b"Index") {
         None => vec![0, dictionary.number(b"Size")?],
         Some(_) => dictionary.numbers(b"Index")?,
     };
-    if index.len() % 2 != 0 {
+    if width == 0 || index.is_empty() || index.len() % 2 != 0 {
         return None;
     }
-    let width = type_width + second_width + third_width;
-    if width == 0 {
-        return None;
+    let runs: Vec<(u64, u64)> = index.chunks(2).map(|run| (run[0], run[1])).collect();
+    let data = lexer.stream(&dictionary, budget)?;
+    let mut rows = 0u64;
+    for &(first, count) in &runs {
+        first.checked_add(count)?;
+        rows = rows.checked_add(count)?;
     }
-    let mut rows = data.chunks_exact(width);
-    let field = |bytes: &[u8]| bytes.iter().fold(0u64, |n, &b| n << 8 | u64::from(b));
-    let mut places = Vec::new();
-    for pair in index.chunks(2) {
-        let (first, count) = (pair[0], pair[1]);
-        for number in first..first.checked_add(count)? {
-            let row = rows.next()?;
-            let (kind, rest) = row.split_at(type_width);
-            let (second, third) = rest.split_at(second_width);
-            // With no width for the type, every row is of type 1.
-            let kind = if type_width == 0 { 1 } else { field(kind) };
-            match kind {
-                1 => places.push((
-                    number,
-                    Place::At {
-                        generation: field(third),
-                        offset: usize::try_from(field(second)).ok()?,
-                    },
-                )),
-                2 => places.push((
-                    number,
-                    Place::In {
-                        stream: field(second),
-                    },
-                )),
-                // A free object, or a type a reader does not know.
-                _ => {}
-            }
-        }
+    if usize::try_from(rows).ok()?.checked_mul(width)? > data.len() {
+        return None;
     }
     Some(Section {
-        places,
+        places: Places::Stream(Rows { data, widths, runs }),
         trailer: dictionary,
     })
 }
 
 /// The dictionary that is object `number` inside the object stream
-/// `stream`, whose object starts at `at`. The stream's data starts with a
-/// number and a place for each object it holds, the places counted from
-/// its `/First` byte.
-fn object_in_stream(bytes: &[u8], at: usize, stream: u64, number: u64) -> Option<Dictionary> {
+/// `stream`, whose object starts at `at` and whose data unpacks within
+/// `budget`. The stream's data starts with a number and a place for each
+/// object it holds, the places counted from its `/First` byte.
+fn object_in_stream(
+    bytes: &[u8],
+    at: usize,
+    stream: u64,
+    number: u64,
+    budget: &mut usize,
+) -> Option<Dictionary> {
     let mut lexer = Lexer::at(bytes, at);
     lexer.object_heading(stream, 0)?;
     let dictionary = lexer.dictionary()?;
     if dictionary.get(b"Type") != Some(&Value::Name(b"ObjStm".to_vec())) {
         return None;
     }
-    let data = lexer.stream(&dictionary)?;
+    let count = dictionary.number(b"N")?;
     let first = usize::try_from(dictionary.number(b"First")?).ok()?;
-    let mut heading = Lexer::at(&data, 0);
-    for _ in 0..dictionary.number(b"N")? {
+    let data = lexer.stream(&dictionary, budget)?;
+    if first > data.len() {
+        return None;
+    }
+    let mut heading = Lexer::at(&data[..first], 0);
+    for _ in 0..count {
         let (n, offset) = (heading.number()?, heading.offset()?);
         if n == number {
             return Lexer::at(&data, first.checked_add(offset)?).dictionary();
@@ -633,10 +720,12 @@ fn object_in_stream(bytes: &[u8], at: usize, stream: u64, number: u64) -> Option
     None
 }
 
-/// The data of a stream, unpacked: by deflate, the filter cross-reference
-/// and object streams are packed with, with or without a PNG predictor, or
-/// by no filter. A stream packed any other way is not read.
-fn unpacked(packed: &[u8], dictionary: &Dictionary) -> Option<Vec<u8>> {
+/// The data of a stream, unpacked within `budget`, which it then takes
+/// from: by deflate, the filter cross-reference and object streams are
+/// packed with, with or without a PNG predictor, or by no filter. A stream
+/// packed any other way, or whose predictor's rows its data does not hold,
+/// is not read.
+fn unpacked(packed: &[u8], dictionary: &Dictionary, budget: &mut usize) -> Option<Vec<u8>> {
     // A filter and its parameters are written alone or in a list of one.
     let alone = |value: Option<&Value>| match value {
         Some(Value::Array(items)) => match &items[..] {
@@ -646,12 +735,14 @@ fn unpacked(packed: &[u8], dictionary: &Dictionary) -> Option<Vec<u8>> {
         other => other.cloned(),
     };
     let data = match alone(dictionary.get(b"Filter")) {
-        None => return Some(packed.to_vec()),
+        None if packed.len() <= *budget => packed.to_vec(),
+        None => return None,
         Some(Value::Name(name)) if name == b"FlateDecode" => {
-            miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(packed, MOST_STREAM).ok()?
+            miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(packed, *budget).ok()?
         }
         Some(_) => return None,
     };
+    *budget -= data.len();
     let parameters = match alone(dictionary.get(b"DecodeParms")) {
         None => return Some(data),
         Some(Value::Dictionary(parameters)) => parameters,
@@ -678,18 +769,18 @@ fn unpacked(packed: &[u8], dictionary: &Dictionary) -> Option<Vec<u8>> {
 }
 
 /// `data` with its PNG predictors undone: rows of `width` bytes, each after
-/// a byte naming how it was predicted, `pixel` bytes to a pixel.
+/// a byte naming how it was predicted, `pixel` bytes to a pixel. Data that
+/// is not whole rows of that width is not read, and nothing is set aside
+/// for a row before that is known.
 fn png_unpredicted(data: &[u8], width: usize, pixel: usize) -> Option<Vec<u8>> {
-    if width == 0 {
+    let stride = width.checked_add(1)?;
+    if width == 0 || data.is_empty() || !data.len().is_multiple_of(stride) {
         return None;
     }
     let mut out: Vec<u8> = Vec::with_capacity(data.len());
     let mut above = vec![0u8; width];
-    for row in data.chunks(width + 1) {
+    for row in data.chunks_exact(stride) {
         let (&predictor, row) = row.split_first()?;
-        if row.len() != width {
-            return None;
-        }
         let mut line = vec![0u8; width];
         for i in 0..width {
             let left = if i >= pixel { line[i - pixel] } else { 0 };
@@ -928,10 +1019,10 @@ impl<'a> Lexer<'a> {
     }
 
     /// The data of the stream whose dictionary, `dictionary`, has just been
-    /// read, unpacked: the bytes after the keyword `stream` and its line
-    /// break, as many as its `/Length` says, or up to `endstream` when its
-    /// length is not written as a number there.
-    fn stream(&mut self, dictionary: &Dictionary) -> Option<Vec<u8>> {
+    /// read, unpacked within `budget`: the bytes after the keyword `stream`
+    /// and its line break, as many as its `/Length` says, or up to
+    /// `endstream` when its length is not written as a number there.
+    fn stream(&mut self, dictionary: &Dictionary, budget: &mut usize) -> Option<Vec<u8>> {
         if self.next()? != Token::Word(b"stream") {
             return None;
         }
@@ -950,7 +1041,7 @@ impl<'a> Lexer<'a> {
                 packed
             }
         };
-        unpacked(packed, dictionary)
+        unpacked(packed, dictionary, budget)
     }
 }
 
@@ -1195,6 +1286,137 @@ pub(crate) mod tests {
         assert_eq!(png_unpredicted(&[0, 1, 2], 4, 2), None);
     }
 
+    /// The PDF of about 200 bytes the review of #57 crashed `stale` with: a
+    /// cross-reference stream whose PNG predictor's `/Columns` is the
+    /// largest whole number.
+    pub(crate) fn crashing_pdf() -> Vec<u8> {
+        let data = miniz_oxide::deflate::compress_to_vec_zlib(&[2, 1, 0, 9, 0], 6);
+        let mut bytes = format!(
+            "%PDF-1.7\n1 0 obj\n<< /Type /XRef /Size 1 /W [1 1 1] /Info 1 0 R /Filter \
+             /FlateDecode /DecodeParms << /Predictor 12 /Columns 18446744073709551615 >> \
+             /Length {} >>\nstream\n",
+            data.len()
+        )
+        .into_bytes();
+        bytes.extend(data);
+        bytes.extend(b"\nendstream\nendobj\nstartxref\n9\n%%EOF\n");
+        bytes
+    }
+
+    /// A PDF of an object stream holding its document information, object
+    /// 2, `<< /AgentDrafter (stamp) >>`, and a cross-reference stream that
+    /// lists it, in rows of the widths `/W [1 2 1]`, three bytes a field.
+    /// `objects` is written into the object stream's dictionary in place of
+    /// its true `/N` and `/First` when given, and `xref` into the
+    /// cross-reference stream's; `columns`, when given, sends the rows
+    /// through PNG's predictor with that `/Columns`.
+    fn object_stream_pdf(objects: Option<&str>, xref: &str, columns: Option<&str>) -> Vec<u8> {
+        let inside = b"2 0 << /AgentDrafter (stamp) >>";
+        let packed = miniz_oxide::deflate::compress_to_vec_zlib(inside, 6);
+        let counts = objects.map_or_else(|| "/N 1 /First 4".to_owned(), str::to_owned);
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let stream_at = bytes.len();
+        bytes.extend(
+            format!(
+                "1 0 obj\n<< /Type /ObjStm {counts} /Filter /FlateDecode /Length {} >>\nstream\n",
+                packed.len()
+            )
+            .as_bytes(),
+        );
+        bytes.extend(&packed);
+        bytes.extend(b"\nendstream\nendobj\n");
+        let xref_at = bytes.len();
+        let rows: [[u8; 4]; 4] = [
+            [0, 0, 0, 0],
+            [1, 0, stream_at as u8, 0],
+            [2, 0, 1, 0],
+            [1, (xref_at >> 8) as u8, xref_at as u8, 0],
+        ];
+        let (data, parameters) = match columns {
+            None => (rows.concat(), String::new()),
+            Some(columns) => (
+                rows.iter()
+                    .flat_map(|row| [&[0][..], row].concat())
+                    .collect(),
+                format!("/DecodeParms << /Predictor 12 /Columns {columns} >>"),
+            ),
+        };
+        let data = miniz_oxide::deflate::compress_to_vec_zlib(&data, 6);
+        bytes.extend(
+            format!(
+                "3 0 obj\n<< /Type /XRef /Size 4 /Info 2 0 R {xref} /Filter /FlateDecode \
+                 {parameters} /Length {} >>\nstream\n",
+                data.len()
+            )
+            .as_bytes(),
+        );
+        bytes.extend(data);
+        bytes.extend(format!("\nendstream\nendobj\nstartxref\n{xref_at}\n%%EOF\n").as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_hostile_pdf_reads_as_not_stamped_and_never_panics() {
+        // The review's crash: the predictor's rows were set aside before
+        // they were checked against the data.
+        let crashing = crashing_pdf();
+        assert!(crashing.len() < 250, "{}", crashing.len());
+        assert_eq!(stamp_in(&crashing), None);
+
+        // The same PDF, well formed, reads, with its predictor and without.
+        let fields = "/W [1 2 1]";
+        assert_eq!(
+            stamp_in(&object_stream_pdf(None, fields, None)).as_deref(),
+            Some("stamp")
+        );
+        assert_eq!(
+            stamp_in(&object_stream_pdf(None, fields, Some("4"))).as_deref(),
+            Some("stamp")
+        );
+        // Each number a hostile PDF could make huge, or make disagree with
+        // the data it describes, makes it read as not stamped.
+        let huge = "18446744073709551615";
+        for columns in [huge, "4294967295", "3", "5", "0"] {
+            let pdf = object_stream_pdf(None, fields, Some(columns));
+            assert_eq!(stamp_in(&pdf), None, "/Columns {columns}");
+        }
+        for broken in [
+            format!("/Colors {huge} /Columns"),
+            format!("/BitsPerComponent {huge} /Columns"),
+            "/Colors 33 /Columns".to_owned(),
+        ] {
+            let pdf = object_stream_pdf(None, fields, Some(&format!("4 {broken} 4")));
+            assert_eq!(stamp_in(&pdf), None, "{broken}");
+        }
+        for xref in [
+            format!("/W [1 {huge} 1]"),
+            "/W [8 8 8]".to_owned(),
+            "/W [1 2]".to_owned(),
+            "/W [0 0 0]".to_owned(),
+            format!("/W [1 2 1] /Index [0 {huge}]"),
+            format!("/W [1 2 1] /Index [{huge} 4]"),
+            "/W [1 2 1] /Index [0 1000000000000]".to_owned(),
+            "/W [1 2 1] /Index [0 5]".to_owned(),
+            "/W [1 2 1] /Index [0 2 2]".to_owned(),
+            "/W [1 2 1] /Index []".to_owned(),
+        ] {
+            assert_eq!(
+                stamp_in(&object_stream_pdf(None, &xref, None)),
+                None,
+                "{xref}"
+            );
+        }
+        for objects in [
+            format!("/N {huge} /First {huge}"),
+            format!("/N 1 /First {huge}"),
+            "/N 1 /First 99".to_owned(),
+            format!("/N {huge} /First 0"),
+        ] {
+            let pdf = object_stream_pdf(Some(&objects), fields, None);
+            assert_eq!(stamp_in(&pdf), None, "{objects}");
+        }
+    }
+
     #[test]
     fn a_stream_packed_another_way_is_not_read() {
         let stream = |dictionary: &str, data: &[u8]| {
@@ -1204,7 +1426,8 @@ pub(crate) mod tests {
             bytes.extend(b"\nendstream");
             let mut lexer = Lexer::at(&bytes, 0);
             let dictionary = lexer.dictionary().unwrap();
-            lexer.stream(&dictionary)
+            let mut budget = MOST_STREAM;
+            lexer.stream(&dictionary, &mut budget)
         };
         let packed = miniz_oxide::deflate::compress_to_vec_zlib(b"1 2 3", 6);
         assert_eq!(stream("", b"1 2 3").unwrap(), b"1 2 3");
