@@ -442,6 +442,7 @@ fn stream_journal(
     Deadline::after(limit).write(stream, head.as_bytes())?;
     let journal = find_command("journal").expect("the registry holds `journal`");
     let mut seen: Option<Option<(u64, SystemTime)>> = None;
+    let mut sent: Option<String> = None;
     let mut said = Instant::now();
     loop {
         let now = journal_state(set);
@@ -452,9 +453,15 @@ fn stream_journal(
             // maps, which always serialize, and JSON escapes every line
             // break, so it is one line of data.
             let data = serde_json::to_string(&reply).expect("a reply serializes to JSON");
-            let event = format!("event: journal\ndata: {data}\n\n");
-            Deadline::after(limit).write(stream, event.as_bytes())?;
-            said = Instant::now();
+            // A change set's entry is written pending and then marked done:
+            // a look between the two waits for the commit, and its reply
+            // already holds the entry done, so the second says nothing new.
+            if sent.as_ref() != Some(&data) {
+                let event = format!("event: journal\ndata: {data}\n\n");
+                Deadline::after(limit).write(stream, event.as_bytes())?;
+                sent = Some(data);
+                said = Instant::now();
+            }
         } else if said.elapsed() >= KEEP_ALIVE {
             Deadline::after(limit).write(stream, b": still watching\n\n")?;
             said = Instant::now();

@@ -9,9 +9,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, change_with, journal, undo, ChangeReport, ChangeRequest, EntryKind, ErrorCode,
-    JournalReport, JournalRequest, Reply, SetBuildRequest, Settings, UndoAction, UndoReport,
-    UndoRequest, UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, MARK_FILE, UNDO_STATES_FOLDER,
+    build_set_with, change_with, journal, undo, ChangeReport, ChangeRequest, CommitState,
+    EntryKind, ErrorCode, JournalReport, JournalRequest, Reply, SetBuildRequest, Settings,
+    UndoAction, UndoReport, UndoRequest, UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, MARK_FILE,
+    UNDO_STATES_FOLDER,
 };
 use serde_json::{json, Value};
 
@@ -206,13 +207,37 @@ fn the_journal_lists_each_change_set_and_failed_attempt_with_its_operations_and_
         .message
         .contains("2 change sets, 2 failed attempts and 0 undos"));
 
-    // The file is JSON lines: an agent reads it a line at a time.
+    // The file is JSON lines: an agent reads it a line at a time. A change
+    // set's entry is written pending before its files, and a line of its own
+    // marks it done once they are in place; a failed attempt is written
+    // whole.
     let text = fs::read_to_string(set.join(JOURNAL_FILE)).unwrap();
-    assert_eq!(text.lines().count(), 4);
-    for (i, line) in text.lines().enumerate() {
-        let entry: Value = serde_json::from_str(line).unwrap();
-        assert_eq!(entry["entry"], i + 1);
-    }
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let read: Vec<(&Value, Option<&str>, Option<&str>)> = lines
+        .iter()
+        .map(|l| (&l["entry"], l["kind"].as_str(), l["state"].as_str()))
+        .collect();
+    assert_eq!(
+        read,
+        [
+            (&json!(1), Some("change_set"), Some("pending")),
+            (&json!(1), None, Some("done")),
+            (&json!(2), Some("change_set"), Some("pending")),
+            (&json!(2), None, Some("done")),
+            (&json!(3), Some("failed_attempt"), None),
+            (&json!(4), Some("failed_attempt"), None),
+        ]
+    );
+    // As read back, each change set is done.
+    let states: Vec<Option<CommitState>> =
+        report.entries.iter().map(|e| e.recorded.state).collect();
+    assert_eq!(
+        states,
+        [Some(CommitState::Done), Some(CommitState::Done), None, None]
+    );
 }
 
 #[test]
@@ -575,7 +600,8 @@ fn a_journal_line_that_is_no_entry_is_reported_with_its_line() {
     fs::write(&path, text).unwrap();
     let error = journal(&JournalRequest { set: set.clone() }).error.unwrap();
     assert_eq!(error.code, ErrorCode::ReadFailed);
-    assert_eq!(error.line, Some(2));
+    // After the change set's entry and the line that marks it done.
+    assert_eq!(error.line, Some(3));
     // A change set does not land on a journal that cannot be read: it could
     // not be undone.
     let before = snapshot(&set);

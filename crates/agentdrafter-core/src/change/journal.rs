@@ -4,10 +4,18 @@
 //!
 //! The journal is the file [`JOURNAL_FILE`], in JSON lines: one entry per
 //! line, each a JSON object, appended in order and never rewritten, so an
-//! agent reads it a line at a time. A change set's entry is added in the
-//! same all-or-nothing step as its files (`commit.rs`), so a change set
-//! lands only with its entry. A failed attempt changed nothing, and its
-//! entry is added after it.
+//! agent reads it a line at a time. A change set's entry is written ahead of
+//! its files, as Zach decided on 2026-11-11: added and synced, `pending`,
+//! before any of them is put in place, and marked done by a line of its own
+//! once all are (`commit.rs`), so a change set lands only with its entry.
+//! An undo's and an accept's are written the same way. An entry a killed
+//! process left pending is rolled back by the next command that reads the
+//! set, and marked so by a line of its own (`recover.rs`). A failed attempt
+//! changed nothing, and its entry is added after it, whole.
+//!
+//! Every entry is added holding the set's journal lock, [`LOCK_FILE`], so
+//! that a command reading the set while another process commits waits for
+//! that commit to finish rather than rolling it back.
 //!
 //! An undo state is the bytes a change set's undo needs: each file it wrote,
 //! as it was before. The entry holds each file's SHA-256 before and after;
@@ -22,15 +30,15 @@
 //! Nothing here depends on git, or on the set's folder being a repository.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::commit::{commit, Append, Replacement};
+use super::commit::{add_line, commit, Ahead, Before, Replacement};
 use super::{inconsistent, ChangeReport, ChangeRequest, Inconsistent};
 use crate::description::read_set_settings;
 use crate::error::{Error, ErrorCode};
@@ -52,6 +60,15 @@ pub const UNDO_STATES_FOLDER: &str = ".agentdrafter/undo-states";
 /// decided on 2026-11-11. An older change set's undo state is pruned.
 pub const KEPT_UNDO_STATES: usize = 50;
 
+/// The file, relative to a drawing set's folder, that a process holds
+/// locked while it adds to the set's journal, and while it rolls back an
+/// entry another left pending. It holds nothing.
+pub const LOCK_FILE: &str = ".agentdrafter/journal.lock";
+
+/// How long a command waits for another process to finish adding to the
+/// set's journal before it gives up.
+const LOCK_WAIT: Duration = Duration::from_secs(30);
+
 /// What a journal entry records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +86,47 @@ pub enum EntryKind {
     Accept,
 }
 
+/// Where the commit of a change set, an undo or an accept, written ahead of
+/// its files, got to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitState {
+    /// Written, before any of its files was put in place, and not yet
+    /// marked done: its commit has not finished.
+    Pending,
+    /// Every file was put in place, and the entry marked done.
+    Done,
+    /// Its commit never finished, since the process writing it stopped, and
+    /// a later command put every file back as it was before, byte for byte:
+    /// it changed nothing.
+    RolledBack,
+}
+
+/// A line of the journal that marks an earlier entry, written pending,
+/// done or rolled back. It is no entry of its own and takes no number.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateLine {
+    /// The entry it marks.
+    entry: u64,
+    state: CommitState,
+    /// When it was added, in UTC.
+    at: String,
+    /// For a rollback, each file it put back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    files: Vec<FileState>,
+}
+
+/// How an entry whose commit never finished was rolled back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RollBack {
+    /// When, in UTC.
+    pub at: String,
+    /// Each file the rollback put back: its SHA-256 as the rollback found
+    /// it, `before`, and as it put it back, `after`.
+    pub files: Vec<FileState>,
+}
+
 /// One entry of the journal, as its line holds it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -76,6 +134,13 @@ pub struct Entry {
     /// set is undone by its entry's number.
     pub entry: u64,
     pub kind: EntryKind,
+    /// Where its commit got to: `pending` on the entry's own line, written
+    /// before any of its files was put in place, and, as read, what a later
+    /// line marks it, `done` or `rolled_back`. None for a failed attempt,
+    /// and for an entry written before entries were written ahead, each of
+    /// which was written whole once its files were in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<CommitState>,
     /// When it was added, in UTC, such as `2026-11-11T18:57:46Z`.
     pub at: String,
     /// The change set as it was sent, with its operations; for a change set
@@ -124,6 +189,10 @@ pub struct Entry {
     /// the set's folder, and the SHA-256 of its bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revision: Vec<FileIssued>,
+    /// How it was rolled back, when it was: read from the line that marks
+    /// it so, not from its own.
+    #[serde(skip)]
+    pub rolled_back: Option<RollBack>,
 }
 
 impl Entry {
@@ -133,6 +202,7 @@ impl Entry {
         Self {
             entry,
             kind,
+            state: None,
             at: now(),
             change_set: None,
             landed_on: Vec::new(),
@@ -147,7 +217,18 @@ impl Entry {
             issued: Vec::new(),
             failed_checks: Vec::new(),
             revision: Vec::new(),
+            rolled_back: None,
         }
+    }
+
+    /// Whether its commit finished: it was written whole, or marked done.
+    /// An entry pending or rolled back changed nothing, as far as the set
+    /// is concerned, and is passed over.
+    pub fn finished(&self) -> bool {
+        !matches!(
+            self.state,
+            Some(CommitState::Pending | CommitState::RolledBack)
+        )
     }
 }
 
@@ -280,12 +361,20 @@ pub struct JournalEntry {
     /// The accept that issued a change set, which can no longer be undone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issued_by: Option<u64>,
+    /// How an entry whose commit never finished was rolled back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rolled_back: Option<RollBack>,
 }
 
 /// Reads a drawing set's journal: every change set and failed attempt, and
-/// every undo, with which change sets can still be undone.
+/// every undo, with which change sets can still be undone. An entry a
+/// commit that never finished left pending is rolled back first, and the
+/// reply says so under `rolled_back`.
 pub fn journal(request: &JournalRequest) -> Reply<JournalReport> {
-    Reply::from(read_journal(&request.set))
+    match super::recover(&request.set) {
+        Ok(rolled_back) => Reply::from(read_journal(&request.set)).after(rolled_back),
+        Err(error) => Reply::from(Err(error)),
+    }
 }
 
 fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
@@ -293,7 +382,21 @@ fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
     let entries = read_entries(folder)?;
     let fates = fates(&entries);
     let can_undo = undoable(&entries, &fates);
-    let count = |kind: EntryKind| entries.iter().filter(|e| e.kind == kind).count();
+    let count = |kind: EntryKind| {
+        entries
+            .iter()
+            .filter(|e| e.kind == kind && e.finished())
+            .count()
+    };
+    let in_state = |state: CommitState| -> Vec<u64> {
+        entries
+            .iter()
+            .filter(|e| e.state == Some(state))
+            .map(|e| e.entry)
+            .collect()
+    };
+    let rolled_back = in_state(CommitState::RolledBack);
+    let pending = in_state(CommitState::Pending);
     let message = if entries.is_empty() {
         "the journal is empty: no change set has been applied to the set".to_owned()
     } else {
@@ -304,8 +407,25 @@ fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
         } else {
             format!(", {undos} and {}", counted(accepts, "accept"))
         };
+        let mut rolled = match rolled_back.as_slice() {
+            [] => String::new(),
+            [one] => format!(
+                "; entry {one} was rolled back, since its commit never finished, and changed \
+                 nothing"
+            ),
+            more => format!(
+                "; entries {} were rolled back, since their commits never finished, and changed \
+                 nothing",
+                listed(more)
+            ),
+        };
+        if let Some(entry) = pending.first() {
+            rolled.push_str(&format!(
+                "; entry {entry} is pending: its commit has not finished"
+            ));
+        }
         format!(
-            "the journal records {}, {}{rest}. {}",
+            "the journal records {}, {}{rest}{rolled}. {}",
             counted(count(EntryKind::ChangeSet), "change set"),
             counted(count(EntryKind::FailedAttempt), "failed attempt"),
             match can_undo.as_slice() {
@@ -322,7 +442,8 @@ fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
         .into_iter()
         .map(|recorded| {
             let fate = fates.get(&recorded.entry).copied().unwrap_or_default();
-            let undo_state = (recorded.kind == EntryKind::ChangeSet).then(|| {
+            let landed = recorded.kind == EntryKind::ChangeSet && recorded.finished();
+            let undo_state = landed.then(|| {
                 if fate.undone_by.is_some() {
                     UndoState::Undone
                 } else if fate.pruned_by.is_some() {
@@ -332,6 +453,7 @@ fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
                 }
             });
             JournalEntry {
+                rolled_back: recorded.rolled_back.clone(),
                 recorded,
                 undo_state,
                 undone_by: fate.undone_by,
@@ -378,10 +500,11 @@ pub(super) struct Fate {
     pub issued_by: Option<u64>,
 }
 
-/// What became of each change set, by its entry.
+/// What became of each change set, by its entry. An entry whose commit
+/// never finished did nothing to any.
 pub(super) fn fates(entries: &[Entry]) -> BTreeMap<u64, Fate> {
     let mut fates: BTreeMap<u64, Fate> = BTreeMap::new();
-    for entry in entries {
+    for entry in entries.iter().filter(|e| e.finished()) {
         for &undone in &entry.undid {
             fates.entry(undone).or_default().undone_by = Some(entry.entry);
         }
@@ -407,19 +530,23 @@ pub(super) fn undoable(entries: &[Entry], fates: &BTreeMap<u64, Fate>) -> Vec<u6
 }
 
 /// The change sets still in place, the oldest first: every change set that
-/// has not been undone.
+/// landed and has not been undone.
 pub(super) fn in_place<'a>(
     entries: &'a [Entry],
     fates: &'a BTreeMap<u64, Fate>,
 ) -> impl Iterator<Item = &'a Entry> + 'a {
     entries.iter().filter(move |e| {
-        e.kind == EntryKind::ChangeSet && fates.get(&e.entry).is_none_or(|f| f.undone_by.is_none())
+        e.kind == EntryKind::ChangeSet
+            && e.finished()
+            && fates.get(&e.entry).is_none_or(|f| f.undone_by.is_none())
     })
 }
 
-/// Whether `entry` is a change set that still keeps its undo state.
+/// Whether `entry` is a change set that landed and still keeps its undo
+/// state.
 pub(super) fn keeps_state(entry: &Entry, fates: &BTreeMap<u64, Fate>) -> bool {
     entry.kind == EntryKind::ChangeSet
+        && entry.finished()
         && fates
             .get(&entry.entry)
             .is_none_or(|f| f.undone_by.is_none() && f.pruned_by.is_none())
@@ -431,10 +558,55 @@ pub(super) fn read_entries(folder: &Path) -> Result<Vec<Entry>, Error> {
 }
 
 /// The journal's text and its entries, or `None` when there is no journal.
+/// A last line written in part is refused, as any line that is not an
+/// entry is: the next command cuts it off (`recover.rs`).
 fn read_text(folder: &Path) -> Result<Option<(String, Vec<Entry>)>, Error> {
+    let Some(read) = read_journal_file(folder)? else {
+        return Ok(None);
+    };
+    if let Some(torn) = read.torn {
+        let path = folder.join(JOURNAL_FILE);
+        return Err(Error::new(
+            ErrorCode::ReadFailed,
+            format!(
+                "line {} of the set's journal is not a journal entry: it was written only in \
+                 part, by a process that stopped while it wrote it",
+                torn.line
+            ),
+        )
+        .at_position(torn.line, 1)
+        .in_file(&path));
+    }
+    Ok(Some((read.text, read.entries)))
+}
+
+/// The journal as read, with the last line, if a process that stopped while
+/// it wrote it left it in part, set apart.
+pub(super) struct JournalRead {
+    /// The journal's text, but a last line written in part.
+    pub text: String,
+    pub entries: Vec<Entry>,
+    pub torn: Option<Torn>,
+}
+
+/// A last line of the journal written only in part: it ends with no line
+/// break and is no JSON. Every line is written with its line break, so only
+/// a write that stopped half-way leaves one, and only at the end.
+#[derive(Clone, Copy)]
+pub(super) struct Torn {
+    /// Its number, counted from 1.
+    pub line: usize,
+    /// Where it begins, in bytes: the journal's length without it.
+    pub at: u64,
+}
+
+/// The set's journal, or `None` when there is none. A line that is not an
+/// entry, or marks an entry no line before it holds pending, is refused,
+/// with its line, unless it is the last and was written only in part.
+pub(super) fn read_journal_file(folder: &Path) -> Result<Option<JournalRead>, Error> {
     let path = folder.join(JOURNAL_FILE);
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             return Err(Error::new(
@@ -444,43 +616,217 @@ fn read_text(folder: &Path) -> Result<Option<(String, Vec<Entry>)>, Error> {
             .in_file(&path))
         }
     };
-    let mut entries = Vec::new();
+    let split = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let (head, tail) = bytes.split_at(split);
+    let mut text = String::from_utf8(head.to_vec()).map_err(|e| {
+        Error::new(
+            ErrorCode::ReadFailed,
+            format!("the set's journal is not text: {e}"),
+        )
+        .in_file(&path)
+    })?;
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut lines = 0;
     for (i, line) in text.lines().enumerate() {
+        lines = i + 1;
         if line.trim().is_empty() {
             continue;
         }
-        let entry: Entry = serde_json::from_str(line).map_err(|e| {
+        let read = parse_line(line).map_err(|e| not_entry(&path, i + 1, &e))?;
+        mark(&mut entries, read, i + 1, &path)?;
+    }
+    let mut torn = None;
+    if !tail.iter().all(u8::is_ascii_whitespace) {
+        let line = lines + 1;
+        match std::str::from_utf8(tail).ok().map(|t| (t, parse_line(t))) {
+            Some((last, Ok(read))) => {
+                mark(&mut entries, read, line, &path)?;
+                text.push_str(last);
+            }
+            _ => {
+                torn = Some(Torn {
+                    line,
+                    at: split as u64,
+                })
+            }
+        }
+    }
+    Ok(Some(JournalRead {
+        text,
+        entries,
+        torn,
+    }))
+}
+
+/// One line of the journal: an entry, or the state it came to.
+enum Line {
+    Entry(Box<Entry>),
+    State(StateLine),
+}
+
+fn parse_line(line: &str) -> Result<Line, serde_json::Error> {
+    match serde_json::from_str::<Entry>(line) {
+        Ok(entry) => Ok(Line::Entry(Box::new(entry))),
+        Err(e) => serde_json::from_str(line).map(Line::State).map_err(|_| e),
+    }
+}
+
+fn not_entry(path: &Path, line: usize, e: &serde_json::Error) -> Error {
+    Error::new(
+        ErrorCode::ReadFailed,
+        format!("line {line} of the set's journal is not a journal entry: {e}"),
+    )
+    .at_position(line, e.column().max(1))
+    .in_file(path)
+}
+
+/// Adds line `line` of the journal to `entries`: an entry, or the state an
+/// entry before it, pending, came to.
+fn mark(entries: &mut Vec<Entry>, read: Line, line: usize, path: &Path) -> Result<(), Error> {
+    let state = match read {
+        Line::Entry(entry) => {
+            entries.push(*entry);
+            return Ok(());
+        }
+        Line::State(state) => state,
+    };
+    let marked = entries
+        .iter_mut()
+        .rev()
+        .find(|e| e.entry == state.entry)
+        .filter(|e| e.state == Some(CommitState::Pending) && state.state != CommitState::Pending)
+        .ok_or_else(|| {
             Error::new(
                 ErrorCode::ReadFailed,
                 format!(
-                    "line {} of the set's journal is not a journal entry: {e}",
-                    i + 1
+                    "line {line} of the set's journal marks entry {} {}, but no line before it \
+                     holds entry {} pending",
+                    state.entry,
+                    state_words(state.state),
+                    state.entry
                 ),
             )
-            .at_position(i + 1, e.column().max(1))
-            .in_file(&path)
+            .at_position(line, 1)
+            .in_file(path)
         })?;
-        entries.push(entry);
+    marked.state = Some(state.state);
+    if state.state == CommitState::RolledBack {
+        marked.rolled_back = Some(RollBack {
+            at: state.at,
+            files: state.files,
+        });
     }
-    Ok(Some((text, entries)))
+    Ok(())
 }
 
-/// The entry to add to the journal: its line, after a line break when the
+/// A commit's state, in words.
+fn state_words(state: CommitState) -> &'static str {
+    match state {
+        CommitState::Pending => "pending",
+        CommitState::Done => "done",
+        CommitState::RolledBack => "rolled back",
+    }
+}
+
+/// The entry a commit that never finished left pending, if there is one.
+/// Only the journal's newest entry can be: every command rolls it back
+/// before it adds another.
+pub(super) fn pending(entries: &[Entry]) -> Option<&Entry> {
+    entries
+        .iter()
+        .rev()
+        .find(|e| e.state == Some(CommitState::Pending))
+}
+
+/// `item` as one line of the journal, after a line break when the
 /// journal's text does not end with one.
-fn append_of(folder: &Path, text: Option<&str>, entry: &Entry) -> Append {
+fn line_of(text: Option<&str>, item: &impl Serialize) -> Vec<u8> {
     // An entry holds only strings, numbers, lists and string-keyed maps,
     // which always serialize, and JSON escapes every line break in them.
-    let mut line = serde_json::to_string(entry).expect("an entry serializes to JSON");
+    let mut line = serde_json::to_string(item).expect("an entry serializes to JSON");
     line.push('\n');
     if text.is_some_and(|t| !t.is_empty() && !t.ends_with('\n')) {
         line.insert(0, '\n');
     }
-    Append {
-        path: folder.join(JOURNAL_FILE),
-        bytes: line.into_bytes(),
-        what: "the set's journal",
-        holds: format!("entry {}", entry.entry),
+    line.into_bytes()
+}
+
+/// The line that marks entry `entry` `state`, made now, with the files a
+/// rollback put back, after a line break when `text`, the journal's, does
+/// not end with one.
+pub(super) fn state_line(
+    text: Option<&str>,
+    entry: u64,
+    state: CommitState,
+    files: Vec<FileState>,
+) -> Vec<u8> {
+    line_of(
+        text,
+        &StateLine {
+            entry,
+            state,
+            at: now(),
+            files,
+        },
+    )
+}
+
+/// Holds the journal lock of the set in `folder`, [`LOCK_FILE`], until the
+/// file it gives is dropped, or, as for a killed process, closed. It waits
+/// up to [`LOCK_WAIT`] for a process that holds it to let it go. It is
+/// taken before anything is written, so when it cannot be, nothing was.
+pub(super) fn lock(folder: &Path) -> Result<File, Error> {
+    let path = folder.join(LOCK_FILE);
+    let failed = |what: &str, why: String| {
+        Error::new(
+            ErrorCode::WriteFailed,
+            format!("could not {what} the set's journal lock: {why}; nothing was changed"),
+        )
+        .in_file(&path)
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| failed("make the folder of", e.to_string()))?;
     }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| failed("open", e.to_string()))?;
+    let start = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if start.elapsed() < LOCK_WAIT => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(failed(
+                    "take",
+                    format!(
+                        "another process has held it for {} seconds, adding to the journal",
+                        LOCK_WAIT.as_secs()
+                    ),
+                ))
+            }
+            Err(TryLockError::Error(e)) => return Err(failed("take", e.to_string())),
+        }
+    }
+}
+
+/// The error for a commit that finds an entry another commit left pending,
+/// which no command has rolled back yet.
+fn left_pending(entry: &Entry) -> Error {
+    Error::new(
+        ErrorCode::RollbackFailed,
+        format!(
+            "entry {} of the set's journal is pending: the commit that wrote it never finished, \
+             and it has not been rolled back; nothing was changed. The next command on the set \
+             rolls it back",
+            entry.entry
+        ),
+    )
 }
 
 /// The number the next entry takes.
@@ -505,10 +851,14 @@ pub(super) fn commit_change_set(
     folder: &Path,
     change_set: &Value,
     landing: Landing,
-    mut replacements: Vec<Replacement>,
+    replacements: Vec<Replacement>,
 ) -> Result<u64, Error> {
+    let _lock = lock(folder)?;
     let (text, entries_before) = read_text(folder)?.unzip();
     let entries_before = entries_before.unwrap_or_default();
+    if let Some(entry) = pending(&entries_before) {
+        return Err(left_pending(entry));
+    }
     let number = next_number(&entries_before);
 
     let mut files = Vec::with_capacity(replacements.len());
@@ -527,21 +877,32 @@ pub(super) fn commit_change_set(
     }
     let folders_made = folders_made(folder, &replacements);
     let store = folder.join(UNDO_STATES_FOLDER);
-    for (print, bytes) in states {
-        let path = store.join(&print);
-        if !path.is_file() {
-            replacements.push(Replacement {
-                path,
-                bytes: Some(bytes),
-                what: "an undo state",
-            });
-        }
-    }
+    // The undo state goes in place first, so that a commit stopped at any
+    // step after it can be rolled back from it.
+    let mut placing: Vec<Replacement> = states
+        .into_iter()
+        .map(|(print, bytes)| (store.join(print), bytes))
+        .filter(|(path, _)| !path.is_file())
+        .map(|(path, bytes)| Replacement {
+            path,
+            bytes: Some(bytes),
+            what: "an undo state",
+        })
+        .collect();
+    let before: Vec<Before> = replacements
+        .iter()
+        .zip(&files)
+        .map(|(r, f)| Before {
+            path: r.path.clone(),
+            print: f.before.clone(),
+        })
+        .collect();
+    placing.extend(replacements);
 
     let fates = fates(&entries_before);
     let change_sets: Vec<&Entry> = entries_before
         .iter()
-        .filter(|e| e.kind == EntryKind::ChangeSet)
+        .filter(|e| e.kind == EntryKind::ChangeSet && e.finished())
         .collect();
     // With this one, the newest KEPT_UNDO_STATES keep theirs.
     let outside = (change_sets.len() + 1).saturating_sub(KEPT_UNDO_STATES);
@@ -551,6 +912,7 @@ pub(super) fn commit_change_set(
         .map(|e| e.entry)
         .collect();
 
+    let made: Vec<PathBuf> = folders_made.iter().map(|f| folder.join(f)).collect();
     let entry = Entry {
         change_set: Some(change_set.clone()),
         landed_on: landing.landed_on,
@@ -561,14 +923,58 @@ pub(super) fn commit_change_set(
         objects: landing.objects,
         ..Entry::new(number, EntryKind::ChangeSet)
     };
-    commit(
-        &replacements,
-        Some(&append_of(folder, text.as_deref(), &entry)),
-    )?;
-    let mut entries = entries_before;
-    entries.push(entry);
-    prune(folder, &entries);
+    let written = Written {
+        text: text.as_deref(),
+        entries: entries_before,
+    };
+    commit_entry(folder, written, entry, &before, &made, &placing)?;
     Ok(number)
+}
+
+/// The journal as a commit found it, holding the lock: its text and its
+/// entries.
+struct Written<'a> {
+    text: Option<&'a str>,
+    entries: Vec<Entry>,
+}
+
+/// Commits `entry`, written ahead of `replacements` (`commit.rs`), while
+/// the caller holds the journal lock, and then prunes the undo states no
+/// change set needs: after it, or, when it failed, after the entries the
+/// journal holds then.
+fn commit_entry(
+    folder: &Path,
+    written: Written,
+    mut entry: Entry,
+    before: &[Before],
+    folders_made: &[PathBuf],
+    replacements: &[Replacement],
+) -> Result<(), Error> {
+    entry.state = Some(CommitState::Pending);
+    let journal = folder.join(JOURNAL_FILE);
+    let committed = commit(
+        &Ahead {
+            journal: &journal,
+            entry: entry.entry,
+            pending: &line_of(written.text, &entry),
+            done: &state_line(None, entry.entry, CommitState::Done, Vec::new()),
+            before,
+            states: &folder.join(UNDO_STATES_FOLDER),
+            folders_made,
+        },
+        replacements,
+    );
+    if committed.is_ok() {
+        let mut entries = written.entries;
+        entry.state = Some(CommitState::Done);
+        entries.push(entry);
+        prune(folder, &entries);
+    } else if let Ok(entries) = read_entries(folder) {
+        // The undo states a commit that failed saved go too, unless its
+        // entry is still pending, whose rollback needs them.
+        prune(folder, &entries);
+    }
+    committed
 }
 
 /// Records a change set that changed nothing as a failed attempt, unless it
@@ -633,11 +1039,19 @@ pub(super) fn record_failed_attempt(
     if !folder.join(SET_SETTINGS_FILE).is_file() {
         return;
     }
+    let Ok(_lock) = lock(folder) else {
+        return;
+    };
     let Ok(read) = read_text(folder) else {
         return;
     };
     let (text, entries) = read.unzip();
-    let number = next_number(entries.as_deref().unwrap_or_default());
+    let entries = entries.unwrap_or_default();
+    // An entry left pending is the next command's to roll back first.
+    if pending(&entries).is_some() {
+        return;
+    }
+    let number = next_number(&entries);
     let entry = Entry {
         change_set: Some(request.change_set.clone()),
         landed_on: landing.landed_on,
@@ -645,7 +1059,8 @@ pub(super) fn record_failed_attempt(
         error,
         ..Entry::new(number, EntryKind::FailedAttempt)
     };
-    if commit(&[], Some(&append_of(folder, text.as_deref(), &entry))).is_ok() {
+    let line = line_of(text.as_deref(), &entry);
+    if add_line(&folder.join(JOURNAL_FILE), &line, "a failed attempt").is_ok() {
         if let Ok(report) = outcome {
             report.journal_entry = Some(number);
         }
@@ -654,26 +1069,73 @@ pub(super) fn record_failed_attempt(
 
 /// Puts back the files of an undo, with the undo's entry in the journal, or
 /// none of it, and gives the entry's number.
+///
+/// The bytes each file has before the undo are saved as undo states first,
+/// as a change set's are, so that an undo stopped at any step can be rolled
+/// back; once it is done, they are pruned with the undone change sets'.
+///
+/// The caller holds the journal lock, `_locked`, from before it read the
+/// journal and the files to work the undo out, so its entry records the
+/// files as they are on disk as it commits: each is checked again here,
+/// whether or not its bytes are kept already.
 pub(super) fn commit_undo(
     folder: &Path,
+    _locked: &File,
     undid: Vec<u64>,
     files: Vec<FileState>,
-    replacements: &[Replacement],
+    replacements: Vec<Replacement>,
 ) -> Result<u64, Error> {
     let (text, entries) = read_text(folder)?.unzip();
-    let mut entries = entries.unwrap_or_default();
+    let entries = entries.unwrap_or_default();
+    if let Some(entry) = pending(&entries) {
+        return Err(left_pending(entry));
+    }
     let number = next_number(&entries);
+    let store = folder.join(UNDO_STATES_FOLDER);
+    let mut placing: Vec<Replacement> = Vec::new();
+    for file in &files {
+        let now = read_state(&folder.join(&file.path))?;
+        if now.as_deref().map(fingerprint) != file.before {
+            return Err(Error::new(
+                ErrorCode::ChangedByHand,
+                format!(
+                    "`{}` changed while the undo was worked out; nothing was changed",
+                    folder.join(&file.path).display()
+                ),
+            )
+            .at_field("change_set"));
+        }
+        let (Some(print), Some(bytes)) = (&file.before, now) else {
+            continue;
+        };
+        let path = store.join(print);
+        if path.is_file() || placing.iter().any(|r| r.path == path) {
+            continue;
+        }
+        placing.push(Replacement {
+            path,
+            bytes: Some(bytes),
+            what: "an undo state",
+        });
+    }
+    let before: Vec<Before> = files
+        .iter()
+        .map(|f| Before {
+            path: folder.join(&f.path),
+            print: f.before.clone(),
+        })
+        .collect();
+    placing.extend(replacements);
     let entry = Entry {
         undid,
         files,
         ..Entry::new(number, EntryKind::Undo)
     };
-    commit(
-        replacements,
-        Some(&append_of(folder, text.as_deref(), &entry)),
-    )?;
-    entries.push(entry);
-    prune(folder, &entries);
+    let written = Written {
+        text: text.as_deref(),
+        entries,
+    };
+    commit_entry(folder, written, entry, &before, &[], &placing)?;
     Ok(number)
 }
 
@@ -695,8 +1157,12 @@ pub(super) fn commit_accept(
     newest: u64,
     accepting: Accepting,
 ) -> Result<u64, Error> {
+    let _lock = lock(folder)?;
     let (text, entries) = read_text(folder)?.unzip();
     let entries = entries.unwrap_or_default();
+    if let Some(entry) = pending(&entries) {
+        return Err(left_pending(entry));
+    }
     let number = next_number(&entries);
     if number != newest + 1 {
         return Err(Error::new(
@@ -715,19 +1181,24 @@ pub(super) fn commit_accept(
         revision: accepting.revision,
         ..Entry::new(number, EntryKind::Accept)
     };
-    commit(&[], Some(&append_of(folder, text.as_deref(), &entry)))?;
+    let written = Written {
+        text: text.as_deref(),
+        entries,
+    };
+    commit_entry(folder, written, entry, &[], &[], &[])?;
     Ok(number)
 }
 
-/// Takes away every undo state no change set that keeps its undo state
-/// needs: those of change sets pruned or undone, and any file left in the
-/// folder that is not an undo state. A file that cannot be taken away is
-/// left; it is needed by nothing.
-fn prune(folder: &Path, entries: &[Entry]) {
+/// Takes away every undo state that neither a change set that keeps its
+/// undo state needs, nor an entry left pending, whose rollback needs it:
+/// those of change sets pruned or undone, and any file left in the folder
+/// that is not an undo state. A file that cannot be taken away is left; it
+/// is needed by nothing.
+pub(super) fn prune(folder: &Path, entries: &[Entry]) {
     let fates = fates(entries);
     let needed: BTreeSet<&str> = entries
         .iter()
-        .filter(|e| keeps_state(e, &fates))
+        .filter(|e| keeps_state(e, &fates) || e.state == Some(CommitState::Pending))
         .flat_map(|e| e.files.iter().filter_map(|f| f.before.as_deref()))
         .collect();
     let store = folder.join(UNDO_STATES_FOLDER);
@@ -806,7 +1277,7 @@ fn code_text(code: ErrorCode) -> String {
 }
 
 /// The time now in UTC, to the second, such as `2026-11-11T18:57:46Z`.
-fn now() -> String {
+pub(super) fn now() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -878,8 +1349,7 @@ mod tests {
             }],
             ..Entry::new(3, EntryKind::ChangeSet)
         };
-        let append = append_of(Path::new("set"), Some("{}"), &entry);
-        let text = String::from_utf8(append.bytes).unwrap();
+        let text = String::from_utf8(line_of(Some("{}"), &entry)).unwrap();
         assert!(text.starts_with('\n') && text.ends_with('\n'));
         assert_eq!(text.trim().lines().count(), 1);
         let back: Entry = serde_json::from_str(text.trim()).unwrap();

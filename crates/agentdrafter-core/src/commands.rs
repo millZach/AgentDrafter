@@ -15,6 +15,12 @@
 //! the folder the interface runs in, or absolute. Font and plot style
 //! folders an input names come before those the interface's settings name,
 //! as `--fonts` and `--plot-styles` come before the environment's.
+//!
+//! Before a command reads a drawing set, the set its input names, it rolls
+//! back an entry of the set's journal a commit that never finished left
+//! pending, as Zach decided on 2026-11-11, and its reply says so under
+//! `rolled_back`; when the rollback cannot complete, the command refuses.
+//! Since every interface runs its commands here, this holds for each.
 
 use std::path::{Path, PathBuf};
 
@@ -24,7 +30,7 @@ use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 
 use crate::build::{build_with, BuildRequest};
-use crate::change::{accept_with, AcceptRequest, JournalRequest, UndoRequest};
+use crate::change::{accept_with, recover, AcceptRequest, JournalRequest, UndoRequest};
 use crate::change::{change_set_schema, change_with, journal, operations, undo, ChangeRequest};
 use crate::check::{check_with, CheckRequest};
 use crate::display_list::{display_list_with, DisplayListRequest};
@@ -81,7 +87,17 @@ impl Command {
     /// and plot styles, for the interface `via` it came through, which an
     /// accept records in the journal. The reply is the one the command line
     /// prints. An input that does not fit the schema is a `usage` error.
+    ///
+    /// When the input names a drawing set, or a file in one, an entry of
+    /// the set's journal that a commit that never finished left pending is
+    /// rolled back first, and the reply says so; when it cannot be, the
+    /// command refuses and does nothing.
     pub fn run(&self, input: Value, settings: &Settings, via: Interface) -> JsonReply {
+        let rolled_back = match set_read(&input).map(|set| recover(&set)) {
+            Some(Err(error)) => return Reply::from(Err(error)),
+            Some(Ok(rolled_back)) => rolled_back,
+            None => None,
+        };
         let outcome = match input {
             Value::Object(input) => (self.run)(input, settings, via),
             other => Err(Error::usage(format!(
@@ -90,7 +106,9 @@ impl Command {
                 json_kind(&other)
             ))),
         };
-        outcome.unwrap_or_else(|error| Reply::from(Err(error)))
+        outcome
+            .unwrap_or_else(|error| Reply::from(Err(error)))
+            .after(rolled_back)
     }
 
     /// The command as plain data, to list it: its name, what it does and
@@ -879,6 +897,25 @@ fn run_check(
 
 // What every command shares.
 
+/// The drawing set a command's input reads, if it names one: the folder its
+/// `set` names; or the set its `source`, or with none its `output`, is, or
+/// is in, the nearest folder above it that holds a set's settings.
+fn set_read(input: &Value) -> Option<PathBuf> {
+    let named = ["set", "source", "output"]
+        .iter()
+        .find_map(|key| input.get(key))?
+        .as_str()?;
+    let path = Path::new(named);
+    let set = path
+        .ancestors()
+        .find(|folder| folder.join(SET_SETTINGS_FILE).is_file())?;
+    Some(if set.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        set.to_owned()
+    })
+}
+
 /// Whether `source` is a drawing set: a folder, whose settings say where
 /// its `outputs` go, so an `output` path, which is for `one` source, is
 /// refused with it. `build` and `plot` both ask.
@@ -945,6 +982,7 @@ fn done<T: Serialize>(outcome: Result<T, Error>) -> JsonReply {
 fn sent<T: Serialize>(reply: Reply<T>) -> JsonReply {
     Reply {
         ok: reply.ok,
+        rolled_back: reply.rolled_back,
         // A reply holds only strings, numbers, lists and string-keyed maps,
         // which always serialize.
         result: reply.result.map(|result| {

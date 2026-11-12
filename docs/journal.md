@@ -10,6 +10,7 @@ The journal is the record, in a drawing set's own folder, of every change set an
 demo-set/
   .agentdrafter/
     journal.jsonl          the journal, one entry per line
+    journal.lock           held, by the process adding to the journal, while it does; it holds nothing
     undo-states/           the bytes each file had before a change set wrote it, named by their SHA-256
     inconsistent.yaml      the inconsistent mark, while the set is marked
 ```
@@ -20,14 +21,18 @@ The journal sits beside the [inconsistent mark](change-sets.md#an-inconsistent-s
 
 The journal is written in JSON lines: one entry per line, each a JSON object, added at the end in order and never rewritten, so an agent reads it a line at a time. Each entry has a number, counted from 1, and a change set is undone by its entry's number, which the change set's reply gives as `journal_entry`.
 
+A change set's entry, an undo's and an accept's are **written ahead** of their files (Zach's decision of 2026-11-11, [below](#a-commit-that-never-finished)): the entry is added `"state":"pending"` before any file is put in place, and a short line of its own, which names the entry and takes no number, marks it `done` once every file is in place. A failed attempt changed nothing, and is written whole, with no state.
+
 ```json
-{"entry":2,"kind":"change_set","at":"2026-11-11T20:05:29Z","change_set":{"operations":[{"center":[5,5,0],"op":"add_circle","radius":0.5,"sheet":"DEMO-001"},{"center":[5,5,0],"layer":"note","op":"add_circle","radius":0.5,"sheet":"DEMO-002"}]},"landed_on":["DEMO-001"],"failed_on":[{"sheet":"DEMO-002","code":"unknown_name","message":"operation 1 (`add_circle`) on sheet `DEMO-002`: unknown layer `note`; the sheet's layers: 0, trim, border, notes"}],"files":[{"path":"rows.yaml","before":"7b10789f…","after":"1097fc0e…"},{"path":"dwg/DEMO-001.dwg","before":"f1982000…","after":"7cf68f86…"},{"path":".agentdrafter/inconsistent.yaml","before":null,"after":"9296004f…"}]}
+{"entry":2,"kind":"change_set","state":"pending","at":"2026-11-11T20:05:29Z","change_set":{"operations":[{"center":[5,5,0],"op":"add_circle","radius":0.5,"sheet":"DEMO-001"},{"center":[5,5,0],"layer":"note","op":"add_circle","radius":0.5,"sheet":"DEMO-002"}]},"landed_on":["DEMO-001"],"failed_on":[{"sheet":"DEMO-002","code":"unknown_name","message":"operation 1 (`add_circle`) on sheet `DEMO-002`: unknown layer `note`; the sheet's layers: 0, trim, border, notes"}],"files":[{"path":"rows.yaml","before":"7b10789f…","after":"1097fc0e…"},{"path":"dwg/DEMO-001.dwg","before":"f1982000…","after":"7cf68f86…"},{"path":".agentdrafter/inconsistent.yaml","before":null,"after":"9296004f…"}]}
+{"entry":2,"state":"done","at":"2026-11-11T20:05:29Z"}
 ```
 
 | Key | What it is |
 |---|---|
-| `entry` | The entry's number. |
-| `kind` | `change_set`, `failed_attempt`, `undo` or `accept`. |
+| `entry` | The entry's number; on a line that marks an entry, the entry it marks. |
+| `kind` | `change_set`, `failed_attempt`, `undo` or `accept`. A line that marks an entry has none. |
+| `state` | Where the commit of a change set, an undo or an accept got to: `pending` on the entry's own line, and `done` or `rolled_back` on the line that marks it. `agentdrafter journal` gives each entry the state it came to. An entry written before entries were written ahead has none: it was written once its files were in place. |
 | `at` | When it was added, in UTC. |
 | `change_set` | The change set as it was sent, with its operations and its `fixes`. |
 | `landed_on` | The sheets the change set landed on. |
@@ -42,22 +47,59 @@ The journal is written in JSON lines: one entry per line, each a JSON object, ad
 | `issued` | The change sets an accept issued. |
 | `failed_checks` | The failed checks an accept was told to accept despite: each one's sheet, rule, object's ID and message. |
 | `revision` | Each file of the set as an accept issued it: its path, relative to the set's folder, and the SHA-256 of its bytes. |
+| `files`, on a line that marks an entry `rolled_back` | Each file the rollback put back: its SHA-256 as the rollback found it, `before`, and as it put it back, `after`. |
 
 Keys with nothing to say are left out.
 
-- **A change set** is recorded in the same all-or-nothing step as its files: its records, its DWGs and the mark land with their undo state and the journal's entry, or none of them does. A change set that lands on some sheets and fails on others is a change set: it lists both.
+- **A change set** is recorded in the same all-or-nothing step as its files: its records, its DWGs and the mark land with their undo state and the journal's entry, or none of them does. Its entry is written pending first, its undo state is put in place next, then its files, and the entry is marked done last. A change set that lands on some sheets and fails on others is a change set: it lists both.
 - **A failed attempt** changed nothing. It is a change set refused whole, such as one naming an operation that does not exist, one that failed on every sheet it touched, or one whose files could not be written, which lists every sheet it touched under `failed_on`, each with the error. It stays in the journal and is never undone.
 - **A dry run** changes nothing on disk, the journal included, so it is not recorded.
-- **An undo** is recorded with the change sets it undid and the files it put back.
+- **An undo** is recorded with the change sets it undid and the files it put back. The bytes it replaces are saved as undo states first, as a change set's are, so that an undo that never finished can be rolled back; once it is done they are pruned.
 - **An accept** is recorded with the interface it came through, the change sets it issued and the files it issued. It writes no file of the set.
+- **An entry rolled back** changed nothing: a rolled-back change set is not in place and cannot be undone, a rolled-back undo undid nothing, and a rolled-back accept issued nothing.
 
-`agentdrafter journal` reads the journal back with what has become of each change set since: `undo_state` is `kept`, `pruned` or `undone`, with `undone_by` or `pruned_by` naming the entry that did it, and `issued_by` names the accept that issued it. `can_undo` lists the change sets an undo can take now: those that keep their undo state and are not issued.
+`agentdrafter journal` reads the journal back with what has become of each change set since: `undo_state` is `kept`, `pruned` or `undone`, with `undone_by` or `pruned_by` naming the entry that did it, and `issued_by` names the accept that issued it. `state` is the state each entry's commit came to, and an entry rolled back has `rolled_back`, with when (`at`) and the `files` it put back. `can_undo` lists the change sets an undo can take now: those that landed, keep their undo state and are not issued.
 
 ```json
 {"ok":true,"result":{"set":"demo-set","file":"demo-set/.agentdrafter/journal.jsonl","message":"the journal records 2 change sets, 0 failed attempts and 0 undos. Change sets 1 and 2 can be undone, each with every later one","entries":[{"entry":1,"kind":"change_set","...":"...","undo_state":"kept"},"..."],"can_undo":[1,2],"kept_undo_states":50}}
 ```
 
-A line that is not a journal entry is reported as `read_failed`, with its line. A change set does not land on a set whose journal cannot be read, since it could not be undone.
+A line that is not a journal entry, or that marks an entry no line before it holds pending, is reported as `read_failed`, with its line. A change set does not land on a set whose journal cannot be read, since it could not be undone.
+
+## A commit that never finished
+
+A process can be killed while it puts a change set's files in place: a closed terminal, a crash, a machine shutting down. Zach decided on 2026-11-11 how the journal recovers from that:
+
+- **Write-ahead.** A change set's, an undo's and an accept's entry is written and synced as pending before any of the set's files are replaced, and is marked done once all are in place.
+- **Roll back on the next command.** The next AgentDrafter command that reads the set finds a pending entry whose commit never finished. It puts every file back byte for byte from the saved undo state, as it was before that commit. It marks the entry rolled back in the journal, and says so in its reply. This holds for `change`, `undo`, `accept`, `journal`, `query`, `build`, `plot`, `check` and `serve`, and for every interface. Then it goes on.
+- If the rollback itself cannot complete, the command refuses with an error that names the set and the entry, and changes nothing more.
+- **A file changed by hand since** (Zach's decision of 2026-11-11, on review): when a file the rollback would put back was changed by hand after the kill, the rollback refuses as undo does. It changes nothing, and names the hand-edited files and the unfinished entry.
+
+A command reads the set when its input's `set` names it, or its `source` (or `stale`'s `output`) is the set's folder or a file in it, such as `render` of a sheet's DWG; a dry run rolls back too. The rollback is in the core's registry of commands, which every interface runs its commands through, so the command line, the HTTP API with its event stream and the viewer, the MCP server and the Python library each do it, and so do the core's own `change`, `undo`, `accept` and `journal`.
+
+```json
+{"ok":true,"rolled_back":{"set":"demo-set","entry":3,"kind":"change_set","message":"entry 3 of the set's journal, a change set, was pending: the process writing it stopped before its commit finished. It was rolled back: 2 files were put back as they were before it, byte for byte, from its undo state, and the journal marks it rolled back; it changed nothing. The command then ran as asked","files":[{"file":"demo-set/templates/ansi-b.yaml","action":"restored"},{"file":"demo-set/dwg/DEMO-001.dwg","action":"restored"}]},"result":{"...":"..."}}
+```
+
+The reply's `rolled_back` comes after `ok`, whatever came of the command itself; `files` lists each file put back (`restored`) or taken away since the commit made it (`removed`). The journal gains the line that marks the entry:
+
+```json
+{"entry":3,"state":"rolled_back","at":"2026-11-11T20:06:02Z","files":[{"path":"templates/ansi-b.yaml","before":"5d1e…","after":"0c4a…"},{"path":"dwg/DEMO-001.dwg","before":"77b3…","after":"f198…"}]}
+```
+
+- **Every file comes back byte for byte**, from the undo state the commit put in place before its first file, whatever step it stopped at: a file it replaced, a file it made, which is taken away with each folder it made once empty, and a file it took away, such as the inconsistent mark. What it left beside them, new files not yet in place and old ones moved aside, named by the entry and by the file each stands for, `.agentdrafter-entry-<entry>-f<j>.tmp` and `.old` for the entry's file `j` as its `files` list it, is taken away too, and its undo state is pruned. A rollback stopped in its turn is done again by the next command.
+- **A commit still running is not rolled back.** A process holds the set's journal lock, `.agentdrafter/journal.lock`, from before it writes an entry until it is marked done, and the system lets the lock go when the process ends, however it ends. A command that finds the newest entry pending waits for the lock, up to 30 seconds, and reads the journal again: only an entry still pending then was left by a process that stopped. So a viewer watching the set while an agent's change set lands sees it done, not rolled back.
+- **A file changed since the commit stopped is not put back.** Each file the entry wrote must hold the bytes the entry records for it `before`, which the commit had not replaced yet, or `after`, which it had, or be missing where the commit leaves it so: one it had not made yet, one it takes away, or one it had moved aside, which waits beside it under that file's own name, `.agentdrafter-entry-<entry>-f<j>.old`, so that no file's backup can stand for another's, however alike their bytes. Anything else was changed by hand or by another program since, and the command refuses with the error `changed_by_hand`, which names the set, the entry and each such file, and changes nothing. Put each back as it was before the entry or as its commit would have left it, and the next command rolls the entry back.
+- **A line of the journal written in part.** A process can stop while it writes a line, which leaves the journal's last line with no line break and no JSON. That is an append that never finished: the line is cut off, and the entry before it, if it is pending, is rolled back as above; the reply's `rolled_back` gives the line under `cut_off_line`, and when only a line was cut off, such as an entry whose process stopped before it changed any file, it has no `entry`. Only a last line can be written in part: one in the middle is left by no stop, and the journal is refused as `read_failed`, with its line, by every command on the set, `query`, `check`, `build`, `plot` and the rest as `journal` refuses it, through every interface; so is any other line that is not an entry, and a journal that cannot be read at all.
+- **The journal never says done unless every file is in place.** Files are put back only while the journal holds the entry pending, so a process killed while it puts them back leaves the entry for the next command. When the line that marks an entry done cannot be written, what the journal holds decides: a done line written whole, whose sync failed and which could not be taken back, stands, since every file is in place; one taken back leaves the entry pending, and the files go back; one that may stand in part leaves the files in place, for the next command to cut the line off and roll the entry back.
+- **An undo works itself out holding the lock.** It reads the journal and the files, and writes its entry, all while it holds the journal lock, so its entry records the files as they are when it commits: no other process's change set can land in between, and a rollback of it never puts a file back over a later change. A change set reads the files it records `before` under the lock too. And the entry rolled back is always the journal's newest: one with entries after it is refused.
+- **When it cannot complete**, such as when an undo state it needs is missing or damaged, the command refuses with the error `rollback_failed`, which names the set, the entry and why, and puts nothing back; the entry stays pending for the next command to try again.
+
+```json
+{"ok":false,"error":{"code":"rollback_failed","message":"the drawing set `demo-set` cannot be read: entry 3, a change set, of its journal is pending, since the process writing it stopped before its commit finished, and it could not be rolled back: the undo state of demo-set/templates/ansi-b.yaml, which holds it as it was before, is missing or damaged; nothing more was changed","file":"demo-set/.agentdrafter/journal.jsonl"}}
+```
+
+A commit that fails while its process runs on, such as on a full disk, puts every file back itself, through the same restore, cuts its entry back off the journal and is recorded as a failed attempt, as before. When it cannot do either, the entry stays pending, its error says so, and the next command rolls it back.
 
 ## Undo
 
@@ -138,25 +180,27 @@ An entry cannot be shown once the bytes it needs are gone: when the undo state o
 | Code | In the journal and undo it means |
 |---|---|
 | `unknown_name` | The journal has no entry of that number. The message lists the change sets an undo can take. |
-| `bad_value` | The entry is a failed attempt, an undo or an accept, or the change set was undone already. |
+| `bad_value` | The entry is a failed attempt, an undo or an accept, or was rolled back, or the change set was undone already. |
 | `issued` | A change set the undo would take was issued by an accept. |
 | `pruned` | A change set the undo needs has had its undo state pruned; or, drawing the set as it was at an entry, a file it needs is no longer kept. |
-| `changed_by_hand` | A file the undo would put back was changed since the change sets left it. |
-| `read_failed` | The set's settings, the journal or an undo state cannot be read, or an undo state is missing or damaged. |
+| `changed_by_hand` | A file the undo would put back was changed since the change sets left it; or, for any command on the set, a file the rollback of an entry left pending would put back was changed since its commit stopped. |
+| `read_failed` | The set's settings, the journal or an undo state cannot be read, or an undo state is missing or damaged, or a line of the journal other than the last is not an entry. |
 | `write_failed` | A file could not be put back; every file is as it was before the undo. |
 | `usage` | The command's arguments are wrong, such as a change set that is not a number. |
 | `inconsistent` | An accept: the set is inconsistent. |
 | `checks_failed` | An accept: checks failed, and it was not told to accept despite them. The reply lists them, and nothing was issued. |
 | `moved_on` | An accept: the journal holds an entry newer than `newest_seen`. |
 | `nothing_to_accept` | An accept: the working revision is the one the last accept issued. |
+| `rollback_failed` | Any command on the set: its journal holds an entry a commit that never finished left pending, and it could not be rolled back. Nothing more was changed. |
 
 ## How it works
 
-`crates/agentdrafter-core/src/change/journal.rs` holds the journal: its entries, reading it, a change set's undo state and entry, a failed attempt's entry, an accept's entry, and pruning. `undo.rs` holds the undo, `accept.rs` the accept and what a stamp says of the revision its files came from, and `history.rs` the set's files as they were at an entry. Both put their files in place through `commit.rs`, which adds the journal's entry last, once every file is in place: a journal that cannot take it is cut back to its length before, and every file is put back, so nothing lands without its entry. If the journal cannot be cut back either, the error does not say nothing was changed: it names the journal and the entry it may still hold for the change that was rolled back. Nothing reads or runs git.
+`crates/agentdrafter-core/src/change/journal.rs` holds the journal: its entries and the lines that mark them, reading it, its lock, a change set's undo state and entry, a failed attempt's entry, an accept's entry, and pruning. `undo.rs` holds the undo, `accept.rs` the accept and what a stamp says of the revision its files came from, `history.rs` the set's files as they were at an entry, and `recover.rs` the rollback of an entry a commit that never finished left pending, which the registry of commands (`src/commands.rs`) runs before a command reads the set. A change set, an undo and an accept put their files in place through `commit.rs`, which writes the entry pending first, then the undo state, then the files, and marks the entry done last, and whose `restore` puts every file back from the undo state, both for a commit that fails and for a rollback. A test-only seam stops a commit at any step, as a killed process stops, and the command line's tests kill the process there (the `test-seams` feature, which nothing that ships has). Every command on a set reads its journal whole, with the same reader as `journal`, before it runs: on forge that costs about 3 ms a megabyte of journal, 31 ms for 2,000 change sets that each list a 100-sheet template edit's objects (9.6 MB), and nothing a command can measure for a journal of a few entries. Nothing reads or runs git.
 
 ## What is not offered yet
 
 - Redo: an undone change set is applied again by sending it again; its operations are in its entry.
-- Two processes changing one set at once: nothing locks the set, so each agent's change sets should go one at a time.
+- Two processes changing one set at once: the journal lock keeps two commits from overlapping, but each change set is worked out from the files as it found them, so each agent's change sets should still go one at a time.
+- Durability through a power cut: each line of the journal and each new file is synced, but the folders are not after a file is moved into place.
 - A record that was a link before a change set comes back as a file holding the same bytes, as the change set left it.
 - Revisions named by letter, such as Rev B, as the picked prototype named them: an accept is known by its entry in the journal.

@@ -19,6 +19,12 @@
 //! An issued change set cannot be undone: once an accept has issued it, an
 //! undo that would take it, itself or as a change set later than the one
 //! asked for, is refused, and changes nothing.
+//!
+//! Its entry is written ahead of its files, as a change set's is, and an
+//! undo whose commit never finished is rolled back by the next command. It
+//! holds the set's journal lock from before it reads the journal and the
+//! files until its entry is done, so its entry records the files as they
+//! are when it commits: no other process's change set lands between.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,9 +34,10 @@ use serde::{Deserialize, Serialize};
 
 use super::commit::Replacement;
 use super::journal::{
-    commit_undo, fates, listed, read_entries, read_state, undo_state, undoable, Entry, EntryKind,
-    Fate, FileState, KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
+    commit_undo, fates, listed, lock, read_entries, read_state, undo_state, undoable, Entry,
+    EntryKind, Fate, FileState, KEPT_UNDO_STATES, UNDO_STATES_FOLDER,
 };
+use super::recover::recover;
 use super::{inconsistent, mark_report, Inconsistent, MARK_FILE};
 use crate::description::{parse_mark, read_set_settings};
 use crate::error::{Error, ErrorCode};
@@ -97,9 +104,14 @@ pub enum UndoAction {
 /// that would do in a dry run.
 ///
 /// The reply is `ok` with the report when every file was put back, and not
-/// `ok`, with an error and nothing changed, when the undo is refused.
+/// `ok`, with an error and nothing changed, when the undo is refused. An
+/// entry a commit that never finished left pending is rolled back first,
+/// and the reply says so under `rolled_back`.
 pub fn undo(request: &UndoRequest) -> Reply<UndoReport> {
-    Reply::from(undo_set(request))
+    match recover(&request.set) {
+        Ok(rolled_back) => Reply::from(undo_set(request)).after(rolled_back),
+        Err(error) => Reply::from(Err(error)),
+    }
 }
 
 /// What one file goes back to.
@@ -117,6 +129,14 @@ struct Plan {
 fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
     let folder = &request.set;
     read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
+    // Held until the undo's entry is done, so the files it reads to work it
+    // out are the files it puts back: a dry run writes nothing, and needs
+    // no lock.
+    let locked = if request.dry_run {
+        None
+    } else {
+        Some(lock(folder)?)
+    };
     let entries = read_entries(folder)?;
     let fates = fates(&entries);
     let wanted = request.change_set;
@@ -129,6 +149,15 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
             format!("the set's journal has no entry {wanted}"),
         ));
     };
+    if !entry.finished() {
+        return Err(refuse(
+            ErrorCode::BadValue,
+            format!(
+                "entry {wanted} was rolled back, since its commit never finished, so it changed \
+                 nothing and there is nothing to undo"
+            ),
+        ));
+    }
     match entry.kind {
         EntryKind::ChangeSet => {}
         EntryKind::FailedAttempt => {
@@ -168,6 +197,7 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
         .iter()
         .filter(|e| {
             e.kind == EntryKind::ChangeSet
+                && e.finished()
                 && e.entry >= wanted
                 && fates.get(&e.entry).is_none_or(|f| f.undone_by.is_none())
         })
@@ -353,7 +383,12 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
             inconsistent: mark,
         });
     }
-    let number = commit_undo(folder, undid.clone(), states, &replacements)?;
+    #[cfg(test)]
+    if let Some(hook) = AFTER_PLAN.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let locked = locked.expect("an undo that writes holds the lock");
+    let number = commit_undo(folder, &locked, undid.clone(), states, replacements)?;
     let mut folders_removed = Vec::new();
     for made in folders {
         let path = folder.join(made);
@@ -416,4 +451,11 @@ fn message(dry_run: bool, undid: &[u64], files: usize) -> String {
              byte"
         )
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test runs once an undo is worked out, before it commits.
+    pub(super) static AFTER_PLAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }

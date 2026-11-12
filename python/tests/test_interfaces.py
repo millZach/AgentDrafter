@@ -83,6 +83,8 @@ def snapshot(set_folder):
 
 
 def journal(set_folder):
+    """Every line of the set's journal: its entries, and the lines that mark
+    an entry written ahead of its files done."""
     lines = (set_folder / JOURNAL_FILE).read_text(encoding="utf-8").splitlines()
     return [json.loads(line) for line in lines]
 
@@ -281,7 +283,7 @@ class Interfaces(unittest.TestCase):
 
         # Each accept is recorded with the interface it came through.
         for interface, via in (("library", "python"), ("cli", "cli"), ("http", "http"), ("mcp", "mcp")):
-            accepts = [e for e in journal(self.folders[interface] / "demo-set") if e["kind"] == "accept"]
+            accepts = [e for e in journal(self.folders[interface] / "demo-set") if e.get("kind") == "accept"]
             self.assertEqual([e["via"] for e in accepts], [via], interface)
 
         # Every file of the set is the same after the same commands.
@@ -313,7 +315,7 @@ class Interfaces(unittest.TestCase):
         http_server.stop()
 
         by_library = journal(self.folders["library"] / "demo-set")
-        self.assertEqual(len(by_library), 2)
+        self.assertEqual(len([line for line in by_library if "kind" in line]), 2, "two entries")
         for entry in by_library:
             self.assertTrue(entry["at"].endswith("Z"), entry)
         for interface in ("cli", "http", "mcp"):

@@ -17,7 +17,10 @@
 //!   fingerprint of each file of the set, so an output made from those
 //!   files says, in its stamp, that it came from an issued revision.
 //!
-//! An accept writes no file of the set: what it issues is in its entry.
+//! An accept writes no file of the set: what it issues is in its entry,
+//! written ahead and marked done as a change set's is; an accept whose
+//! commit never finished is rolled back by the next command, and issued
+//! nothing.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -30,6 +33,7 @@ use super::journal::{
     commit_accept, fates, in_place, listed, read_entries, Accepting, CheckFailed, Entry, EntryKind,
     FileIssued,
 };
+use super::recover::recover;
 use crate::check::{check_with, CheckReport, CheckRequest};
 use crate::description::{read_set_settings, SavedSet};
 use crate::error::{Error, ErrorCode};
@@ -99,17 +103,24 @@ pub struct AcceptReport {
 /// error, when checks fail and `despite_failed_checks` was not given; and
 /// not `ok`, with only an error, when the accept is refused: the set is
 /// inconsistent, the journal has moved on past `newest_seen`, there is
-/// nothing to accept, or a sheet cannot be read.
+/// nothing to accept, or a sheet cannot be read. An entry a commit that
+/// never finished left pending is rolled back first, and the reply says so
+/// under `rolled_back`.
 pub fn accept_with(
     request: &AcceptRequest,
     settings: &Settings,
     via: Interface,
 ) -> Reply<AcceptReport> {
-    match accept_set(request, settings, via) {
+    let rolled_back = match recover(&request.set) {
+        Ok(rolled_back) => rolled_back,
+        Err(error) => return Reply::from(Err(error)),
+    };
+    let reply = match accept_set(request, settings, via) {
         Ok(Accepted::Done(report)) => Reply::from(Ok(report)),
         Ok(Accepted::ChecksFailed(report, error)) => Reply::partly(report, error),
         Err(error) => Reply::from(Err(error)),
-    }
+    };
+    reply.after(rolled_back)
 }
 
 /// An accept's outcome short of an error.
@@ -162,7 +173,10 @@ fn accept_set(
         .collect();
     let revision = revision(folder, &set)?;
 
-    let last_accept = entries.iter().rev().find(|e| e.kind == EntryKind::Accept);
+    let last_accept = entries
+        .iter()
+        .rev()
+        .find(|e| e.kind == EntryKind::Accept && e.finished());
     if numbers.is_empty() {
         if let Some(last) = last_accept.filter(|e| same_files(&e.revision, &revision)) {
             return Err(Error::new(
@@ -451,6 +465,7 @@ pub(crate) fn stamp_revision(files: &[(&Path, &[u8])]) -> StampRevision {
     }
     let accept = entries.iter().rev().find(|e| {
         e.kind == EntryKind::Accept
+            && e.finished()
             && read.iter().all(|(path, print)| {
                 e.revision
                     .iter()
