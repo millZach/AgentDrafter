@@ -171,6 +171,40 @@ fn sheet_defs() -> Map<String, Value> {
     defs
 }
 
+/// The characters Rust's `char::is_whitespace` takes as white space,
+/// Unicode's White_Space, as ranges: what `str::trim` takes away.
+const WHITE_SPACE: [(char, char); 10] = [
+    ('\u{9}', '\u{d}'),
+    (' ', ' '),
+    ('\u{85}', '\u{85}'),
+    ('\u{a0}', '\u{a0}'),
+    ('\u{1680}', '\u{1680}'),
+    ('\u{2000}', '\u{200a}'),
+    ('\u{2028}', '\u{2029}'),
+    ('\u{202f}', '\u{202f}'),
+    ('\u{205f}', '\u{205f}'),
+    ('\u{3000}', '\u{3000}'),
+];
+
+/// A regular expression a string matches when it holds a character that
+/// is not white space: contents that show, as the reader asks of a text's
+/// and an mtext's. It names the characters one by one, as `\uXXXX`, so
+/// that every regular expression engine reads it the same; `\S` is not the
+/// same set in all of them.
+pub(super) fn shows_pattern() -> String {
+    let class: String = WHITE_SPACE
+        .iter()
+        .map(|&(first, last)| {
+            if first == last {
+                format!("\\u{:04x}", u32::from(first))
+            } else {
+                format!("\\u{:04x}-\\u{:04x}", u32::from(first), u32::from(last))
+            }
+        })
+        .collect();
+    format!("[^{class}]")
+}
+
 /// `characters` escaped for a regular expression's character class.
 fn regex_class(characters: &str) -> String {
     characters
@@ -663,10 +697,12 @@ fn text_defs(defs: &mut Map<String, Value>) {
             &["contents", "position", "height"],
             json!({
                 "contents": {
-                    "description": "What the text says, exactly as it shows: one line, not \
-                                    empty, with no control characters. `%` shows as a percent \
+                    "description": "What the text says, exactly as it shows: one line, \
+                                    something that shows, so not empty and not only white \
+                                    space, with no control characters. `%` shows as a percent \
                                     sign, however many there are.",
                     "type": TEXT_TYPES,
+                    "pattern": shows_pattern(),
                 },
                 "position": {
                     "$ref": "#/$defs/point",
@@ -699,11 +735,13 @@ fn text_defs(defs: &mut Map<String, Value>) {
             &["contents", "position", "height"],
             json!({
                 "contents": {
-                    "description": "What the text says, exactly as it shows, not empty: a line \
+                    "description": "What the text says, exactly as it shows: something that \
+                                    shows, so not empty and not only white space. A line \
                                     break starts a new line, and line breaks at the end are \
                                     dropped. No control characters but line breaks. A \\, { or } \
                                     shows as itself; formatting codes are not read.",
                     "type": TEXT_TYPES,
+                    "pattern": shows_pattern(),
                 },
                 "position": {
                     "$ref": "#/$defs/point",
@@ -860,6 +898,16 @@ mod tests {
         }
         for schema in [sheet_description_schema(), block_library_schema()] {
             walk(&schema, &schema["$defs"]);
+        }
+    }
+
+    #[test]
+    fn the_white_space_the_contents_pattern_names_is_what_trim_takes_away() {
+        for c in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
+            let listed = WHITE_SPACE
+                .iter()
+                .any(|&(first, last)| (first..=last).contains(&c));
+            assert_eq!(listed, c.is_whitespace(), "U+{:04X}", u32::from(c));
         }
     }
 }

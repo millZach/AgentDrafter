@@ -67,6 +67,11 @@ impl Emitter<'_> {
         let Kind::Scalar(value) = &node.kind else {
             return self.flow(node);
         };
+        // A bare null an edit made is written as one: quoted, it would be
+        // text.
+        if node.source.is_none() && node.is_bare_null() {
+            return value.clone();
+        }
         if let Some(source) = node.source {
             let raw = &self.text[source.start..source.end];
             let one_line = !raw.contains(['\n', '\r']);
@@ -484,6 +489,27 @@ mod tests {
         // Text an edit made is quoted where it would read as a bare null.
         assert!(!read("name: null\n").same_as(&read("name: 'null'\n")));
         assert_eq!(scalar_text("null", Context::Flow, 0, "\n"), "'null'");
+        // A bare null an edit made is written bare, and reads back as one.
+        let mut made = read("circle: {radius: 1, layer: notes}\n");
+        forget(&mut made);
+        let Kind::Mapping(entries) = &mut made.kind else {
+            panic!()
+        };
+        let Kind::Mapping(keys) = &mut entries[0].value.kind else {
+            panic!()
+        };
+        keys[1].value = Node::bare_null();
+        let emitter = Emitter {
+            text: "",
+            newline: "\n",
+        };
+        let written = emitter.item(&made, 2);
+        assert_eq!(written, "circle: {radius: 1, layer: null}");
+        assert!(read(&written).same_as(&made));
+        assert!(!read("layer: 'null'\n").same_as(&read(&format!(
+            "layer: {}\n",
+            emitter.flow(&Node::bare_null())
+        ))));
     }
 
     #[test]

@@ -554,6 +554,26 @@ fn cases() -> Vec<Case> {
         (&CONTENTS, "100", json!(100), true),
         (&CONTENTS, "'yes'", json!("yes"), true),
         (&CONTENTS, "[A]", json!(["A"]), false),
+    ]);
+    // Contents are required, so contents that do not show are an error:
+    // empty, quoted, or only white space, Unicode's included. A character
+    // that is not white space, even one that draws nothing, shows.
+    for place in [&CONTENTS, &MTEXT_CONTENTS] {
+        cases.extend([
+            (place, "''", json!(""), false),
+            (place, "' '", json!(" "), false),
+            (
+                place,
+                "\"\\t \\u3000\\u2029\"",
+                json!("\t \u{3000}\u{2029}"),
+                false,
+            ),
+            (place, "' A '", json!(" A "), true),
+            (place, "\"\\u00a0A\"", json!("\u{a0}A"), true),
+            (place, "\"\\ufeff\"", json!("\u{feff}"), true),
+        ]);
+    }
+    cases.extend(vec![
         // A single line's justification.
         (&JUSTIFY, "middle_center", json!("middle_center"), true),
         (&JUSTIFY, "'left'", json!("left"), true),

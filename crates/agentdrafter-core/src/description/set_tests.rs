@@ -770,6 +770,13 @@ fn the_template_schema_accepts_exactly_the_templates_the_reader_accepts() {
             (place, "[A]", json!(["A"]), false),
         ]);
     }
+    // A text's contents written in the template must show, as in a sheet
+    // description; an attribute's value may be empty.
+    for place in [&TEXT_CONTENTS, &MTEXT_CONTENTS] {
+        cases.push((place, "''", json!(""), false));
+        cases.push((place, "' '", json!(" "), false));
+    }
+    cases.push((&ATTRIBUTE_VALUE, "''", json!(""), true));
     // Only an attribute's value and text's contents come from the row.
     cases.push((&LAYER_NAME, "{row: LAYER}", json!({"row": "LAYER"}), false));
     assert_reader_and_schema_agree(&template_schema(), cases, read_template_with_every_value);

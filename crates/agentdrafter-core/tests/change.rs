@@ -1203,3 +1203,166 @@ fn an_error_names_the_operation_that_set_the_bad_value() {
         e.message
     );
 }
+
+#[test]
+fn an_add_reads_a_null_as_a_sheet_description_reads_a_bare_null() {
+    let set = demo_set("nulls");
+    // On an optional text or path field a null leaves the key out: an id
+    // so sent is given one, and a layer, a style and an attribute's value
+    // take their defaults.
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "id": null, "name": null, "layer": null},
+            {"op": "add_text", "sheet": "DEMO-002", "contents": "NOTE", "position": [1, 8, 0], "height": 0.2, "style": null},
+            {"op": "insert_block", "sheet": "DEMO-002", "block": "TITLE_BLOCK", "position": [8, 3, 0], "attributes": {"TITLE": "T", "REV": null}},
+        ]}),
+    );
+    let ids: Vec<&str> = report
+        .operations
+        .iter()
+        .map(|o| o.id.as_deref().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        ["DEMO-002/circle-1", "DEMO-002/text-1", "DEMO-002/insert-1"]
+    );
+    let on_sheet = recorded(&set);
+    let Object::Circle(circle) = &on_sheet["DEMO-002/circle-1"] else {
+        panic!()
+    };
+    assert_eq!(circle.layer, "0");
+    let Object::Text(text) = &on_sheet["DEMO-002/text-1"] else {
+        panic!()
+    };
+    assert_eq!(text.style, "Standard");
+    let Object::Insert(insert) = &on_sheet["DEMO-002/insert-1"] else {
+        panic!()
+    };
+    let rev = insert.attributes.iter().find(|a| a.tag == "REV").unwrap();
+    assert_eq!(rev.value, "0", "the definition's default");
+    let in_dwg = built(&set, "DEMO-002");
+    for id in &ids {
+        assert!(in_dwg.contains_key(*id), "{id} is built");
+    }
+    // The record writes each null as the bare null it stands for.
+    let row = row_text(&set, "DEMO-002");
+    assert!(
+        row.contains(
+            "- circle: {center: [5, 5, 0], radius: 0.5, layer: null, id: circle-1, name: null}\n"
+        ),
+        "{row}"
+    );
+    assert!(row.contains("style: null"), "{row}");
+    assert!(row.contains("attributes: {REV: null, TITLE: T}"), "{row}");
+
+    // On a required one, or on a key that is not text, it is an error, as
+    // in a sheet description, and the sheet is left as it was.
+    let before = snapshot(&set);
+    for (op, code, field) in [
+        (
+            json!({"op": "add_text", "sheet": "DEMO-002", "contents": null, "position": [1, 8, 0], "height": 0.2}),
+            ErrorCode::MissingKey,
+            "operations[0].contents",
+        ),
+        (
+            json!({"op": "insert_block", "sheet": "DEMO-002", "block": null, "position": [8, 3, 0]}),
+            ErrorCode::MissingKey,
+            "operations[0].block",
+        ),
+        (
+            json!({"op": "add_polyline", "sheet": "DEMO-002", "points": [[0, 0, 0], [1, 0, 0]], "closed": null}),
+            ErrorCode::WrongType,
+            "operations[0].closed",
+        ),
+        (
+            json!({"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": null}),
+            ErrorCode::BadNumber,
+            "operations[0].radius",
+        ),
+    ] {
+        let reply = apply(&set, json!({"operations": [op]}));
+        assert!(!reply.ok, "{op}");
+        let e = reply.result.unwrap().sheets[0].error.clone().unwrap();
+        assert_eq!(e.code, code, "{op}: {e:?}");
+        assert_eq!(e.field.as_deref(), Some(field), "{op}: {e:?}");
+        assert_eq!(snapshot(&set), before, "{op}");
+    }
+}
+
+#[test]
+fn an_adds_schema_takes_exactly_what_the_add_takes() {
+    let set = demo_set("add-schema");
+    let listed = operations();
+    let on_sheet = |mut op: Value| {
+        op["sheet"] = json!("DEMO-002");
+        op
+    };
+    let with = |mut op: Value, key: &str, value: Value| {
+        op[key] = value;
+        on_sheet(op)
+    };
+    let circle = json!({"op": "add_circle", "center": [5, 5, 0], "radius": 0.5});
+    let text = json!({"op": "add_text", "contents": "A", "position": [1, 8, 0], "height": 0.2});
+    let mtext = json!({"op": "add_mtext", "contents": "A", "position": [1, 7, 0], "height": 0.1});
+    let insert = json!({"op": "insert_block", "block": "TITLE_BLOCK", "position": [8, 3, 0]});
+    let hatch = json!({"op": "add_hatch", "pattern": "SOLID", "boundary": [{"polyline": {"points": [[3, 6, 0], [4, 6, 0], [4, 7, 0]]}}]});
+    let polyline = json!({"op": "add_polyline", "points": [[0, 0, 0], [1, 0, 0]]});
+    let cases = [
+        // A null leaves an optional text or path field out.
+        (with(circle.clone(), "id", Value::Null), true),
+        (with(circle.clone(), "name", Value::Null), true),
+        (with(circle.clone(), "layer", Value::Null), true),
+        (with(text.clone(), "style", Value::Null), true),
+        (
+            with(insert.clone(), "attributes", json!({"REV": null})),
+            true,
+        ),
+        // A required one so sent is an error, and so is a null on a key
+        // that is not text.
+        (with(text.clone(), "contents", Value::Null), false),
+        (with(insert.clone(), "block", Value::Null), false),
+        (with(hatch.clone(), "pattern", Value::Null), false),
+        (with(circle.clone(), "radius", Value::Null), false),
+        (with(text.clone(), "rotation", Value::Null), false),
+        (with(polyline.clone(), "closed", Value::Null), false),
+        // Quoted, null is text.
+        (with(text.clone(), "contents", json!("null")), true),
+        // Contents that do not show are an error.
+        (with(text.clone(), "contents", json!("")), false),
+        (with(text.clone(), "contents", json!(" ")), false),
+        (with(mtext.clone(), "contents", json!("")), false),
+        (with(mtext.clone(), "contents", json!("\n")), false),
+    ];
+    let mut disagreements = Vec::new();
+    for (op, accepted) in cases {
+        let info = listed
+            .operations
+            .iter()
+            .find(|o| o.name == op["op"])
+            .unwrap();
+        let by_schema = jsonschema::validator_for(&info.schema)
+            .unwrap()
+            .is_valid(&op);
+        let reply = dry_run(&set, json!({"operations": [op.clone()]}));
+        let why = reply.error.as_ref().map(|e| e.message.clone()).or_else(|| {
+            let sheet = reply.result.as_ref()?.sheets.first()?;
+            sheet.error.as_ref().map(|e| e.message.clone())
+        });
+        if by_schema != accepted || reply.ok != accepted {
+            disagreements.push(format!(
+                "{op}: expected {}, the schema {}, the change set {} ({})",
+                if accepted { "accepted" } else { "refused" },
+                if by_schema { "accepts" } else { "refuses" },
+                if reply.ok { "lands" } else { "does not land" },
+                why.unwrap_or_default(),
+            ));
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "{} disagreements:\n{}",
+        disagreements.len(),
+        disagreements.join("\n")
+    );
+}
