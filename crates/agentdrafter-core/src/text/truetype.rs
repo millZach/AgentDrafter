@@ -119,20 +119,21 @@ impl TrueTypeFont {
 /// The glyph `face` draws `c` with; none when it holds no glyph for it.
 ///
 /// A font encoded as a Windows symbol font, whose character map has a
-/// Windows symbol table, (3, 0), and no Unicode table, holds its characters
-/// at U+F000 plus their code: `I`, 0x49, at U+F049. A character below U+0100
-/// that such a font holds no glyph for at its own code is looked up there,
-/// as Windows and AutoCAD do. ttf-parser reads only Unicode tables, so the
-/// symbol table is read here. Any other font is read as ttf-parser reads it.
+/// Windows symbol table, (3, 0), holds its characters at U+F000 plus their
+/// code: `I`, 0x49, at U+F049. Its Unicode table, when it has one, holds
+/// them there too. A character such a font holds no glyph for in its
+/// Unicode tables is looked up in its symbol table, at its own code and
+/// then, below U+0100, at U+F000 plus its code, as Windows and AutoCAD do.
+/// ttf-parser reads only Unicode tables, so the symbol table is read here.
+/// A font with no symbol table is read as ttf-parser reads it.
 fn glyph_index(face: &Face, c: char) -> Option<GlyphId> {
     if let Some(id) = face.glyph_index(c) {
         return Some(id);
     }
-    let subtables = face.tables().cmap?.subtables;
-    if subtables.into_iter().any(|s| s.is_unicode()) {
-        return None;
-    }
-    let symbol = subtables
+    let symbol = face
+        .tables()
+        .cmap?
+        .subtables
         .into_iter()
         .find(|s| s.platform_id == PlatformId::Windows && s.encoding_id == 0)?;
     // A code mapped to glyph 0 is mapped to the missing glyph: not found.
@@ -251,9 +252,10 @@ pub(crate) mod tests {
     }
 
     /// The bytes of a font as [`made_up_font`] writes them, encoded as a
-    /// Windows symbol font: a Windows symbol table, (3, 0), holds each
-    /// character at U+F000 plus its code, and a Mac table, (1, 0), at its
-    /// own code, with no Unicode table. Its characters are below U+0100.
+    /// Windows symbol font: a Windows symbol table, (3, 0), and a Unicode
+    /// table, (0, 0), both hold each character at U+F000 plus its code, and
+    /// a Mac table, (1, 0), at its own code, as AutoCAD's twins of its
+    /// PostScript fonts carry them. Its characters are below U+0100.
     fn made_up_symbol_font(glyphs: &[MadeUpGlyph]) -> Vec<u8> {
         made_up(glyphs, true)
     }
@@ -371,7 +373,12 @@ pub(crate) mod tests {
                 ids[usize::from(*code)] = *id as u8;
             }
             format0.extend(ids);
-            vec![(1, 0, format0), (3, 0, format4(0xF000))] // Mac, Windows symbol
+            // Unicode, Mac, Windows symbol.
+            vec![
+                (0, 0, format4(0xF000)),
+                (1, 0, format0),
+                (3, 0, format4(0xF000)),
+            ]
         } else {
             vec![(3, 1, format4(0))] // Windows Unicode BMP
         };
@@ -457,7 +464,7 @@ pub(crate) mod tests {
     #[test]
     fn a_symbol_font_draws_its_characters_from_u_f000_on() {
         // A font encoded as a Windows symbol font holds `A` at U+F041 and
-        // `I` at U+F049 (#62).
+        // `I` at U+F049, in its Unicode table as in its symbol table (#62).
         let font = TrueTypeFont::parse(made_up_symbol_font(&[
             ('A', 700, [0, 0, 700, 640]),
             ('I', 300, [100, 0, 200, 640]),
