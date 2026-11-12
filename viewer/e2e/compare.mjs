@@ -150,6 +150,46 @@ const near = (from, to, width, height, radius) => {
   return { ink, share: ink ? found / ink : 1 };
 };
 
+/** How far apart two colours are: the most any channel differs by. */
+const apart = (a, i, b, j) =>
+  Math.max(Math.abs(a[i * 4] - b[j * 4]), Math.abs(a[i * 4 + 1] - b[j * 4 + 1]), Math.abs(a[i * 4 + 2] - b[j * 4 + 2]));
+
+/**
+ * A pixel's colour matches another's when no channel differs by more than
+ * this, three eighths of the range: more than anti-aliasing moves an edge
+ * pixel (the viewer shares a pixel's coverage out in four samples, so an
+ * edge the PNG covers by a half it may cover by a quarter, 64 levels off),
+ * less than red, blue or green differ from black, or from one another, even
+ * at half a pixel's coverage (128 levels).
+ */
+export const SAME_COLOUR = 96;
+
+/**
+ * The share of `from`'s ink with a pixel of `to` within `radius` pixels in
+ * the same colour: so ink of the right colour, not only ink.
+ */
+const nearColour = (from, ink, to, width, height, radius) => {
+  const offsets = within(radius);
+  let count = 0;
+  let found = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      if (!ink[i]) continue;
+      count++;
+      for (const [dx, dy] of offsets) {
+        const u = x + dx;
+        const v = y + dy;
+        if (u >= 0 && v >= 0 && u < width && v < height && apart(from, i, to, v * width + u) <= SAME_COLOUR) {
+          found++;
+          break;
+        }
+      }
+    }
+  }
+  return count ? found / count : 1;
+};
+
 /**
  * How closely two images of the same size agree: `a` the PNG's pixels and
  * `b` the viewer's, each RGBA.
@@ -183,6 +223,8 @@ export function compare(a, b, width, height) {
     png_ink_within_2px: png2.share,
     viewer_ink_within_1px: view1.share,
     viewer_ink_within_2px: view2.share,
+    png_colour_within_1px: nearColour(a, inkA, b, width, height, 1),
+    viewer_colour_within_1px: nearColour(b, inkB, a, width, height, 1),
     pixels_differing_by_more_than_64: differing / (width * height),
     mean_channel_difference: total / (width * height * 3),
   };

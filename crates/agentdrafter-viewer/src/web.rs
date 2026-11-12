@@ -5,17 +5,26 @@
 //! calls [`Viewer::draw`] with those; the GPU is given two numbers and the
 //! mesh it already holds, so a pan or a zoom costs nothing to lay out.
 //!
-//! - Strokes are drawn as one draw: each segment a quad round the pen's
-//!   capsule, its round ends and its coverage worked out per pixel, so a
-//!   pen is exactly as wide as the PNG draws it, anti-aliased. The quads
-//!   are plain triangles, not instances, which software WebGL draws several
+//! - Items are painted in the display list's order, as the PNG paints
+//!   them: a later item covers an earlier one, and nothing is blended.
+//!   Items next to one another that draw strokes, or fills, are drawn by
+//!   one draw call, run after run; the GPU applies each draw's triangles,
+//!   and each draw, in order. A sheet whose strokes and fills alternate
+//!   more than 64 times is drawn instead in two draws, every item at a
+//!   depth by its place in the list, a later one nearer, so the depth test
+//!   keeps the later item's colour in every sample.
+//! - Strokes are drawn as one draw: each segment a quad exactly as wide as
+//!   the pen and long enough for its round ends, so a pen is as wide as
+//!   the PNG draws it. The samples the quad's sides cover are the pen's;
+//!   at a round end the shader works out the share of the pixel the pen
+//!   covers, by its distance, and that share of the samples is written
+//!   (alpha to coverage). Every sample is written opaque, so where one
+//!   stroke's segments overlap at a corner they cover the same samples
+//!   once, and the canvas's multisampling smooths the edges. The quads are
+//!   plain triangles, not instances, which software WebGL draws several
 //!   times faster.
 //! - Fills are drawn as one draw of their triangles, their edges smoothed
-//!   by the canvas's multisampling.
-//! - Ink only darkens: blending takes each pixel's darkest ink (`MIN`), so
-//!   strokes that meet at a corner do not darken where they overlap, and
-//!   the order of the shapes does not matter. Where two colours cross, the
-//!   darker shows.
+//!   by the multisampling.
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -24,16 +33,18 @@ use web_sys::{
     WebGlUniformLocation, WebGlVertexArrayObject,
 };
 
-use crate::mesh::{read_reply, Mesh};
+use crate::mesh::{read_reply, Kind, Mesh, Run};
 
 const STROKE_VERTEX: &str = r#"#version 300 es
 precision highp float;
 layout(location = 0) in vec4 a_segment;
 layout(location = 1) in float a_lineweight;
 layout(location = 2) in vec4 a_color;
+layout(location = 3) in float a_item;
 uniform vec2 u_scale;
 uniform vec2 u_offset;
 uniform vec2 u_size;
+uniform float u_items;
 uniform float u_pixels_per_mm;
 uniform float u_finest;
 out vec2 v_at;
@@ -45,6 +56,9 @@ void main() {
   vec2 a = a_segment.xy * u_scale + u_offset;
   vec2 b = a_segment.zw * u_scale + u_offset;
   float half_width = max(a_lineweight * u_pixels_per_mm, u_finest) * 0.5;
+  // Along the segment, room for the round ends and their smoothing; across
+  // it, the pen's width exactly, so the samples its sides cover are the
+  // samples the pen covers.
   float reach = half_width + 1.0;
   vec2 along = b - a;
   float length_ = length(along);
@@ -53,13 +67,15 @@ void main() {
   // The quad's corner: the index is four to a segment.
   int corner = gl_VertexID & 3;
   vec2 p = ((corner & 1) == 0 ? a - dir * reach : b + dir * reach)
-         + across * ((corner & 2) == 0 ? -reach : reach);
+         + across * ((corner & 2) == 0 ? -half_width : half_width);
   v_at = p;
   v_a = a;
   v_b = b;
   v_half = half_width;
   v_color = a_color.rgb;
-  gl_Position = vec4(p.x / u_size.x * 2.0 - 1.0, 1.0 - p.y / u_size.y * 2.0, 0.0, 1.0);
+  // A later item is nearer, so it covers an earlier one.
+  float depth = 1.0 - 2.0 * (a_item + 1.0) / (u_items + 1.0);
+  gl_Position = vec4(p.x / u_size.x * 2.0 - 1.0, 1.0 - p.y / u_size.y * 2.0, depth, 1.0);
 }
 "#;
 
@@ -70,15 +86,25 @@ flat in vec2 v_a;
 flat in vec2 v_b;
 flat in float v_half;
 flat in vec3 v_color;
+uniform bool u_multisampled;
 out vec4 o_color;
 void main() {
   vec2 pa = v_at - v_a;
   vec2 ba = v_b - v_a;
-  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-12), 0.0, 1.0);
-  float d = length(pa - ba * h);
+  float length2 = dot(ba, ba);
+  float t = length2 > 1e-12 ? dot(pa, ba) / length2 : -1.0;
+  // Beside the segment, the quad's own edges are the pen's: every sample
+  // the quad covers is ink.
+  if (t >= 0.0 && t <= 1.0) {
+    o_color = vec4(v_color, 1.0);
+    return;
+  }
+  // At a round end, the share of the pixel the pen covers, by its distance.
+  float d = length(pa - ba * clamp(t, 0.0, 1.0));
   float coverage = clamp(v_half + 0.5 - d, 0.0, 1.0);
-  if (coverage <= 0.0) discard;
-  o_color = vec4(mix(vec3(1.0), v_color, coverage), 1.0);
+  // Without samples to share out, a pixel is the pen's when it covers half.
+  if (coverage <= 0.0 || (!u_multisampled && coverage < 0.5)) discard;
+  o_color = vec4(v_color, coverage);
 }
 "#;
 
@@ -86,14 +112,17 @@ const FILL_VERTEX: &str = r#"#version 300 es
 precision highp float;
 layout(location = 0) in vec2 a_point;
 layout(location = 1) in vec4 a_color;
+layout(location = 2) in float a_item;
 uniform vec2 u_scale;
 uniform vec2 u_offset;
 uniform vec2 u_size;
+uniform float u_items;
 flat out vec3 v_color;
 void main() {
   vec2 p = a_point * u_scale + u_offset;
   v_color = a_color.rgb;
-  gl_Position = vec4(p.x / u_size.x * 2.0 - 1.0, 1.0 - p.y / u_size.y * 2.0, 0.0, 1.0);
+  float depth = 1.0 - 2.0 * (a_item + 1.0) / (u_items + 1.0);
+  gl_Position = vec4(p.x / u_size.x * 2.0 - 1.0, 1.0 - p.y / u_size.y * 2.0, depth, 1.0);
 }
 "#;
 
@@ -136,6 +165,11 @@ const SURROUND: [f32; 3] = [
 /// The paper's shadow on the background.
 const SHADOW: [f32; 3] = [0.04, 0.045, 0.05];
 
+/// The most runs of strokes and fills a sheet is drawn in one by one, in
+/// order; a sheet whose strokes and fills alternate more often is drawn in
+/// two draws, in order by depth.
+const MOST_RUNS: usize = 64;
+
 /// How far the paper's shadow falls, in CSS pixels.
 const SHADOW_OFFSET: f64 = 6.0;
 
@@ -168,8 +202,11 @@ struct Loaded {
     origin: [f64; 2],
     paper: [f64; 4],
     millimetres_per_unit: f64,
-    segments: i32,
-    triangle_corners: i32,
+    /// How many items the display list holds, which sets each one's depth.
+    items: f32,
+    segments: u32,
+    triangles: u32,
+    runs: Vec<Run>,
     strokes: WebGlVertexArrayObject,
     fills: WebGlVertexArrayObject,
     buffers: Vec<WebGlBuffer>,
@@ -182,6 +219,8 @@ pub struct Viewer {
     stroke: Program,
     fill: Program,
     rect: Program,
+    /// Whether the canvas has samples to share a pixel's coverage out in.
+    multisampled: bool,
     surround: [f32; 3],
     sheet: Option<Loaded>,
 }
@@ -196,7 +235,7 @@ impl Viewer {
         for (key, value) in [
             ("antialias", true),
             ("alpha", false),
-            ("depth", false),
+            ("depth", true),
             ("stencil", false),
             ("preserveDrawingBuffer", false),
         ] {
@@ -219,15 +258,17 @@ impl Viewer {
                 "u_scale",
                 "u_offset",
                 "u_size",
+                "u_items",
                 "u_pixels_per_mm",
                 "u_finest",
+                "u_multisampled",
             ],
         )?;
         let fill = Program::new(
             &gl,
             FILL_VERTEX,
             FILL_FRAGMENT,
-            &["u_scale", "u_offset", "u_size"],
+            &["u_scale", "u_offset", "u_size", "u_items"],
         )?;
         let rect = Program::new(
             &gl,
@@ -235,11 +276,17 @@ impl Viewer {
             RECT_FRAGMENT,
             &["u_rect", "u_size", "u_color"],
         )?;
+        let multisampled = gl
+            .get_parameter(Gl::SAMPLES)
+            .ok()
+            .and_then(|samples| samples.as_f64())
+            .is_some_and(|samples| samples > 1.0);
         Ok(Viewer {
             gl,
             stroke,
             fill,
             rect,
+            multisampled,
             surround: SURROUND,
             sheet: None,
         })
@@ -281,6 +328,7 @@ impl Viewer {
         gl.viewport(0, 0, width, height);
         let [r, g, b] = self.surround;
         gl.clear_color(r, g, b, 1.0);
+        gl.clear_depth(1.0);
         gl.clear(Gl::COLOR_BUFFER_BIT);
         let Some(sheet) = &self.sheet else {
             return;
@@ -289,8 +337,10 @@ impl Viewer {
         let pixels = scale * ratio;
         let device = |x: f64, y: f64| ((x - left) * pixels, (top - y) * pixels);
 
-        // The paper and its shadow, opaque.
+        // The paper and its shadow, opaque, under everything.
         gl.disable(Gl::BLEND);
+        gl.disable(Gl::DEPTH_TEST);
+        gl.disable(Gl::SAMPLE_ALPHA_TO_COVERAGE);
         let [x0, y0, x1, y1] = sheet.paper;
         let (left_px, top_px) = device(x0, y1);
         let (right_px, bottom_px) = device(x1, y0);
@@ -313,32 +363,70 @@ impl Viewer {
             size,
         );
 
-        // The ink: each pixel takes the darkest drawn on it.
-        gl.enable(Gl::BLEND);
-        gl.blend_equation(Gl::MIN);
+        // The ink, in the display list's order.
         let scale_xy = (pixels as f32, -pixels as f32);
         let offset = device(sheet.origin[0], sheet.origin[1]);
         let offset = (offset.0 as f32, offset.1 as f32);
-        if sheet.triangle_corners > 0 {
-            gl.use_program(Some(&self.fill.program));
-            gl.uniform2f(self.fill.at("u_scale"), scale_xy.0, scale_xy.1);
-            gl.uniform2f(self.fill.at("u_offset"), offset.0, offset.1);
-            gl.uniform2f(self.fill.at("u_size"), size.0, size.1);
-            gl.bind_vertex_array(Some(&sheet.fills));
-            gl.draw_elements_with_i32(Gl::TRIANGLES, sheet.triangle_corners, Gl::UNSIGNED_INT, 0);
+        gl.use_program(Some(&self.fill.program));
+        gl.uniform2f(self.fill.at("u_scale"), scale_xy.0, scale_xy.1);
+        gl.uniform2f(self.fill.at("u_offset"), offset.0, offset.1);
+        gl.uniform2f(self.fill.at("u_size"), size.0, size.1);
+        gl.uniform1f(self.fill.at("u_items"), sheet.items);
+        gl.use_program(Some(&self.stroke.program));
+        gl.uniform2f(self.stroke.at("u_scale"), scale_xy.0, scale_xy.1);
+        gl.uniform2f(self.stroke.at("u_offset"), offset.0, offset.1);
+        gl.uniform2f(self.stroke.at("u_size"), size.0, size.1);
+        gl.uniform1f(self.stroke.at("u_items"), sheet.items);
+        gl.uniform1i(
+            self.stroke.at("u_multisampled"),
+            i32::from(self.multisampled),
+        );
+        let per_mm = pixels / sheet.millimetres_per_unit.max(f64::MIN_POSITIVE);
+        gl.uniform1f(self.stroke.at("u_pixels_per_mm"), per_mm as f32);
+        // The finest pen is one CSS pixel wide, as a PNG's is one pixel.
+        gl.uniform1f(self.stroke.at("u_finest"), ratio as f32);
+        let draw = |kind: Kind, first: u32, count: u32| match kind {
+            Kind::Fills => {
+                gl.use_program(Some(&self.fill.program));
+                gl.bind_vertex_array(Some(&sheet.fills));
+                gl.draw_elements_with_i32(
+                    Gl::TRIANGLES,
+                    (count * 3) as i32,
+                    Gl::UNSIGNED_INT,
+                    (first * 3 * 4) as i32,
+                );
+            }
+            Kind::Strokes => {
+                gl.use_program(Some(&self.stroke.program));
+                gl.bind_vertex_array(Some(&sheet.strokes));
+                gl.enable(Gl::SAMPLE_ALPHA_TO_COVERAGE);
+                gl.draw_elements_with_i32(
+                    Gl::TRIANGLES,
+                    (count * 6) as i32,
+                    Gl::UNSIGNED_INT,
+                    (first * 6 * 4) as i32,
+                );
+                gl.disable(Gl::SAMPLE_ALPHA_TO_COVERAGE);
+            }
+        };
+        if sheet.runs.len() <= MOST_RUNS {
+            // Run after run, as the display list orders them: what is drawn
+            // later covers what was drawn before, within a draw call and
+            // across them.
+            for run in &sheet.runs {
+                draw(run.kind, run.first, run.count);
+            }
+        } else {
+            // Too many runs to draw one by one: every fill, then every
+            // stroke, each at its item's depth, so each sample keeps the
+            // colour of the latest item drawn on it, which is the nearest.
+            gl.clear(Gl::DEPTH_BUFFER_BIT);
+            gl.enable(Gl::DEPTH_TEST);
+            gl.depth_func(Gl::LEQUAL);
+            draw(Kind::Fills, 0, sheet.triangles);
+            draw(Kind::Strokes, 0, sheet.segments);
         }
-        if sheet.segments > 0 {
-            gl.use_program(Some(&self.stroke.program));
-            gl.uniform2f(self.stroke.at("u_scale"), scale_xy.0, scale_xy.1);
-            gl.uniform2f(self.stroke.at("u_offset"), offset.0, offset.1);
-            gl.uniform2f(self.stroke.at("u_size"), size.0, size.1);
-            let per_mm = pixels / sheet.millimetres_per_unit.max(f64::MIN_POSITIVE);
-            gl.uniform1f(self.stroke.at("u_pixels_per_mm"), per_mm as f32);
-            // The finest pen is one CSS pixel wide, as a PNG's is one pixel.
-            gl.uniform1f(self.stroke.at("u_finest"), ratio as f32);
-            gl.bind_vertex_array(Some(&sheet.strokes));
-            gl.draw_elements_with_i32(Gl::TRIANGLES, sheet.segments * 6, Gl::UNSIGNED_INT, 0);
-        }
+        gl.disable(Gl::DEPTH_TEST);
         gl.bind_vertex_array(None);
     }
 
@@ -428,6 +516,9 @@ impl Viewer {
         )?;
         gl.enable_vertex_attrib_array(2);
         gl.vertex_attrib_pointer_with_i32(2, 4, Gl::UNSIGNED_BYTE, true, 0, 0);
+        buffer(Gl::ARRAY_BUFFER, &four(&places(&mesh.segment_items), 4))?;
+        gl.enable_vertex_attrib_array(3);
+        gl.vertex_attrib_pointer_with_i32(3, 1, Gl::FLOAT, false, 0, 0);
         let quads: Vec<u8> = (0..mesh.segments.len() as u32)
             .flat_map(|s| [0, 1, 2, 2, 1, 3].map(|corner| 4 * s + corner))
             .flat_map(u32::to_le_bytes)
@@ -442,6 +533,9 @@ impl Viewer {
         buffer(Gl::ARRAY_BUFFER, mesh.fill_colors.as_flattened())?;
         gl.enable_vertex_attrib_array(1);
         gl.vertex_attrib_pointer_with_i32(1, 4, Gl::UNSIGNED_BYTE, true, 0, 0);
+        buffer(Gl::ARRAY_BUFFER, &places(&mesh.fill_items))?;
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_with_i32(2, 1, Gl::FLOAT, false, 0, 0);
         let corners: Vec<u8> = mesh
             .triangles
             .as_flattened()
@@ -455,8 +549,10 @@ impl Viewer {
             origin: mesh.origin,
             paper: mesh.paper,
             millimetres_per_unit,
-            segments: mesh.segments.len() as i32,
-            triangle_corners: (mesh.triangles.len() * 3) as i32,
+            items: mesh.items as f32,
+            segments: mesh.segments.len() as u32,
+            triangles: mesh.triangles.len() as u32,
+            runs: mesh.runs.clone(),
             strokes,
             fills,
             buffers,
@@ -479,6 +575,15 @@ impl Viewer {
 /// Little-endian bytes of `values`, as WebAssembly and the GPU read them.
 fn floats(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+/// Items' places in the display list as the GPU reads them, 32-bit floats,
+/// which hold every whole number up to 16,777,216 exactly.
+fn places(items: &[u32]) -> Vec<u8> {
+    items
+        .iter()
+        .flat_map(|&place| (place as f32).to_le_bytes())
+        .collect()
 }
 
 /// A shader of `kind` compiled from `source`.

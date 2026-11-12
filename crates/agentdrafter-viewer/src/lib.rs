@@ -12,10 +12,10 @@
 //! - `web` (built for `wasm32` only) is the module the page loads: it draws
 //!   the mesh with WebGL2 at the view the page asks for, on white paper.
 //!   Pens are widths on paper, as in the PNG, never thinner than one CSS
-//!   pixel; ends and corners are round. Ink only darkens the paper: each
-//!   pixel takes the darkest ink drawn on it, so strokes that meet do not
-//!   darken where they overlap. Panning and zooming change two numbers the
-//!   GPU is given, so the mesh is built once per sheet.
+//!   pixel; ends and corners are round. Items paint in the display list's
+//!   order, a later one over an earlier one, as the PNG paints them.
+//!   Panning and zooming change two numbers the GPU is given, so the mesh
+//!   is built once per sheet.
 //!
 //! It needs WebGL2 and nothing newer: no WebGPU.
 

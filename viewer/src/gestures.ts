@@ -12,6 +12,8 @@ export interface Surface {
   /** Shows `view` from the next frame, kept in sight. */
   show(view: View): void;
   limits(): Limits;
+  /** The reviewer took the view in hand: it no longer follows the fit. */
+  touched(): void;
 }
 
 type Point = [number, number];
@@ -85,6 +87,7 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if ((e.target as Element | null)?.closest?.('button')) return;
     glide.stop();
+    surface.touched();
     try {
       element.setPointerCapture(e.pointerId);
     } catch {
@@ -168,6 +171,7 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
   const wheel = (e: WheelEvent) => {
     e.preventDefault();
     glide.stop();
+    surface.touched();
     const lines = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
     const dy = e.deltaY * lines;
     const p = local(e);

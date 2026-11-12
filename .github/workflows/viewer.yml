@@ -71,12 +71,13 @@ jobs:
       - name: Build agentdrafter with the page built in
         run: cargo build -p agentdrafter-cli --locked
 
-      # The PNG match, the token beyond the local machine, frame times at phone
-      # size with the CPU throttled 4x, WebGL2 with no WebGPU, mouse and tabs,
-      # and screenshots; software WebGL, as the runner has no GPU. With four
-      # cores and no GPU, the runner fills the phone's canvas slower than a
-      # phone's GPU does, so the frames check holds the page's own draw per
-      # frame and reports the frame times (docs/viewer.md).
+      # The PNG match in ink and colour, the token beyond the local machine,
+      # draws and frame times at phone size with the CPU throttled 4x, WebGL2
+      # with no WebGPU, mouse, the fit, tabs and screenshots; software WebGL,
+      # as the runner has no GPU. With four cores and no GPU, the runner fills
+      # the phone's canvas slower than a phone's GPU does, so the frames check
+      # holds that every gesture draws and the page's own draw is small, and
+      # reports the times (docs/viewer.md).
       - name: The page in headless Chrome
         working-directory: viewer
         run: node e2e/run.mjs --chrome "$(command -v google-chrome)" --smooth draw

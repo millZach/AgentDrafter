@@ -803,12 +803,14 @@ mod tests {
         assert!(line.get("token").is_none());
     }
 
-    /// Serves `requests`, each raw bytes on its own connection, as
-    /// [`exchange`] does, and returns each response's status, head and
-    /// body as they came.
+    /// Serves `requests`, each raw bytes on its own connection, with
+    /// `guard`, on a loopback port of its own, and returns each response's
+    /// status, head and body as they came. The server stops when the last
+    /// is answered.
     fn exchange_raw(guard: Guard, requests: Vec<Vec<u8>>) -> Vec<(u16, String, Vec<u8>)> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        assert!(is_local(address.ip()));
         let count = requests.len();
         let server = thread::spawn(move || {
             let settings = Settings::default();
@@ -928,36 +930,13 @@ mod tests {
         assert_eq!(statuses, [200, 200, 403, 403]);
     }
 
-    /// Serves `requests`, each raw bytes on its own connection, with
-    /// `guard`, on a loopback port of its own, and returns each response's
-    /// status and JSON. The server stops when the last is answered.
+    /// Serves `requests` as [`exchange_raw`] does, and returns each
+    /// response's status, head and JSON.
     fn exchange(guard: Guard, requests: Vec<Vec<u8>>) -> Vec<(u16, String, Value)> {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        assert!(is_local(address.ip()));
-        let count = requests.len();
-        let server = thread::spawn(move || {
-            let settings = Settings::default();
-            for _ in 0..count {
-                let (stream, _) = listener.accept().unwrap();
-                handle(stream, &guard, &settings, DEADLINE);
-            }
-        });
-        let responses = requests
+        exchange_raw(guard, requests)
             .into_iter()
-            .map(|request| {
-                let mut stream = TcpStream::connect(address).unwrap();
-                stream.write_all(&request).unwrap();
-                let mut response = Vec::new();
-                stream.read_to_end(&mut response).unwrap();
-                let response = String::from_utf8(response).unwrap();
-                let (head, body) = response.split_once("\r\n\r\n").unwrap();
-                let status = head.split(' ').nth(1).unwrap().parse().unwrap();
-                (status, head.to_owned(), serde_json::from_str(body).unwrap())
-            })
-            .collect();
-        server.join().unwrap();
-        responses
+            .map(|(status, head, body)| (status, head, serde_json::from_slice(&body).unwrap()))
+            .collect()
     }
 
     fn post(name: &str, headers: &str, body: &str) -> Vec<u8> {

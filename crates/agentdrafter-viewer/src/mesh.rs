@@ -1,5 +1,7 @@
 //! A display list made ready for the GPU: every stroke's segments, each
-//! with its pen's width and colour, and every fill cut into triangles.
+//! with its pen's width and colour, and every fill cut into triangles, each
+//! with its item's place in the display list, so the GPU can draw a later
+//! item over an earlier one, as the PNG paints them.
 //!
 //! This is plain computation, tested natively. The colours are the core's
 //! own, [`Color::on_paper`], so the screen draws each colour index as the
@@ -46,6 +48,24 @@ pub struct SheetReply {
     pub display_list: DisplayList,
 }
 
+/// What a run of items draws: stroke segments or fill triangles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Strokes,
+    Fills,
+}
+
+/// Items next to one another in the display list that draw the same kind
+/// of shape, so one draw call draws them, in their order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Run {
+    pub kind: Kind,
+    /// The run's first segment, or first triangle.
+    pub first: u32,
+    /// How many segments, or triangles, it draws.
+    pub count: u32,
+}
+
 /// A sheet ready to draw.
 #[derive(Debug, PartialEq)]
 pub struct Mesh {
@@ -59,14 +79,23 @@ pub struct Mesh {
     pub widths: Vec<f32>,
     /// Each segment's colour on paper, opaque RGBA.
     pub segment_colors: Vec<[u8; 4]>,
+    /// Each segment's item: its place in the display list, counted from 0.
+    pub segment_items: Vec<u32>,
     /// Every fill's triangles' corners, from the origin.
     pub fill_points: Vec<[f32; 2]>,
     /// Each corner's colour on paper, opaque RGBA.
     pub fill_colors: Vec<[u8; 4]>,
+    /// Each corner's item: its place in the display list, counted from 0.
+    pub fill_items: Vec<u32>,
     /// Three corners to each triangle.
     pub triangles: Vec<[u32; 3]>,
     /// How many fills could not be cut into triangles, and are not drawn.
     pub fills_not_drawn: usize,
+    /// How many items the display list holds.
+    pub items: usize,
+    /// The display list's items as runs of one kind, in its order: drawn
+    /// one after another, a later item paints over an earlier one.
+    pub runs: Vec<Run>,
     /// The sheet of paper the drawing sits on, in drawing units:
     /// `[left, bottom, right, top]`.
     pub paper: [f64; 4],
@@ -115,15 +144,21 @@ impl Mesh {
             segments: Vec::new(),
             widths: Vec::new(),
             segment_colors: Vec::new(),
+            segment_items: Vec::new(),
             fill_points: Vec::new(),
             fill_colors: Vec::new(),
+            fill_items: Vec::new(),
             triangles: Vec::new(),
             fills_not_drawn: 0,
+            items: sheet.display_list.items.len(),
+            runs: Vec::new(),
             paper,
         };
         let mut tessellator = FillTessellator::new();
-        for item in &sheet.display_list.items {
+        for (place, item) in sheet.display_list.items.iter().enumerate() {
+            let place = place as u32;
             let color = rgba(item.color);
+            let (segments, triangles) = (mesh.segments.len(), mesh.triangles.len());
             match &item.shape {
                 Shape::Stroke { lineweight, runs } => {
                     for run in runs {
@@ -132,6 +167,7 @@ impl Mesh {
                             mesh.segments.push([a[0], a[1], b[0], b[1]]);
                             mesh.widths.push(*lineweight as f32);
                             mesh.segment_colors.push(color);
+                            mesh.segment_items.push(place);
                         };
                         match run.as_slice() {
                             [] => {}
@@ -179,6 +215,8 @@ impl Mesh {
                     let base = mesh.fill_points.len() as u32;
                     mesh.fill_colors
                         .extend(std::iter::repeat_n(color, buffers.vertices.len()));
+                    mesh.fill_items
+                        .extend(std::iter::repeat_n(place, buffers.vertices.len()));
                     mesh.fill_points.extend(buffers.vertices);
                     mesh.triangles.extend(
                         buffers
@@ -190,8 +228,26 @@ impl Mesh {
                     );
                 }
             }
+            let added = [
+                (Kind::Strokes, segments, mesh.segments.len()),
+                (Kind::Fills, triangles, mesh.triangles.len()),
+            ];
+            for (kind, before, after) in added {
+                if after > before {
+                    mesh.extend_run(kind, before as u32, (after - before) as u32);
+                }
+            }
         }
         mesh
+    }
+
+    /// Adds `count` segments or triangles of `kind`, from `first`, to the
+    /// last run when it is of that kind, or as a run of their own.
+    fn extend_run(&mut self, kind: Kind, first: u32, count: u32) {
+        match self.runs.last_mut() {
+            Some(run) if run.kind == kind && run.first + run.count == first => run.count += count,
+            _ => self.runs.push(Run { kind, first, count }),
+        }
     }
 
     /// What the sheet is, for the page.
@@ -325,6 +381,19 @@ mod tests {
             ]
         );
         assert_eq!(mesh.widths, vec![0.5, 0.5, 0.5, 0.0]);
+        // Each segment knows its item's place, so the later item draws over
+        // the earlier.
+        assert_eq!(mesh.segment_items, vec![0, 0, 0, 1]);
+        assert_eq!(mesh.items, 2);
+        // Strokes after strokes are one run, one draw call.
+        assert_eq!(
+            mesh.runs,
+            vec![Run {
+                kind: Kind::Strokes,
+                first: 0,
+                count: 4
+            }]
+        );
         // Index 7 draws black on paper, as the PNG draws it; 1 is red.
         assert_eq!(
             mesh.segment_colors,
@@ -370,6 +439,34 @@ mod tests {
         let non_zero = Mesh::of(&sheet(vec![fill(FillRule::NonZero)], paper));
         assert!((area(&non_zero) - 100.0).abs() < 1e-3);
         assert_eq!(non_zero.fills_not_drawn, 0);
+        // A stroke after a fill is a later item than every corner of it.
+        let line = item(
+            1,
+            Shape::Stroke {
+                lineweight: 0.5,
+                runs: vec![vec![[0.0, 5.0], [10.0, 5.0]]],
+            },
+        );
+        let both = Mesh::of(&sheet(vec![fill(FillRule::EvenOdd), line], None));
+        assert!(both.fill_items.iter().all(|&place| place == 0));
+        // A fill, then a stroke: two runs, drawn in that order.
+        assert_eq!(
+            both.runs,
+            vec![
+                Run {
+                    kind: Kind::Fills,
+                    first: 0,
+                    count: both.triangles.len() as u32
+                },
+                Run {
+                    kind: Kind::Strokes,
+                    first: 0,
+                    count: 1
+                },
+            ]
+        );
+        assert_eq!(both.fill_items.len(), both.fill_points.len());
+        assert_eq!(both.segment_items, vec![1]);
     }
 
     #[test]
@@ -412,6 +509,8 @@ mod tests {
             .sum();
         assert!(expected > 1000, "a loop sheet draws {expected} segments");
         assert_eq!(mesh.segments.len(), expected);
+        // A loop sheet draws only strokes: one run, one draw call.
+        assert_eq!(mesh.runs.len(), 1);
         let summary = mesh.summary(&sheet);
         assert_eq!(summary.segments, expected);
         assert_eq!(summary.millimetres_per_unit, 25.4);

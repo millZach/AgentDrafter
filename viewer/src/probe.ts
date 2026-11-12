@@ -21,6 +21,12 @@ export interface Summary {
   fills_not_drawn: number;
 }
 
+/** One draw of the canvas: when it began, and how long the call took. */
+export interface Draw {
+  at: number;
+  ms: number;
+}
+
 export interface Capture {
   /** The drawing point at the image's top left, and pixels per drawing unit. */
   left: number;
@@ -37,8 +43,8 @@ export interface Probe {
   view(): View;
   /** Shows `view` from the next frame, as a pan or a zoom does. */
   show(view: View): void;
-  /** Each frame's draw time in milliseconds since the last call. */
-  takeDrawTimes(): number[];
+  /** Each draw of the canvas since the last call: when, and how long. */
+  takeDraws(): Draw[];
   /** The canvas drawn at `capture`, one CSS pixel to a pixel: RGBA, base64. */
   capture(capture: Capture): string;
 }
@@ -54,7 +60,7 @@ interface Parts {
   canvas: HTMLCanvasElement;
   view(): View;
   show(view: View): void;
-  drawTimes: number[];
+  draws: Draw[];
   redraw(): void;
 }
 
@@ -64,8 +70,8 @@ export function installProbe(parts: Parts): () => void {
     summary: null,
     view: parts.view,
     show: parts.show,
-    takeDrawTimes() {
-      return parts.drawTimes.splice(0, parts.drawTimes.length);
+    takeDraws() {
+      return parts.draws.splice(0, parts.draws.length);
     },
     capture({ left, top, scale, width, height, white = true }) {
       const viewer = parts.viewer();

@@ -40,11 +40,11 @@ The engine stays on the machine that holds the drawings. The page asks it for a 
 
 The page's renderer, `crates/agentdrafter-viewer`, is Rust compiled to WebAssembly. It reads the reply with the core's own types and draws it with WebGL2:
 
-- **Strokes**: each segment of each stroke is a quad round its pen's capsule, and the fragment shader works out each pixel's distance from the segment, so ends and corners are round and every pen is exactly as wide as the PNG draws it, anti-aliased. All of a sheet's segments draw in one draw call.
-- **Fills** (solid hatches, TrueType text) are cut into triangles once, by their fill rule, with [lyon](https://crates.io/crates/lyon_tessellation), and drawn in one draw call; the canvas's multisampling smooths their edges.
+- **In the display list's order**, as the PNG paints it: a later item covers an earlier one, a blue line over a red one where they cross, a fill over the line under it. Nothing is blended. Items next to one another that draw strokes, or fills, are drawn by one draw call, run after run, and the GPU applies each draw's triangles, and each draw, in order: a demo plant loop sheet, all strokes, is one draw call. A sheet whose strokes and fills alternate more than 64 times is drawn instead in two draws, every item at a depth by its place in the list, a later one nearer, so the depth test keeps the later item's colour in every sample.
+- **Strokes**: each segment of each stroke is a quad exactly as wide as its pen and long enough for its round ends, so every pen is as wide as the PNG draws it. The samples the quad's sides cover are the pen's; at a round end the fragment shader works out the share of the pixel the pen covers, by its distance, and that share of the pixel's samples is written (alpha to coverage). Each sample is written opaque, so where one stroke's segments overlap at a corner they cover the same samples once, and the canvas's multisampling, four samples a pixel, smooths the edges.
+- **Fills** (solid hatches, TrueType text) are cut into triangles once, by their fill rule, with [lyon](https://crates.io/crates/lyon_tessellation); the multisampling smooths their edges.
 - **Colours** are the core's own: each colour index in the colour it plots in on paper, index 7 black, as the PNG draws them.
 - **Pens are widths on paper**, as in the PNG and the PDF: a 0.5 mm pen is twice as wide when the sheet is shown twice as large. The finest pen is one CSS pixel wide, as a PNG's finest is one pixel.
-- **Ink only darkens the paper.** Each pixel takes the darkest ink drawn on it (WebGL's `MIN` blending), so strokes that meet do not darken where their edges overlap, and the shapes' order does not matter. Where two colours cross, the darker shows, where the PNG shows the later one.
 - **The paper** is the sheet's declared paper, white, with a shadow, on the page's dark background; a sheet with no paper, such as a DWG, sits on its extents with the 5 mm margin a render leaves.
 - **Panning and zooming** change two numbers the GPU is given; the sheet is laid out once, when it loads. Curves are drawn within a 100,000th of the sheet's larger side, finer than a pixel at the closest zoom.
 
@@ -60,9 +60,13 @@ As the picked prototype does:
 
 The sheet can zoom out to half its fitted size and in to 32 times it, and is never flung out of sight.
 
+**The fit.** A sheet is fitted to the screen when it is first shown and on every change of tab: the whole paper, 10 pixels in from the edges, above a phone's bottom sheet. Until the reviewer pans or zooms, the view follows the fit: when the canvas changes size, as a browser may while it settles, or the pixel ratio changes, or the bottom sheet's peek does, the sheet is fitted again. Once the reviewer has moved it, a change of size keeps the point at the middle of the screen where it was, and the fit button fits it again. On a laptop the zoom buttons sit over the fitted sheet's top right corner, as they do in the picked prototype.
+
 ## The look
 
 The look follows variant A of the prototype the reviewer picked (#16): the drawing fills the screen, the set's sheets are tabs across the top, and the journal's sheet peeks up from the bottom on a phone, dragging up to half or nearly all of the screen, and is a panel on the right on a laptop (900 CSS pixels wide or more). Undo last and Accept are in the peek, always in reach. Until #18 they hold their places switched off, and the journal's sheet says what is coming; nothing in it does anything yet.
+
+A tab shows its sheet at once when the page has drawn it before; the server is asked for each sheet once. Going back to a sheet already drawn shows it with nothing said of the sheet asked for meanwhile, whether that one is still coming (its reply is kept for later) or failed.
 
 ## Building it
 
@@ -84,39 +88,64 @@ The page's packages, all permissive or MPL-2.0 (ADR-0010): `react`, `react-dom` 
 
 ## Tests
 
-- `cargo test -p agentdrafter-viewer`: the mesh, natively: strokes into segments with their pens and colours on paper, fills into triangles by their rule, and a demo plant sheet read from the core's own reply.
+- `cargo test -p agentdrafter-viewer`: the mesh, natively: strokes into segments with their pens and colours on paper, fills into triangles by their rule, each with its item's place, the runs of one kind in order, and a demo plant sheet read from the core's own reply.
 - `npm test` in `viewer/`: the view's arithmetic (fit, zoom about a point, pinch, keeping the sheet in sight), taking the token from the fragment and sending it as a bearer, and the image comparison below.
 - `node e2e/run.mjs` in `viewer/` (after `npm run build` and `cargo build -p agentdrafter-cli`): the page in headless Chromium against `agentdrafter serve`, each check starting and stopping its own server. `--chrome` names the browser; `--gl gpu` draws with the machine's GPU instead of software WebGL. It writes `results.json`, the screenshots and the compared images into `target/viewer-e2e/`.
-  - `png`: the canvas matches its PNG (below).
+  - `png`: the canvas matches its PNG, in ink and in colour (below).
   - `token`: a server listening on `0.0.0.0` serves the page and its files without the token and refuses commands without it, with another or with it in a query string; the page with no token says how to open it; from the printed address it draws, takes the token off the address, keeps it for the tab and still draws after a reload; the server printed one line.
-  - `frames`: frame times at phone size (below).
+  - `frames`: draws and frame times at phone size (below).
   - `webgl2`: the built page never names WebGPU, and the viewer draws in a browser with WebGPU switched off and `navigator.gpu` taken away; in a browser with no WebGL at all, the page says it cannot draw there, and why.
   - `mouse`: the wheel zooms, a drag pans, a double click zooms in, fit and the zoom buttons work, and a tab shows its sheet and names it in the address.
+  - `fit`: the first load shows the whole sheet, at phone and laptop sizes, and so does another tab; a page laid out at 1000 by 700 and then narrowed to 390 by 844, and then given 3 device pixels to a CSS pixel, is fitted to each; a view the reviewer zoomed keeps its scale through a change of size.
+  - `tabs`: with the server's replies held back or failed at will, going back to a sheet already drawn while another is still coming, or after another failed, shows it and says nothing more; the late reply changes nothing; a sheet drawn before is not asked for again.
   - `look`: screenshots at phone size (390 by 844 CSS pixels at 3 device pixels each, touch) and laptop size (1440 by 900).
 
 ### Measured against the PNG
 
-The canvas is drawn at the view and size of `agentdrafter render --scale 1 --dpi <dpi>` of the same sheet, at one device pixel to a CSS pixel, white round the paper as a PNG's paper is, and read back. A demo plant sheet in the viewer is the set's sheet; its PNG is rendered from its DWG, which draws the same display list point for point. For every inked pixel of each image (its darkest channel below 192), the nearest pixel of the other image darker than 224 is looked for, within one pixel and within two, as ticket #11 measured the PNG against AutoCAD. The tolerance the test holds: 99.9% of each image's ink within one pixel of the other's, all of it within two, at most 0.2% of pixels differing by more than 64 levels in any channel, and a mean difference under 2 levels in 255. Software WebGL in headless Chromium on forge:
+The canvas is drawn at the view and size of `agentdrafter render --scale 1 --dpi <dpi>` of the same sheet, at one device pixel to a CSS pixel, white round the paper as a PNG's paper is, and read back. A demo plant sheet in the viewer is the set's sheet; its PNG is rendered from its DWG, which draws the same display list point for point. `viewer/e2e/overlap.yaml` is a made-up sheet of colours drawn over one another: a blue line over a red one, a black line over both, a green fill over the three, a red line over that and a yellow fill over part of it.
 
-| Sheet | dpi | Image | PNG's ink within 1 px of the viewer's | Viewer's ink within 1 px of the PNG's | Pixels differing by more than 64 | Mean difference (of 255) |
+For every inked pixel of each image (its darkest channel below 192), the nearest pixel of the other image darker than 224 is looked for, within one pixel and within two, as ticket #11 measured the PNG against AutoCAD; and the nearest in the same colour, no channel more than 96 levels off. That is more than anti-aliasing moves an edge pixel, and less than red, blue or green differ from black, or from one another, even at half a pixel's coverage.
+
+The tolerance the test holds:
+
+- 99.9% of each image's ink within one pixel of the other's, and all of it within two;
+- 99.7% of it within one pixel in the same colour;
+- at most 0.5% of pixels differing by more than 64 levels in any channel;
+- a mean difference under 2 levels in 255.
+
+Software WebGL in headless Chromium on forge:
+
+| Sheet | dpi | Image | Ink within 1 px, PNG's and viewer's | In its colour within 1 px, PNG's and viewer's | Pixels differing by more than 64 | Mean difference (of 255) |
 |---|---|---|---|---|---|---|
-| demo plant `DP-LD-101` | 100 | 1740 by 1140 | 100% | 100% | 0.038% | 0.52 |
-| demo plant `DP-LD-301` | 200 | 3479 by 2279 | 100% | 100% | 0.015% | 0.23 |
-| `examples/geometry.yaml` | 150 | 1506 by 969 | 100% | 100% | 0.034% | 0.23 |
-| `examples/hatch.yaml` | 150 | 1359 by 1241 | 100% | 100% | 0.006% | 0.19 |
-| `examples/text.yaml` | 150 | 1478 by 789 | 100% | 100% | 0.025% | 0.36 |
+| demo plant `DP-LD-101` | 100 | 1740 by 1140 | 100%, 100% | 100%, 99.83% | 0.22% | 0.58 |
+| demo plant `DP-LD-301` | 200 | 3479 by 2279 | 100%, 100% | 99.98%, 100% | 0.028% | 0.26 |
+| `examples/geometry.yaml` | 150 | 1506 by 969 | 100%, 100% | 100%, 100% | 0.068% | 0.18 |
+| `examples/hatch.yaml` | 150 | 1359 by 1241 | 100%, 100% | 99.99%, 100% | 0.037% | 0.26 |
+| `examples/text.yaml` | 150 | 1478 by 789 | 100%, 100% | 99.97%, 100% | 0.088% | 0.47 |
+| `viewer/e2e/overlap.yaml` | 150 | 650 by 414 | 100%, 100% | 100%, 100% | 0.076% | 0.23 |
 
-What still differs: anti-aliasing. tiny-skia covers each edge pixel by the area the shape covers, the viewer by its distance from the pen's centre line and, for fills, by four samples a pixel; and where a red and a black stroke cross, the viewer shows black where the PNG shows the later.
+The viewer of the pull request's first commit took each pixel's darkest ink. On the overlap sheet it kept only 94.6% and 93.4% of the ink in its colour, and on `geometry.yaml` 99.5%, so this test fails it.
+
+What still differs: anti-aliasing. tiny-skia covers each edge pixel by the area the shape covers; the viewer by four samples a pixel, so an edge the PNG covers by a third the viewer may cover by a quarter or a half. That puts DP-LD-101's 0.7 mm border, 2.76 pixels wide at 100 dpi, at 127 in the PNG and 128 or 192 in the viewer at its edges.
 
 ### Smooth on a phone
 
-The `frames` check opens the demo plant's `DP-LD-101` (5,582 segments) at phone size with touch and the CPU throttled four times (Chrome's `Emulation.setCPUThrottlingRate`), then pinches out with two fingers, drags with one and lets go moving, and pinches in, through Chrome's own touch events, while every animation frame's time is kept. It holds the page's own draw per frame to a median of 1 ms and 95% within 4 ms, the point under the fingers under them, and 95% of frames within 20 ms, 99% within 34 ms (one refresh late at most) and none over 100 ms. On forge, while other work kept its load average near 9:
+The `frames` check opens the demo plant's `DP-LD-101` (5,582 segments, one draw call) at phone size with touch and the CPU throttled four times (Chrome's `Emulation.setCPUThrottlingRate`). Through Chrome's own touch events, a finger moving every 8 ms, it pinches out with two fingers, drags with one and lets go moving, and pinches in. It keeps the time of every display frame and of every draw of the canvas in each gesture, and how long each draw call took. It holds:
 
-| WebGL | Runs | Frames a run | Median | 95% within | 99% within | Longest | Over 33.3 ms | The page's draw per frame (median, 95%) | Drift under the fingers |
-|---|---|---|---|---|---|---|---|---|---|
-| Software (SwiftShader), as CI's runners have | 6 | 342 to 355 | 16.7 ms | 16.8 ms | 33.3 to 33.4 ms | 33.4 ms in four runs, 66.7 and 66.8 ms in two | 1 to 5 | 0.1 to 0.3 ms, 0.8 to 0.9 ms | 0 px |
-| forge's GPU (RTX 4060, through Vulkan) | 2 | 355 and 356 | 16.7 ms | 16.8 ms | 16.8 ms | 16.8 ms | 0 | 0.1 ms, 0.7 to 0.8 ms | 0 px |
+- every gesture draws the canvas at least 20 times;
+- the page's own draw takes a median of 1 ms at most and 95% within 4 ms;
+- the point under the fingers stays under them.
 
-CI's runner, four cores with no GPU, fills the phone's 1170 by 2532 canvas in software slower than the display's pace: there the frames came at a median of 16.7 ms but 95% within 50 ms, while the page's own draw took 0.1 ms (median) and 1.5 ms (95%). That is the runner's software WebGL, not the page, so CI's job runs the check with `--smooth draw`, which holds the page's own draw and reports the frame times.
+With the GPU (`--gl gpu`) it also holds:
 
-A frame of 16.7 ms is the display's 60 a second. Drawing each segment as an instance of one quad cost software WebGL about 33 ms a frame, which drawing the quads as plain triangles brought under a frame. A real phone has a GPU of its own; how it feels in the hand is the reviewer's to judge.
+- the canvas drawn on at least 60% of each gesture's frames;
+- 95% of the times between draws, and between frames, within 20 ms, 99% within 34 ms (one refresh late at most), and none over 100 ms.
+
+In software WebGL (the default without a GPU, and CI's runner) filling the phone's 1170 by 2532 multisampled canvas on the CPU, beside Chrome's own handling of the test's touches, is slower than a phone's GPU, so those times are reported, not held. On forge:
+
+| WebGL | Draws in each gesture's frames (pinch out, drag and fling, pinch in) | Between frames: median, 95%, 99%, longest | Between draws: median, 95%, 99%, longest | The page's draw: median, 95% | Drift under the fingers |
+|---|---|---|---|---|---|
+| forge's GPU (RTX 4060, through Vulkan), two runs | 90 of 93, 83 of 93, 77 of 78 | 16.7, 16.7, 16.8, 16.8 ms | 16.7, 17.5 to 17.7, 33.5 to 33.7, 33.6 to 33.9 ms | 0.1 ms, 0.7 to 0.8 ms | 0.66 px |
+| Software (SwiftShader) | 90 of 108, 77 of 95, 78 of 90 | 16.7, 33.3, 50, 50.1 ms | 21.8, 36.1, 68.7, 78.1 ms | 0.2 ms, 0.9 ms | 0.66 px |
+
+A frame of 16.7 ms is the display's 60 a second. On the GPU, the canvas is redrawn on nearly every frame of every gesture, and a draw comes a frame late only where the test's next touch did. A real phone has a GPU of its own; how it feels in the hand is the reviewer's to judge.

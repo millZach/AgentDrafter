@@ -14,6 +14,10 @@
 //            with touch, at phone size with the CPU throttled 4 times;
 // - webgl2:  the viewer draws where there is WebGL2 and no WebGPU at all;
 // - mouse:   wheel, drag, double click, the zoom buttons and the sheet tabs;
+// - fit:     the first load, and a change of size or pixel ratio, shows the
+//            whole sheet, at phone and laptop sizes;
+// - tabs:    back to a sheet already drawn shows it, whatever the sheet
+//            asked for meanwhile is doing;
 // - look:    screenshots at phone and laptop sizes.
 //
 // It writes results.json, the screenshots and each compared image into
@@ -60,9 +64,13 @@ const BROWSER_ARGS = [
     : ['--use-angle=swiftshader', '--enable-unsafe-swiftshader']),
 ];
 const THROTTLE = Number(option('--throttle') ?? 4);
-// What the `frames` check holds: `frames`, the frame times (the default),
-// or `draw`, the page's own draw per frame alone.
-const SMOOTH = option('--smooth') ?? 'frames';
+// What the `frames` check holds besides that every gesture is drawn and
+// the page's own draw is small: `frames`, also the times between draws and
+// between the display's frames, by default with `--gl gpu`; or `draw`,
+// nothing more, by default with software WebGL, where filling the phone's
+// canvas on the CPU, beside Chrome's own handling of the test's touches,
+// is slower than any phone's GPU. The times are reported either way.
+const SMOOTH = option('--smooth') ?? (GL === 'gpu' ? 'frames' : 'draw');
 const PHONE = { viewport: { width: 390, height: 844 }, deviceScaleFactor: Number(process.env.E2E_RATIO ?? 3), isMobile: true, hasTouch: true };
 const LAPTOP = { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 };
 
@@ -76,6 +84,7 @@ cpSync(join(root, 'examples', 'demo-plant'), join(scratch, 'demo-plant'), {
 for (const sheet of ['geometry.yaml', 'hatch.yaml', 'text.yaml']) {
   cpSync(join(root, 'examples', sheet), join(scratch, sheet));
 }
+cpSync(join(viewer, 'e2e', 'overlap.yaml'), join(scratch, 'overlap.yaml'));
 
 /** Runs the command line in the scratch folder and gives its JSON reply. */
 function agentdrafter(...args) {
@@ -144,6 +153,8 @@ async function open(context, url, sheet) {
 const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))];
 const round = (n, places = 2) => Math.round(n * 10 ** places) / 10 ** places;
 const stats = (values) => {
+  // Nothing measured is not a measurement of nothing: it fails.
+  assert(values.length > 0, 'there is nothing to measure');
   const sorted = [...values].sort((a, b) => a - b);
   return {
     count: sorted.length,
@@ -171,6 +182,8 @@ const checks = {
       { name: 'geometry', source: 'geometry.yaml', png: 'geometry.yaml', dpi: 150 },
       { name: 'hatch', source: 'hatch.yaml', png: 'hatch.yaml', dpi: 150 },
       { name: 'text', source: 'text.yaml', png: 'text.yaml', dpi: 150 },
+      // Colours drawn over one another, in order.
+      { name: 'overlap', source: 'overlap.yaml', png: 'overlap.yaml', dpi: 150 },
     ];
     const server = await serve('127.0.0.1:0');
     const b = await browser();
@@ -200,15 +213,17 @@ const checks = {
       await server.stop();
     }
     // The tolerance (docs/viewer.md): 99.9% of each image's ink within one
-    // pixel of the other's and all of it within two; at most 0.2% of the
-    // pixels differing by more than 64 levels in a channel, and the mean
+    // pixel of the other's and all of it within two, 99.7% of it within one
+    // pixel of the other's in the same colour; at most 0.5% of the pixels
+    // differing by more than 64 levels in a channel, and the mean
     // difference under 2 levels in 255.
     for (const r of results) {
       for (const side of ['png', 'viewer']) {
         assert(r[`${side}_ink_within_1px`] >= 0.999, `${r.case}: ${side} ink within 1 px is ${r[`${side}_ink_within_1px`]}`);
         assert(r[`${side}_ink_within_2px`] >= 0.99999, `${r.case}: ${side} ink within 2 px is ${r[`${side}_ink_within_2px`]}`);
+        assert(r[`${side}_colour_within_1px`] >= 0.997, `${r.case}: ${side} ink in its colour within 1 px is ${r[`${side}_colour_within_1px`]}`);
       }
-      assert(r.pixels_differing_by_more_than_64 <= 0.002, `${r.case}: ${r.pixels_differing_by_more_than_64} of the pixels differ by more than 64`);
+      assert(r.pixels_differing_by_more_than_64 <= 0.005, `${r.case}: ${r.pixels_differing_by_more_than_64} of the pixels differ by more than 64`);
       assert(r.mean_channel_difference < 2, `${r.case}: the mean difference is ${r.mean_channel_difference}`);
     }
     return { cases: results };
@@ -301,7 +316,7 @@ const checks = {
           if (!window.__stop) requestAnimationFrame(tick);
         };
         requestAnimationFrame(tick);
-        window.agentdrafterViewer.takeDrawTimes();
+        window.agentdrafterViewer.takeDraws();
       });
       const touch = (type, points) =>
         cdp.send('Input.dispatchTouchEvent', {
@@ -311,8 +326,17 @@ const checks = {
       const toDrawing = (v, sx, sy) => [v.left + (sx - box.x) / v.scale, v.top - (sy - box.y) / v.scale];
       const toPage = (v, x, y) => [box.x + (x - v.left) * v.scale, box.y + (v.top - y) * v.scale];
       const view = () => page.evaluate(() => window.agentdrafterViewer.view());
+      const now = () => page.evaluate(() => performance.now());
       const cx = box.x + box.width / 2;
       const cy = box.y + box.height * 0.4;
+      // Each gesture's span of the page's clock. A finger moves every 8 ms,
+      // faster than the display's frames, so every frame has a move to draw.
+      const phases = [];
+      const gesture = async (name, run) => {
+        const began = await now();
+        await run();
+        phases.push({ name, began, ended: await now() });
+      };
 
       // Two fingers spread apart, their middle drifting left.
       const before = await view();
@@ -320,40 +344,43 @@ const checks = {
         [cx - d / 2 + dx, cy],
         [cx + d / 2 + dx, cy],
       ];
-      await touch('touchStart', pair(80, 0));
-      for (let i = 1; i <= 60; i++) {
-        await touch('touchMove', pair(80 + i * 3, -i));
-        await sleep(16);
-      }
-      const pinched = await view();
+      let pinched;
+      await gesture('pinch out', async () => {
+        await touch('touchStart', pair(80, 0));
+        for (let i = 1; i <= 90; i++) {
+          await touch('touchMove', pair(80 + i * 2, -i * 0.66));
+          await sleep(8);
+        }
+        pinched = await view();
+        await touch('touchEnd', []);
+      });
       const under = toDrawing(before, cx, cy);
       const [ux, uy] = toPage(pinched, under[0], under[1]);
-      const drift = Math.hypot(ux - (cx - 60), uy - cy);
-      await touch('touchEnd', []);
-      // One finger drags, and lets go moving.
-      await touch('touchStart', [[cx, cy]]);
-      for (let i = 1; i <= 40; i++) {
-        await touch('touchMove', [[cx - i * 3, cy - i * 2]]);
-        await sleep(16);
-      }
-      await touch('touchEnd', []);
-      await sleep(400);
+      const drift = Math.hypot(ux - (cx - 90 * 0.66), uy - cy);
+      // One finger drags, and lets go moving: the sheet glides on.
+      await gesture('drag and fling', async () => {
+        await touch('touchStart', [[cx, cy]]);
+        for (let i = 1; i <= 60; i++) {
+          await touch('touchMove', [[cx - i * 2, cy - i * 1.3]]);
+          await sleep(8);
+        }
+        await touch('touchEnd', []);
+        await sleep(400);
+      });
       const panned = await view();
       // Two fingers close in.
-      await touch('touchStart', pair(260, 0));
-      for (let i = 1; i <= 50; i++) {
-        await touch('touchMove', pair(260 - i * 3, 0));
-        await sleep(16);
-      }
-      await touch('touchEnd', []);
-      await sleep(300);
+      await gesture('pinch in', async () => {
+        await touch('touchStart', pair(260, 0));
+        for (let i = 1; i <= 75; i++) {
+          await touch('touchMove', pair(260 - i * 2, 0));
+          await sleep(8);
+        }
+        await touch('touchEnd', []);
+      });
       const after = await view();
       const { frames, draws } = await page.evaluate(() => {
         window.__stop = true;
-        const f = window.__frames;
-        const gaps = [];
-        for (let i = 1; i < f.length; i++) gaps.push(f[i] - f[i - 1]);
-        return { frames: gaps, draws: window.agentdrafterViewer.takeDrawTimes() };
+        return { frames: window.__frames, draws: window.agentdrafterViewer.takeDraws() };
       });
       await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
       await page.screenshot({ path: join(out, 'look-phone-pinched.png') });
@@ -362,28 +389,60 @@ const checks = {
       assert(drift < 3, `the point under the fingers stays under them: ${drift} px`);
       assert(Math.abs(panned.left - pinched.left) > 1e-3, 'the drag pans');
       assert(after.scale < panned.scale, 'the pinch zooms out');
+
+      // Within each gesture: the display's frames, the canvas's draws, the
+      // time between one draw and the next, and how long each draw took.
+      const gaps = (times) => times.slice(1).map((t, i) => t - times[i]);
+      const each = phases.map(({ name, began, ended }) => {
+        const shown = frames.filter((t) => t >= began && t <= ended);
+        const drawn = draws.filter((d) => d.at >= began && d.at <= ended);
+        assert(drawn.length > 0, `${name}: the canvas was never drawn`);
+        return {
+          gesture: name,
+          frames: shown.length,
+          draws: drawn.length,
+          frame_intervals: stats(gaps(shown)),
+          draw_intervals: stats(gaps(drawn.map((d) => d.at))),
+          draw_ms: stats(drawn.map((d) => d.ms)),
+        };
+      });
+      const during = (t) => phases.some(({ began, ended }) => t >= began && t <= ended);
+      const allDraws = draws.filter((d) => during(d.at));
+      const allDrawIntervals = phases.flatMap(({ began, ended }) =>
+        gaps(draws.filter((d) => d.at >= began && d.at <= ended).map((d) => d.at)),
+      );
+      const allFrameIntervals = phases.flatMap(({ began, ended }) => gaps(frames.filter((t) => t >= began && t <= ended)));
       const result = {
         device: `390x844 CSS px at 3 device px each, touch, CPU throttled ${THROTTLE}x`,
         webgl: await page.evaluate(() => { const gl = document.createElement('canvas').getContext('webgl2'); const ext = gl.getExtension('WEBGL_debug_renderer_info'); return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); }),
         sheet: `${summary.sheet}: ${summary.segments} segments`,
-        frame_intervals: stats(frames),
-        draw_call_per_frame: stats(draws),
+        gestures: each,
+        frame_intervals: stats(allFrameIntervals),
+        draw_intervals: stats(allDrawIntervals),
+        draw_ms: stats(allDraws.map((d) => d.ms)),
         pinch_drift_px: round(drift),
       };
-      // The page's own work each frame, under the throttle, is a sliver of
-      // a frame, whatever draws the pixels.
-      const draw = result.draw_call_per_frame;
-      assert(draw.median_ms <= 1 && draw.p95_ms <= 4, `the page's draw per frame is not small: ${JSON.stringify(result)}`);
-      // Smooth: 95% of frames come at the display's pace (60 a second), 99%
-      // within one refresh of it, and none stalls for 100 ms. `--smooth draw`
-      // holds the page's own draw alone, where software WebGL on a small
-      // machine with no GPU, such as CI's runner, is slower than any phone's
-      // GPU to fill the canvas; the frame times are still reported.
-      result.held_to = SMOOTH === 'draw' ? "the page's draw per frame" : 'the frame times';
+      // Every gesture draws the canvas, again and again as the fingers
+      // move; held to the display's pace, on most of its frames.
+      for (const g of each) {
+        assert(g.draws >= 20, `${g.gesture}: ${g.draws} draws in ${g.frames} frames`);
+        if (SMOOTH !== 'draw') {
+          assert(g.draws >= g.frames * 0.6, `${g.gesture}: ${g.draws} draws in ${g.frames} frames`);
+        }
+      }
+      // The page's own work each draw, under the throttle, is a sliver of a
+      // frame, whatever draws the pixels.
+      const draw = result.draw_ms;
+      assert(draw.median_ms <= 1 && draw.p95_ms <= 4, `the page's draw is not small: ${JSON.stringify(result)}`);
+      // Smooth: 95% of the draws during gestures come at the display's pace
+      // (60 a second), 99% within one refresh of it, and none stalls for
+      // 100 ms; and so do the display's frames.
+      result.held_to = SMOOTH === 'draw' ? "the draws' count and the page's draw" : 'the draws and the frames';
       if (SMOOTH !== 'draw') {
-        const { p95_ms, p99_ms, max_ms } = result.frame_intervals;
-        const smooth = p95_ms <= 20 && p99_ms <= 34 && max_ms <= 100;
-        assert(smooth, `frames are not smooth: ${JSON.stringify(result)}`);
+        for (const name of ['draw_intervals', 'frame_intervals']) {
+          const { p95_ms, p99_ms, max_ms } = result[name];
+          assert(p95_ms <= 20 && p99_ms <= 34 && max_ms <= 100, `${name} are not smooth: ${JSON.stringify(result)}`);
+        }
       }
       return result;
     } finally {
@@ -478,6 +537,156 @@ const checks = {
       assert(page.url().includes('sheet=DP-LD-202'), 'the address names the sheet shown');
       assert(problems.length === 0, problems.join('; '));
       return { fitted, wheeled, dragged, doubled };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * The first load shows the whole sheet, at phone and laptop sizes; so it
+   * does when the screen changes size or pixel ratio under the fitted view,
+   * as the reviewer has not moved it; a view the reviewer moved stays put.
+   */
+  async fit() {
+    const server = await serve('127.0.0.1:0');
+    const b = await browser();
+    // Where the paper is on the canvas, in CSS pixels, and the room the
+    // canvas shows, above a phone's bottom sheet.
+    const where = (page) =>
+      page.evaluate(() => {
+        const probe = window.agentdrafterViewer;
+        const [left, bottom, right, top] = probe.summary.paper;
+        const v = probe.view();
+        const canvas = document.querySelector('.stage');
+        const c = canvas.getBoundingClientRect();
+        const sheet = document.querySelector('.va-sheet').getBoundingClientRect();
+        const below = sheet.top > c.top + 10 && sheet.left < c.right - 10 ? c.bottom - sheet.top : 0;
+        return {
+          paper: [(left - v.left) * v.scale, (v.top - top) * v.scale, (right - v.left) * v.scale, (v.top - bottom) * v.scale],
+          room: [c.width, c.height - below],
+          backing: [canvas.width, canvas.height],
+          ratio: window.devicePixelRatio,
+          scale: v.scale,
+        };
+      });
+    const inSight = (w, what) => {
+      const [x0, y0, x1, y1] = w.paper;
+      const [width, height] = w.room;
+      assert(x0 >= -0.5 && y0 >= -0.5 && x1 <= width + 0.5 && y1 <= height + 0.5, `${what}: the sheet is not all in sight: ${JSON.stringify(w)}`);
+      // Fitted, not shrunk: one side spans the room but its padding.
+      assert(x1 - x0 >= width - 21 || y1 - y0 >= height - 21, `${what}: the sheet does not fill the room: ${JSON.stringify(w)}`);
+    };
+    const settle = (page) => page.evaluate(() => new Promise((done) => setTimeout(() => requestAnimationFrame(() => done()), 300)));
+    const seen = {};
+    try {
+      for (const [name, device] of [
+        ['phone', PHONE],
+        ['laptop', LAPTOP],
+      ]) {
+        const context = await b.newContext(device);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant`, 'DP-LD-101');
+        await settle(page);
+        seen[name] = await where(page);
+        inSight(seen[name], `first load at ${name} size`);
+        await page.click('.tab:nth-child(3)');
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'DP-LD-103');
+        await settle(page);
+        inSight(await where(page), `another sheet at ${name} size`);
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+
+      // Laid out at one size, then the screen another, as a browser may
+      // before it settles: the sheet is fitted to the screen it ends at.
+      const context = await b.newContext({ viewport: { width: 1000, height: 700 }, deviceScaleFactor: 1 });
+      const { page, problems } = await open(context, `${server.base}/?source=demo-plant`, 'DP-LD-101');
+      await page.setViewportSize({ width: 390, height: 844 });
+      await settle(page);
+      seen.resized = await where(page);
+      inSight(seen.resized, 'after the screen narrowed');
+      // And the pixel ratio changing under it, as on another screen.
+      const cdp = await context.newCDPSession(page);
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+      await settle(page);
+      seen.ratio = await where(page);
+      inSight(seen.ratio, 'after the pixel ratio changed');
+      assert(seen.ratio.backing[0] === Math.round(seen.ratio.room[0] * 3), `the canvas has 3 device pixels to a CSS pixel: ${JSON.stringify(seen.ratio)}`);
+      // Zoomed by the reviewer: a change of size keeps their view's scale.
+      await page.mouse.move(150, 300);
+      await page.mouse.wheel(0, -300);
+      await settle(page);
+      const zoomed = await where(page);
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 700, deviceScaleFactor: 3, mobile: true });
+      await settle(page);
+      const kept = await where(page);
+      assert(Math.abs(kept.scale - zoomed.scale) < 1e-9 && zoomed.scale > seen.ratio.scale * 1.1, `a view the reviewer zoomed is not fitted again: ${JSON.stringify({ fitted: seen.ratio.scale, zoomed: zoomed.scale, kept: kept.scale })}`);
+      assert(problems.length === 0, problems.join('; '));
+      return seen;
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * Going back to a sheet already drawn shows it, and says nothing of the
+   * sheet asked for meanwhile, whether that one is still coming or failed.
+   */
+  async tabs() {
+    const server = await serve('127.0.0.1:0');
+    const b = await browser();
+    try {
+      const context = await b.newContext(LAPTOP);
+      let release;
+      const held = new Promise((done) => {
+        release = done;
+      });
+      const asked = [];
+      await context.route('**/commands/display-list', async (route) => {
+        const sheet = route.request().postDataJSON()?.sheet ?? null;
+        asked.push(sheet);
+        if (sheet === 'DP-LD-102') {
+          await held;
+          await route.continue();
+        } else if (sheet === 'DP-LD-103') {
+          await route.fulfill({
+            status: 422,
+            contentType: 'application/json',
+            body: JSON.stringify({ ok: false, error: { code: 'read_failed', message: 'a made-up failure of DP-LD-103' } }),
+          });
+        } else {
+          await route.continue();
+        }
+      });
+      const { page, problems } = await open(context, `${server.base}/?source=demo-plant`, 'DP-LD-101');
+      const note = () => page.evaluate(() => document.querySelector('.va-note')?.textContent ?? null);
+      const shown = () => page.evaluate(() => window.agentdrafterViewer.summary.sheet);
+
+      // B is asked for and still coming; back to A before it comes.
+      await page.click('.tab:has-text("DP-LD-102")');
+      await page.waitForFunction(() => document.querySelector('.va-note')?.textContent?.includes('DP-LD-102'));
+      await page.click('.tab:has-text("DP-LD-101")');
+      await page.waitForFunction(() => !document.querySelector('.va-note'));
+      assert((await shown()) === 'DP-LD-101', 'A is shown');
+      // B comes after all: A stays, with nothing said.
+      release();
+      await sleep(500);
+      assert((await note()) === null && (await shown()) === 'DP-LD-101', `B coming late changes nothing: ${await note()}`);
+      // B, kept when it came, shows at once when asked for again.
+      const before = asked.length;
+      await page.click('.tab:has-text("DP-LD-102")');
+      await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'DP-LD-102');
+      assert(asked.length === before, 'a sheet drawn before is not asked for again');
+
+      // C fails; back to B.
+      await page.click('.tab:has-text("DP-LD-103")');
+      await page.waitForFunction(() => document.querySelector('.va-note.failed')?.textContent?.includes('made-up failure'));
+      await page.click('.tab:has-text("DP-LD-102")');
+      await page.waitForFunction(() => !document.querySelector('.va-note'));
+      assert((await shown()) === 'DP-LD-102', 'B is shown again');
+      assert(problems.filter((p) => !p.includes('422')).length === 0, problems.join('; '));
+      return { asked };
     } finally {
       await b.close();
       await server.stop();

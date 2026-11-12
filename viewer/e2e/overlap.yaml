@@ -1,0 +1,32 @@
+# A made-up sheet for the viewer's browser tests (e2e/run.mjs): colours that
+# overlap, in the order they are drawn, so the canvas is held to the PNG's
+# colours where one object covers another. A blue line is drawn over a red
+# one where they cross, a black line over both and a red line over all
+# three; a green solid fill, drawn after the first three lines, hides them
+# where it lies; a yellow fill, drawn last, hides part of the last red line.
+units: mm
+
+layers:
+  red: {color: red, lineweight: 2.0}
+  blue: {color: blue, lineweight: 2.0}
+  black: {color: white, lineweight: 1.0}
+  green: {color: green}
+  yellow: {color: yellow}
+
+objects:
+  - line: {from: [0, 0, 0], to: [100, 60, 0], layer: red}
+  - line: {from: [0, 60, 0], to: [100, 0, 0], layer: blue}
+  - line: {from: [5, 30, 0], to: [95, 30, 0], layer: black}
+  - hatch:
+      pattern: SOLID
+      boundary:
+        - polyline:
+            points: [[12, 12, 0], [30, 12, 0], [30, 48, 0], [12, 48, 0]]
+      layer: green
+  - line: {from: [50, 5, 0], to: [50, 55, 0], layer: red}
+  - hatch:
+      pattern: SOLID
+      boundary:
+        - polyline:
+            points: [[46, 42, 0], [54, 42, 0], [54, 50, 0], [46, 50, 0]]
+      layer: yellow

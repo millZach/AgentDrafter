@@ -61,7 +61,11 @@ export function App({ token, source, sheet }: AppProps) {
     const key = (wanted ?? '').toUpperCase();
     const kept = replies.current.get(key);
     if (kept) {
+      // A sheet drawn before is shown again at once: whatever another sheet
+      // was saying, loading or failing, is not this one's to say. The
+      // request for that other sheet, if it is still out, is let go.
       setReply(kept);
+      setStatus({ kind: 'shown' });
       return;
     }
     setStatus({ kind: 'loading', message: wanted ? `Drawing ${wanted}…` : 'Drawing the sheet…' });
@@ -69,8 +73,9 @@ export function App({ token, source, sheet }: AppProps) {
     if (wanted) input.sheet = wanted;
     run('display-list', input, token).then(
       (text) => {
-        if (!current) return;
+        // Kept even when the reviewer has moved on, for when they come back.
         replies.current.set(key, text);
+        if (!current) return;
         setReply(text);
       },
       (e) => current && setStatus({ kind: 'failed', message: why(e, token) }),

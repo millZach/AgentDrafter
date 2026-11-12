@@ -36,3 +36,13 @@ test('a grey hairline just either side of the ink threshold still matches', () =
   assert.equal(result.png_ink_pixels, 10);
   assert.equal(result.png_ink_within_1px, 1);
 });
+
+test('ink of another colour does not match, where ink alone would', () => {
+  const line = Array.from({ length: 10 }, (_, x) => [x, 5]);
+  const red = image(10, 10, []);
+  for (const [x, y] of line) red.set([255, 0, 0], (y * 10 + x) * 4);
+  const result = compare(red, image(10, 10, line), 10, 10);
+  assert.equal(result.png_ink_within_1px, 1, 'both have ink there');
+  assert.equal(result.png_colour_within_1px, 0, 'but red is not black');
+  assert.equal(compare(red, red, 10, 10).png_colour_within_1px, 1);
+});
