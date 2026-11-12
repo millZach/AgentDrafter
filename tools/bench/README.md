@@ -53,7 +53,7 @@ python3 tools/bench/laptop.py --binary target/bench-binary/agentdrafter.exe --wh
 - It runs the bench with the laptop's own Python and its own Edge (`--browser chrome` for Chrome), headless: all three numbers against the binary, then the cold command and the set against the wheel's command.
 - At the end, whatever happened, it stops anything still running from that folder and removes it, and says whether it could.
 
-It prints the binary's JSON, with the wheel's `cold` and `set` under `wheel`, and `laptop`: how long it waited, the memory free when it began, whether an AutoCAD console was running when it ended, what it measured and whether the folder was removed. Options after `--` go to the bench, such as `-- --runs 20`.
+It prints the binary's JSON, with the wheel's `cold` and `set` under `wheel`, and `laptop`: how long it waited, the memory free when it began, whether an AutoCAD console was running when it ended, what it measured and whether the folder was removed. Options after `--` go to the bench, each followed by its value, such as `-- --runs 20`. Only those that say how much it measures are passed on: `--only`, `--runs`, `--sheets`, `--set-runs`, `--changes` and `--gl`. Any other option is refused, since it could name another program or a folder outside the temporary one. A kill or hang-up of `laptop.py` ends the run through its clean-up before the judge's lock is let go, as the judge's own runs do.
 
 The wheel's command is a Python entry point that runs the command line's code inside the extension ([`docs/python.md`](../../docs/python.md#the-command)), so each command it runs starts Python first. The binary's numbers are the baseline, as forge's are of the plain binary.
 

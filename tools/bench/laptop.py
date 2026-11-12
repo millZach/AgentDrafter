@@ -144,6 +144,21 @@ def stage(binary: Path | None, wheel: Path | None, into: Path) -> list[Path]:
     return files
 
 
+# The bench's options the laptop run passes on: how much it measures, never what it runs or where.
+PASSED_ON = {"--only", "--runs", "--sheets", "--set-runs", "--changes", "--gl"}
+
+
+def bench_options(extra: list[str]) -> list[str]:
+    """The options for bench.py after --, each with its value; refuses any that would choose a program or a folder."""
+    if len(extra) % 2:
+        raise LaptopError("the bench's options after -- go in pairs, such as --runs 20")
+    for name in extra[0::2]:
+        if name.split("=", 1)[0] not in PASSED_ON or "=" in name:
+            raise LaptopError("the laptop run passes on only %s, each followed by its value; not %s" % (
+                ", ".join(sorted(PASSED_ON)), name))
+    return extra
+
+
 def script_for(binary: Path | None, wheel: Path | None, browser: str, extra: list[str]) -> str:
     """The run's PowerShell, with the folder still to fill in as `%(dir)s`."""
     return RUN % {
@@ -164,11 +179,14 @@ def main(argv=None) -> int:
     p.add_argument("bench", nargs=argparse.REMAINDER, help="after --: options for bench.py, such as --runs 20")
     args = p.parse_args(argv)
     extra = args.bench[1:] if args.bench[:1] == ["--"] else args.bench
+    # A kill or hang-up ends the run through the clean-up below, before the judge's lock is let go.
+    judge.stop_on_signals()
     binary = Path(args.binary) if args.binary else None
     wheel = Path(args.wheel) if args.wheel else None
     try:
         if not binary and not wheel:
             raise LaptopError("name the binary with --binary, the wheel with --wheel, or both")
+        extra = bench_options(extra)
         if binary and (not binary.is_file() or binary.suffix.lower() != ".exe" or binary.read_bytes()[:2] != b"MZ"):
             raise LaptopError("--binary must be agentdrafter.exe for Windows")
         if wheel and (not wheel.is_file() or not wheel.name.endswith("win_amd64.whl")):
@@ -188,10 +206,13 @@ def main(argv=None) -> int:
                     "running an AutoCAD console" if turn == "BUSY" else "short of memory", waited))
             say("the laptop is free after %s s; making one temporary folder there" % waited)
             folder = laptop.ps(MAKE, 60).strip()
-            if not folder or " " in folder or "'" in folder:
-                raise LaptopError("the laptop's temporary folder cannot be copied to by scp")
+            if not folder:
+                raise LaptopError("the laptop made no temporary folder")
             replies = {}
             try:
+                # Refused inside the try, so the folder just made is still removed.
+                if " " in folder or "'" in folder:
+                    raise LaptopError("the laptop's temporary folder cannot be copied to by scp")
                 laptop.put(files, folder)
                 say("running the bench there")
                 try:

@@ -687,10 +687,12 @@ def main(argv=None) -> int:
         if not (plant / "rows.yaml").is_file():
             raise BenchError("no demo plant at --plant")
         if args.work:
-            work = Path(args.work)
-            work.mkdir(parents=True, exist_ok=True)
-            if any(work.iterdir()):
+            given = Path(args.work)
+            # Refused before it is ours: a folder that holds anything is never removed at the end.
+            if given.exists() and (not given.is_dir() or any(given.iterdir())):
                 raise BenchError("--work must be an empty folder")
+            given.mkdir(parents=True, exist_ok=True)
+            work = given
         else:
             work = Path(tempfile.mkdtemp(prefix="agentdrafter-bench-"))
         tool = Agentdrafter(args.bin)
