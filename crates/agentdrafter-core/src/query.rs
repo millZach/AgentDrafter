@@ -27,6 +27,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::build::is_same_file;
 use crate::description::{read_sheet_record, SavedSet, SheetRecord};
 use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
@@ -618,9 +619,8 @@ fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) 
         .block_library
         .as_ref()
         .map(|written| {
-            worked_out(&record.file.parent().unwrap_or(Path::new("")).join(written))
-                .display()
-                .to_string()
+            let read = record.file.parent().unwrap_or(Path::new("")).join(written);
+            worked_out(&read).display().to_string()
         })
         .unwrap_or_default();
     definition
@@ -642,9 +642,12 @@ fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) 
         .collect()
 }
 
-/// `path` with its `.` and `..` worked out as written, so that the block
-/// library a template in `templates/` names as `../blocks.yaml` is
-/// `blocks.yaml` in the set's folder, as the set's other files are given.
+/// `path`, the file a sheet's block library was read from, with its `.`
+/// and `..` worked out as written, so that the block library a template in
+/// `templates/` names as `../blocks.yaml` is `blocks.yaml` in the set's
+/// folder, as the set's other files are given. Worked out so, a path can
+/// name another file than the one read, as when `templates/` is a link to
+/// another folder; then `path` is given as it was read.
 fn worked_out(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -658,7 +661,11 @@ fn worked_out(path: &Path) -> PathBuf {
             other => out.push(other),
         }
     }
-    out
+    if is_same_file(&out, path) {
+        out
+    } else {
+        path.to_owned()
+    }
 }
 
 /// One object a selection matched, on one of the sheets looked at.
