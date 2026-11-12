@@ -281,6 +281,12 @@ _Avoid_: password, API key
 The browser window where the reviewer watches a drawing set change, steps through its journal, and accepts or undoes. It learns of every change set from the set's journal, whichever interface sent it.
 _Avoid_: app, editor, UI
 
+### Measuring
+
+**Speed baseline**:
+The fixed set of numbers later work reports its speed against: one command from a cold start, a 100-sheet set built to DWG and PDF, and a change showing in the viewer, measured by one script on the laptop and on forge and recorded with the machines. A pull request that could move them reports them; none is a gate.
+_Avoid_: benchmark score, performance budget
+
 ### Material
 
 **Client material**:

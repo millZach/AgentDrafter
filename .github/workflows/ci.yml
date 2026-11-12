@@ -93,6 +93,12 @@ jobs:
           print("".join(lines), end="")
           PY
 
+      # The speed bench (tools/bench, docs/speed.md), run small on this system to check that it still
+      # measures. Runners' speed varies too much for a number to mean anything here: none is held.
+      - name: The speed bench still runs (no number is held)
+        shell: bash
+        run: python tools/bench/bench.py --bin target/debug/agentdrafter --only cold,set --runs 2 --sheets 16 --set-runs 1
+
       - name: Keep the demo plant's hashes, DWGs and PDFs
         uses: actions/upload-artifact@v7
         with:

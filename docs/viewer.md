@@ -115,7 +115,7 @@ cd ..
 cargo build -p agentdrafter-cli
 ```
 
-**How the page reaches the binary.** `crates/agentdrafter-cli/build.rs` embeds every file of `viewer/dist/` in `agentdrafter` when it has been built. The built page is not committed: CI's `Viewer` workflow builds it and tests the binary with it. A plain `cargo build` on a machine without Node works: with no `viewer/dist/`, the binary carries a one-page note in its place that says how to build the viewer, and serves every command as before. This keeps generated WebAssembly and JavaScript out of the repository and out of every pull request's diff, and the required CI jobs need no Node.
+**How the page reaches the binary.** `crates/agentdrafter-cli/build.rs` embeds every file of `viewer/dist/` in `agentdrafter` when it has been built. The built page is not committed: CI's `Viewer` workflow builds it and tests the binary with it. A plain `cargo build` on a machine without Node works: with no `viewer/dist/`, the binary carries a one-page note in its place that says how to build the viewer, and serves every command as before. This keeps generated WebAssembly and JavaScript out of the repository and out of every pull request's diff, and the required CI jobs need no Node. CI's `Windows binary` workflow, not on the merge bar, builds a Windows `agentdrafter.exe` with the page in, on each push to `main` and when asked, for the speed baseline's run on the laptop ([speed.md](speed.md)).
 
 `npm run dev` serves the page from Vite on port 5173 and sends its commands on to `agentdrafter serve` on `127.0.0.1:7316`, for working on the page.
 
