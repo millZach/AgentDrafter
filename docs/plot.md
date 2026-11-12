@@ -32,11 +32,11 @@ What a CTB's pen sets, and what the plot follows:
 
 | A pen's setting | What the plot does |
 |---|---|
-| `color` | Followed. -1 (or -1006632961) plots the object's own colour, in the colour AutoCAD plots that index in ([`render`](render.md#what-it-draws)), index 7 black. Any other value means the pen plots in a colour of its own: red, green and blue in the low three bytes of the pen's `mode_color`, where CTB writers keep a custom colour while `color` may hold another value, or of `color` when the pen has no `mode_color`. AutoCAD's own `monochrome.ctb` and `acad.ctb` write no `mode_color`, and the made-up probe below wrote the same colour in both, so AutoCAD has not been seen plotting a pen whose two differ. Nor has it been seen plotting a `color` or `mode_color` whose top byte is 0xC3, the kind ezdxf calls ACI, whose low byte would be a colour index; it is read as red, green and blue like any other. Both wait for a short AutoCAD probe on the machine that has AutoCAD, which is offline for now ([#36](https://github.com/millZach/AgentDrafter/issues/36)). |
+| `color` | Followed. -1 (or -1006632961) plots the object's own colour, in the colour AutoCAD plots that index in ([`render`](render.md#what-it-draws)), index 7 black. Any other value means the pen plots in a colour of its own: red, green and blue in the low three bytes of the pen's `mode_color`, where CTB writers keep a custom colour while `color` may hold another value, or of `color` when the pen has no `mode_color`. A `mode_color` of -1006632961 (or -1) plots the object's own colour. A value whose top byte is 0xC3, the kind ezdxf calls ACI, is red, green and blue like any other, not a colour index: 0xC3000003 plots red 0, green 0, blue 3, not index 3's green. AutoCAD 2026 plotted all of this through a made-up CTB ([below](#how-autocad-plots-a-pens-colour)), except a `mode_color` of -1, which it was not shown and is read like -1006632961. |
 | `lineweight` | Followed. 0 plots the object's own lineweight, its layer's or AutoCAD's default of 0.25 mm; any other value `n` plots with the lineweight at place `n - 1` of the file's `custom_lineweight_table`, counted from 0, so 1 is its first, 0 mm. AutoCAD 2026 plotted a made-up CTB's pens of `lineweight` 20 and 25 at the table's 0.9 and 1.58 mm, its places 19 and 24, not at 1 and 2 mm. |
 | `screen`, grayscale in `color_policy`, `linetype`, `end_style`, `join_style`, `fill_style`, and the table's `apply_factor` | Not followed yet. The reply's `plot_style.not_followed` lists each one a CTB sets, with what it means, what the plot does instead, and the colour indexes whose pens set it, so nothing is left out in silence. AutoCAD's `monochrome.ctb` and `acad.ctb` set none of them. |
 
-A NUL byte at the end of a CTB's text, which some writers such as ezdxf add, is ignored. A value followed by an appendix after a space, in brackets, as some files' lineweight tables carry one (`0.0076200000000 (+7.Z+"8V?S_LC )`, shown in ezdxf's issue #1069), is read as the value before it, as ezdxf reads it; what the appendix means is not known. Anything else after a value, not in brackets, is an error, as before. A CTB that cannot be found, or read, is an error (`read_failed`, at `plot_style`) and nothing is written. A named plot style table (STB) is refused: a sheet is plotted through a CTB.
+A NUL byte at the end of a CTB's text, which some writers such as ezdxf add, is ignored. A value followed by an appendix after a space, in brackets, as some files' lineweight tables carry one (`0.0076200000000 (+7.Z+"8V?S_LC )`, shown in ezdxf's issue #1069), is read as the value before it, as ezdxf reads it and as AutoCAD 2026 plotted it (below); what the appendix means is not known. Anything else after a value, not in brackets, is an error, as before. A CTB that cannot be found, or read, is an error (`read_failed`, at `plot_style`) and nothing is written. A named plot style table (STB) is refused: a sheet is plotted through a CTB.
 
 ## The text
 
@@ -93,6 +93,27 @@ The tolerance a plot is held to: every inked pixel within 2 pixels (0.17 mm) at 
 | made-up CTB probe | A3; 200 by 110 mm | 99.96% | 100% | 99.99% | 100% |
 
 On the demo sheets, the 7% of AgentDrafter's ink that is not near AutoCAD's is the trim line's half pen on the page's edge, which AutoCAD leaves out; away from a band 5 pixels wide along the edge, both ways match. Through the made-up CTB, every pen plotted in the same colour in both, and every lineweight the CTB set came out the same to the pixel.
+
+### How AutoCAD plots a pen's colour
+
+A second made-up probe settled how AutoCAD reads a pen's `color` and `mode_color` when they differ, and a value of the 0xC3 kind ([#36](https://github.com/millZach/AgentDrafter/issues/36)). AutoCAD 2026 plotted a made-up sheet, a line and a solid swatch on each of ten layers of their own colour index, through a made-up CTB of ten such pens, as above, on 2026-11-12. Read at 600 dots per inch, each pen came out in the colour below. AgentDrafter's plot of the same DWG through the same CTB matches it on every pen.
+
+| Pen | `color` | `mode_color` | AutoCAD plotted |
+|---|---|---|---|
+| 1 | red | blue | blue: `mode_color` |
+| 30 | 0xC3000003 | blue | blue: `mode_color` |
+| 2 | red | 0xC3000003 | red 0, green 0, blue 3: the low three bytes, not index 3's green |
+| 3 | 0xC3000005 | none | red 0, green 0, blue 5 |
+| 50 | 0xC3000001 | 0xC3000001 | red 0, green 0, blue 1 |
+| 60 | 0xC3000002 | 0xC3000004 | red 0, green 0, blue 4 |
+| 4 | red | -1006632961 | the object's own colour, index 4's cyan |
+| 6 | -1 | green | the object's own colour, index 6's magenta |
+| 40 | green | green | green |
+| 250 | red | none | red |
+
+Pen 4 was the one AgentDrafter plotted otherwise before: it read `mode_color`'s low three bytes as white. It now plots the object's own colour, as AutoCAD does. A `mode_color` of -1 is read the same way, though AutoCAD was shown only -1006632961. Every line plotted 0.51 mm wide in both, its layer's 0.5 mm, to within a pixel at 600 dots per inch (0.042 mm).
+
+The same run plotted the sheet through a second made-up CTB, whose lineweight table carries the appendices of ezdxf's issue #1069 at its places 19 and 24. AutoCAD plotted the pens that use them at 0.889 and 1.566 mm as measured, the table's 0.9 and 1.58 mm, the same as AgentDrafter.
 
 What still differs: the trim line on the page's edge (above); AutoCAD writes its PDF on a grid of 1/600 inch, one step down and to the left of where things are, and rounds each lineweight to it, so its sheets sit 0.04 mm off AgentDrafter's and its pens are up to 0.01 mm wider or narrower; TrueType text sits up to 2 pixels from AutoCAD's, as it does in the PNG; and AutoCAD writes its SHX text as lines, so none of it can be searched, where AgentDrafter's can.
 

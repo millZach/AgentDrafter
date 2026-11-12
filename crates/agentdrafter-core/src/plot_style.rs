@@ -24,7 +24,11 @@
 //!   value means the pen plots in a colour of its own, red, green and blue
 //!   in the low three bytes of its `mode_color`. CTB writers keep a custom
 //!   colour there, and `color` may then hold another value; a pen with no
-//!   `mode_color` plots the colour in `color`'s low three bytes.
+//!   `mode_color` plots the colour in `color`'s low three bytes. A
+//!   `mode_color` of -1006632961, or -1, plots the object's own colour. A
+//!   value whose top byte is 0xC3, which ezdxf calls ACI, is red, green
+//!   and blue too, not a colour index. AutoCAD 2026 plotted a made-up CTB
+//!   so, pen by pen.
 //! - `lineweight`: 0 plots the object's own lineweight; any other value `n`
 //!   plots with the lineweight at place `n - 1` of `custom_lineweight_table`,
 //!   counted from 0, so 1 is the table's first, 0 mm. AutoCAD 2026 plotted a
@@ -199,12 +203,17 @@ impl PlotStyle {
             let plotted = match number("color")? {
                 None => None,
                 Some(c) if OBJECT_COLORS.contains(&c) => None,
-                Some(c) => {
-                    // A custom colour is kept in `mode_color`, and `color`
-                    // may then hold another value.
-                    let c = number("mode_color")?.unwrap_or(c) as u32;
-                    Some([(c >> 16) as u8, (c >> 8) as u8, c as u8])
-                }
+                // A custom colour is kept in `mode_color`, and `color` may
+                // then hold another value: AutoCAD plots `mode_color`. A
+                // `mode_color` that names the object's own colour plots
+                // that, as AutoCAD 2026 plotted one of -1006632961.
+                Some(c) => match number("mode_color")?.unwrap_or(c) {
+                    c if OBJECT_COLORS.contains(&c) => None,
+                    c => {
+                        let c = c as u32;
+                        Some([(c >> 16) as u8, (c >> 8) as u8, c as u8])
+                    }
+                },
             };
             let lineweight = match number("lineweight")? {
                 None | Some(0) => None,
@@ -320,8 +329,9 @@ impl Section {
                     // in brackets, such as `0.0076200000000 (+7.Z+"8V?S_LC )`
                     // in a lineweight table (ezdxf's issue #1069). What it
                     // means is not known; the value is what comes before
-                    // it, as ezdxf reads it. Anything else after a space
-                    // stays in the value, which then does not read.
+                    // it, as ezdxf reads it and AutoCAD 2026 plotted it.
+                    // Anything else after a space stays in the value,
+                    // which then does not read.
                     None => match value.split_once(' ') {
                         Some((before, appendix))
                             if appendix.trim_start().starts_with('(')
@@ -470,6 +480,45 @@ mod tests {
         assert_eq!(style.color(Color(1)), [0, 0, 255]);
         assert_eq!(style.color(Color(2)), [0, 128, 0]);
         assert_eq!(style.color(Color(3)), Color(3).on_paper());
+    }
+
+    #[test]
+    fn pens_plot_as_autocad_plotted_the_probe() {
+        // The pens of the made-up CTB AutoCAD 2026 plotted for #36, each
+        // `(index, color, mode_color)`, and the colour AutoCAD plotted it in.
+        let aci = |index: u32| i64::from((0xC300_0000u32 | index) as i32);
+        let object = aci(0x00FF_FFFF);
+        assert_eq!(object, -1_006_632_961);
+        let (red, blue, green) = (rgb(255, 0, 0), rgb(0, 0, 255), rgb(0, 128, 0));
+        let pens: [(u8, i64, Option<i64>, [u8; 3]); 10] = [
+            // `color` and `mode_color` differ: `mode_color`.
+            (1, red, Some(blue), [0, 0, 255]),
+            (30, aci(3), Some(blue), [0, 0, 255]),
+            // A value of the 0xC3 kind is red, green and blue, not an index.
+            (2, red, Some(aci(3)), [0, 0, 3]),
+            (3, aci(5), None, [0, 0, 5]),
+            (50, aci(1), Some(aci(1)), [0, 0, 1]),
+            (60, aci(2), Some(aci(4)), [0, 0, 4]),
+            // A `mode_color` naming the object's own colour: index 4's cyan.
+            (4, red, Some(object), [0, 255, 255]),
+            // A `color` naming it, whatever the `mode_color`: index 6's
+            // magenta.
+            (6, OBJECT_COLOR, Some(green), [255, 0, 255]),
+            (40, green, Some(green), [0, 128, 0]),
+            (250, red, None, [255, 0, 0]),
+        ];
+        let mut text = made_up_ctb_text(&pens.map(|(index, color, _, _)| (index, color, 0)), "");
+        for (index, _, mode, _) in pens {
+            if let Some(mode) = mode {
+                let name = format!("  name=\"Color_{index}\n");
+                let at = text.find(&name).unwrap() + name.len();
+                text.insert_str(at, &format!("  mode_color={mode}\n"));
+            }
+        }
+        let style = PlotStyle::parse_ctb(&ctb_file(&text)).unwrap();
+        for (index, _, _, plotted) in pens {
+            assert_eq!(style.color(Color(index)), plotted, "pen {index}");
+        }
     }
 
     #[test]
