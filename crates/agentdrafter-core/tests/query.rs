@@ -743,7 +743,9 @@ fn a_query_finds_text_an_inserted_block_draws() {
         let text = &object.block_text[0];
         assert_eq!(text.field, "blocks.TITLE_BLOCK.objects[7]");
         assert_eq!(text.contents, "DEMO PLANT");
-        assert!(text.file.ends_with("blocks.yaml"), "{text:?}");
+        // The template names it as `../blocks.yaml`; it is the set's
+        // `blocks.yaml`, worked out (#35).
+        assert_eq!(text.file, set.join("blocks.yaml").display().to_string());
     }
     // Text on the sheet itself carries no block text.
     let heading = find(
@@ -756,4 +758,38 @@ fn a_query_finds_text_an_inserted_block_draws() {
     let line = serde_json::to_value(&heading).unwrap();
     assert_eq!(line["objects"][0]["id"], "DEMO-001/heading");
     assert!(line["objects"][0].get("block_text").is_none(), "{line}");
+}
+
+/// When the set's `templates/` is a link to a folder elsewhere, the
+/// template's `../blocks.yaml` is read beside that folder, not in the set,
+/// so the block library is given by the path it was read from.
+#[cfg(unix)]
+#[test]
+fn block_text_names_the_block_library_read_through_a_linked_folder() {
+    let dir = scratch("block-text-linked");
+    let set = dir.join("set");
+    let shared = dir.join("shared");
+    demo_set::copy_demo_set(&set);
+    fs::create_dir_all(&shared).unwrap();
+    fs::rename(set.join("templates"), shared.join("templates")).unwrap();
+    fs::rename(set.join("blocks.yaml"), shared.join("blocks.yaml")).unwrap();
+    std::os::unix::fs::symlink("../shared/templates", set.join("templates")).unwrap();
+    let report = find(
+        &set,
+        Selection {
+            text: Some("DEMO PLANT".into()),
+            ..Selection::default()
+        },
+    );
+    let Answer::Find { objects, .. } = &report.answer else {
+        unreachable!()
+    };
+    assert_eq!(objects.len(), SHEETS.len());
+    let read = set.join("templates").join("../blocks.yaml");
+    assert!(!set.join("blocks.yaml").exists());
+    for object in objects {
+        let text = &object.block_text[0];
+        assert_eq!(text.file, read.display().to_string());
+        assert!(Path::new(&text.file).is_file(), "{text:?}");
+    }
 }

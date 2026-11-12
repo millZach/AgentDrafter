@@ -158,6 +158,28 @@ fn deleting_an_object_writes_the_places_of_those_after_it_that_have_none() {
 }
 
 #[test]
+fn an_id_or_a_name_that_is_a_bare_null_is_left_out() {
+    let text = "units: mm\nobjects:\n  - circle: {center: [0, 0, 0], radius: 1}\n  - circle: {center: [5, 0, 0], radius: 1, id: null, name: ~}\n  - circle: {center: [9, 0, 0], radius: 1, id: 'null'}\n";
+    let mut record = file(text);
+    let listed = record.objects(ObjectList::Template);
+    let ids: Vec<(&str, bool)> = listed.iter().map(|l| (l.id.as_str(), l.written)).collect();
+    assert_eq!(
+        ids,
+        [("objects[0]", false), ("objects[1]", false), ("null", true)]
+    );
+    assert_eq!(listed[1].name, None);
+    // Deleting the first writes the second's place in its `id`, in place
+    // of the bare null, so its ID does not move.
+    assert_eq!(record.delete(ObjectList::Template, 0, 0), ["objects[1]"]);
+    let after = record.new_text().unwrap().unwrap();
+    assert!(
+        after.contains("radius: 1, id: 'objects[1]', name: ~}"),
+        "{after}"
+    );
+    assert!(after.contains("id: 'null'}"), "{after}");
+}
+
+#[test]
 fn a_list_in_brackets_becomes_a_list_of_items() {
     let text = "units: mm\nobjects: []  # none yet\n";
     let mut record = file(text);

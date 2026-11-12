@@ -232,7 +232,7 @@ A block is defined once, in the block library of the drawing set, and inserted o
 | `position` | yes | Where the block's base point sits: a point. |
 | `scale` | no | How much the block is enlarged, the same along every axis: a number more than 0, with no unit. Without it, 1. |
 | `rotation` | no | An angle: degrees anticlockwise from the X axis. Without it, 0. |
-| `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty. An attribute the insert leaves out takes its definition's default. |
+| `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty, written `''`. An attribute the insert leaves out takes its definition's default, and so does one whose value is a bare null, such as `TAG:` ([the YAML subset](#the-yaml-subset), rule 8). |
 | `layer` | no | The layer the insert sits on, as for every object. |
 
 An insert takes an `id` and a `name` as every object does ([IDs and names](#ids-and-names)).
@@ -291,7 +291,16 @@ AgentDrafter reads SHX fonts in the `AutoCAD-86 shapes` and `AutoCAD-86 unifont`
 
 `agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...` measures one line of text as AutoCAD measures a text object (AutoLISP's `textbox`): `width` is from the left edge of what the text draws to the right edge, and `left`, `right`, `bottom` and `top` say where that is from the start of the line, in the unit of the height. `advance` is how far the pen moves. `--font` names a font as a text style does, by its file name alone, and is read only from the font folders. `font` says which font was used and, when it was a look-alike, why. A space at either end draws nothing, so it adds nothing to the width.
 
-Measured against AutoCAD 2026 with its own fonts, on the machine that has them: the widths of 139 made-up strings in `romans.shx`, `simplex.shx`, `txt.shx`, `isocp.shx`, Arial and Times New Roman, 0.1 to 7 units high, match AutoCAD's to within 1e-12 of the unit, and the box of each of the 1,151 characters of the four SHX fonts, 100 high, matches to the eight decimal places AutoCAD printed, but for the ogonek letters Ą, ą, Ę and ę in `romans.shx` and Ą in `simplex.shx`, which AutoCAD boxes up to 0.12 of the height wider or deeper. AutoCAD does not kern.
+Measured against AutoCAD 2026 with its own fonts, on the machine that has them: the widths of 139 made-up strings in `romans.shx`, `simplex.shx`, `txt.shx`, `isocp.shx`, Arial and Times New Roman, 0.1 to 7 units high, match AutoCAD's to within 1e-12 of the unit, and the box of each of the 1,151 characters of the four SHX fonts, 100 high, matches to the eight decimal places AutoCAD printed. AutoCAD does not kern.
+
+An SHX character's box is not always the box of the strokes it draws. AutoCAD's box, which AgentDrafter follows, reaches past them in four ways:
+
+- An arc of up to half a turn is boxed by its chord and the chord moved out to the arc's middle, which reaches past a quarter arc; a longer arc is boxed by its whole circle.
+- An octant arc (shape code 10) of half a turn that passes through the point of its circle at 180°, the side to the left of its centre, between its ends is boxed by its whole circle. One that only starts or ends there is not, and neither is a bulge arc.
+- An octant arc is boxed when the pen is up too, though it draws nothing.
+- When the pen comes down, AutoCAD counts the point the pen last moved to as drawn, even when a pop (shape code 6) has put the pen somewhere else since.
+
+The last three were found from the ogonek letters Ą, ą, Ę and ę in `romans.shx` and Ą in `simplex.shx`, which AutoCAD boxed up to 0.12 of the height wider or deeper than their strokes (#28). They were confirmed on 20 made-up shapes in AutoCAD 2026: half circles through 180° and not, clockwise and anticlockwise, at three scales, with the pen down and up, and pops followed by the pen coming down and not. The four fonts draw no other character these rules change. Not measured: a fractional arc (shape code 11) of half a turn, and a fractional or bulge arc with the pen up. AgentDrafter boxes those by the first rule alone, and only when the pen is down.
 
 ## Values
 
@@ -325,7 +334,8 @@ A file may start with a UTF-8 byte-order mark. It is ignored: every rule below a
 4. **No directives.** A line starting with `%`, such as `%YAML 1.2` or `%TAG`, is an error.
 5. **Keys are text, and each appears once.** A list or mapping used as a key is an error. The same key twice in one mapping is an error, even in flow style.
 6. **No unknown keys.** A key the sheet description does not define is an error, and the error lists the keys that are allowed there.
-7. **Every scalar is text; the sheet description gives it its meaning.** YAML's guessing of types is off: `yes`, `no`, `null`, `~`, `0x10` and `.inf` are not booleans, nulls or numbers. A coordinate is read as a length and nothing else, so `null` there is an error. Quoted and plain scalars mean the same: `'mm'`, `"mm"` and `mm` are one unit, and `layer: 0` and `layer: '0'` are one layer.
+7. **Every scalar is text; the sheet description gives it its meaning.** YAML's guessing of types is off: `yes`, `no`, `0x10` and `.inf` are not booleans or numbers. A coordinate is read as a length and nothing else, so `null` there is an error. Quoted and plain scalars mean the same: `'mm'`, `"mm"` and `mm` are one unit, and `layer: 0` and `layer: '0'` are one layer.
+8. **A bare null leaves a text field out.** Zach decided on 2026-11-11 that on a field whose value is text or a path, a bare null means the field is not written. A bare null is `null`, `Null`, `NULL` or `~`, unquoted, or a value left empty, as in `name:`. An optional field written so takes its default, as if it were left out: `layer: ~` puts an object on layer `0`, and an attribute written `TAG:` takes its definition's default. A required field written so is the `missing_key` error, such as `contents: null` on a text or `block:` on an insert. Quoted, it is text: `'null'` is the word null, and `''` is empty text. The reader can tell `name:` from `name: null`, but a YAML reader that guesses types makes both null, so the schema cannot, and the two mean the same. The rule is the same for every text and path field of every kind of file: a sheet description, a template, a block library, a set's settings and its rows. Elsewhere `null` is read as the text it is, so `closed: null` is an error, as `closed: maybe` is.
 
 Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are all allowed.
 
@@ -350,10 +360,10 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 | `yaml_syntax` | The text is not well-formed YAML. |
 | `not_in_subset` | An anchor, alias, tag, directive, second document or key that is not text. |
 | `duplicate_key` | A key appears twice in one mapping, two layer, linetype, hatch pattern or block names differ only in case, or a block defines one attribute tag twice. The message gives the line of the first. |
-| `duplicate_name` | Two objects on a sheet carry the same name, or names that differ only in case. The message gives the line of the first. |
+| `duplicate_name` | Two objects on a sheet carry the same name, or names that differ only in case. The message gives the line of the first's `name`. |
 | `duplicate_id` | Two objects in one sheet description or template carry the same `id`, or IDs that differ only in case, or an object without an `id` sits at a place another object's `id` is written as. The message gives the line and place of the first. |
 | `unknown_key` | A key the sheet description does not define, including an unknown object type, an attribute definition on a sheet or an insert in a block. |
-| `missing_key` | A required key is missing, or the file is empty. |
+| `missing_key` | A required key is missing or is a bare null, or the file is empty. |
 | `missing_unit` | The sheet declares no unit. |
 | `unknown_unit` | A unit that is not one of `mm`, `cm`, `m`, `in`, `ft`. |
 | `wrong_type` | A value of the wrong shape, such as a point without three coordinates, a polyline with too few points, a hatch with no loops, or `closed: yes`. |

@@ -142,6 +142,10 @@ _Avoid_: stamp (a stamp records the revision an output came from), signature, wa
 The unit a sheet description states for its numbers, such as `mm`. A number with no unit of its own is in the declared unit; a number that carries its own unit is converted to it. There is no default unit.
 _Avoid_: default unit, base unit
 
+**Bare null**:
+An unquoted `null`, `Null`, `NULL` or `~`, or a value left empty, as in `name:`, in a sheet description or another file of a drawing set. On a field whose value is text or a path it means the field is not written: an optional field takes its default and a required one is an error. Quoted, `'null'` is text.
+_Avoid_: null value, empty value
+
 **Original**:
 A DWG that someone else drew, such as a plant's drawing. It is read-only to AgentDrafter and is never overwritten.
 _Avoid_: source drawing, input file

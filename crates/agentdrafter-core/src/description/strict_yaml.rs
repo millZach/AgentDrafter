@@ -97,12 +97,29 @@ impl Node {
         Self::new(Kind::Scalar(text.into()))
     }
 
+    /// Whether the node is a bare null: a plain scalar that a YAML reader
+    /// which guesses types reads as null, `null`, `Null`, `NULL` or `~`, or
+    /// a value left empty, as in `name:`. Zach decided on 2026-11-11 that a
+    /// bare null on an optional text field means the field is not written,
+    /// and on a required one is an error; quoted, `'null'` is the word. A
+    /// node an edit made is written so that it reads back as its text.
+    pub(super) fn is_bare_null(&self) -> bool {
+        match (&self.kind, self.source) {
+            (Kind::Scalar(text), Some(source)) => {
+                source.style == Style::Plain && reads_as_null(text)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether `self` and `other` hold the same scalars, lists and
     /// mappings, keys in the same order, wherever and however each is
-    /// written.
+    /// written. A bare null is not the same as text.
     pub(super) fn same_as(&self, other: &Node) -> bool {
         match (&self.kind, &other.kind) {
-            (Kind::Scalar(a), Kind::Scalar(b)) => a == b,
+            (Kind::Scalar(a), Kind::Scalar(b)) => {
+                a == b && self.is_bare_null() == other.is_bare_null()
+            }
             (Kind::Sequence(a), Kind::Sequence(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.same_as(b))
             }
@@ -115,6 +132,12 @@ impl Node {
             _ => false,
         }
     }
+}
+
+/// Whether `text`, written plain, is what a YAML reader that guesses types
+/// reads as null: YAML 1.2's `null`, `Null`, `NULL`, `~` and nothing.
+pub(super) fn reads_as_null(text: &str) -> bool {
+    matches!(text, "" | "~" | "null" | "Null" | "NULL")
 }
 
 /// The path to a child of the field at `parent`: `objects[0]` and `line` give `objects[0].line`.

@@ -293,9 +293,18 @@ impl RecordFile {
             for (i, item) in items.iter_mut().enumerate().skip(index) {
                 let place = list.place(i + 1);
                 if let Some(keys) = object_keys_mut(item) {
-                    if !keys.iter().any(|e| e.key == ID_KEY) {
-                        keys.push(new_entry(ID_KEY, Node::scalar(place.clone())));
-                        kept.push((i, place));
+                    // An `id` that is a bare null is left out, so the
+                    // object takes its place: write that in its stead.
+                    match keys.iter_mut().find(|e| e.key == ID_KEY) {
+                        Some(id) if id.value.is_bare_null() => {
+                            id.value = Node::scalar(place.clone());
+                            kept.push((i, place));
+                        }
+                        Some(_) => {}
+                        None => {
+                            keys.push(new_entry(ID_KEY, Node::scalar(place.clone())));
+                            kept.push((i, place));
+                        }
                     }
                 }
             }
@@ -518,7 +527,7 @@ impl RecordFile {
         };
         entries
             .iter()
-            .find(|e| e.key == name)
+            .find(|e| e.key == name && !e.value.is_bare_null())
             .and_then(|e| match &e.value.kind {
                 Kind::Scalar(text) => Some(text.clone()),
                 _ => None,
@@ -1005,7 +1014,7 @@ fn object_keys_mut(item: &mut Node) -> Option<&mut Vec<Entry>> {
 
 fn scalar_of<'a>(keys: &'a [Entry], key: &str) -> Option<&'a str> {
     keys.iter()
-        .find(|e| e.key == key)
+        .find(|e| e.key == key && !e.value.is_bare_null())
         .and_then(|e| match &e.value.kind {
             Kind::Scalar(text) => Some(text.as_str()),
             _ => None,

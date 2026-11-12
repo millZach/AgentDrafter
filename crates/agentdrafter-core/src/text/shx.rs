@@ -215,9 +215,10 @@ impl ShxFont {
                 0 => break,
                 1 => {
                     // AutoCAD counts the point where the pen comes down as
-                    // drawn, even when nothing follows.
+                    // drawn, even when nothing follows: the point the pen
+                    // last moved to, which a pop does not move (#28).
                     pen.down = true;
-                    pen.mark(pen.x, pen.y);
+                    pen.mark(pen.last.0, pen.last.1);
                     pen.lift();
                     pen.trace_to(pen.x, pen.y);
                 }
@@ -271,7 +272,12 @@ impl ShxFont {
                     let span = if octants == 0 { 8 } else { octants };
                     let start = f64::from(start) * FRAC_PI_4;
                     let sweep = f64::from(span) * FRAC_PI_4;
-                    pen.arc(radius, start, if clockwise { -sweep } else { sweep });
+                    pen.arc(
+                        radius,
+                        start,
+                        if clockwise { -sweep } else { sweep },
+                        ArcCode::Octant,
+                    );
                 }
                 11 => {
                     let start_offset = f64::from(code.u8()?);
@@ -280,7 +286,7 @@ impl ShxFont {
                     let (clockwise, start, octants) = octants(code.u8()?);
                     let (from, to) =
                         fractional_arc(clockwise, start, octants, start_offset, end_offset);
-                    pen.arc(radius, from, to - from);
+                    pen.arc(radius, from, to - from, ArcCode::Other);
                 }
                 12 => {
                     let (dx, dy, bulge) = (code.i8()?, code.i8()?, code.i8()?);
@@ -394,6 +400,23 @@ fn fractional_arc(
     (from.to_radians(), to.to_radians())
 }
 
+/// Whether an arc from angle `start` sweeping `sweep` radians is half a
+/// turn that passes through the point of its circle at 180° between its
+/// ends: anticlockwise from above 0° and below 180°, or clockwise from
+/// above 180°.
+fn half_through_180(start: f64, sweep: f64) -> bool {
+    const SLACK: f64 = 1e-9;
+    if (sweep.abs() - PI).abs() > SLACK {
+        return false;
+    }
+    let start = start.rem_euclid(TAU);
+    if sweep > 0.0 {
+        start > SLACK && start < PI - SLACK
+    } else {
+        start > PI + SLACK && start < TAU - SLACK
+    }
+}
+
 /// A glyph's strokes: runs of points drawn with the pen down.
 pub(crate) type Strokes = Vec<Vec<[f64; 2]>>;
 
@@ -405,9 +428,21 @@ struct Pen {
     down: bool,
     scale: f64,
     stack: Vec<(f64, f64)>,
+    /// Where the pen last moved to, drawing or not. A pop puts the pen
+    /// back without moving this.
+    last: (f64, f64),
     ink: Option<Rect>,
     /// The strokes drawn, when they are wanted as well as the box.
     trace: Option<Trace>,
+}
+
+/// The command an arc is drawn by, which AutoCAD boxes in its own way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArcCode {
+    /// An octant arc, code 10.
+    Octant,
+    /// A fractional arc, code 11, or a bulge arc, codes 12 and 13.
+    Other,
 }
 
 /// The strokes a shape draws, in shape units.
@@ -429,6 +464,7 @@ impl Default for Pen {
             down: true,
             scale: 1.0,
             stack: Vec::new(),
+            last: (0.0, 0.0),
             ink: None,
             trace: None,
         }
@@ -480,22 +516,30 @@ impl Pen {
         }
         self.x = x;
         self.y = y;
+        self.last = (x, y);
     }
 
     /// Draws an arc of `radius` from the pen, which sits on the circle at
-    /// angle `start`, sweeping `sweep` radians (anticlockwise when positive).
+    /// angle `start`, sweeping `sweep` radians (anticlockwise when positive),
+    /// by the command `code`.
     ///
     /// The arc's box is taken as AutoCAD takes it, which can reach past the
     /// arc: an arc of up to half a turn is bounded by its chord and the
     /// chord moved out to the arc's middle, and a longer one by its whole
     /// circle. A half circle that starts on an axis comes out exact; a
     /// quarter does not. (Seen in AutoCAD 2026's `textbox` of `isocp.shx`.)
-    fn arc(&mut self, radius: f64, start: f64, sweep: f64) {
+    /// An octant arc is boxed whether or not the pen is down, and one of
+    /// half a turn that passes through the point of its circle at 180°
+    /// between its ends is boxed by its whole circle; a bulge arc of half a
+    /// turn is not (#28, seen in AutoCAD 2026's `textbox` of a made-up font).
+    /// Only an arc drawn with the pen down is traced.
+    fn arc(&mut self, radius: f64, start: f64, sweep: f64, code: ArcCode) {
         let radius = radius * self.scale;
         let (cx, cy) = (self.x - radius * start.cos(), self.y - radius * start.sin());
         let on_circle = |angle: f64| (cx + radius * angle.cos(), cy + radius * angle.sin());
-        if self.down {
-            if sweep.abs() > PI + 1e-12 {
+        let octant = code == ArcCode::Octant;
+        if self.down || octant {
+            if sweep.abs() > PI + 1e-12 || (octant && half_through_180(start, sweep)) {
                 self.mark(cx - radius, cy - radius);
                 self.mark(cx + radius, cy + radius);
             } else {
@@ -508,6 +552,8 @@ impl Pen {
                     self.mark(x, y);
                 }
             }
+        }
+        if self.down {
             if let Some(tolerance) = self.trace.as_ref().map(|t| t.tolerance) {
                 let steps = arc_steps(radius, sweep, tolerance);
                 self.trace_to(self.x, self.y);
@@ -518,6 +564,7 @@ impl Pen {
             }
         }
         (self.x, self.y) = on_circle(start + sweep);
+        self.last = (self.x, self.y);
     }
 
     /// Moves by `(dx, dy)` along an arc whose bulge is `bulge` / 127: the
@@ -544,7 +591,7 @@ impl Pen {
         let saved = self.scale;
         // `arc` scales the radius; it is already in drawing units here.
         self.scale = 1.0;
-        self.arc(radius, start, sweep);
+        self.arc(radius, start, sweep, ArcCode::Other);
         self.scale = saved;
     }
 }
@@ -784,6 +831,76 @@ pub(crate) mod tests {
         let ink = glyph.ink.unwrap();
         close(ink.bottom, -0.5);
         close(ink.top, 0.0);
+    }
+
+    /// The box of shape `program`, in a made-up font whose capitals stand
+    /// 10 units, as `[left, bottom, right, top]`.
+    fn ink_of(program: &[u8]) -> [f64; 4] {
+        let font = ShxFont::parse(&unifont(10, &[(65, program)])).unwrap();
+        let ink = font.glyph('A').unwrap().ink.unwrap();
+        [ink.left, ink.bottom, ink.right, ink.top]
+    }
+
+    #[track_caller]
+    fn same_box(a: [f64; 4], b: [f64; 4]) {
+        for (a, b) in a.into_iter().zip(b) {
+            close(a, b);
+        }
+    }
+
+    #[test]
+    fn an_octant_half_circle_through_180_degrees_is_boxed_by_its_whole_circle() {
+        // Each from (0, 0), radius 5. Through 180°, anticlockwise from 90°
+        // (at any scale) or clockwise from 270°: the whole circle.
+        same_box(ink_of(&[10, 5, 0x24, 0]), [-0.5, -1.0, 0.5, 0.0]);
+        same_box(
+            ink_of(&[3, 2, 10, 10, 0x24, 4, 2, 0]),
+            [-0.5, -1.0, 0.5, 0.0],
+        );
+        same_box(ink_of(&[10, 5, 0xE4, 0]), [-0.5, 0.0, 0.5, 1.0]);
+        // Not through it: as the arc's chord rule gives, which is exact.
+        same_box(ink_of(&[10, 5, 0xA4, 0]), [0.0, -1.0, 0.5, 0.0]);
+        same_box(ink_of(&[10, 5, 0x64, 0]), [0.0, 0.0, 0.5, 1.0]);
+        // Ending on 180° is not passing through it.
+        same_box(ink_of(&[10, 5, 0x04, 0]), [-1.0, 0.0, 0.0, 0.5]);
+        // A bulge arc of half a turn through 180° is exact.
+        same_box(
+            ink_of(&[12, 0, (-10i8) as u8, 127, 0]),
+            [-0.5, -1.0, 0.0, 0.0],
+        );
+    }
+
+    #[test]
+    fn an_octant_arc_is_boxed_with_the_pen_up_but_not_drawn() {
+        // Pen up, a half circle clockwise from 90° to (0, -10), pen down, a
+        // line back up to (0, 0).
+        let program = [2, 10, 5, 0xA4, 1, 8, 0, 10, 0];
+        same_box(ink_of(&program), [0.0, -1.0, 0.5, 0.0]);
+        let font = ShxFont::parse(&unifont(10, &[(65, &program)])).unwrap();
+        let (_, strokes) = font.strokes('A', 0.01).unwrap();
+        let [run] = strokes.as_slice() else {
+            panic!("one stroke, the line: {strokes:?}");
+        };
+        let [from, to] = run.as_slice() else {
+            panic!("a line of two points: {run:?}");
+        };
+        same_box([from[0], from[1], to[0], to[1]], [0.0, -1.0, 0.0, 0.0]);
+        // A bulge arc with the pen up is not boxed.
+        same_box(
+            ink_of(&[2, 12, 0, (-10i8) as u8, 127, 1, 8, 0, 10, 0]),
+            [0.0, -1.0, 0.0, 0.0],
+        );
+    }
+
+    #[test]
+    fn the_pen_comes_down_where_it_last_moved_not_where_a_pop_put_it() {
+        // Pen up, push at (0, 0), move to (10, 0) and (10, -10), pop, pen
+        // down, a line up to (0, 5): AutoCAD counts (10, -10) as drawn.
+        let down: &[u8] = &[2, 5, 8, 10, 0, 8, 0, (-10i8) as u8, 6, 1, 8, 0, 5, 0];
+        same_box(ink_of(down), [0.0, -1.0, 1.0, 0.5]);
+        // With no pen down after the pop, nothing more is counted.
+        let up: &[u8] = &[8, 0, 5, 5, 2, 8, 10, (-15i8) as u8, 6, 0];
+        same_box(ink_of(up), [0.0, 0.0, 0.0, 0.5]);
     }
 
     #[test]

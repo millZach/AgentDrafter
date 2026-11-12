@@ -355,6 +355,54 @@ fn an_inserts_values_are_checked() {
 }
 
 #[test]
+fn a_bare_null_leaves_a_text_field_out_and_quoted_is_the_word() {
+    // Zach decided on 2026-11-11: a bare null on an optional text field
+    // is the field left out, so an attribute takes its definition's
+    // default, and a name or a layer is as if not written.
+    for written in ["TAG:", "TAG: null", "TAG: ~", "TAG: NULL"] {
+        let sheet = with_library(&format!(
+            "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert:\n      block: MARKER\n      position: [0, 0, 0]\n      name: null\n      layer: ~\n      attributes:\n        {written}\n"
+        ));
+        let Object::Insert(insert) = &sheet.objects[0] else {
+            panic!("an insert")
+        };
+        assert_eq!(insert.attributes[0].value, "?", "{written}");
+        assert_eq!((insert.name.as_deref(), insert.layer.as_str()), (None, "0"));
+    }
+    let sheet = with_library(&one_object(
+        "insert: {block: MARKER, position: [0, 0, 0], name: 'null', attributes: {TAG: 'null', NOTE: ''}}",
+    ));
+    let Object::Insert(insert) = &sheet.objects[0] else {
+        panic!("an insert")
+    };
+    assert_eq!(insert.name.as_deref(), Some("null"));
+    assert_eq!(insert.attributes[0].value, "null");
+    assert_eq!(insert.attributes[1].value, "");
+    // A tag the block does not have is refused even with a bare null.
+    let e = error_with_library(&one_object(
+        "insert: {block: MARKER, position: [0, 0, 0], attributes: {LABEL: null}}",
+    ));
+    assert_eq!(e.code, ErrorCode::UnknownName, "{e:?}");
+    // On a required field a bare null is the field left out: an error.
+    let e = error_with_library(&one_object("insert: {block: null, position: [0, 0, 0]}"));
+    assert_names(
+        &e,
+        ErrorCode::MissingKey,
+        "objects[0].insert.block",
+        &["`block` is a bare `null`", "quote it: `'null'`"],
+    );
+    let e = library_error(
+        "units: mm\nblocks:\n  B: {objects: [{attdef: {tag:, position: [0, 0, 0], height: 1}}]}\n",
+    );
+    assert_names(
+        &e,
+        ErrorCode::MissingKey,
+        "blocks.B.objects[0].attdef.tag",
+        &["`tag` is left empty"],
+    );
+}
+
+#[test]
 fn a_name_is_given_once_on_a_sheet() {
     let e = error_with_library(
         "units: mm
@@ -369,6 +417,25 @@ objects:
         ErrorCode::DuplicateName,
         "objects[1].insert.name",
         &["`JB`", "line 4", "differ only in case"],
+    );
+    // The line given is the first object's `name:` key's, not its own
+    // first line (#35).
+    let e = error_with_library(
+        "units: mm
+block_library: blocks.yaml
+objects:
+  - insert:
+      block: ARROW
+      position: [0, 0, 0]
+      name: jb
+  - insert: {block: ARROW, position: [5, 0, 0], name: jb}
+",
+    );
+    assert_names(
+        &e,
+        ErrorCode::DuplicateName,
+        "objects[1].insert.name",
+        &["given at line 7 already, to the object at `objects[0]`"],
     );
 }
 

@@ -190,7 +190,7 @@ pub(super) fn hatch(
     patterns: &[HatchPattern],
 ) -> Result<Hatch, Error> {
     let pattern = pattern(
-        fields.require("pattern")?,
+        fields.require_text("pattern")?,
         &fields.path_of("pattern"),
         patterns,
     )?;

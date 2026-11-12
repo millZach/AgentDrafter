@@ -22,11 +22,12 @@
 //! that cannot be answered as asked is an error, and so is a sheet that
 //! cannot be read: an answer must not leave a sheet out.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::build::is_same_file;
 use crate::description::{read_sheet_record, SavedSet, SheetRecord};
 use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
@@ -618,13 +619,8 @@ fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) 
         .block_library
         .as_ref()
         .map(|written| {
-            record
-                .file
-                .parent()
-                .unwrap_or(Path::new(""))
-                .join(written)
-                .display()
-                .to_string()
+            let read = record.file.parent().unwrap_or(Path::new("")).join(written);
+            worked_out(&read).display().to_string()
         })
         .unwrap_or_default();
     definition
@@ -644,6 +640,32 @@ fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) 
             })
         })
         .collect()
+}
+
+/// `path`, the file a sheet's block library was read from, with its `.`
+/// and `..` worked out as written, so that the block library a template in
+/// `templates/` names as `../blocks.yaml` is `blocks.yaml` in the set's
+/// folder, as the set's other files are given. Worked out so, a path can
+/// name another file than the one read, as when `templates/` is a link to
+/// another folder; then `path` is given as it was read.
+fn worked_out(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    if is_same_file(&out, path) {
+        out
+    } else {
+        path.to_owned()
+    }
 }
 
 /// One object a selection matched, on one of the sheets looked at.

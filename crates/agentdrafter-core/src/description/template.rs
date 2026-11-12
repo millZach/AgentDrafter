@@ -368,7 +368,7 @@ fn row_value_name(node: &Node, path: &str) -> Result<Option<String>, Error> {
         "a value from the row, `{row: NAME}`,",
     )?;
     let name_path = fields.path_of(ROW_KEY);
-    let name_node = fields.require(ROW_KEY)?;
+    let name_node = fields.require_text(ROW_KEY)?;
     let name = scalar(name_node, &name_path, "the name of one of the row's values")?;
     if let Some(problem) = value_name_problem(name) {
         return Err(bad_value(name_node, &name_path, problem));

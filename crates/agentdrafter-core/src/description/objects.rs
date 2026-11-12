@@ -219,7 +219,7 @@ pub(super) fn object(
         keys,
         &format!("{article} {}", entry.key),
     )?;
-    let layer = match fields.get("layer") {
+    let layer = match fields.text("layer") {
         Some(node) => layer_name(node, &fields.path_of("layer"), tables.layers)?,
         None => LAYER_ZERO.to_owned(),
     };
