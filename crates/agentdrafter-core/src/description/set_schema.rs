@@ -245,15 +245,19 @@ pub(crate) fn template_schema() -> Value {
     });
     for kind in ["text", "mtext"] {
         let contents = &mut defs[kind]["properties"]["contents"];
-        let written = contents.take();
+        let mut written = contents.take();
+        let description = written
+            .as_object_mut()
+            .and_then(|own| own.remove("description"))
+            .and_then(|d| d.as_str().map(str::to_owned))
+            .unwrap_or_default();
         *contents = json!({
             "description": format!(
-                "{} In a template, or a value from the row, {{{ROW_KEY}: NAME}}, which these rules \
-                 apply to once it is filled in.",
-                written["description"].as_str().unwrap_or_default()
+                "{description} In a template, or a value from the row, {{{ROW_KEY}: NAME}}, which \
+                 these rules apply to once it is filled in."
             ),
             "anyOf": [
-                { "type": written["type"] },
+                written,
                 { "$ref": "#/$defs/row_value" },
             ],
         });

@@ -37,6 +37,9 @@ pub(super) struct Node {
     /// Where the node is written in the text it was read from, and how.
     /// `None` for a node an edit made, which is written out afresh.
     pub source: Option<Source>,
+    /// Whether a node an edit made is a bare null ([`Node::bare_null`]).
+    /// A node read from a text is one when its source says so.
+    pub made_null: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,6 +92,7 @@ impl Node {
             kind,
             at: Pos { line: 0, column: 0 },
             source: None,
+            made_null: false,
         }
     }
 
@@ -97,17 +101,30 @@ impl Node {
         Self::new(Kind::Scalar(text.into()))
     }
 
+    /// A bare null an edit made, written `null`. A change set sends its
+    /// values as JSON, and JSON's `null` is what a YAML reader that guesses
+    /// types makes of a bare null, so a `null` it sends is written as one,
+    /// and read as the file's own bare nulls are.
+    pub(super) fn bare_null() -> Self {
+        Self {
+            made_null: true,
+            ..Self::scalar("null")
+        }
+    }
+
     /// Whether the node is a bare null: a plain scalar that a YAML reader
     /// which guesses types reads as null, `null`, `Null`, `NULL` or `~`, or
     /// a value left empty, as in `name:`. Zach decided on 2026-11-11 that a
     /// bare null on an optional text field means the field is not written,
     /// and on a required one is an error; quoted, `'null'` is the word. A
-    /// node an edit made is written so that it reads back as its text.
+    /// node an edit made is written so that it reads back as its text,
+    /// unless it is a bare null an edit made ([`Node::bare_null`]).
     pub(super) fn is_bare_null(&self) -> bool {
         match (&self.kind, self.source) {
             (Kind::Scalar(text), Some(source)) => {
                 source.style == Style::Plain && reads_as_null(text)
             }
+            (Kind::Scalar(_), None) => self.made_null,
             _ => false,
         }
     }
@@ -250,6 +267,7 @@ pub(super) fn read(text: &str) -> Result<Option<Node>, Error> {
                     kind: Kind::Scalar(value.into_owned()),
                     at,
                     source: Some(Source { start, end, style }),
+                    made_null: false,
                 };
                 place(node, &mut stack, &mut root)?;
             }
@@ -283,6 +301,7 @@ pub(super) fn read(text: &str) -> Result<Option<Node>, Error> {
                             source: Some(closed_source(opened, closed, last)),
                             kind: Kind::Sequence(items),
                             at,
+                            made_null: false,
                         }
                     }
                     Some(Frame::Mapping {
@@ -296,6 +315,7 @@ pub(super) fn read(text: &str) -> Result<Option<Node>, Error> {
                             source: Some(closed_source(opened, closed, last)),
                             kind: Kind::Mapping(entries),
                             at,
+                            made_null: false,
                         }
                     }
                     None => unreachable!("the YAML parser closed a collection it never opened"),
