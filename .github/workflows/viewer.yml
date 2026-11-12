@@ -82,6 +82,11 @@ jobs:
         working-directory: viewer
         run: node e2e/run.mjs --chrome "$(command -v google-chrome)" --smooth draw
 
+      # The speed bench's viewer number (tools/bench, docs/speed.md), run small to check that it still
+      # measures, with the page built in. No number is held.
+      - name: The speed bench still measures a change showing in the viewer (no number is held)
+        run: python3 tools/bench/bench.py --bin target/debug/agentdrafter --only viewer --changes 3 --browser "$(command -v google-chrome)"
+
       - name: Keep the numbers, the screenshots and the compared images
         if: always()
         uses: actions/upload-artifact@v7

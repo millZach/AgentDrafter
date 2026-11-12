@@ -86,7 +86,7 @@ Later, order not yet set: carrying part of an old sheet into a generated one; ba
 - Windows, Linux and macOS. Every change builds and passes its tests on GitHub's runners for all three. Hand-proving happens on the Windows laptop and on forge; there is no Mac to hand-prove on.
 - The repository is public from the first commit and holds no client material (ADR-0008).
 - CI runs on GitHub, never on the laptop.
-- **Speed is baselined.** The first build measures a fixed set of numbers on the laptop: one command from a cold start, a 100-sheet set built to DWG and PDF, and a change showing in the viewer. Those become the bars every later pull request reports against.
+- **Speed is baselined.** The first build measures a fixed set of numbers on the laptop: one command from a cold start, a 100-sheet set built to DWG and PDF, and a change showing in the viewer. Those become the bars every later pull request reports against. Zach decided on 2026-11-11 that the baseline is measured on the laptop, in one short scripted run of a few minutes, under the judge's lock. The numbers, the machines they were measured on, forge's numbers beside them and how a pull request reports against them are in [`docs/speed.md`](speed.md).
 - **The judge runs on the laptop, on DWG changes and before releases.** AutoCAD exists only there, so the real-drawing checks cannot run in CI. An agent starts them in the background when a pull request touches DWG reading or writing and before each release: one AutoCAD at a time, a memory check first, results as counts. Zach is told when a run starts and what it found.
 
 ## The stack
