@@ -287,6 +287,8 @@ A font that is in no font folder, or cannot be read, is replaced by a look-alike
 
 AgentDrafter reads SHX fonts in the `AutoCAD-86 shapes` and `AutoCAD-86 unifont` layouts, which AutoCAD's own text fonts use, and TrueType fonts through ttf-parser (MIT or Apache-2.0). Big fonts, for Asian scripts, are not read.
 
+A TrueType font encoded as a Windows symbol font, whose character map has a Windows symbol table (platform 3, encoding 0) and no Unicode table, holds its characters at U+F000 plus their code: `I`, 0x49, at U+F049. Some of the TrueType fonts AutoCAD draws a drawing's PostScript fonts with are such fonts. A character below U+0100 that such a font holds no glyph for at its own code is looked up there, as Windows and AutoCAD do, so its text measures, draws, plots and is checked in its own characters, not in missing-glyph boxes. A PDF's searchable text holds the characters as written. Its Mac table (platform 1, encoding 0) is not read.
+
 ### Measuring text
 
 `agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...` measures one line of text as AutoCAD measures a text object (AutoLISP's `textbox`): `width` is from the left edge of what the text draws to the right edge, and `left`, `right`, `bottom` and `top` say where that is from the start of the line, in the unit of the height. `advance` is how far the pen moves. `--font` names a font as a text style does, by its file name alone, and is read only from the font folders. `font` says which font was used and, when it was a look-alike, why. A space at either end draws nothing, so it adds nothing to the width.
