@@ -81,6 +81,8 @@ For each new entry:
 
 The reviewer looking at the set as it was at an entry ([below](#stepping-through-the-journal)) is not moved: the toast still comes, and Show takes them back to the set as it is.
 
+**A drawing kept is never older than the sheet.** Each sheet's drawing is kept with its generation: the sheet's version, which each entry that touches it moves on, and an epoch the whole journal shares. A reply that comes after its sheet's version moved on, such as one asked for before a change set to that sheet landed, is not kept, so going back to the sheet asks for it again. A journal that grows shorter, as when a change set's commit is rolled back, or whose entries already seen were replaced, moves the epoch on: every drawing kept, as the set is and as it was at an entry, is dropped and drawn again, and the checks are run again.
+
 ## Stepping through the journal
 
 The bottom sheet lists the journal's entries, the newest first: change sets, failed attempts, undos and accepts, each with its number, what it did in a few words, the sheets it landed (✓) and failed (✕) on, its time and what has become of it: landed, failed check, inconsistent, undone, issued, failed attempt, undo or accept, and through which interface. Opening one shows its details: why it failed, its operations, what issued or undid it, and Undo for a change set an undo can take, with every later one.
@@ -89,7 +91,7 @@ Stepping to an entry, with the arrows or by opening it, **shows the set as it wa
 
 ## Picking
 
-A tap, or a click, picks the object drawn nearest it, within 16 CSS pixels: the core picks it from the display list the page draws, in WebAssembly (`pick` in `src/draw/pick.rs`), so what is picked is what is drawn there, an insert for everything its block draws, and the page holds no hit-test of its own. The bottom sheet turns into the inspector, as the prototype's does: the object's name, its type (an insert's block), ID, name, layer and sheet, an insert's attributes, the checks it fails, and the change sets that changed it. The picked object gets a blue halo. A tap on nothing, or the Journal button, goes back to the journal. The `display-list` reply says what each object is, by its place, which is what the inspector shows.
+A tap, or a click, picks the object drawn nearest it, within 16 CSS pixels: the core picks it from the display list the page draws, in WebAssembly (`pick` in `src/draw/pick.rs`), so what is picked is what is drawn there, an insert for everything its block draws, and the page holds no hit-test of its own. The bottom sheet turns into the inspector, as the prototype's does: the object's name, its type (an insert's block), ID, name, layer and sheet, an insert's attributes, the checks it fails, and the change sets that changed it. The picked object gets a blue halo. The pick follows the object by its ID as the sheet is drawn again, so a change set that deletes an object before it leaves it picked; once the object itself is gone, nothing is picked. A tap on nothing, or the Journal button, goes back to the journal. The `display-list` reply says what each object is, by its place, which is what the inspector shows.
 
 ## Undo and accept
 
@@ -134,6 +136,9 @@ The page's packages, all permissive or MPL-2.0 (ADR-0010): `react`, `react-dom` 
   - `pick`: at phone size, a tap on an insert shows its ID, name, layer, block and attributes, and marks it; a tap on nothing goes back to the journal.
   - `undo`: Undo last undoes a template edit, every file on every sheet it reached put back, through the undo command, and is off once nothing is left to undo.
   - `accept`: at phone size, Accept is refused while the set is inconsistent; undone from the page, then a change set that fails checks: Accept asks, listing them, issues nothing until confirmed, then issues the change set; the journal records the viewer's accept and the failed checks, and undo refuses the issued change set.
+  - `late`: sheet B asked for and its reply held back, the reviewer back on A, a change set to B landed, then B's old reply let through: going back to B asks for it again and shows the change.
+  - `rewind`: two change sets land, then the second is rolled back, its file put back and the journal cut back to one entry: the page draws the set as it now is and lists one entry.
+  - `follow`: at phone size, with Y picked among X, Y and Z, deleting X through the command line keeps Y picked, its halo at its new place; deleting Y clears the pick.
   - `look`: screenshots at phone size (390 by 844 CSS pixels at 3 device pixels each, touch) and laptop size (1440 by 900).
 
 ### Measured against the PNG

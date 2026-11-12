@@ -15,18 +15,26 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use super::journal::{fates, read_entries, undo_state, EntryKind, KEPT_UNDO_STATES};
+use super::journal::{fates, read_entries, relative, undo_state, EntryKind, KEPT_UNDO_STATES};
 use crate::description::ReadFiles;
 use crate::error::{Error, ErrorCode};
 use crate::stamp::fingerprint;
 
 /// A drawing set's files as they were just after one entry of its journal:
 /// those that differ from the files on disk, by their place in the set's
-/// folder. A file not held here is read from disk.
+/// folder. A file not held here is read from disk; a file held here never
+/// is.
+///
+/// Each file is named as the journal names it: the path the set's reader
+/// and a change set's commit both join onto the set's folder, such as
+/// `templates/a.yaml` or `../shared/rows.yaml`, taken back off the folder
+/// by the journal's own [`relative`]. A file the reader asks for is named
+/// the same way, so a record outside the set's folder, or written with
+/// `..`, is found as the journal kept it.
 pub(crate) struct FilesAsOf {
-    /// The set's folder, from the root, with `.` and `..` worked out.
+    /// The set's folder, as the reader is given it.
     folder: PathBuf,
     /// Each file a later entry wrote, by its path relative to the set's
     /// folder: its bytes then, or none when there was no file.
@@ -107,7 +115,7 @@ impl FilesAsOf {
             files.insert(path.to_owned(), Some(bytes));
         }
         Ok(FilesAsOf {
-            folder: from_root(folder),
+            folder: folder.to_owned(),
             files,
         })
     }
@@ -115,13 +123,9 @@ impl FilesAsOf {
     /// The bytes of the file at `path` as they were, if a later entry wrote
     /// it: `Some(None)` when there was no file then.
     fn held(&self, path: &Path) -> Option<Option<&[u8]>> {
-        let path = from_root(path);
-        let inside = path.strip_prefix(&self.folder).ok()?;
-        let parts: Vec<String> = inside
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        self.files.get(&parts.join("/")).map(Option::as_deref)
+        self.files
+            .get(&relative(&self.folder, path))
+            .map(Option::as_deref)
     }
 }
 
@@ -137,24 +141,4 @@ impl ReadFiles for FilesAsOf {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
         }
     }
-}
-
-/// `path` from the root, with `.` and `..` worked out as written.
-fn from_root(path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir().unwrap_or_default().join(path)
-    };
-    let mut out = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }

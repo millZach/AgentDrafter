@@ -25,10 +25,10 @@ import {
 } from './view.ts';
 import { installProbe, type Draw, type Summary } from './probe.ts';
 
-/** The objects halos mark: places in the sheet's objects, and whether each was added. */
-export interface Marks {
-  places: number[];
-  added: boolean[];
+/** An object a halo marks: its place in the sheet's objects, and whether it was added. */
+export interface Mark {
+  place: number;
+  added: boolean;
 }
 
 /** A request to show a part of a sheet: the places of its objects, or the whole sheet when none. */
@@ -47,7 +47,7 @@ export interface DrawingProps {
   /** Only the fit button, as on a phone, where fingers zoom. */
   compact: boolean;
   /** The objects a change set touched, marked with halos. */
-  marks: Marks;
+  marks: Mark[];
   /** The object the reviewer picked, marked blue; null for none. */
   picked: number | null;
   /** When the marked change set landed, by performance.now(), so its halos pulse; null to hold them still. */
@@ -179,9 +179,12 @@ export function Drawing({
     const v = viewer.current;
     if (!v) return;
     const { marks: m, picked: p } = shownMarks.current;
-    v.set_marks(Uint32Array.from(m.places), Uint8Array.from(m.added.map((a) => (a ? 1 : 0))), p ?? -1);
+    // Two lists, as the renderer takes them.
+    const places = m.map((mark) => mark.place);
+    const added = m.map((mark) => mark.added);
+    v.set_marks(Uint32Array.from(places), Uint8Array.from(added.map((a) => (a ? 1 : 0))), p ?? -1);
     const probe = window.agentdrafterViewer;
-    if (probe) probe.marked = { places: [...m.places], added: [...m.added], picked: p };
+    if (probe) probe.marked = { places, added, picked: p };
     redraw();
   };
   // Shows the part of the sheet a focus asks for, once that sheet is drawn.

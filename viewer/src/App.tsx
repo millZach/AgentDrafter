@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { call, CommandError, run, watch, type StreamState } from './api.ts';
 import { BottomSheet } from './BottomSheet.tsx';
-import { Drawing, type Focus, type Marks } from './Drawing.tsx';
+import { Drawing, type Focus, type Mark } from './Drawing.tsx';
 import {
   changedOn,
   entryTitle,
@@ -71,6 +71,23 @@ interface AcceptReport {
   checks: { findings: Finding[] };
 }
 
+/** A `display-list` reply, with the request it answered and the generation it was asked in. */
+interface Drawn {
+  text: string;
+  /** The entry and the sheet asked for, as the cache keys them. */
+  at: number | null;
+  sheetKey: string;
+  generation: string;
+}
+
+/** The object the reviewer picked: by its ID, so it is followed as the sheet changes; by its place when it has none. */
+interface Picked {
+  id: string | null;
+  place: number;
+  /** The drawing it was picked on, which an object with no ID is known in alone. */
+  summary: Summary;
+}
+
 interface Asking {
   report: AcceptReport;
   /** The newest entry the reviewer has seen, which the accept follows. */
@@ -79,6 +96,13 @@ interface Asking {
 
 const WIDE = '(min-width: 900px)';
 const upper = (s: string) => s.toUpperCase();
+
+/** The version that counts every change that touched a sheet, for a sheet not yet named. */
+const ANY = '*';
+
+/** What an entry recorded, apart from what has become of it since, to tell it from another of its number. */
+const recorded = (e: Entry): string =>
+  JSON.stringify([e.kind, e.at, e.change_set ?? null, e.files ?? null, e.undid ?? null, e.issued ?? null]);
 
 function useWide(): boolean {
   const [wide, setWide] = useState(() => window.matchMedia(WIDE).matches);
@@ -109,7 +133,7 @@ export function App({ token, source, sheet }: AppProps) {
   const wide = useWide();
   const [wanted, setWanted] = useState<string | null>(sheet);
   const [at, setAt] = useState<number | null>(null);
-  const [reply, setReply] = useState<string | null>(null);
+  const [reply, setReply] = useState<Drawn | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [status, setStatus] = useState<Status>({ kind: 'loading', message: 'Drawing the sheet…' });
   const [covered, setCovered] = useState(0);
@@ -121,7 +145,7 @@ export function App({ token, source, sheet }: AppProps) {
   const [pulseSince, setPulseSince] = useState<number | null>(null);
   const [focus, setFocus] = useState<Focus | null>(null);
   const [focusWanted, setFocusWanted] = useState<{ key: number; sheet: string; ids: string[] } | null>(null);
-  const [picked, setPicked] = useState<number | null>(null);
+  const [picked, setPicked] = useState<Picked | null>(null);
   const [inspecting, setInspecting] = useState(false);
   const [raise, setRaise] = useState(0);
   const [toast, setToast] = useState<Toast | null>(null);
@@ -129,8 +153,18 @@ export function App({ token, source, sheet }: AppProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [findings, setFindings] = useState<ReadonlyMap<string, Finding[]>>(new Map());
   const [versions, setVersions] = useState<Readonly<Record<string, number>>>({});
+  const [epoch, setEpoch] = useState(0);
   const replies = useRef(new Map<string, string>());
   const seen = useRef<number | null>(null);
+  // What each entry seen was, as recorded, to notice one replaced.
+  const seenEntries = useRef(new Map<number, string>());
+  // The generations, read when a reply comes: each sheet's version, the
+  // count of every change that touched a sheet (ANY), and the epoch, which
+  // a journal cut back or replaced moves on.
+  const versionsNow = useRef(versions);
+  const epochNow = useRef(epoch);
+  versionsNow.current = versions;
+  epochNow.current = epoch;
   const atNow = useRef(at);
   const keys = useRef(0);
   const tabs = useRef<HTMLElement>(null);
@@ -149,7 +183,19 @@ export function App({ token, source, sheet }: AppProps) {
 
   const sheetKey = upper(wanted ?? '');
   const cacheKey = `${at ?? 'live'}|${sheetKey}`;
-  const version = at === null ? (versions[sheetKey] ?? 0) : 0;
+  const version = at === null ? (versions[sheetKey || ANY] ?? 0) : 0;
+
+  /**
+   * The generation of what the server draws for `sheetKey` at `entry`, now:
+   * a sheet as it is changes with each entry that touches it, and with any
+   * when the sheet is not named yet; a sheet as it was changes only when
+   * the journal is cut back or replaced. A reply is kept only while its
+   * generation is still the one it was asked in.
+   */
+  const generationOf = (entry: number | null, key: string): string =>
+    entry === null
+      ? `${epochNow.current}:${key || ANY}:${versionsNow.current[key || ANY] ?? 0}`
+      : `${epochNow.current}`;
 
   // Each sheet asked for is drawn by the server once, then kept, until an
   // entry of the journal touches it: then the set as it is now is asked
@@ -161,7 +207,7 @@ export function App({ token, source, sheet }: AppProps) {
       // A sheet drawn before is shown again at once: whatever another sheet
       // was saying, loading or failing, is not this one's to say. The
       // request for that other sheet, if it is still out, is let go.
-      setReply(kept);
+      setReply({ text: kept, at, sheetKey, generation: generationOf(at, sheetKey) });
       setStatus({ kind: 'shown' });
       return;
     }
@@ -171,12 +217,16 @@ export function App({ token, source, sheet }: AppProps) {
     const input: Record<string, string | number> = { source };
     if (wanted) input.sheet = wanted;
     if (at !== null) input.entry = at;
+    const generation = generationOf(at, sheetKey);
     run('display-list', input, token).then(
       (text) => {
-        // Kept even when the reviewer has moved on, for when they come back.
+        // Kept even when the reviewer has moved on, for when they come
+        // back, unless the sheet has changed since it was asked for: then
+        // it is the old drawing, and the sheet is asked for again.
+        if (generationOf(at, sheetKey) !== generation) return;
         replies.current.set(cacheKey, text);
         if (!current) return;
-        setReply(text);
+        setReply({ text, at, sheetKey, generation });
       },
       (e) => {
         if (!current) return;
@@ -190,15 +240,19 @@ export function App({ token, source, sheet }: AppProps) {
     return () => {
       current = false;
     };
-    // The key holds the sheet and the entry; the version says it changed.
+    // The key holds the sheet and the entry; the version and the epoch say
+    // it changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cacheKey, version, source, token]);
+  }, [cacheKey, version, epoch, source, token]);
 
   const loaded = useCallback(
     (shown: Summary) => {
       setSummary(shown);
       setStatus({ kind: 'shown' });
-      if (reply) replies.current.set(`${shown.entry ?? 'live'}|${upper(shown.sheet)}`, reply);
+      // Kept by its sheet's own name too, while it is still current.
+      if (reply && generationOf(reply.at, reply.sheetKey) === reply.generation) {
+        replies.current.set(`${shown.entry ?? 'live'}|${upper(shown.sheet)}`, reply.text);
+      }
       if (!wanted) setWanted(shown.sheet);
       // The address names the sheet shown, so a reload shows it again.
       const query = new URLSearchParams(window.location.search);
@@ -233,7 +287,7 @@ export function App({ token, source, sheet }: AppProps) {
 
   // What a new entry says, as a toast.
   const toastFor = useCallback(
-    (entry: Entry, report: JournalReport, failedChecks: Finding[]) => {
+    (entry: Entry, failedChecks: Finding[]) => {
       const n = entry.entry;
       switch (entry.kind) {
         case 'failed_attempt':
@@ -272,7 +326,6 @@ export function App({ token, source, sheet }: AppProps) {
               n,
             );
           }
-          void report;
           return say('ok', `Change set ${n} landed on ${listed(landed)}`, entryTitle(entry), n);
         }
       }
@@ -296,8 +349,21 @@ export function App({ token, source, sheet }: AppProps) {
         setNoJournal(null);
         setJournal(report);
         const before = seen.current;
+        const kept = seenEntries.current;
+        // A journal cut back, as a commit rolled back cuts it, or whose
+        // entries seen were replaced, is not the one the drawings came
+        // from: every drawing kept is dropped, and drawn again.
+        const replaced =
+          before !== null &&
+          (newest(report) < before || report.entries.some((e) => e.entry <= before && kept.get(e.entry) !== recorded(e)));
         seen.current = newest(report);
-        if (before === null) {
+        seenEntries.current = new Map(report.entries.map((e) => [e.entry, recorded(e)]));
+        if (before === null || replaced) {
+          if (replaced) {
+            replies.current.clear();
+            epochNow.current += 1;
+            setEpoch(epochNow.current);
+          }
           void check(null);
           return;
         }
@@ -305,11 +371,13 @@ export function App({ token, source, sheet }: AppProps) {
         if (!fresh.length) return;
         const touched = [...new Set(fresh.flatMap((e) => sheetsTouched(e, report)).map(upper))];
         for (const s of touched) replies.current.delete(`live|${s}`);
-        setVersions((v) => {
-          const next = { ...v };
-          for (const s of touched) next[s] = (next[s] ?? 0) + 1;
-          return next;
-        });
+        if (touched.length) replies.current.delete('live|');
+        // The versions move on now, so a reply already on its way is seen
+        // as old when it comes.
+        const next = { ...versionsNow.current };
+        for (const s of [...touched, ...(touched.length ? [ANY] : [])]) next[s] = (next[s] ?? 0) + 1;
+        versionsNow.current = next;
+        setVersions(next);
         const last = fresh.at(-1) as Entry;
         const landed = [...fresh].reverse().find((e) => e.kind === 'change_set' && (e.landed_on?.length ?? 0) > 0);
         // A change set that lands is marked, and its marks pulse, unless the
@@ -319,9 +387,9 @@ export function App({ token, source, sheet }: AppProps) {
           setPulseSince(performance.now());
         }
         if (touched.length) {
-          void check(touched).then((found) => toastFor(last, report, found));
+          void check(touched).then((found) => toastFor(last, found));
         } else {
-          toastFor(last, report, []);
+          toastFor(last, []);
         }
       },
       setStream,
@@ -339,12 +407,30 @@ export function App({ token, source, sheet }: AppProps) {
     (summary?.objects ?? []).forEach((o, i) => o.id && byId.set(upper(o.id), i));
     return byId;
   }, [summary]);
-  const marks = useMemo<Marks>(() => {
+  const marks = useMemo<Mark[]>(() => {
     const showing = focusedEntry && (!focusedEntry.undone_by || at === focusedEntry.entry);
     const changed = showing && summary ? changedOn(focusedEntry, summary.sheet) : [];
-    const found = changed.filter((o) => places.has(upper(o.id)));
-    return { places: found.map((o) => places.get(upper(o.id)) as number), added: found.map((o) => o.how === 'added') };
+    return changed
+      .filter((o) => places.has(upper(o.id)))
+      .map((o) => ({ place: places.get(upper(o.id)) as number, added: o.how === 'added' }));
   }, [focusedEntry, summary, places, at]);
+
+  // The picked object, followed by its ID as the sheet is drawn again; one
+  // gone from the sheet is no longer picked.
+  const pickedPlace =
+    picked === null || !summary
+      ? null
+      : picked.id !== null
+        ? (places.get(upper(picked.id)) ?? null)
+        : picked.summary === summary
+          ? picked.place
+          : null;
+  useEffect(() => {
+    if (picked !== null && summary && pickedPlace === null) {
+      setPicked(null);
+      setInspecting(false);
+    }
+  }, [picked, summary, pickedPlace]);
 
   // A part of a sheet asked for, once that sheet is drawn.
   useEffect(() => {
@@ -450,7 +536,7 @@ export function App({ token, source, sheet }: AppProps) {
   };
 
   const pick = (place: number | null) => {
-    setPicked(place);
+    setPicked(place === null || !summary ? null : { id: summary.objects[place]?.id ?? null, place, summary });
     setInspecting(place !== null);
     if (place !== null) setRaise((r) => r + 1);
   };
@@ -467,7 +553,7 @@ export function App({ token, source, sheet }: AppProps) {
 
   const sheets = summary?.sheets ?? [];
   const name = summary?.name ?? '';
-  const object = picked !== null ? summary?.objects[picked] : undefined;
+  const object = pickedPlace !== null ? summary?.objects[pickedPlace] : undefined;
   const line =
     at !== null
       ? `Showing entry ${at} as it was: read-only`
@@ -585,11 +671,11 @@ export function App({ token, source, sheet }: AppProps) {
       <div className="va-main">
         <div className="va-vp">
           <Drawing
-            reply={reply}
+            reply={reply?.text ?? null}
             coveredBelow={covered}
             compact={!wide}
             marks={marks}
-            picked={picked}
+            picked={pickedPlace}
             pulseSince={pulseSince}
             focus={focus}
             onLoaded={loaded}

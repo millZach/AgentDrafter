@@ -408,6 +408,85 @@ fn outputs_made_after_an_accept_say_in_their_stamps_that_they_came_from_an_issue
     assert!(!stale(&pdf_now).issued);
 }
 
+/// A built copy of the demo set whose template, or whose rows file, is kept
+/// outside its folder, as a set's paths may name them: the template at
+/// `../outside/ansi-b.yaml`, or the rows at `../shared/rows.yaml`.
+fn outside_set(test: &str, outside: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("core-accept")
+        .join(test);
+    let _ = fs::remove_dir_all(&dir);
+    let set = dir.join("demo-set");
+    demo_set::copy_demo_set(&set);
+    match outside {
+        "template" => {
+            fs::create_dir_all(dir.join("outside")).unwrap();
+            fs::rename(
+                set.join("templates").join("ansi-b.yaml"),
+                dir.join("outside").join("ansi-b.yaml"),
+            )
+            .unwrap();
+            // The template names its block library from its own folder.
+            fs::copy(set.join("blocks.yaml"), dir.join("blocks.yaml")).unwrap();
+            let rows = fs::read_to_string(set.join("rows.yaml")).unwrap();
+            let rows = rows.replace(
+                "template: templates/ansi-b.yaml",
+                "template: ../outside/ansi-b.yaml",
+            );
+            fs::write(set.join("rows.yaml"), rows).unwrap();
+        }
+        _ => {
+            fs::create_dir_all(dir.join("shared")).unwrap();
+            fs::rename(set.join("rows.yaml"), dir.join("shared").join("rows.yaml")).unwrap();
+            let settings = fs::read_to_string(set.join("set.yaml")).unwrap();
+            fs::write(
+                set.join("set.yaml"),
+                settings.replace("rows: rows.yaml", "rows: ../shared/rows.yaml"),
+            )
+            .unwrap();
+        }
+    }
+    let reply = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: false,
+        },
+        &Settings::default(),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    set
+}
+
+#[test]
+fn stepping_back_reads_the_records_the_journal_kept_even_outside_the_set_s_folder() {
+    for (outside, first, second) in [
+        // A template edit writes the template outside the set.
+        ("template", moved(0.1), moved(0.2)),
+        // An object of a row's own writes the rows file outside the set.
+        (
+            "rows",
+            json!({"operations": [{"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5, "layer": "notes", "id": "tank"}]}),
+            json!({"operations": [{"op": "move", "target": {"id": "DEMO-001/tank"}, "by": [1, 0, 0]}]}),
+        ),
+    ] {
+        let set = outside_set(&format!("outside-{outside}"), outside);
+        assert_eq!(apply(&set, first), 1, "{outside}");
+        let at_first = drawn(&set, None).unwrap();
+        assert_eq!(apply(&set, second), 2, "{outside}");
+        let now = drawn(&set, None).unwrap();
+        assert_ne!(
+            now, at_first,
+            "{outside}: the second change set changed the sheet"
+        );
+        assert_eq!(
+            drawn(&set, Some(1)).unwrap(),
+            at_first,
+            "{outside}: entry 1 is drawn from the record the journal kept, not today's"
+        );
+        assert_eq!(drawn(&set, Some(2)).unwrap(), now, "{outside}");
+    }
+}
+
 /// The text of `sheet`'s display list as the set was at `entry`, or now.
 fn drawn(set: &Path, entry: Option<u64>) -> Result<String, ErrorCode> {
     let mut request = DisplayListRequest::new(set);

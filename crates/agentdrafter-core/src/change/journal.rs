@@ -764,7 +764,7 @@ pub(super) fn undo_state(folder: &Path, print: &str) -> Option<Vec<u8>> {
 }
 
 /// `path` relative to the set's `folder`, with `/` between folders.
-fn relative(folder: &Path, path: &Path) -> String {
+pub(super) fn relative(folder: &Path, path: &Path) -> String {
     let inside = path.strip_prefix(folder).unwrap_or(path);
     let parts: Vec<String> = inside
         .components()

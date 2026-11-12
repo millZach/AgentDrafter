@@ -30,7 +30,13 @@
 // - undo:    Undo last undoes the newest change set, as one;
 // - accept:  refused while the set is inconsistent; warns of failed checks
 //            and lists them; then issues the change sets, which can no
-//            longer be undone, and the journal says the viewer accepted.
+//            longer be undone, and the journal says the viewer accepted;
+// - late:    a sheet's reply that comes after a change to that sheet landed
+//            is not kept: going back to the sheet asks for it again;
+// - rewind:  a journal cut back, as a commit rolled back cuts it, drops
+//            the drawings kept and draws the set as it is;
+// - follow:  a picked object stays picked as objects before it are
+//            deleted, and the pick clears when it is deleted itself.
 //
 // It writes results.json, the screenshots and each compared image into
 // --out (target/viewer-e2e by default), and exits 1 when any check fails.
@@ -1069,6 +1075,170 @@ const checks = {
       await page.screenshot({ path: join(out, 'accept-issued.png') });
       assert(problems.filter((p) => !p.includes('422')).length === 0, problems.join('; '));
       return { journal_entry: accept.entry, issued: accept.issued, via: accept.via, screenshots: ['accept-refused.png', 'accept-dialog.png', 'accept-issued.png'] };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * The exact order that once kept an old drawing for good: sheet B asked
+   * for, the reviewer back on A before it comes, a change to B lands, and
+   * then B's old reply comes. Going back to B asks for it again and shows
+   * the change.
+   */
+  async late() {
+    const folder = freshPlant('late');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    try {
+      const context = await b.newContext(LAPTOP);
+      let release;
+      const held = new Promise((done) => {
+        release = done;
+      });
+      let fetched;
+      const old = new Promise((done) => {
+        fetched = done;
+      });
+      const askedForB = [];
+      await context.route('**/commands/display-list', async (route) => {
+        const sheet = route.request().postDataJSON()?.sheet ?? null;
+        if (sheet !== 'DP-LD-102') return route.continue();
+        askedForB.push(performance.now());
+        if (askedForB.length > 1) return route.continue();
+        // B's reply as the set is now, held until after the change lands.
+        const response = await route.fetch();
+        fetched();
+        await held;
+        await route.fulfill({ response });
+      });
+      const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+      await live(page);
+      await page.click('.tab:has-text("DP-LD-102")');
+      await old;
+      await page.click('.tab:has-text("DP-LD-101")');
+      await page.waitForFunction(() => window.agentdrafterViewer.summary.sheet === 'DP-LD-101' && !document.querySelector('.va-note'));
+      const landed = sendChange(folder, {
+        operations: [{ op: 'insert_block', sheet: 'DP-LD-102', block: 'TRANSMITTER', position: [2, 3, 0], attributes: { FUNC: 'LI', LOOP: '102' }, id: 'came-late' }],
+      });
+      assert(landed.ok, JSON.stringify(landed.error));
+      await page.waitForFunction(() => document.querySelector('.va-toast')?.textContent?.includes('landed on DP-LD-102'), null, { timeout: 15000 });
+      // B's old reply comes now.
+      release();
+      await sleep(500);
+      await page.click('.tab:has-text("DP-LD-102")');
+      await page.waitForFunction(
+        () => window.agentdrafterViewer.summary.sheet === 'DP-LD-102' && window.agentdrafterViewer.summary.objects.some((o) => o.id === 'DP-LD-102/came-late'),
+        null,
+        { timeout: 15000 },
+      );
+      assert(askedForB.length === 2, `B is asked for again, not shown from the old reply: asked ${askedForB.length} times`);
+      assert(problems.length === 0, problems.join('; '));
+      return { asked_for_b: askedForB.length };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * A journal cut back, as a commit rolled back cuts it, with the set's
+   * files put back: the page drops what it kept and draws the set as it is.
+   */
+  async rewind() {
+    const folder = freshPlant('rewind');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    try {
+      const context = await b.newContext(LAPTOP);
+      const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+      await live(page);
+      const start = await objectOf(page, 'DP-LD-101/device');
+      const at = (left) =>
+        page.waitForFunction(
+          ([place, wanted]) => Math.abs(window.agentdrafterViewer.bounds([place])[0] - wanted) < 1e-6,
+          [start.place, left],
+          { timeout: 15000 },
+        );
+      const set = join(folder, 'demo-plant');
+      const journalFile = join(set, '.agentdrafter', 'journal.jsonl');
+      assert(sendChange(folder, move('DP-LD-101/device', 0.5)).ok, 'change set 1');
+      await at(start.bounds[0] + 0.5);
+      const rowsAfterFirst = readFileSync(join(set, 'rows.yaml'));
+      const journalAfterFirst = readFileSync(journalFile);
+      assert(sendChange(folder, move('DP-LD-101/device', 0.5)).ok, 'change set 2');
+      await at(start.bounds[0] + 1);
+      await page.waitForFunction(() => document.querySelector('.va-jhead')?.textContent?.includes('2 entries'));
+      // Change set 2 rolled back: its files as they were, and the journal
+      // cut back to its length before.
+      writeFileSync(join(set, 'rows.yaml'), rowsAfterFirst);
+      writeFileSync(journalFile, journalAfterFirst);
+      await page.waitForFunction(() => document.querySelector('.va-jhead')?.textContent?.includes('1 entry'), null, { timeout: 15000 });
+      await at(start.bounds[0] + 0.5);
+      assert(problems.length === 0, problems.join('; '));
+      return { cut_back_to: 1 };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * A pick follows its object: with Y picked in [X, Y, Z], deleting X
+   * through the command line keeps Y picked, and deleting Y clears it.
+   */
+  async follow() {
+    const folder = freshPlant('follow');
+    // Z, after the row's X (the device) and Y (the I/O channel).
+    assert(
+      sendChange(folder, { operations: [{ op: 'add_circle', sheet: 'DP-LD-101', center: [9, 3, 0], radius: 0.3, layer: 'notes', id: 'z' }] }).ok,
+      'Z is added',
+    );
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    try {
+      const context = await b.newContext(PHONE);
+      const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+      await live(page);
+      const y = await objectOf(page, 'DP-LD-101/io-channel');
+      const x = await objectOf(page, 'DP-LD-101/device');
+      const z = await objectOf(page, 'DP-LD-101/z');
+      assert(x.place < y.place && y.place < z.place, `X, Y and Z in order: ${x.place}, ${y.place}, ${z.place}`);
+      const [x0, y0, x1, y1] = y.bounds;
+      const tapAt = await page.evaluate(
+        ([px, py]) => {
+          const v = window.agentdrafterViewer.view();
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          return [r.left + (px - v.left) * v.scale, r.top + (v.top - py) * v.scale];
+        },
+        [(x0 + x1) / 2, (y0 + y1) / 2],
+      );
+      await page.touchscreen.tap(tapAt[0], tapAt[1]);
+      await page.waitForSelector('.va-inspect');
+      const shownId = () =>
+        page.evaluate(() => {
+          for (const tr of document.querySelectorAll('.va-inspect .kv tr')) {
+            if (tr.querySelector('th')?.textContent === 'ID') return tr.querySelector('td')?.textContent;
+          }
+          return null;
+        });
+      assert((await shownId()) === 'DP-LD-101/io-channel', 'Y is picked');
+
+      // X deleted: Y keeps its pick, at its new place.
+      assert(sendChange(folder, { operations: [{ op: 'delete', target: { id: 'DP-LD-101/device' } }] }).ok, 'X is deleted');
+      await page.waitForFunction(() => !window.agentdrafterViewer.summary.objects.some((o) => o.id === 'DP-LD-101/device'), null, { timeout: 15000 });
+      await sleep(200);
+      assert((await shownId()) === 'DP-LD-101/io-channel', `Y is still picked: ${await shownId()}`);
+      const now = await objectOf(page, 'DP-LD-101/io-channel');
+      const marked = await page.evaluate(() => window.agentdrafterViewer.marked);
+      assert(now.place === y.place - 1 && marked.picked === now.place, `the halo follows Y to its new place: ${JSON.stringify(marked)}, ${now.place}`);
+
+      // Y deleted: the pick clears.
+      assert(sendChange(folder, { operations: [{ op: 'delete', target: { id: 'DP-LD-101/io-channel' } }] }).ok, 'Y is deleted');
+      await page.waitForFunction(() => !document.querySelector('.va-inspect') && window.agentdrafterViewer.marked?.picked === null, null, { timeout: 15000 });
+      assert(problems.length === 0, problems.join('; '));
+      return { followed: 'DP-LD-101/io-channel', cleared: true };
     } finally {
       await b.close();
       await server.stop();

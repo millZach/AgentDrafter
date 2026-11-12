@@ -47,6 +47,7 @@ export interface Entry {
   via?: string;
   issued?: number[];
   failed_checks?: CheckFailed[];
+  files?: { path: string; before: string | null; after: string | null }[];
   undo_state?: 'kept' | 'pruned' | 'undone';
   undone_by?: number;
   pruned_by?: number;
