@@ -1,6 +1,6 @@
 # AutoCAD's capabilities against AgentDrafter's
 
-This page maps what AutoCAD lets a drafter do against what AgentDrafter does, and ranks the gap by what an agent drafting controls drawings needs most: loop sheets, PLC interconnects, panel layouts and network one-lines. Each capability has one issue. Zach decided on 2026-11-13 that the work follows this ranking ([`docs/plan.md`](plan.md)). It was written on 2026-11-13, at `main` 53ff845, and folds in the notes of a real controls job drawn with AgentDrafter that day, told here in made-up terms only (ADR-0008).
+This page maps what AutoCAD lets a drafter do against what AgentDrafter does, and ranks the gap by what an agent drafting controls drawings needs most: loop sheets, PLC interconnects, panel layouts and network one-lines. Each capability has one issue. Zach decided on 2026-11-13 that the work follows this ranking ([`docs/plan.md`](plan.md)). It was written on 2026-11-13, at `main` 53ff845, and folds in the notes of two real controls jobs drawn with AgentDrafter that day, told here in made-up terms only (ADR-0008).
 
 Every capability is done the same way, and each issue says so: the schema and the reader agree on it, an operation covers it with its AutoCAD command as an alias, all four interfaces reach it from the core's registry (ADR-0007), the PNG, the PDF and the viewer draw it through the one drawing pipeline (ADR-0011) as AutoCAD plots it, every DWG it writes passes the judge, and its page and glossary words land with it. An entry's AutoCAD words, such as layout or viewport, join [`CONTEXT.md`](../CONTEXT.md) when the entry is built, not before.
 
@@ -15,9 +15,11 @@ Every capability is done the same way, and each issue says so: the schema and th
 
 acadrust, behind the seam in `src/dwg.rs`, already models most of what the gap needs: dimensions, leaders and multileaders, tables, layouts and viewports, wipeouts, images and underlays, fields, groups, dynamic blocks, multilines, points, construction lines and 3D solids, as well as transforms and explode. Most of the gap is AgentDrafter's own model, operations and drawing pipeline, not the DWG library.
 
-## What the real job showed
+## What the real jobs showed
 
 A real controls job drew about twenty sheets with AgentDrafter: interconnects, network one-lines and panel layouts, generated from data, with no change sets used. Every sheet passed the checker and AutoCAD 2026's audit with no errors, AutoCAD's plot looked the same as AgentDrafter's PDF, a rebuild was byte for byte the same, and the set built, plotted and checked in about a second. The checker caught three real faults. What it cost, most costly first, is in the ranking below as issues [#100](https://github.com/millZach/AgentDrafter/issues/100), [#97](https://github.com/millZach/AgentDrafter/issues/97), [#64](https://github.com/millZach/AgentDrafter/issues/64), [#99](https://github.com/millZach/AgentDrafter/issues/99), [#98](https://github.com/millZach/AgentDrafter/issues/98), [#77](https://github.com/millZach/AgentDrafter/issues/77), [#65](https://github.com/millZach/AgentDrafter/issues/65), [#101](https://github.com/millZach/AgentDrafter/issues/101), [#103](https://github.com/millZach/AgentDrafter/issues/103), [#102](https://github.com/millZach/AgentDrafter/issues/102), [#104](https://github.com/millZach/AgentDrafter/issues/104), [#73](https://github.com/millZach/AgentDrafter/issues/73) and [#76](https://github.com/millZach/AgentDrafter/issues/76); its one known gap was no dimensions on panel sheets, [#75](https://github.com/millZach/AgentDrafter/issues/75).
+
+A second real controls job, 25 sheets on 2026-11-13, met the same gaps in nearly the same order, which is recorded on each issue. It asked for one more: a build that reports, or cleans up, outputs no row writes any more, [#109](https://github.com/millZach/AgentDrafter/issues/109), ranked 18th below. Its note on attribute tags was checked against the reader: `#` and `/` already pass, and a repeated tag and a lowercase one do not ([#99](https://github.com/millZach/AgentDrafter/issues/99)).
 
 ## How it is ranked
 
@@ -30,7 +32,7 @@ A real controls job drew about twenty sheets with AgentDrafter: interconnects, n
 
 | Rank | Capability | AutoCAD | Issue |
 |---|---|---|---|
-| 1 | An object's own colour, linetype, lineweight and linetype scale | PROPERTIES, CHPROP, LTSCALE | [#64](https://github.com/millZach/AgentDrafter/issues/64) |
+| 1 | An object's own colour, linetype, lineweight and linetype scale (built, #108) | PROPERTIES, CHPROP, LTSCALE | [#64](https://github.com/millZach/AgentDrafter/issues/64) |
 | 2 | Polylines with arc segments and widths, donuts and 2D solids | PLINE, DONUT, SOLID | [#65](https://github.com/millZach/AgentDrafter/issues/65) |
 | 3 | Plot a sheet onto its declared paper, not only its extents | PLOT window or limits | [#97](https://github.com/millZach/AgentDrafter/issues/97) |
 | 4 | Layer control: layers, linetypes and text styles as operations; on, frozen, locked and plot states | LAYER, LINETYPE, STYLE | [#68](https://github.com/millZach/AgentDrafter/issues/68) |
@@ -47,32 +49,33 @@ A real controls job drew about twenty sheets with AgentDrafter: interconnects, n
 | 15 | A row's value inside other text | none: drawing sets | [#102](https://github.com/millZach/AgentDrafter/issues/102) |
 | 16 | More than one rows file in a drawing set | none: drawing sets | [#103](https://github.com/millZach/AgentDrafter/issues/103) |
 | 17 | Render through a plot style, to show what prints | PLOT preview | [#104](https://github.com/millZach/AgentDrafter/issues/104) |
-| 18 | Copy and array | COPY, ARRAY | [#66](https://github.com/millZach/AgentDrafter/issues/66) |
-| 19 | Rotate, scale and mirror | ROTATE, SCALE, MIRROR | [#67](https://github.com/millZach/AgentDrafter/issues/67) |
-| 20 | Read a plant's DWG whole: every object, a decode report and a text mirror | OPEN, AUDIT | [#70](https://github.com/millZach/AgentDrafter/issues/70) |
-| 21 | Revise a plant's DWG: a change set on an original, saved as a revision in its version | SAVEAS | [#71](https://github.com/millZach/AgentDrafter/issues/71) |
-| 22 | Revision clouds | REVCLOUD | [#72](https://github.com/millZach/AgentDrafter/issues/72) |
-| 23 | Wipeouts and draw order | WIPEOUT, DRAWORDER | [#78](https://github.com/millZach/AgentDrafter/issues/78) |
-| 24 | Dynamic blocks placed in a chosen state | BEDIT states, Properties | [#79](https://github.com/millZach/AgentDrafter/issues/79) |
-| 25 | Find and replace across a drawing set | FIND | [#86](https://github.com/millZach/AgentDrafter/issues/86) |
-| 26 | Offset | OFFSET | [#80](https://github.com/millZach/AgentDrafter/issues/80) |
-| 27 | Trim and extend | TRIM, EXTEND | [#81](https://github.com/millZach/AgentDrafter/issues/81) |
-| 28 | Fillet and chamfer | FILLET, CHAMFER | [#82](https://github.com/millZach/AgentDrafter/issues/82) |
-| 29 | Break and join | BREAK, JOIN | [#83](https://github.com/millZach/AgentDrafter/issues/83) |
-| 30 | Stretch | STRETCH | [#84](https://github.com/millZach/AgentDrafter/issues/84) |
-| 31 | Explode | EXPLODE | [#85](https://github.com/millZach/AgentDrafter/issues/85) |
-| 32 | Fields | FIELD | [#87](https://github.com/millZach/AgentDrafter/issues/87) |
-| 33 | Plot-style control: named plot styles, page setups and plot scale | PAGESETUP, STB | [#88](https://github.com/millZach/AgentDrafter/issues/88) |
-| 34 | DXF read and write | DXFIN, DXFOUT | [#89](https://github.com/millZach/AgentDrafter/issues/89) |
-| 35 | External references | XREF, XATTACH, XBIND | [#90](https://github.com/millZach/AgentDrafter/issues/90) |
-| 36 | Raster images and PDF underlays | IMAGEATTACH, PDFATTACH | [#91](https://github.com/millZach/AgentDrafter/issues/91) |
-| 37 | Groups | GROUP | [#92](https://github.com/millZach/AgentDrafter/issues/92) |
-| 38 | Annotation scale | ANNOTATIVE, CANNOSCALE | [#93](https://github.com/millZach/AgentDrafter/issues/93) |
-| 39 | Points, construction lines, rays, multilines and tolerances | POINT, XLINE, RAY, MLINE, TOLERANCE | [#94](https://github.com/millZach/AgentDrafter/issues/94) |
-| 40 | Convert a drawing to another DWG version | SAVEAS to a version | [#95](https://github.com/millZach/AgentDrafter/issues/95) |
-| 41 | 3D solids in the AutoCAD style | BOX, EXTRUDE, UNION | [#96](https://github.com/millZach/AgentDrafter/issues/96) |
+| 18 | A build reports, or cleans up, outputs that no row writes any more | none: drawing sets | [#109](https://github.com/millZach/AgentDrafter/issues/109) |
+| 19 | Copy and array | COPY, ARRAY | [#66](https://github.com/millZach/AgentDrafter/issues/66) |
+| 20 | Rotate, scale and mirror | ROTATE, SCALE, MIRROR | [#67](https://github.com/millZach/AgentDrafter/issues/67) |
+| 21 | Read a plant's DWG whole: every object, a decode report and a text mirror | OPEN, AUDIT | [#70](https://github.com/millZach/AgentDrafter/issues/70) |
+| 22 | Revise a plant's DWG: a change set on an original, saved as a revision in its version | SAVEAS | [#71](https://github.com/millZach/AgentDrafter/issues/71) |
+| 23 | Revision clouds | REVCLOUD | [#72](https://github.com/millZach/AgentDrafter/issues/72) |
+| 24 | Wipeouts and draw order | WIPEOUT, DRAWORDER | [#78](https://github.com/millZach/AgentDrafter/issues/78) |
+| 25 | Dynamic blocks placed in a chosen state | BEDIT states, Properties | [#79](https://github.com/millZach/AgentDrafter/issues/79) |
+| 26 | Find and replace across a drawing set | FIND | [#86](https://github.com/millZach/AgentDrafter/issues/86) |
+| 27 | Offset | OFFSET | [#80](https://github.com/millZach/AgentDrafter/issues/80) |
+| 28 | Trim and extend | TRIM, EXTEND | [#81](https://github.com/millZach/AgentDrafter/issues/81) |
+| 29 | Fillet and chamfer | FILLET, CHAMFER | [#82](https://github.com/millZach/AgentDrafter/issues/82) |
+| 30 | Break and join | BREAK, JOIN | [#83](https://github.com/millZach/AgentDrafter/issues/83) |
+| 31 | Stretch | STRETCH | [#84](https://github.com/millZach/AgentDrafter/issues/84) |
+| 32 | Explode | EXPLODE | [#85](https://github.com/millZach/AgentDrafter/issues/85) |
+| 33 | Fields | FIELD | [#87](https://github.com/millZach/AgentDrafter/issues/87) |
+| 34 | Plot-style control: named plot styles, page setups and plot scale | PAGESETUP, STB | [#88](https://github.com/millZach/AgentDrafter/issues/88) |
+| 35 | DXF read and write | DXFIN, DXFOUT | [#89](https://github.com/millZach/AgentDrafter/issues/89) |
+| 36 | External references | XREF, XATTACH, XBIND | [#90](https://github.com/millZach/AgentDrafter/issues/90) |
+| 37 | Raster images and PDF underlays | IMAGEATTACH, PDFATTACH | [#91](https://github.com/millZach/AgentDrafter/issues/91) |
+| 38 | Groups | GROUP | [#92](https://github.com/millZach/AgentDrafter/issues/92) |
+| 39 | Annotation scale | ANNOTATIVE, CANNOSCALE | [#93](https://github.com/millZach/AgentDrafter/issues/93) |
+| 40 | Points, construction lines, rays, multilines and tolerances | POINT, XLINE, RAY, MLINE, TOLERANCE | [#94](https://github.com/millZach/AgentDrafter/issues/94) |
+| 41 | Convert a drawing to another DWG version | SAVEAS to a version | [#95](https://github.com/millZach/AgentDrafter/issues/95) |
+| 42 | 3D solids in the AutoCAD style | BOX, EXTRUDE, UNION | [#96](https://github.com/millZach/AgentDrafter/issues/96) |
 
-Already filed before this map, and not ranked again here: text underline and overline, `%%u` and `%%o` ([#60](https://github.com/millZach/AgentDrafter/issues/60)); MTEXT's inline formatting codes ([#61](https://github.com/millZach/AgentDrafter/issues/61)); a middle-justified TrueType text's place ([#59](https://github.com/millZach/AgentDrafter/issues/59)).
+Already filed before this map, and not ranked again here: text underline and overline, `%%u` and `%%o` ([#60](https://github.com/millZach/AgentDrafter/issues/60)); MTEXT's inline formatting codes ([#61](https://github.com/millZach/AgentDrafter/issues/61)); a middle-justified TrueType text's place ([#59](https://github.com/millZach/AgentDrafter/issues/59)). Filed while building, as follow-ups: an object's true colour ([#106](https://github.com/millZach/AgentDrafter/issues/106)) and a quoted insert scale the schema lets through ([#107](https://github.com/millZach/AgentDrafter/issues/107)).
 
 ## The plan's agreed order, against this ranking
 
