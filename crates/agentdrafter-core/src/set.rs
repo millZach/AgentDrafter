@@ -383,7 +383,7 @@ fn set_at(folder: PathBuf, dwg: &Path, written: &str) -> Result<DwgSet, String> 
 /// that an output drawn on that paper can be stamped with them. None when
 /// the DWG names no set, the set or the DWG's row cannot be read, or the
 /// sheet declares no paper: the DWG then plots to its extents.
-pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<(Paper, Vec<(SourceKind, PathBuf, Vec<u8>)>)> {
+pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<(Paper, Vec<FileRead>)> {
     let set = set_of_dwg(dwg).ok()?;
     let settings_file = set.folder.join(SET_SETTINGS_FILE);
     let settings = read_set_settings(&settings_file).ok()?;
@@ -414,6 +414,10 @@ pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<(Paper, Vec<(SourceKind, PathBu
         ],
     ))
 }
+
+/// A file read to draw an output, with what it is and its bytes, for the
+/// output's stamp.
+pub(crate) type FileRead = (SourceKind, PathBuf, Vec<u8>);
 
 /// Why a DWG that carries no build mark names no drawing set.
 const NO_MARK: &str = "the DWG carries no build mark AgentDrafter can read, so it names no \
