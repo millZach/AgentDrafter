@@ -353,6 +353,16 @@ def find_browser(given: str | None) -> str:
     raise BenchError("no Chromium, Chrome or Edge found; name one with --browser")
 
 
+def _port_written(port_file: Path) -> bool:
+    """Whether the browser has written its DevTools port and path. On Windows
+    the browser can hold the file open while it writes it, and reading it
+    then is refused, which counts as not written yet."""
+    try:
+        return port_file.is_file() and len(port_file.read_text().split()) >= 2
+    except PermissionError:
+        return False
+
+
 class Browser:
     """A headless Chromium-family browser with a profile of its own, driven over DevTools."""
 
@@ -370,7 +380,7 @@ class Browser:
         self.proc = subprocess.Popen(args + ["about:blank"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log)
         port_file = profile / "DevToolsActivePort"
         deadline = time.monotonic() + 60
-        while not (port_file.is_file() and len(port_file.read_text().split()) >= 2):
+        while not _port_written(port_file):
             if self.proc.poll() is not None:
                 raise BenchError("the browser stopped as it started (exit %d)" % self.proc.returncode)
             if time.monotonic() > deadline:
