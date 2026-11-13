@@ -9,16 +9,17 @@ use super::blocks::{attribute_definition, insert, ATTDEF_KEYS, BLOCK_TEXT_KEYS, 
 use super::hatch::{self, HATCH_KEYS};
 use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
 use super::layers::{layer_name, properties};
+use super::polyline;
 use super::strict_yaml::{index_path, key_path, Kind, Node, Pos};
 use super::text::{mtext, text, MTEXT_KEYS, TEXT_KEYS};
 use super::{
-    angle, at, bad_value, boolean, length, plain_number, point, points, scalar, unknown_key,
-    wrong_type, Fields,
+    angle, at, bad_value, length, plain_number, point, points, scalar, unknown_key, wrong_type,
+    Fields,
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arc, BlockLibrary, Circle, Ellipse, HatchPattern, Layer, Line, Linetype, Object, Polyline,
-    Spline, FIT_DEGREE, LAYER_ZERO,
+    Arc, BlockLibrary, Circle, Ellipse, HatchPattern, Layer, Line, Linetype, Object, Spline,
+    FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
@@ -27,7 +28,7 @@ use crate::units::Unit;
 type ObjectType = (&'static str, &'static [&'static str]);
 
 /// The drawn objects both a sheet and a block hold, and the keys each takes.
-const DRAWN_OBJECT_TYPES: [ObjectType; 9] = [
+const DRAWN_OBJECT_TYPES: [ObjectType; 11] = [
     ("line", &LINE_KEYS),
     ("polyline", &POLYLINE_KEYS),
     ("arc", &ARC_KEYS),
@@ -37,11 +38,13 @@ const DRAWN_OBJECT_TYPES: [ObjectType; 9] = [
     ("hatch", &HATCH_KEYS),
     ("text", &TEXT_KEYS),
     ("mtext", &MTEXT_KEYS),
+    ("donut", &DONUT_KEYS),
+    ("solid", &SOLID_KEYS),
 ];
 
 /// The drawn objects followed by one more object type.
-const fn drawn_and(last: ObjectType) -> [ObjectType; 10] {
-    let mut types = [last; 10];
+const fn drawn_and(last: ObjectType) -> [ObjectType; 12] {
+    let mut types = [last; 12];
     let mut i = 0;
     while i < DRAWN_OBJECT_TYPES.len() {
         types[i] = DRAWN_OBJECT_TYPES[i];
@@ -52,12 +55,12 @@ const fn drawn_and(last: ObjectType) -> [ObjectType; 10] {
 
 /// Every object type a sheet description can hold, and the keys each takes:
 /// the drawn objects, and inserts.
-pub(crate) const OBJECT_TYPES: [ObjectType; 10] = drawn_and(("insert", &INSERT_KEYS));
+pub(crate) const OBJECT_TYPES: [ObjectType; 12] = drawn_and(("insert", &INSERT_KEYS));
 
 /// Every object type a block in a block library can hold, and the keys
 /// each takes: the drawn objects a sheet holds, and attribute definitions.
 /// A text in a block takes its cell as well.
-pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 10] = {
+pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 12] = {
     let mut types = drawn_and(("attdef", &ATTDEF_KEYS));
     types[TEXT_TYPE] = ("text", &BLOCK_TEXT_KEYS);
     types
@@ -139,9 +142,28 @@ const LINE_KEYS: [&str; 7] = [
     "lineweight",
     "linetype_scale",
 ];
-const POLYLINE_KEYS: [&str; 7] = [
+const POLYLINE_KEYS: [&str; 8] = [
     "points",
     "closed",
+    "width",
+    "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
+];
+const DONUT_KEYS: [&str; 8] = [
+    "center",
+    "inside_diameter",
+    "outside_diameter",
+    "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
+];
+const SOLID_KEYS: [&str; 6] = [
+    "corners",
     "layer",
     "color",
     "linetype",
@@ -275,7 +297,9 @@ pub(super) fn object(
     let units = tables.units;
     let mut object = match (entry.key.as_str(), &mut *place) {
         ("line", _) => line(&fields, units, layer).map(Object::Line),
-        ("polyline", _) => polyline(&fields, units, layer).map(Object::Polyline),
+        ("polyline", _) => polyline::polyline(&fields, units, layer).map(Object::Polyline),
+        ("donut", _) => polyline::donut(&fields, units, layer).map(Object::Donut),
+        ("solid", _) => polyline::solid(&fields, units, layer).map(Object::Solid),
         ("arc", _) => arc(&fields, units, layer).map(Object::Arc),
         ("circle", _) => circle(&fields, units, layer).map(Object::Circle),
         ("ellipse", _) => ellipse(&fields, units, layer).map(Object::Ellipse),
@@ -309,23 +333,6 @@ fn line(fields: &Fields, units: Unit, layer: String) -> Result<Line, Error> {
     Ok(Line {
         from: point(fields.require("from")?, &fields.path_of("from"), units)?,
         to: point(fields.require("to")?, &fields.path_of("to"), units)?,
-        layer,
-        properties: Default::default(),
-    })
-}
-
-fn polyline(fields: &Fields, units: Unit, layer: String) -> Result<Polyline, Error> {
-    let closed = match fields.get("closed") {
-        Some(node) => boolean(node, &fields.path_of("closed"))?,
-        None => false,
-    };
-    let path = fields.path_of("points");
-    // A closed polyline needs three points to enclose anything.
-    let fewest = if closed { 3 } else { 2 };
-    let points = points(fields.require("points")?, &path, units, fewest)?;
-    Ok(Polyline {
-        points,
-        closed,
         layer,
         properties: Default::default(),
     })

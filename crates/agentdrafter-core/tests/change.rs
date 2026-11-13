@@ -334,6 +334,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("add_hatch", "HATCH"),
             ("add_text", "TEXT"),
             ("add_mtext", "MTEXT"),
+            ("add_donut", "DONUT"),
+            ("add_solid", "SOLID"),
             ("insert_block", "INSERT"),
             ("change", "CHANGE"),
             ("move", "MOVE"),
@@ -351,6 +353,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "HATCH", "sheet": "S", "pattern": "SOLID", "boundary": [{"polyline": {"points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]}),
         json!({"op": "add_text", "sheet": "S", "contents": "A", "position": [0, 0, 0], "height": 1}),
         json!({"op": "add_mtext", "sheet": "S", "contents": "A\nB", "position": [0, 0, 0], "height": 1}),
+        json!({"op": "add_donut", "sheet": "S", "center": [0, 0, 0], "outside_diameter": 1}),
+        json!({"op": "SOLID", "sheet": "S", "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}),
         json!({"op": "INSERT", "sheet": "S", "block": "B", "position": [0, 0, 0], "attributes": {"TAG": "X"}}),
         json!({"op": "change", "target": {"id": "S/a"}, "set": {"layer": "notes"}}),
         json!({"op": "move", "target": {"name": "n", "sheet": "S"}, "by": [1, 0, 0]}),
@@ -594,6 +598,46 @@ fn a_failed_operation_names_itself_and_lists_the_valid_choices() {
     );
     assert_eq!(e.field.as_deref(), Some("operations[0].set.id"));
     assert!(e.message.contains("fixed for its life"));
+}
+
+#[test]
+fn donuts_solids_and_wide_arc_polylines_are_added_and_moved() {
+    let set = demo_set("arcs-widths");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "DONUT", "sheet": "DEMO-003", "center": [5, 5, 0], "inside_diameter": 0, "outside_diameter": 0.1, "name": "dot"},
+            {"op": "add_solid", "sheet": "DEMO-003", "corners": [[1, 1, 0], [2, 1, 0], [1.5, 2, 0]], "name": "flag"},
+            {"op": "PLINE", "sheet": "DEMO-003", "points": [{"point": [3, 3, 0], "arc_angle": 180, "start_width": 0.05}, [4, 3, 0]], "name": "bend"},
+        ]}),
+    );
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "move", "target": {"name": "dot"}, "by": [1, 0, 0]},
+            {"op": "move", "target": {"name": "flag"}, "by": [0, 1, 0]},
+            {"op": "move", "target": {"name": "bend"}, "by": [0, 0.5, 0]},
+        ]}),
+    );
+    let on_sheet = built(&set, "DEMO-003");
+    // The donut reads back from its DWG as the polyline it is written as.
+    let Object::Polyline(dot) = &on_sheet["DEMO-003/donut-1"] else {
+        panic!("{:?}", on_sheet["DEMO-003/donut-1"])
+    };
+    close(dot.points[0].x, 6.025);
+    close(dot.width, 0.05);
+    let Object::Solid(flag) = &on_sheet["DEMO-003/solid-1"] else {
+        panic!()
+    };
+    close(flag.corners[2].y, 3.0);
+    let Object::Polyline(bend) = &on_sheet["DEMO-003/polyline-1"] else {
+        panic!()
+    };
+    close(bend.points[0].y, 3.5);
+    close(bend.bulge(0), 1.0);
+    assert_eq!(bend.widths_at(0), [0.05, 0.0]);
+    assert!(row_text(&set, "DEMO-003")
+        .contains("{point: [3, 3.5, 0], arc_angle: 180, start_width: 0.05}"));
 }
 
 #[test]

@@ -636,3 +636,30 @@ objects:
     assert_eq!(runs(by_layer[0]).len(), 1);
     assert!(by_layer[2..].iter().all(|i| i.color == Color(1)));
 }
+
+/// A donut and a 2D solid fill their area, and a wide polyline fills its
+/// band, each with no stroke of its own, as AutoCAD 2026 plotted a made-up
+/// probe of them on a layer of 1 mm lineweight.
+#[test]
+fn donuts_solids_and_wide_polylines_fill_with_no_lineweight() {
+    let list = draw(
+        "units: mm\nlayers:\n  heavy: {color: red, lineweight: 1}\nobjects:\n\
+         - donut: {center: [0, 0, 0], inside_diameter: 2, outside_diameter: 4, layer: heavy}\n\
+         - solid: {corners: [[10, 0, 0], [14, 0, 0], [12, 3, 0]], layer: heavy}\n\
+         - polyline: {points: [[20, 0, 0], [30, 0, 0]], width: 2, layer: heavy}\n",
+    );
+    for object in 0..3 {
+        let items = items_of(&list, object);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(matches!(items[0].shape, Shape::Fill { .. }), "{items:?}");
+        assert_eq!(items[0].color, Color(1));
+    }
+    // The donut's ring reaches from radius 1 to 2.
+    for p in items_of(&list, 0)[0].points() {
+        let r = p[0].hypot(p[1]);
+        assert!((0.999..=2.001).contains(&r), "{p:?}");
+    }
+    let extents = list.extents().unwrap();
+    near(extents.min, [-2.0, -2.0]);
+    near(extents.max, [30.0, 3.0]);
+}

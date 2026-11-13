@@ -120,12 +120,14 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 | Type | Keys | What it is |
 |---|---|---|
 | `line` | `from`, `to` | A straight line between two points. |
-| `polyline` | `points`; `closed` | Straight segments joined end to end through the points, in order: at least 2, or 3 when closed. `closed: true` adds a segment from the last point back to the first; without it, `false`. When every point has the same `z`, it is AutoCAD's lightweight polyline at that elevation; otherwise it is a 3D polyline. |
+| `polyline` | `points`; `closed`, `width` | Segments joined end to end through the points, in order: at least 2, or 3 when closed. Each is straight, or an arc where its point says so, and as wide as its widths; see [Polylines](#polylines). `closed: true` adds a segment from the last point back to the first; without it, `false`. When every point has the same `z`, it is AutoCAD's lightweight polyline at that elevation; otherwise it is a 3D polyline, which has no arcs and no widths. |
 | `arc` | `center`, `radius`, `start_angle`, `end_angle` | Part of a circle, drawn anticlockwise from its start angle to its end angle. The angles must differ once whole turns are taken off; a whole circle is a `circle`. |
 | `circle` | `center`, `radius` | A circle. |
 | `ellipse` | `center`, `major_axis`, `ratio`; `start_angle`, `end_angle` | An ellipse. `major_axis` runs from the centre to one end of the major axis, as `[dx, dy, dz]`, with `dz` 0. `ratio` is the minor axis over the major axis, more than 0 and at most 1. With `start_angle` and `end_angle`, measured anticlockwise from the major axis, only the part from one to the other is drawn; give both or neither. |
 | `spline` | `fit_points` or `control_points`; `degree` | A smooth curve. With `fit_points`, at least 3 points it passes through, no two in a row the same; AutoCAD fits a cubic through them, as its SPLINE command does by default. With `control_points`, the control points of a B-spline that starts at the first and ends at the last, of `degree` 1 to 10 (without it, 3), with more control points than its degree. Not both. |
 | `hatch` | `pattern`, `boundary`; `scale`, `angle` | An area filled solid or with a pattern, inside a boundary; see below. |
+| `donut` | `center`, `outside_diameter`; `inside_diameter` | A ring, or a filled dot when its inside diameter is 0, as AutoCAD's DONUT draws it, such as a wire's junction dot. See [Polylines](#polylines). |
+| `solid` | `corners` | A filled triangle or quadrilateral, AutoCAD's 2D solid: 3 or 4 corners sharing one `z`, listed in order round the outline. AgentDrafter writes them in AutoCAD's own order, which crosses the third and fourth. |
 | `text` | `contents`, `position`, `height`; `style`, `width_factor`, `rotation`, `justify` | A single line of text, as AutoCAD's TEXT draws it. See [Text](#text). |
 | `mtext` | `contents`, `position`, `height`; `width`, `style`, `width_factor`, `rotation`, `justify` | Text of one or more lines in a box, as AutoCAD's MTEXT draws it. See [Text](#text). |
 | `insert` | `block`, `position`; `scale`, `rotation`, `attributes` | A block from the sheet's block library, placed as AutoCAD's INSERT places it. See [Inserts](#inserts). |
@@ -167,6 +169,34 @@ objects:
 ```
 
 The DWG writes them as AutoCAD does, on each object and in the drawing's LTSCALE, and reading a DWG back gives them; an object with a true colour is not read yet. `change` sets them, and a bare null takes one away, so the object draws with its layer's again.
+
+### Polylines
+
+A polyline's point is `[x, y, z]`, or a mapping when the segment that starts there is an arc or has a width (Zach decided this on 2026-11-13):
+
+| Key | Required | What it is |
+|---|---|---|
+| `point` | yes | Where the point is. |
+| `bulge` | no | The segment's arc as AutoCAD keeps it: the tangent of a quarter of its included angle, positive anticlockwise. 1 is a half circle anticlockwise, -1 clockwise, 0 a straight segment. A number with no unit. |
+| `arc_angle` | no | The segment's arc by its included angle in degrees: more than -360 and less than 360, positive anticlockwise, 180 a half circle. Not with `bulge`. A DWG read back gives `bulge`. |
+| `start_width`, `end_width` | no | The segment's width at its start and at its end: lengths of 0 or more. The width changes evenly between them. Without them, 0. |
+
+The segment a point starts runs to the next point, or, from the last point of a closed polyline, back to the first; the last point of an open polyline starts none and gives neither. `width` on the polyline gives every segment one width, AutoCAD's constant width, and is not given with a point's own widths. A 3D polyline takes no arc and no width.
+
+A segment with no width draws as a line, with its lineweight, and its linetype starts again at each point, as AutoCAD draws a polyline. A wide segment fills a band centred on its path, with square ends and no lineweight, as AutoCAD 2026 plotted a made-up probe: where two wide segments meet, their edges are carried on to where they cross, a mitred corner. A wide segment in a linetype fills its band under each dash.
+
+```yaml
+# A rounded corner, an arrowhead and a junction dot.
+- polyline:
+    points:
+      - [0, 0, 0]
+      - {point: [10, 0, 0], arc_angle: 90}
+      - [12, 2, 0]
+- polyline: {points: [[20, 0, 0], {point: [26, 0, 0], start_width: 2, end_width: 0}, [28, 0, 0]]}
+- donut: {center: [12, 2, 0], outside_diameter: 1}
+```
+
+A `donut`'s `outside_diameter` is more than 0, and its `inside_diameter` is 0 or more and less than that; without it, 0, a filled dot. It is written as AutoCAD's DONUT writes it, a closed polyline of two half circles on the ring's middle, as wide as the ring, so a DWG reads it back as that polyline.
 
 ### Hatches
 

@@ -48,6 +48,7 @@ pub(crate) mod curves;
 mod hatch;
 mod linetype;
 mod pick;
+mod polyline;
 mod text;
 
 use serde::{Deserialize, Serialize};
@@ -55,13 +56,14 @@ use serde::{Deserialize, Serialize};
 use crate::model::block::{definition_text, Placement};
 use crate::model::{
     attribute_text, Block, Insert, Layer, Object, ObjectColor, ObjectLinetype, ObjectLineweight,
-    Point3, Properties, Sheet, CONTINUOUS, LAYER_ZERO, WHITE,
+    Point3, Polyline, Properties, Sheet, CONTINUOUS, LAYER_ZERO, WHITE,
 };
 use crate::text::placement::SheetFonts;
 
 pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
 pub use pick::{object_bounds, pick};
+pub(crate) use polyline::bulge_of;
 
 /// AutoCAD's default lineweight, which a layer with none of its own plots
 /// with: 0.25 mm, AutoCAD's `LWDEFAULT` as installed.
@@ -563,26 +565,61 @@ impl<'a> Drawer<'a> {
             },
             ..shapes(lettering.shapes)
         };
+        // A flat polyline: its thin segments stroked, each starting its
+        // linetype again, as AutoCAD draws a polyline with PLINEGEN off,
+        // and its wide segments filled.
+        let flat_polyline = |polyline: &Polyline| -> Drawn {
+            let points: Vec<Point2> = polyline.points.iter().map(|&p| flat(p)).collect();
+            // Wide dashes are cut in the block's own coordinates and then
+            // enlarged with it, so their pattern is shrunk by the insert's
+            // scale first, to keep its own lengths, as a thin one does.
+            let own = placed.map_or(1.0, |p| p.0.scale());
+            let wide_pattern: Option<Vec<f64>> =
+                pattern.map(|lengths| lengths.iter().map(|l| l / own).collect());
+            let drawn = polyline::draw(
+                &points,
+                polyline.closed,
+                |i| polyline.bulge(i),
+                |i| polyline.widths_at(i),
+                wide_pattern.as_deref(),
+                tolerance,
+            );
+            let mut runs = Vec::new();
+            for segment in drawn.thin {
+                runs.extend(linetype::along(&path(segment), pattern, false));
+            }
+            let mut out = stroke(runs);
+            if !drawn.fills.is_empty() {
+                out.shapes.extend(
+                    shapes(vec![Shape::Fill {
+                        rule: FillRule::NonZero,
+                        contours: drawn.fills,
+                    }])
+                    .shapes,
+                );
+            }
+            out
+        };
         match object {
             Object::Line(line) => stroke(linetype::along(
                 &path(vec![flat(line.from), flat(line.to)]),
                 pattern,
                 false,
             )),
+            Object::Polyline(polyline) if polyline.is_flat() => flat_polyline(polyline),
+            Object::Donut(donut) => flat_polyline(&donut.polyline()),
+            Object::Solid(solid) => shapes(vec![Shape::Fill {
+                rule: FillRule::NonZero,
+                contours: vec![polyline::anticlockwise(
+                    solid.corners.iter().map(|&p| flat(p)).collect(),
+                )],
+            }]),
             Object::Polyline(polyline) => {
                 let mut points = path(polyline.points.iter().map(|&p| flat(p)).collect());
                 if polyline.closed && !points.is_empty() {
                     points.push(points[0]);
                 }
-                let level = polyline.points.first().map_or(0.0, |p| p.z);
-                if polyline.points.iter().all(|p| p.z == level) {
-                    // A flat polyline starts its linetype again at each vertex.
-                    let mut runs = Vec::new();
-                    for segment in points.windows(2) {
-                        runs.extend(linetype::along(segment, pattern, false));
-                    }
-                    stroke(runs)
-                } else {
+                {
                     // AutoCAD draws a 3D polyline continuous, whatever its linetype.
                     stroke(linetype::along(&points, None, false))
                 }

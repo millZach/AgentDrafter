@@ -26,6 +26,7 @@ mod layers;
 mod mark;
 mod objects;
 pub(crate) mod paper;
+mod polyline;
 mod records;
 pub(crate) mod schema;
 mod set;
@@ -731,3 +732,6 @@ mod edit_tests;
 
 #[cfg(test)]
 mod property_tests;
+
+#[cfg(test)]
+mod polyline_tests;

@@ -1026,6 +1026,8 @@ fn points_of(object: &Object) -> Vec<(String, Point3)> {
         }
         Object::Spline(spline) => listed("fit_points", &spline.fit_points),
         Object::Hatch(_) => Vec::new(),
+        Object::Donut(donut) => one("center", donut.center),
+        Object::Solid(solid) => listed("corners", &solid.corners),
         Object::Text(text) => one("position", text.position),
         Object::MText(text) => one("position", text.position),
         Object::AttributeDefinition(definition) => one("position", definition.position),

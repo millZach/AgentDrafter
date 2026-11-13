@@ -59,6 +59,9 @@ fn every_object_type_reads() {
             closed: true,
             layer: on_zero(),
             properties: Default::default(),
+            bulges: Vec::new(),
+            width: 0.0,
+            widths: Vec::new(),
         })
     );
     assert_eq!(
@@ -482,7 +485,7 @@ fn unknown_keys_in_layers_linetypes_and_objects_list_the_allowed_keys() {
         (
             "polyline: {points: [], close: true}",
             "close",
-            "a polyline takes points, closed, layer",
+            "a polyline takes points, closed, width, layer",
         ),
         (
             "arc: {middle: [0, 0, 0]}",

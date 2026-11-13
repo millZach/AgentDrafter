@@ -83,13 +83,30 @@ pub struct Line {
     pub properties: Properties,
 }
 
-/// Straight segments through two or more points, joined end to end.
+/// Segments through two or more points, joined end to end: straight, or
+/// arcs where a point's bulge says so, and as wide as their widths.
 ///
 /// When every point has the same `z` it is written as AutoCAD's lightweight
-/// polyline at that elevation; otherwise as a 3D polyline.
+/// polyline at that elevation; otherwise as a 3D polyline, which has no
+/// arcs and no widths.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Polyline {
     pub points: Vec<Point3>,
+    /// For each point, the bulge of the segment that starts there, as
+    /// AutoCAD keeps it: the tangent of a quarter of the arc's included
+    /// angle, positive anticlockwise, 0 for a straight segment. Empty when
+    /// every segment is straight; otherwise one for each point.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bulges: Vec<f64>,
+    /// For each point, the width the segment that starts there has at its
+    /// start and at its end, in the declared unit. Empty when no point
+    /// gives one; otherwise one for each point.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widths: Vec<[f64; 2]>,
+    /// The width of every segment, when no point gives its own: AutoCAD's
+    /// constant width. 0 draws a line.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub width: f64,
     /// Whether a last segment joins the last point back to the first.
     #[serde(default)]
     pub closed: bool,
@@ -146,6 +163,93 @@ pub struct Ellipse {
     pub properties: Properties,
 }
 
+impl Polyline {
+    /// A polyline of straight, thin segments through `points`.
+    pub fn through(points: Vec<Point3>, closed: bool, layer: impl Into<String>) -> Self {
+        Self {
+            points,
+            bulges: Vec::new(),
+            widths: Vec::new(),
+            width: 0.0,
+            closed,
+            layer: layer.into(),
+            properties: Properties::default(),
+        }
+    }
+
+    /// The bulge of the segment that starts at point `i`.
+    pub fn bulge(&self, i: usize) -> f64 {
+        self.bulges.get(i).copied().unwrap_or(0.0)
+    }
+
+    /// The widths at the start and the end of the segment that starts at
+    /// point `i`.
+    pub fn widths_at(&self, i: usize) -> [f64; 2] {
+        if self.widths.is_empty() {
+            [self.width, self.width]
+        } else {
+            self.widths.get(i).copied().unwrap_or([0.0, 0.0])
+        }
+    }
+
+    /// Whether every point has the same `z`: AutoCAD's lightweight polyline.
+    pub fn is_flat(&self) -> bool {
+        let level = self.points.first().map_or(0.0, |p| p.z);
+        self.points.iter().all(|p| p.z == level)
+    }
+}
+
+/// A ring, or a filled dot when its inside diameter is 0, as AutoCAD's
+/// DONUT draws it: a closed polyline of two half circles, as wide as the
+/// ring. It lies in the plane parallel to XY at its centre's `z`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Donut {
+    pub center: Point3,
+    /// At least 0 and less than the outside diameter.
+    pub inside_diameter: f64,
+    /// More than 0.
+    pub outside_diameter: f64,
+    #[serde(default = "layer_zero")]
+    pub layer: String,
+    #[serde(flatten)]
+    pub properties: Properties,
+}
+
+impl Donut {
+    /// The polyline AutoCAD's DONUT writes: from the point on the ring's
+    /// middle circle at 0 degrees, a half circle anticlockwise to the point
+    /// at 180 and another back, as wide as the ring.
+    pub fn polyline(&self) -> Polyline {
+        let radius = (self.inside_diameter + self.outside_diameter) / 4.0;
+        let c = self.center;
+        Polyline {
+            points: vec![
+                Point3::new(c.x + radius, c.y, c.z),
+                Point3::new(c.x - radius, c.y, c.z),
+            ],
+            bulges: vec![1.0, 1.0],
+            widths: Vec::new(),
+            width: (self.outside_diameter - self.inside_diameter) / 2.0,
+            closed: true,
+            layer: self.layer.clone(),
+            properties: self.properties.clone(),
+        }
+    }
+}
+
+/// A filled triangle or quadrilateral, AutoCAD's 2D solid. Its corners are
+/// listed round its outline, and it lies in the plane parallel to XY at
+/// their `z`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Solid {
+    /// 3 or 4 corners, in order round the outline, sharing one `z`.
+    pub corners: Vec<Point3>,
+    #[serde(default = "layer_zero")]
+    pub layer: String,
+    #[serde(flatten)]
+    pub properties: Properties,
+}
+
 impl Ellipse {
     /// Whether the ellipse is whole rather than an elliptical arc.
     pub fn is_whole(&self) -> bool {
@@ -189,6 +293,8 @@ pub enum Object {
     Ellipse(Ellipse),
     Spline(Spline),
     Hatch(Hatch),
+    Donut(Donut),
+    Solid(Solid),
     Text(Text),
     #[serde(rename = "mtext")]
     MText(MText),
@@ -210,6 +316,8 @@ impl Object {
             Object::Ellipse(_) => "ellipse",
             Object::Spline(_) => "spline",
             Object::Hatch(_) => "hatch",
+            Object::Donut(_) => "donut",
+            Object::Solid(_) => "solid",
             Object::Text(_) => "text",
             Object::MText(_) => "mtext",
             Object::AttributeDefinition(_) => "attdef",
@@ -227,6 +335,8 @@ impl Object {
             Object::Ellipse(o) => &o.layer,
             Object::Spline(o) => &o.layer,
             Object::Hatch(o) => &o.layer,
+            Object::Donut(o) => &o.layer,
+            Object::Solid(o) => &o.layer,
             Object::Text(o) => &o.layer,
             Object::MText(o) => &o.layer,
             Object::AttributeDefinition(o) => &o.layer,
@@ -244,6 +354,8 @@ impl Object {
             Object::Ellipse(o) => &o.properties,
             Object::Spline(o) => &o.properties,
             Object::Hatch(o) => &o.properties,
+            Object::Donut(o) => &o.properties,
+            Object::Solid(o) => &o.properties,
             Object::Text(o) => &o.properties,
             Object::MText(o) => &o.properties,
             Object::AttributeDefinition(o) => &o.properties,
@@ -260,6 +372,8 @@ impl Object {
             Object::Ellipse(o) => &mut o.properties,
             Object::Spline(o) => &mut o.properties,
             Object::Hatch(o) => &mut o.properties,
+            Object::Donut(o) => &mut o.properties,
+            Object::Solid(o) => &mut o.properties,
             Object::Text(o) => &mut o.properties,
             Object::MText(o) => &mut o.properties,
             Object::AttributeDefinition(o) => &mut o.properties,
@@ -313,6 +427,11 @@ pub(crate) fn one() -> f64 {
 #[allow(clippy::trivially_copy_pass_by_ref, clippy::float_cmp)]
 pub(crate) fn is_one(n: &f64) -> bool {
     *n == 1.0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, clippy::float_cmp)]
+pub(crate) fn is_zero(n: &f64) -> bool {
+    *n == 0.0
 }
 
 /// An object property's value that takes its layer's: AutoCAD's ByLayer.

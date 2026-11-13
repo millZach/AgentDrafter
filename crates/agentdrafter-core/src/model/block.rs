@@ -211,6 +211,11 @@ pub(crate) struct Placement {
 }
 
 impl Placement {
+    /// How much the insert enlarges its block.
+    pub(crate) fn scale(&self) -> f64 {
+        self.scale
+    }
+
     pub(crate) fn of(insert: &Insert, base: Point3) -> Placement {
         let (sin, cos) = insert.rotation.to_radians().sin_cos();
         Placement {

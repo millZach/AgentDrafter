@@ -39,6 +39,9 @@ use crate::units::Unit;
 /// A plain decimal number, as `docs/sheet-description.md` defines it.
 pub(super) const NUMBER: &str = "-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?";
 
+/// A number as [`NUMBER`] writes it that is 0 or more: no sign.
+pub(super) const NOT_NEGATIVE_NUMBER: &str = "[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?";
+
 /// A number as [`NUMBER`] writes it that is more than 0: no sign, and a
 /// digit other than 0 before its exponent.
 pub(super) const POSITIVE_NUMBER: &str =
@@ -356,6 +359,32 @@ fn defs() -> Map<String, Value> {
 
     let mut defs = Map::new();
     defs.insert(
+        "length_not_negative".into(),
+        json!({
+            "description": "A length of 0 or more, written as a length is.",
+            "anyOf": [
+                { "type": "number", "minimum": 0 },
+                {
+                    "type": "string",
+                    "pattern": format!("^{NOT_NEGATIVE_NUMBER}( ?({unit_pattern}))?$"),
+                },
+            ],
+        }),
+    );
+    defs.insert(
+        "length_more_than_0".into(),
+        json!({
+            "description": "A length more than 0, written as a length is.",
+            "anyOf": [
+                { "type": "number", "exclusiveMinimum": 0 },
+                {
+                    "type": "string",
+                    "pattern": format!("^{POSITIVE_NUMBER}( ?({unit_pattern}))?$"),
+                },
+            ],
+        }),
+    );
+    defs.insert(
         "length".into(),
         json!({
             "description": format!(
@@ -565,21 +594,134 @@ fn defs() -> Map<String, Value> {
     defs.insert(
         "polyline".into(),
         object_def(
-            "Straight segments joined end to end through two or more points. When every point \
+            "Segments joined end to end through two or more points: straight, or an arc where a \
+             point gives its bulge or arc angle, and as wide as their widths. When every point \
              has the same z it is AutoCAD's lightweight polyline at that elevation; otherwise a \
-             3D polyline.",
+             3D polyline, which takes no arcs and no widths.",
             &["points"],
             json!({
                 "points": {
-                    "description": "The points in order: at least 2, or 3 when closed.",
+                    "description": "The points in order: at least 2, or 3 when closed. Each is a \
+                                    point, or a mapping that gives its point and the arc and \
+                                    widths of the segment that starts there.",
                     "type": "array",
-                    "items": { "$ref": "#/$defs/point" },
+                    "items": {
+                        "anyOf": [
+                            { "$ref": "#/$defs/point" },
+                            { "$ref": "#/$defs/polyline_point" },
+                        ],
+                    },
                     "minItems": 2,
+                },
+                "width": {
+                    "$ref": "#/$defs/length_not_negative",
+                    "description": "The width of every segment, AutoCAD's constant width: a \
+                                    length of 0 or more. Not with a point's own widths. Without \
+                                    it, 0, a line.",
                 },
                 "closed": {
                     "description": "Whether a last segment joins the last point back to the \
                                     first. Without it, false.",
                     "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+            }),
+        ),
+    );
+    // A polyline's constant width is not given with a point's own widths.
+    if let Some(polyline) = defs.get_mut("polyline") {
+        polyline["if"] = json!({ "required": ["width"] });
+        polyline["then"] = json!({
+            "properties": {
+                "points": {
+                    "items": {
+                        "not": {
+                            "type": "object",
+                            "anyOf": [
+                                { "required": ["start_width"] },
+                                { "required": ["end_width"] },
+                            ],
+                        },
+                    },
+                },
+            },
+        });
+    }
+    defs.insert(
+        "polyline_point".into(),
+        json!({
+            "description": "A polyline's point that gives more than where it is: the arc and \
+                            the widths of the segment that starts there. The last point of an \
+                            open polyline starts no segment and gives neither.",
+            "type": "object",
+            "required": ["point"],
+            "not": { "required": ["bulge", "arc_angle"] },
+            "additionalProperties": false,
+            "properties": {
+                "point": { "$ref": "#/$defs/point" },
+                "bulge": {
+                    "description": "The segment's arc as AutoCAD keeps it: the tangent of a \
+                                    quarter of its included angle, positive anticlockwise; 1 is \
+                                    a half circle, 0 a straight segment. Not with arc_angle.",
+                    "anyOf": [
+                        { "type": "number" },
+                        { "type": "string", "pattern": format!("^{NUMBER}$") },
+                    ],
+                },
+                "arc_angle": {
+                    "description": "The segment's arc by its included angle in degrees, more than \
+                                    -360 and less than 360, positive anticlockwise; 180 is a half \
+                                    circle. Not with bulge.",
+                    "anyOf": [
+                        { "type": "number", "exclusiveMinimum": -360, "exclusiveMaximum": 360 },
+                        { "type": "string", "pattern": format!("^{NUMBER}$") },
+                    ],
+                },
+                "start_width": {
+                    "$ref": "#/$defs/length_not_negative",
+                    "description": "The segment's width at its start: a length of 0 or more. \
+                                    Without it, 0.",
+                },
+                "end_width": {
+                    "$ref": "#/$defs/length_not_negative",
+                    "description": "The segment's width at its end: a length of 0 or more. \
+                                    Without it, 0.",
+                },
+            },
+        }),
+    );
+    defs.insert(
+        "donut".into(),
+        object_def(
+            "A ring, or a filled dot when its inside diameter is 0, as AutoCAD's DONUT draws it, \
+             in the plane parallel to XY at its centre's z. It is written as AutoCAD's DONUT \
+             writes it, a closed wide polyline.",
+            &["center", "outside_diameter"],
+            json!({
+                "center": { "$ref": "#/$defs/point" },
+                "inside_diameter": {
+                    "$ref": "#/$defs/length_not_negative",
+                    "description": "A length of 0 or more and less than the outside diameter. \
+                                    Without it, 0, a filled dot.",
+                },
+                "outside_diameter": {
+                    "$ref": "#/$defs/length_more_than_0",
+                    "description": "A length more than 0.",
+                },
+            }),
+        ),
+    );
+    defs.insert(
+        "solid".into(),
+        object_def(
+            "A filled triangle or quadrilateral, AutoCAD's 2D solid, flat at its corners' z.",
+            &["corners"],
+            json!({
+                "corners": {
+                    "description": "3 or 4 corners, in order round the outline, sharing one z.",
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/point" },
+                    "minItems": 3,
+                    "maxItems": 4,
                 },
             }),
         ),

@@ -19,7 +19,7 @@ use std::path::Path;
 
 use acadrust::entities::{
     Arc as DwgArc, Circle as DwgCircle, Ellipse as DwgEllipse, EntityCommon, EntityType,
-    Line as DwgLine, LwPolyline, LwVertex, Polyline3D, Spline as DwgSpline,
+    Line as DwgLine, LwPolyline, LwVertex, Polyline3D, Solid as DwgSolid, Spline as DwgSpline,
 };
 use acadrust::tables::{BlockRecord, Layer as DwgLayer, LineType, LineTypeElement};
 use acadrust::types::{Color, DxfVersion, LineWeight, Vector2, Vector3};
@@ -30,7 +30,8 @@ use crate::error::{Error, ErrorCode};
 use crate::model::{
     is_one, Arc, Block, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype,
     Lineweight, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
-    Properties, Spline, BUILT_IN_LINETYPES, BY_BLOCK, BY_LAYER, CONTINUOUS, FIT_DEGREE, LAYER_ZERO,
+    Properties, Solid, Spline, BUILT_IN_LINETYPES, BY_BLOCK, BY_LAYER, CONTINUOUS, FIT_DEGREE,
+    LAYER_ZERO,
 };
 use crate::text::Text as TextObject;
 use crate::units::Unit;
@@ -253,6 +254,8 @@ fn dwg_object(
         Object::Ellipse(ellipse) => EntityType::Ellipse(dwg_ellipse(ellipse)),
         Object::Spline(spline) => EntityType::Spline(dwg_spline(spline)),
         Object::Hatch(hatch) => EntityType::Hatch(Box::new(hatch::dwg_hatch(hatch))),
+        Object::Donut(donut) => dwg_polyline(&donut.polyline()),
+        Object::Solid(solid) => EntityType::Solid(dwg_solid(solid)),
         Object::Text(t) => EntityType::Text(text::dwg_text(t, start_of(t))),
         Object::MText(t) => EntityType::MText(Box::new(text::dwg_mtext(t))),
         Object::AttributeDefinition(definition) => {
@@ -344,10 +347,11 @@ pub(super) fn read_properties(common: &EntityCommon) -> Option<Properties> {
 }
 
 /// A polyline whose points share one `z` is a lightweight polyline at that
-/// elevation, as AutoCAD's PLINE draws it; any other is a 3D polyline.
+/// elevation, as AutoCAD's PLINE draws it, with each point's bulge and
+/// widths, or its constant width; any other is a 3D polyline.
 fn dwg_polyline(polyline: &Polyline) -> EntityType {
     let elevation = polyline.points.first().map_or(0.0, |p| p.z);
-    if polyline.points.iter().all(|p| p.z == elevation) {
+    if polyline.is_flat() {
         let mut flat = LwPolyline::from_points(
             polyline
                 .points
@@ -355,6 +359,13 @@ fn dwg_polyline(polyline: &Polyline) -> EntityType {
                 .map(|p| Vector2::new(p.x, p.y))
                 .collect(),
         );
+        for (i, vertex) in flat.vertices.iter_mut().enumerate() {
+            vertex.bulge = polyline.bulge(i);
+            if !polyline.widths.is_empty() {
+                [vertex.start_width, vertex.end_width] = polyline.widths_at(i);
+            }
+        }
+        flat.constant_width = polyline.width;
         flat.elevation = elevation;
         flat.is_closed = polyline.closed;
         EntityType::LwPolyline(flat)
@@ -363,6 +374,16 @@ fn dwg_polyline(polyline: &Polyline) -> EntityType {
             Polyline3D::from_points(polyline.points.iter().map(|&p| vector(p)).collect());
         spatial.flags.closed = polyline.closed;
         EntityType::Polyline3D(spatial)
+    }
+}
+
+/// A 2D solid, its corners round its outline written in AutoCAD's order:
+/// the third and fourth crossed, and a triangle's last corner twice.
+fn dwg_solid(solid: &Solid) -> DwgSolid {
+    let c = |i: usize| vector(solid.corners[i.min(solid.corners.len() - 1)]);
+    match solid.corners.len() {
+        3 => DwgSolid::new(c(0), c(1), c(2), c(2)),
+        _ => DwgSolid::new(c(0), c(1), c(3), c(2)),
     }
 }
 
@@ -563,18 +584,26 @@ fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
             layer,
             properties: Default::default(),
         }),
-        EntityType::LwPolyline(flat)
-            if flat.normal == Vector3::UNIT_Z
-                && flat.constant_width == 0.0
-                && flat.vertices.iter().all(is_plain_vertex) =>
+        EntityType::LwPolyline(flat) if flat.normal == Vector3::UNIT_Z => {
+            Object::Polyline(read_flat_polyline(flat, layer)?)
+        }
+        EntityType::Solid(solid)
+            if solid.normal == Vector3::UNIT_Z && solid.thickness == 0.0 && !solid.is_trace =>
         {
-            Object::Polyline(Polyline {
-                points: flat
-                    .vertices
-                    .iter()
-                    .map(|v| Point3::new(v.location.x, v.location.y, flat.elevation))
-                    .collect(),
-                closed: flat.is_closed,
+            let [first, second, third, fourth] = [
+                solid.first_corner,
+                solid.second_corner,
+                solid.third_corner,
+                solid.fourth_corner,
+            ]
+            .map(point);
+            let corners = if fourth == third {
+                vec![first, second, third]
+            } else {
+                vec![first, second, fourth, third]
+            };
+            Object::Solid(Solid {
+                corners,
                 layer,
                 properties: Default::default(),
             })
@@ -589,6 +618,9 @@ fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
                 closed: spatial.flags.closed,
                 layer,
                 properties: Default::default(),
+                bulges: Vec::new(),
+                width: 0.0,
+                widths: Vec::new(),
             })
         }
         EntityType::Arc(arc) if arc.normal == Vector3::UNIT_Z => Object::Arc(Arc {
@@ -643,8 +675,63 @@ fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
     Some(object)
 }
 
-fn is_plain_vertex(vertex: &LwVertex) -> bool {
-    vertex.bulge == 0.0 && vertex.start_width == 0.0 && vertex.end_width == 0.0
+/// A lightweight polyline: its points at its elevation, each one's bulge,
+/// and its widths: each point's when any gives one, else its constant
+/// width. One whose points give widths and a different constant width as
+/// well, or a width less than 0, has no model.
+fn read_flat_polyline(flat: &LwPolyline, layer: String) -> Option<Polyline> {
+    let vertices = &flat.vertices;
+    if vertices.iter().any(|v| {
+        !v.bulge.is_finite()
+            || !(v.start_width >= 0.0 && v.end_width >= 0.0)
+            || !v.start_width.is_finite()
+            || !v.end_width.is_finite()
+    }) || !(flat.constant_width >= 0.0 && flat.constant_width.is_finite())
+    {
+        return None;
+    }
+    let own_widths = vertices.iter().any(has_width);
+    let width = flat.constant_width;
+    if own_widths
+        && width != 0.0
+        && vertices
+            .iter()
+            .any(|v| v.start_width != width || v.end_width != width)
+    {
+        return None;
+    }
+    let bulges: Vec<f64> = if vertices.iter().any(|v| v.bulge != 0.0) {
+        vertices.iter().map(|v| v.bulge).collect()
+    } else {
+        Vec::new()
+    };
+    let (widths, width) = if own_widths && width == 0.0 {
+        (
+            vertices
+                .iter()
+                .map(|v| [v.start_width, v.end_width])
+                .collect(),
+            0.0,
+        )
+    } else {
+        (Vec::new(), width)
+    };
+    Some(Polyline {
+        points: vertices
+            .iter()
+            .map(|v| Point3::new(v.location.x, v.location.y, flat.elevation))
+            .collect(),
+        bulges,
+        widths,
+        width,
+        closed: flat.is_closed,
+        layer,
+        properties: Properties::default(),
+    })
+}
+
+fn has_width(vertex: &LwVertex) -> bool {
+    vertex.start_width != 0.0 || vertex.end_width != 0.0
 }
 
 /// A spline through fit points with AutoCAD's default fit, or a
@@ -1056,6 +1143,9 @@ mod tests {
             closed: false,
             layer: LAYER_ZERO.to_owned(),
             properties: Default::default(),
+            bulges: Vec::new(),
+            width: 0.0,
+            widths: Vec::new(),
         };
         let flat = polyline(vec![Point3::new(0.0, 0.0, 2.0), Point3::new(1.0, 0.0, 2.0)]);
         let EntityType::LwPolyline(written) = dwg_polyline(&flat) else {

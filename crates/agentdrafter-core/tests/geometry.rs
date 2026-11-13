@@ -282,3 +282,29 @@ objects:
     }
     assert_same_objects(&sheet, &read);
 }
+
+#[test]
+fn arcs_widths_donuts_and_solids_read_back() {
+    let (sheet, read) = build_and_read(
+        "arcs-widths",
+        "units: mm
+objects:
+         - polyline: {points: [{point: [0, 0, 0], bulge: 0.5, start_width: 1, end_width: 0.5}, {point: [10, 0, 0], arc_angle: -90}, [10, 10, 0]], closed: true}
+         - polyline: {points: [[0, 20, 2], [10, 20, 2]], width: 0.75}
+         - donut: {center: [30, 0, 0], inside_diameter: 1, outside_diameter: 3}
+         - solid: {corners: [[40, 0, 0], [44, 0, 0], [44, 2, 0], [40, 2, 0]]}
+         - solid: {corners: [[50, 0, 0], [54, 0, 0], [52, 3, 0]]}
+",
+    );
+    assert_eq!(read.objects.len(), 5);
+    assert_eq!(read.objects[0], sheet.objects[0]);
+    assert_eq!(read.objects[1], sheet.objects[1]);
+    // A donut is written as AutoCAD's DONUT writes it, and reads back as
+    // that polyline.
+    let Object::Donut(donut) = &sheet.objects[2] else {
+        panic!()
+    };
+    assert_eq!(read.objects[2], Object::Polyline(donut.polyline()));
+    assert_eq!(read.objects[3], sheet.objects[3]);
+    assert_eq!(read.objects[4], sheet.objects[4]);
+}

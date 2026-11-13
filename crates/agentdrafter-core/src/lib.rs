@@ -122,9 +122,9 @@ pub use error::{Error, ErrorCode};
 pub use interface::Interface;
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use model::{
-    Arc, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype, Lineweight, Object,
-    ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline, Properties, Sheet, Spline,
-    BY_BLOCK, BY_LAYER, CONTINUOUS, DEFAULT_LINEWEIGHT, LAYER_ZERO,
+    Arc, Circle, Donut, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype, Lineweight,
+    Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline, Properties, Sheet,
+    Solid, Spline, BY_BLOCK, BY_LAYER, CONTINUOUS, DEFAULT_LINEWEIGHT, LAYER_ZERO,
 };
 pub use model::{Cell, Paper};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};

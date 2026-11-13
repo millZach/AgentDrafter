@@ -48,6 +48,8 @@ A sheet's template is the file its row's path names, as the file system resolves
 | `add_hatch` | `HATCH` | Adds a hatch. |
 | `add_text` | `TEXT` | Adds a single line of text. |
 | `add_mtext` | `MTEXT` | Adds multiline text. |
+| `add_donut` | `DONUT` | Adds a donut. |
+| `add_solid` | `SOLID` | Adds a 2D solid. |
 | `insert_block` | `INSERT` | Adds an insert of a block from the block library. |
 | `change` | `CHANGE` | Sets keys of an object. |
 | `move` | `MOVE` | Moves an object. |
