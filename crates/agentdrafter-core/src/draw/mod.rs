@@ -570,12 +570,18 @@ impl<'a> Drawer<'a> {
         // and its wide segments filled.
         let flat_polyline = |polyline: &Polyline| -> Drawn {
             let points: Vec<Point2> = polyline.points.iter().map(|&p| flat(p)).collect();
+            // Wide dashes are cut in the block's own coordinates and then
+            // enlarged with it, so their pattern is shrunk by the insert's
+            // scale first, to keep its own lengths, as a thin one does.
+            let own = placed.map_or(1.0, |p| p.0.scale());
+            let wide_pattern: Option<Vec<f64>> =
+                pattern.map(|lengths| lengths.iter().map(|l| l / own).collect());
             let drawn = polyline::draw(
                 &points,
                 polyline.closed,
                 |i| polyline.bulge(i),
                 |i| polyline.widths_at(i),
-                pattern,
+                wide_pattern.as_deref(),
                 tolerance,
             );
             let mut runs = Vec::new();

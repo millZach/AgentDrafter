@@ -124,6 +124,12 @@ fn a_wrong_arc_or_width_is_refused() {
             "objects[0].polyline.points[0].point",
             &["point"],
         ),
+        (
+            "polyline: {points: [{point: [0, 0, 0], bulge: 1, start_width: 1}, [1, 0, 0]], width: 2}",
+            ErrorCode::BadValue,
+            "objects[0].polyline.points[0].start_width",
+            &["not both"],
+        ),
     ] {
         assert_names(&error(object), code, field, words);
     }

@@ -24,6 +24,8 @@ struct Extras {
     widths: Option<[f64; 2]>,
     /// The first key that gives an arc or a width, for an error.
     first: Option<(String, Node)>,
+    /// The first key that gives a width, for an error.
+    first_width: Option<(String, Node)>,
 }
 
 pub(super) fn polyline(fields: &Fields, units: Unit, layer: String) -> Result<Polyline, Error> {
@@ -62,7 +64,10 @@ pub(super) fn polyline(fields: &Fields, units: Unit, layer: String) -> Result<Po
                 return Err(bad_value(node, &path, "a width is 0 or more"));
             }
             if let Some(e) = extras.iter().find(|e| e.widths.is_some()) {
-                let (key, at) = e.first.clone().expect("a point with a width names its key");
+                let (key, at) = e
+                    .first_width
+                    .clone()
+                    .expect("a point with a width names its key");
                 return Err(bad_value(
                     &at,
                     &key,
@@ -177,6 +182,9 @@ fn vertex(node: &Node, path: &str, units: Unit, last: bool) -> Result<(Point3, E
             widths[i] = width;
             has_width = true;
             note(&mut extra, key, node);
+            if extra.first_width.is_none() {
+                extra.first_width = Some((path, node.clone()));
+            }
         }
     }
     if has_width {

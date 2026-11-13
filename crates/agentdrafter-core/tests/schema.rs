@@ -111,6 +111,24 @@ objects:
     json: r#"{"units": "mm", "objects": [{"solid": {"corners": V}}]}"#,
 };
 
+const WIDE_POINT: Place = Place {
+    name: "a point of a polyline with a constant width",
+    yaml: "units: mm\nobjects:\n  - polyline: {points: [V, [1, 0, 0]], width: 1}\n",
+    json: r#"{"units": "mm", "objects": [{"polyline": {"points": [V, [1, 0, 0]], "width": 1}}]}"#,
+};
+
+const POLYLINE_WIDTH: Place = Place {
+    name: "a polyline's width",
+    yaml: "units: mm\nobjects:\n  - polyline: {points: [[0, 0, 0], [1, 0, 0]], width: V}\n",
+    json: r#"{"units": "mm", "objects": [{"polyline": {"points": [[0, 0, 0], [1, 0, 0]], "width": V}}]}"#,
+};
+
+const DONUT_OUTSIDE: Place = Place {
+    name: "a donut's outside diameter",
+    yaml: "units: mm\nobjects:\n  - donut: {center: [0, 0, 0], outside_diameter: V}\n",
+    json: r#"{"units": "mm", "objects": [{"donut": {"center": [0, 0, 0], "outside_diameter": V}}]}"#,
+};
+
 const CLOSED: Place = Place {
     name: "a polyline's closed",
     yaml: "units: mm\nobjects:\n  - polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]], closed: V}\n",
@@ -506,10 +524,32 @@ fn cases() -> Vec<Case> {
         (&VERTEX, "{bulge: 1}", json!({"bulge": 1}), false),
         (&VERTEX, "{point: [0, 0, 0], sweep: 1}", json!({"point": [0, 0, 0], "sweep": 1}), false),
         (&VERTEX, "{point: [0, 0, 0], bulge: big}", json!({"point": [0, 0, 0], "bulge": "big"}), false),
+        (&VERTEX, "{point: [0, 0, 0], bulge: 1, arc_angle: 180}", json!({"point": [0, 0, 0], "bulge": 1, "arc_angle": 180}), false),
+        (&VERTEX, "{point: [0, 0, 0], arc_angle: 360}", json!({"point": [0, 0, 0], "arc_angle": 360}), false),
+        (&VERTEX, "{point: [0, 0, 0], arc_angle: -359.5}", json!({"point": [0, 0, 0], "arc_angle": -359.5}), true),
+        (&VERTEX, "{point: [0, 0, 0], start_width: -1}", json!({"point": [0, 0, 0], "start_width": -1}), false),
+        (&VERTEX, "{point: [0, 0, 0], end_width: '-1 mm'}", json!({"point": [0, 0, 0], "end_width": "-1 mm"}), false),
+        // A point's own widths are not given with the polyline's width.
+        (&WIDE_POINT, "[0, 0, 0]", json!([0, 0, 0]), true),
+        (&WIDE_POINT, "{point: [0, 0, 0], bulge: 1}", json!({"point": [0, 0, 0], "bulge": 1}), true),
+        (&WIDE_POINT, "{point: [0, 0, 0], start_width: 1}", json!({"point": [0, 0, 0], "start_width": 1}), false),
+        (&WIDE_POINT, "{point: [0, 0, 0], end_width: 0}", json!({"point": [0, 0, 0], "end_width": 0}), false),
+        // A polyline's width: a length of 0 or more.
+        (&POLYLINE_WIDTH, "0", json!(0), true),
+        (&POLYLINE_WIDTH, "0.5 in", json!("0.5 in"), true),
+        (&POLYLINE_WIDTH, "-1", json!(-1), false),
+        (&POLYLINE_WIDTH, "'-1 mm'", json!("-1 mm"), false),
+        // A donut's outside diameter: a length more than 0.
+        (&DONUT_OUTSIDE, "2", json!(2), true),
+        (&DONUT_OUTSIDE, "'0.1 in'", json!("0.1 in"), true),
+        (&DONUT_OUTSIDE, "0", json!(0), false),
+        (&DONUT_OUTSIDE, "'0 mm'", json!("0 mm"), false),
+        (&DONUT_OUTSIDE, "-2", json!(-2), false),
         // A donut's inside diameter: a length.
         (&DONUT_INSIDE, "0", json!(0), true),
         (&DONUT_INSIDE, "1 mm", json!("1 mm"), true),
         (&DONUT_INSIDE, "wide", json!("wide"), false),
+        (&DONUT_INSIDE, "-1", json!(-1), false),
         // A solid's corners: 3 or 4 points.
         (&SOLID_CORNERS, "[[0, 0, 0], [1, 0, 0], [1, 1, 0]]", json!([[0, 0, 0], [1, 0, 0], [1, 1, 0]]), true),
         (&SOLID_CORNERS, "[[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]]", json!([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]]), true),

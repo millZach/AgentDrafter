@@ -39,6 +39,9 @@ use crate::units::Unit;
 /// A plain decimal number, as `docs/sheet-description.md` defines it.
 pub(super) const NUMBER: &str = "-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?";
 
+/// A number as [`NUMBER`] writes it that is 0 or more: no sign.
+pub(super) const NOT_NEGATIVE_NUMBER: &str = "[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?";
+
 /// A number as [`NUMBER`] writes it that is more than 0: no sign, and a
 /// digit other than 0 before its exponent.
 pub(super) const POSITIVE_NUMBER: &str =
@@ -356,6 +359,32 @@ fn defs() -> Map<String, Value> {
 
     let mut defs = Map::new();
     defs.insert(
+        "length_not_negative".into(),
+        json!({
+            "description": "A length of 0 or more, written as a length is.",
+            "anyOf": [
+                { "type": "number", "minimum": 0 },
+                {
+                    "type": "string",
+                    "pattern": format!("^{NOT_NEGATIVE_NUMBER}( ?({unit_pattern}))?$"),
+                },
+            ],
+        }),
+    );
+    defs.insert(
+        "length_more_than_0".into(),
+        json!({
+            "description": "A length more than 0, written as a length is.",
+            "anyOf": [
+                { "type": "number", "exclusiveMinimum": 0 },
+                {
+                    "type": "string",
+                    "pattern": format!("^{POSITIVE_NUMBER}( ?({unit_pattern}))?$"),
+                },
+            ],
+        }),
+    );
+    defs.insert(
         "length".into(),
         json!({
             "description": format!(
@@ -585,7 +614,7 @@ fn defs() -> Map<String, Value> {
                     "minItems": 2,
                 },
                 "width": {
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                     "description": "The width of every segment, AutoCAD's constant width: a \
                                     length of 0 or more. Not with a point's own widths. Without \
                                     it, 0, a line.",
@@ -598,6 +627,25 @@ fn defs() -> Map<String, Value> {
             }),
         ),
     );
+    // A polyline's constant width is not given with a point's own widths.
+    if let Some(polyline) = defs.get_mut("polyline") {
+        polyline["if"] = json!({ "required": ["width"] });
+        polyline["then"] = json!({
+            "properties": {
+                "points": {
+                    "items": {
+                        "not": {
+                            "type": "object",
+                            "anyOf": [
+                                { "required": ["start_width"] },
+                                { "required": ["end_width"] },
+                            ],
+                        },
+                    },
+                },
+            },
+        });
+    }
     defs.insert(
         "polyline_point".into(),
         json!({
@@ -606,6 +654,7 @@ fn defs() -> Map<String, Value> {
                             open polyline starts no segment and gives neither.",
             "type": "object",
             "required": ["point"],
+            "not": { "required": ["bulge", "arc_angle"] },
             "additionalProperties": false,
             "properties": {
                 "point": { "$ref": "#/$defs/point" },
@@ -619,18 +668,21 @@ fn defs() -> Map<String, Value> {
                     ],
                 },
                 "arc_angle": {
-                    "$ref": "#/$defs/angle",
                     "description": "The segment's arc by its included angle in degrees, more than \
                                     -360 and less than 360, positive anticlockwise; 180 is a half \
                                     circle. Not with bulge.",
+                    "anyOf": [
+                        { "type": "number", "exclusiveMinimum": -360, "exclusiveMaximum": 360 },
+                        { "type": "string", "pattern": format!("^{NUMBER}$") },
+                    ],
                 },
                 "start_width": {
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                     "description": "The segment's width at its start: a length of 0 or more. \
                                     Without it, 0.",
                 },
                 "end_width": {
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                     "description": "The segment's width at its end: a length of 0 or more. \
                                     Without it, 0.",
                 },
@@ -647,12 +699,12 @@ fn defs() -> Map<String, Value> {
             json!({
                 "center": { "$ref": "#/$defs/point" },
                 "inside_diameter": {
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_not_negative",
                     "description": "A length of 0 or more and less than the outside diameter. \
                                     Without it, 0, a filled dot.",
                 },
                 "outside_diameter": {
-                    "$ref": "#/$defs/length",
+                    "$ref": "#/$defs/length_more_than_0",
                     "description": "A length more than 0.",
                 },
             }),

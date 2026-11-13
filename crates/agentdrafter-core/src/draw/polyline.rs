@@ -164,9 +164,17 @@ fn mitre(before: &mut Band, after: &mut Band) {
         (&mut before.left, &mut after.left),
         (&mut before.right, &mut after.right),
     ] {
-        let end = *edge_before.last().expect("an edge has two ends");
+        // Each edge is carried on along its own direction at the corner,
+        // which a tapered segment's edges do not share with its path.
+        let n = edge_before.len();
+        let end = edge_before[n - 1];
+        let into = [
+            end[0] - edge_before[n - 2][0],
+            end[1] - edge_before[n - 2][1],
+        ];
         let start = edge_after[0];
-        if let Some(corner) = crossing(end, u, start, v) {
+        let out = [edge_after[1][0] - start[0], edge_after[1][1] - start[1]];
+        if let Some(corner) = crossing(end, into, start, out) {
             *edge_before.last_mut().expect("an edge has two ends") = corner;
             edge_after[0] = corner;
         }
@@ -431,6 +439,34 @@ mod tests {
                 "{band:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_tapered_segment_is_mitred_along_its_own_edges() {
+        let widths = |i: usize| if i == 0 { [0.0, 4.0] } else { [4.0, 4.0] };
+        let drawn = draw(
+            &[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]],
+            false,
+            |_| 0.0,
+            widths,
+            None,
+            1e-3,
+        );
+        // The taper's edges, from (0, 0) to (10, +-2), carried on to the
+        // second segment's edges at x = 8 and x = 12.
+        let first = &drawn.fills[0];
+        assert!(
+            first
+                .iter()
+                .any(|p| (p[0] - 8.0).abs() < 1e-9 && (p[1] - 1.6).abs() < 1e-9),
+            "{first:?}"
+        );
+        assert!(
+            first
+                .iter()
+                .any(|p| (p[0] - 12.0).abs() < 1e-9 && (p[1] + 2.4).abs() < 1e-9),
+            "{first:?}"
+        );
     }
 
     #[test]
