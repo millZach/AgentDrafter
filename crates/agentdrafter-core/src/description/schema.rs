@@ -39,6 +39,11 @@ use crate::units::Unit;
 /// A plain decimal number, as `docs/sheet-description.md` defines it.
 pub(super) const NUMBER: &str = "-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?";
 
+/// A number as [`NUMBER`] writes it that is more than 0: no sign, and a
+/// digit other than 0 before its exponent.
+pub(super) const POSITIVE_NUMBER: &str =
+    "(0*[1-9][0-9]*(\\.[0-9]+)?|[0-9]+\\.[0-9]*[1-9][0-9]*)([eE][-+]?[0-9]+)?";
+
 /// The strict YAML subset, as both schemas' descriptions state it.
 pub(super) const SUBSET: &str =
     "It is written in a strict subset of YAML 1.2: one document; no anchors, \
@@ -542,7 +547,7 @@ fn defs() -> Map<String, Value> {
                             `ltscale`: a number more than 0, with no unit. Without it, 1.",
             "anyOf": [
                 { "type": "number", "exclusiveMinimum": 0 },
-                { "type": "string", "pattern": format!("^{NUMBER}$") },
+                { "type": "string", "pattern": format!("^{POSITIVE_NUMBER}$") },
             ],
         }),
     );
