@@ -68,6 +68,18 @@ _Avoid_: line style, dash pattern
 The pen width a layer, or an object of its own, plots with, one of AutoCAD's standard widths in millimetres. It is a width on paper, so it is not in the declared unit.
 _Avoid_: line width, pen size, thickness (a thickness is AutoCAD's extrusion of an object)
 
+**Bulge**:
+How a polyline's segment curves, as AutoCAD keeps it: the tangent of a quarter of the included angle of its arc, positive anticlockwise; 0 is straight and 1 a half circle. A sheet description may give the arc's included angle instead, as `arc_angle`.
+_Avoid_: curvature, arc factor
+
+**Donut**:
+A ring, or a filled dot when its inside diameter is 0, as AutoCAD's DONUT draws it: a closed polyline of two half circles, as wide as the ring, such as a wire's junction dot.
+_Avoid_: dot, ring, filled circle
+
+**2D solid**:
+A filled triangle or quadrilateral, AutoCAD's SOLID object. A sheet description lists its corners round the outline.
+_Avoid_: solid (alone it is a hatch's `SOLID` fill, or AutoCAD's 3D solid), filled polygon
+
 **Hatch**:
 An object that fills an area solid or with a hatch pattern, inside a boundary of closed loops, as in AutoCAD. It draws no outline of its own.
 _Avoid_: fill, shading, region (a region is AutoCAD's 2D solid object)

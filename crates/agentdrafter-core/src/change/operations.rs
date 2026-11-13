@@ -35,7 +35,7 @@ pub(crate) struct Spec {
 }
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 14] = [
+pub(crate) const SPECS: [Spec; 16] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -45,6 +45,8 @@ pub(crate) const SPECS: [Spec; 14] = [
     add("add_hatch", "HATCH", "hatch"),
     add("add_text", "TEXT", "text"),
     add("add_mtext", "MTEXT", "mtext"),
+    add("add_donut", "DONUT", "donut"),
+    add("add_solid", "SOLID", "solid"),
     add("insert_block", "INSERT", "insert"),
     Spec {
         name: "change",

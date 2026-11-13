@@ -97,6 +97,8 @@ A point is named as its key in the sheet description. Without one, the object's 
 | `circle`, `arc`, `ellipse` | `center` |
 | `spline` | `fit_points[0]`, ... or `control_points[0]`, ... |
 | `hatch` | none: measure from an object at its boundary |
+| `donut` | `center` |
+| `solid` | `corners[0]`, `corners[1]`, ... |
 
 ```json
 {"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-001","DEMO-002","DEMO-003"],"message":"18.179658962697843 in from the position of `DEMO-001/heading` to the position of `DEMO-001/objects[2]`, on sheet `DEMO-001`","kind":"measure","distance":18.179658962697843,"delta":[15.5,-9.5,0.0],"from":{"sheet":"DEMO-001","id":"DEMO-001/heading","type":"text","point":"position","at":[1.0,10.0,0.0]},"to":{"sheet":"DEMO-001","id":"DEMO-001/objects[2]","name":"title-block","type":"insert","point":"position","at":[16.5,0.5,0.0]}}}

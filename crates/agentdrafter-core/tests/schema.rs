@@ -84,6 +84,33 @@ objects: []
     json: r#"{"units": "mm", "ltscale": V, "objects": []}"#,
 };
 
+const VERTEX: Place = Place {
+    name: "a polyline's point",
+    yaml: "units: mm
+objects:
+  - polyline: {points: [V, [1, 0, 0]]}
+",
+    json: r#"{"units": "mm", "objects": [{"polyline": {"points": [V, [1, 0, 0]]}}]}"#,
+};
+
+const DONUT_INSIDE: Place = Place {
+    name: "a donut's inside diameter",
+    yaml: "units: mm
+objects:
+  - donut: {center: [0, 0, 0], inside_diameter: V, outside_diameter: 2}
+",
+    json: r#"{"units": "mm", "objects": [{"donut": {"center": [0, 0, 0], "inside_diameter": V, "outside_diameter": 2}}]}"#,
+};
+
+const SOLID_CORNERS: Place = Place {
+    name: "a solid's corners",
+    yaml: "units: mm
+objects:
+  - solid: {corners: V}
+",
+    json: r#"{"units": "mm", "objects": [{"solid": {"corners": V}}]}"#,
+};
+
 const CLOSED: Place = Place {
     name: "a polyline's closed",
     yaml: "units: mm\nobjects:\n  - polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]], closed: V}\n",
@@ -469,6 +496,25 @@ fn cases() -> Vec<Case> {
         (&LTSCALE, "big", json!("big"), false),
         (&LTSCALE, "'-1'", json!("-1"), false),
         (&LTSCALE, "'000'", json!("000"), false),
+        // A polyline's point: a point, or a mapping that gives its point.
+        (&VERTEX, "[0, 0, 0]", json!([0, 0, 0]), true),
+        (&VERTEX, "{point: [0, 0, 0]}", json!({"point": [0, 0, 0]}), true),
+        (&VERTEX, "{point: [0, 0, 0], bulge: 0.5}", json!({"point": [0, 0, 0], "bulge": 0.5}), true),
+        (&VERTEX, "{point: [0, 0, 0], bulge: '-1'}", json!({"point": [0, 0, 0], "bulge": "-1"}), true),
+        (&VERTEX, "{point: [0, 0, 0], arc_angle: 90}", json!({"point": [0, 0, 0], "arc_angle": 90}), true),
+        (&VERTEX, "{point: [0, 0, 0], start_width: 1 mm, end_width: 0}", json!({"point": [0, 0, 0], "start_width": "1 mm", "end_width": 0}), true),
+        (&VERTEX, "{bulge: 1}", json!({"bulge": 1}), false),
+        (&VERTEX, "{point: [0, 0, 0], sweep: 1}", json!({"point": [0, 0, 0], "sweep": 1}), false),
+        (&VERTEX, "{point: [0, 0, 0], bulge: big}", json!({"point": [0, 0, 0], "bulge": "big"}), false),
+        // A donut's inside diameter: a length.
+        (&DONUT_INSIDE, "0", json!(0), true),
+        (&DONUT_INSIDE, "1 mm", json!("1 mm"), true),
+        (&DONUT_INSIDE, "wide", json!("wide"), false),
+        // A solid's corners: 3 or 4 points.
+        (&SOLID_CORNERS, "[[0, 0, 0], [1, 0, 0], [1, 1, 0]]", json!([[0, 0, 0], [1, 0, 0], [1, 1, 0]]), true),
+        (&SOLID_CORNERS, "[[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]]", json!([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]]), true),
+        (&SOLID_CORNERS, "[[0, 0, 0], [1, 0, 0]]", json!([[0, 0, 0], [1, 0, 0]]), false),
+        (&SOLID_CORNERS, "[[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 0]]", json!([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 0]]), false),
         // closed: true or false, quoted or not.
         (&CLOSED, "true", json!(true), true),
         (&CLOSED, "'true'", json!("true"), true),

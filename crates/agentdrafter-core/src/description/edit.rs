@@ -22,6 +22,7 @@ use serde_json::{Map, Value};
 use super::emit::{number_text, scalar_text, Context, Emitter};
 use super::ids::{ID_KEY, NAME_KEY};
 use super::objects::{article, OBJECT_TYPES};
+use super::polyline::VERTEX_KEYS;
 use super::set::ROW_OBJECTS_KEY;
 use super::strict_yaml::{self, index_path, key_path, Entry, Kind, Node, Source, Style};
 use super::template::ROW_KEY;
@@ -258,7 +259,11 @@ impl RecordFile {
         ordered.sort_by_key(|(key, _)| order.iter().position(|k| k == key).unwrap_or(order.len()));
         let mut entries = Vec::with_capacity(ordered.len());
         for (key, value) in ordered {
-            entries.push(new_entry(key, node_of(value)));
+            let mut node = node_of(value);
+            if kind == "polyline" && key == "points" {
+                order_vertices(&mut node);
+            }
+            entries.push(new_entry(key, node));
         }
         let object = Node::new(Kind::Mapping(vec![new_entry(
             kind,
@@ -409,8 +414,16 @@ impl RecordFile {
                     keys.remove(p);
                 }
                 (Value::Null, None) => continue,
-                (value, Some(p)) => keys[p].value = node_of(value),
-                (value, None) => keys.push(new_entry(key, node_of(value))),
+                (value, position) => {
+                    let mut node = node_of(value);
+                    if kind == "polyline" && key == "points" {
+                        order_vertices(&mut node);
+                    }
+                    match position {
+                        Some(p) => keys[p].value = node,
+                        None => keys.push(new_entry(key, node)),
+                    }
+                }
             }
             edited = true;
         }
@@ -453,7 +466,10 @@ impl RecordFile {
                 | ("text" | "mtext" | "insert", "position") => {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
-                ("polyline", "points") | ("spline", "fit_points" | "control_points") => {
+                ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,
+                ("polyline", "points")
+                | ("spline", "fit_points" | "control_points")
+                | ("solid", "corners") => {
                     move_points(&mut entry.value, by, units, &field)?;
                 }
                 ("hatch", "boundary") => move_boundary(&mut entry.value, by, units, &field)?,
@@ -1065,6 +1081,24 @@ fn node_of(value: &Value) -> Node {
     }
 }
 
+/// Writes the keys of each of a polyline's points that is a mapping in the
+/// order a sheet description lists them: its point first.
+fn order_vertices(points: &mut Node) {
+    let Kind::Sequence(items) = &mut points.kind else {
+        return;
+    };
+    for item in items {
+        if let Kind::Mapping(keys) = &mut item.kind {
+            keys.sort_by_key(|k| {
+                VERTEX_KEYS
+                    .iter()
+                    .position(|v| *v == k.key)
+                    .unwrap_or(VERTEX_KEYS.len())
+            });
+        }
+    }
+}
+
 fn move_point(node: &mut Node, by: [f64; 3], units: Unit, field: &str) -> Result<(), Error> {
     let Kind::Sequence(coordinates) = &mut node.kind else {
         return Err(not_a_point(field));
@@ -1111,7 +1145,15 @@ fn move_points(node: &mut Node, by: [f64; 3], units: Unit, field: &str) -> Resul
         return Err(not_a_point(field));
     };
     for (i, point) in points.iter_mut().enumerate() {
-        move_point(point, by, units, &index_path(field, i))?;
+        let at = index_path(field, i);
+        // A polyline's point may be a mapping that gives its point.
+        if let Kind::Mapping(keys) = &mut point.kind {
+            for key in keys.iter_mut().filter(|k| k.key == "point") {
+                move_point(&mut key.value, by, units, &key_path(&at, "point"))?;
+            }
+        } else {
+            move_point(point, by, units, &at)?;
+        }
     }
     Ok(())
 }
