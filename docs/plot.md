@@ -127,7 +127,7 @@ What still differs: the trim line on the page's edge (above); AutoCAD writes its
 
 ## What is not offered yet
 
-- Paper-space layouts and viewports, and a scale other than 1:1: a sheet is model space plotted to extents.
+- Paper-space layouts and viewports, and a scale other than 1:1: a sheet is model space plotted at 1:1 onto its declared paper, or to its extents when it declares none.
 - A plot style's screening, grayscale, linetypes, line ends and joins and fill styles (listed under `not_followed` when a CTB sets them), and named plot styles (STB).
 - PDF layers from the drawing's layers, and PDF/A.
 - More than one sheet in one PDF.

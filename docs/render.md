@@ -50,7 +50,7 @@ Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of 
 {"stamp":1,"produced_by":"agentdrafter 0.0.0","sources":[{"kind":"sheet_description","path":"sheet-1.yaml","sha256":"…"},{"kind":"block_library","path":"blocks.yaml","sha256":"…"}],"revision":{"issued":false}}
 ```
 
-- `sources` holds a sheet description and the block library it names, when it names one, or a DWG alone; a PDF of a drawing set's sheet holds its template, the rows file and the block library.
+- `sources` holds a sheet description and the block library it names, when it names one; or a DWG, followed by its set's template and rows file when its build mark leads to its set, which its paper is read from ([the sheet size](plot.md#the-sheet-size)); a PDF of a drawing set's sheet holds its template, the rows file and the block library.
 - Each entry's `kind` is `sheet_description`, `dwg`, `block_library`, `template` or `rows`.
 - `path` is where the file was, from the PNG's folder when the two share a folder above them, with `/` between folders, so a PNG and its files moved together still find each other and the stamp names no folder above them. Otherwise it is the path in full.
 - `sha256` is the SHA-256 of the file's bytes, as the render read them.

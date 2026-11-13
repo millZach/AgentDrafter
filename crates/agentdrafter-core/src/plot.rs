@@ -154,8 +154,10 @@ pub struct PlotReport {
     /// The drawing's unit; none when a DWG has none the core knows, and it
     /// is plotted as millimetres.
     pub units: Option<Unit>,
-    /// The box round everything drawn, in drawing units: the sheet.
-    pub extents: Bounds,
+    /// The box round everything drawn, in drawing units; none when a sheet
+    /// that declares its paper draws nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extents: Option<Bounds>,
     /// The plot style the PDF was drawn through.
     pub plot_style: PlotStyleUsed,
     /// How many objects of each type were drawn, such as `{"line": 1}`.
@@ -486,7 +488,7 @@ fn plot_record(
         page: page.3,
         scale: 1.0,
         units: record.units,
-        extents: list.extents().unwrap_or(page.2),
+        extents: list.extents(),
         plot_style: used.clone(),
         objects: object_counts(sheet),
         objects_not_drawn: record.objects_not_drawn,

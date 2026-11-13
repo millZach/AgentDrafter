@@ -233,7 +233,7 @@ fn render_within(
     );
     check_size(view.width, view.height)?;
 
-    let pixmap = raster::rasterize(&list, &view).ok_or_else(|| {
+    let mut pixmap = raster::rasterize(&list, &view).ok_or_else(|| {
         Error::new(
             ErrorCode::WriteFailed,
             format!(
@@ -242,6 +242,13 @@ fn render_within(
             ),
         )
     })?;
+    // What lies off the paper is cut away, where the image is larger than
+    // the paper it fits.
+    if sheet.paper.is_some() {
+        if let Some((paper, _)) = draw::page_of(sheet, &list) {
+            raster::blank_outside(&mut pixmap, &view, paper);
+        }
+    }
     let stamp = Stamp::new(&record.read(), &output);
     let png = raster::png(&pixmap, &stamp.to_json(), pixels_per_millimetre).map_err(|e| {
         Error::new(

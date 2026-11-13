@@ -622,3 +622,29 @@ objects:
     let image = decode(&PathBuf::from(&report.png), report);
     assert!(image.inked(50, 25) && image.inked(99, 25) && !image.inked(5, 25));
 }
+
+/// An image larger than the paper it fits shows nothing that lies off the
+/// paper.
+#[test]
+fn a_render_fitted_to_a_larger_image_cuts_what_lies_off_the_paper() {
+    let dir = scratch("paper-fitted");
+    let source = dir.join("sheet.yaml");
+    fs::write(
+        &source,
+        "units: mm\npaper: [100, 50]\nobjects:\n  - line: {from: [10, 25, 0], to: [90, 25, 0]}\n  - line: {from: [10, 60, 0], to: [90, 60, 0]}\n",
+    )
+    .unwrap();
+    let mut request = RenderRequest::new(&source);
+    request.width = Some(100);
+    request.height = Some(100);
+    let report = render_with(&request, &Settings::default()).unwrap_or_else(|e| panic!("{e}"));
+    let image = decode(&PathBuf::from(&report.png), report);
+    // The paper fills the image's width and sits in its middle, 50 high;
+    // the line on it shows, the one 10 above it does not.
+    assert!(image.inked(50, 50));
+    for y in 0..25 {
+        for x in 0..100 {
+            assert!(!image.inked(x, y), "ink off the paper at ({x}, {y})");
+        }
+    }
+}

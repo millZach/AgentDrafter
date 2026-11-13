@@ -77,8 +77,9 @@ fn an_11x17_sheet_plots_at_exactly_431_8_by_279_4_mm() {
         assert_eq!(result.sheet_size.width_points, 1224.0);
         assert_eq!(result.sheet_size.height_points, 792.0);
         assert_eq!(result.scale, 1.0);
-        assert_eq!(result.extents.min, [0.0, 0.0]);
-        assert_eq!(result.extents.max, [17.0, 11.0]);
+        let extents = result.extents.unwrap();
+        assert_eq!(extents.min, [0.0, 0.0]);
+        assert_eq!(extents.max, [17.0, 11.0]);
         assert!(result.pdf.ends_with(&format!("{}.pdf", sheet.sheet)));
     }
 
@@ -599,8 +600,9 @@ paper: ANSI B landscape
         (431.8, 279.4)
     );
     // The extents are still what it draws, the line's end among them.
-    assert_eq!(report.extents.min, [0.5, 0.5]);
-    assert_eq!(report.extents.max, [20.0, 10.5]);
+    let extents = report.extents.unwrap();
+    assert_eq!(extents.min, [0.5, 0.5]);
+    assert_eq!(extents.max, [20.0, 10.5]);
 
     fs::write(
         &sheet,
@@ -632,4 +634,5 @@ objects: []
         (report.sheet_size.width_mm, report.sheet_size.height_mm),
         (100.0, 50.0)
     );
+    assert_eq!(report.extents, None, "it draws nothing");
 }
