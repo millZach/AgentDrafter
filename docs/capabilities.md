@@ -1,6 +1,6 @@
 # AutoCAD's capabilities against AgentDrafter's
 
-This page maps what AutoCAD lets a drafter do against what AgentDrafter does, and ranks the gap by what an agent drafting controls drawings needs most: loop sheets, PLC interconnects, panel layouts and network one-lines. Each capability has one issue. The ranking is a suggestion; the order of work is Zach's, and the order he agreed in [`docs/plan.md`](plan.md) stands until he changes it. It was written on 2026-11-13, at `main` 53ff845, and folds in the notes of a real controls job drawn with AgentDrafter that day, told here in made-up terms only (ADR-0008).
+This page maps what AutoCAD lets a drafter do against what AgentDrafter does, and ranks the gap by what an agent drafting controls drawings needs most: loop sheets, PLC interconnects, panel layouts and network one-lines. Each capability has one issue. Zach decided on 2026-11-13 that the work follows this ranking ([`docs/plan.md`](plan.md)). It was written on 2026-11-13, at `main` 53ff845, and folds in the notes of a real controls job drawn with AgentDrafter that day, told here in made-up terms only (ADR-0008).
 
 Every capability is done the same way, and each issue says so: the schema and the reader agree on it, an operation covers it with its AutoCAD command as an alias, all four interfaces reach it from the core's registry (ADR-0007), the PNG, the PDF and the viewer draw it through the one drawing pipeline (ADR-0011) as AutoCAD plots it, every DWG it writes passes the judge, and its page and glossary words land with it. An entry's AutoCAD words, such as layout or viewport, join [`CONTEXT.md`](../CONTEXT.md) when the entry is built, not before.
 
@@ -85,7 +85,7 @@ Already filed before this map, and not ranked again here: text underline and ove
 | 3. Dimensions and leaders | [#75](https://github.com/millZach/AgentDrafter/issues/75), [#76](https://github.com/millZach/AgentDrafter/issues/76), with [#74](https://github.com/millZach/AgentDrafter/issues/74) under them |
 | 4. Dynamic blocks placed in a chosen state | [#79](https://github.com/millZach/AgentDrafter/issues/79) |
 
-The ranking differs from the plan's order in one way: the real job generated every sheet and revised none, and what it paid for was on new sheets. So this ranking puts first what generating a plant's sheets cost that day, most of it small, and the foundations a plant's drawing needs either way, an object's own colour and arc polylines, then the objects controls sheets are full of, tables, leaders and dimensions, then layouts, and revising a plant's DWG after them. Either order builds the same issues.
+The ranking differs from the plan's order in one way: the real job generated every sheet and revised none, and what it paid for was on new sheets. So this ranking puts first what generating a plant's sheets cost that day, most of it small, and the foundations a plant's drawing needs either way, an object's own colour and arc polylines, then the objects controls sheets are full of, tables, leaders and dimensions, then layouts, and revising a plant's DWG after them. Zach chose this ranking on 2026-11-13; either order builds the same issues.
 
 ## What the map leaves out
 

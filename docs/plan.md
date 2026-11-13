@@ -41,6 +41,8 @@ In this order:
 3. **Dimensions and leaders.**
 4. **Dynamic blocks placed in a chosen state.**
 
+Zach decided on 2026-11-13 that the work after the first usable version follows the ranking in [`docs/capabilities.md`](capabilities.md), which a real controls job's notes shaped: the gaps generating a plant's sheets cost first, then tables, leaders, dimensions and layouts, then revising a plant's DWG. The four steps above are all in it, in that order's places.
+
 Later, order not yet set: carrying part of an old sheet into a generated one; batch edit and query across existing sets; 3D solids in the AutoCAD style (boxes, extrudes, unions and cuts in the same file as the 2D work); the drafting app for people. Every coordinate is 3D from the start so that 3D is not a rewrite.
 
 ## Rules of the engine
