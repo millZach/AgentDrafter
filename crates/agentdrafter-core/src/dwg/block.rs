@@ -124,6 +124,7 @@ pub(super) fn dwg_attribute_definition(
         ..AttributeFlags::default()
     };
     definition.layer.clone_into(&mut dwg.common.layer);
+    super::set_properties(&mut dwg.common, &definition.properties);
     dwg
 }
 
@@ -170,6 +171,7 @@ pub(super) fn dwg_insert(
             invisible: definition.invisible,
             ..AttributeFlags::default()
         };
+        super::set_properties(&mut dwg_attribute.common, &text.properties);
         dwg_attribute.common.layer = text.layer;
         dwg.attributes.push(dwg_attribute);
     }
@@ -230,6 +232,7 @@ pub(super) fn read_attribute_definition(
         justify,
         invisible: dwg.flags.invisible,
         layer,
+        properties: Default::default(),
     })
 }
 
@@ -261,6 +264,7 @@ pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> O
         attributes: Vec::with_capacity(definitions.len()),
         name: super::ids::read_name(&dwg.common),
         layer,
+        properties: Default::default(),
     };
     for (definition, dwg_attribute) in definitions.into_iter().zip(&dwg.attributes) {
         let value = read_attribute(dwg_attribute, &insert, block, definition)?;
@@ -293,7 +297,8 @@ fn read_attribute(
     } else {
         dwg.alignment_point
     };
-    let same = super::takes_layer_properties(&dwg.common)
+    let same = !dwg.common.invisible
+        && super::read_properties(&dwg.common).as_ref() == Some(&expected.properties)
         && dwg.tag == definition.tag
         && dwg.normal == Vector3::UNIT_Z
         && dwg.oblique_angle == 0.0
@@ -369,6 +374,7 @@ mod tests {
             justify,
             invisible: false,
             layer: LAYER_ZERO.into(),
+            properties: Default::default(),
         }
     }
 
@@ -402,6 +408,7 @@ mod tests {
             ],
             name: Some("mark-1".into()),
             layer: "symbols".into(),
+            properties: Default::default(),
         }
     }
 

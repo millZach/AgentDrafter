@@ -66,6 +66,7 @@ fn the_one_line_example_builds_to_a_2018_dwg_that_reads_back_the_same_line() {
             from: Point3::new(0.0, 0.0, 0.0),
             to: Point3::new(100.0, 50.0, 0.0),
             layer: "0".to_owned(),
+            properties: Default::default(),
         })]
     );
     assert_eq!(read.objects_not_read, 0);

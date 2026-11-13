@@ -377,6 +377,7 @@ mod tests {
             angle: 0.0,
             boundary,
             layer: LAYER_ZERO.into(),
+            properties: Default::default(),
         }
     }
 

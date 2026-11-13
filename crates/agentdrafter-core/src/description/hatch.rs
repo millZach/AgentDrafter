@@ -24,7 +24,17 @@ pub(crate) const HATCH_PATTERN_KEYS: [&str; 1] = ["lines"];
 pub(crate) const PATTERN_LINE_KEYS: [&str; 4] = ["angle", "origin", "delta", "dashes"];
 
 /// The keys a hatch takes.
-pub(crate) const HATCH_KEYS: [&str; 5] = ["pattern", "scale", "angle", "boundary", "layer"];
+pub(crate) const HATCH_KEYS: [&str; 9] = [
+    "pattern",
+    "scale",
+    "angle",
+    "boundary",
+    "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
+];
 
 /// The kinds of loop a hatch's boundary holds.
 pub(crate) const LOOP_TYPES: [&str; 2] = ["polyline", "edges"];
@@ -227,6 +237,7 @@ pub(super) fn hatch(
         angle,
         boundary,
         layer,
+        properties: Default::default(),
     })
 }
 

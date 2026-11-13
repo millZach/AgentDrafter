@@ -31,7 +31,7 @@ use crate::build::is_same_file;
 use crate::description::{read_sheet_record, SavedSet, SheetRecord};
 use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
-use crate::model::{Attribute, Object, Point3, Sheet, CONTINUOUS};
+use crate::model::{Attribute, Object, Point3, Sheet};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -1098,7 +1098,7 @@ fn extents(
 ///
 /// The extents follow the geometry, as AutoCAD's do, not the dashes a
 /// linetype lays along it: the sheet is drawn through the one pipeline with
-/// every layer continuous. Text still draws as its font draws it.
+/// every layer and object continuous. Text still draws as its font draws it.
 fn sheet_extents(record: &SheetRecord, fonts: &SheetFonts) -> Option<Extents> {
     measuring_drawing(&record.sheet, fonts)
         .extents()
@@ -1106,15 +1106,14 @@ fn sheet_extents(record: &SheetRecord, fonts: &SheetFonts) -> Option<Extents> {
 }
 
 /// The sheet drawn to measure it: through the one pipeline with every
-/// layer continuous, so that what it draws follows the geometry, not the
+/// layer and object continuous, so that what it draws follows the geometry, not the
 /// dashes a linetype lays along it, with its curves drawn within
 /// [`EXTENTS_TOLERANCE`] of its larger side. Text draws as its font draws
 /// it. Empty when the sheet draws nothing.
 pub(crate) fn measuring_drawing(sheet: &Sheet, fonts: &SheetFonts) -> DisplayList {
+    // With no linetype defined, every layer and object draws continuous.
     let mut sheet = sheet.clone();
-    for layer in &mut sheet.layers {
-        CONTINUOUS.clone_into(&mut layer.linetype);
-    }
+    sheet.linetypes.clear();
     let sheet = &sheet;
     // A coarse drawing, curves to within a unit, for the sheet's size; then
     // one fine enough to measure it by.

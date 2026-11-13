@@ -28,7 +28,7 @@ blocks:
 | Key | Required | What it is |
 |---|---|---|
 | `units` | yes | The library's declared unit, as a sheet's. A sheet draws only on a library in its own unit; a drawing set has one declared unit. |
-| `linetypes` | no | The linetypes the library's layers draw with, as a sheet's. |
+| `linetypes` | no | The linetypes the library's layers and objects draw with, as a sheet's. |
 | `layers` | no | The layers the blocks' objects sit on, as a sheet's. |
 | `hatch_patterns` | no | The hatch patterns the blocks' hatches fill with, as a sheet's. |
 | `text_styles` | no | The text styles the blocks' text and attributes draw with, as a sheet's. |
@@ -43,7 +43,7 @@ A block's name follows the rules for a layer's name: 1 to 255 characters, not st
 | `base_point` | no | The point of the block that sits at an insert's position, in the block's own coordinates: a point. Without it, `[0, 0, 0]`. |
 | `objects` | yes | The block's objects, in drawing order: at least one. Each is a mapping with one key, its type: any [object a sheet holds](sheet-description.md#objects) but `insert`, or `attdef`. An object names a layer, text style or hatch pattern of the library's. It takes no `id` and no `name`: an insert of the block is the object on a sheet, with an [ID and a name](sheet-description.md#ids-and-names) of its own. A `text` takes a [`cell`](#cells) as well. |
 
-An object on layer `0` in a block draws with the layer of the insert it is drawn by, as in AutoCAD; an object on any other layer draws with that layer.
+An object on layer `0` in a block draws with the layer of the insert it is drawn by, as in AutoCAD; an object on any other layer draws with that layer. An object, or an attribute definition, whose `color`, `linetype` or `lineweight` is `ByBlock` draws with the insert's own, as AutoCAD draws it; see [An object's own colour, linetype and lineweight](sheet-description.md#an-objects-own-colour-linetype-and-lineweight).
 
 ### Attribute definitions
 
@@ -62,6 +62,7 @@ An `attdef` is AutoCAD's ATTDEF: a labelled text field each insert of the block 
 | `justify` | no | Where the text sits against its position: one of a `text`'s justifications. Without it, `left`. |
 | `invisible` | no | `true` to hide the attribute on every insert, as AutoCAD's Invisible mode hides it. Without it, `false`. |
 | `layer` | no | The layer, as for every object. An attribute defined on layer `0` sits on the layer of each insert; one defined on any other layer sits on that layer. |
+| `color`, `linetype`, `lineweight`, `linetype_scale` | no | The attribute's own, as for every object; each insert's attribute is written with them. `ByBlock` takes the insert's. |
 | `cell` | no | The box the attribute draws within on each insert, such as its title-block cell. See [Cells](#cells). |
 
 ### Cells

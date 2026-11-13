@@ -385,6 +385,7 @@ mod tests {
             control_points: Vec::new(),
             degree: 3,
             layer: LAYER_ZERO.into(),
+            properties: Default::default(),
         };
         let points = spline(&through, 1e-4);
         for p in &fit {
@@ -399,6 +400,7 @@ mod tests {
             control_points: fit.clone(),
             degree: 2,
             layer: LAYER_ZERO.into(),
+            properties: Default::default(),
         };
         let points = spline(&by_control, 1e-4);
         close(points[0], [0.0, 95.0], 1e-12);
@@ -422,6 +424,7 @@ mod tests {
             control_points: Vec::new(),
             degree: 3,
             layer: LAYER_ZERO.into(),
+            properties: Default::default(),
         };
         let points = spline(&s, 1e-4);
         assert!(points.len() > 2, "{points:?}");
@@ -462,6 +465,7 @@ mod tests {
             start_angle: 0.0,
             end_angle: 180.0,
             layer: LAYER_ZERO.into(),
+            properties: Default::default(),
         };
         let points = ellipse(&e, 0.01);
         close(points[0], [40.0, 0.0], 1e-9);

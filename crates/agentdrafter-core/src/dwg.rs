@@ -28,8 +28,9 @@ use acadrust::{CadDocument, DwgReader, DwgWriter};
 use crate::description::{normalize_degrees, SheetRecord};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arc, Block, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype, Lineweight,
-    Object, Point3, Polyline, Spline, BUILT_IN_LINETYPES, FIT_DEGREE, LAYER_ZERO,
+    is_one, Arc, Block, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype,
+    Lineweight, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
+    Properties, Spline, BUILT_IN_LINETYPES, BY_BLOCK, BY_LAYER, CONTINUOUS, FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::Text as TextObject;
 use crate::units::Unit;
@@ -107,6 +108,9 @@ pub(crate) fn write_new_sheet(
     }
     let mut drawing = CadDocument::with_version(NEW_SHEET_VERSION);
     drawing.header.insertion_units = insertion_units(sheet.units);
+    if !is_one(&sheet.ltscale) {
+        drawing.header.linetype_scale = sheet.ltscale;
+    }
     drawing.header.measurement = i16::from(sheet.units.is_metric());
     drawing
         .summary_info
@@ -223,9 +227,9 @@ fn set_layer_properties(dwg_layer: &mut DwgLayer, layer: &Layer) {
     };
 }
 
-/// The DWG object for one of ours, on its layer. It takes its colour,
-/// linetype and lineweight from the layer, as acadrust's objects do unless
-/// told otherwise. An insert's block is one of `blocks`.
+/// The DWG object for one of ours, on its layer, with its own colour,
+/// linetype, lineweight and linetype scale where it gives them. An
+/// insert's block is one of `blocks`.
 fn dwg_object(
     object: &Object,
     start_of: &dyn Fn(&TextObject) -> Point3,
@@ -267,10 +271,76 @@ fn dwg_object(
             EntityType::Insert(block::dwg_insert(insert, definition, start_of)?)
         }
     };
-    object
-        .layer()
-        .clone_into(&mut dwg_object.common_mut().layer);
+    let common = dwg_object.common_mut();
+    object.layer().clone_into(&mut common.layer);
+    set_properties(common, object.properties());
     Ok(dwg_object)
+}
+
+/// Writes an object's own colour, linetype, lineweight and linetype scale
+/// on its DWG object. What is `ByLayer`, or a scale of 1, is left as
+/// acadrust makes it, so an object that gives none is written as before.
+pub(super) fn set_properties(common: &mut EntityCommon, properties: &Properties) {
+    match properties.color {
+        ObjectColor::ByLayer => {}
+        ObjectColor::ByBlock => common.color = Color::ByBlock,
+        ObjectColor::Index(index) => common.color = Color::Index(index),
+    }
+    match &properties.linetype {
+        ObjectLinetype::ByLayer => {}
+        ObjectLinetype::ByBlock => BY_BLOCK.clone_into(&mut common.linetype),
+        ObjectLinetype::Named(name) => name.clone_into(&mut common.linetype),
+    }
+    match properties.lineweight {
+        ObjectLineweight::ByLayer => {}
+        ObjectLineweight::ByBlock => common.line_weight = LineWeight::ByBlock,
+        ObjectLineweight::Default => common.line_weight = LineWeight::Default,
+        ObjectLineweight::Width(width) => {
+            common.line_weight = LineWeight::Value(width.hundredths());
+        }
+    }
+    if !is_one(&properties.linetype_scale) {
+        common.linetype_scale = properties.linetype_scale;
+    }
+}
+
+/// An object's own colour, linetype, lineweight and linetype scale as its
+/// DWG object holds them, if the core has a model for them: an index colour
+/// rather than a true colour, and a standard lineweight.
+pub(super) fn read_properties(common: &EntityCommon) -> Option<Properties> {
+    let color = match common.color {
+        Color::ByLayer => ObjectColor::ByLayer,
+        Color::ByBlock => ObjectColor::ByBlock,
+        Color::Index(index) if index >= 1 => ObjectColor::Index(index),
+        _ => return None,
+    };
+    let linetype = if common.linetype.is_empty() || common.linetype.eq_ignore_ascii_case(BY_LAYER) {
+        ObjectLinetype::ByLayer
+    } else if common.linetype.eq_ignore_ascii_case(BY_BLOCK) {
+        ObjectLinetype::ByBlock
+    } else if common.linetype.eq_ignore_ascii_case(CONTINUOUS) {
+        ObjectLinetype::Named(CONTINUOUS.to_owned())
+    } else {
+        ObjectLinetype::Named(common.linetype.clone())
+    };
+    let lineweight = match common.line_weight {
+        LineWeight::ByLayer => ObjectLineweight::ByLayer,
+        LineWeight::ByBlock => ObjectLineweight::ByBlock,
+        LineWeight::Default => ObjectLineweight::Default,
+        LineWeight::Value(hundredths) => {
+            ObjectLineweight::Width(Lineweight::from_hundredths(hundredths)?)
+        }
+    };
+    let linetype_scale = common.linetype_scale;
+    if !(linetype_scale.is_finite() && linetype_scale > 0.0) {
+        return None;
+    }
+    Some(Properties {
+        color,
+        linetype,
+        lineweight,
+        linetype_scale,
+    })
 }
 
 /// A polyline whose points share one `z` is a lightweight polyline at that
@@ -410,6 +480,7 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         objects,
         ids_and_names,
         objects_not_read,
+        ltscale: drawing.header.linetype_scale,
     })
 }
 
@@ -471,14 +542,15 @@ fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
     })
 }
 
-/// One of our objects, if the DWG object has a model in the core and takes
-/// its colour, linetype and lineweight from its layer. An insert is read
-/// only when its block is one of `blocks`.
+/// One of our objects, if the DWG object and its own colour, linetype,
+/// lineweight and linetype scale have a model in the core. An insert is
+/// read only when its block is one of `blocks`.
 fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
     let common = dwg_object.common();
-    if !takes_layer_properties(common) {
+    if common.invisible {
         return None;
     }
+    let properties = read_properties(common)?;
     let layer = if common.layer.is_empty() {
         LAYER_ZERO.to_owned()
     } else {
@@ -489,6 +561,7 @@ fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
             from: point(line.start),
             to: point(line.end),
             layer,
+            properties: Default::default(),
         }),
         EntityType::LwPolyline(flat)
             if flat.normal == Vector3::UNIT_Z
@@ -503,6 +576,7 @@ fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
                     .collect(),
                 closed: flat.is_closed,
                 layer,
+                properties: Default::default(),
             })
         }
         EntityType::Polyline3D(spatial)
@@ -514,6 +588,7 @@ fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
                 points: spatial.vertices.iter().map(|v| point(v.position)).collect(),
                 closed: spatial.flags.closed,
                 layer,
+                properties: Default::default(),
             })
         }
         EntityType::Arc(arc) if arc.normal == Vector3::UNIT_Z => Object::Arc(Arc {
@@ -522,11 +597,13 @@ fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
             start_angle: normalize_degrees(arc.start_angle.to_degrees()),
             end_angle: normalize_degrees(arc.end_angle.to_degrees()),
             layer,
+            properties: Default::default(),
         }),
         EntityType::Circle(circle) if circle.normal == Vector3::UNIT_Z => Object::Circle(Circle {
             center: point(circle.center),
             radius: circle.radius,
             layer,
+            properties: Default::default(),
         }),
         EntityType::Ellipse(ellipse)
             if ellipse.normal == Vector3::UNIT_Z && ellipse.major_axis.z == 0.0 =>
@@ -548,6 +625,7 @@ fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
                 start_angle,
                 end_angle,
                 layer,
+                properties: Default::default(),
             })
         }
         EntityType::Spline(spline) => Object::Spline(read_spline(spline, layer)?),
@@ -560,16 +638,9 @@ fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
         EntityType::Insert(insert) => Object::Insert(block::read_insert(insert, layer, blocks)?),
         _ => return None,
     };
+    let mut object = object;
+    *object.properties_mut() = properties;
     Some(object)
-}
-
-/// Whether an object is visible and draws with its layer's colour, linetype
-/// and lineweight, which is all the core's model of an object knows.
-fn takes_layer_properties(common: &EntityCommon) -> bool {
-    common.color == Color::ByLayer
-        && common.line_weight == LineWeight::ByLayer
-        && (common.linetype.is_empty() || common.linetype.eq_ignore_ascii_case("ByLayer"))
-        && !common.invisible
 }
 
 fn is_plain_vertex(vertex: &LwVertex) -> bool {
@@ -593,6 +664,7 @@ fn read_spline(spline: &DwgSpline, layer: String) -> Option<Spline> {
             control_points: Vec::new(),
             degree: FIT_DEGREE,
             layer,
+            properties: Default::default(),
         });
     }
     let degree = u8::try_from(spline.degree).ok()?;
@@ -614,6 +686,7 @@ fn read_spline(spline: &DwgSpline, layer: String) -> Option<Spline> {
         control_points: points(&spline.control_points),
         degree,
         layer,
+        properties: Default::default(),
     })
 }
 
@@ -793,6 +866,7 @@ mod tests {
             blocks: Vec::new(),
             objects: Vec::new(),
             paper: None,
+            ltscale: 1.0,
         }
     }
 
@@ -899,6 +973,7 @@ mod tests {
             from: Point3::new(0.0, 0.0, 0.0),
             to: Point3::new(1.0, 0.0, 0.0),
             layer: LAYER_ZERO.to_owned(),
+            properties: Default::default(),
         }));
         let error = write_new_sheet(&record(sheet), &|t| t.position, &ON_ITS_OWN).unwrap_err();
         assert_eq!(error.code, ErrorCode::DwgWrite);
@@ -961,6 +1036,7 @@ mod tests {
                 start_angle,
                 end_angle,
                 layer: LAYER_ZERO.to_owned(),
+                properties: Default::default(),
             })
         };
         let across = arc(300.0, 60.0);
@@ -979,6 +1055,7 @@ mod tests {
             points,
             closed: false,
             layer: LAYER_ZERO.to_owned(),
+            properties: Default::default(),
         };
         let flat = polyline(vec![Point3::new(0.0, 0.0, 2.0), Point3::new(1.0, 0.0, 2.0)]);
         let EntityType::LwPolyline(written) = dwg_polyline(&flat) else {
@@ -990,11 +1067,56 @@ mod tests {
     }
 
     #[test]
-    fn an_object_with_its_own_colour_is_not_read_as_one_of_ours() {
+    fn an_objects_own_properties_are_read_and_a_true_colour_is_not() {
         let mut line = DwgLine::from_points(Vector3::ZERO, Vector3::UNIT_X);
-        assert!(read_object(&EntityType::Line(line.clone()), &[]).is_some());
+        let read = read_object(&EntityType::Line(line.clone()), &[]).unwrap();
+        assert!(read.properties().is_by_layer());
         line.common.color = Color::Index(1);
+        line.common.linetype = "Hidden".to_owned();
+        line.common.line_weight = LineWeight::Value(35);
+        line.common.linetype_scale = 0.5;
+        let read = read_object(&EntityType::Line(line.clone()), &[]).unwrap();
+        assert_eq!(
+            *read.properties(),
+            Properties {
+                color: ObjectColor::Index(1),
+                linetype: ObjectLinetype::Named("Hidden".to_owned()),
+                lineweight: ObjectLineweight::Width(Lineweight::from_hundredths(35).unwrap()),
+                linetype_scale: 0.5,
+            }
+        );
+        line.common.color = Color::ByBlock;
+        line.common.linetype = "BYBLOCK".to_owned();
+        line.common.line_weight = LineWeight::ByBlock;
+        let read = read_object(&EntityType::Line(line.clone()), &[]).unwrap();
+        assert_eq!(read.properties().color, ObjectColor::ByBlock);
+        assert_eq!(read.properties().linetype, ObjectLinetype::ByBlock);
+        assert_eq!(read.properties().lineweight, ObjectLineweight::ByBlock);
+        line.common.color = Color::Rgb { r: 1, g: 2, b: 3 };
         assert!(read_object(&EntityType::Line(line), &[]).is_none());
+    }
+
+    #[test]
+    fn an_objects_own_properties_are_written_and_by_layer_is_left_as_it_was() {
+        let plain = DwgLine::from_points(Vector3::ZERO, Vector3::UNIT_X).common;
+        let mut common = plain.clone();
+        set_properties(&mut common, &Properties::default());
+        assert_eq!(common.color, plain.color);
+        assert_eq!(common.linetype, plain.linetype);
+        assert_eq!(common.line_weight, plain.line_weight);
+        assert_eq!(common.linetype_scale, plain.linetype_scale);
+        let own = Properties {
+            color: ObjectColor::ByBlock,
+            linetype: ObjectLinetype::Named("Hidden".to_owned()),
+            lineweight: ObjectLineweight::Default,
+            linetype_scale: 2.0,
+        };
+        set_properties(&mut common, &own);
+        assert_eq!(common.color, Color::ByBlock);
+        assert_eq!(common.linetype, "Hidden");
+        assert_eq!(common.line_weight, LineWeight::Default);
+        assert_eq!(common.linetype_scale, 2.0);
+        assert_eq!(read_properties(&common), Some(own));
     }
 
     /// `CONTEXT.md` says drawing and object. acadrust's own names, which

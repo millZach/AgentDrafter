@@ -58,6 +58,7 @@ fn every_object_type_reads() {
             points: vec![P0, Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 5.0, 0.0)],
             closed: true,
             layer: on_zero(),
+            properties: Default::default(),
         })
     );
     assert_eq!(
@@ -68,6 +69,7 @@ fn every_object_type_reads() {
             start_angle: 30.0,
             end_angle: 120.0,
             layer: on_zero(),
+            properties: Default::default(),
         })
     );
     assert_eq!(
@@ -76,6 +78,7 @@ fn every_object_type_reads() {
             center: Point3::new(1.0, 2.0, 3.0),
             radius: 4.0,
             layer: on_zero(),
+            properties: Default::default(),
         })
     );
     assert_eq!(
@@ -87,6 +90,7 @@ fn every_object_type_reads() {
             start_angle: 0.0,
             end_angle: 360.0,
             layer: on_zero(),
+            properties: Default::default(),
         })
     );
     assert_eq!(
@@ -96,6 +100,7 @@ fn every_object_type_reads() {
             control_points: Vec::new(),
             degree: 3,
             layer: on_zero(),
+            properties: Default::default(),
         })
     );
     assert_eq!(
@@ -105,6 +110,7 @@ fn every_object_type_reads() {
             control_points: vec![P0, Point3::new(5.0, 5.0, 0.0), Point3::new(10.0, 0.0, 0.0)],
             degree: 2,
             layer: on_zero(),
+            properties: Default::default(),
         })
     );
 }
@@ -160,6 +166,7 @@ objects:
                 center: Point3::new(25.4, 0.0, 0.0),
                 radius: 10.0,
                 layer: on_zero(),
+                properties: Default::default(),
             }),
             Object::Ellipse(Ellipse {
                 center: P0,
@@ -168,6 +175,7 @@ objects:
                 start_angle: 0.0,
                 end_angle: 360.0,
                 layer: on_zero(),
+                properties: Default::default(),
             }),
         ]
     );
@@ -237,6 +245,7 @@ fn layers_carry_colour_linetype_and_lineweight_from_a_linetype_definition() {
             from: P0,
             to: Point3::new(10.0, 0.0, 0.0),
             layer: "hidden".into(),
+            properties: Default::default(),
         })
     );
     assert_eq!(sheet.objects[1].layer(), "0");

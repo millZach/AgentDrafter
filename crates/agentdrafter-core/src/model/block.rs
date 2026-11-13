@@ -103,6 +103,8 @@ pub struct AttributeDefinition {
     pub invisible: bool,
     #[serde(default = "layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: crate::model::Properties,
 }
 
 /// One attribute an insert carries: the value of the block's attribute
@@ -135,6 +137,8 @@ pub struct Insert {
     pub name: Option<String>,
     #[serde(default = "layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: crate::model::Properties,
 }
 
 /// The blocks a drawing set shares, each defined once, with the layers,
@@ -183,6 +187,7 @@ pub fn attribute_text(
         rotation: normalize_degrees(definition.rotation + insert.rotation),
         justify: definition.justify,
         layer,
+        properties: definition.properties.clone(),
     }
 }
 
@@ -252,6 +257,7 @@ pub(crate) fn definition_text(definition: &AttributeDefinition) -> Text {
         rotation: definition.rotation,
         justify: definition.justify,
         layer: definition.layer.clone(),
+        properties: definition.properties.clone(),
     }
 }
 
@@ -272,6 +278,7 @@ mod tests {
             justify: Justify::MiddleCenter,
             invisible: false,
             layer: layer.into(),
+            properties: Default::default(),
         }
     }
 
@@ -284,6 +291,7 @@ mod tests {
             attributes: Vec::new(),
             name: None,
             layer: "symbols".into(),
+            properties: Default::default(),
         }
     }
 

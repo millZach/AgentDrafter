@@ -107,6 +107,7 @@ fn a_library_reads_its_blocks_with_their_attribute_definitions() {
             center: Point3::new(0.0, 0.0, 0.0),
             radius: 5.0,
             layer: "symbols".into(),
+            properties: Default::default(),
         })
     );
     assert_eq!(
@@ -123,6 +124,7 @@ fn a_library_reads_its_blocks_with_their_attribute_definitions() {
             justify: Justify::MiddleCenter,
             invisible: false,
             layer: "symbols".into(),
+            properties: Default::default(),
         })
     );
     assert_eq!(
@@ -139,6 +141,7 @@ fn a_library_reads_its_blocks_with_their_attribute_definitions() {
             justify: Justify::Left,
             invisible: true,
             layer: "hidden".into(),
+            properties: Default::default(),
         })
     );
     let arrow = &library.blocks[1];
@@ -170,6 +173,7 @@ fn an_insert_reads_every_key_and_fills_in_attributes_it_leaves_out() {
             ],
             name: Some("m1".into()),
             layer: "0".into(),
+            properties: Default::default(),
         })]
     );
     let plain = with_library(&one_object("insert: {block: ARROW, position: [0, 0, 0]}"));
@@ -326,7 +330,7 @@ fn an_inserts_values_are_checked() {
             "insert: {block: MARKER, position: [0, 0, 0], colour: red}",
             ErrorCode::UnknownKey,
             "objects[0].insert.colour",
-            &["an insert takes block, position, scale, rotation, attributes, layer, id, name"],
+            &["an insert takes block, position, scale, rotation, attributes, layer, color, linetype, lineweight, linetype_scale, id, name"],
         ),
         (
             "insert: {position: [0, 0, 0]}",

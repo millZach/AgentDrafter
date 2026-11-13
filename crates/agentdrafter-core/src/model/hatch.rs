@@ -32,6 +32,8 @@ pub struct Hatch {
     pub boundary: Vec<HatchLoop>,
     #[serde(default = "layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: crate::model::Properties,
 }
 
 impl Hatch {

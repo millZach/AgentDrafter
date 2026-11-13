@@ -181,6 +181,7 @@ pub(super) fn read_hatch(dwg_hatch: &DwgHatch, layer: String) -> Option<Hatch> {
         angle,
         boundary,
         layer,
+        properties: Default::default(),
     })
 }
 

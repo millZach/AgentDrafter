@@ -123,7 +123,8 @@ pub use interface::Interface;
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use model::{
     Arc, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype, Lineweight, Object,
-    Point3, Polyline, Sheet, Spline, CONTINUOUS, LAYER_ZERO,
+    ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline, Properties, Sheet, Spline,
+    BY_BLOCK, BY_LAYER, CONTINUOUS, DEFAULT_LINEWEIGHT, LAYER_ZERO,
 };
 pub use model::{Cell, Paper};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};

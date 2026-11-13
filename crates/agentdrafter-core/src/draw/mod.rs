@@ -6,10 +6,17 @@
 //! What is drawn follows AutoCAD's plot of the same DWG, seen in AutoCAD
 //! 2026's plots of made-up sheets:
 //!
-//! - Each object draws with its layer's colour, linetype and lineweight. A
-//!   layer with no lineweight of its own draws with AutoCAD's default,
-//!   0.25 mm. A lineweight is a width on paper, so the display list keeps
-//!   it in millimetres and each output turns it into its own units.
+//! - Each object draws with its own colour, linetype and lineweight where
+//!   it gives them, and its layer's where they are `ByLayer`. One drawn by
+//!   an insert takes the insert's where they are `ByBlock`; one on the
+//!   sheet draws `ByBlock` white, continuous and at the default
+//!   lineweight, as AutoCAD draws it. A layer with no lineweight of its
+//!   own draws with AutoCAD's default, 0.25 mm. A lineweight is a width on
+//!   paper, so the display list keeps it in millimetres and each output
+//!   turns it into its own units.
+//! - A linetype's dashes and gaps are enlarged by the sheet's `ltscale`
+//!   times the object's own linetype scale, AutoCAD's LTSCALE and
+//!   CELTSCALE.
 //! - A linetype repeats along each line, arc, circle, ellipse and spline,
 //!   and along each segment of a flat polyline, laid out so that both ends
 //!   draw alike ([`linetype`]). A 3D polyline draws continuous, as AutoCAD
@@ -47,7 +54,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::block::{definition_text, Placement};
 use crate::model::{
-    attribute_text, Block, Insert, Layer, Object, Point3, Sheet, CONTINUOUS, LAYER_ZERO,
+    attribute_text, Block, Insert, Layer, Object, ObjectColor, ObjectLinetype, ObjectLineweight,
+    Point3, Properties, Sheet, CONTINUOUS, LAYER_ZERO, WHITE,
 };
 use crate::text::placement::SheetFonts;
 
@@ -242,14 +250,35 @@ impl DisplayList {
     }
 }
 
-/// How a layer draws its objects, resolved.
+/// How an object draws, resolved from its own properties, its layer's and
+/// its insert's.
 #[derive(Clone, Copy)]
 struct Pen<'a> {
     color: Color,
-    /// The linetype's pattern; none for a continuous line.
+    /// The linetype's pattern, as defined; none for a continuous line.
     pattern: Option<&'a [f64]>,
+    /// What the pattern's lengths are enlarged by.
+    scale: f64,
     /// Millimetres on paper.
     lineweight: f64,
+}
+
+impl Pen<'_> {
+    /// How a `ByBlock` object on the sheet itself draws, outside any
+    /// insert: white, continuous, at the default lineweight, as AutoCAD
+    /// draws it.
+    const OUTSIDE_A_BLOCK: Pen<'static> = Pen {
+        color: Color(WHITE),
+        pattern: None,
+        scale: 1.0,
+        lineweight: DEFAULT_LINEWEIGHT,
+    };
+
+    /// The pattern with its lengths enlarged by the scale.
+    fn dashes(&self) -> Option<Vec<f64>> {
+        self.pattern
+            .map(|pattern| pattern.iter().map(|l| l * self.scale).collect())
+    }
 }
 
 /// What one object draws, in its own coordinates.
@@ -326,9 +355,52 @@ struct Drawer<'a> {
 }
 
 impl<'a> Drawer<'a> {
+    /// How an object with `properties` on the layer named `layer` draws:
+    /// with `by_block` where a property is `ByBlock`, the pen of the insert
+    /// that draws it, if any.
+    fn pen(&self, layer: &str, properties: &Properties, by_block: Option<Pen<'a>>) -> Pen<'a> {
+        let by_layer = self.layer_pen(layer);
+        let by_block = by_block.unwrap_or(Pen::OUTSIDE_A_BLOCK);
+        let color = match properties.color {
+            ObjectColor::ByLayer => by_layer.color,
+            ObjectColor::ByBlock => by_block.color,
+            ObjectColor::Index(index) => Color(index),
+        };
+        let pattern = match &properties.linetype {
+            ObjectLinetype::ByLayer => by_layer.pattern,
+            ObjectLinetype::ByBlock => by_block.pattern,
+            ObjectLinetype::Named(name) => self.pattern(name),
+        };
+        let lineweight = match properties.lineweight {
+            ObjectLineweight::ByLayer => by_layer.lineweight,
+            ObjectLineweight::ByBlock => by_block.lineweight,
+            ObjectLineweight::Default => DEFAULT_LINEWEIGHT,
+            ObjectLineweight::Width(width) => width.millimetres(),
+        };
+        Pen {
+            color,
+            pattern,
+            scale: self.sheet.ltscale * properties.linetype_scale,
+            lineweight,
+        }
+    }
+
+    /// The pattern of the linetype named `name`; none for `Continuous`, or
+    /// for a linetype the sheet does not define.
+    fn pattern(&self, name: &str) -> Option<&'a [f64]> {
+        if name.eq_ignore_ascii_case(CONTINUOUS) {
+            return None;
+        }
+        self.sheet
+            .linetypes
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
+            .map(|t| t.pattern.as_slice())
+    }
+
     /// How the layer named `name` draws, layer `0`'s defaults for a layer
     /// the sheet does not define.
-    fn pen(&self, name: &str) -> Pen<'a> {
+    fn layer_pen(&self, name: &str) -> Pen<'a> {
         let sheet = self.sheet;
         let layer = sheet
             .layers
@@ -341,18 +413,10 @@ impl<'a> Drawer<'a> {
                     .find(|l| l.name.eq_ignore_ascii_case(name))
             })
             .unwrap_or(&self.layer_zero);
-        let pattern = if layer.linetype.eq_ignore_ascii_case(CONTINUOUS) {
-            None
-        } else {
-            sheet
-                .linetypes
-                .iter()
-                .find(|t| t.name.eq_ignore_ascii_case(&layer.linetype))
-                .map(|t| t.pattern.as_slice())
-        };
         Pen {
             color: Color(layer.color),
-            pattern,
+            pattern: self.pattern(&layer.linetype),
+            scale: 1.0,
             lineweight: layer
                 .lineweight
                 .map_or(DEFAULT_LINEWEIGHT, |w| w.millimetres()),
@@ -374,7 +438,7 @@ impl<'a> Drawer<'a> {
             self.insert(index, insert, tolerance, list);
             return;
         }
-        let pen = self.pen(object.layer());
+        let pen = self.pen(object.layer(), object.properties(), None);
         let drawn = self.object(object, pen, tolerance, None);
         if drawn.cut_short {
             list.hatches_cut_short
@@ -394,6 +458,8 @@ impl<'a> Drawer<'a> {
             return;
         };
         let placed = Placed::of(insert, block);
+        // What the block's `ByBlock` objects draw with.
+        let insert_pen = self.pen(&insert.layer, &insert.properties, None);
         // Curves are made chords in the block's own coordinates, then
         // enlarged: to keep within the tolerance once enlarged, they are
         // made finer.
@@ -408,7 +474,7 @@ impl<'a> Drawer<'a> {
                 LAYER_ZERO => insert.layer.as_str(),
                 layer => layer,
             };
-            let pen = self.pen(layer);
+            let pen = self.pen(layer, object.properties(), Some(insert_pen));
             let drawn = self.object(object, pen, within, Some(&placed));
             if drawn.cut_short {
                 let cut = self.cut_short(index, object, Some(&block.name));
@@ -441,7 +507,7 @@ impl<'a> Drawer<'a> {
                 .find(|a| a.tag == definition.tag)
                 .map_or(definition.default.as_str(), |a| a.value.as_str());
             let text = attribute_text(insert, block, definition, value);
-            let pen = self.pen(&text.layer);
+            let pen = self.pen(&text.layer, &text.properties, Some(insert_pen));
             let lettering = text::draw_text(&text, self.fonts, pen.lineweight, tolerance);
             list.add(index, Some(part), pen.color, lettering.shapes, Vec::new());
             list.add_text(index, Some(part), lettering.runs);
@@ -461,6 +527,8 @@ impl<'a> Drawer<'a> {
         tolerance: f64,
         placed: Option<&Placed>,
     ) -> Drawn {
+        let dashes = pen.dashes();
+        let pattern = dashes.as_deref();
         let path = |points: Vec<Point2>| -> Vec<Point2> {
             match placed {
                 Some(placed) => points.into_iter().map(|p| placed.point(p)).collect(),
@@ -498,7 +566,7 @@ impl<'a> Drawer<'a> {
         match object {
             Object::Line(line) => stroke(linetype::along(
                 &path(vec![flat(line.from), flat(line.to)]),
-                pen.pattern,
+                pattern,
                 false,
             )),
             Object::Polyline(polyline) => {
@@ -511,7 +579,7 @@ impl<'a> Drawer<'a> {
                     // A flat polyline starts its linetype again at each vertex.
                     let mut runs = Vec::new();
                     for segment in points.windows(2) {
-                        runs.extend(linetype::along(segment, pen.pattern, false));
+                        runs.extend(linetype::along(segment, pattern, false));
                     }
                     stroke(runs)
                 } else {
@@ -527,7 +595,7 @@ impl<'a> Drawer<'a> {
                     arc.end_angle,
                     tolerance,
                 )),
-                pen.pattern,
+                pattern,
                 false,
             )),
             Object::Circle(circle) => stroke(linetype::along(
@@ -536,17 +604,17 @@ impl<'a> Drawer<'a> {
                     circle.radius,
                     tolerance,
                 )),
-                pen.pattern,
+                pattern,
                 true,
             )),
             Object::Ellipse(ellipse) => stroke(linetype::along(
                 &path(curves::ellipse(ellipse, tolerance)),
-                pen.pattern,
+                pattern,
                 ellipse.is_whole(),
             )),
             Object::Spline(spline) => stroke(linetype::along(
                 &path(curves::spline(spline, tolerance)),
-                pen.pattern,
+                pattern,
                 false,
             )),
             Object::Hatch(h) => {

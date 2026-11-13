@@ -142,7 +142,9 @@ fn a_blocks_objects_take_no_id() {
     assert_eq!(e.code, ErrorCode::UnknownKey);
     assert_eq!(e.field.as_deref(), Some("blocks.B.objects[0].circle.id"));
     assert!(
-        e.message.ends_with("a circle takes center, radius, layer"),
+        e.message.ends_with(
+            "a circle takes center, radius, layer, color, linetype, lineweight, linetype_scale"
+        ),
         "{e:?}"
     );
 }

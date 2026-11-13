@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
     build_set_with, change_set_schema, change_with, operations, query_with, read_dwg, Answer,
-    ChangeReport, ChangeRequest, ErrorCode, Object, Query, QueryRequest, Reply, Selection,
-    SetBuildRequest, Settings, JOURNAL_FILE, LOCK_FILE, MARK_FILE,
+    ChangeReport, ChangeRequest, ErrorCode, Object, ObjectColor, ObjectLineweight, Query,
+    QueryRequest, Reply, Selection, SetBuildRequest, Settings, JOURNAL_FILE, LOCK_FILE, MARK_FILE,
 };
 use serde_json::{json, Value};
 
@@ -536,7 +536,8 @@ fn a_failed_operation_names_itself_and_lists_the_valid_choices() {
     );
     assert_eq!(e.code, ErrorCode::UnknownKey);
     assert!(
-        e.message.contains("from, to, layer, id, name"),
+        e.message
+            .contains("from, to, layer, color, linetype, lineweight, linetype_scale, id, name"),
         "{}",
         e.message
     );
@@ -593,6 +594,49 @@ fn a_failed_operation_names_itself_and_lists_the_valid_choices() {
     );
     assert_eq!(e.field.as_deref(), Some("operations[0].set.id"));
     assert!(e.message.contains("fixed for its life"));
+}
+
+#[test]
+fn change_sets_an_objects_own_properties_and_a_null_gives_back_its_layers() {
+    let set = demo_set("own-properties");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "add_circle", "sheet": "DEMO-003", "center": [5, 5, 0], "radius": 0.5, "name": "spot", "color": "red", "lineweight": 0.5},
+        ]}),
+    );
+    let spot = |set: &Path| {
+        let Object::Circle(spot) = built(set, "DEMO-003")["DEMO-003/circle-1"].clone() else {
+            panic!()
+        };
+        spot.properties
+    };
+    assert_eq!(spot(&set).color, ObjectColor::Index(1));
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "change", "target": {"name": "spot"}, "set": {"color": "ByBlock", "linetype_scale": 2, "lineweight": null}},
+        ]}),
+    );
+    let changed = spot(&set);
+    assert_eq!(changed.color, ObjectColor::ByBlock);
+    assert_eq!(changed.lineweight, ObjectLineweight::ByLayer);
+    assert_eq!(changed.linetype_scale, 2.0);
+    let reply = apply(
+        &set,
+        json!({"operations": [{"op": "change", "target": {"name": "spot"}, "set": {"color": 300}}]}),
+    );
+    assert!(!reply.ok);
+    let report = reply.result.unwrap();
+    let e = report
+        .operations
+        .into_iter()
+        .find(|o| !o.ok)
+        .unwrap()
+        .error
+        .unwrap();
+    assert_eq!(e.field.as_deref(), Some("operations[0].set.color"));
+    assert!(e.message.contains("ByLayer"), "{}", e.message);
 }
 
 #[test]

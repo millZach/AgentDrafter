@@ -18,7 +18,7 @@ use crate::units::Unit;
 pub(crate) const TEXT_STYLE_KEYS: [&str; 2] = ["font", "width_factor"];
 
 /// The keys a single line of text takes.
-pub(crate) const TEXT_KEYS: [&str; 8] = [
+pub(crate) const TEXT_KEYS: [&str; 12] = [
     "contents",
     "position",
     "height",
@@ -27,10 +27,14 @@ pub(crate) const TEXT_KEYS: [&str; 8] = [
     "rotation",
     "justify",
     "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
 ];
 
 /// The keys multiline text takes.
-pub(crate) const MTEXT_KEYS: [&str; 9] = [
+pub(crate) const MTEXT_KEYS: [&str; 13] = [
     "contents",
     "position",
     "height",
@@ -40,6 +44,10 @@ pub(crate) const MTEXT_KEYS: [&str; 9] = [
     "rotation",
     "justify",
     "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
 ];
 
 pub(super) fn text_styles(node: &Node) -> Result<Vec<TextStyle>, Error> {
@@ -106,6 +114,7 @@ pub(super) fn text(
         rotation: rotation(fields)?,
         justify: justify(fields)?,
         layer,
+        properties: Default::default(),
     })
 }
 
@@ -156,6 +165,7 @@ pub(super) fn mtext(
         rotation: rotation(fields)?,
         justify: attachment(fields)?,
         layer,
+        properties: Default::default(),
     })
 }
 

@@ -5,9 +5,12 @@
 //! in case are refused as well.
 
 use super::strict_yaml::{index_path, key_path, Entry, Kind, Node};
-use super::{at, bad_value, choice, length, scalar, sequence, wrong_type, Fields};
+use super::{at, bad_value, choice, length, plain_number, scalar, sequence, wrong_type, Fields};
 use crate::error::{Error, ErrorCode};
-use crate::model::{Layer, Linetype, Lineweight, BUILT_IN_LINETYPES, CONTINUOUS, LAYER_ZERO};
+use crate::model::{
+    Layer, Linetype, Lineweight, ObjectColor, ObjectLinetype, ObjectLineweight, Properties,
+    BUILT_IN_LINETYPES, BY_BLOCK, BY_LAYER, CONTINUOUS, DEFAULT_LINEWEIGHT, LAYER_ZERO,
+};
 use crate::units::{parse_length, LengthError, Unit};
 
 /// The keys a linetype takes.
@@ -81,7 +84,7 @@ pub(super) fn layers(node: &Node, linetypes: &[Linetype]) -> Result<Vec<Layer>, 
         let fields = Fields::of(&entry.value, &path, &LAYER_KEYS, "a layer")?;
         let mut layer = Layer::new(entry.key.clone());
         if let Some(node) = fields.get("color") {
-            layer.color = colour(node, &fields.path_of("color"))?;
+            layer.color = colour(node, &fields.path_of("color"), "")?;
         }
         if let Some(node) = fields.text("linetype") {
             layer.linetype = linetype_name(node, &fields.path_of("linetype"), linetypes)?;
@@ -92,6 +95,65 @@ pub(super) fn layers(node: &Node, linetypes: &[Linetype]) -> Result<Vec<Layer>, 
         layers.push(layer);
     }
     Ok(layers)
+}
+
+/// The keys every object takes for a colour, linetype, lineweight and
+/// linetype scale of its own, besides its layer.
+pub(crate) const PROPERTY_KEYS: [&str; 4] = ["color", "linetype", "lineweight", "linetype_scale"];
+
+/// An object's own colour, linetype, lineweight and linetype scale: each
+/// `ByLayer` unless the object gives it. `linetypes` are those the
+/// object's sheet or block library defines.
+pub(super) fn properties(fields: &Fields, linetypes: &[Linetype]) -> Result<Properties, Error> {
+    let mut properties = Properties::default();
+    if let Some(node) = fields.get("color") {
+        let path = fields.path_of("color");
+        properties.color = match &node.kind {
+            Kind::Scalar(text) if text == BY_LAYER => ObjectColor::ByLayer,
+            Kind::Scalar(text) if text == BY_BLOCK => ObjectColor::ByBlock,
+            _ => ObjectColor::Index(colour(node, &path, "`ByLayer`, `ByBlock`, ")?),
+        };
+    }
+    if let Some(node) = fields.text("linetype") {
+        let path = fields.path_of("linetype");
+        let mut choices = vec![BY_LAYER, BY_BLOCK, CONTINUOUS];
+        choices.extend(linetypes.iter().map(|l| l.name.as_str()));
+        properties.linetype = ObjectLinetype::from(named(node, &path, "linetype", &choices)?);
+    }
+    if let Some(node) = fields.get("lineweight") {
+        let path = fields.path_of("lineweight");
+        properties.lineweight = match &node.kind {
+            Kind::Scalar(text) if text == BY_LAYER => ObjectLineweight::ByLayer,
+            Kind::Scalar(text) if text == BY_BLOCK => ObjectLineweight::ByBlock,
+            Kind::Scalar(text) if text == DEFAULT_LINEWEIGHT => ObjectLineweight::Default,
+            _ => ObjectLineweight::Width(lineweight(node, &path).map_err(|e| Error {
+                message: format!(
+                    "{}; or `{BY_LAYER}`, `{BY_BLOCK}` or `{DEFAULT_LINEWEIGHT}`",
+                    e.message
+                ),
+                ..e
+            })?),
+        };
+    }
+    if let Some(node) = fields.get("linetype_scale") {
+        properties.linetype_scale = linetype_scale(node, &fields.path_of("linetype_scale"))?;
+    }
+    Ok(properties)
+}
+
+/// A linetype scale: a number more than 0, with no unit, that a linetype's
+/// dashes and gaps are enlarged by.
+pub(super) fn linetype_scale(node: &Node, path: &str) -> Result<f64, Error> {
+    let scale = plain_number(node, path, "a linetype scale, a number such as `0.5`")?;
+    if scale > 0.0 {
+        Ok(scale)
+    } else {
+        Err(bad_value(
+            node,
+            path,
+            "a linetype scale is more than 0: how much a linetype's dashes and gaps are enlarged",
+        ))
+    }
 }
 
 /// The name of a layer an object sits on: `0` or one of the sheet's layers.
@@ -203,9 +265,11 @@ fn pattern(node: &Node, path: &str, units: Unit) -> Result<Vec<f64>, Error> {
     Err(bad_value(node, path, problem))
 }
 
-fn colour(node: &Node, path: &str) -> Result<u8, Error> {
+/// A colour index, by number or name. `more` names what else the value
+/// may be, for the error, such as `ByLayer, ByBlock, `.
+fn colour(node: &Node, path: &str, more: &str) -> Result<u8, Error> {
     let choices = format!(
-        "a colour is an AutoCAD colour index from 1 to 255, or one of {}",
+        "a colour is {more}an AutoCAD colour index from 1 to 255, or one of {}",
         colour_names()
     );
     let text = choice(node, path, "a colour", &choices)?;

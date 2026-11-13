@@ -45,15 +45,27 @@ What the judge counts when it compares AutoCAD's reading of an original with its
 _Avoid_: entity count, geometry
 
 **Layer**:
-A named group of objects in a drawing, as in AutoCAD. An object sits on one layer and draws with the layer's colour, linetype and lineweight.
+A named group of objects in a drawing, as in AutoCAD. An object sits on one layer and draws with the layer's colour, linetype and lineweight, unless it gives its own.
 _Avoid_: level, class
 
+**ByLayer**:
+An object's colour, linetype or lineweight taken from its layer, as AutoCAD's ByLayer is. Each of an object's is ByLayer unless it gives its own.
+_Avoid_: default, inherit
+
+**ByBlock**:
+An object's colour, linetype or lineweight taken from the insert that draws the object's block, as AutoCAD's ByBlock is, so one block draws in different colours on different inserts. On the sheet itself, outside any block, it draws white, continuous and at the default lineweight.
+_Avoid_: from parent
+
+**Linetype scale**:
+What a linetype's dashes and gaps are enlarged by where an object draws them: the sheet's `ltscale`, AutoCAD's LTSCALE, times the object's own `linetype_scale`. An insert's scale does not enlarge them.
+_Avoid_: dash scale, pattern scale (a hatch's scale enlarges its pattern)
+
 **Linetype**:
-A named pattern of dashes, gaps and dots that a layer draws its objects with, such as `HIDDEN`. Every linetype but `Continuous` comes from a definition in the sheet description.
+A named pattern of dashes, gaps and dots that a layer, or an object of its own, draws with, such as `HIDDEN`. Every linetype but `Continuous` comes from a definition in the sheet description.
 _Avoid_: line style, dash pattern
 
 **Lineweight**:
-The pen width a layer plots with, one of AutoCAD's standard widths in millimetres. It is a width on paper, so it is not in the declared unit.
+The pen width a layer, or an object of its own, plots with, one of AutoCAD's standard widths in millimetres. It is a width on paper, so it is not in the declared unit.
 _Avoid_: line width, pen size, thickness (a thickness is AutoCAD's extrusion of an object)
 
 **Hatch**:

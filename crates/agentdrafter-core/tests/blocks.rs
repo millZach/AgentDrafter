@@ -272,3 +272,39 @@ fn an_insert_of_a_missing_block_or_attribute_is_an_error_listing_the_choices() {
         assert!(!dir.join("bad.dwg").exists(), "no DWG is written");
     }
 }
+
+#[test]
+fn a_blocks_own_properties_and_its_inserts_read_back() {
+    let dir = scratch("own-properties");
+    fs::write(
+        dir.join("blocks.yaml"),
+        "units: mm
+linetypes:
+  DOTS: {pattern: [0, -1]}
+blocks:
+  B:
+    objects:
+               - line: {from: [0, 0, 0], to: [10, 0, 0], color: ByBlock, linetype: DOTS, lineweight: ByBlock}
+               - attdef: {tag: TAG, position: [0, 5, 0], height: 2, color: ByBlock, lineweight: 0.5}
+",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("sheet.yaml"),
+        "units: mm
+block_library: blocks.yaml
+objects:
+         - insert: {block: B, position: [0, 0, 0], attributes: {TAG: X}, color: 6, lineweight: 0.7}
+         - insert: {block: B, position: [0, 20, 0], attributes: {TAG: Y}}
+",
+    )
+    .unwrap();
+    let (sheet, _, read) = build_and_read(&dir.join("sheet.yaml"));
+    assert_same_objects(&sheet, &read);
+    assert_same_block(&sheet.blocks[0], &read);
+    assert!(
+        read.linetypes.iter().any(|t| t.name == "DOTS"),
+        "{:?}",
+        read.linetypes
+    );
+}

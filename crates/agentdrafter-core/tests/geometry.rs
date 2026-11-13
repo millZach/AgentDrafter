@@ -67,6 +67,7 @@ fn assert_same_objects(sheet: &Sheet, read: &DrawingContents) {
                 w.center == r.center
                     && w.radius == r.radius
                     && w.layer == r.layer
+                    && w.properties == r.properties
                     && close(w.start_angle, r.start_angle)
                     && close(w.end_angle, r.end_angle)
             }
@@ -75,6 +76,7 @@ fn assert_same_objects(sheet: &Sheet, read: &DrawingContents) {
                     && w.major_axis == r.major_axis
                     && w.ratio == r.ratio
                     && w.layer == r.layer
+                    && w.properties == r.properties
                     && close(w.start_angle, r.start_angle)
                     && close(w.end_angle, r.end_angle)
             }
@@ -248,4 +250,35 @@ objects:
     assert_eq!(circle.center, Point3::new(1.0, 0.0, 0.0));
     assert_eq!(circle.radius, 12.0);
     assert_eq!(read.units, Some(Unit::In));
+}
+
+#[test]
+fn an_objects_own_properties_and_the_sheets_ltscale_read_back() {
+    let (sheet, read) = build_and_read(
+        "own-properties",
+        "units: mm
+ltscale: 2.5
+linetypes:
+  DASHED: {pattern: [5, -2.5]}
+layers:
+  wiring: {color: red}
+objects:
+         - line: {from: [0, 0, 0], to: [10, 0, 0], layer: wiring, color: 3, linetype: DASHED, lineweight: 0.35, linetype_scale: 0.5}
+         - line: {from: [0, 1, 0], to: [10, 1, 0], color: ByBlock, linetype: ByBlock, lineweight: ByBlock}
+         - polyline: {points: [[0, 2, 0], [10, 2, 0]], linetype: Continuous, lineweight: Default}
+         - arc: {center: [0, 0, 0], radius: 5, start_angle: 0, end_angle: 90, color: 250}
+         - circle: {center: [0, 0, 0], radius: 3, lineweight: 2.11}
+         - ellipse: {center: [0, 0, 0], major_axis: [4, 0, 0], ratio: 0.5, color: ByLayer}
+         - spline: {fit_points: [[0, 0, 0], [1, 1, 0], [2, 0, 0]], linetype_scale: 3}
+         - hatch: {pattern: SOLID, boundary: [{polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}], color: 8}
+         - text: {contents: A, position: [0, 0, 0], height: 1, color: 2}
+         - mtext: {contents: B, position: [0, 0, 0], height: 1, lineweight: 0.5}
+",
+    );
+    assert_eq!(read.ltscale, 2.5);
+    assert_eq!(read.objects.len(), sheet.objects.len());
+    for (wrote, came_back) in sheet.objects.iter().zip(&read.objects) {
+        assert_eq!(wrote.properties(), came_back.properties(), "{wrote:?}");
+    }
+    assert_same_objects(&sheet, &read);
 }
