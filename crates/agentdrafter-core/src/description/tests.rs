@@ -41,8 +41,10 @@ fn reads_one_line() {
                 from: Point3::new(0.0, 0.0, 0.0),
                 to: Point3::new(100.0, 50.0, 0.0),
                 layer: "0".to_owned(),
+                properties: Default::default(),
             })],
             paper: None,
+            ltscale: 1.0,
         }
     );
 }
@@ -77,6 +79,7 @@ fn a_number_with_its_own_unit_is_converted_to_the_declared_unit() {
             from: Point3::new(25.4, 500.0, 0.0),
             to: Point3::new(20.0, -304.8, 3.0),
             layer: "0".to_owned(),
+            properties: Default::default(),
         })]
     );
 }
@@ -136,7 +139,7 @@ fn an_unknown_key_is_named() {
     let e = error("units: mm\nobjects:\n  - line:\n      form: [0, 0, 0]\n");
     assert_eq!(
         e.message,
-        "unknown key `form`; a line takes from, to, layer, id, name"
+        "unknown key `form`; a line takes from, to, layer, color, linetype, lineweight, linetype_scale, id, name"
     );
 }
 

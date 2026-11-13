@@ -59,9 +59,10 @@ pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
 pub(crate) use template::{read_template, read_template_in, template_at};
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 8] = [
+pub(crate) const SHEET_KEYS: [&str; 9] = [
     "units",
     "block_library",
+    "ltscale",
     "linetypes",
     "layers",
     "hatch_patterns",
@@ -341,6 +342,10 @@ fn sheet_and_records(
         Some(node) => text::text_styles(node)?,
         None => Vec::new(),
     };
+    let ltscale = match fields.get("ltscale") {
+        Some(node) => layers::linetype_scale(node, "ltscale")?,
+        None => 1.0,
+    };
     let paper = match fields.get(paper::PAPER_KEY) {
         Some(node) => Some(paper::paper(node, paper::PAPER_KEY, units)?),
         None => None,
@@ -348,6 +353,7 @@ fn sheet_and_records(
     let list = sequence(fields.require("objects")?, "objects", "a list of objects")?;
     let tables = Tables {
         units,
+        linetypes: &linetypes,
         layers: &layers,
         hatch_patterns: &hatch_patterns,
         styles: &text_styles,
@@ -390,6 +396,7 @@ fn sheet_and_records(
         blocks: Vec::new(),
         objects,
         paper,
+        ltscale,
     };
     if let Some(library) = &library {
         blocks::take_from_library(&mut sheet, library, &fields)?;
@@ -721,3 +728,6 @@ mod id_tests;
 
 #[cfg(test)]
 mod edit_tests;
+
+#[cfg(test)]
+mod property_tests;

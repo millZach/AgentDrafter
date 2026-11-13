@@ -8,7 +8,7 @@
 use super::blocks::{attribute_definition, insert, ATTDEF_KEYS, BLOCK_TEXT_KEYS, INSERT_KEYS};
 use super::hatch::{self, HATCH_KEYS};
 use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
-use super::layers::layer_name;
+use super::layers::{layer_name, properties};
 use super::strict_yaml::{index_path, key_path, Kind, Node, Pos};
 use super::text::{mtext, text, MTEXT_KEYS, TEXT_KEYS};
 use super::{
@@ -17,8 +17,8 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arc, BlockLibrary, Circle, Ellipse, HatchPattern, Layer, Line, Object, Polyline, Spline,
-    FIT_DEGREE, LAYER_ZERO,
+    Arc, BlockLibrary, Circle, Ellipse, HatchPattern, Layer, Line, Linetype, Object, Polyline,
+    Spline, FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
@@ -87,6 +87,7 @@ const fn same_name(a: &str, b: &str) -> bool {
 /// and the layers, hatch patterns and text styles defined beside them.
 pub(super) struct Tables<'a> {
     pub units: Unit,
+    pub linetypes: &'a [Linetype],
     pub layers: &'a [Layer],
     pub hatch_patterns: &'a [HatchPattern],
     pub styles: &'a [TextStyle],
@@ -129,19 +130,66 @@ impl Place<'_> {
     }
 }
 
-const LINE_KEYS: [&str; 3] = ["from", "to", "layer"];
-const POLYLINE_KEYS: [&str; 3] = ["points", "closed", "layer"];
-const ARC_KEYS: [&str; 5] = ["center", "radius", "start_angle", "end_angle", "layer"];
-const CIRCLE_KEYS: [&str; 3] = ["center", "radius", "layer"];
-const ELLIPSE_KEYS: [&str; 6] = [
+const LINE_KEYS: [&str; 7] = [
+    "from",
+    "to",
+    "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
+];
+const POLYLINE_KEYS: [&str; 7] = [
+    "points",
+    "closed",
+    "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
+];
+const ARC_KEYS: [&str; 9] = [
+    "center",
+    "radius",
+    "start_angle",
+    "end_angle",
+    "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
+];
+const CIRCLE_KEYS: [&str; 7] = [
+    "center",
+    "radius",
+    "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
+];
+const ELLIPSE_KEYS: [&str; 10] = [
     "center",
     "major_axis",
     "ratio",
     "start_angle",
     "end_angle",
     "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
 ];
-const SPLINE_KEYS: [&str; 4] = ["fit_points", "control_points", "degree", "layer"];
+const SPLINE_KEYS: [&str; 8] = [
+    "fit_points",
+    "control_points",
+    "degree",
+    "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
+];
 
 /// The article an object type takes in a message: `an` for `arc`,
 /// `ellipse`, `insert` and `mtext`, `a` for the others.
@@ -223,6 +271,7 @@ pub(super) fn object(
         Some(node) => layer_name(node, &fields.path_of("layer"), tables.layers)?,
         None => LAYER_ZERO.to_owned(),
     };
+    let properties = properties(&fields, tables.linetypes)?;
     let units = tables.units;
     let mut object = match (entry.key.as_str(), &mut *place) {
         ("line", _) => line(&fields, units, layer).map(Object::Line),
@@ -244,6 +293,7 @@ pub(super) fn object(
         }
         (other, _) => unreachable!("object type `{other}` is listed but not read"),
     }?;
+    *object.properties_mut() = properties;
     if let Place::Sheet { objects, .. } = place {
         let record = object_record(&fields, node, place_in_file, objects)?;
         // An insert keeps its name in the model too, as it has since blocks.
@@ -260,6 +310,7 @@ fn line(fields: &Fields, units: Unit, layer: String) -> Result<Line, Error> {
         from: point(fields.require("from")?, &fields.path_of("from"), units)?,
         to: point(fields.require("to")?, &fields.path_of("to"), units)?,
         layer,
+        properties: Default::default(),
     })
 }
 
@@ -276,6 +327,7 @@ fn polyline(fields: &Fields, units: Unit, layer: String) -> Result<Polyline, Err
         points,
         closed,
         layer,
+        properties: Default::default(),
     })
 }
 
@@ -289,6 +341,7 @@ fn arc(fields: &Fields, units: Unit, layer: String) -> Result<Arc, Error> {
         start_angle,
         end_angle,
         layer,
+        properties: Default::default(),
     })
 }
 
@@ -317,6 +370,7 @@ fn circle(fields: &Fields, units: Unit, layer: String) -> Result<Circle, Error> 
         center: point(fields.require("center")?, &fields.path_of("center"), units)?,
         radius: radius(fields, units)?,
         layer,
+        properties: Default::default(),
     })
 }
 
@@ -389,6 +443,7 @@ fn ellipse(fields: &Fields, units: Unit, layer: String) -> Result<Ellipse, Error
         start_angle,
         end_angle,
         layer,
+        properties: Default::default(),
     })
 }
 
@@ -437,7 +492,7 @@ fn spline(fields: &Fields, units: Unit, layer: String) -> Result<Spline, Error> 
                 fit_points,
                 control_points: Vec::new(),
                 degree: FIT_DEGREE,
-                layer,
+                layer, properties: Default::default(),
             })
         }
         (None, Some(control)) => {
@@ -462,7 +517,7 @@ fn spline(fields: &Fields, units: Unit, layer: String) -> Result<Spline, Error> 
                 fit_points: Vec::new(),
                 control_points,
                 degree,
-                layer,
+                layer, properties: Default::default(),
             })
         }
         (Some(_), Some(control)) => Err(at(

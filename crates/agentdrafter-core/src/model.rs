@@ -79,6 +79,8 @@ pub struct Line {
     pub to: Point3,
     #[serde(default = "layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: Properties,
 }
 
 /// Straight segments through two or more points, joined end to end.
@@ -93,6 +95,8 @@ pub struct Polyline {
     pub closed: bool,
     #[serde(default = "layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: Properties,
 }
 
 /// Part of a circle, drawn anticlockwise from `start_angle` to `end_angle`.
@@ -107,6 +111,8 @@ pub struct Arc {
     pub end_angle: f64,
     #[serde(default = "layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: Properties,
 }
 
 /// A circle in the plane parallel to XY at its centre's `z`.
@@ -116,6 +122,8 @@ pub struct Circle {
     pub radius: f64,
     #[serde(default = "layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: Properties,
 }
 
 /// An ellipse, or part of one, in the plane parallel to XY at its centre's `z`.
@@ -134,6 +142,8 @@ pub struct Ellipse {
     pub end_angle: f64,
     #[serde(default = "layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: Properties,
 }
 
 impl Ellipse {
@@ -160,10 +170,13 @@ pub struct Spline {
     pub degree: u8,
     #[serde(default = "layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: Properties,
 }
 
 /// A single thing on a sheet. Each sits on a layer and draws with its
-/// layer's colour, linetype and lineweight.
+/// layer's colour, linetype and lineweight unless its [`Properties`] give
+/// its own.
 ///
 /// It is written as `{"type": "line", ...}` in JSON.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -218,6 +231,247 @@ impl Object {
             Object::MText(o) => &o.layer,
             Object::AttributeDefinition(o) => &o.layer,
             Object::Insert(o) => &o.layer,
+        }
+    }
+
+    /// The object's own colour, linetype, lineweight and linetype scale.
+    pub fn properties(&self) -> &Properties {
+        match self {
+            Object::Line(o) => &o.properties,
+            Object::Polyline(o) => &o.properties,
+            Object::Arc(o) => &o.properties,
+            Object::Circle(o) => &o.properties,
+            Object::Ellipse(o) => &o.properties,
+            Object::Spline(o) => &o.properties,
+            Object::Hatch(o) => &o.properties,
+            Object::Text(o) => &o.properties,
+            Object::MText(o) => &o.properties,
+            Object::AttributeDefinition(o) => &o.properties,
+            Object::Insert(o) => &o.properties,
+        }
+    }
+
+    pub(crate) fn properties_mut(&mut self) -> &mut Properties {
+        match self {
+            Object::Line(o) => &mut o.properties,
+            Object::Polyline(o) => &mut o.properties,
+            Object::Arc(o) => &mut o.properties,
+            Object::Circle(o) => &mut o.properties,
+            Object::Ellipse(o) => &mut o.properties,
+            Object::Spline(o) => &mut o.properties,
+            Object::Hatch(o) => &mut o.properties,
+            Object::Text(o) => &mut o.properties,
+            Object::MText(o) => &mut o.properties,
+            Object::AttributeDefinition(o) => &mut o.properties,
+            Object::Insert(o) => &mut o.properties,
+        }
+    }
+}
+
+/// An object's own colour, linetype, lineweight and linetype scale, as
+/// AutoCAD's PROPERTIES sets them. Each is `ByLayer` unless the object
+/// gives its own, and then it draws with its layer's.
+///
+/// Its keys sit beside the object's others in JSON, and are left out where
+/// they are `ByLayer`, or 1 for the linetype scale.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Properties {
+    #[serde(default, skip_serializing_if = "ObjectColor::is_by_layer")]
+    pub color: ObjectColor,
+    #[serde(default, skip_serializing_if = "ObjectLinetype::is_by_layer")]
+    pub linetype: ObjectLinetype,
+    #[serde(default, skip_serializing_if = "ObjectLineweight::is_by_layer")]
+    pub lineweight: ObjectLineweight,
+    /// What the object's linetype is enlarged by, more than 0, on top of
+    /// the sheet's [`Sheet::ltscale`]: AutoCAD's CELTSCALE.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub linetype_scale: f64,
+}
+
+impl Default for Properties {
+    fn default() -> Self {
+        Self {
+            color: ObjectColor::ByLayer,
+            linetype: ObjectLinetype::ByLayer,
+            lineweight: ObjectLineweight::ByLayer,
+            linetype_scale: 1.0,
+        }
+    }
+}
+
+impl Properties {
+    /// Whether the object takes everything from its layer.
+    pub fn is_by_layer(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+pub(crate) fn one() -> f64 {
+    1.0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, clippy::float_cmp)]
+pub(crate) fn is_one(n: &f64) -> bool {
+    *n == 1.0
+}
+
+/// An object property's value that takes its layer's: AutoCAD's ByLayer.
+pub const BY_LAYER: &str = "ByLayer";
+
+/// An object property's value that takes its block insert's: AutoCAD's ByBlock.
+pub const BY_BLOCK: &str = "ByBlock";
+
+/// The lineweight that is AutoCAD's default lineweight, LWDEFAULT.
+pub const DEFAULT_LINEWEIGHT: &str = "Default";
+
+/// An object's own colour: its layer's, its block insert's, or an AutoCAD
+/// colour index from 1 to 255.
+///
+/// It is written as `"ByLayer"`, `"ByBlock"` or the index in JSON.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ColorJson", into = "ColorJson")]
+pub enum ObjectColor {
+    #[default]
+    ByLayer,
+    ByBlock,
+    Index(u8),
+}
+
+impl ObjectColor {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub fn is_by_layer(&self) -> bool {
+        *self == Self::ByLayer
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ColorJson {
+    Index(u8),
+    Word(String),
+}
+
+impl TryFrom<ColorJson> for ObjectColor {
+    type Error = String;
+
+    fn try_from(json: ColorJson) -> Result<Self, String> {
+        match json {
+            ColorJson::Index(0) => Err("a colour index is 1 to 255".to_owned()),
+            ColorJson::Index(index) => Ok(Self::Index(index)),
+            ColorJson::Word(word) => match word.as_str() {
+                BY_LAYER => Ok(Self::ByLayer),
+                BY_BLOCK => Ok(Self::ByBlock),
+                _ => Err(format!(
+                    "`{word}` is not a colour; ByLayer, ByBlock or an index from 1 to 255"
+                )),
+            },
+        }
+    }
+}
+
+impl From<ObjectColor> for ColorJson {
+    fn from(color: ObjectColor) -> Self {
+        match color {
+            ObjectColor::ByLayer => Self::Word(BY_LAYER.to_owned()),
+            ObjectColor::ByBlock => Self::Word(BY_BLOCK.to_owned()),
+            ObjectColor::Index(index) => Self::Index(index),
+        }
+    }
+}
+
+/// An object's own linetype: its layer's, its block insert's, or one by
+/// name, `Continuous` or one the sheet defines.
+///
+/// It is written as `"ByLayer"`, `"ByBlock"` or the name in JSON.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum ObjectLinetype {
+    #[default]
+    ByLayer,
+    ByBlock,
+    Named(String),
+}
+
+impl ObjectLinetype {
+    pub fn is_by_layer(&self) -> bool {
+        *self == Self::ByLayer
+    }
+}
+
+impl From<String> for ObjectLinetype {
+    fn from(name: String) -> Self {
+        match name.as_str() {
+            BY_LAYER => Self::ByLayer,
+            BY_BLOCK => Self::ByBlock,
+            _ => Self::Named(name),
+        }
+    }
+}
+
+impl From<ObjectLinetype> for String {
+    fn from(linetype: ObjectLinetype) -> Self {
+        match linetype {
+            ObjectLinetype::ByLayer => BY_LAYER.to_owned(),
+            ObjectLinetype::ByBlock => BY_BLOCK.to_owned(),
+            ObjectLinetype::Named(name) => name,
+        }
+    }
+}
+
+/// An object's own lineweight: its layer's, its block insert's, AutoCAD's
+/// default lineweight, or a standard lineweight.
+///
+/// It is written as `"ByLayer"`, `"ByBlock"`, `"Default"` or millimetres in
+/// JSON.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "LineweightJson", into = "LineweightJson")]
+pub enum ObjectLineweight {
+    #[default]
+    ByLayer,
+    ByBlock,
+    Default,
+    Width(Lineweight),
+}
+
+impl ObjectLineweight {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub fn is_by_layer(&self) -> bool {
+        *self == Self::ByLayer
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum LineweightJson {
+    Width(Lineweight),
+    Word(String),
+}
+
+impl TryFrom<LineweightJson> for ObjectLineweight {
+    type Error = String;
+
+    fn try_from(json: LineweightJson) -> Result<Self, String> {
+        match json {
+            LineweightJson::Width(width) => Ok(Self::Width(width)),
+            LineweightJson::Word(word) => match word.as_str() {
+                BY_LAYER => Ok(Self::ByLayer),
+                BY_BLOCK => Ok(Self::ByBlock),
+                DEFAULT_LINEWEIGHT => Ok(Self::Default),
+                _ => Err(format!(
+                    "`{word}` is not a lineweight; ByLayer, ByBlock, Default or a standard lineweight in millimetres"
+                )),
+            },
+        }
+    }
+}
+
+impl From<ObjectLineweight> for LineweightJson {
+    fn from(lineweight: ObjectLineweight) -> Self {
+        match lineweight {
+            ObjectLineweight::ByLayer => Self::Word(BY_LAYER.to_owned()),
+            ObjectLineweight::ByBlock => Self::Word(BY_BLOCK.to_owned()),
+            ObjectLineweight::Default => Self::Word(DEFAULT_LINEWEIGHT.to_owned()),
+            ObjectLineweight::Width(width) => Self::Width(width),
         }
     }
 }
@@ -371,6 +625,10 @@ pub struct Sheet {
     /// and a plot draw the sheet as they would without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper: Option<Paper>,
+    /// What every linetype on the sheet is enlarged by, more than 0:
+    /// AutoCAD's LTSCALE. An object's own linetype scale multiplies it.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub ltscale: f64,
 }
 
 /// The paper a sheet is drawn on, as its sheet description or template
@@ -441,8 +699,10 @@ pub struct DrawingContents {
     /// data, in the same order.
     #[serde(default)]
     pub ids_and_names: Vec<IdAndName>,
-    /// How many model-space objects the core has no model for yet, including
-    /// those that set their own colour, linetype or lineweight rather than
-    /// taking their layer's.
+    /// How many model-space objects the core has no model for yet, such as
+    /// those with a true colour.
     pub objects_not_read: usize,
+    /// What every linetype in the drawing is enlarged by: its LTSCALE.
+    #[serde(default = "one")]
+    pub ltscale: f64,
 }

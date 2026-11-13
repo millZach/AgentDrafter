@@ -45,6 +45,7 @@ Keys are spelled as AutoCAD spells them: `color`, `center`.
 |---|---|---|
 | `units` | yes | The sheet's declared unit: `mm`, `cm`, `m`, `in` or `ft`. Every length on the sheet is in this unit unless it carries its own. It becomes the DWG's insertion unit. |
 | `block_library` | no | The block library the sheet's inserts draw their blocks from: the path of its file. See [Inserts](#inserts). |
+| `ltscale` | no | What every linetype on the sheet is enlarged by, AutoCAD's LTSCALE: a number more than 0, with no unit. Without it, 1. See [An object's own colour, linetype and lineweight](#an-objects-own-colour-linetype-and-lineweight). |
 | `linetypes` | no | The sheet's linetypes: a mapping from each linetype's name to its definition. |
 | `layers` | no | The sheet's layers: a mapping from each layer's name to its colour, linetype and lineweight. |
 | `hatch_patterns` | no | The sheet's hatch patterns: a mapping from each pattern's name to its lines. |
@@ -63,7 +64,7 @@ A linetype is a pattern of dashes, gaps and dots that a layer draws its objects 
 
 ### Layers
 
-A layer is a named group of objects that draw with its colour, linetype and lineweight. Every drawing already has layer `0`, which is white, continuous and of the default lineweight; listing `0` under `layers` sets its properties.
+A layer is a named group of objects that draw with its colour, linetype and lineweight, unless they give their own ([below](#an-objects-own-colour-linetype-and-lineweight)). Every drawing already has layer `0`, which is white, continuous and of the default lineweight; listing `0` under `layers` sets its properties.
 
 | Key | Required | What it is |
 |---|---|---|
@@ -114,7 +115,7 @@ The DWG names the font, and AutoCAD finds it on the machine that opens the drawi
 
 ### Objects
 
-Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight; it has none of its own. Every object may also take an `id` key, its ID in the record, and a `name` key, a name an agent selects it by; see [IDs and names](#ids-and-names).
+Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight unless it gives its own, under `color`, `linetype`, `lineweight` and `linetype_scale`; see [An object's own colour, linetype and lineweight](#an-objects-own-colour-linetype-and-lineweight). Every object may also take an `id` key, its ID in the record, and a `name` key, a name an agent selects it by; see [IDs and names](#ids-and-names).
 
 | Type | Keys | What it is |
 |---|---|---|
@@ -132,6 +133,40 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 Keys before the semicolon are required; keys after it are not. A `radius` is a length more than 0.
 
 Arcs, circles and ellipses lie in the plane parallel to XY at their centre's `z`, and so does a hatch, at the `z` its boundary's points share. Lines, polylines and splines may run anywhere in 3D.
+
+### An object's own colour, linetype and lineweight
+
+Every object, an insert and a block's objects and attribute definitions among them, may take a colour, a linetype, a lineweight and a linetype scale of its own, as AutoCAD's PROPERTIES gives them. Each is `ByLayer` unless the object gives it: the object then draws with its layer's.
+
+| Key | What it is |
+|---|---|
+| `color` | `ByLayer`, `ByBlock`, or an AutoCAD colour index as a layer takes it: 1 to 255, or `red` to `white`. Without it, `ByLayer`. |
+| `linetype` | `ByLayer`, `ByBlock`, `Continuous`, or a name under `linetypes`, written exactly as it is there. Without it, `ByLayer`. |
+| `lineweight` | `ByLayer`, `ByBlock`, `Default` (AutoCAD's default lineweight, 0.25 mm as installed), or a standard lineweight in millimetres as a layer takes it. Without it, `ByLayer`. |
+| `linetype_scale` | What the object's linetype is enlarged by, on top of the sheet's `ltscale`: a number more than 0, with no unit. Without it, 1. |
+
+`ByLayer`, `ByBlock` and `Default` are written as here, in that case. A true colour is not offered yet ([#106](https://github.com/millZach/AgentDrafter/issues/106)).
+
+`ByBlock` is for a block's objects: one drawn by an insert takes the insert's own colour, linetype or lineweight, or the insert's layer's where the insert's are `ByLayer`, so one block can draw red on one sheet and white on another. An object on the sheet itself that is `ByBlock` draws as AutoCAD draws it, white, continuous and at the default lineweight. A linetype a block's object names comes to the sheet from the block library with the block, as its layers do.
+
+A linetype's dashes and gaps are drawn at their defined lengths times the sheet's `ltscale` times the object's `linetype_scale`, as AutoCAD multiplies LTSCALE and an object's linetype scale. An insert does not enlarge them ([Inserts](#inserts)).
+
+```yaml
+units: mm
+ltscale: 2
+linetypes:
+  DASHED: {pattern: [5, -2.5]}
+layers:
+  wiring: {color: white}
+objects:
+  # Drawn green and dashed at 0.35 mm, whatever the layer says; its dashes
+  # are 5 x 2 x 0.5 = 5 mm long.
+  - line: {from: [0, 0, 0], to: [100, 0, 0], layer: wiring, color: green, linetype: DASHED, lineweight: 0.35, linetype_scale: 0.5}
+  # Drawn in the wiring layer's white, at its own 0.7 mm.
+  - line: {from: [0, 10, 0], to: [100, 10, 0], layer: wiring, lineweight: 0.7}
+```
+
+The DWG writes them as AutoCAD does, on each object and in the drawing's LTSCALE, and reading a DWG back gives them; an object with a true colour is not read yet. `change` sets them, and a bare null takes one away, so the object draws with its layer's again.
 
 ### Hatches
 

@@ -268,6 +268,8 @@ pub struct Text {
     pub justify: Justify,
     #[serde(default = "crate::model::layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: crate::model::Properties,
 }
 
 /// Text of one or more lines in a box, as AutoCAD's MTEXT draws it.
@@ -299,4 +301,6 @@ pub struct MText {
     pub justify: Attachment,
     #[serde(default = "crate::model::layer_zero")]
     pub layer: String,
+    #[serde(flatten)]
+    pub properties: crate::model::Properties,
 }

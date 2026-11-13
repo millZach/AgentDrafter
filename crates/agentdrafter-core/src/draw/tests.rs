@@ -534,3 +534,105 @@ fn the_pipeline_needs_no_file_system_thread_or_clock() {
         }
     }
 }
+
+const OWN_PROPERTIES: &str = r#"
+units: mm
+linetypes:
+  DASHED: {pattern: [5, -2.5]}
+layers:
+  outline: {color: red, lineweight: 0.5}
+objects:
+  - line: {from: [0, 0, 0], to: [100, 0, 0], layer: outline}
+  - line: {from: [0, 10, 0], to: [100, 10, 0], layer: outline, color: 3, linetype: DASHED, lineweight: 0.7}
+  - line: {from: [0, 20, 0], to: [100, 20, 0], layer: outline, color: ByBlock, linetype: ByBlock, lineweight: Default}
+  - line: {from: [0, 30, 0], to: [100, 30, 0], linetype: DASHED, linetype_scale: 2}
+"#;
+
+/// An object's own colour, linetype and lineweight win over its layer's;
+/// `ByBlock` on the sheet itself draws white and continuous, and `Default`
+/// at AutoCAD's default lineweight.
+#[test]
+fn an_objects_own_properties_win_over_its_layers() {
+    let list = draw(OWN_PROPERTIES);
+    let by_layer = items_of(&list, 0)[0];
+    assert_eq!(by_layer.color, Color(1));
+    assert_eq!(lineweight(by_layer), 0.5);
+    assert_eq!(runs(by_layer).len(), 1);
+    let own = items_of(&list, 1)[0];
+    assert_eq!(own.color, Color(3));
+    assert_eq!(lineweight(own), 0.7);
+    let dashed = linetype::along(&[[0.0, 10.0], [100.0, 10.0]], Some(&[5.0, -2.5]), false);
+    assert_eq!(runs(own), &dashed);
+    let by_block = items_of(&list, 2)[0];
+    assert_eq!(by_block.color, Color(7));
+    assert_eq!(lineweight(by_block), DEFAULT_LINEWEIGHT);
+    assert_eq!(runs(by_block).len(), 1);
+}
+
+/// A linetype's dashes and gaps are enlarged by the sheet's `ltscale`
+/// times the object's own linetype scale.
+#[test]
+fn a_linetype_is_enlarged_by_the_sheets_ltscale_and_the_objects_own() {
+    let at = |list: &DisplayList| runs(items_of(list, 3)[0]).clone();
+    let doubled = linetype::along(&[[0.0, 30.0], [100.0, 30.0]], Some(&[10.0, -5.0]), false);
+    assert_eq!(at(&draw(OWN_PROPERTIES)), doubled);
+    let sheet = OWN_PROPERTIES.replace("units: mm\n", "units: mm\nltscale: 0.25\n");
+    let halved = linetype::along(&[[0.0, 30.0], [100.0, 30.0]], Some(&[2.5, -1.25]), false);
+    assert_eq!(at(&draw(&sheet)), halved);
+    // The sheet's own scale reaches a line that takes its layer's linetype.
+    let sheet = sheet
+        .replace(
+            "  - line: {from: [0, 30, 0], to: [100, 30, 0], linetype: DASHED, linetype_scale: 2}",
+            "  - line: {from: [0, 30, 0], to: [100, 30, 0], layer: dashed}",
+        )
+        .replace("layers:\n", "layers:\n  dashed: {linetype: DASHED}\n");
+    let quartered = linetype::along(&[[0.0, 30.0], [100.0, 30.0]], Some(&[1.25, -0.625]), false);
+    assert_eq!(at(&draw(&sheet)), quartered);
+}
+
+const BY_BLOCK_LIBRARY: &str = r#"
+units: mm
+linetypes:
+  DOTS: {pattern: [0, -1]}
+layers:
+  own: {color: blue}
+blocks:
+  B:
+    objects:
+      - line: {from: [0, 0, 0], to: [10, 0, 0], color: ByBlock, linetype: ByBlock, lineweight: ByBlock}
+      - line: {from: [0, 2, 0], to: [10, 2, 0], layer: own, linetype: DOTS}
+      - attdef: {tag: TAG, position: [0, 5, 0], height: 2, color: ByBlock}
+"#;
+
+/// A block's `ByBlock` objects and attributes draw with the insert's own
+/// colour, linetype and lineweight, or its layer's where the insert's are
+/// `ByLayer`; a linetype a block's object names comes to the sheet with it.
+#[test]
+fn a_by_block_object_takes_the_inserts_properties() {
+    let sheet = r#"
+units: mm
+block_library: blocks.yaml
+linetypes:
+  DASHED: {pattern: [2, -1]}
+layers:
+  red: {color: red, lineweight: 0.5}
+objects:
+  - insert: {block: B, position: [0, 0, 0], attributes: {TAG: X}, layer: red, color: 6, linetype: DASHED, lineweight: 0.7}
+  - insert: {block: B, position: [0, 50, 0], attributes: {TAG: Y}, layer: red}
+"#;
+    let list = draw_with_library("by-block", BY_BLOCK_LIBRARY, sheet);
+    let own = items_of(&list, 0);
+    assert_eq!(own[0].color, Color(6));
+    assert_eq!(lineweight(own[0]), 0.7);
+    let dashed = linetype::along(&[[0.0, 0.0], [10.0, 0.0]], Some(&[2.0, -1.0]), false);
+    assert_eq!(runs(own[0]), &dashed);
+    assert_eq!(own[1].color, Color(5));
+    let dotted = linetype::along(&[[0.0, 2.0], [10.0, 2.0]], Some(&[0.0, -1.0]), false);
+    assert_eq!(runs(own[1]), &dotted);
+    assert!(own[2..].iter().all(|i| i.color == Color(6)), "{own:?}");
+    let by_layer = items_of(&list, 1);
+    assert_eq!(by_layer[0].color, Color(1));
+    assert_eq!(lineweight(by_layer[0]), 0.5);
+    assert_eq!(runs(by_layer[0]).len(), 1);
+    assert!(by_layer[2..].iter().all(|i| i.color == Color(1)));
+}

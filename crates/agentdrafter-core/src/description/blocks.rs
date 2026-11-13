@@ -25,7 +25,7 @@ use super::{
 use crate::error::{Error, ErrorCode};
 use crate::model::{
     Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert, Layer, Linetype, Object,
-    Point3, Sheet, CONTINUOUS,
+    ObjectLinetype, Point3, Sheet, CONTINUOUS,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
@@ -47,7 +47,7 @@ pub(crate) const BLOCK_KEYS: [&str; 2] = ["base_point", "objects"];
 pub(crate) const CELL_KEY: &str = "cell";
 
 /// The keys an attribute definition takes.
-pub(crate) const ATTDEF_KEYS: [&str; 12] = [
+pub(crate) const ATTDEF_KEYS: [&str; 16] = [
     "tag",
     "prompt",
     "default",
@@ -59,12 +59,16 @@ pub(crate) const ATTDEF_KEYS: [&str; 12] = [
     "justify",
     "invisible",
     "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
     CELL_KEY,
 ];
 
 /// The keys a single line of text takes in a block: a sheet's, and its
 /// cell.
-pub(crate) const BLOCK_TEXT_KEYS: [&str; 9] = [
+pub(crate) const BLOCK_TEXT_KEYS: [&str; 13] = [
     "contents",
     "position",
     "height",
@@ -73,17 +77,25 @@ pub(crate) const BLOCK_TEXT_KEYS: [&str; 9] = [
     "rotation",
     "justify",
     "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
     CELL_KEY,
 ];
 
 /// The keys an insert takes, besides those every object on a sheet takes.
-pub(crate) const INSERT_KEYS: [&str; 6] = [
+pub(crate) const INSERT_KEYS: [&str; 10] = [
     "block",
     "position",
     "scale",
     "rotation",
     "attributes",
     "layer",
+    "color",
+    "linetype",
+    "lineweight",
+    "linetype_scale",
 ];
 
 /// The longest attribute tag AgentDrafter writes, in characters.
@@ -138,6 +150,7 @@ pub fn parse_block_library(text: &str) -> Result<BlockLibrary, Error> {
     };
     let tables = Tables {
         units,
+        linetypes: &linetypes,
         layers: &layers,
         hatch_patterns: &hatch_patterns,
         styles: &text_styles,
@@ -310,6 +323,7 @@ pub(super) fn attribute_definition(
         justify: justify(fields)?,
         invisible,
         layer,
+        properties: Default::default(),
     })
 }
 
@@ -354,6 +368,7 @@ pub(super) fn insert(
         attributes,
         name: None,
         layer,
+        properties: Default::default(),
     })
 }
 
@@ -599,10 +614,13 @@ pub(super) fn take_from_library(
         .iter()
         .filter(|l| objects().any(|o| o.layer() == l.name))
         .collect();
-    let used_linetypes = library
-        .linetypes
-        .iter()
-        .filter(|t| t.name != CONTINUOUS && used_layers.iter().any(|l| l.linetype == t.name));
+    let used_linetypes = library.linetypes.iter().filter(|t| {
+        t.name != CONTINUOUS
+                && (used_layers.iter().any(|l| l.linetype == t.name)
+                    || objects().any(|o| {
+                        matches!(&o.properties().linetype, ObjectLinetype::Named(n) if *n == t.name)
+                    }))
+    });
     let used_styles = library.text_styles.iter().filter(|s| {
         objects().any(|o| match o {
             Object::Text(t) => t.style == s.name,

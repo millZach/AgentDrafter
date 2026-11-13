@@ -72,6 +72,7 @@ fn a_solid_hatch_reads() {
             angle: 0.0,
             boundary: square(),
             layer: "0".to_owned(),
+            properties: Default::default(),
         }
     );
 }

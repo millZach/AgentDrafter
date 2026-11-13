@@ -173,6 +173,7 @@ mod tests {
             rotation,
             justify,
             layer: "0".to_owned(),
+            properties: Default::default(),
         }
     }
 

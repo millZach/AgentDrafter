@@ -37,6 +37,53 @@ const LINEWEIGHT: Place = Place {
     json: r#"{"units": "mm", "layers": {"a": {"lineweight": V}}, "objects": []}"#,
 };
 
+const OBJECT_COLOR: Place = Place {
+    name: "an object's color",
+    yaml: "units: mm
+objects:
+  - circle: {center: [0, 0, 0], radius: 1, color: V}
+",
+    json: r#"{"units": "mm", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1, "color": V}}]}"#,
+};
+
+const OBJECT_LINETYPE: Place = Place {
+    name: "an object's linetype",
+    yaml: "units: mm
+linetypes:
+  DASHED: {pattern: [1, -1]}
+objects:
+  - circle: {center: [0, 0, 0], radius: 1, linetype: V}
+",
+    json: r#"{"units": "mm", "linetypes": {"DASHED": {"pattern": [1, -1]}}, "objects": [{"circle": {"center": [0, 0, 0], "radius": 1, "linetype": V}}]}"#,
+};
+
+const OBJECT_LINEWEIGHT: Place = Place {
+    name: "an object's lineweight",
+    yaml: "units: mm
+objects:
+  - circle: {center: [0, 0, 0], radius: 1, lineweight: V}
+",
+    json: r#"{"units": "mm", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1, "lineweight": V}}]}"#,
+};
+
+const LINETYPE_SCALE: Place = Place {
+    name: "an object's linetype scale",
+    yaml: "units: mm
+objects:
+  - circle: {center: [0, 0, 0], radius: 1, linetype_scale: V}
+",
+    json: r#"{"units": "mm", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1, "linetype_scale": V}}]}"#,
+};
+
+const LTSCALE: Place = Place {
+    name: "a sheet's ltscale",
+    yaml: "units: mm
+ltscale: V
+objects: []
+",
+    json: r#"{"units": "mm", "ltscale": V, "objects": []}"#,
+};
+
 const CLOSED: Place = Place {
     name: "a polyline's closed",
     yaml: "units: mm\nobjects:\n  - polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]], closed: V}\n",
@@ -380,6 +427,48 @@ fn cases() -> Vec<Case> {
         (&LINEWEIGHT, "'-0.35'", json!("-0.35"), false),
         (&LINEWEIGHT, "'3.5e-1 mm'", json!("3.5e-1 mm"), false),
         (&LINEWEIGHT, "thick", json!("thick"), false),
+        // An object's own color: ByLayer, ByBlock, or a layer's color.
+        (&OBJECT_COLOR, "ByLayer", json!("ByLayer"), true),
+        (&OBJECT_COLOR, "'ByBlock'", json!("ByBlock"), true),
+        (&OBJECT_COLOR, "42", json!(42), true),
+        (&OBJECT_COLOR, "'42'", json!("42"), true),
+        (&OBJECT_COLOR, "red", json!("red"), true),
+        (&OBJECT_COLOR, "bylayer", json!("bylayer"), false),
+        (&OBJECT_COLOR, "0", json!(0), false),
+        (&OBJECT_COLOR, "256", json!(256), false),
+        (&OBJECT_COLOR, "purple", json!("purple"), false),
+        // An object's own linetype: ByLayer, ByBlock, Continuous or the sheet's.
+        (&OBJECT_LINETYPE, "ByLayer", json!("ByLayer"), true),
+        (&OBJECT_LINETYPE, "ByBlock", json!("ByBlock"), true),
+        (&OBJECT_LINETYPE, "Continuous", json!("Continuous"), true),
+        (&OBJECT_LINETYPE, "DASHED", json!("DASHED"), true),
+        (&OBJECT_LINETYPE, "null", json!(null), true),
+        (&OBJECT_LINETYPE, "[DASHED]", json!(["DASHED"]), false),
+        // An object's own lineweight: ByLayer, ByBlock, Default or a layer's.
+        (&OBJECT_LINEWEIGHT, "ByLayer", json!("ByLayer"), true),
+        (&OBJECT_LINEWEIGHT, "ByBlock", json!("ByBlock"), true),
+        (&OBJECT_LINEWEIGHT, "Default", json!("Default"), true),
+        (&OBJECT_LINEWEIGHT, "0.35", json!(0.35), true),
+        (&OBJECT_LINEWEIGHT, "'0.50 mm'", json!("0.50 mm"), true),
+        (&OBJECT_LINEWEIGHT, "default", json!("default"), false),
+        (&OBJECT_LINEWEIGHT, "0.33", json!(0.33), false),
+        // A linetype scale: a number more than 0, with no unit.
+        (&LINETYPE_SCALE, "0.5", json!(0.5), true),
+        (&LINETYPE_SCALE, "'2'", json!("2"), true),
+        (&LINETYPE_SCALE, "0", json!(0), false),
+        (&LINETYPE_SCALE, "-1", json!(-1), false),
+        (&LINETYPE_SCALE, "'2 mm'", json!("2 mm"), false),
+        (&LINETYPE_SCALE, "'0'", json!("0"), false),
+        (&LINETYPE_SCALE, "'0.0'", json!("0.0"), false),
+        (&LINETYPE_SCALE, "'-1'", json!("-1"), false),
+        (&LINETYPE_SCALE, "'0.05'", json!("0.05"), true),
+        (&LINETYPE_SCALE, "'2e1'", json!("2e1"), true),
+        (&LTSCALE, "2.5", json!(2.5), true),
+        (&LTSCALE, "'0.25'", json!("0.25"), true),
+        (&LTSCALE, "0", json!(0), false),
+        (&LTSCALE, "big", json!("big"), false),
+        (&LTSCALE, "'-1'", json!("-1"), false),
+        (&LTSCALE, "'000'", json!("000"), false),
         // closed: true or false, quoted or not.
         (&CLOSED, "true", json!(true), true),
         (&CLOSED, "'true'", json!("true"), true),

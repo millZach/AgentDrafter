@@ -24,11 +24,13 @@ use super::blocks::LIBRARY_KEYS;
 use super::ids::{ID_KEY, ID_PUNCTUATION, ID_SEPARATOR, LONGEST_ID, SHEET_OBJECT_KEYS};
 use super::layers::{
     colour_names, COLOUR_NAMES, FORBIDDEN_IN_NAMES, LONGEST_DESCRIPTION, LONGEST_NAME,
-    LONGEST_PATTERN,
+    LONGEST_PATTERN, PROPERTY_KEYS,
 };
 use super::objects::{FEWEST_FIT_POINTS, HIGHEST_DEGREE, OBJECT_TYPES};
 use super::{block_schema, hatch_schema, SHEET_KEYS};
-use crate::model::{Lineweight, CONTINUOUS, FIT_DEGREE, LAYER_ZERO, WHITE};
+use crate::model::{
+    Lineweight, BY_BLOCK, BY_LAYER, CONTINUOUS, DEFAULT_LINEWEIGHT, FIT_DEGREE, LAYER_ZERO, WHITE,
+};
 use crate::text::{
     Attachment, Justify, FORBIDDEN_IN_FONT_NAMES, STANDARD, STANDARD_FONT, WIDTH_FACTORS,
 };
@@ -36,6 +38,11 @@ use crate::units::Unit;
 
 /// A plain decimal number, as `docs/sheet-description.md` defines it.
 pub(super) const NUMBER: &str = "-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?";
+
+/// A number as [`NUMBER`] writes it that is more than 0: no sign, and a
+/// digit other than 0 before its exponent.
+pub(super) const POSITIVE_NUMBER: &str =
+    "(0*[1-9][0-9]*(\\.[0-9]+)?|[0-9]+\\.[0-9]*[1-9][0-9]*)([eE][-+]?[0-9]+)?";
 
 /// The strict YAML subset, as both schemas' descriptions state it.
 pub(super) const SUBSET: &str =
@@ -81,7 +88,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, objects_key, paper_key] =
+    let [units_key, block_library_key, ltscale_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, objects_key, paper_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -97,6 +104,12 @@ pub fn sheet_description_schema() -> Value {
         "properties": {
             units_key: units_property("sheet"),
             block_library_key: block_schema::block_library_property(),
+            ltscale_key: {
+                "$ref": "#/$defs/linetype_scale",
+                "description": "What every linetype on the sheet is enlarged by: AutoCAD's \
+                                LTSCALE, a number more than 0, with no unit. An object's own \
+                                `linetype_scale` multiplies it. Without it, 1.",
+            },
             linetypes_key: linetypes,
             layers_key: layers,
             hatch_patterns_key: hatch_patterns,
@@ -480,6 +493,65 @@ fn defs() -> Map<String, Value> {
         }),
     );
     defs.insert(
+        "object_color".into(),
+        json!({
+            "description": format!(
+                "The object's own colour: `{BY_LAYER}`, its layer's; `{BY_BLOCK}`, the colour of \
+                 the insert that places its block; or an AutoCAD colour index from 1 to 255, or \
+                 one of {} (1 to 7). Without it, `{BY_LAYER}`.",
+                colour_names()
+            ),
+            "anyOf": [
+                { "enum": [BY_LAYER, BY_BLOCK] },
+                { "type": "integer", "minimum": 1, "maximum": 255 },
+                {
+                    "type": "string",
+                    "pattern": "^0*([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$",
+                },
+                { "enum": colours },
+            ],
+        }),
+    );
+    defs.insert(
+        "object_linetype".into(),
+        optional_text(json!({
+            "description": format!(
+                "The object's own linetype: `{BY_LAYER}`, its layer's; `{BY_BLOCK}`, the \
+                 linetype of the insert that places its block; `{CONTINUOUS}`; or a name under \
+                 `linetypes`, written exactly as it is there. Without it, `{BY_LAYER}`."
+            ),
+            "type": TEXT_TYPES,
+        })),
+    );
+    defs.insert(
+        "object_lineweight".into(),
+        json!({
+            "description": format!(
+                "The object's own lineweight: `{BY_LAYER}`, its layer's; `{BY_BLOCK}`, the \
+                 lineweight of the insert that places its block; `{DEFAULT_LINEWEIGHT}`, \
+                 AutoCAD's default lineweight; or a pen width in millimetres whatever the \
+                 declared unit, with or without `mm`: one of {}. Without it, `{BY_LAYER}`.",
+                Lineweight::choices()
+            ),
+            "anyOf": [
+                { "enum": [BY_LAYER, BY_BLOCK, DEFAULT_LINEWEIGHT] },
+                { "enum": lineweights },
+                { "type": "string", "pattern": format!("^({lineweight_pattern})( ?mm)?$") },
+            ],
+        }),
+    );
+    defs.insert(
+        "linetype_scale".into(),
+        json!({
+            "description": "What the object's linetype is enlarged by, on top of the sheet's \
+                            `ltscale`: a number more than 0, with no unit. Without it, 1.",
+            "anyOf": [
+                { "type": "number", "exclusiveMinimum": 0 },
+                { "type": "string", "pattern": format!("^{POSITIVE_NUMBER}$") },
+            ],
+        }),
+    );
+    defs.insert(
         "line".into(),
         object_def(
             "A straight line between two points.",
@@ -772,10 +844,19 @@ fn text_defs(defs: &mut Map<String, Value>) {
     );
 }
 
-/// The definition of one object type: its own `properties` and `layer`.
+/// The definition of one object type: its own `properties`, its `layer`,
+/// and its own colour, linetype, lineweight and linetype scale.
 pub(super) fn object_def(description: &str, required: &[&str], properties: Value) -> Value {
     let mut properties = properties;
     properties["layer"] = json!({ "$ref": "#/$defs/layer_name" });
+    for (key, def) in PROPERTY_KEYS.into_iter().zip([
+        "object_color",
+        "object_linetype",
+        "object_lineweight",
+        "linetype_scale",
+    ]) {
+        properties[key] = json!({ "$ref": format!("#/$defs/{def}") });
+    }
     json!({
         "description": description,
         "type": "object",
