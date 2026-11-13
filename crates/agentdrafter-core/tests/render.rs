@@ -595,3 +595,30 @@ fn a_dwg_with_inserts_renders_as_its_sheet_description() {
         "{differ} pixels differ"
     );
 }
+
+/// A render covers the paper a sheet declares, as a plot does, with no
+/// margin, and what lies off it is cut at the image's edge.
+#[test]
+fn a_render_covers_the_declared_paper() {
+    let dir = scratch("paper");
+    let source = dir.join("sheet.yaml");
+    fs::write(
+        &source,
+        "units: mm
+paper: [100, 50]
+objects:
+  - line: {from: [10, 25, 0], to: [150, 25, 0]}
+",
+    )
+    .unwrap();
+    let mut request = RenderRequest::new(&source);
+    request.scale = Some(1.0);
+    request.dpi = 25.4;
+    let report = render_with(&request, &Settings::default()).unwrap_or_else(|e| panic!("{e}"));
+    // One pixel a millimetre: the paper, 100 by 50, and nothing more.
+    assert_eq!((report.width, report.height), (100, 50));
+    assert_eq!(report.top_left, [0.0, 50.0]);
+    assert_eq!(report.page, agentdrafter_core::PageFrom::Paper);
+    let image = decode(&PathBuf::from(&report.png), report);
+    assert!(image.inked(50, 25) && image.inked(99, 25) && !image.inked(5, 25));
+}

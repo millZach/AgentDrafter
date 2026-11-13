@@ -26,11 +26,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::build::{build_sheet, is_same_file, BuildReport};
 use crate::change::relative_to;
-use crate::description::{read_rows, read_set_settings, read_template, template_path};
+use crate::description::{
+    read_rows, read_set_settings, read_template, rows_at, template_at, template_path,
+};
 use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
+use crate::model::Paper;
 use crate::reply::Reply;
 use crate::settings::Settings;
+use crate::stamp::SourceKind;
 use crate::units::Unit;
 
 /// The file at the top of a drawing set's folder that holds the set's
@@ -371,6 +375,44 @@ fn set_at(folder: PathBuf, dwg: &Path, written: &str) -> Result<DwgSet, String> 
         path: relative_to(&folder, &built),
         folder,
     })
+}
+
+/// The paper the sheet a DWG was built as declares, read from the drawing
+/// set its build mark names ([`set_of_dwg`]): its template filled in from
+/// its row, as a build reads it. Each file read is given with its bytes, so
+/// that an output drawn on that paper can be stamped with them. None when
+/// the DWG names no set, the set or the DWG's row cannot be read, or the
+/// sheet declares no paper: the DWG then plots to its extents.
+pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<(Paper, Vec<(SourceKind, PathBuf, Vec<u8>)>)> {
+    let set = set_of_dwg(dwg).ok()?;
+    let settings_file = set.folder.join(SET_SETTINGS_FILE);
+    let settings = read_set_settings(&settings_file).ok()?;
+    let rows_file = set.folder.join(&settings.rows);
+    let rows_bytes = fs::read(&rows_file).ok()?;
+    let rows = rows_at(std::str::from_utf8(&rows_bytes).ok()?, &rows_file).ok()?;
+    let name = dwg.file_stem()?.to_string_lossy().into_owned();
+    let row = rows.iter().find(|r| r.sheet == name)?;
+    let template = template_path(&set.folder, row);
+    let template_bytes = fs::read(&template).ok()?;
+    let text = std::str::from_utf8(&template_bytes).ok()?;
+    let mut notices = Vec::new();
+    let (record, _) = template_at(
+        text,
+        &template,
+        row,
+        &rows_file,
+        settings.units,
+        &mut notices,
+    )
+    .ok()?;
+    let paper = record.sheet.paper?;
+    Some((
+        paper,
+        vec![
+            (SourceKind::Template, template, template_bytes),
+            (SourceKind::Rows, rows_file, rows_bytes),
+        ],
+    ))
 }
 
 /// Why a DWG that carries no build mark names no drawing set.

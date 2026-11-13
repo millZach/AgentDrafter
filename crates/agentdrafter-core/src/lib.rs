@@ -116,7 +116,8 @@ pub use display_list::{
     DISPLAY_LIST_TOLERANCE,
 };
 pub use draw::{
-    object_bounds, pick, Bounds, Color, DisplayList, FillRule, Item, Point2, Shape, TextRun,
+    object_bounds, pick, Bounds, Color, DisplayList, FillRule, Item, PageFrom, Point2, Shape,
+    TextRun,
 };
 pub use error::{Error, ErrorCode};
 pub use interface::Interface;

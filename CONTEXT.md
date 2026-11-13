@@ -252,7 +252,7 @@ One failed check: the sheet, the rule, the object by ID and name, and what is wr
 _Avoid_: violation, error (an error stops a request; a finding does not), issue
 
 **Paper**:
-What a sheet is drawn on, as its template or sheet description declares it: a width and a height, or a standard size such as `ANSI B landscape`, with its lower left corner at the origin. The checker holds the sheet to it.
+What a sheet is drawn on, as its template or sheet description declares it: a width and a height, or a standard size such as `ANSI B landscape`, with its lower left corner at the origin. The checker holds the sheet to it, and a plot and a render are drawn on it.
 _Avoid_: page, sheet size, limits (AutoCAD's limits are a setting of its own)
 
 **Cell**:

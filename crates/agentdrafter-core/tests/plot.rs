@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, check_stale, plot_set_with, plot_with, render_with, ErrorCode, PlotReport,
-    PlotRequest, PlotSetRequest, RenderRequest, SetBuildRequest, Settings, SourceKind,
+    build_set_with, check_stale, plot_set_with, plot_with, render_with, ErrorCode, PageFrom,
+    PlotReport, PlotRequest, PlotSetRequest, RenderRequest, SetBuildRequest, Settings, SourceKind,
     StaleRequest, BUILT_IN_PLOT_STYLE,
 };
 
@@ -102,6 +102,14 @@ fn an_11x17_sheet_plots_at_exactly_431_8_by_279_4_mm() {
         [0.0, 0.0, 1224.0, 792.0]
     );
     assert_eq!(from_dwg.sheet_size.width_mm, 431.8);
+    // The DWG holds no paper: it takes its sheet's from the set its build
+    // mark names, and is stamped with the files it read it from.
+    assert_eq!(from_dwg.page, PageFrom::Paper);
+    let kinds: Vec<SourceKind> = from_dwg.stamp.sources.iter().map(|s| s.kind).collect();
+    assert_eq!(
+        kinds,
+        [SourceKind::Dwg, SourceKind::Template, SourceKind::Rows]
+    );
 
     // A sheet drawn in millimetres to the same size plots on the same page.
     let mm = dir.join("mm.yaml");
@@ -556,4 +564,72 @@ fn a_set_plots_every_sheet_it_can_and_says_which_failed() {
     assert!(set.join("dwg").join("DEMO-001.pdf").exists());
     assert!(!set.join("dwg").join("DEMO-002.pdf").exists());
     assert!(set.join("dwg").join("DEMO-003.pdf").exists());
+}
+
+/// Zach decided on 2026-11-13 that a sheet that declares its paper plots on
+/// exactly that paper, what lies off it cut at the page's edge, and that a
+/// sheet that declares none plots to its extents.
+#[test]
+fn a_sheet_that_declares_its_paper_plots_on_that_paper() {
+    let dir = scratch("paper");
+    let sheet = dir.join("sheet.yaml");
+    // A border short of the paper's edge, as a sheet whose trim marks sit on
+    // a layer that does not plot draws, and a line that runs off the paper.
+    let drawn = "objects:
+  - polyline: {points: [[0.5, 0.5, 0], [16.5, 0.5, 0], [16.5, 10.5, 0], [0.5, 10.5, 0]], closed: true}
+  - line: {from: [16, 5, 0], to: [20, 5, 0]}
+";
+    fs::write(
+        &sheet,
+        format!(
+            "units: in
+paper: ANSI B landscape
+{drawn}"
+        ),
+    )
+    .unwrap();
+    let report = plot(&sheet, |_| {}, &Settings::default());
+    assert_eq!(report.page, PageFrom::Paper);
+    assert_eq!(
+        read(dir.join("sheet.pdf")).media_box(),
+        [0.0, 0.0, 1224.0, 792.0]
+    );
+    assert_eq!(
+        (report.sheet_size.width_mm, report.sheet_size.height_mm),
+        (431.8, 279.4)
+    );
+    // The extents are still what it draws, the line's end among them.
+    assert_eq!(report.extents.min, [0.5, 0.5]);
+    assert_eq!(report.extents.max, [20.0, 10.5]);
+
+    fs::write(
+        &sheet,
+        format!(
+            "units: in
+{drawn}"
+        ),
+    )
+    .unwrap();
+    let report = plot(&sheet, |r| r.overwrite = true, &Settings::default());
+    assert_eq!(report.page, PageFrom::Extents);
+    assert_eq!(
+        read(dir.join("sheet.pdf")).media_box(),
+        [0.0, 0.0, 19.5 * 72.0, 10.0 * 72.0]
+    );
+
+    // A sheet that declares its paper and draws nothing plots a blank page.
+    fs::write(
+        &sheet,
+        "units: mm
+paper: [100, 50]
+objects: []
+",
+    )
+    .unwrap();
+    let report = plot(&sheet, |r| r.overwrite = true, &Settings::default());
+    assert_eq!(report.page, PageFrom::Paper);
+    assert_eq!(
+        (report.sheet_size.width_mm, report.sheet_size.height_mm),
+        (100.0, 50.0)
+    );
 }

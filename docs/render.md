@@ -27,14 +27,14 @@ A sheet description that names a block library is drawn with it, found from the 
 
 ## Size and scale
 
-Until drawing sets and their paper sizes arrive (ticket #7), a render covers the drawing's extents, with a margin round them.
+A render covers the paper the sheet declares, as a [plot](plot.md#the-sheet-size) does, with no margin, what lies off it cut at the image's edge; the reply's `page` is `paper`. A sheet that declares none is covered to its extents, with the margin round them, and `page` is `extents`. A DWG takes its paper from the set its build mark names.
 
 | Option | Default | What it is |
 |---|---|---|
 | `--dpi` | 150 | How many pixels an inch of paper spans. Lineweights draw at this. |
 | `--scale` | | The plot scale: how long a length on the drawing is on paper, as a share of itself, such as `1` for 1:1 or `0.02` for 1:50. The drawing's unit counts: 1 m drawn at `0.02` is 20 mm on paper. A DWG with no unit is taken to be in millimetres. |
 | `--width`, `--height` | | The image's size in pixels, the drawing fitted inside it and centred. With one, the other follows the drawing. Not given with `--scale`. |
-| `--margin` | 5 | The margin round the extents, in millimetres of paper. |
+| `--margin` | 5 | The margin round the extents, in millimetres of paper, for a sheet that declares no paper. |
 
 Without a scale or a size, the image's longer side is 2000 pixels. An image is at most 32767 pixels on a side and 100 million in all.
 
