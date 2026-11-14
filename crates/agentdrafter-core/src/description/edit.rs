@@ -35,6 +35,9 @@ use super::template::ROW_KEY;
 use crate::error::{Error, ErrorCode};
 use crate::units::{parse_length, LengthError, Unit};
 
+mod cells;
+pub(crate) use cells::{Axis, TableEdit, TableEdited};
+
 /// A list of objects in a record: a template's own, at `objects`, or one
 /// row's, at `rows[N].objects`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1444,6 +1447,41 @@ impl RecordFile {
         };
         self.touch(list, index, operation, Touch::Keys(vec![key]));
         Ok(AttributeSet::Written)
+    }
+
+    /// Edits the grid of the table of `list` at `index`, as operation
+    /// `operation`: sets a cell's keys, or adds or deletes a row or a
+    /// column, keeping its merges, title and header in line. A cell's text
+    /// the template takes from the row is not set here: the row's value and
+    /// its new text are returned, for the caller to set in the sheet's row.
+    /// An error's field is in the operation, such as `set.merge` or `at`.
+    pub(crate) fn table_edit(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        edit: &TableEdit,
+        operation: usize,
+    ) -> Result<TableEdited, Error> {
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let item = &mut items[index];
+        let kind = object_parts(item).0.unwrap_or_default().to_owned();
+        if kind != "table" {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "the object is {} {kind}, and only a table has cells, rows and columns",
+                    article(&kind)
+                ),
+            )
+            .at_field("target"));
+        }
+        let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
+        let edited = cells::edit_table(keys, edit)?;
+        if edited.edited {
+            self.touch(list, index, operation, Touch::Keys(edited.touched.clone()));
+        }
+        Ok(edited)
     }
 
     /// The text of row `row`'s value `name`, if the row gives it.

@@ -36,8 +36,8 @@ use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::blocks::tag_in_capitals;
 use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
-    template_at, template_in, template_path, AttributeSet, Disk, GivenValue, Listed, MarkFailure,
-    ObjectList, ReadFiles, RecordFile, Row, ID_SEPARATOR,
+    template_at, template_in, template_path, AttributeSet, Axis, Disk, GivenValue, Listed,
+    MarkFailure, ObjectList, ReadFiles, RecordFile, Row, TableEdit, ID_SEPARATOR,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -840,7 +840,8 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             Body::Change { target, .. }
             | Body::Move { target, .. }
             | Body::Delete { target }
-            | Body::SetAttribute { target, .. } => match target {
+            | Body::SetAttribute { target, .. }
+            | Body::TableEdit { target, .. } => match target {
                 Target::Id { sheet, .. } => (sheet, "target.id"),
                 Target::Name {
                     sheet: Some(sheet), ..
@@ -1058,7 +1059,8 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         Body::Change { target, .. }
         | Body::Move { target, .. }
         | Body::Delete { target }
-        | Body::SetAttribute { target, .. } => target,
+        | Body::SetAttribute { target, .. }
+        | Body::TableEdit { target, .. } => target,
         Body::Add { .. } | Body::Table { .. } | Body::Block { .. } => {
             unreachable!("handled above")
         }
@@ -1242,6 +1244,32 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 }
             }
         }
+        Body::TableEdit { edit, .. } => match record.table_edit(list, index, edit, op.index) {
+            Ok(edited) => {
+                let mut words = format!("{} of `{id}`", edited.words);
+                for note in &edited.notes {
+                    words.push_str("; ");
+                    words.push_str(note);
+                }
+                edits_object = edited.edited;
+                if edited.edited {
+                    done.message = format!("{words}{template_note}");
+                    if let Some(refusal) = many_paths(files, file, op, "target") {
+                        return refusal;
+                    }
+                } else {
+                    sheets = vec![k];
+                    if edited.from_row.is_none() {
+                        done.message = format!("{words}, which it gives already");
+                    }
+                }
+                from_row = edited.from_row;
+            }
+            Err(e) => {
+                let field = e.field.clone().unwrap_or_default();
+                return fail(reach, op_err(e.code, e.message, &field));
+            }
+        },
         Body::Add { .. } | Body::Table { .. } | Body::Block { .. } => {
             unreachable!("handled above")
         }
@@ -1300,6 +1328,10 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
             .collect();
         let set_what = match &op.body {
             Body::SetAttribute { .. } => format!("{attribute_set} of `{id}`"),
+            Body::TableEdit {
+                edit: TableEdit::SetCell { cell: [r, c], .. },
+                ..
+            } => format!("the text of cell [{r}, {c}] of `{id}`"),
             _ => format!("the contents of `{id}`"),
         };
         let row_message = format!(
@@ -2699,7 +2731,8 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         Body::Change { target, .. }
         | Body::Move { target, .. }
         | Body::Delete { target }
-        | Body::SetAttribute { target, .. } => match target {
+        | Body::SetAttribute { target, .. }
+        | Body::TableEdit { target, .. } => match target {
             Target::Id { sheet, .. }
             | Target::Name {
                 sheet: Some(sheet), ..
@@ -2797,6 +2830,7 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode) -> String {
         }
         Body::Move { .. } => "by".to_owned(),
         Body::Delete { .. } => String::new(),
+        Body::TableEdit { edit, .. } => grid_field(edit, within),
         // A place within the block it wrote, such as `objects[0].line.layer`,
         // is that place in the operation.
         Body::Block { .. } => rest.to_owned(),
@@ -2807,6 +2841,55 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode) -> String {
                 "value".to_owned()
             }
         }
+    }
+}
+
+/// The field within a table operation that `within`, a place within its
+/// table such as `cells[2][1].merge[0]` or `rows[3]`, is about.
+fn grid_field(edit: &TableEdit, within: &str) -> String {
+    /// `cells[R][C]` and what follows, or `None`.
+    fn cell_of(within: &str) -> Option<(usize, usize, &str)> {
+        let rest = within.strip_prefix("cells[")?;
+        let (row, rest) = rest.split_once(']')?;
+        let rest = rest.strip_prefix('[')?;
+        let (column, rest) = rest.split_once(']')?;
+        Some((row.parse().ok()?, column.parse().ok()?, rest))
+    }
+    match edit {
+        TableEdit::SetCell { cell, set } => match cell_of(within) {
+            Some((r, c, rest)) if [r, c] == *cell => {
+                let key = rest
+                    .strip_prefix('.')
+                    .and_then(|k| k.split(['.', '[']).next())
+                    .unwrap_or("");
+                if set.contains_key(key) {
+                    format!("set{rest}")
+                } else {
+                    "set".to_owned()
+                }
+            }
+            _ if set.contains_key("merge") => "set.merge".to_owned(),
+            _ => "set".to_owned(),
+        },
+        TableEdit::Add {
+            axis, size, cells, ..
+        } => {
+            if within.starts_with(axis.sizes_key()) {
+                return if size.is_some() {
+                    axis.size_key().to_owned()
+                } else {
+                    String::new()
+                };
+            }
+            match (cell_of(within), cells) {
+                (Some((r, c, rest)), Some(_)) => match axis {
+                    Axis::Row => format!("cells[{c}]{rest}"),
+                    Axis::Column => format!("cells[{r}]{rest}"),
+                },
+                _ => String::new(),
+            }
+        }
+        TableEdit::Delete { axis, .. } => axis.word().to_owned(),
     }
 }
 
@@ -2915,7 +2998,8 @@ fn target_words(op: &Operation) -> String {
         Body::Change { target, .. }
         | Body::Move { target, .. }
         | Body::Delete { target }
-        | Body::SetAttribute { target, .. } => target.words(),
+        | Body::SetAttribute { target, .. }
+        | Body::TableEdit { target, .. } => target.words(),
         Body::Add {
             to: AddTo::Sheet(s),
             ..

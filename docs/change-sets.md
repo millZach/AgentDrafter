@@ -56,6 +56,11 @@ A sheet's template is the file its row's path names, as the file system resolves
 | `move` | `MOVE` | Moves an object. |
 | `delete` | `ERASE` | Deletes an object. |
 | `set_attribute` | `ATTEDIT` | Sets one attribute value of an insert, naming one occurrence of a tag its block defines more than once. |
+| `set_cell` | `TABLEDIT` | Sets keys of a table's cell: its text, style, height, justification or merge. |
+| `add_row` | none | Adds a row to a table. |
+| `delete_row` | none | Deletes a row of a table. |
+| `add_column` | none | Adds a column to a table. |
+| `delete_column` | none | Deletes a column of a table. |
 | `add_layer`, `change_layer`, `rename_layer`, `delete_layer` | `LAYER`, none, `RENAME`, `LAYDEL` | Adds, changes, renames or deletes a layer of a template. |
 | `add_linetype`, `change_linetype`, `rename_linetype`, `delete_linetype` | `LINETYPE`, none, none, none | The same for a linetype. |
 | `add_text_style`, `change_text_style`, `rename_text_style`, `delete_text_style` | `STYLE`, none, none, none | The same for a text style. |
@@ -101,6 +106,22 @@ Zach decided on 2026-11-13 (#99) how it names one of a tag the block defines mor
 - When the tag repeats, `occurrence` is needed: without it the operation fails with `missing_key` at `occurrence`, listing each occurrence with its value, such as ``1 `ISSUED`, 2 `-` (its default)``. An occurrence past the last fails with `bad_value`, listing them too.
 - When the tag does not repeat, `occurrence` is 1 or left out; any other is `bad_value`.
 - It writes that item of the insert's list in its record, growing a shorter list with nulls, which take their defaults, and writing a list where the record gave none. An item the template takes from the row, `{row: NAME}`, sets the sheet's row value, as a whole attribute from the row does.
+
+### Tables
+
+Five operations edit a [table](sheet-description.md#tables)'s grid, as AutoCAD's TABLEDIT and its row and column commands do. Each names its table under `target`, by its ID or its name, as every edit names its object, and lands as any edit of an object does: a table of a template is edited in the template, so every sheet built from it follows, all or nothing, and a table of a row's own objects on that sheet alone. A table on a locked layer is not edited. Cells, rows and columns count from 0 from the top left, a cell `[row, column]`, as the record's `cells[r][c]` and the checker's `table_cell` do. After each operation the sheet is read back and built, so a table it leaves wrong fails the sheet, with the error placed in the operation, at the key that caused it, such as `operations[0].set.merge[0]` or `operations[1].height`.
+
+- **`set_cell`** (`TABLEDIT`) takes `target`, `cell`, `[row, column]`, and `set`: the cell's keys, `text`, `style`, `height`, `justify` and `merge`, each to its new value as a sheet description writes a cell's; `null` takes a key away. A cell written as its text alone stays so when only its text is set, and becomes a mapping when another key is; one left with nothing is written `''`. A cell inside another cell's merge shows nothing of its own and is refused, naming the merge's cell, so set that cell, or take its merge away first. A `merge` keeps within the table and off other merges, and the cells it covers must be empty: one that is not is refused, and the error lists them, to be emptied first with `set: {"text": null}`. A cell's text its template takes from the row, `{row: NAME}`, as the cell or as its `text`, is set in the sheet's row, on that sheet alone, and the reply's `row_value` names it, as `set_attribute` does (decision 5).
+
+  ```json
+  {"op": "set_cell", "target": {"id": "DEMO-001/cables"}, "cell": [3, 0], "set": {"text": "C-104", "merge": [1, 2]}}
+  ```
+
+- **`add_row`** takes `target`, and `at`, the new row's place, the row there and those after it moving down; without it, after the last. `height` is its height; without it, the height of the row before it, or of the first row when it goes in at 0. `cells` is its cells, one for each column, each written as a sheet description writes a cell; without them, empty. A merge it falls inside, between its first and last rows, grows by a row, and the new row's cells under it must be empty. The title and header rows are the table's first: a row is not added above either, nor between them (`bad_value` at `at`).
+- **`delete_row`** takes `target` and `row`. A merge it cuts through shrinks by a row, and one left spanning its own cell alone is taken away. A row holding a merged cell that spans more rows than it is refused, naming the cell, so take the merge away first with `set_cell`, `set: {"merge": null}`. Deleting the title row leaves the table without one, and the header row likewise. A table keeps at least one row.
+- **`add_column`** and **`delete_column`** do the same across, with `at`, `width`, `cells`, one for each row, and `column`. A merge across the column grows or shrinks, a column holding a merged cell that spans more columns is refused, and a table keeps at least one column.
+
+The reply's operation says what else it did to keep the table in line, such as `the merge of cell [0, 0] grows to [1, 5]`. The table is written again as an object an edit touched is ([How the records are written](#how-the-records-are-written)): each value it did not touch as it was, and a comment inside the table is lost.
 
 ### Blocks
 
@@ -214,5 +235,6 @@ Only what an operation touched is rewritten. Each record is read into the strict
 - Change sets on a sheet description outside a drawing set.
 - Operations on the set's other parts: hatch patterns, the block library's own layers, linetypes and text styles, renaming or deleting a block, rows and their values directly, and a sheet's template.
 - Choosing where in its list an added object goes; it is drawn after the others.
+- A column added after the last joining a merge that ends at the last, such as a title's: the merge stays as it was, and `set_cell` widens it. A merge grows only when the row or column goes in between its first and last.
 - Moving an object from a template to a row, or the reverse.
 - The MCP server, the Python library and the HTTP API ([#14](https://github.com/millZach/AgentDrafter/issues/14)), which will reach the same core entry point.

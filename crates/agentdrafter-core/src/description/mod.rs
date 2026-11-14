@@ -51,7 +51,7 @@ use crate::model::{BlockLibrary, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 pub use blocks::parse_block_library;
-pub(crate) use edit::{AttributeSet, GivenValue, Listed, ObjectList, RecordFile};
+pub(crate) use edit::{AttributeSet, Axis, GivenValue, Listed, ObjectList, RecordFile, TableEdit};
 pub(crate) use emit::number_text;
 pub(crate) use ids::ID_SEPARATOR;
 pub(crate) use mark::{mark_text, parse_mark, MarkFailure};
@@ -61,6 +61,7 @@ pub(crate) use set::{
     read_rows, read_rows_in, read_set_settings, read_set_settings_in, rows_at, template_path, Row,
 };
 pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
+pub(crate) use table::CELL_KEYS;
 pub(crate) use template::{
     library_named, read_template, read_template_in, template_at, template_in,
 };
