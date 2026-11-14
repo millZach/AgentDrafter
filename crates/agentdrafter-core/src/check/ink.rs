@@ -6,6 +6,10 @@
 //! contours. A text's letters are an SHX font's strokes, or a TrueType
 //! font's filled outlines; a line is its dashes as its linetype lays them
 //! out, or a wide polyline's filled band.
+//!
+//! Two inks touch where they overlap by more than the tolerance: two pens
+//! by how far their widths overlap, and a pen or an outline and a filled
+//! area by how deep it reaches into the area.
 
 use crate::draw::{Bounds, Point2, Shape};
 
@@ -14,7 +18,7 @@ use crate::draw::{Bounds, Point2, Shape};
 pub(super) struct Ink {
     /// Each stroke's segment, with half its pen's width in drawing units.
     /// A dot is a segment from a point to itself.
-    pub segments: Vec<(Point2, Point2, f64)>,
+    pub strokes: Vec<(Point2, Point2, f64)>,
     /// Each filled area's closed contours, filled by the non-zero rule.
     pub fills: Vec<Vec<Point2>>,
     /// The box round all of it, its pens' widths among it.
@@ -34,10 +38,10 @@ impl Ink {
                 for run in runs {
                     match run.as_slice() {
                         [] => {}
-                        [p] => self.segments.push((*p, *p, half)),
+                        [p] => self.strokes.push((*p, *p, half)),
                         _ => {
                             for pair in run.windows(2) {
-                                self.segments.push((pair[0], pair[1], half));
+                                self.strokes.push((pair[0], pair[1], half));
                             }
                         }
                     }
@@ -45,67 +49,77 @@ impl Ink {
                 }
             }
             Shape::Fill { contours, .. } => {
-                for contour in contours {
-                    if contour.len() < 2 {
-                        continue;
-                    }
-                    for i in 0..contour.len() {
-                        let next = contour[(i + 1) % contour.len()];
-                        self.segments.push((contour[i], next, 0.0));
-                    }
+                for contour in contours.iter().filter(|c| c.len() >= 3) {
                     points.extend(contour.iter().copied());
                     self.fills.push(contour.clone());
                 }
             }
         }
         if let Some(b) = Bounds::of(points.into_iter()) {
-            let grown = Bounds {
-                min: [b.min[0] - reach, b.min[1] - reach],
-                max: [b.max[0] + reach, b.max[1] + reach],
-            };
+            let grown = [
+                [b.min[0] - reach, b.min[1] - reach],
+                [b.max[0] + reach, b.max[1] + reach],
+            ];
             let had = self.bounds.into_iter().flat_map(|b| [b.min, b.max]);
-            self.bounds = Bounds::of(had.chain([grown.min, grown.max]));
+            self.bounds = Bounds::of(had.chain(grown));
         }
     }
 
-    /// Where this ink and `other` touch as they print, by more than
-    /// `tolerance`: a point where they cross, or where their pens overlap
-    /// by more than it, or a point of one inside a filled area of the
-    /// other. None when they do not.
+    /// The edges of the filled areas, as segments of no width.
+    fn edges(&self) -> Vec<(Point2, Point2)> {
+        self.fills
+            .iter()
+            .flat_map(|c| (0..c.len()).map(move |i| (c[i], c[(i + 1) % c.len()])))
+            .collect()
+    }
+
+    /// Where this ink and `other` overlap as they print by more than
+    /// `tolerance`: a point inside both inks. None when they do not.
     pub fn touches(&self, other: &Ink, tolerance: f64) -> Option<Point2> {
         let (a, b) = (self.bounds?, other.bounds?);
-        if a.min[0] > b.max[0] + tolerance
-            || b.min[0] > a.max[0] + tolerance
-            || a.min[1] > b.max[1] + tolerance
-            || b.min[1] > a.max[1] + tolerance
-        {
+        if apart(&a, &b, tolerance) {
             return None;
         }
-        for &(p, q, w) in &self.segments {
-            let seg = Bounds::of([p, q].into_iter()).expect("two points");
-            for &(r, s, v) in &other.segments {
-                let reach = w + v + tolerance;
-                if seg.min[0] > r[0].max(s[0]) + reach
-                    || r[0].min(s[0]) > seg.max[0] + reach
-                    || seg.min[1] > r[1].max(s[1]) + reach
-                    || r[1].min(s[1]) > seg.max[1] + reach
-                {
+        // Two pens: how far their widths overlap, or a crossing.
+        for &(p, q, w) in &self.strokes {
+            for &(r, s, v) in &other.strokes {
+                if apart_segments(p, q, r, s, w + v + tolerance) {
                     continue;
                 }
                 if let Some(at) = cross(p, q, r, s) {
-                    return Some(at);
+                    if w + v > tolerance || (w == 0.0 && v == 0.0) {
+                        return Some(at);
+                    }
                 }
-                let (d, at) = distance(p, q, r, s);
+                let (d, on_first, on_second) = distance(p, q, r, s);
                 if w + v - d > tolerance {
-                    return Some(at);
+                    // Between the two centrelines, inside both pens.
+                    let t = if w + v > 0.0 { w / (w + v) } else { 0.5 };
+                    return Some([
+                        on_first[0] + (on_second[0] - on_first[0]) * t,
+                        on_first[1] + (on_second[1] - on_first[1]) * t,
+                    ]);
                 }
             }
         }
-        // A stroke wholly inside the other's filled area, or the reverse.
+        // A pen, or a filled area's outline, reaching into the other's
+        // filled area.
         for (inner, outer) in [(self, other), (other, self)] {
-            for &(p, _, _) in &inner.segments {
-                if !outer.fills.is_empty() && inside(p, &outer.fills) {
-                    return Some(p);
+            if outer.fills.is_empty() {
+                continue;
+            }
+            let edges = outer.edges();
+            let Some(area) = Bounds::of(outer.fills.iter().flatten().copied()) else {
+                continue;
+            };
+            let mut reaching: Vec<(Point2, Point2, f64)> = inner.strokes.clone();
+            reaching.extend(inner.edges().into_iter().map(|(p, q)| (p, q, 0.0)));
+            for (p, q, w) in reaching {
+                if apart_segments(p, q, area.min, area.max, w + tolerance) {
+                    continue;
+                }
+                if let Some(at) = into_fill(p, q, w, &outer.fills, &edges, tolerance) {
+                    return Some(at);
                 }
             }
         }
@@ -113,9 +127,79 @@ impl Ink {
     }
 }
 
-/// Where segment `p`–`q` crosses segment `r`–`s`, ends included; none when
-/// they do not, or lie along one line.
-fn cross(p: Point2, q: Point2, r: Point2, s: Point2) -> Option<Point2> {
+/// Where a pen `w` wide each side of segment `p`–`q` reaches into the area
+/// `fills`, bounded by `edges`, by more than `tolerance`: a point inside
+/// both. The segment is cut where it crosses the edges; each piece whose
+/// middle is inside reaches as deep as that middle is from the edges, plus
+/// the pen. A segment outside the area reaches in by its pen less its
+/// distance from the edges.
+fn into_fill(
+    p: Point2,
+    q: Point2,
+    w: f64,
+    fills: &[Vec<Point2>],
+    edges: &[(Point2, Point2)],
+    tolerance: f64,
+) -> Option<Point2> {
+    let mut cuts = vec![0.0, 1.0];
+    for &(r, s) in edges {
+        if let Some(t) = cross_at(p, q, r, s) {
+            cuts.push(t);
+        }
+    }
+    cuts.sort_by(f64::total_cmp);
+    let at = |t: f64| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+    let depth = |m: Point2| {
+        edges
+            .iter()
+            .map(|&(r, s)| {
+                let n = nearest(m, r, s);
+                (m[0] - n[0]).hypot(m[1] - n[1])
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    for pair in cuts.windows(2) {
+        let m = at((pair[0] + pair[1]) / 2.0);
+        if inside(m, fills) && depth(m) + w > tolerance {
+            return Some(m);
+        }
+    }
+    // Outside the area, the pen may still reach over its edge.
+    if w > tolerance {
+        for &(r, s) in edges {
+            let (d, on_segment, on_edge) = distance(p, q, r, s);
+            if w - d > tolerance {
+                let t = if w > 0.0 { (d / w).min(1.0) } else { 1.0 };
+                let toward = [
+                    on_segment[0] + (on_edge[0] - on_segment[0]) * t,
+                    on_segment[1] + (on_edge[1] - on_segment[1]) * t,
+                ];
+                return Some(toward);
+            }
+        }
+    }
+    None
+}
+
+/// Whether two boxes are apart by more than `margin`.
+fn apart(a: &Bounds, b: &Bounds, margin: f64) -> bool {
+    a.min[0] > b.max[0] + margin
+        || b.min[0] > a.max[0] + margin
+        || a.min[1] > b.max[1] + margin
+        || b.min[1] > a.max[1] + margin
+}
+
+/// Whether segments `p`–`q` and `r`–`s` are apart by more than `margin`,
+/// box against box.
+fn apart_segments(p: Point2, q: Point2, r: Point2, s: Point2, margin: f64) -> bool {
+    p[0].min(q[0]) > r[0].max(s[0]) + margin
+        || r[0].min(s[0]) > p[0].max(q[0]) + margin
+        || p[1].min(q[1]) > r[1].max(s[1]) + margin
+        || r[1].min(s[1]) > p[1].max(q[1]) + margin
+}
+
+/// Where along segment `p`–`q`, from 0 to 1, it crosses segment `r`–`s`.
+fn cross_at(p: Point2, q: Point2, r: Point2, s: Point2) -> Option<f64> {
     let d1 = [q[0] - p[0], q[1] - p[1]];
     let d2 = [s[0] - r[0], s[1] - r[1]];
     let denom = d1[0] * d2[1] - d1[1] * d2[0];
@@ -125,15 +209,20 @@ fn cross(p: Point2, q: Point2, r: Point2, s: Point2) -> Option<Point2> {
     let w = [r[0] - p[0], r[1] - p[1]];
     let t = (w[0] * d2[1] - w[1] * d2[0]) / denom;
     let u = (w[0] * d1[1] - w[1] * d1[0]) / denom;
-    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u))
-        .then(|| [p[0] + t * d1[0], p[1] + t * d1[1]])
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some(t)
 }
 
-/// The least distance between segment `p`–`q` and segment `r`–`s`, and
-/// the point on the first where it is.
-fn distance(p: Point2, q: Point2, r: Point2, s: Point2) -> (f64, Point2) {
-    let mut best = (f64::INFINITY, p);
-    for (point, a, b, own) in [
+/// Where segment `p`–`q` crosses segment `r`–`s`, ends included; none when
+/// they do not, or lie along one line.
+fn cross(p: Point2, q: Point2, r: Point2, s: Point2) -> Option<Point2> {
+    cross_at(p, q, r, s).map(|t| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t])
+}
+
+/// The least distance between segment `p`–`q` and segment `r`–`s`, and the
+/// nearest points on each.
+fn distance(p: Point2, q: Point2, r: Point2, s: Point2) -> (f64, Point2, Point2) {
+    let mut best = (f64::INFINITY, p, r);
+    for (point, a, b, first) in [
         (p, r, s, true),
         (q, r, s, true),
         (r, p, q, false),
@@ -142,7 +231,11 @@ fn distance(p: Point2, q: Point2, r: Point2, s: Point2) -> (f64, Point2) {
         let near = nearest(point, a, b);
         let d = (point[0] - near[0]).hypot(point[1] - near[1]);
         if d < best.0 {
-            best = (d, if own { point } else { near });
+            best = if first {
+                (d, point, near)
+            } else {
+                (d, near, point)
+            };
         }
     }
     best
@@ -181,10 +274,23 @@ fn inside(p: Point2, contours: &[Vec<Point2>]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::draw::FillRule;
 
     fn stroke(runs: Vec<Vec<Point2>>, lineweight: f64) -> Ink {
         let mut ink = Ink::default();
         ink.add(&Shape::Stroke { lineweight, runs }, 1.0);
+        ink
+    }
+
+    fn filled(contour: Vec<Point2>) -> Ink {
+        let mut ink = Ink::default();
+        ink.add(
+            &Shape::Fill {
+                rule: FillRule::NonZero,
+                contours: vec![contour],
+            },
+            1.0,
+        );
         ink
     }
 
@@ -203,18 +309,35 @@ mod tests {
     }
 
     #[test]
-    fn a_stroke_inside_a_filled_letter_touches_it() {
-        let mut letter = Ink::default();
-        letter.add(
-            &Shape::Fill {
-                rule: crate::draw::FillRule::NonZero,
-                contours: vec![vec![[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]]],
-            },
-            1.0,
+    fn where_two_pens_touch_is_inside_both() {
+        let line = stroke(vec![vec![[0.0, 0.0], [10.0, 0.0]]], 0.25);
+        let letter = stroke(vec![vec![[2.0, 0.2], [8.0, 0.2]]], 0.25);
+        let at = line.touches(&letter, 0.01).unwrap();
+        assert!(
+            at[1] <= 0.125 + 1e-12 && at[1] >= 0.2 - 0.125 - 1e-12,
+            "{at:?}"
         );
-        let inner = stroke(vec![vec![[1.0, 2.0], [3.0, 2.0]]], 0.0);
-        assert!(inner.touches(&letter, 0.01).is_some());
+    }
+
+    #[test]
+    fn a_stroke_inside_a_filled_letter_touches_it_and_a_brush_does_not() {
+        let stem = filled(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 10.0], [0.0, 10.0]]);
+        let inner = stroke(vec![vec![[0.2, 2.0], [0.8, 2.0]]], 0.0);
+        assert!(inner.touches(&stem, 0.01).is_some());
         let outside = stroke(vec![vec![[5.0, 2.0], [6.0, 2.0]]], 0.0);
-        assert!(outside.touches(&letter, 0.01).is_none());
+        assert!(outside.touches(&stem, 0.01).is_none());
+        // A 1 wide pen whose edge reaches 0.005 into the stem: within the
+        // tolerance, so it does not touch; one reaching 0.1 in does.
+        let brush = stroke(vec![vec![[1.495, 4.5], [2.0, 4.5]]], 1.0);
+        assert!(brush.touches(&stem, 0.01).is_none());
+        let into = stroke(vec![vec![[1.4, 4.5], [2.0, 4.5]]], 1.0);
+        assert!(into.touches(&stem, 0.01).is_some());
+        // A hairline running along the stem's edge does not reach into it.
+        let along = stroke(vec![vec![[1.0, 2.0], [1.0, 8.0]]], 0.0);
+        assert!(along.touches(&stem, 0.01).is_none());
+        // A hairline across the stem reaches half its width in.
+        let across = stroke(vec![vec![[-1.0, 5.0], [2.0, 5.0]]], 0.0);
+        let at = across.touches(&stem, 0.01).unwrap();
+        assert!((0.0..=1.0).contains(&at[0]), "{at:?}");
     }
 }
