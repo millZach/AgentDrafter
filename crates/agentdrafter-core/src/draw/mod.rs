@@ -667,11 +667,10 @@ impl<'a> Drawer<'a> {
             if definition.invisible {
                 continue;
             }
-            let value = insert
-                .attributes
-                .iter()
-                .find(|a| a.tag == definition.tag)
-                .map_or(definition.default.as_str(), |a| a.value.as_str());
+            // Matched by place, since a block may define a tag more than once.
+            let value = block
+                .attribute_value(insert, p)
+                .unwrap_or(definition.default.as_str());
             // The attribute where the insert puts it: on the sheet, or in
             // the enclosing block, which `outer` then places.
             let mut text = attribute_text(insert, block, definition, value);

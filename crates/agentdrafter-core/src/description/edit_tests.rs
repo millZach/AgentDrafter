@@ -69,12 +69,12 @@ fn a_block_object_keeps_its_layout_and_its_quotes() {
 fn an_attribute_the_row_fills_is_left_to_the_row() {
     let mut record = file(TEMPLATE);
     let set = record
-        .set_attribute(ObjectList::Template, 2, "TITLE", "NEW", 0)
+        .set_attribute(ObjectList::Template, 2, "TITLE", None, "NEW", 0)
         .unwrap();
     assert_eq!(set, AttributeSet::FromRow("TITLE".to_owned()));
     assert_eq!(record.new_text().unwrap(), None);
     let set = record
-        .set_attribute(ObjectList::Template, 2, "DRAWN", "ZM", 0)
+        .set_attribute(ObjectList::Template, 2, "DRAWN", None, "ZM", 0)
         .unwrap();
     assert_eq!(set, AttributeSet::Written);
     let after = record.new_text().unwrap().unwrap();
@@ -450,13 +450,13 @@ fn a_nested_inserts_value_is_removed_from_its_block_alone() {
     assert_eq!(outer, "OUTER");
     assert_eq!(insert.block, "INNER");
     assert_eq!(
-        insert.values,
+        pairs(&insert.values),
         [
             ("LETTER".to_owned(), "A".to_owned()),
             ("NOTE".to_owned(), "kept".to_owned())
         ]
     );
-    record.remove_block_attribute("OUTER", 1, "LETTER").unwrap();
+    record.fit_block_attribute("OUTER", 1, "LETTER", 0).unwrap();
     let after = record.new_text().unwrap().unwrap();
     assert_eq!(
         after,
@@ -466,7 +466,7 @@ fn a_nested_inserts_value_is_removed_from_its_block_alone() {
         )
     );
     // The last value takes `attributes` with it.
-    record.remove_block_attribute("OUTER", 1, "NOTE").unwrap();
+    record.fit_block_attribute("OUTER", 1, "NOTE", 0).unwrap();
     let after = record.new_text().unwrap().unwrap();
     assert_eq!(
         after,
@@ -480,17 +480,13 @@ fn a_templates_attribute_value_is_removed_and_its_row_reference_with_it() {
     let inserts = record.inserts(ObjectList::Template);
     assert_eq!(inserts.len(), 1);
     assert_eq!(inserts[0].index, 2);
-    assert!(inserts[0]
-        .values
-        .contains(&("REV".to_owned(), "{row: REV}".to_owned())));
-    assert!(inserts[0]
-        .values
-        .contains(&("DRAWN".to_owned(), "AD".to_owned())));
+    assert!(pairs(&inserts[0].values).contains(&("REV".to_owned(), "{row: REV}".to_owned())));
+    assert!(pairs(&inserts[0].values).contains(&("DRAWN".to_owned(), "AD".to_owned())));
     record
-        .remove_attribute(ObjectList::Template, 2, "REV", 0)
+        .fit_attribute(ObjectList::Template, 2, "REV", 0, 0)
         .unwrap();
     record
-        .remove_attribute(ObjectList::Template, 2, "DRAWN", 0)
+        .fit_attribute(ObjectList::Template, 2, "DRAWN", 0, 0)
         .unwrap();
     let after = record.new_text().unwrap().unwrap();
     let (new, gone) = diff(TEMPLATE, &after);
@@ -540,4 +536,12 @@ fn a_library_whose_empty_braces_hold_a_comment_is_not_rewritten() {
     let e = added.unwrap_err();
     assert_eq!(e.code, crate::error::ErrorCode::WriteFailed, "{e:?}");
     assert!(e.message.contains("written in braces"), "{}", e.message);
+}
+
+/// Each value an insert's record gives, as its key and its text.
+fn pairs(values: &[super::GivenValue]) -> Vec<(String, String)> {
+    values
+        .iter()
+        .map(|v| (v.key.clone(), v.text.clone()))
+        .collect()
 }

@@ -209,7 +209,14 @@ pub struct AttributeRemoved {
     /// The insert's ID on each sheet it is on; none for an insert in a
     /// block, which is on every sheet that inserts that block.
     pub ids: Vec<String>,
+    /// The tag, in capitals.
     pub tag: String,
+    /// Which of the tag's values was removed, counted from 1, when the
+    /// block still defines the tag but fewer times than the insert's list
+    /// gave values for: an item past the last it keeps. Left out when the
+    /// whole value was removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurrence: Option<usize>,
     /// The value as the record wrote it, such as `B` or `{row: REV}`; a
     /// row's value itself stays in its row.
     pub value: String,

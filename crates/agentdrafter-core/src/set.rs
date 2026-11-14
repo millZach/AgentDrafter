@@ -104,8 +104,8 @@ pub struct SheetOutcome {
     pub notices: Vec<Notice>,
 }
 
-/// Something a build noticed about a sheet that did not stop it, placed in
-/// the file it is about.
+/// Something a build or a change noticed about a sheet that did not stop
+/// it, placed in the file it is about.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Notice {
     pub code: NoticeCode,
@@ -132,6 +132,10 @@ pub enum NoticeCode {
     /// built without it, as Zach decided on 2026-11-11, and the notice keeps
     /// a stray or misspelt value in sight.
     UnusedValue,
+    /// An attribute tag is written in lowercase, in a block library's
+    /// attribute definition or an insert's `attributes`. It is taken in
+    /// capitals, as AutoCAD keeps it, and the notice says so.
+    TagInCapitals,
 }
 
 /// Builds every sheet of a drawing set, reading fonts from the font folders

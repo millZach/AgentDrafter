@@ -32,10 +32,11 @@ use super::{
     ChangeRequest, Fill, OperationOutcome, RowValueSet, SheetChange,
 };
 use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
+use crate::description::blocks::tag_in_capitals;
 use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
-    template_at, template_in, template_path, AttributeSet, Disk, Listed, MarkFailure, ObjectList,
-    ReadFiles, RecordFile, Row, ID_SEPARATOR,
+    template_at, template_in, template_path, AttributeSet, Disk, GivenValue, Listed, MarkFailure,
+    ObjectList, ReadFiles, RecordFile, Row, ID_SEPARATOR,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -1078,6 +1079,26 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
     } = found;
     let reach = at.reach(file, k);
     let units = files.units;
+    // The block a set_attribute's insert places, with the attributes it
+    // carries as its library holds it now, so that the operation can tell
+    // which of a tag the block defines more than once it sets.
+    let carried = match &op.body {
+        Body::SetAttribute { .. } => {
+            let block = at
+                .file(file)
+                .ok()
+                .and_then(|r| r.object_value(list, index, "block"));
+            match (block, files.library_of[files.template_of[k]]) {
+                (Some(block), Some(l)) => at
+                    .library(l)
+                    .ok()
+                    .and_then(|r| r.block_carried(&block))
+                    .map(|carried| (block, carried)),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
     let record = match at.file(file) {
         Ok(record) => record,
         Err(e) => return fail(reach, e),
@@ -1106,6 +1127,8 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
     };
     let mut sheets = reach.clone();
     let mut from_row: Option<(String, String)> = None;
+    // The attribute a set_attribute sets, in words, for its message.
+    let mut attribute_set = String::new();
     // Whether the operation edits the object itself, not only a row value.
     let mut edits_object = true;
     // A move or a delete always edits the object's file; a change and an
@@ -1160,14 +1183,32 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 refuse: false,
             };
         }
-        Body::SetAttribute { tag, value, .. } => {
-            match record.set_attribute(list, index, tag, value, op.index) {
+        Body::SetAttribute {
+            tag,
+            occurrence,
+            value,
+            ..
+        } => {
+            let capitals = tag_in_capitals(tag);
+            let item = match set_which(
+                &capitals,
+                *occurrence,
+                carried.as_ref(),
+                record,
+                list,
+                index,
+            ) {
+                Ok(item) => item,
+                Err((code, message)) => return fail(reach, op_err(code, message, "occurrence")),
+            };
+            attribute_set = attribute_words(tag, item);
+            match record.set_attribute(list, index, &capitals, item, value, op.index) {
                 Ok(AttributeSet::Written) => {
                     if let Some(refusal) = many_paths(files, file, op, "target") {
                         return refusal;
                     }
                     done.message =
-                        format!("sets the attribute {tag} of `{id}` to `{value}`{template_note}");
+                        format!("sets {attribute_set} of `{id}` to `{value}`{template_note}");
                 }
                 Ok(AttributeSet::FromRow(name)) => {
                     edits_object = false;
@@ -1241,7 +1282,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
             .map(|f| format!("{} of `{}`", f.at, f.id))
             .collect();
         let set_what = match &op.body {
-            Body::SetAttribute { tag, .. } => format!("the attribute {tag} of `{id}`"),
+            Body::SetAttribute { .. } => format!("{attribute_set} of `{id}`"),
             _ => format!("the contents of `{id}`"),
         };
         let row_message = format!(
@@ -1668,7 +1709,10 @@ fn apply_block(
                         ),
                         ids => quoted_list(&ids.iter().map(String::as_str).collect::<Vec<_>>()),
                     };
-                    format!("{} (`{}`) of {place}", r.tag, r.value)
+                    match r.occurrence {
+                        Some(n) => format!("{} occurrence {n} (`{}`) of {place}", r.tag, r.value),
+                        None => format!("{} (`{}`) of {place}", r.tag, r.value),
+                    }
                 })
                 .collect();
             let s = if list.len() == 1 { "" } else { "s" };
@@ -1706,6 +1750,101 @@ fn apply_block(
     }
 }
 
+/// The attribute a set_attribute sets, in words: `the attribute REV`, or
+/// for item `item` of a tag the block defines more than once, counted from
+/// 0, `occurrence 2 of the attribute NOTE`. A tag written in lowercase is
+/// named in capitals, saying so.
+fn attribute_words(tag: &str, item: Option<usize>) -> String {
+    let capitals = tag_in_capitals(tag);
+    let written = if capitals == tag {
+        String::new()
+    } else {
+        format!(" (written `{tag}`, taken in capitals, as AutoCAD keeps a tag)")
+    };
+    match item {
+        Some(i) => format!("occurrence {} of the attribute {capitals}{written}", i + 1),
+        None => format!("the attribute {capitals}{written}"),
+    }
+}
+
+/// Which value of the attribute `tag`, in capitals, a set_attribute with
+/// `occurrence` sets on the insert of `list` at `index` in `record`: none
+/// for the tag's single value, or the item of its list, counted from 0,
+/// when its block, `carried` with the attributes it carries and their
+/// defaults, defines the tag more than once. Without `occurrence` that is
+/// an error listing each occurrence with its value; so is an occurrence the
+/// block does not define. A tag the block does not carry is left for the
+/// sheet's reading to refuse.
+fn set_which(
+    tag: &str,
+    occurrence: Option<usize>,
+    carried: Option<&(String, Vec<(String, String)>)>,
+    record: &RecordFile,
+    list: ObjectList,
+    index: usize,
+) -> Result<Option<usize>, (ErrorCode, String)> {
+    let Some((block, carried)) = carried else {
+        return Ok(None);
+    };
+    let defaults: Vec<&str> = carried
+        .iter()
+        .filter(|(t, _)| t == tag)
+        .map(|(_, default)| default.as_str())
+        .collect();
+    let given = record
+        .inserts(list)
+        .into_iter()
+        .find(|insert| insert.index == index)
+        .and_then(|insert| insert.values.into_iter().find(|v| v.tag == tag));
+    let listing = || {
+        let each: Vec<String> = defaults
+            .iter()
+            .enumerate()
+            .map(|(i, default)| {
+                let written = match &given {
+                    Some(GivenValue {
+                        items: Some(items), ..
+                    }) => items.get(i).cloned().flatten(),
+                    Some(g) if i == 0 && !g.null => Some(g.text.clone()),
+                    _ => None,
+                };
+                match written {
+                    Some(value) => format!("{} `{value}`", i + 1),
+                    None => format!("{} `{default}` (its default)", i + 1),
+                }
+            })
+            .collect();
+        each.join(", ")
+    };
+    match (defaults.len(), occurrence) {
+        (0, _) | (1, None | Some(1)) => Ok(None),
+        (1, Some(o)) => Err((
+            ErrorCode::BadValue,
+            format!(
+                "block `{block}` defines the attribute `{tag}` once, so its occurrence is 1 or \
+                 left out, not {o}"
+            ),
+        )),
+        (n, None) => Err((
+            ErrorCode::MissingKey,
+            format!(
+                "block `{block}` defines the attribute `{tag}` {n} times; name the one to set \
+                 with occurrence, counted from 1 in the order the block defines them: {}",
+                listing()
+            ),
+        )),
+        (n, Some(o)) if o > n => Err((
+            ErrorCode::BadValue,
+            format!(
+                "block `{block}` defines the attribute `{tag}` {n} times, so its occurrence is \
+                 1 to {n}, not {o}: {}",
+                listing()
+            ),
+        )),
+        (_, Some(o)) => Ok(Some(o - 1)),
+    }
+}
+
 /// What bringing inserts into line did.
 #[derive(Default)]
 struct Synced {
@@ -1719,8 +1858,12 @@ struct Synced {
 /// AutoCAD's ATTSYNC does: each value an insert gives for a tag its block
 /// no longer carries is removed, in the templates that name the library,
 /// in the rows of the sheets built from them, and in the library's own
-/// blocks. A new tag needs nothing written, since an insert that gives no
-/// value takes the definition's default.
+/// blocks. A tag the block now defines fewer times than an insert's list
+/// gives values for loses the list's surplus items; a tag it now defines
+/// once takes the list's first item alone, and a tag it now defines more
+/// than once takes a single value as its list's first item. A new tag
+/// needs nothing written, since an insert that gives no value takes the
+/// definition's default.
 fn sync(
     at: &mut Attempt,
     l: usize,
@@ -1741,11 +1884,19 @@ fn sync(
         .iter()
         .map(|b| (b.clone(), record.block_carried_tags(b).unwrap_or_default()))
         .collect();
-    let gone = |block: &str, tag: &str| {
+    // How many times the block `block` now carries `tag`; none when the
+    // block is not brought into line.
+    let count = |block: &str, tag: &str| {
         carried
             .iter()
             .find(|(b, _)| b == block)
-            .is_some_and(|(_, tags)| !tags.iter().any(|t| t == tag))
+            .map(|(_, tags)| tags.iter().filter(|t| *t == tag).count())
+    };
+    // What fitting `given` to the block `block` takes away, and how many
+    // times the block carries its tag; none when it fits as it is.
+    let unfit = |block: &str, given: &GivenValue| {
+        let n = count(block, &given.tag)?;
+        given.unfitted(n).map(|gone| (n, gone))
     };
     let synced = |block: &str| carried.iter().any(|(b, _)| b == block);
     // The blocks an insert on a sheet reaches through: these, and every
@@ -1772,31 +1923,29 @@ fn sync(
 
     // The library's own blocks, whose definitions insert these.
     let library_path = record.path.display().to_string();
-    let nested: Vec<(String, usize, String, String)> = record
+    let nested: Vec<(String, usize, GivenValue, usize, Removed)> = record
         .block_inserts()
         .into_iter()
         .filter(|(_, insert)| synced(&insert.block))
         .flat_map(|(outer, insert)| {
             let block = insert.block.clone();
+            let index = insert.index;
             insert
                 .values
                 .into_iter()
-                .filter(|(tag, _)| gone(&block, tag))
-                .map(move |(tag, value)| (outer.clone(), insert.index, tag, value))
+                .filter_map(|given| {
+                    let (n, gone) = unfit(&block, &given)?;
+                    Some((outer.clone(), index, given, n, gone))
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
-    for (outer, index, tag, value) in nested {
+    for (outer, index, given, n, gone) in nested {
         record
-            .remove_block_attribute(&outer, index, &tag)
+            .fit_block_attribute(&outer, index, &given.key, n)
             .map_err(fail)?;
-        removed.push(AttributeRemoved {
-            record: library_path.clone(),
-            field: format!("blocks.{outer}.objects[{index}]"),
-            ids: Vec::new(),
-            tag,
-            value,
-        });
+        let field = format!("blocks.{outer}.objects[{index}]");
+        removed.extend(removals(&library_path, &field, &[], &given.tag, gone));
     }
 
     // Each template that names the library: its inserts are on every
@@ -1820,9 +1969,9 @@ fn sync(
                     .iter()
                     .map(|&k| (k, format!("{}/{id}", files.name(k)))),
             );
-            for (tag, value) in insert.values {
-                if gone(&insert.block, &tag) {
-                    edits.push((insert.index, tag, value, ids.clone()));
+            for given in insert.values {
+                if let Some((n, gone)) = unfit(&insert.block, &given) {
+                    edits.push((insert.index, given, n, gone, ids.clone()));
                 }
             }
         }
@@ -1834,17 +1983,12 @@ fn sync(
         }
         let template = at.template(t).map_err(fail)?;
         let path = template.path.display().to_string();
-        for (index, tag, value, ids) in edits {
+        for (index, given, n, gone, ids) in edits {
             template
-                .remove_attribute(ObjectList::Template, index, &tag, op.index)
+                .fit_attribute(ObjectList::Template, index, &given.key, n, op.index)
                 .map_err(fail)?;
-            removed.push(AttributeRemoved {
-                record: path.clone(),
-                field: ObjectList::Template.place(index),
-                ids,
-                tag,
-                value,
-            });
+            let field = ObjectList::Template.place(index);
+            removed.extend(removals(&path, &field, &ids, &given.tag, gone));
         }
     }
 
@@ -1860,23 +2004,18 @@ fn sync(
             }
             let id = format!("{}/{}", files.name(k), listed[insert.index].id);
             reached.push((k, id.clone()));
-            for (tag, value) in insert.values {
-                if gone(&insert.block, &tag) {
-                    edits.push((insert.index, tag, value, id.clone()));
+            for given in insert.values {
+                if let Some((n, gone)) = unfit(&insert.block, &given) {
+                    edits.push((insert.index, given, n, gone, id.clone()));
                 }
             }
         }
-        for (index, tag, value, id) in edits {
+        for (index, given, n, gone, id) in edits {
             at.rows
-                .remove_attribute(list, index, &tag, op.index)
+                .fit_attribute(list, index, &given.key, n, op.index)
                 .map_err(fail)?;
-            removed.push(AttributeRemoved {
-                record: rows_path.clone(),
-                field: list.place(index),
-                ids: vec![id],
-                tag,
-                value,
-            });
+            let field = list.place(index);
+            removed.extend(removals(&rows_path, &field, &[id], &given.tag, gone));
         }
     }
     reached.sort_by_key(|(k, _)| *k);
@@ -1884,6 +2023,36 @@ fn sync(
         inserts: reached.into_iter().map(|(_, id)| id).collect(),
         removed,
     })
+}
+
+/// What fitting an insert's value to its block takes away: the whole
+/// value, or items of its list, each with its occurrence, counted from 1.
+type Removed = Vec<(Option<usize>, String)>;
+
+/// The removals `gone` from the value an insert gives for `tag`, the insert
+/// being at `field` in `record` with the IDs `ids`.
+fn removals(
+    record: &str,
+    field: &str,
+    ids: &[String],
+    tag: &str,
+    gone: Removed,
+) -> impl Iterator<Item = AttributeRemoved> {
+    let (record, field, ids, tag) = (
+        record.to_owned(),
+        field.to_owned(),
+        ids.to_vec(),
+        tag.to_owned(),
+    );
+    gone.into_iter()
+        .map(move |(occurrence, value)| AttributeRemoved {
+            record: record.clone(),
+            field: field.clone(),
+            ids: ids.clone(),
+            tag: tag.clone(),
+            occurrence,
+            value,
+        })
 }
 
 /// The refusal of block operation `op` on the library `l` when the set's

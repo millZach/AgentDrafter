@@ -2,8 +2,9 @@
 //!
 //! A template is written with what a sheet description holds. Where a
 //! sheet's value comes from its row, the template writes `{row: NAME}` in
-//! place of the value: as an insert's attribute value, or as a text's or an
-//! mtext's contents. A sheet is the template with each `{row: NAME}`
+//! place of the value: as an insert's attribute value, or an item of the
+//! list of values of a tag its block defines more than once, or as a
+//! text's or an mtext's contents. A sheet is the template with each `{row: NAME}`
 //! replaced by the row's value `NAME`, read as a sheet description is read.
 //!
 //! A row may also hold objects of its own, which are on its sheet alone,
@@ -18,8 +19,9 @@
 
 use std::path::Path;
 
+use super::blocks::Noticed;
 use super::ids::ObjectRecord;
-use super::records::SheetRecord;
+use super::records::{notices_of, SheetRecord};
 use super::set::{value_name_problem, Row};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
 use super::{
@@ -108,7 +110,8 @@ pub(crate) fn template_in(
     set_units: Unit,
     notices: &mut Vec<Notice>,
 ) -> Result<(SheetRecord, Option<LibraryFile>), Error> {
-    let mut library = None;
+    let mut library: Option<LibraryFile> = None;
+    let mut noticed = Vec::new();
     let (sheet, objects) = fill_with_records(
         text,
         row,
@@ -116,8 +119,15 @@ pub(crate) fn template_in(
         set_units,
         &mut library_beside_in(files, path, &mut library),
         notices,
+        &mut noticed,
     )
     .map_err(|e| e.or_in_file(path))?;
+    // What reading the block library noticed, then the sheet's objects.
+    if let Some(read) = &mut library {
+        let from_library = std::mem::take(&mut read.noticed);
+        notices.extend(notices_of(from_library, &row.sheet, &row.template, path));
+    }
+    notices.extend(notices_of(noticed, &row.sheet, &row.template, path));
     let record = SheetRecord {
         name: row.sheet.clone(),
         file: path.to_owned(),
@@ -154,7 +164,16 @@ pub(super) fn fill(
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
     notices: &mut Vec<Notice>,
 ) -> Result<Sheet, Error> {
-    fill_with_records(text, row, rows_file, set_units, load, notices).map(|(sheet, _)| sheet)
+    fill_with_records(
+        text,
+        row,
+        rows_file,
+        set_units,
+        load,
+        notices,
+        &mut Vec::new(),
+    )
+    .map(|(sheet, _)| sheet)
 }
 
 /// Reads the text of a template as the sheet `row` names, filled in with
@@ -163,7 +182,8 @@ pub(super) fn fill(
 /// block library the template names, as for a sheet description. An error
 /// about a row's value names `rows_file`; any other is left for the caller
 /// to place in the template's file, unless it names the block library's. A
-/// value of the row the template has no place for is added to `notices`.
+/// value of the row the template has no place for is added to `notices`,
+/// and what reading the sheet's objects noticed to `noticed`.
 pub(super) fn fill_with_records(
     text: &str,
     row: &Row,
@@ -171,6 +191,7 @@ pub(super) fn fill_with_records(
     set_units: Unit,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
     notices: &mut Vec<Notice>,
+    noticed: &mut Vec<Noticed>,
 ) -> Result<(Sheet, Vec<ObjectRecord>), Error> {
     let mut root = strict_yaml::read(text)?;
     let mut filled: Vec<Filled> = Vec::new();
@@ -203,7 +224,7 @@ pub(super) fn fill_with_records(
         path: row.objects_path(),
         file: rows_file,
     };
-    sheet_and_records(root, load, Some(set_units), Some(row_objects))
+    sheet_and_records(root, load, Some(set_units), Some(row_objects), noticed)
         .map_err(|e| at_row_value(e, &filled, row, rows_file))
 }
 
@@ -357,7 +378,17 @@ pub(super) fn places_in(
             };
             let attributes_path = key_path(&object_path, "attributes");
             for value in values {
-                visit(&mut value.value, key_path(&attributes_path, &value.key))?;
+                let path = key_path(&attributes_path, &value.key);
+                // A tag the block defines more than once takes a list, and
+                // each of its items may be a value from the row.
+                match &mut value.value.kind {
+                    Kind::Sequence(items) => {
+                        for (i, item) in items.iter_mut().enumerate() {
+                            visit(item, index_path(&path, i))?;
+                        }
+                    }
+                    _ => visit(&mut value.value, path)?,
+                }
             }
         }
         "text" | "mtext" => {

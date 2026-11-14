@@ -837,3 +837,55 @@ fn a_layers_query_lists_each_sheets_layers_with_their_states() {
         json!({"name": "trim", "color": 8, "linetype": "Continuous", "plot": false, "objects": 2})
     );
 }
+
+/// Zach decided on 2026-11-13 (#99) that the attributes of a tag a block
+/// defines more than once are reported as a list, in the order the block
+/// defines them, occurrence 1 first, a tag defined once as one value as
+/// before; a find by an attribute matches any occurrence.
+#[test]
+fn a_repeated_tags_values_are_reported_as_a_list_and_any_is_found() {
+    let dir = scratch("repeated-tags");
+    fs::write(
+        dir.join("blocks.yaml"),
+        "units: mm
+blocks:
+  NOTES:
+    objects:
+      - attdef: {tag: NOTE, position: [0, 0, 0], height: 1, default: '-'}
+      - attdef: {tag: 'NOTE#1', position: [0, 2, 0], height: 1}
+      - attdef: {tag: NOTE, position: [0, 4, 0], height: 1, default: '-'}
+      - attdef: {tag: NOTE, position: [0, 6, 0], height: 1, default: '-'}
+",
+    )
+    .unwrap();
+    let sheet = dir.join("sheet.yaml");
+    fs::write(
+        &sheet,
+        "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {block: NOTES, position: [0, 0, 0], name: notes, attributes: {NOTE: [first, null, third], 'NOTE#1': one}}
+",
+    )
+    .unwrap();
+    let attributes = ask(&sheet, Query::Attributes(Selection::default()));
+    let read = serde_json::to_value(&attributes).unwrap();
+    assert_eq!(
+        read["inserts"][0]["attributes"],
+        json!({"NOTE": ["first", "-", "third"], "NOTE#1": "one"})
+    );
+    for value in ["first", "third", "-"] {
+        let found = find(
+            &sheet,
+            Selection {
+                tag: Some("NOTE".into()),
+                value: Some(value.into()),
+                ..Selection::default()
+            },
+        );
+        let Answer::Find { count, .. } = found.answer else {
+            panic!("a find's answer")
+        };
+        assert_eq!(count, 1, "NOTE={value}");
+    }
+}

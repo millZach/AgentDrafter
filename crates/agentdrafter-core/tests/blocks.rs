@@ -8,8 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_with, parse_block_library, read_dwg, read_sheet_description, Block, BuildReport,
-    BuildRequest, DrawingContents, ErrorCode, Insert, Object, Settings, Sheet, TextStyle,
+    build_with, display_list_with, parse_block_library, read_dwg, read_sheet_description,
+    Attribute, Block, BuildReport, BuildRequest, DisplayListRequest, DrawingContents, ErrorCode,
+    Insert, NoticeCode, Object, Settings, Sheet, TextStyle,
 };
 
 /// How far an angle read back may be from the one written, in degrees. A
@@ -407,4 +408,207 @@ objects:
     for insert in inserts(&read.objects) {
         assert_eq!(insert.attributes.len(), 5, "{insert:?}");
     }
+}
+
+/// A made-up revision block of the kind a plant keeps: a tag defined more
+/// than once, one of those times constant, and tags with punctuation and
+/// one in lowercase, as AutoCAD allows them.
+const REVISIONS: &str = "units: mm
+blocks:
+  REVISIONS:
+    objects:
+      - attdef: {tag: NOTE, position: [0, 0, 0], height: 2, default: '-'}
+      - attdef: {tag: 'NOTE#1', position: [0, 3, 0], height: 2}
+      - attdef: {tag: NOTE, position: [0, 6, 0], height: 2, default: '-'}
+      - attdef: {tag: A/B, position: [0, 9, 0], height: 2}
+      - attdef: {tag: NOTE, position: [0, 12, 0], height: 2, default: K, constant: true}
+      - attdef: {tag: MM/DD/YY, position: [0, 15, 0], height: 2}
+      - attdef: {tag: X.Y, position: [0, 18, 0], height: 2}
+      - attdef: {tag: REV-1, position: [0, 21, 0], height: 2}
+      - attdef: {tag: '#', position: [0, 24, 0], height: 2}
+      - attdef: {tag: '1', position: [0, 27, 0], height: 2}
+      - attdef: {tag: rev, position: [0, 30, 0], height: 2}
+      - attdef: {tag: NOTE, position: [0, 33, 0], height: 2, default: '-'}
+";
+
+/// A tag a block defines more than once takes a list of values, one for
+/// each definition but the constant one, in the block's order; tags with
+/// punctuation are kept as written, and one written in lowercase is taken
+/// in capitals, which the build's reply says. The DWG holds one attribute
+/// for each definition, in order, reads back as written, and draws each
+/// value where its own definition puts it.
+#[test]
+fn repeated_and_punctuated_tags_read_back_from_a_dwg() {
+    let dir = scratch("repeated");
+    fs::write(dir.join("blocks.yaml"), REVISIONS).unwrap();
+    fs::write(
+        dir.join("sheet.yaml"),
+        "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {block: REVISIONS, position: [0, 0, 0], attributes: {NOTE: [first, null, third], 'NOTE#1': n1, A/B: ab, MM/DD/YY: 11/13/26, X.Y: xy, REV-1: r1, '#': hash, '1': one, Rev: B}}
+  - insert: {block: REVISIONS, position: [50, 0, 0], attributes: {NOTE: [only]}}
+",
+    )
+    .unwrap();
+    let (sheet, report, read) = build_and_read(&dir.join("sheet.yaml"));
+    let tags: Vec<&str> = sheet.blocks[0]
+        .attribute_definitions()
+        .map(|d| d.tag.as_str())
+        .collect();
+    assert_eq!(
+        tags,
+        [
+            "NOTE", "NOTE#1", "NOTE", "A/B", "NOTE", "MM/DD/YY", "X.Y", "REV-1", "#", "1", "REV",
+            "NOTE"
+        ]
+    );
+    let given = |tag: &str, value: &str| Attribute {
+        tag: tag.into(),
+        value: value.into(),
+    };
+    let Object::Insert(first) = &sheet.objects[0] else {
+        panic!("an insert");
+    };
+    assert_eq!(
+        first.attributes,
+        [
+            given("NOTE", "first"),
+            given("NOTE#1", "n1"),
+            given("NOTE", "-"),
+            given("A/B", "ab"),
+            given("MM/DD/YY", "11/13/26"),
+            given("X.Y", "xy"),
+            given("REV-1", "r1"),
+            given("#", "hash"),
+            given("1", "one"),
+            given("REV", "B"),
+            given("NOTE", "third"),
+        ]
+    );
+    let Object::Insert(second) = &sheet.objects[1] else {
+        panic!("an insert");
+    };
+    let notes: Vec<&str> = second
+        .attributes
+        .iter()
+        .filter(|a| a.tag == "NOTE")
+        .map(|a| a.value.as_str())
+        .collect();
+    assert_eq!(notes, ["only", "-", "-"]);
+    // The library's `rev` and the sheet's `Rev`, each where it is written.
+    let notices: Vec<(NoticeCode, &str, &str)> = report
+        .notices
+        .iter()
+        .map(|n| (n.code, n.field.as_str(), n.message.as_str()))
+        .collect();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert_eq!(notices[0].0, NoticeCode::TagInCapitals);
+    assert_eq!(notices[0].1, "blocks.REVISIONS.objects[10].attdef.tag");
+    assert!(report.notices[0].file.ends_with("blocks.yaml"));
+    assert!(
+        notices[0].2.contains("`rev` is taken as `REV`"),
+        "{notices:?}"
+    );
+    assert_eq!(notices[1].1, "objects[0].insert.attributes.Rev");
+    assert!(report.notices[1].file.ends_with("sheet.yaml"));
+    // Read back from the DWG, each value is its own definition's.
+    assert_same_objects(&sheet, &read);
+    assert_same_block(&sheet.blocks[0], &read);
+    // And each draws where its definition puts it: occurrence 3 of NOTE is
+    // the last definition, 33 above the insert.
+    let drawn = display_list_with(
+        &DisplayListRequest::new(dir.join("sheet.yaml")),
+        &Settings::default(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let at = |word: &str, object: usize| -> f64 {
+        drawn
+            .display_list
+            .text
+            .iter()
+            .filter(|run| run.object == object)
+            .find(|run| run.characters.iter().map(|(c, _)| c).collect::<String>() == word)
+            .unwrap_or_else(|| panic!("`{word}` drawn"))
+            .origin[1]
+    };
+    assert!((at("first", 0) - 0.0).abs() < 1e-9);
+    assert!((at("third", 0) - 33.0).abs() < 1e-9);
+    assert!((at("K", 0) - 12.0).abs() < 1e-9);
+    assert!((at("only", 1) - 0.0).abs() < 1e-9);
+}
+
+/// A repeated tag takes a list no longer than the times the block defines
+/// it, and not one value; a tag defined once takes one value, not a list.
+/// A tag cannot hold a space, and one given twice, in two cases, is an
+/// error.
+#[test]
+fn a_repeated_tag_takes_a_list_and_a_single_tag_one_value() {
+    let dir = scratch("repeated-errors");
+    fs::write(dir.join("blocks.yaml"), REVISIONS).unwrap();
+    let sheet = dir.join("sheet.yaml");
+    for (attributes, code, field, words) in [
+        (
+            "{NOTE: [a, b, c, d]}",
+            ErrorCode::BadValue,
+            "objects[0].insert.attributes.NOTE",
+            "defines the attribute `NOTE` 3 times, so it takes at most 3 values",
+        ),
+        (
+            "{NOTE: a}",
+            ErrorCode::WrongType,
+            "objects[0].insert.attributes.NOTE",
+            "takes a list of values",
+        ),
+        (
+            "{A/B: [a]}",
+            ErrorCode::WrongType,
+            "objects[0].insert.attributes.A/B",
+            "defines the attribute `A/B` once",
+        ),
+        (
+            "{X.Y: [a]}",
+            ErrorCode::WrongType,
+            "objects[0].insert.attributes.X.Y",
+            "defines the attribute `X.Y` once",
+        ),
+        (
+            "{NOTE: [a, \"b\\nc\"]}",
+            ErrorCode::BadValue,
+            "objects[0].insert.attributes.NOTE[1]",
+            "one line",
+        ),
+        (
+            "{rev: a, REV: b}",
+            ErrorCode::DuplicateKey,
+            "objects[0].insert.attributes.REV",
+            "given twice",
+        ),
+        (
+            "{'NOTE 2': a}",
+            ErrorCode::UnknownName,
+            "objects[0].insert.attributes.NOTE 2",
+            "NOTE (3 times, given as a list), NOTE#1, A/B",
+        ),
+    ] {
+        fs::write(
+            &sheet,
+            format!(
+                "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {{block: REVISIONS, position: [0, 0, 0], attributes: {attributes}}}\n"
+            ),
+        )
+        .unwrap();
+        let e = read_sheet_description(&sheet).unwrap_err();
+        assert_eq!(e.code, code, "{attributes}: {e:?}");
+        assert_eq!(e.field.as_deref(), Some(field), "{attributes}: {e:?}");
+        assert!(e.message.contains(words), "{attributes}: {}", e.message);
+    }
+    // A tag with a space is refused where the block defines it.
+    let e = parse_block_library(&REVISIONS.replace("tag: X.Y", "tag: 'X Y'")).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadValue);
+    assert_eq!(
+        e.field.as_deref(),
+        Some("blocks.REVISIONS.objects[6].attdef.tag")
+    );
+    assert!(e.message.contains("cannot hold a space"), "{}", e.message);
 }

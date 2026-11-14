@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::description::{read_sheet_record, SheetRecord};
+use crate::description::{read_sheet_record_noting, SheetRecord};
 use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
 use crate::settings::Settings;
@@ -61,6 +61,12 @@ pub struct BuildReport {
     /// look-alike each is measured with. The DWG names the styles' own
     /// fonts all the same. Empty when every font was found.
     pub font_substitutions: Vec<FontSubstitution>,
+    /// What reading a sheet description built on its own noticed that did
+    /// not stop it, such as an attribute tag written in lowercase and taken
+    /// in capitals. Left out when there is nothing to say; a sheet of a
+    /// drawing set gives its notices beside its result.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<crate::set::Notice>,
 }
 
 /// Builds a sheet description into a DWG in the 2018 format, reading fonts
@@ -77,20 +83,23 @@ pub fn build(request: &BuildRequest) -> Result<BuildReport, Error> {
 /// description names is read from beside it.
 pub fn build_with(request: &BuildRequest, settings: &Settings) -> Result<BuildReport, Error> {
     let description = request.description.as_path();
-    let record = read_sheet_record(description)?;
+    let mut notices = Vec::new();
+    let record = read_sheet_record_noting(description, &mut notices)?;
     let output = request
         .output
         .clone()
         .unwrap_or_else(|| description.with_extension("dwg"));
     let alone = BuildMark { set: None };
-    build_sheet(
+    let mut report = build_sheet(
         &record,
         description,
         &output,
         &alone,
         request.overwrite,
         settings,
-    )
+    )?;
+    report.notices = notices;
+    Ok(report)
 }
 
 /// Builds the sheet `record` holds, read from the sheet description or
@@ -174,6 +183,7 @@ pub(crate) fn prepare_sheet(
         objects,
         bytes: bytes.len(),
         font_substitutions: fonts.substitutions(),
+        notices: Vec::new(),
     };
     Ok(PreparedSheet { report, bytes })
 }

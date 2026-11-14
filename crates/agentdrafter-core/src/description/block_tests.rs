@@ -270,13 +270,13 @@ fn an_attribute_the_block_does_not_have_lists_its_attributes() {
         &["unknown attribute `SIZE`", "TAG, NOTE"],
     );
     let e = error_with_library(&one_object(
-        "insert: {block: MARKER, position: [0, 0, 0], attributes: {tag: A-1}}",
+        "insert: {block: MARKER, position: [0, 0, 0], attributes: {size: A-1}}",
     ));
     assert_names(
         &e,
         ErrorCode::UnknownName,
-        "objects[0].insert.attributes.tag",
-        &["TAG, NOTE"],
+        "objects[0].insert.attributes.size",
+        &["unknown attribute `size`", "TAG, NOTE"],
     );
     let e = error_with_library(&one_object(
         "insert: {block: ARROW, position: [0, 0, 0], attributes: {TAG: A-1}}",
@@ -509,22 +509,10 @@ fn a_block_library_is_checked_as_a_sheet_is() {
             &["unknown layer `symbols`"],
         ),
         (
-            "units: mm\nblocks:\n  A: {objects: [{attdef: {tag: Tag, position: [0, 0, 0], height: 1}}]}\n",
-            ErrorCode::BadValue,
-            "blocks.A.objects[0].attdef.tag",
-            &["in capitals", "`TAG`"],
-        ),
-        (
             "units: mm\nblocks:\n  A: {objects: [{attdef: {tag: TWO WORDS, position: [0, 0, 0], height: 1}}]}\n",
             ErrorCode::BadValue,
             "blocks.A.objects[0].attdef.tag",
             &["cannot hold a space"],
-        ),
-        (
-            "units: mm\nblocks:\n  A:\n    objects:\n      - attdef: {tag: TAG, position: [0, 0, 0], height: 1}\n      - attdef: {tag: TAG, position: [0, 2, 0], height: 1}\n",
-            ErrorCode::DuplicateKey,
-            "blocks.A.objects[1].attdef.tag",
-            &["defined twice", "line 5"],
         ),
         (
             "units: mm\nblocks:\n  A: {objects: [{attdef: {tag: TAG, position: [0, 0, 0], height: 1, prompt: \"A\\nB\"}}]}\n",
@@ -932,4 +920,23 @@ fn a_constant_attribute_is_set_only_by_its_definition() {
     // Saying false is no conflict.
     parse_block_library(&MODES.replace("constant: true}", "constant: true, verify: false}"))
         .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// A tag is taken in capitals letter for letter: a letter whose capital is
+/// more than one letter, such as `ß`, stays as written, so a tag the
+/// schema takes at 255 characters or fewer is read at the same length.
+#[test]
+fn a_tag_keeps_its_length_in_capitals() {
+    assert_eq!(super::blocks::tag_in_capitals("straße"), "STRAßE");
+    let tag = "ß".repeat(128);
+    let library = parse_block_library(&format!(
+        "units: mm\nblocks:\n  B:\n    objects:\n      - attdef: {{tag: {tag}, position: [0, 0, 0], height: 1}}\n"
+    ))
+    .unwrap_or_else(|e| panic!("{e}"));
+    let read = &library.blocks[0]
+        .attribute_definitions()
+        .next()
+        .unwrap()
+        .tag;
+    assert_eq!(read.chars().count(), 128);
 }

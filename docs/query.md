@@ -40,7 +40,7 @@ Every answer has the same frame, then what its kind found:
 | `--name` | The object's name, such as `title-block`. Any object may carry one. |
 | `--block` | An insert of the block. |
 | `--tag` | An insert carrying the attribute; with `--value`, the attribute the value is looked for in. |
-| `--value` | An insert one of whose attributes has the value, or the attribute `--tag` names. |
+| `--value` | An insert one of whose attributes has the value, or the attribute `--tag` names: any occurrence of a tag its block defines more than once. |
 | `--text` | A text or an mtext saying it, or an insert whose block draws a text or an mtext saying it. |
 
 **How each matches.** An ID, a name, a block and an attribute tag are identifiers, and no two of a kind differ only in case, so each matches the whole of it in any case: `--name TITLE-BLOCK` finds `title-block`. A value and a text match the whole of it, case and all. With `--contains`, every option matches a value that holds it, in any case: `--id border --contains` finds the border on every sheet, and `--text made-up --contains` the notes.
@@ -66,6 +66,8 @@ An attribute's value is not text the block draws: it is found with `--value`.
 ```json
 {"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-001"],"message":"1 insert has the name `title-block`, on sheet `DEMO-001`","kind":"attributes","count":1,"inserts":[{"sheet":"DEMO-001","id":"DEMO-001/objects[2]","name":"title-block","block":"TITLE_BLOCK","attributes":{"TITLE":"AREA 100 GENERAL ARRANGEMENT","DWG_NO":"DEMO-001","SHEET":"1 OF 3","REV":"0","DATE":"2026-11-11","DRAWN":"AD"},"file":"examples/demo-set/templates/ansi-b.yaml","field":"objects[2]","line":19,"column":5}]}}
 ```
+
+A tag the insert's block defines more than once ([the block library](block-library.md#a-tag-defined-more-than-once)) maps to a list of its values, in the order the block defines them, occurrence 1 first, as an insert gives them: `"attributes":{"NOTE":["ISSUED","-","AS BUILT"],"NOTE#1":"A"}`. A tag defined once maps to its one value, as above. Zach decided this on 2026-11-13 (#99).
 
 ## Blocks
 

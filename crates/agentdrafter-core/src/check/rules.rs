@@ -669,12 +669,12 @@ impl InBlock<'_> {
     /// contents, or the insert's value of an attribute.
     fn says(&self) -> Option<String> {
         match self.object {
+            // Matched by place, since a block may define a tag more than once.
             Object::AttributeDefinition(d) => Some(
-                self.insert
-                    .attributes
-                    .iter()
-                    .find(|a| a.tag == d.tag)
-                    .map_or(d.default.clone(), |a| a.value.clone()),
+                self.block
+                    .attribute_value(self.insert, self.index)
+                    .unwrap_or(&d.default)
+                    .to_owned(),
             ),
             object => says(object),
         }

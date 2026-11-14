@@ -375,10 +375,14 @@ fn does(spec: &Spec) -> String {
             )
         }
         Kind::SetAttribute => "Sets the value of the attribute tag of an insert. When the \
-                               insert's template takes that attribute from the row, the \
-                               sheet's row value is set instead, on that sheet alone, and the \
-                               reply names every place on the sheet the value fills. AutoCAD's \
-                               ATTEDIT."
+                               insert's block defines the tag more than once, occurrence names \
+                               which, counted from 1 in the order the block defines them, and \
+                               is needed: without it the operation fails, listing each \
+                               occurrence with its value. A tag written in lowercase is taken \
+                               in capitals, as AutoCAD keeps it. When the insert's template \
+                               takes that attribute from the row, the sheet's row value is set \
+                               instead, on that sheet alone, and the reply names every place on \
+                               the sheet the value fills. AutoCAD's ATTEDIT."
             .to_owned(),
     }
 }
@@ -610,6 +614,14 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             "properties": {
                 "target": target,
                 "tag": { "$ref": "#/$defs/attribute_tag" },
+                "occurrence": {
+                    "description": "Which of the attributes with this tag to set, counted from 1 \
+                                    in the order the insert's block defines them: needed when \
+                                    the block defines the tag more than once, and 1 or left out \
+                                    when it defines it once.",
+                    "type": "integer",
+                    "minimum": 1,
+                },
                 "value": { "$ref": "#/$defs/attribute_value" },
             },
         }),
@@ -828,6 +840,9 @@ pub(crate) enum Body {
     SetAttribute {
         target: Target,
         tag: String,
+        /// Which of the attributes with the tag, counted from 1, when the
+        /// block defines it more than once.
+        occurrence: Option<usize>,
         value: String,
     },
     /// A table operation: on the entry `name` of the template `to` names,
@@ -1184,8 +1199,24 @@ fn operation(
             Body::Delete { target: target()? }
         }
         Kind::SetAttribute => {
-            keys(&["target", "tag", "value"])?;
+            keys(&["target", "tag", "occurrence", "value"])?;
             let target = target()?;
+            let occurrence =
+                match map.get("occurrence") {
+                    None => None,
+                    // A whole number, written `1` or `1.0`, as JSON Schema's
+                    // integer takes it.
+                    Some(Value::Number(n)) if whole(n).is_some_and(|n| n >= 1) => {
+                        whole(n).and_then(|n| usize::try_from(n).ok())
+                    }
+                    Some(_) => return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected the occurrence, a whole number from 1: which of the attributes \
+                         with this tag to set, in the order the block defines them"
+                            .to_owned(),
+                        "occurrence",
+                    )),
+                };
             let tag = match map.get("tag") {
                 Some(Value::String(tag)) => tag.clone(),
                 _ => {
@@ -1215,7 +1246,12 @@ fn operation(
                     ))
                 }
             };
-            Body::SetAttribute { target, tag, value }
+            Body::SetAttribute {
+                target,
+                tag,
+                occurrence,
+                value,
+            }
         }
         Kind::Block(op) => {
             let allowed: &[&str] = match op {
@@ -1565,6 +1601,15 @@ fn length(value: &Value, units: Unit) -> Result<f64, String> {
             "expected a length such as 1 or \"4 in\", found `{text}`"
         )),
     }
+}
+
+/// `n` as a whole number from 0, whether JSON writes it `2` or `2.0`.
+fn whole(n: &serde_json::Number) -> Option<u64> {
+    n.as_u64().or_else(|| {
+        n.as_f64()
+            .filter(|f| f.fract() == 0.0 && *f >= 0.0 && *f <= u64::MAX as f64)
+            .map(|f| f as u64)
+    })
 }
 
 #[cfg(test)]

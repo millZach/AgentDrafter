@@ -267,9 +267,8 @@ const MTEXT_WIDTH: Place = Place {
 };
 
 /// The block library the places on a sheet that names one draw on: a block
-/// `B` with the attribute `TAG`.
-const LIBRARY: &str =
-    "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: TAG, position: [0, 0, 0], height: 1}}]}\n";
+/// `B` with the attribute `TAG`, defined once, and `NOTE`, defined twice.
+const LIBRARY: &str = "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: TAG, position: [0, 0, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 2, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 4, 0], height: 1}}]}\n";
 
 const INSERT_SCALE: Place = Place {
     name: "an insert's scale",
@@ -281,6 +280,12 @@ const ATTRIBUTE_VALUE: Place = Place {
     name: "an insert's attribute value",
     yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - insert: {block: B, position: [0, 0, 0], attributes: {TAG: V}}\n",
     json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"insert": {"block": "B", "position": [0, 0, 0], "attributes": {"TAG": V}}}]}"#,
+};
+
+const ATTRIBUTE_LIST: Place = Place {
+    name: "a repeated tag's values",
+    yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - insert: {block: B, position: [0, 0, 0], attributes: {NOTE: V}}\n",
+    json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"insert": {"block": "B", "position": [0, 0, 0], "attributes": {"NOTE": V}}}]}"#,
 };
 
 const ATTRIBUTE_KEY: Place = Place {
@@ -439,10 +444,24 @@ fn cases() -> Vec<Case> {
         (&ATTRIBUTE_VALUE, "'50%'", json!("50%"), true),
         (&ATTRIBUTE_VALUE, "\"A\\nB\"", json!("A\nB"), false),
         (&ATTRIBUTE_VALUE, "'\\U+00B0'", json!("\\U+00B0"), false),
-        (&ATTRIBUTE_VALUE, "[A]", json!(["A"]), false),
-        // An attribute's tag, as a key: in capitals.
+        // A tag the block defines more than once takes a list of values,
+        // as long as the times it defines it or shorter, null taking the
+        // default. The schema cannot see how many times the block defines
+        // a tag, so a list for a tag defined once, a list too long, and one
+        // value for a repeated tag are the reader's to refuse.
+        (&ATTRIBUTE_LIST, "[A, B]", json!(["A", "B"]), true),
+        (&ATTRIBUTE_LIST, "[A]", json!(["A"]), true),
+        (&ATTRIBUTE_LIST, "[null, '7']", json!([null, "7"]), true),
+        (&ATTRIBUTE_LIST, "[]", json!([]), true),
+        (&ATTRIBUTE_LIST, "[[A]]", json!([["A"]]), false),
+        (&ATTRIBUTE_LIST, "[{a: b}]", json!([{"a": "b"}]), false),
+        (&ATTRIBUTE_LIST, "[\"A\\nB\"]", json!(["A\nB"]), false),
+        (&ATTRIBUTE_LIST, "['\\U+00B0']", json!(["\\U+00B0"]), false),
+        // An attribute's tag, as a key: written in lowercase, it is taken
+        // in capitals, as AutoCAD keeps it.
         (&ATTRIBUTE_KEY, "TAG", json!("TAG"), true),
-        (&ATTRIBUTE_KEY, "tag", json!("tag"), false),
+        (&ATTRIBUTE_KEY, "tag", json!("tag"), true),
+        (&ATTRIBUTE_KEY, "Tag", json!("Tag"), true),
         (&ATTRIBUTE_KEY, "'T G'", json!("T G"), false),
         // A name: text with no space at either end, given once.
         (&INSERT_NAME, "jb", json!("jb"), true),
@@ -930,15 +949,24 @@ fn library_cases() -> Vec<Case> {
             json!([[0, 0, 0], [5, 2, 0]]),
             false,
         ),
-        // A tag: capitals, no spaces.
+        // A tag: no spaces; one in lowercase is taken in capitals, and
+        // punctuation is kept.
         (&TAG, "TAG", json!("TAG"), true),
+        (&TAG, "'NOTE#1'", json!("NOTE#1"), true),
+        (&TAG, "A/B", json!("A/B"), true),
+        (&TAG, "MM/DD/YY", json!("MM/DD/YY"), true),
+        (&TAG, "X.Y", json!("X.Y"), true),
+        (&TAG, "REV-1", json!("REV-1"), true),
+        (&TAG, "'#'", json!("#"), true),
+        (&TAG, "'1'", json!("1"), true),
+        (&TAG, "ÄÖ", json!("ÄÖ"), true),
         (&TAG, "'TAG_2'", json!("TAG_2"), true),
         (&TAG, "ÉTAT", json!("ÉTAT"), true),
         (&TAG, "'100'", json!("100"), true),
         (&TAG, "100", json!(100), true),
         (&TAG, "TRUE", json!(true), true),
-        (&TAG, "Tag", json!("Tag"), false),
-        (&TAG, "état", json!("état"), false),
+        (&TAG, "Tag", json!("Tag"), true),
+        (&TAG, "état", json!("état"), true),
         (&TAG, "'A B'", json!("A B"), false),
         (&TAG, "''", json!(""), false),
         // invisible: true or false, quoted or not.
