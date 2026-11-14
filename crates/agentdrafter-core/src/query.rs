@@ -1230,6 +1230,27 @@ pub(crate) fn measuring_drawing(sheet: &Sheet, fonts: &SheetFonts) -> DisplayLis
     draw::draw_sheet(sheet, fonts, tolerance, MOST_HATCH_DASHES)
 }
 
+/// The sheet drawn as it prints, to see what touches what: drawn as
+/// [`measuring_drawing`] draws it, its curves as fine, but with its
+/// linetypes laid out, so a line is its dashes, and with layers that do not
+/// plot left out, as on paper.
+pub(crate) fn printing_drawing(sheet: &Sheet, fonts: &SheetFonts) -> DisplayList {
+    let coarse = draw::draw_sheet(sheet, fonts, 1.0, MOST_HATCH_DASHES);
+    let size = coarse.extents().map_or(0.0, |b| b.width().max(b.height()));
+    let tolerance = if size > 0.0 {
+        size * EXTENTS_TOLERANCE
+    } else {
+        EXTENTS_TOLERANCE
+    };
+    draw::draw_sheet_for(
+        sheet,
+        fonts,
+        tolerance,
+        MOST_HATCH_DASHES,
+        draw::Purpose::Plot,
+    )
+}
+
 impl Extents {
     /// The box `bounds` draws within.
     pub(crate) fn of(bounds: &Bounds) -> Extents {
