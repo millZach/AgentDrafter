@@ -551,6 +551,13 @@ objects:
   - line: {id: far, from: [-1000000, 1.1, 0], to: [1000000, 1.1, 0]}
   - circle: {id: wheel, center: [1000000, 0, 0], radius: 1000}
   - line: {id: grazing, from: [999000, 999.9999199999968, 0], to: [1001000, 999.9999199999968, 0]}
+  - spline: {id: shallow, degree: 2, control_points: [[999000, 0.01, 0], [1000000, -0.01, 0], [1001000, 0.01, 0]]}
+  - line: {id: skimming, from: [999000, 0.0000005, 0], to: [1001000, 0.0000005, 0]}
+  - spline: {id: quintic, degree: 5, control_points: [[-1, -1, 0], [-0.6, 1, 0], [-0.2, -1, 0], [0.2, 1, 0], [0.6, -1, 0], [1, 1, 0]]}
+  - line: {id: axis, from: [-1, 0, 0], to: [1, 0, 0]}
+  - polyline: {id: vee, points: [[7000, 0, 0], [7005, 5, 0], [7010, 0, 0]]}
+  - line: {id: level, from: [6995, 5, 0], to: [7015, 5, 0]}
+  - line: {id: post, from: [7005, -1, 0], to: [7005, 10, 0]}
   - line: {id: through, from: [6000, 0, 0], to: [6010, 0, 0]}
   - polyline: {id: hairpin, points: [[6009, -1, 0], [6009, 1, 0], [6001, 1, 0], [6001, -1, 0]]}
 "#,
@@ -713,4 +720,59 @@ fn a_line_crossing_a_large_circle_at_a_shallow_angle_crosses_it_twice() {
     assert_eq!(points.len(), 2, "{points:#?}");
     assert!((points[0].at.x - 999_999.6).abs() < 1e-6, "{points:#?}");
     assert!((points[1].at.x - 1_000_000.4).abs() < 1e-6, "{points:#?}");
+}
+
+#[test]
+fn two_crossings_close_together_on_a_spline_are_two() {
+    // A flat spline dips 5e-7 below a line, crossing it 14.14 apart.
+    let sheet = review("dip");
+    for kind_of in [SnapKind::Intersection, SnapKind::ApparentIntersection] {
+        let (_, points) = snap(
+            &sheet,
+            with(kind("review/shallow", kind_of), "review/skimming"),
+        );
+        assert_eq!(points.len(), 2, "{points:#?}");
+        assert!(
+            (points[0].at.x - 999_992.928_932_188_1).abs() < 1e-6,
+            "{points:#?}"
+        );
+        assert!(
+            (points[1].at.x - 1_000_007.071_067_811_9).abs() < 1e-6,
+            "{points:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_spline_crossing_a_line_once_where_it_flattens_crosses_it_once() {
+    // y = x⁵ crosses the X axis once, at the origin, where it is flat.
+    let sheet = review("quintic");
+    for kind_of in [SnapKind::Intersection, SnapKind::ApparentIntersection] {
+        let (_, points) = snap(&sheet, with(kind("review/quintic", kind_of), "review/axis"));
+        assert_eq!(points.len(), 1, "{points:#?}");
+        assert!(
+            points[0].at.x.abs() < 1e-3 && points[0].at.y.abs() < 1e-9,
+            "{points:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_point_at_a_polylines_corner_is_found_once() {
+    // Both segments of the V end at its apex, which a line touches along
+    // its top and another passes through.
+    let sheet = review("corner");
+    for line in ["review/level", "review/post"] {
+        let (_, points) = snap(
+            &sheet,
+            with(kind(line, SnapKind::Intersection), "review/vee"),
+        );
+        assert_eq!(points.len(), 1, "{line}: {points:#?}");
+        close(points[0].at, [7005.0, 5.0, 0.0]);
+    }
+    let (_, points) = snap(
+        &sheet,
+        with(kind("review/vee", SnapKind::Intersection), "review/post"),
+    );
+    assert_eq!(points.len(), 1, "{points:#?}");
 }

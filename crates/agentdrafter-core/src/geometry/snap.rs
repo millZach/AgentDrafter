@@ -268,34 +268,76 @@ pub(crate) fn intersections(parts: &[Part], others: &[Part], apparent: bool) -> 
         SnapKind::Intersection
     };
     // Each crossing, with its part's place among the first object's parts
-    // and its parameter along it, to put them in order.
-    let mut crossed: Vec<(usize, f64, f64, SnapPoint)> = Vec::new();
+    // and its parameter along it, to put them in order, and the end of
+    // each part it lies at, if it does.
+    let mut crossed: Vec<Crossed> = Vec::new();
     for (i, part) in parts.iter().enumerate() {
-        for other in others {
+        for (j, other) in others.iter().enumerate() {
             let size = scale_of(&part.curve).max(scale_of(&other.curve));
             for (t, u) in crossings(&part.curve, &other.curve) {
                 let (p, q) = (part.curve.point(t), other.curve.point(u));
                 if !apparent && (p[2] - q[2]).abs() > tolerance(size) {
                     continue;
                 }
-                crossed.push((i, t, size, found(kind, part, Some(other), p)));
+                crossed.push(Crossed {
+                    part: i,
+                    other: j,
+                    t,
+                    at_end: end_at(&part.curve, t),
+                    other_end: end_at(&other.curve, u),
+                    size,
+                    point: found(kind, part, Some(other), p),
+                });
             }
         }
     }
-    crossed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    // A point where two parts meet, such as a polyline's corner, is one.
-    let mut points: Vec<SnapPoint> = Vec::new();
-    for (_, _, size, point) in crossed {
-        let p = [point.at.x, point.at.y, point.at.z];
-        let seen = points.iter().any(|seen| {
-            plan_distance([seen.at.x, seen.at.y, seen.at.z], p) <= tolerance(size)
-                && (apparent || (seen.at.z - p[2]).abs() <= tolerance(size))
+    crossed.sort_by(|a, b| a.part.cmp(&b.part).then(a.t.total_cmp(&b.t)));
+    // A point where two parts of one object meet, such as a polyline's
+    // corner, is found on each of them: it is one point where both lie at
+    // an end of their parts and those ends are one place. No two points
+    // are one for being close alone.
+    let mut kept: Vec<Crossed> = Vec::new();
+    for c in crossed {
+        let same_end = |a: Option<P3>, b: Option<P3>, size: f64| match (a, b) {
+            (Some(a), Some(b)) => plan_distance(a, b) <= tolerance(size),
+            _ => false,
+        };
+        let seen = kept.iter().any(|k| {
+            (k.part != c.part && same_end(k.at_end, c.at_end, c.size))
+                || (k.other != c.other && same_end(k.other_end, c.other_end, c.size))
         });
         if !seen {
-            points.push(point);
+            kept.push(c);
         }
     }
-    numbered(points)
+    numbered(kept.into_iter().map(|c| c.point).collect())
+}
+
+/// A crossing found between a part of the first object and one of the
+/// other's.
+struct Crossed {
+    part: usize,
+    other: usize,
+    t: f64,
+    /// The end of the first object's part it lies at, if it does.
+    at_end: Option<P3>,
+    /// The end of the other object's part it lies at, if it does.
+    other_end: Option<P3>,
+    size: f64,
+    point: SnapPoint,
+}
+
+/// The end of `c` that the parameter `t` is at, within a little.
+fn end_at(c: &Curve, t: f64) -> Option<P3> {
+    let (a, b) = c.domain();
+    let slack = (b - a) * 1e-9;
+    if t - a <= slack {
+        Some(c.start())
+    } else if b - t <= slack {
+        Some(c.end())
+    } else {
+        None
+    }
 }
 
 fn found(kind: SnapKind, part: &Part, other: Option<&Part>, at: P3) -> SnapPoint {

@@ -632,26 +632,27 @@ fn bisect(f: &dyn Fn(f64) -> f64, mut a: f64, mut b: f64, mut fa: f64) -> f64 {
 /// each.
 pub(crate) type Crossing = (f64, f64);
 
-/// Where curves `c` and `d` cross seen from above, in the order they lie
-/// along `c`. Lines and arcs are crossed exactly; anything with an ellipse
-/// or a spline is found from fine chords and then refined.
+/// Where curves `c` and `d` cross or touch seen from above, in the order
+/// they lie along `c`.
+///
+/// One of the two is taken as a signed function of a point that is 0 on
+/// it, its [`Shape`], and that function is followed along the other:
+/// see [`meetings`]. A crossing is a change of its sign and a touch a dip
+/// of its size to 0 that does not change it, so each point is found once,
+/// however close another is, and no point is found that is not on both.
+/// The shape is the simpler of the two, a line before a circle or an arc,
+/// before an ellipse, before a spline, whose shape is its signed distance.
 pub(crate) fn crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
     let size = scale_of(c).max(scale_of(d));
-    let mut found = match (c, d) {
-        _ if end_on(c).is_some() => seen_end_on(c, d, size),
-        _ if end_on(d).is_some() => seen_end_on(d, c, size)
-            .into_iter()
-            .map(|(u, t)| (t, u))
-            .collect(),
-        (Curve::Segment { .. } | Curve::Arc { .. }, Curve::Segment { .. } | Curve::Arc { .. }) => {
-            exact_crossings(c, d)
-        }
-        (Curve::Segment { .. }, Curve::Ellipse { .. }) => line_ellipse(c, d),
-        (Curve::Ellipse { .. }, Curve::Segment { .. }) => line_ellipse(d, c)
-            .into_iter()
-            .map(|(u, t)| (t, u))
-            .collect(),
-        _ => numeric_crossings(c, d),
+    let swap = |found: Vec<Crossing>| found.into_iter().map(|(u, t)| (t, u)).collect();
+    let mut found: Vec<Crossing> = if end_on(c).is_some() {
+        seen_end_on(c, d, size)
+    } else if end_on(d).is_some() {
+        swap(seen_end_on(d, c, size))
+    } else if rank(c) < rank(d) {
+        swap(meet(d, c, size))
+    } else {
+        meet(c, d, size)
     };
     found.retain(|&(t, u)| c.holds(t) && d.holds(u));
     let (c0, c1) = c.domain();
@@ -661,29 +662,331 @@ pub(crate) fn crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
         *u = u.clamp(d0, d1);
     }
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
-    // One point is found once: two within the tolerance are one. Where
-    // curves touch, each crossing found there has been refined to the one
-    // point they touch at ([`numeric_crossings`]), so they are within it.
-    found.dedup_by(|a, b| plan_distance(c.point(a.0), c.point(b.0)) <= 1e-9 * size);
+    found.dedup_by(|a, b| a.0 == b.0);
     found
 }
 
-/// How near two curves must come to touch, for curves as large as `size`:
-/// far less than the tolerance points are one within, so that two real
-/// crossings at a shallow angle, whose curves part between them by less
-/// than that tolerance, are not taken for one touch.
-fn touch_tolerance(size: f64) -> f64 {
-    1e-12 * size
+/// How a curve ranks as a shape: the simpler, the earlier.
+fn rank(c: &Curve) -> u8 {
+    match c {
+        Curve::Segment { .. } => 0,
+        Curve::Arc { .. } => 1,
+        Curve::Ellipse { .. } => 2,
+        Curve::Spline(_) => 3,
+    }
 }
 
-/// The sine of the angle between the curves, seen from above, at `at`.
-fn crossing_sine(c: &Curve, d: &Curve, at: Crossing) -> f64 {
-    let (u, v) = (c.tangent(at.0), d.tangent(at.1));
-    let lengths = u[0].hypot(u[1]) * v[0].hypot(v[1]);
-    if lengths == 0.0 {
-        return 0.0;
+/// How large a curve's coordinates are, for tolerances: at least 1.
+pub(crate) fn scale_of(c: &Curve) -> f64 {
+    let (min, max) = c.extents();
+    min.iter()
+        .chain(max.iter())
+        .fold(1.0_f64, |m, v| m.max(v.abs()))
+}
+
+/// A curve as a signed function of a point seen from above, 0 on the line,
+/// circle or ellipse it runs along, or, for a spline, on the spline.
+enum Shape<'a> {
+    /// The signed distance from the line through `a` square to `n`, a unit
+    /// vector.
+    Line { a: [f64; 2], n: [f64; 2] },
+    /// `|p − c|² − r²`.
+    Circle { c: [f64; 2], r: f64 },
+    /// `α² + β² − 1`, where `α` and `β` are the point's coordinates along
+    /// the ellipse's axes, each as a share of its axis: its unit-circle
+    /// form. `m` and `k` are the axes over their lengths squared.
+    Ellipse {
+        c: [f64; 2],
+        m: [f64; 2],
+        k: [f64; 2],
+        start: f64,
+        sweep: f64,
+    },
+    /// The signed distance from the spline, at the foot on it nearest the
+    /// point, found from the nearest of `near`, points along it.
+    Curve { d: &'a Curve, near: Vec<(f64, P3)> },
+}
+
+impl<'a> Shape<'a> {
+    fn of(d: &'a Curve) -> Shape<'a> {
+        match d {
+            Curve::Segment { a, b } => {
+                let v = [b[0] - a[0], b[1] - a[1]];
+                let l = v[0].hypot(v[1]);
+                Shape::Line {
+                    a: [a[0], a[1]],
+                    n: [-v[1] / l, v[0] / l],
+                }
+            }
+            Curve::Arc { center, radius, .. } => Shape::Circle {
+                c: [center[0], center[1]],
+                r: *radius,
+            },
+            Curve::Ellipse {
+                center,
+                major,
+                minor,
+                start,
+                sweep,
+            } => {
+                let over = |v: &[f64; 2]| {
+                    let l2 = v[0] * v[0] + v[1] * v[1];
+                    [v[0] / l2, v[1] / l2]
+                };
+                Shape::Ellipse {
+                    c: [center[0], center[1]],
+                    m: over(major),
+                    k: over(minor),
+                    start: *start,
+                    sweep: *sweep,
+                }
+            }
+            Curve::Spline(_) => {
+                let mut near = Vec::new();
+                for w in d.breaks().windows(2) {
+                    for i in 0..=32 {
+                        let u = w[0] + (w[1] - w[0]) * f64::from(i) / 32.0;
+                        near.push((u, d.point(u)));
+                    }
+                }
+                Shape::Curve { d, near }
+            }
+        }
     }
-    (u[0] * v[1] - u[1] * v[0]).abs() / lengths
+
+    /// The function's value at `p`, its gradient there, and how far `p`
+    /// is from the curve.
+    fn at(&self, p: P3) -> (f64, [f64; 2], f64) {
+        match self {
+            Shape::Line { a, n } => {
+                let v = (p[0] - a[0]) * n[0] + (p[1] - a[1]) * n[1];
+                (v, *n, v.abs())
+            }
+            Shape::Circle { c, r } => {
+                let w = [p[0] - c[0], p[1] - c[1]];
+                (
+                    w[0] * w[0] + w[1] * w[1] - r * r,
+                    [2.0 * w[0], 2.0 * w[1]],
+                    (w[0].hypot(w[1]) - r).abs(),
+                )
+            }
+            Shape::Ellipse { c, m, k, .. } => {
+                let w = [p[0] - c[0], p[1] - c[1]];
+                let (alpha, beta) = (w[0] * m[0] + w[1] * m[1], w[0] * k[0] + w[1] * k[1]);
+                let v = alpha * alpha + beta * beta - 1.0;
+                let g = [
+                    2.0 * (alpha * m[0] + beta * k[0]),
+                    2.0 * (alpha * m[1] + beta * k[1]),
+                ];
+                let slope = g[0].hypot(g[1]);
+                let far = if slope > 0.0 {
+                    v.abs() / slope
+                } else {
+                    f64::INFINITY
+                };
+                (v, g, far)
+            }
+            Shape::Curve { d, .. } => {
+                let u = self.foot(p);
+                let (q, v) = (d.point(u), d.tangent(u));
+                let l = v[0].hypot(v[1]);
+                let n = if l > 0.0 {
+                    [-v[1] / l, v[0] / l]
+                } else {
+                    [0.0, 0.0]
+                };
+                let w = [p[0] - q[0], p[1] - q[1]];
+                (w[0] * n[0] + w[1] * n[1], n, w[0].hypot(w[1]))
+            }
+        }
+    }
+
+    /// The spline's parameter at the foot nearest `p`.
+    fn foot(&self, p: P3) -> f64 {
+        let Shape::Curve { d, near } = self else {
+            return 0.0;
+        };
+        let start = near
+            .iter()
+            .min_by(|a, b| plan_distance(a.1, p).total_cmp(&plan_distance(b.1, p)))
+            .map_or(0.0, |n| n.0);
+        let (a, b) = d.domain();
+        foot_on(d, p, start).clamp(a, b)
+    }
+
+    /// The parameter along `d`, the curve this is the shape of, of `p`, a
+    /// point on it.
+    fn parameter(&self, d: &Curve, p: P3) -> Option<f64> {
+        match self {
+            Shape::Line { .. } | Shape::Circle { .. } => d.parameter_of(p),
+            Shape::Ellipse {
+                c,
+                m,
+                k,
+                start,
+                sweep,
+            } => {
+                let w = [p[0] - c[0], p[1] - c[1]];
+                let (alpha, beta) = (w[0] * m[0] + w[1] * m[1], w[0] * k[0] + w[1] * k[1]);
+                let share = (beta.atan2(alpha) - start).rem_euclid(TAU) / sweep;
+                // A point a hair before the start is at the start.
+                let turn = TAU / sweep;
+                Some(if share > 1.0 && turn - share < 1e-9 * turn {
+                    share - turn
+                } else {
+                    share
+                })
+            }
+            Shape::Curve { .. } => Some(self.foot(p)),
+        }
+    }
+}
+
+/// Whether a curve closes on itself: a whole circle or ellipse.
+fn closed(c: &Curve) -> bool {
+    match c {
+        Curve::Arc { sweep, .. } | Curve::Ellipse { sweep, .. } => sweep.abs() >= TAU - 1e-12,
+        _ => false,
+    }
+}
+
+/// Where `c` meets `d`, seen from above: the parameter along each.
+fn meet(c: &Curve, d: &Curve, size: f64) -> Vec<Crossing> {
+    let shape = Shape::of(d);
+    meetings(c, &shape, size)
+        .into_iter()
+        .filter_map(|t| Some((t, shape.parameter(d, c.point(t))?)))
+        .collect()
+}
+
+/// The parameters along `c` where it meets `shape`.
+///
+/// The shape's function, `f`, is followed along `c`, cut into pieces at
+/// `c`'s breaks and wherever `f`'s slope along it changes sign, found from
+/// fine steps and halved down to the last digit. Within a piece `f` only
+/// rises or only falls, so it is 0 there at most once:
+///
+/// - A piece whose ends have opposite signs holds one crossing, halved down
+///   to the last digit. One piece gives one point, so two crossings
+///   however close are two, and a crossing where `c` runs flat is one.
+/// - A touch is where `f`'s size dips between two pieces that do not change
+///   sign, kept only when the point is on both curves within the
+///   tolerance, `1e-9 · (1 + size)` and a few units of rounding. An end of
+///   an open curve is a touch so too, as where a line ends on another.
+/// - Where the dip does change sign, on both sides, but by no more than
+///   rounding can, the two crossings beside it are the one touch it is.
+/// - Where `c` lies along the shape within the tolerance all the way, they
+///   meet nowhere: collinear lines do not intersect, as AutoCAD's
+///   intersection snap finds none between them.
+///
+/// A whole circle or ellipse is followed from where it is furthest from the
+/// shape, so that its start, which is its end, is no point it meets.
+fn meetings(c: &Curve, shape: &Shape, size: f64) -> Vec<f64> {
+    let tolerance = 1e-9 * (1.0 + size) + 8.0 * f64::EPSILON * size;
+    let rounding = 64.0 * f64::EPSILON * size;
+    let value = |t: f64| shape.at(c.point(t)).0;
+    let distance = |t: f64| shape.at(c.point(t)).2;
+    let slope = |t: f64| {
+        let (_, g, _) = shape.at(c.point(t));
+        let v = c.tangent(t);
+        g[0] * v[0] + g[1] * v[1]
+    };
+    let round = closed(c);
+    let breaks = if round {
+        let from = (0..64)
+            .map(|i| f64::from(i) / 64.0)
+            .max_by(|a, b| value(*a).abs().total_cmp(&value(*b).abs()))
+            .unwrap_or(0.0);
+        vec![from, from + 1.0]
+    } else {
+        c.breaks()
+    };
+    let steps = match c {
+        Curve::Segment { .. } => 8,
+        Curve::Arc { sweep, .. } | Curve::Ellipse { sweep, .. } => {
+            ((sweep.abs() / TAU) * 128.0).ceil().max(16.0) as usize
+        }
+        Curve::Spline(_) => 64,
+    };
+    // The pieces: the breaks, and where the slope changes sign, marked.
+    let mut splits: Vec<(f64, bool)> = Vec::new();
+    let mut farthest: f64 = 0.0;
+    for w in breaks.windows(2) {
+        splits.push((w[0], false));
+        let mut last: Option<(f64, f64)> = None;
+        for i in 0..=steps {
+            let t = w[0] + (w[1] - w[0]) * i as f64 / steps as f64;
+            farthest = farthest.max(distance(t));
+            let s = slope(t);
+            if s == 0.0 {
+                continue;
+            }
+            if let Some((t0, s0)) = last {
+                if s0.signum() != s.signum() {
+                    splits.push((bisect(&slope, t0, t, s0), true));
+                }
+            }
+            last = Some((t, s));
+        }
+    }
+    splits.push((*breaks.last().unwrap_or(&1.0), false));
+    if farthest <= tolerance {
+        return Vec::new();
+    }
+    let ts: Vec<f64> = splits.iter().map(|s| s.0).collect();
+    let fs: Vec<f64> = ts.iter().map(|&t| value(t)).collect();
+    let n = ts.len();
+    let changes =
+        |i: usize| fs[i] != 0.0 && fs[i + 1] != 0.0 && fs[i].signum() != fs[i + 1].signum();
+    let mut crossing: Vec<bool> = (0..n - 1).map(changes).collect();
+    let mut found: Vec<f64> = (0..n).filter(|&i| fs[i] == 0.0).map(|i| ts[i]).collect();
+    for k in 1..n - 1 {
+        if !splits[k].1 || fs[k] == 0.0 {
+            continue;
+        }
+        let (before, after) = (crossing[k - 1], crossing[k]);
+        if before && after && distance(ts[k]) <= rounding {
+            crossing[k - 1] = false;
+            crossing[k] = false;
+            found.push(ts[k]);
+        } else if !before
+            && !after
+            && fs[k].abs() <= fs[k - 1].abs()
+            && fs[k].abs() <= fs[k + 1].abs()
+            && distance(ts[k]) <= tolerance
+        {
+            found.push(ts[k]);
+        }
+    }
+    if !round {
+        for (k, next, piece) in [(0, 1, 0), (n - 1, n - 2, n - 2)] {
+            if fs[k] != 0.0
+                && !crossing[piece]
+                && fs[k].abs() <= fs[next].abs()
+                && distance(ts[k]) <= tolerance
+            {
+                found.push(ts[k]);
+            }
+        }
+    }
+    for i in 0..n - 1 {
+        if crossing[i] {
+            let t = bisect(&value, ts[i], ts[i + 1], fs[i]);
+            if distance(t) <= tolerance {
+                found.push(t);
+            }
+        }
+    }
+    if round {
+        for t in &mut found {
+            if *t >= 1.0 {
+                *t -= 1.0;
+            }
+        }
+    }
+    found.sort_by(f64::total_cmp);
+    found.dedup();
+    found
 }
 
 /// The parameter of the foot on `d`, near `u`, of the perpendicular from
@@ -702,40 +1005,6 @@ fn foot_on(d: &Curve, q: P3, mut u: f64) -> f64 {
         }
     }
     u
-}
-
-/// Where two curves touch, near a point Newton's method found where they
-/// meet at a very shallow angle: where, along `c`, its direction and that
-/// of `d` at its nearest point turn parallel. That angle passes through 0
-/// steadily at a touch, so the point is found to the last digits, where
-/// the curves' meeting alone gives it only to the square root of the
-/// arithmetic's precision. None when the angle does not pass through 0
-/// nearby.
-fn touch_point(c: &Curve, d: &Curve, t: f64, u: f64) -> Option<Crossing> {
-    let (c0, c1) = c.domain();
-    let angle = |t: f64| {
-        let w = foot_on(d, c.point(t), u);
-        let (a, b) = (c.tangent(t), d.tangent(w));
-        a[0] * b[1] - a[1] * b[0]
-    };
-    let mut reach = (c1 - c0) * 1e-7;
-    while reach <= (c1 - c0) * 1e-2 {
-        let (lo, hi) = ((t - reach).max(c0), (t + reach).min(c1));
-        let (flo, fhi) = (angle(lo), angle(hi));
-        if flo == 0.0 {
-            return Some((lo, foot_on(d, c.point(lo), u)));
-        }
-        if fhi == 0.0 || flo.signum() != fhi.signum() {
-            let at = if fhi == 0.0 {
-                hi
-            } else {
-                bisect(&angle, lo, hi, flo)
-            };
-            return Some((at, foot_on(d, c.point(at), u)));
-        }
-        reach *= 10.0;
-    }
-    None
 }
 
 /// A straight segment seen end on from above, a line along Z: the point
@@ -779,282 +1048,6 @@ fn seen_end_on(c: &Curve, d: &Curve, size: f64) -> Vec<Crossing> {
             (t, u)
         })
         .collect()
-}
-
-/// Where a straight segment `c` crosses an ellipse `e`, exactly: in the
-/// ellipse's own frame, along its axes as units, the ellipse is the unit
-/// circle and the segment still a line. A line that touches it meets it
-/// once.
-fn line_ellipse(c: &Curve, e: &Curve) -> Vec<Crossing> {
-    let (
-        Curve::Segment { a, b },
-        Curve::Ellipse {
-            center,
-            major,
-            minor,
-            start,
-            sweep,
-        },
-    ) = (c, e)
-    else {
-        return Vec::new();
-    };
-    let frame = |v: [f64; 2]| {
-        [
-            (v[0] * major[0] + v[1] * major[1]) / (major[0] * major[0] + major[1] * major[1]),
-            (v[0] * minor[0] + v[1] * minor[1]) / (minor[0] * minor[0] + minor[1] * minor[1]),
-        ]
-    };
-    let w = frame([a[0] - center[0], a[1] - center[1]]);
-    let v = frame([b[0] - a[0], b[1] - a[1]]);
-    let qa = v[0] * v[0] + v[1] * v[1];
-    if qa == 0.0 {
-        return Vec::new();
-    }
-    // Along the line from its point nearest the centre, `w0`, the ellipse
-    // is where `s² qa = 1 - |w0|²`: no large terms that cancel, however
-    // far the segment reaches.
-    let t0 = -(w[0] * v[0] + w[1] * v[1]) / qa;
-    let w0 = [w[0] + v[0] * t0, w[1] + v[1] * t0];
-    let h = 1.0 - (w0[0] * w0[0] + w0[1] * w0[1]);
-    // What rounding leaves in `h`, from the size of `w`.
-    let rounding = 64.0 * f64::EPSILON * (1.0 + w[0].hypot(w[1]));
-    let along: Vec<f64> = if h < -rounding {
-        Vec::new()
-    } else if h <= rounding {
-        vec![0.0]
-    } else {
-        let s = (h / qa).sqrt();
-        vec![-s, s]
-    };
-    let size = scale_of(c).max(scale_of(e));
-    along
-        .into_iter()
-        .map(|s| {
-            let t = t0 + s;
-            let (x, y) = (w0[0] + v[0] * s, w0[1] + v[1] * s);
-            let share = (y.atan2(x) - start).rem_euclid(TAU) / sweep;
-            // A point a hair before the start is at the start.
-            let turn = TAU / sweep;
-            let share = if share > 1.0 && turn - share < 1e-9 * turn {
-                share - turn
-            } else {
-                share
-            };
-            (t, share)
-        })
-        // Only a point on both: a touch is one where they meet.
-        .filter(|&(t, u)| plan_distance(c.point(t), e.point(u)) <= 1e-9 * size)
-        .collect()
-}
-
-/// How large a curve's coordinates are, for tolerances: at least 1.
-pub(crate) fn scale_of(c: &Curve) -> f64 {
-    let (min, max) = c.extents();
-    min.iter()
-        .chain(max.iter())
-        .fold(1.0_f64, |m, v| m.max(v.abs()))
-}
-
-/// The line or circle a segment or an arc runs along: a point and a
-/// direction, or a centre and a radius.
-enum Carrier {
-    Line { a: [f64; 2], d: [f64; 2] },
-    Circle { c: [f64; 2], r: f64 },
-}
-
-fn carrier(curve: &Curve) -> Carrier {
-    match curve {
-        Curve::Segment { a, b } => Carrier::Line {
-            a: [a[0], a[1]],
-            d: [b[0] - a[0], b[1] - a[1]],
-        },
-        Curve::Arc { center, radius, .. } => Carrier::Circle {
-            c: [center[0], center[1]],
-            r: *radius,
-        },
-        _ => unreachable!("only a segment or an arc has a line or a circle"),
-    }
-}
-
-/// The points where the lines or circles of two segments or arcs meet.
-fn exact_crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
-    let points: Vec<[f64; 2]> = match (carrier(c), carrier(d)) {
-        (Carrier::Line { a, d: u }, Carrier::Line { a: b, d: v }) => {
-            let cross = u[0] * v[1] - u[1] * v[0];
-            if cross == 0.0 {
-                Vec::new()
-            } else {
-                let t = ((b[0] - a[0]) * v[1] - (b[1] - a[1]) * v[0]) / cross;
-                vec![[a[0] + u[0] * t, a[1] + u[1] * t]]
-            }
-        }
-        (Carrier::Line { a, d: u }, Carrier::Circle { c, r })
-        | (Carrier::Circle { c, r }, Carrier::Line { a, d: u }) => line_circle(a, u, c, r),
-        (Carrier::Circle { c: c1, r: r1 }, Carrier::Circle { c: c2, r: r2 }) => {
-            circle_circle(c1, r1, c2, r2)
-        }
-    };
-    points
-        .into_iter()
-        .filter_map(|p| {
-            let p = [p[0], p[1], 0.0];
-            Some((c.parameter_of(p)?, d.parameter_of(p)?))
-        })
-        .collect()
-}
-
-fn line_circle(a: [f64; 2], u: [f64; 2], c: [f64; 2], r: f64) -> Vec<[f64; 2]> {
-    let l2 = u[0] * u[0] + u[1] * u[1];
-    if l2 == 0.0 {
-        return Vec::new();
-    }
-    // The foot of the perpendicular from the centre, and half the chord.
-    let t = ((c[0] - a[0]) * u[0] + (c[1] - a[1]) * u[1]) / l2;
-    let foot = [a[0] + u[0] * t, a[1] + u[1] * t];
-    let h2 = r * r - ((foot[0] - c[0]).powi(2) + (foot[1] - c[1]).powi(2));
-    let tolerance = 1e-12 * r * r;
-    if h2 < -tolerance {
-        return Vec::new();
-    }
-    if h2 <= tolerance {
-        return vec![foot];
-    }
-    let s = (h2 / l2).sqrt();
-    vec![
-        [foot[0] - u[0] * s, foot[1] - u[1] * s],
-        [foot[0] + u[0] * s, foot[1] + u[1] * s],
-    ]
-}
-
-fn circle_circle(c1: [f64; 2], r1: f64, c2: [f64; 2], r2: f64) -> Vec<[f64; 2]> {
-    let d = (c2[0] - c1[0]).hypot(c2[1] - c1[1]);
-    if d == 0.0 {
-        return Vec::new();
-    }
-    let a = (d * d + r1 * r1 - r2 * r2) / (2.0 * d);
-    let h2 = r1 * r1 - a * a;
-    let tolerance = 1e-12 * r1.max(r2).powi(2);
-    if h2 < -tolerance {
-        return Vec::new();
-    }
-    let e = [(c2[0] - c1[0]) / d, (c2[1] - c1[1]) / d];
-    let m = [c1[0] + e[0] * a, c1[1] + e[1] * a];
-    if h2 <= tolerance {
-        return vec![m];
-    }
-    let h = h2.sqrt();
-    vec![
-        [m[0] - e[1] * h, m[1] + e[0] * h],
-        [m[0] + e[1] * h, m[1] - e[0] * h],
-    ]
-}
-
-/// The curve's parameters at fine steps along it, its breaks among them.
-fn samples(c: &Curve) -> Vec<f64> {
-    let per_piece = match c {
-        Curve::Segment { .. } => 1,
-        Curve::Arc { sweep, .. } | Curve::Ellipse { sweep, .. } => {
-            ((sweep.abs() / TAU) * 256.0).ceil().max(8.0) as usize
-        }
-        Curve::Spline(_) => 32,
-    };
-    let breaks = c.breaks();
-    let mut at = vec![breaks[0]];
-    for w in breaks.windows(2) {
-        for i in 1..=per_piece {
-            at.push(w[0] + (w[1] - w[0]) * i as f64 / per_piece as f64);
-        }
-    }
-    at
-}
-
-/// Where two curves cross, found where their fine chords cross or nearly
-/// do, then refined by Newton's method on both parameters.
-fn numeric_crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
-    let (ts, us) = (samples(c), samples(d));
-    let (pc, pd): (Vec<P3>, Vec<P3>) = (
-        ts.iter().map(|&t| c.point(t)).collect(),
-        us.iter().map(|&u| d.point(u)).collect(),
-    );
-    let size = scale_of(c).max(scale_of(d));
-    let mut found = Vec::new();
-    for i in 0..ts.len() - 1 {
-        let (a0, a1) = (pc[i], pc[i + 1]);
-        for j in 0..us.len() - 1 {
-            let (b0, b1) = (pd[j], pd[j + 1]);
-            // Boxes that miss by more than a little cannot cross.
-            let reach = 0.05 * (plan_distance(a0, a1) + plan_distance(b0, b1));
-            if a0[0].min(a1[0]) > b0[0].max(b1[0]) + reach
-                || b0[0].min(b1[0]) > a0[0].max(a1[0]) + reach
-                || a0[1].min(a1[1]) > b0[1].max(b1[1]) + reach
-                || b0[1].min(b1[1]) > a0[1].max(a1[1]) + reach
-            {
-                continue;
-            }
-            let (s, r) = chord_crossing(a0, a1, b0, b1);
-            let t = ts[i] + (ts[i + 1] - ts[i]) * s.clamp(0.0, 1.0);
-            let u = us[j] + (us[j + 1] - us[j]) * r.clamp(0.0, 1.0);
-            if let Some((t, u)) = refine(c, d, t, u) {
-                if plan_distance(c.point(t), d.point(u)) > 1e-9 * size {
-                    continue;
-                }
-                // Where the curves run nearly the same way they may touch
-                // rather than cross: if they meet where they come nearest,
-                // that is the one point they touch at.
-                let touch = (crossing_sine(c, d, (t, u)) < 1e-4)
-                    .then(|| touch_point(c, d, t, u))
-                    .flatten()
-                    .filter(|&(t, u)| {
-                        plan_distance(c.point(t), d.point(u)) <= touch_tolerance(size)
-                    });
-                found.push(touch.unwrap_or((t, u)));
-            }
-        }
-    }
-    found
-}
-
-/// Where two chords' lines cross, as a share along each; the middle of each
-/// when they are parallel.
-fn chord_crossing(a0: P3, a1: P3, b0: P3, b1: P3) -> (f64, f64) {
-    let u = [a1[0] - a0[0], a1[1] - a0[1]];
-    let v = [b1[0] - b0[0], b1[1] - b0[1]];
-    let cross = u[0] * v[1] - u[1] * v[0];
-    if cross == 0.0 {
-        return (0.5, 0.5);
-    }
-    let w = [b0[0] - a0[0], b0[1] - a0[1]];
-    (
-        (w[0] * v[1] - w[1] * v[0]) / cross,
-        (w[0] * u[1] - w[1] * u[0]) / cross,
-    )
-}
-
-/// Newton's method for `c(t) = d(u)` seen from above, from a guess, kept to
-/// a little beyond each curve's ends; none when it does not settle.
-fn refine(c: &Curve, d: &Curve, mut t: f64, mut u: f64) -> Option<(f64, f64)> {
-    let (c0, c1) = c.domain();
-    let (d0, d1) = d.domain();
-    let (cs, ds) = ((c1 - c0) * 0.01, (d1 - d0) * 0.01);
-    for _ in 0..64 {
-        let (p, q) = (c.point(t), d.point(u));
-        let f = [p[0] - q[0], p[1] - q[1]];
-        let (dc, dd) = (c.tangent(t), d.tangent(u));
-        // [dc, -dd] [Δt, Δu] = -f
-        let det = dc[0] * -dd[1] - (-dd[0]) * dc[1];
-        if det == 0.0 {
-            return None;
-        }
-        let dt = (-f[0] * -dd[1] - (-dd[0]) * -f[1]) / det;
-        let du = (dc[0] * -f[1] - (-f[0]) * dc[1]) / det;
-        t = (t + dt).clamp(c0 - cs, c1 + cs);
-        u = (u + du).clamp(d0 - ds, d1 + ds);
-        if dt.abs() <= 1e-15 * (1.0 + t.abs()) && du.abs() <= 1e-15 * (1.0 + u.abs()) {
-            break;
-        }
-    }
-    Some((t, u))
 }
 
 /// The parameters at which the curve meets `wanted`, a condition on the
