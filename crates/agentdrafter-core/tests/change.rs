@@ -3208,6 +3208,94 @@ fn a_leaders_text_from_the_row_is_set_in_the_row_when_its_other_keys_are_the_sam
     assert_eq!(numbered.annotation.as_ref().unwrap().text, "2 OF 9");
 }
 
+/// Only the text is set in the row: a style named like a number is
+/// compared by its name, not as a number.
+#[test]
+fn a_leaders_text_is_not_set_in_the_row_when_the_change_names_another_style() {
+    let set = demo_set("row-leader-text-more");
+    let template = set.join("templates/ansi-b.yaml");
+    let text = fs::read_to_string(&template).unwrap().replace(
+        "  notes: {font: romans.shx, width_factor: 0.8}\n",
+        "  notes: {font: romans.shx, width_factor: 0.8}\n  '1': {font: romans.shx, width_factor: 0.5}\n  '1.0': {font: romans.shx, width_factor: 2}\n",
+    );
+    fs::write(&template, text).unwrap();
+    let add = json!({"operations": [
+        {"op": "add_mleader", "template": "templates/ansi-b.yaml", "id": "titled", "leaders": [[[1, 1, 0], [3, 2, 0]]], "content": {"text": {"row": "TITLE"}, "height": 0.2, "style": "1"}},
+        {"op": "add_leader", "template": "templates/ansi-b.yaml", "id": "numbered", "points": [[5, 1, 0], [6, 3, 0]], "annotation": {"text": {"row": "SHEET"}, "height": 0.2, "style": "1"}},
+    ]});
+    lands(&set, add);
+    // Style `1.0` is another style than `1`: the template changes, on
+    // every sheet.
+    for (target, key) in [
+        ("DEMO-002/titled", "content"),
+        ("DEMO-002/numbered", "annotation"),
+    ] {
+        let report = lands(
+            &set,
+            json!({"operations": [
+                {"op": "change", "target": {"id": target}, "set": {key: {"text": "RENAMED", "height": 0.2, "style": "1.0"}}},
+            ]}),
+        );
+        assert!(report.operations[0].row_value.is_none(), "{target}");
+        assert_eq!(report.operations[0].sheets, SHEETS, "{target}");
+    }
+    assert_eq!(
+        mleader_of(&set, "DEMO-001", "titled")
+            .content
+            .text()
+            .unwrap()
+            .style
+            .as_deref(),
+        Some("1.0")
+    );
+}
+
+/// A null for a key the content takes and the template leaves out is as
+/// the key left out; a null that takes a key away, or names a key the
+/// content does not take, changes more than the text, and is refused as
+/// the template's reader refuses it.
+#[test]
+fn a_null_in_a_leaders_text_change_is_set_in_the_row_only_for_a_key_left_out() {
+    let set = demo_set("row-leader-text-null");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "add_mleader", "template": "templates/ansi-b.yaml", "id": "titled", "leaders": [[[1, 1, 0], [3, 2, 0]]], "content": {"text": {"row": "TITLE"}, "height": 0.2}},
+            {"op": "add_leader", "template": "templates/ansi-b.yaml", "id": "numbered", "points": [[5, 1, 0], [6, 3, 0]], "annotation": {"text": {"row": "SHEET"}, "height": 0.2}},
+        ]}),
+    );
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "change", "target": {"id": "DEMO-002/titled"}, "set": {"content": {"text": "IN THE ROW", "height": 0.2, "attachment": null}}},
+            {"op": "change", "target": {"id": "DEMO-002/numbered"}, "set": {"annotation": {"text": "2 OF 9", "height": 0.2, "style": null}}},
+        ]}),
+    );
+    for operation in &report.operations {
+        assert!(operation.row_value.is_some(), "{}", operation.message);
+    }
+    for (target, key, set_key) in [
+        ("DEMO-002/titled", "content", "bogus"),
+        ("DEMO-002/titled", "content", "height"),
+        ("DEMO-002/numbered", "annotation", "attachment"),
+        ("DEMO-002/numbered", "annotation", "height"),
+    ] {
+        let mut value = json!({"text": "RENAMED", "height": 0.2});
+        value[set_key] = Value::Null;
+        let error = failed_operation(
+            &set,
+            json!({"operations": [
+                {"op": "change", "target": {"id": target}, "set": {key: value}}
+            ]}),
+        );
+        assert!(
+            error.message.contains(set_key) || error.message.contains("null"),
+            "{target} {set_key}: {}",
+            error.message
+        );
+    }
+}
+
 #[test]
 fn a_leaders_text_from_the_row_that_shows_nothing_fails_at_the_text() {
     let set = demo_set("row-leader-text-blank");

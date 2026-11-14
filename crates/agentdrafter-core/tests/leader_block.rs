@@ -55,6 +55,10 @@ blocks:
     objects:
       - circle: {center: [0, 0, 0], radius: 5}
       - attdef: {tag: T, prompt: T, default: '%%d', position: [0, 0, 0], height: 2.5, justify: middle_center}
+  FAR:
+    base_point: [1e12, 1e12, 0]
+    objects:
+      - circle: {center: [1e12, 1e12, 0], radius: 5}
   SPOT:
     objects:
       - polyline: {points: [{point: [0, 0, 0], bulge: 1}, [0, 0, 0]]}
@@ -611,4 +615,27 @@ fn a_bulged_segment_that_ends_where_it_starts_places_as_the_pipeline_draws_it() 
     );
     let read = read_dwg(&dir.join("sheet.dwg")).unwrap();
     assert_eq!(read.objects_not_read, 0, "{read:?}");
+}
+
+/// A base point far from the block's own origin moves the matrix far, and
+/// its rounding with it: the block still reads back.
+#[test]
+fn block_content_with_a_far_base_point_reads_back() {
+    let sheet = ONE.replace(
+        "{block: BOXA, attributes: {TAG: TB-1}}",
+        "{block: FAR, rotation: 13.7}",
+    );
+    let (dir, _) = built_drawing("far-base", &sheet);
+    let read = read_dwg(&dir.join("sheet.dwg")).unwrap();
+    assert_eq!(read.objects_not_read, 0, "{read:?}");
+    let Object::MLeader(m) = &read.objects[0] else {
+        panic!("{read:?}")
+    };
+    let content = m.content.block().unwrap();
+    assert_eq!(content.block, "FAR");
+    assert!(
+        (content.rotation - 13.7).abs() < 1e-9,
+        "{}",
+        content.rotation
+    );
 }

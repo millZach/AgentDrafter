@@ -27,6 +27,7 @@ use serde_json::{Map, Value};
 use super::blocks::tag_in_capitals;
 use super::emit::{number_text, scalar_text, Context, Emitter};
 use super::ids::{ID_KEY, NAME_KEY};
+use super::leader::{ANNOTATION_KEYS, TEXT_CONTENT_KEYS};
 use super::objects::{article, BLOCK_OBJECT_TYPES, OBJECT_TYPES};
 use super::polyline::VERTEX_KEYS;
 use super::set::ROW_OBJECTS_KEY;
@@ -1349,8 +1350,13 @@ impl RecordFile {
             }
             if (kind == "mleader" && key == "content") || (kind == "leader" && key == "annotation")
             {
+                let takes: &[&str] = if kind == "mleader" {
+                    &TEXT_CONTENT_KEYS
+                } else {
+                    &ANNOTATION_KEYS
+                };
                 if let Some(found) =
-                    position.and_then(|p| text_from_row(&keys[p].value, value, units))
+                    position.and_then(|p| text_from_row(&keys[p].value, value, takes, units))
                 {
                     from_row = Some(found);
                     from_row_key = if kind == "mleader" {
@@ -2351,12 +2357,16 @@ fn row_value_name(node: &Node) -> Option<String> {
 
 /// When `now`, a multileader's content or an older leader's annotation as
 /// the template writes it, takes its `text` from the row, and `new` gives
-/// every other key as `now` does, by value, and a text of its own: the row
-/// value's name and the new text, which the sheet's row is to take. A key
-/// left out or given as null is the same as one written so; a length is
-/// compared in the declared unit `units`, so `0.2` and `0.20`, and `5.08`
-/// and `0.2 in` on a sheet in millimetres, are the same.
-fn text_from_row(now: &Node, new: &Value, units: Unit) -> Option<(String, String)> {
+/// every other key as `now` does and a text of its own: the row value's
+/// name and the new text, which the sheet's row is to take. `takes` is the
+/// keys the content or annotation takes. A key `new` gives as null is as
+/// one left out when `now` has none and it is one of `takes`; a null for
+/// a key `now` has takes it away, and a null for one it does not take is
+/// a mistake for the template's reader to refuse, so neither is the text
+/// alone. A length, the `height`, is compared in the declared unit
+/// `units`, so `0.2` and `0.20`, and `5.08` and `0.2 in` on a sheet in
+/// millimetres, are the same; every other key is compared as written.
+fn text_from_row(now: &Node, new: &Value, takes: &[&str], units: Unit) -> Option<(String, String)> {
     let Kind::Mapping(entries) = &now.kind else {
         return None;
     };
@@ -2374,6 +2384,12 @@ fn text_from_row(now: &Node, new: &Value, units: Unit) -> Option<(String, String
         .iter()
         .filter(|e| e.key != "text" && !e.value.is_bare_null())
         .collect();
+    for (key, value) in set {
+        let has = others.iter().any(|e| e.key == *key);
+        if value.is_null() && (has || !takes.contains(&key.as_str())) {
+            return None;
+        }
+    }
     let given = set
         .iter()
         .filter(|(key, value)| key.as_str() != "text" && !value.is_null())
@@ -2385,16 +2401,19 @@ fn text_from_row(now: &Node, new: &Value, units: Unit) -> Option<(String, String
         .iter()
         .all(|e| {
             set.get(&e.key)
-                .is_some_and(|v| same_value(&e.value, v, units))
+                .is_some_and(|v| same_value(&e.key, &e.value, v, units))
         })
         .then_some((name, text))
 }
 
-/// Whether `value` gives what `node` writes: the same node, or two
-/// numbers, or two lengths in the declared unit `units`, that are equal.
-fn same_value(node: &Node, value: &Value, units: Unit) -> bool {
+/// Whether `value` gives what `node` writes under `key`: the same node,
+/// or, for the `height`, the same length in the declared unit `units`.
+fn same_value(key: &str, node: &Node, value: &Value, units: Unit) -> bool {
     if node.same_as(&node_of(value)) {
         return true;
+    }
+    if key != "height" {
+        return false;
     }
     let Kind::Scalar(written) = &node.kind else {
         return false;

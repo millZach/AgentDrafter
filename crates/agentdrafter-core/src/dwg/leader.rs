@@ -1004,24 +1004,29 @@ pub(super) fn read_mleader(
             return None;
         }
         // The matrix that takes the block's own points to the sheet places
-        // it there too: its turn and scale within a rounding, its move
-        // within the sheet's reach.
+        // it there too: its turn and scale within a rounding, and its move,
+        // the position less the turned and scaled base point, within a
+        // billionth of the sheet's reach and the rounding of that sum,
+        // which grows with the base point, as a table's text is matched.
         let own_base = blocks
             .iter()
             .find(|b| b.name == insert.block)
             .map_or(Point3::new(0.0, 0.0, 0.0), |b| b.base_point);
         let want = block_transform(insert, own_base);
+        let position = insert.position;
+        let sizes = position.x.abs()
+            + position.y.abs()
+            + position.z.abs()
+            + insert.scale * (own_base.x.abs() + own_base.y.abs() + own_base.z.abs());
+        let moved = 1e-9 * (1.0 + reach) + 8.0 * f64::EPSILON * sizes;
+        let turned = 1e-9 * insert.scale.max(1.0);
         let matrix_near =
             want.iter()
                 .zip(&context.transform_matrix)
                 .enumerate()
                 .all(|(k, (a, b))| {
-                    let within = if k % 4 == 3 {
-                        reach
-                    } else {
-                        insert.scale.max(1.0)
-                    };
-                    (a - b).abs() <= within * 1e-9
+                    let within = if k % 4 == 3 { moved } else { turned };
+                    (a - b).abs() <= within
                 });
         if !matrix_near {
             return None;
