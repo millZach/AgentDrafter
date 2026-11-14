@@ -340,6 +340,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("add_donut", "DONUT"),
             ("add_solid", "SOLID"),
             ("insert_block", "INSERT"),
+            ("add_table", "TABLE"),
             ("change", "CHANGE"),
             ("move", "MOVE"),
             ("delete", "ERASE"),
@@ -375,6 +376,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "add_donut", "sheet": "S", "center": [0, 0, 0], "outside_diameter": 1}),
         json!({"op": "SOLID", "sheet": "S", "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}),
         json!({"op": "INSERT", "sheet": "S", "block": "B", "position": [0, 0, 0], "attributes": {"TAG": "X", "NOTE": ["a", null]}}),
+        json!({"op": "TABLE", "sheet": "S", "position": [0, 10, 0], "columns": [5, 5], "rows": [2], "cells": [["A", {"text": "B", "height": 1}]]}),
         json!({"op": "change", "target": {"id": "S/a"}, "set": {"layer": "notes"}}),
         json!({"op": "move", "target": {"name": "n", "sheet": "S"}, "by": [1, 0, 0]}),
         json!({"op": "erase", "target": {"name": "n"}}),
@@ -407,7 +409,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         }
     }
     let whole = jsonschema::validator_for(&change_set_schema()).unwrap();
-    assert!(whole.is_valid(&json!({"operations": samples, "fixes": ["DEMO-002"]})));
+    assert!(whole.is_valid(&json!({"operations": samples.to_vec(), "fixes": ["DEMO-002"]})));
     for wrong in [
         json!({"operations": [{"op": "add_line", "from": [0, 0, 0], "to": [1, 1, 0]}]}),
         json!({"operations": [{"op": "add_line", "sheet": "S", "template": "t.yaml", "from": [0, 0, 0], "to": [1, 1, 0]}]}),
@@ -675,6 +677,29 @@ fn donuts_solids_and_wide_arc_polylines_are_added_and_moved() {
     assert_eq!(bend.widths_at(0), [0.05, 0.0]);
     assert!(row_text(&set, "DEMO-003")
         .contains("{point: [3, 3.5, 0], arc_angle: 180, start_width: 0.05}"));
+}
+
+#[test]
+fn a_table_is_added_and_moved() {
+    let set = demo_set("table");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "TABLE", "sheet": "DEMO-003", "position": [1, 8, 0], "columns": [1, 2], "rows": [0.4, 0.4], "cells": [["TAG", "SERVICE"], ["P-1", {"text": "PUMP", "justify": "middle_left"}]], "header": true, "name": "list"},
+        ]}),
+    );
+    lands(
+        &set,
+        json!({"operations": [{"op": "move", "target": {"name": "list"}, "by": [0.5, -1, 0]}]}),
+    );
+    let Object::Table(list) = &built(&set, "DEMO-003")["DEMO-003/table-1"] else {
+        panic!()
+    };
+    close(list.position.x, 1.5);
+    close(list.position.y, 7.0);
+    assert!(list.header && !list.title);
+    assert_eq!(list.cells[1][1].text, "PUMP");
+    assert!(row_text(&set, "DEMO-003").contains("position: [1.5, 7, 0]"));
 }
 
 #[test]

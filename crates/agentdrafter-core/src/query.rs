@@ -583,6 +583,7 @@ impl Selection {
             match object {
                 Object::Text(t) if m.text(&t.contents, text) => {}
                 Object::MText(t) if m.text(&t.contents, text) => {}
+                Object::Table(t) if t.cells.iter().flatten().any(|c| m.text(&c.text, text)) => {}
                 Object::Insert(insert) => {
                     in_block = block_text(record, &insert.block, |c| m.text(c, text));
                     if in_block.is_empty() {
@@ -1144,6 +1145,7 @@ fn points_of(object: &Object) -> Vec<(String, Point3)> {
         Object::MText(text) => one("position", text.position),
         Object::AttributeDefinition(definition) => one("position", definition.position),
         Object::Insert(insert) => one("position", insert.position),
+        Object::Table(table) => one("position", table.position),
     }
 }
 

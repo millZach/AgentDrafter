@@ -3,8 +3,8 @@
 //! A template is written with what a sheet description holds. Where a
 //! sheet's value comes from its row, the template writes `{row: NAME}` in
 //! place of the value: as an insert's attribute value, or an item of the
-//! list of values of a tag its block defines more than once, or as a
-//! text's or an mtext's contents. A sheet is the template with each `{row: NAME}`
+//! list of values of a tag its block defines more than once, as a text's
+//! or an mtext's contents, or as a table cell's text. A sheet is the template with each `{row: NAME}`
 //! replaced by the row's value `NAME`, read as a sheet description is read.
 //!
 //! A row may also hold objects of its own, which are on its sheet alone,
@@ -394,6 +394,34 @@ pub(super) fn places_in(
         "text" | "mtext" => {
             if let Some(contents) = keys.iter_mut().find(|k| k.key == "contents") {
                 visit(&mut contents.value, key_path(&object_path, "contents"))?;
+            }
+        }
+        // Each cell's text: the cell itself when it is written as its text
+        // or as a value from the row, or its `text`.
+        "table" => {
+            let Some(cells) = keys.iter_mut().find(|k| k.key == "cells") else {
+                return Ok(());
+            };
+            let Kind::Sequence(rows) = &mut cells.value.kind else {
+                return Ok(());
+            };
+            let cells_path = key_path(&object_path, "cells");
+            for (r, row) in rows.iter_mut().enumerate() {
+                let Kind::Sequence(items) = &mut row.kind else {
+                    continue;
+                };
+                let row_path = index_path(&cells_path, r);
+                for (c, item) in items.iter_mut().enumerate() {
+                    let path = index_path(&row_path, c);
+                    let Kind::Mapping(keys) = &mut item.kind else {
+                        continue;
+                    };
+                    if keys.iter().any(|k| k.key == ROW_KEY) {
+                        visit(item, path)?;
+                    } else if let Some(text) = keys.iter_mut().find(|k| k.key == "text") {
+                        visit(&mut text.value, key_path(&path, "text"))?;
+                    }
+                }
             }
         }
         _ => {}

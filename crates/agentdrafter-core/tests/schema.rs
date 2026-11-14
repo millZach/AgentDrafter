@@ -355,6 +355,36 @@ const SHEET_TEXT_CELL: Place = Place {
     json: r#"{"units": "mm", "objects": [{"text": {"contents": "A", "position": [0, 0, 0], "height": 1, "cell": V}}]}"#,
 };
 
+const TABLE_CELL: Place = Place {
+    name: "a table's cell",
+    yaml: "units: mm\nobjects:\n  - table: {position: [0, 0, 0], columns: [10], rows: [5], cells: [[V]]}\n",
+    json: r#"{"units": "mm", "objects": [{"table": {"position": [0, 0, 0], "columns": [10], "rows": [5], "cells": [[V]]}}]}"#,
+};
+
+const TABLE_MERGE: Place = Place {
+    name: "a table cell's merge",
+    yaml: "units: mm\nobjects:\n  - table: {position: [0, 0, 0], columns: [10, 10], rows: [5], cells: [[{text: A, merge: V}, '']]}\n",
+    json: r#"{"units": "mm", "objects": [{"table": {"position": [0, 0, 0], "columns": [10, 10], "rows": [5], "cells": [[{"text": "A", "merge": V}, ""]]}}]}"#,
+};
+
+const TABLE_TITLE: Place = Place {
+    name: "a table's title",
+    yaml: "units: mm\nobjects:\n  - table: {position: [0, 0, 0], columns: [10], rows: [5], cells: [[A]], title: V}\n",
+    json: r#"{"units": "mm", "objects": [{"table": {"position": [0, 0, 0], "columns": [10], "rows": [5], "cells": [["A"]], "title": V}}]}"#,
+};
+
+const TABLE_TABLE_STYLE: Place = Place {
+    name: "a table's table style",
+    yaml: "units: mm\nobjects:\n  - table: {position: [0, 0, 0], columns: [10], rows: [5], cells: [[A]], table_style: V}\n",
+    json: r#"{"units": "mm", "objects": [{"table": {"position": [0, 0, 0], "columns": [10], "rows": [5], "cells": [["A"]], "table_style": V}}]}"#,
+};
+
+const TABLE_STYLE_DEF: Place = Place {
+    name: "a table style",
+    yaml: "units: mm\ntable_styles:\n  s: V\nobjects: []\n",
+    json: r#"{"units": "mm", "table_styles": {"s": V}, "objects": []}"#,
+};
+
 /// `(place, value as YAML, the same value as JSON, accepted)`.
 type Case = (&'static Place, &'static str, Value, bool);
 
@@ -398,6 +428,7 @@ fn bare_null_cases() -> Vec<Case> {
         bare_null(&FONT, false, Some(("'null'", false))),
         bare_null(&INSERT_BLOCK, false, None),
         bare_null(&HATCH_PATTERN, false, None),
+        bare_null(&TABLE_TABLE_STYLE, true, None),
     ]
     .concat()
 }
@@ -800,6 +831,119 @@ fn cases() -> Vec<Case> {
         ]);
     }
     cases.extend(vec![
+        // A table's cell: its text, a number read as its text, empty, or a
+        // mapping of its text and what it draws with.
+        (&TABLE_CELL, "A", json!("A"), true),
+        (&TABLE_CELL, "42", json!(42), true),
+        (&TABLE_CELL, "''", json!(""), true),
+        (&TABLE_CELL, "null", json!(null), true),
+        (
+            &TABLE_CELL,
+            "{text: A, height: 2}",
+            json!({"text": "A", "height": 2}),
+            true,
+        ),
+        (
+            &TABLE_CELL,
+            "{text: A, height: '2 mm'}",
+            json!({"text": "A", "height": "2 mm"}),
+            true,
+        ),
+        (
+            &TABLE_CELL,
+            "{text: A, height: 0}",
+            json!({"text": "A", "height": 0}),
+            false,
+        ),
+        (
+            &TABLE_CELL,
+            "{text: A, justify: top_left}",
+            json!({"text": "A", "justify": "top_left"}),
+            true,
+        ),
+        (
+            &TABLE_CELL,
+            "{text: A, justify: left}",
+            json!({"text": "A", "justify": "left"}),
+            false,
+        ),
+        (
+            &TABLE_CELL,
+            "{text: A, colour: 1}",
+            json!({"text": "A", "colour": 1}),
+            false,
+        ),
+        (&TABLE_CELL, "{height: 2}", json!({"height": 2}), true),
+        (&TABLE_CELL, "[A]", json!(["A"]), false),
+        // A merge: two whole numbers from 1.
+        (&TABLE_MERGE, "[1, 2]", json!([1, 2]), true),
+        (&TABLE_MERGE, "['1', '2']", json!(["1", "2"]), true),
+        (&TABLE_MERGE, "[0, 2]", json!([0, 2]), false),
+        (&TABLE_MERGE, "[1, -2]", json!([1, -2]), false),
+        (&TABLE_MERGE, "[1.5, 2]", json!([1.5, 2]), false),
+        (&TABLE_MERGE, "[2]", json!([2]), false),
+        (&TABLE_MERGE, "[1, 2, 1]", json!([1, 2, 1]), false),
+        // Whether the first row is a title.
+        (&TABLE_TITLE, "true", json!(true), true),
+        (&TABLE_TITLE, "'false'", json!("false"), true),
+        (&TABLE_TITLE, "yes", json!("yes"), false),
+        // A table style: its text height required; what each kind of row
+        // draws with.
+        (
+            &TABLE_STYLE_DEF,
+            "{text_height: 2.5}",
+            json!({"text_height": 2.5}),
+            true,
+        ),
+        (&TABLE_STYLE_DEF, "{}", json!({}), false),
+        (
+            &TABLE_STYLE_DEF,
+            "{text_height: 2.5, title: {justify: middle_left, text_height: 3}}",
+            json!({"text_height": 2.5, "title": {"justify": "middle_left", "text_height": 3}}),
+            true,
+        ),
+        (
+            &TABLE_STYLE_DEF,
+            "{text_height: 2.5, data: {justify: left}}",
+            json!({"text_height": 2.5, "data": {"justify": "left"}}),
+            false,
+        ),
+        (
+            &TABLE_STYLE_DEF,
+            "{text_height: 2.5, data: {fill: red}}",
+            json!({"text_height": 2.5, "data": {"fill": "red"}}),
+            false,
+        ),
+        (
+            &TABLE_STYLE_DEF,
+            "{text_height: 2.5, border_color: ByBlock, border_lineweight: 0.35}",
+            json!({"text_height": 2.5, "border_color": "ByBlock", "border_lineweight": 0.35}),
+            true,
+        ),
+        (
+            &TABLE_STYLE_DEF,
+            "{text_height: 2.5, border_lineweight: 0.3333}",
+            json!({"text_height": 2.5, "border_lineweight": 0.3333}),
+            false,
+        ),
+        (
+            &TABLE_STYLE_DEF,
+            "{text_height: 2.5, horizontal_margin: 0, vertical_margin: '1 mm'}",
+            json!({"text_height": 2.5, "horizontal_margin": 0, "vertical_margin": "1 mm"}),
+            true,
+        ),
+        (
+            &TABLE_STYLE_DEF,
+            "{text_height: 2.5, horizontal_margin: -1}",
+            json!({"text_height": 2.5, "horizontal_margin": -1}),
+            false,
+        ),
+        (
+            &TABLE_STYLE_DEF,
+            "{text_height: 2.5, fill: true}",
+            json!({"text_height": 2.5, "fill": true}),
+            false,
+        ),
         // A single line's justification.
         (&JUSTIFY, "middle_center", json!("middle_center"), true),
         (&JUSTIFY, "'left'", json!("left"), true),

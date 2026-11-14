@@ -36,6 +36,7 @@ fn reads_one_line() {
             linetypes: Vec::new(),
             layers: Vec::new(),
             text_styles: Vec::new(),
+            table_styles: Vec::new(),
             blocks: Vec::new(),
             objects: vec![Object::Line(Line {
                 from: Point3::new(0.0, 0.0, 0.0),
@@ -150,7 +151,7 @@ fn an_unknown_object_type_is_named() {
     assert_eq!(e.field.as_deref(), Some("objects[0].hexagon"));
     assert_eq!(
         e.message,
-        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline, hatch, text, mtext, donut, solid, insert"
+        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline, hatch, text, mtext, donut, solid, insert, table"
     );
 }
 

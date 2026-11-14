@@ -61,7 +61,8 @@ pub enum Rule {
     /// origin, within the tolerance.
     OffSheet,
     /// Each text and attribute of an insert whose block declares its cell
-    /// draws within the cell, placed by the insert.
+    /// draws within the cell, placed by the insert, and each table cell's
+    /// text keeps inside the cell's margins.
     TextOverflow,
     /// No two texts on a sheet, the text inserts draw among them, have
     /// drawn boxes that overlap by more than the tolerance.
@@ -192,8 +193,12 @@ pub struct CheckedObject {
     /// objects draws it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_block: Option<BlockPart>,
+    /// When the check is about a table's cell: its row and its column,
+    /// counted from 0 from the top left.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_cell: Option<[usize; 2]>,
     /// What the text says, when the check is about text: a text's or an
-    /// mtext's contents, or an attribute's value.
+    /// mtext's contents, an attribute's value, or a table cell's text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }

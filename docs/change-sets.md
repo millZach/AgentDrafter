@@ -51,6 +51,7 @@ A sheet's template is the file its row's path names, as the file system resolves
 | `add_donut` | `DONUT` | Adds a donut. |
 | `add_solid` | `SOLID` | Adds a 2D solid. |
 | `insert_block` | `INSERT` | Adds an insert of a block from the block library. |
+| `add_table` | `TABLE` | Adds a table. |
 | `change` | `CHANGE` | Sets keys of an object. |
 | `move` | `MOVE` | Moves an object. |
 | `delete` | `ERASE` | Deletes an object. |

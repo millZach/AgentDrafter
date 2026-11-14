@@ -20,7 +20,12 @@
 //!   position, scale and rotation: what it draws is taken back into the
 //!   block's own coordinates and held to the cell there, and how far it
 //!   reaches past, enlarged by the insert's scale, is held to the
-//!   tolerance on the sheet. Text with no cell is not checked.
+//!   tolerance on the sheet. Text with no cell is not checked. And each
+//!   cell of a table holds its text inside its margins: across, what the
+//!   text draws; up, the height AutoCAD sets its lines in: the text's
+//!   height and 5/3 of it more for each line after the first, and at least
+//!   4/3 of it, as AutoCAD 2026 grew made-up tables' rows of one to four
+//!   lines to fit.
 //! - **`text_on_text`**: the box round what each line of text draws, seen
 //!   in the line's own direction, as the pipeline draws the line, overlaps
 //!   no other text's by more than the tolerance: how far one would move to
@@ -48,7 +53,7 @@ use super::{BlockPart, CheckedObject, Finding, Rule, Sides};
 use crate::description::SheetRecord;
 use crate::draw::{Bounds, DisplayList, Item, Point2, TextRun};
 use crate::model::block::Placement;
-use crate::model::{Block, Insert, Object, Paper};
+use crate::model::{Block, Insert, Object, Paper, Table, TableStyle, LINE_BOX, LINE_STEP};
 use crate::query::{measuring_drawing, printing_drawing, written_at, Extents};
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
@@ -258,11 +263,16 @@ impl Sheet<'_> {
     }
 
     /// A finding for each text or attribute an insert draws past the cell
-    /// its block declares for it.
+    /// its block declares for it, and each table cell's text that needs
+    /// more than its cell.
     fn text_overflow(&self) -> Vec<Finding> {
         let u = self.units;
         let mut findings = Vec::new();
         for (i, object) in self.record.sheet.objects.iter().enumerate() {
+            if let Object::Table(table) = object {
+                findings.extend(self.table_overflow(i, table));
+                continue;
+            }
             let Object::Insert(insert) = object else {
                 continue;
             };
@@ -325,6 +335,99 @@ impl Sheet<'_> {
                 finding.past = Some(past);
                 findings.push(finding);
             }
+        }
+        findings
+    }
+
+    /// A finding for each cell of the table at `i` whose text needs more
+    /// than the cell inside its margins: across, what the text draws; up,
+    /// the height AutoCAD sets its lines in, placed as the text is
+    /// justified.
+    fn table_overflow(&self, i: usize, table: &Table) -> Vec<Finding> {
+        let u = self.units;
+        let sheet = &self.record.sheet;
+        let style = sheet
+            .table_style(&table.table_style)
+            .unwrap_or_else(|| TableStyle::standard(sheet.units));
+        let mut findings = Vec::new();
+        for cell in table.laid_out(&style) {
+            let Some(text) = &cell.text else {
+                continue;
+            };
+            let mine = |c: Option<[usize; 2]>| c == Some(cell.at);
+            let drawn = Bounds::of(
+                self.list
+                    .items
+                    .iter()
+                    .filter(|item| item.object == i && mine(item.cell))
+                    .flat_map(Item::points),
+            );
+            let Some(drawn) = drawn else {
+                continue;
+            };
+            let lines = self
+                .list
+                .text
+                .iter()
+                .filter(|run| run.object == i && mine(run.cell))
+                .count()
+                .max(1);
+            let [h, v] = cell.margins;
+            let inside = Bounds {
+                min: [cell.x[0] + h, cell.y[0] + v],
+                max: [cell.x[1] - h, cell.y[1] - v],
+            };
+            // The height AutoCAD sets the lines in, placed as the text is
+            // justified: from the top margin, about the middle, or up from
+            // the bottom margin.
+            let needs = text.height * LINE_BOX.max(1.0 + LINE_STEP * (lines - 1) as f64);
+            let at = crate::text::Attachment::ALL
+                .iter()
+                .position(|a| *a == text.justify)
+                .unwrap_or(0);
+            let (low, high) = match at / 3 {
+                0 => (inside.max[1] - needs, inside.max[1]),
+                1 => {
+                    let middle = (cell.y[0] + cell.y[1]) / 2.0;
+                    (middle - needs / 2.0, middle + needs / 2.0)
+                }
+                _ => (inside.min[1], inside.min[1] + needs),
+            };
+            let needed = Bounds {
+                min: [drawn.min[0], low],
+                max: [drawn.max[0], high],
+            };
+            let past = Sides {
+                left: beyond(inside.min[0] - needed.min[0]),
+                bottom: beyond(inside.min[1] - needed.min[1]),
+                right: beyond(needed.max[0] - inside.max[0]),
+                top: beyond(needed.max[1] - inside.max[1]),
+            };
+            if past.most() <= self.tolerance {
+                continue;
+            }
+            let path = cell.at.to_vec();
+            let mut finding = self.finding(
+                Rule::TextOverflow,
+                format!(
+                    "{} needs {} its cell inside its margins: its text draws from x {} to {} and \
+                     its {} set {} {u} high, and inside its margins the cell runs from {} to {} \
+                     {u}; AutoCAD would make the row taller where the text needs more height",
+                    self.text_words(i, &path, ""),
+                    past.words(self.tolerance, 1.0, u, "side"),
+                    num(needed.min[0]),
+                    num(needed.max[0]),
+                    if lines == 1 { "line is" } else { "lines are" },
+                    num(needs),
+                    point(inside.min),
+                    point(inside.max),
+                ),
+            );
+            finding.object = Some(self.checked(i, &path));
+            finding.drawn = Some(Extents::of(&needed));
+            finding.cell = Some(Extents::of(&inside));
+            finding.past = Some(past);
+            findings.push(finding);
         }
         findings
     }
@@ -403,7 +506,7 @@ impl Sheet<'_> {
         let mut letters: BTreeMap<Key, Ink> = BTreeMap::new();
         let mut lines: BTreeMap<Key, Ink> = BTreeMap::new();
         for item in &printed.items {
-            let key = (item.object, path(item.part, &item.nested));
+            let key = (item.object, item_path(item.part, &item.nested, item.cell));
             match self.drawn_as(&key) {
                 Drawn::Letters => letters
                     .entry(key)
@@ -427,7 +530,9 @@ impl Sheet<'_> {
                 let says = printed
                     .text
                     .iter()
-                    .filter(|run| run.object == text.0 && path(run.part, &run.nested) == text.1)
+                    .filter(|run| {
+                        run.object == text.0 && item_path(run.part, &run.nested, run.cell) == text.1
+                    })
                     .map(|run| run.characters.iter().map(|&(c, _)| c).collect::<String>())
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -470,6 +575,9 @@ impl Sheet<'_> {
             Object::Hatch(_) | Object::Solid(_) | Object::Donut(_) | Object::Insert(_) => {
                 Drawn::Fill
             }
+            // A table's borders are lines; its cells' text, letters.
+            Object::Table(_) if path.is_empty() => Drawn::Line,
+            Object::Table(_) => Drawn::Letters,
         }
     }
 
@@ -532,6 +640,21 @@ impl Sheet<'_> {
     fn checked(&self, i: usize, path: &[usize]) -> CheckedObject {
         let record = self.record;
         let object = &record.sheet.objects[i];
+        if let (Object::Table(table), [row, column]) = (object, path) {
+            return CheckedObject {
+                id: record.id(i),
+                name: record.objects[i].name.clone(),
+                kind: object.type_name().to_owned(),
+                written_at: written_at(record, i),
+                in_block: None,
+                table_cell: Some([*row, *column]),
+                text: table
+                    .cells
+                    .get(*row)
+                    .and_then(|r| r.get(*column))
+                    .map(|c| c.text.clone()),
+            };
+        }
         let (in_block, text) = match self.in_block(i, path) {
             Some(inner) => {
                 let tag = match inner.object {
@@ -555,6 +678,7 @@ impl Sheet<'_> {
             kind: object.type_name().to_owned(),
             written_at: written_at(record, i),
             in_block,
+            table_cell: None,
             text,
         }
     }
@@ -600,9 +724,25 @@ impl Sheet<'_> {
         let words = self.object_words(i);
         let on_line = format!(" on its line `{line}`");
         let Some(inner) = self.in_block(i, path) else {
-            return match &self.record.sheet.objects[i] {
-                Object::Text(t) => format!("{words} saying `{}`", t.contents),
-                Object::MText(_) => format!("{words}{on_line}"),
+            return match (&self.record.sheet.objects[i], path) {
+                (Object::Text(t), _) => format!("{words} saying `{}`", t.contents),
+                (Object::MText(_), _) => format!("{words}{on_line}"),
+                (Object::Table(table), &[row, column]) => {
+                    let says = table
+                        .cells
+                        .get(row)
+                        .and_then(|r| r.get(column))
+                        .map(|c| c.text.replace('\n', " "))
+                        .unwrap_or_default();
+                    let line = if line.is_empty() || line == says {
+                        String::new()
+                    } else {
+                        on_line
+                    };
+                    format!(
+                        "the cell at row {row}, column {column} of {words} saying `{says}`{line}"
+                    )
+                }
                 _ => words,
             };
         };
@@ -702,6 +842,16 @@ fn path(part: Option<usize>, nested: &[usize]) -> Vec<usize> {
     part.into_iter().chain(nested.iter().copied()).collect()
 }
 
+/// What draws an item or a line of text, past the sheet's object: the path
+/// to the object of an insert's block, as [`path`] gives it, or a table's
+/// cell, its row and column.
+fn item_path(part: Option<usize>, nested: &[usize], cell: Option<[usize; 2]>) -> Vec<usize> {
+    match cell {
+        Some(cell) => cell.to_vec(),
+        None => path(part, nested),
+    }
+}
+
 /// What an object draws, for `text_on_line`.
 enum Drawn {
     Letters,
@@ -745,7 +895,7 @@ impl TextBox {
             (length > 0.0).then(|| [v[0] / length, v[1] / length])
         };
         Some(TextBox {
-            key: (run.object, path(run.part, &run.nested)),
+            key: (run.object, item_path(run.part, &run.nested, run.cell)),
             says: run.characters.iter().map(|&(c, _)| c).collect(),
             along: unit(run.across)?,
             up: unit(run.up)?,
