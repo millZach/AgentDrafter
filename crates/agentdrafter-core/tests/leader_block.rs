@@ -507,6 +507,21 @@ fn a_multileader_whose_block_content_value_holds_two_percent_signs_is_not_read()
 }
 
 #[test]
+fn a_multileader_whose_left_out_value_takes_a_default_with_two_percent_signs_is_not_read() {
+    let sheet = ONE.replace(
+        "block: BOXA, attributes: {TAG: TB-1}",
+        "block: DEGREES, attributes: {T: '90'}",
+    );
+    let (dir, mut drawing) = built_drawing("percent-default-not-read", &sheet);
+    assert_eq!(read_back(&dir, &drawing).objects_not_read, 0);
+    // With its value left out, the value is the definition's default, `%%d`.
+    the_mleader(&mut drawing).block_attributes.clear();
+    let read = read_back(&dir, &drawing);
+    assert_eq!(read.objects_not_read, 1, "{read:?}");
+    assert!(read.objects.is_empty(), "{read:?}");
+}
+
+#[test]
 fn a_row_value_that_puts_two_percent_signs_in_block_content_fails_at_the_rows_value() {
     let dir = scratch("percent-row");
     let set = dir.join("set");

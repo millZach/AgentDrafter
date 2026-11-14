@@ -1134,14 +1134,19 @@ fn read_block_content(
         }
         values[k] = Some(text_contents(&attribute.text)?);
     }
+    // A value the DWG leaves out is its definition's default, which AutoCAD
+    // draws as it draws a value, so a `%%` there is refused the same way.
     let attributes = carried
         .iter()
         .zip(values)
-        .map(|(definition, value)| Attribute {
-            tag: definition.tag.clone(),
-            value: value.unwrap_or_else(|| definition.default.clone()),
+        .map(|(definition, value)| {
+            let value = value.unwrap_or_else(|| definition.default.clone());
+            (!value.contains("%%")).then(|| Attribute {
+                tag: definition.tag.clone(),
+                value,
+            })
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
     let degrees = crate::description::normalize_degrees(written.block_rotation.to_degrees());
     Some(MLeaderBlock {
         block: block.name.clone(),
