@@ -5,12 +5,14 @@
 //! inserts of blocks, and a block also holds attribute definitions;
 //! `blocks.rs` reads both.
 
-use super::blocks::{attribute_definition, insert, ATTDEF_KEYS, BLOCK_TEXT_KEYS, INSERT_KEYS};
+use super::blocks::{
+    attribute_definition, insert, Noticed, ATTDEF_KEYS, BLOCK_TEXT_KEYS, INSERT_KEYS,
+};
 use super::hatch::{self, HATCH_KEYS};
 use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
 use super::layers::{layer_name, properties};
 use super::polyline;
-use super::strict_yaml::{index_path, key_path, Kind, Node, Pos};
+use super::strict_yaml::{index_path, key_path, Kind, Node};
 use super::text::{mtext, text, MTEXT_KEYS, TEXT_KEYS};
 use super::{
     angle, at, bad_value, length, plain_number, point, points, scalar, unknown_key, wrong_type,
@@ -105,16 +107,19 @@ pub(super) struct Tables<'a> {
 
 /// Where an object is: on a sheet, which may insert blocks from its block
 /// library and gives each object an ID and each name once, or in a block,
-/// which defines each attribute tag once.
+/// which defines attributes. Each keeps what its reading noticed.
 pub(super) enum Place<'a> {
     Sheet {
         library: Option<&'a BlockLibrary>,
         /// The record of each object read so far, with its ID and name.
         objects: Vec<ObjectRecord>,
+        /// What reading the objects so far noticed, such as an attribute
+        /// tag written in lowercase.
+        noticed: Vec<Noticed>,
     },
     Block {
-        /// Each attribute tag defined so far, and where.
-        tags: Vec<(String, Pos)>,
+        /// What reading the block's objects so far noticed.
+        noticed: Vec<Noticed>,
         /// The library's blocks read so far, which an insert in this block
         /// may place: every block it inserts is read before it.
         library: Option<&'a BlockLibrary>,
@@ -316,12 +321,18 @@ pub(super) fn object(
         }
         ("text", _) => text(&fields, units, layer, tables.styles).map(Object::Text),
         ("mtext", _) => mtext(&fields, units, layer, tables.styles).map(Object::MText),
-        ("attdef", Place::Block { tags, .. }) => {
-            attribute_definition(&fields, tables, layer, tags).map(Object::AttributeDefinition)
+        ("attdef", Place::Block { noticed, .. }) => {
+            attribute_definition(&fields, tables, layer, noticed).map(Object::AttributeDefinition)
         }
-        ("insert", Place::Sheet { library, .. } | Place::Block { library, .. }) => {
-            insert(&fields, units, layer, *library).map(Object::Insert)
-        }
+        (
+            "insert",
+            Place::Sheet {
+                library, noticed, ..
+            }
+            | Place::Block {
+                library, noticed, ..
+            },
+        ) => insert(&fields, units, layer, *library, noticed).map(Object::Insert),
         (other, _) => unreachable!("object type `{other}` is listed but not read"),
     }?;
     *object.properties_mut() = properties;

@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::blocks::Noticed;
 use super::ids::{object_id, ObjectRecord};
 use super::{
     library_beside, on_its_own_with_records, read_file, read_rows_in, read_set_settings_in,
@@ -17,7 +18,7 @@ use super::{
 };
 use crate::error::Error;
 use crate::model::Sheet;
-use crate::set::SET_SETTINGS_FILE;
+use crate::set::{Notice, SET_SETTINGS_FILE};
 use crate::units::Unit;
 
 /// One sheet as its record states it, with the ID of each of its objects.
@@ -53,6 +54,31 @@ impl SheetRecord {
             _ => &self.file,
         }
     }
+}
+
+/// The notices of what reading sheet `sheet` noticed, whose objects are
+/// written in `file`, and whose template is `template` as its row writes
+/// it, or for a sheet description built on its own, its path. Each is
+/// placed in the file it names, or `file` when it names none.
+pub(crate) fn notices_of(
+    noticed: Vec<Noticed>,
+    sheet: &str,
+    template: &str,
+    file: &Path,
+) -> impl Iterator<Item = Notice> {
+    let sheet = sheet.to_owned();
+    let template = template.to_owned();
+    let file = file.to_owned();
+    noticed.into_iter().map(move |n| Notice {
+        code: n.code,
+        message: n.message,
+        sheet: sheet.clone(),
+        template: template.clone(),
+        field: n.field,
+        line: n.at.line,
+        column: n.at.column,
+        file: n.file.as_deref().unwrap_or(&file).display().to_string(),
+    })
 }
 
 /// A drawing set's settings and rows as they are saved, ready to read its
@@ -118,14 +144,30 @@ impl SavedSet {
 /// with the block library it names, as `read_sheet_description` does, and
 /// the record of each of its objects. The sheet is named by the file.
 pub(crate) fn read_sheet_record(path: &Path) -> Result<SheetRecord, Error> {
+    read_sheet_record_noting(path, &mut Vec::new())
+}
+
+/// Reads the sheet description in the file at `path` as
+/// [`read_sheet_record`] does, adding what reading it and its block library
+/// noticed to `notices`, such as an attribute tag written in lowercase.
+pub(crate) fn read_sheet_record_noting(
+    path: &Path,
+    notices: &mut Vec<Notice>,
+) -> Result<SheetRecord, Error> {
     let text = read_file(path, "the sheet description")?;
     let mut library = None;
-    let (sheet, objects) = on_its_own_with_records(&text, &mut library_beside(path, &mut library))
-        .map_err(|e| e.or_in_file(path))?;
+    let mut noticed = Vec::new();
+    let (sheet, objects) =
+        on_its_own_with_records(&text, &mut library_beside(path, &mut library), &mut noticed)
+            .map_err(|e| e.or_in_file(path))?;
     let name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let written = path.display().to_string();
+    let from_library = library.map(|l| l.noticed).unwrap_or_default();
+    notices.extend(notices_of(from_library, &name, &written, path));
+    notices.extend(notices_of(noticed, &name, &written, path));
     Ok(SheetRecord {
         name,
         file: path.to_owned(),

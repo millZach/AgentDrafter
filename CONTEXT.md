@@ -117,7 +117,7 @@ An attribute whose value its block's definition holds, the same on every insert,
 _Avoid_: fixed attribute, static attribute
 
 **Attribute tag**:
-The label an attribute is filled in by, such as `TAG` or `TERMINAL`, written in capitals as AutoCAD keeps it. A plain tag is what an instrument or device is called on the drawing, which is often an attribute's value.
+The label an attribute is filled in by, such as `TAG` or `TERMINAL`, kept in capitals as AutoCAD keeps it. A block may define one tag on more than one attribute definition; each is an **occurrence** of the tag, counted from 1 in the order the block defines them. A plain tag is what an instrument or device is called on the drawing, which is often an attribute's value.
 _Avoid_: attribute name, field name
 
 **Insert**:

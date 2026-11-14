@@ -304,12 +304,29 @@ A block is defined once, in the block library of the drawing set, and inserted o
 | `position` | yes | Where the block's base point sits: a point. |
 | `scale` | no | How much the block is enlarged, the same along every axis: a number more than 0, with no unit. Without it, 1. |
 | `rotation` | no | An angle: degrees anticlockwise from the X axis. Without it, 0. |
-| `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty, written `''`. An attribute the insert leaves out takes its definition's default, and so does one whose value is a bare null, such as `TAG:` ([the YAML subset](#the-yaml-subset), rule 8). A [constant attribute](block-library.md#attribute-modes) takes no value from an insert. |
+| `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty, written `''`. A tag the block defines more than once takes a list of values instead, one for each in the order the block defines them, such as `NOTE: [first, second]` ([below](#a-tag-defined-more-than-once)). An attribute the insert leaves out takes its definition's default, and so does one whose value is a bare null, such as `TAG:` ([the YAML subset](#the-yaml-subset), rule 8). A [constant attribute](block-library.md#attribute-modes) takes no value from an insert. A tag written in lowercase is taken in capitals, as the block keeps it. |
 | `layer` | no | The layer the insert sits on, as for every object. |
 
 An insert takes an `id` and a `name` as every object does ([IDs and names](#ids-and-names)).
 
 A block that is not in the library, or an attribute tag the block does not define, is an error that lists the library's blocks or the block's attribute tags. An insert's attributes draw where the block's attribute definitions are, moved, scaled and turned with the insert. Only uniform, positive scales are offered: a mirrored or stretched insert waits for a later ticket.
+
+#### A tag defined more than once
+
+```yaml
+  - insert: {block: REVISIONS, position: [0, 0, 0], attributes: {NOTE: [ISSUED FOR REVIEW, null, AS BUILT], 'NOTE#1': A}}
+```
+
+A block may define one tag on more than one attribute definition, as AutoCAD allows ([the block library](block-library.md#a-tag-defined-more-than-once)). An insert gives that tag's values as a list, in the order the block defines them: the first item is the tag's first occurrence, the second its second, and so on. Zach decided on 2026-11-13 (#99):
+
+- A tag the block defines once takes one value, as before; a list there is an error.
+- A tag it defines more than once takes a list, and one value there is an error asking for a list.
+- The list may be shorter than the times the block defines the tag: the occurrences it does not reach take their definitions' defaults. It may not be longer: that is an error saying how many times the block defines the tag.
+- An item written as a bare null, such as `null`, takes its definition's default, so a list can skip an occurrence.
+- A constant definition carries no value, so the list covers only the tag's other definitions, in order. A tag with one carried definition and one constant one takes one value.
+- In a template, each item may be a value from the row, `NOTE: [{row: REV_NOTE}, AS BUILT]`, and a tag defined once takes `{row: NAME}` as before.
+
+A tag written in lowercase, such as `note`, is taken in capitals, `NOTE`, as AutoCAD keeps every tag, and the reply carries a `tag_in_capitals` notice saying where it is written: the build's `notices` for a sheet built on its own, and the sheet's `notices` in a drawing set's build or a change set's reply. Giving one tag twice, in two cases, such as `{note: A, NOTE: B}`, is an error.
 
 A built sheet holds the blocks it inserts, as the library defines them, and the library's layers, linetypes and text styles those blocks use. A layer, linetype or text style the sheet defines too must be defined the same in both, or the build stops with an error at the sheet's definition: otherwise a block would not draw on the sheet as the library defines it. Layer `0`, `Continuous` and `Standard`, when the library does not list them, are the sheet's own, as they are in AutoCAD. The sheet's own objects, an insert among them, sit on the sheet's layers, so an insert on a layer the library defines lists that layer under `layers` as well.
 
@@ -433,16 +450,16 @@ Comments, block style and flow style (`[0, 0, 0]`, `{from: ..., to: ...}`) are a
 | `read_failed` | The sheet description, or the block library it names, could not be read. |
 | `yaml_syntax` | The text is not well-formed YAML. |
 | `not_in_subset` | An anchor, alias, tag, directive, second document or key that is not text. |
-| `duplicate_key` | A key appears twice in one mapping, two layer, linetype, hatch pattern or block names differ only in case, or a block defines one attribute tag twice. The message gives the line of the first. |
+| `duplicate_key` | A key appears twice in one mapping, two layer, linetype, hatch pattern or block names differ only in case, or an insert gives one attribute tag twice in two cases. The message gives the line of the first. |
 | `duplicate_name` | Two objects on a sheet carry the same name, or names that differ only in case. The message gives the line of the first's `name`. |
 | `duplicate_id` | Two objects in one sheet description or template carry the same `id`, or IDs that differ only in case, or an object without an `id` sits at a place another object's `id` is written as. The message gives the line and place of the first. |
 | `unknown_key` | A key the sheet description does not define, including an unknown object type, an attribute definition on a sheet or an insert in a block. |
 | `missing_key` | A required key is missing or is a bare null, or the file is empty. |
 | `missing_unit` | The sheet declares no unit. |
 | `unknown_unit` | A unit that is not one of `mm`, `cm`, `m`, `in`, `ft`. |
-| `wrong_type` | A value of the wrong shape, such as a point without three coordinates, a polyline with too few points, a hatch with no loops, or `closed: yes`. |
+| `wrong_type` | A value of the wrong shape, such as a point without three coordinates, a polyline with too few points, a hatch with no loops, `closed: yes`, a list for an attribute tag the block defines once, or one value for a tag it defines more than once. |
 | `bad_number` | A value that should be a number is not one, carries a unit where none belongs, or is too large to hold in the declared unit. |
-| `bad_value` | A value of the right shape that is not allowed: a colour outside 1 to 255, a lineweight that is not standard, a radius or text height that is not positive, a ratio outside 0 to 1, a width factor outside 0.01 to 100, an arc whose angles are equal, a linetype pattern that breaks AutoCAD's rules, a name AutoCAD would refuse, a hatch pattern line whose lines would lie on one another, a hatch scale or angle given with `SOLID`, a boundary that does not lie flat or whose edges do not join up, a text style that is `Standard` in another case, a font that is not an SHX or TrueType file name, a justification that does not exist, text contents that are empty or would not show as written, an attribute tag that is not in capitals or holds a space, a name AgentDrafter refuses, an insert's scale that is not more than 0, a block library path that is not relative or holds a character it cannot, a block library in another unit than the sheet, a layer, linetype or text style the sheet and the blocks it inserts define differently. |
+| `bad_value` | A value of the right shape that is not allowed: a colour outside 1 to 255, a lineweight that is not standard, a radius or text height that is not positive, a ratio outside 0 to 1, a width factor outside 0.01 to 100, an arc whose angles are equal, a linetype pattern that breaks AutoCAD's rules, a name AutoCAD would refuse, a hatch pattern line whose lines would lie on one another, a hatch scale or angle given with `SOLID`, a boundary that does not lie flat or whose edges do not join up, a text style that is `Standard` in another case, a font that is not an SHX or TrueType file name, a justification that does not exist, text contents that are empty or would not show as written, an attribute tag that holds a space, a list longer than the times its block defines a tag, a name AgentDrafter refuses, an insert's scale that is not more than 0, a block library path that is not relative or holds a character it cannot, a block library in another unit than the sheet, a layer, linetype or text style the sheet and the blocks it inserts define differently. |
 | `unknown_name` | A layer, linetype, hatch pattern or text style that the sheet description does not define, a block that is not in the block library, or an attribute tag the block does not define. |
 | `output_exists` | A file is already where the DWG would go, and `--overwrite` was not given. |
 | `not_a_build` | `--overwrite` was given, but the file where the DWG would go is not a DWG AgentDrafter built, or cannot be read to tell. It may be an original, and an original is never overwritten. |

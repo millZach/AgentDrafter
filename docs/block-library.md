@@ -72,7 +72,7 @@ An `attdef` is AutoCAD's ATTDEF: a labelled text field each insert of the block 
 
 | Key | Required | What it is |
 |---|---|---|
-| `tag` | yes | The attribute's tag: the label an insert fills it in by, such as `TAG` or `TERMINAL`. 1 to 255 characters, written in capitals as AutoCAD keeps it, with no spaces and no control characters. A block defines each tag once. |
+| `tag` | yes | The attribute's tag: the label an insert fills it in by, such as `TAG` or `TERMINAL`. 1 to 255 characters with no spaces and no control characters; punctuation is kept as written, such as `NOTE#1`, `A/B`, `MM/DD/YY`, `X.Y`, `REV-1`, `#` or `1`. AutoCAD keeps a tag in capitals, so one written in lowercase is taken in capitals, with a notice. A block may define a tag more than once ([below](#a-tag-defined-more-than-once)). |
 | `prompt` | no | What AutoCAD asks for when a person inserts the block: one line of text with no control characters. Without it, empty, and AutoCAD asks with the tag. |
 | `default` | no | The value an insert takes when it gives none: one line of text, as a `text`'s contents are, which may be empty. A constant attribute's value on every insert. Without it, empty. |
 | `position` | yes | The point the attribute's text is justified at, in the block's own coordinates. |
@@ -104,6 +104,26 @@ Zach decided on 2026-11-13 how a constant attribute behaves:
 
 `verify`, `preset` and `lock_position` change only what AutoCAD does when a person inserts the block or edits it: nothing draws differently. Each insert's attribute carries its definition's Invisible, Verify, Preset and Lock position, as AutoCAD 2026 gave an insert of the same block it made itself.
 
+### A tag defined more than once
+
+```yaml
+blocks:
+  REVISIONS:
+    objects:
+      - attdef: {tag: NOTE, position: [0, 0, 0], height: 2.5, default: '-'}
+      - attdef: {tag: NOTE, position: [0, 4, 0], height: 2.5, default: '-'}
+      - attdef: {tag: 'NOTE#1', position: [0, 8, 0], height: 2.5}
+      - attdef: {tag: rev, position: [0, 12, 0], height: 2.5}
+```
+
+A plant's block may define one tag on several attribute definitions, as AutoCAD allows, such as a revision block with a placeholder tag on each line. Zach decided on 2026-11-13 (#99) how AgentDrafter takes one:
+
+- **Each definition is its own attribute.** An insert carries one value for each definition but the constant ones, in the block's order, as AutoCAD's does, and draws each where its own definition is.
+- **An insert gives a repeated tag's values as a list**, in the order the block defines them, the first item being the tag's first occurrence: `attributes: {NOTE: [ISSUED, AS BUILT]}`. A tag defined once takes one value. [Inserts](sheet-description.md#a-tag-defined-more-than-once) sets out the rules: a shorter list leaves the rest at their defaults, a longer one is an error, and a null item takes its default.
+- **A constant occurrence carries no value**, so a tag that repeats with some occurrences constant takes a list covering only the others, in order; when only one is left, it takes one value.
+- **A change set names one occurrence** with `set_attribute`'s `occurrence`, counted from 1, which it needs for a repeated tag ([change sets](change-sets.md)), and a [query](query.md) reports a repeated tag's values as a list.
+- **A tag written in lowercase is taken in capitals**, `rev` as `REV`, as AutoCAD keeps every tag, rather than refused. The reply of the command that read it carries a `tag_in_capitals` notice naming the file, the field and the line: a build's `notices`, a drawing set's sheet's `notices`, and a change set's sheet's `notices`. A query, a check, a render and a plot read the tag in capitals too, without a notice. A tag still cannot hold a space, which AutoCAD refuses as well.
+
 ### Cells
 
 ```yaml
@@ -124,11 +144,11 @@ Each block is written as AutoCAD writes one: a block definition with the library
 
 An insert's ID and name are kept in the DWG as extended data under the registered application `AGENTDRAFTER`, as every object's [ID and name](sheet-description.md#ids-and-names) are: the text `sheet` followed by the sheet's name, `id` followed by the insert's `id` or its place, then, when it has a name, `name` followed by the name. AutoCAD carries them through a save.
 
-Reading a DWG back gives its block definitions, the inserts nested in them among their objects, and its inserts with their attribute values, scale, rotation and name, and each object's ID. An insert is read only when each attribute is where its block puts it, with its definition's tag, mode, style and justification.
+Reading a DWG back gives its block definitions, the inserts nested in them among their objects, and its inserts with their attribute values, scale, rotation and name, and each object's ID. An insert is read only when each attribute is where its block puts it, with its definition's tag, mode, style and justification. Attributes are matched to definitions by their place, so a tag the block defines more than once reads back with each value where its own definition is.
 
 ## Changing it through a change set
 
-A change set adds a block to a drawing set's library with `add_block` (AutoCAD's BLOCK), replaces a block's whole definition with `redefine_block` (BEDIT), and brings inserts into line with their blocks' definitions with `attsync` (ATTSYNC), for a library edited by hand. An edit to the library reaches every sheet whose template names it, all or nothing, and a value an insert gives for a tag its block no longer carries is removed from its record as AutoCAD's ATTSYNC removes it. [Change sets](change-sets.md#blocks) sets out how each is written and what the reply lists.
+A change set adds a block to a drawing set's library with `add_block` (AutoCAD's BLOCK), replaces a block's whole definition with `redefine_block` (BEDIT), and brings inserts into line with their blocks' definitions with `attsync` (ATTSYNC), for a library edited by hand. An edit to the library reaches every sheet whose template names it, all or nothing, and a value an insert gives for a tag its block no longer carries is removed from its record as AutoCAD's ATTSYNC removes it. A repeated tag keeps its values by occurrence: a tag the block now defines fewer times loses the list's items past the last it keeps, each listed with its `occurrence`; one it now defines once takes the list's first item alone; and one it now defines more than once takes a single value as its list's first item. [Change sets](change-sets.md#blocks) sets out how each is written and what the reply lists.
 
 ## What is not offered yet
 

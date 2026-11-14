@@ -12,7 +12,8 @@ use crate::model::BlockLibrary;
 fn records(text: &str) -> Result<Vec<ObjectRecord>, Error> {
     let root = strict_yaml::read(text)?;
     let mut no_library = |_: &str| -> Result<BlockLibrary, Error> { unreachable!() };
-    sheet_and_records(root, &mut no_library, None, None).map(|(_, records)| records)
+    sheet_and_records(root, &mut no_library, None, None, &mut Vec::new())
+        .map(|(_, records)| records)
 }
 
 #[test]

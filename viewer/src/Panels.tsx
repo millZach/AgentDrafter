@@ -260,8 +260,9 @@ export function Inspector({ object, sheet, journal, fails, onBack, onShow }: Ins
       <table className="kv attrs">
         <tbody>
           {attributes.length ? (
-            attributes.map((a) => (
-              <tr key={a.tag}>
+            attributes.map((a, i) => (
+              // A block may define a tag more than once, so the place keys it.
+              <tr key={i}>
                 <th>{a.tag}</th>
                 <td>{a.value}</td>
               </tr>

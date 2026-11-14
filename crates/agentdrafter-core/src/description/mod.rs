@@ -49,12 +49,12 @@ use crate::model::{BlockLibrary, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 pub use blocks::parse_block_library;
-pub(crate) use edit::{AttributeSet, Listed, ObjectList, RecordFile};
+pub(crate) use edit::{AttributeSet, GivenValue, Listed, ObjectList, RecordFile};
 pub(crate) use emit::number_text;
 pub(crate) use ids::ID_SEPARATOR;
 pub(crate) use mark::{mark_text, parse_mark, MarkFailure};
 pub(crate) use objects::article;
-pub(crate) use records::{read_sheet_record, SavedSet, SheetRecord};
+pub(crate) use records::{read_sheet_record, read_sheet_record_noting, SavedSet, SheetRecord};
 pub(crate) use set::{
     read_rows, read_rows_in, read_set_settings, read_set_settings_in, rows_at, template_path, Row,
 };
@@ -127,6 +127,8 @@ pub(crate) struct LibraryFile {
     pub path: PathBuf,
     /// Its bytes.
     pub bytes: Vec<u8>,
+    /// What reading it noticed, each placed in it.
+    pub noticed: Vec<blocks::Noticed>,
 }
 
 /// Reads `text`, the sheet description in the file at `path`, as
@@ -148,18 +150,20 @@ fn on_its_own(
     text: &str,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
 ) -> Result<Sheet, Error> {
-    on_its_own_with_records(text, load).map(|(sheet, _)| sheet)
+    on_its_own_with_records(text, load, &mut Vec::new()).map(|(sheet, _)| sheet)
 }
 
 /// Reads a sheet description built on its own as [`on_its_own`] does, with
-/// the record of each of its objects.
+/// the record of each of its objects, adding what reading its objects
+/// noticed to `noticed`.
 fn on_its_own_with_records(
     text: &str,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
+    noticed: &mut Vec<blocks::Noticed>,
 ) -> Result<(Sheet, Vec<ObjectRecord>), Error> {
     let mut root = strict_yaml::read(text)?;
     template::refuse_row_values(root.as_mut())?;
-    sheet_and_records(root, load, None, None)
+    sheet_and_records(root, load, None, None, noticed)
 }
 
 /// A row's own objects, which a sheet of a drawing set holds after its
@@ -240,10 +244,15 @@ fn library_beside_in<'a>(
                 ),
             )
         })?;
-        let parsed = parse_block_library(&text).map_err(|e| e.in_file(&file))?;
+        let (parsed, mut noticed) =
+            blocks::read_block_library(&text).map_err(|e| e.in_file(&file))?;
+        for n in &mut noticed {
+            n.file = Some(file.clone());
+        }
         *read = Some(LibraryFile {
             path: file,
             bytes: text.into_bytes(),
+            noticed,
         });
         Ok(parsed)
     }
@@ -256,7 +265,7 @@ fn sheet(
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
     set_units: Option<Unit>,
 ) -> Result<Sheet, Error> {
-    sheet_and_records(root, load, set_units, None).map(|(sheet, _)| sheet)
+    sheet_and_records(root, load, set_units, None, &mut Vec::new()).map(|(sheet, _)| sheet)
 }
 
 /// Reads a sheet description, or a template once a row has filled it in,
@@ -268,12 +277,15 @@ fn sheet(
 /// drawing set the sheet is built in, if it is built in one: the sheet must
 /// be in it too. `row_objects` are the sheet's row's own objects, if it has
 /// any: they follow the template's, name what the template defines, and an
-/// error in one is placed in the rows file.
+/// error in one is placed in the rows file. What reading the objects
+/// noticed, such as an attribute tag written in lowercase, is added to
+/// `noticed`; what reading the block library noticed is kept with its file.
 fn sheet_and_records(
     root: Option<Node>,
     load: &mut dyn FnMut(&str) -> Result<BlockLibrary, Error>,
     set_units: Option<Unit>,
     row_objects: Option<RowObjects>,
+    noticed: &mut Vec<blocks::Noticed>,
 ) -> Result<(Sheet, Vec<ObjectRecord>), Error> {
     let Some(root) = root else {
         return Err(Error::new(
@@ -366,6 +378,7 @@ fn sheet_and_records(
     let mut place = Place::Sheet {
         library: library.as_ref(),
         objects: Vec::new(),
+        noticed: Vec::new(),
     };
     let mut objects = list
         .iter()
@@ -373,6 +386,15 @@ fn sheet_and_records(
         .map(|(i, node)| objects::object(node, &index_path("objects", i), &tables, &mut place))
         .collect::<Result<Vec<_>, _>>()?;
     let in_template = objects.len();
+    let Place::Sheet {
+        noticed: template_noticed,
+        ..
+    } = &mut place
+    else {
+        unreachable!("a sheet's objects are read on a sheet")
+    };
+    noticed.append(template_noticed);
+    let row_objects_file = row_objects.as_ref().map(|row| row.file.to_owned());
     if let Some(row) = row_objects {
         for (j, node) in row.items.iter().enumerate() {
             let path = index_path(&row.path, j);
@@ -384,11 +406,16 @@ fn sheet_and_records(
     }
     let Place::Sheet {
         objects: mut records,
+        noticed: in_rows,
         ..
     } = place
     else {
         unreachable!("a sheet's objects are read on a sheet")
     };
+    noticed.extend(in_rows.into_iter().map(|n| blocks::Noticed {
+        file: row_objects_file.clone(),
+        ..n
+    }));
     for record in &mut records[in_template..] {
         record.in_row = true;
     }

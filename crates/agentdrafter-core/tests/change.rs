@@ -373,11 +373,11 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "add_mtext", "sheet": "S", "contents": "A\nB", "position": [0, 0, 0], "height": 1}),
         json!({"op": "add_donut", "sheet": "S", "center": [0, 0, 0], "outside_diameter": 1}),
         json!({"op": "SOLID", "sheet": "S", "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}),
-        json!({"op": "INSERT", "sheet": "S", "block": "B", "position": [0, 0, 0], "attributes": {"TAG": "X"}}),
+        json!({"op": "INSERT", "sheet": "S", "block": "B", "position": [0, 0, 0], "attributes": {"TAG": "X", "NOTE": ["a", null]}}),
         json!({"op": "change", "target": {"id": "S/a"}, "set": {"layer": "notes"}}),
         json!({"op": "move", "target": {"name": "n", "sheet": "S"}, "by": [1, 0, 0]}),
         json!({"op": "erase", "target": {"name": "n"}}),
-        json!({"op": "set_attribute", "target": {"id": "S/objects[2]"}, "tag": "REV", "value": "B"}),
+        json!({"op": "set_attribute", "target": {"id": "S/objects[2]"}, "tag": "NOTE", "occurrence": 2, "value": "B"}),
         json!({"op": "layer", "sheet": "S", "name": "markup", "color": "red", "plot": false}),
         json!({"op": "change_layer", "sheet": "S", "name": "markup", "set": {"locked": true}}),
         json!({"op": "rename", "sheet": "S", "name": "markup", "to": "redline"}),
@@ -414,6 +414,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"operations": [{"op": "move", "target": {"id": "S/a"}, "by": [1, 0]}]}),
         json!({"operations": [{"op": "nudge", "target": {"id": "S/a"}}]}),
         json!({"operations": [], "undo": true}),
+        json!({"operations": [{"op": "set_attribute", "target": {"id": "S/a"}, "tag": "NOTE", "occurrence": 0, "value": "B"}]}),
+        json!({"operations": [{"op": "set_attribute", "target": {"id": "S/a"}, "tag": "NOTE", "occurrence": "2", "value": "B"}]}),
     ] {
         assert!(!whole.is_valid(&wrong), "the schema refuses {wrong}");
     }
@@ -2398,4 +2400,264 @@ fn an_error_in_a_block_is_not_placed_in_a_block_whose_name_reads_as_its_place() 
         Some("operations[0].objects[0].line.layer"),
         "{e:#?}"
     );
+}
+
+/// A made-up block that defines `NOTE` three times, as a plant's revision
+/// block may, with tags that hold punctuation, one written in lowercase.
+const NOTES: &str = "  NOTES:
+    objects:
+      - attdef: {tag: NOTE, position: [0, 0, 0], height: 0.1, default: '-'}
+      - attdef: {tag: A/B, position: [0, -0.2, 0], height: 0.1}
+      - attdef: {tag: NOTE, position: [0, -0.4, 0], height: 0.1, default: '-'}
+      - attdef: {tag: x.y, position: [0, -0.6, 0], height: 0.1}
+      - attdef: {tag: NOTE, position: [0, -0.8, 0], height: 0.1, default: '-'}
+";
+
+/// The demo set with `NOTES` in its library, inserted by its template,
+/// which takes the first `NOTE` from the row, and by DEMO-001's row.
+fn set_with_notes(test: &str) -> PathBuf {
+    let set = demo_set(test);
+    append(&set.join("blocks.yaml"), NOTES);
+    append(
+        &set.join("templates").join("ansi-b.yaml"),
+        "  - insert: {block: NOTES, position: [5, 5, 0], id: revs, attributes: {NOTE: [{row: REV}, kept]}}\n",
+    );
+    rebuild(&set);
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "INSERT", "sheet": "DEMO-001", "block": "NOTES", "position": [2, 2, 0], "id": "n", "attributes": {"NOTE": ["a"], "X.Y": "xy"}}
+        ]}),
+    );
+    set
+}
+
+/// The values the records give the attribute `tag` of the insert `id`, in
+/// the order its block defines them.
+fn values_of(set: &Path, id: &str, tag: &str) -> Vec<String> {
+    let Object::Insert(insert) = &recorded(set)[id] else {
+        panic!("an insert")
+    };
+    insert
+        .attributes
+        .iter()
+        .filter(|a| a.tag == tag)
+        .map(|a| a.value.clone())
+        .collect()
+}
+
+/// Zach decided on 2026-11-13 (#99) that `set_attribute` names one of a
+/// tag its block defines more than once by `occurrence`, counted from 1,
+/// and fails without one, listing each with its value; a row's value fills
+/// one item of the list, and a tag written in lowercase is taken in
+/// capitals, with a notice.
+#[test]
+fn set_attribute_sets_one_occurrence_of_a_repeated_tag() {
+    let set = set_with_notes("repeated-tag");
+    assert_eq!(values_of(&set, "DEMO-001/n", "NOTE"), ["a", "-", "-"]);
+    assert_eq!(values_of(&set, "DEMO-002/revs", "NOTE"), ["0", "kept", "-"]);
+
+    // Without an occurrence, the operation lists them.
+    let e = failed_operation(
+        &set,
+        json!({"operations": [
+            {"op": "set_attribute", "target": {"id": "DEMO-001/n"}, "tag": "NOTE", "value": "c"}
+        ]}),
+    );
+    assert_eq!(e.code, ErrorCode::MissingKey, "{e:?}");
+    assert_eq!(e.field.as_deref(), Some("operations[0].occurrence"));
+    assert!(
+        e.message.contains(
+            "block `NOTES` defines the attribute `NOTE` 3 times; name the one to set with \
+             occurrence, counted from 1 in the order the block defines them: 1 `a`, 2 `-` (its \
+             default), 3 `-` (its default)"
+        ),
+        "{}",
+        e.message
+    );
+    for (tag, occurrence, words) in [
+        ("NOTE", 4, "so its occurrence is 1 to 3, not 4"),
+        (
+            "A/B",
+            2,
+            "defines the attribute `A/B` once, so its occurrence is 1 or left out",
+        ),
+    ] {
+        let e = failed_operation(
+            &set,
+            json!({"operations": [
+                {"op": "set_attribute", "target": {"id": "DEMO-001/n"}, "tag": tag, "occurrence": occurrence, "value": "c"}
+            ]}),
+        );
+        assert_eq!(e.code, ErrorCode::BadValue, "{e:?}");
+        assert_eq!(e.field.as_deref(), Some("operations[0].occurrence"));
+        assert!(e.message.contains(words), "{}", e.message);
+    }
+
+    // Occurrence 3 grows the list, the second taking its default; tags with
+    // punctuation are set as they are written, and one in lowercase in
+    // capitals.
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "set_attribute", "target": {"id": "DEMO-001/n"}, "tag": "NOTE", "occurrence": 3, "value": "c"},
+            {"op": "set_attribute", "target": {"id": "DEMO-001/n"}, "tag": "A/B", "occurrence": 1, "value": "ab"},
+            {"op": "set_attribute", "target": {"id": "DEMO-001/n"}, "tag": "x.y", "value": "XY"}
+        ]}),
+    );
+    assert!(
+        report.operations[0]
+            .message
+            .starts_with("sets occurrence 3 of the attribute NOTE of `DEMO-001/n` to `c`"),
+        "{}",
+        report.operations[0].message
+    );
+    assert!(
+        report.operations[2]
+            .message
+            .contains("the attribute X.Y (written `x.y`, taken in capitals"),
+        "{}",
+        report.operations[2].message
+    );
+    assert_eq!(values_of(&set, "DEMO-001/n", "NOTE"), ["a", "-", "c"]);
+    assert_eq!(values_of(&set, "DEMO-001/n", "A/B"), ["ab"]);
+    assert_eq!(values_of(&set, "DEMO-001/n", "X.Y"), ["XY"]);
+    assert!(
+        row_text(&set, "DEMO-001").contains("X.Y: XY"),
+        "{}",
+        row_text(&set, "DEMO-001")
+    );
+    // The library's `x.y` is taken in capitals, and the sheet's reply says
+    // where.
+    let sheet = &report.sheets[0];
+    assert_eq!(sheet.sheet, "DEMO-001");
+    let notice = sheet
+        .notices
+        .iter()
+        .find(|n| n.code == agentdrafter_core::NoticeCode::TagInCapitals)
+        .expect("a notice of the lowercase tag");
+    assert_eq!(notice.field, "blocks.NOTES.objects[3].attdef.tag");
+    assert!(notice.file.ends_with("blocks.yaml"), "{notice:?}");
+    // The DWG holds each value as its own attribute, in order.
+    let Object::Insert(written) = &built(&set, "DEMO-001")["DEMO-001/n"] else {
+        panic!("an insert")
+    };
+    let values: Vec<&str> = written
+        .attributes
+        .iter()
+        .map(|a| a.value.as_str())
+        .collect();
+    assert_eq!(values, ["a", "ab", "-", "XY", "c"]);
+
+    // The template takes occurrence 1 from the row, so setting it sets that
+    // sheet's row value; occurrence 2 the template writes, so every sheet
+    // built from it changes.
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "set_attribute", "target": {"id": "DEMO-002/revs"}, "tag": "NOTE", "occurrence": 1, "value": "B"},
+            {"op": "set_attribute", "target": {"id": "DEMO-002/revs"}, "tag": "NOTE", "occurrence": 2, "value": "every"}
+        ]}),
+    );
+    let row_value = report.operations[0]
+        .row_value
+        .as_ref()
+        .expect("a row value");
+    assert_eq!(row_value.sheet, "DEMO-002");
+    assert!(
+        report.operations[0]
+            .message
+            .contains("since its template takes occurrence 1 of the attribute NOTE"),
+        "{}",
+        report.operations[0].message
+    );
+    assert_eq!(
+        values_of(&set, "DEMO-002/revs", "NOTE"),
+        ["B", "every", "-"]
+    );
+    assert_eq!(
+        values_of(&set, "DEMO-003/revs", "NOTE"),
+        ["A", "every", "-"]
+    );
+    assert!(row_text(&set, "DEMO-002").contains("REV: B"));
+}
+
+/// Zach decided on 2026-11-13 (#99) that bringing inserts into line keeps
+/// a repeated tag's values by their occurrence: a tag the block now
+/// defines fewer times loses its list's surplus items, each listed with
+/// its occurrence; a tag it now defines once takes its list's first item
+/// alone, and one it defines more than once again takes a single value as
+/// its list's first.
+#[test]
+fn redefining_a_repeated_tag_keeps_its_values_by_occurrence() {
+    let set = set_with_notes("repeated-redefine");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "set_attribute", "target": {"id": "DEMO-001/n"}, "tag": "NOTE", "occurrence": 3, "value": "c"}
+        ]}),
+    );
+    let note = |y: f64| json!({"attdef": {"tag": "NOTE", "position": [0, y, 0], "height": 0.1, "default": "-"}});
+    // Twice: the row's third value goes.
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "BEDIT", "name": "NOTES", "objects": [note(0.0), note(-0.4)]}
+        ]}),
+    );
+    let removed: Vec<(String, Option<usize>, String)> = report.operations[0]
+        .attributes_removed
+        .iter()
+        .map(|r| (r.tag.clone(), r.occurrence, r.value.clone()))
+        .collect();
+    assert_eq!(
+        removed,
+        [
+            ("NOTE".to_owned(), Some(3), "c".to_owned()),
+            ("X.Y".to_owned(), None, "xy".to_owned()),
+        ]
+    );
+    assert!(
+        report.operations[0]
+            .message
+            .contains("NOTE occurrence 3 (`c`) of `DEMO-001/n`"),
+        "{}",
+        report.operations[0].message
+    );
+    assert_eq!(values_of(&set, "DEMO-001/n", "NOTE"), ["a", "-"]);
+    // Once: the template's second value goes, and the row's list is one
+    // value.
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "BEDIT", "name": "NOTES", "objects": [note(0.0)]}
+        ]}),
+    );
+    let removed: Vec<(String, Option<usize>, String)> = report.operations[0]
+        .attributes_removed
+        .iter()
+        .map(|r| (r.tag.clone(), r.occurrence, r.value.clone()))
+        .collect();
+    assert_eq!(removed, [("NOTE".to_owned(), Some(2), "kept".to_owned())]);
+    let template = fs::read_to_string(set.join("templates").join("ansi-b.yaml")).unwrap();
+    assert!(
+        template.contains("attributes: {NOTE: {row: REV}}"),
+        "{template}"
+    );
+    assert!(
+        row_text(&set, "DEMO-001").contains("NOTE: a"),
+        "{}",
+        row_text(&set, "DEMO-001")
+    );
+    assert_eq!(values_of(&set, "DEMO-002/revs", "NOTE"), ["0"]);
+    // Twice again: each single value becomes its list's first.
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "BEDIT", "name": "NOTES", "objects": [note(0.0), note(-0.4)]}
+        ]}),
+    );
+    assert!(report.operations[0].attributes_removed.is_empty());
+    assert_eq!(values_of(&set, "DEMO-001/n", "NOTE"), ["a", "-"]);
+    assert_eq!(values_of(&set, "DEMO-003/revs", "NOTE"), ["A", "-"]);
 }

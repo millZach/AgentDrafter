@@ -54,7 +54,7 @@ A sheet's template is the file its row's path names, as the file system resolves
 | `change` | `CHANGE` | Sets keys of an object. |
 | `move` | `MOVE` | Moves an object. |
 | `delete` | `ERASE` | Deletes an object. |
-| `set_attribute` | `ATTEDIT` | Sets one attribute value of an insert. |
+| `set_attribute` | `ATTEDIT` | Sets one attribute value of an insert, naming one occurrence of a tag its block defines more than once. |
 | `add_layer`, `change_layer`, `rename_layer`, `delete_layer` | `LAYER`, none, `RENAME`, `LAYDEL` | Adds, changes, renames or deletes a layer of a template. |
 | `add_linetype`, `change_linetype`, `rename_linetype`, `delete_linetype` | `LINETYPE`, none, none, none | The same for a linetype. |
 | `add_text_style`, `change_text_style`, `rename_text_style`, `delete_text_style` | `STYLE`, none, none, none | The same for a text style. |
@@ -88,7 +88,17 @@ The table is written again whole, one entry to a line in braces, where the templ
 
 **A locked layer.** An object whose layer is `locked` is not edited: `change`, `move`, `delete` and `set_attribute` on it are refused with `locked`, naming the layer, as AutoCAD will not edit it. A row's value is not set either when any place on the sheet it fills, such as a heading, is on a locked layer; that refusal reaches only that sheet. An object can still be added onto a locked layer, as in AutoCAD. To edit one, unlock its layer first with `change_layer`, `set: {"locked": false}` or `null`, in the same change set or an earlier one.
 
-**`set_attribute`** takes `target`, an insert, `tag` and `value`, one line of text. An attribute the insert leaves out is added. When the insert's template takes the attribute from the row, the sheet's row value is set instead (decision 5), and the reply's `row_value` names the value and every place on the sheet it fills: the demo set's `TITLE` fills both the title block's `TITLE` and the heading's contents.
+**`set_attribute`** takes `target`, an insert, `tag` and `value`, one line of text, and `occurrence` when the insert's block defines the tag more than once. An attribute the insert leaves out is added. When the insert's template takes the attribute from the row, the sheet's row value is set instead (decision 5), and the reply's `row_value` names the value and every place on the sheet it fills: the demo set's `TITLE` fills both the title block's `TITLE` and the heading's contents. A tag written in lowercase is taken in capitals, as AutoCAD keeps it, and the operation's message says so.
+
+```json
+{"op": "set_attribute", "target": {"id": "DEMO-001/revisions"}, "tag": "NOTE", "occurrence": 2, "value": "AS BUILT"}
+```
+
+Zach decided on 2026-11-13 (#99) how it names one of a tag the block defines more than once ([the block library](block-library.md#a-tag-defined-more-than-once)). `occurrence` counts from 1, in the order the block defines the tag, leaving out its constant definitions, which carry no value:
+
+- When the tag repeats, `occurrence` is needed: without it the operation fails with `missing_key` at `occurrence`, listing each occurrence with its value, such as ``1 `ISSUED`, 2 `-` (its default)``. An occurrence past the last fails with `bad_value`, listing them too.
+- When the tag does not repeat, `occurrence` is 1 or left out; any other is `bad_value`.
+- It writes that item of the insert's list in its record, growing a shorter list with nulls, which take their defaults, and writing a list where the record gave none. An item the template takes from the row, `{row: NAME}`, sets the sheet's row value, as a whole attribute from the row does.
 
 ### Blocks
 
@@ -104,7 +114,7 @@ Zach decided on 2026-11-13 how a change set defines and redefines the blocks of 
 
 **Bringing inserts into line.** An insert carries a value for each tag its block carries: each of its attribute definitions' tags but a constant one's. A value an insert gives for a tag its block no longer carries, because the block no longer defines the tag or now defines it constant, is removed from the insert's record, as AutoCAD's ATTSYNC removes it: from the inserts of the templates that name the library, from the rows' own inserts of the sheets built from them, and from the inserts nested in the library's other blocks. A value the template takes from the row, `{row: REV}`, is removed from the template in the same way; the row's value stays in the row. An insert left with no value loses its `attributes`. A new tag needs nothing written: an insert that gives no value takes the definition's default. An insert stores no place for its attributes, so nothing else needs bringing into line. `agentdrafter undo` puts every value removed back, with the library, byte for byte.
 
-The reply's operation lists the inserts it reached under `inserts`, by ID, on every sheet it reaches, an insert of a template on every sheet built from it: each insert of the block, and each insert of a block that nests it, however deep, which draws as the new definition does though it has no values of the block's to bring into line; and each value it removed under `attributes_removed`: the `record`, the insert's place in it under `field`, such as `objects[2]`, `rows[1].objects[0]` or, for an insert nested in another block, `blocks.STAMP.objects[0]`, its IDs on the sheets (none for an insert in a block), the `tag`, and the `value` as the record wrote it, such as `B` or `{row: REV}`. The journal entry marks each insert reached as changed, so the viewer shows it. The operation's `before` and `after` are the block as the library writes it, on one line.
+The reply's operation lists the inserts it reached under `inserts`, by ID, on every sheet it reaches, an insert of a template on every sheet built from it: each insert of the block, and each insert of a block that nests it, however deep, which draws as the new definition does though it has no values of the block's to bring into line; and each value it removed under `attributes_removed`: the `record`, the insert's place in it under `field`, such as `objects[2]`, `rows[1].objects[0]` or, for an insert nested in another block, `blocks.STAMP.objects[0]`, its IDs on the sheets (none for an insert in a block), the `tag`, the `occurrence`, counted from 1, when only an item of a repeated tag's list was removed, and the `value` as the record wrote it, such as `B` or `{row: REV}`. A tag the block now defines fewer times than an insert's list gives values for loses the list's surplus items; one it now defines once takes the list's first item alone, and one it now defines more than once takes a single value as its list's first item. The journal entry marks each insert reached as changed, so the viewer shows it. The operation's `before` and `after` are the block as the library writes it, on one line.
 
 The library is written as a template's objects are: the block an operation sets is written again whole, a key to a line, its base point in brackets and its objects an item to a line, in the place of its entry, and a block added goes after the library's last; a library whose blocks are written `{}` takes its first block a key to a line under `blocks:`. A block that only lost a nested insert's value is written again the same way. Every other block, comment and byte of the library stays as it was; a comment inside a block written again is lost.
 

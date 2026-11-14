@@ -270,13 +270,13 @@ fn an_attribute_the_block_does_not_have_lists_its_attributes() {
         &["unknown attribute `SIZE`", "TAG, NOTE"],
     );
     let e = error_with_library(&one_object(
-        "insert: {block: MARKER, position: [0, 0, 0], attributes: {tag: A-1}}",
+        "insert: {block: MARKER, position: [0, 0, 0], attributes: {size: A-1}}",
     ));
     assert_names(
         &e,
         ErrorCode::UnknownName,
-        "objects[0].insert.attributes.tag",
-        &["TAG, NOTE"],
+        "objects[0].insert.attributes.size",
+        &["unknown attribute `size`", "TAG, NOTE"],
     );
     let e = error_with_library(&one_object(
         "insert: {block: ARROW, position: [0, 0, 0], attributes: {TAG: A-1}}",
@@ -509,22 +509,10 @@ fn a_block_library_is_checked_as_a_sheet_is() {
             &["unknown layer `symbols`"],
         ),
         (
-            "units: mm\nblocks:\n  A: {objects: [{attdef: {tag: Tag, position: [0, 0, 0], height: 1}}]}\n",
-            ErrorCode::BadValue,
-            "blocks.A.objects[0].attdef.tag",
-            &["in capitals", "`TAG`"],
-        ),
-        (
             "units: mm\nblocks:\n  A: {objects: [{attdef: {tag: TWO WORDS, position: [0, 0, 0], height: 1}}]}\n",
             ErrorCode::BadValue,
             "blocks.A.objects[0].attdef.tag",
             &["cannot hold a space"],
-        ),
-        (
-            "units: mm\nblocks:\n  A:\n    objects:\n      - attdef: {tag: TAG, position: [0, 0, 0], height: 1}\n      - attdef: {tag: TAG, position: [0, 2, 0], height: 1}\n",
-            ErrorCode::DuplicateKey,
-            "blocks.A.objects[1].attdef.tag",
-            &["defined twice", "line 5"],
         ),
         (
             "units: mm\nblocks:\n  A: {objects: [{attdef: {tag: TAG, position: [0, 0, 0], height: 1, prompt: \"A\\nB\"}}]}\n",

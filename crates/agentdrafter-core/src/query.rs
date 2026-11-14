@@ -357,15 +357,27 @@ pub struct InsertAttributes {
 }
 
 /// An insert's attributes, written in JSON as a mapping from each tag to
-/// its value, in the order the block defines them.
+/// its value, in the order the block defines them. A tag the block defines
+/// more than once maps to a list of its values, in that order, the first
+/// being occurrence 1, as an insert gives them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AttributeValues(pub Vec<Attribute>);
 
 impl Serialize for AttributeValues {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        let mut tags: Vec<(&str, Vec<&str>)> = Vec::new();
         for attribute in &self.0 {
-            map.serialize_entry(&attribute.tag, &attribute.value)?;
+            match tags.iter_mut().find(|(tag, _)| *tag == attribute.tag) {
+                Some((_, values)) => values.push(&attribute.value),
+                None => tags.push((&attribute.tag, vec![&attribute.value])),
+            }
+        }
+        let mut map = serializer.serialize_map(Some(tags.len()))?;
+        for (tag, values) in &tags {
+            match values.as_slice() {
+                [value] => map.serialize_entry(tag, value)?,
+                values => map.serialize_entry(tag, values)?,
+            }
         }
         map.end()
     }

@@ -24,6 +24,11 @@ blocks:
       - attdef: {tag: TITLE, position: [5, 12, 0], height: 3}
       - attdef: {tag: DWG_NO, position: [5, 4, 0], height: 2.5}
       - attdef: {tag: REV, default: '0', position: [80, 4, 0], height: 2.5}
+  NOTES:
+    objects:
+      - attdef: {tag: NOTE, position: [0, 0, 0], height: 2.5}
+      - attdef: {tag: NOTE, position: [0, -5, 0], height: 2.5}
+      - attdef: {tag: NOTE, position: [0, -10, 0], height: 2.5}
 ";
 
 /// A made-up template: a title block and a heading from the row.
@@ -717,6 +722,12 @@ const ATTRIBUTE_VALUE: Place = Place {
     json: r#"{"units": "mm", "block_library": "blocks.yaml", "objects": [{"insert": {"block": "TB", "position": [0, 0, 0], "attributes": {"TITLE": V}}}]}"#,
 };
 
+const ATTRIBUTE_LIST: Place = Place {
+    name: "a repeated tag's values in a template",
+    yaml: "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {block: NOTES, position: [0, 0, 0], attributes: {NOTE: V}}\n",
+    json: r#"{"units": "mm", "block_library": "blocks.yaml", "objects": [{"insert": {"block": "NOTES", "position": [0, 0, 0], "attributes": {"NOTE": V}}}]}"#,
+};
+
 const TEXT_CONTENTS: Place = Place {
     name: "a text's contents in a template",
     yaml: "units: mm\nobjects:\n  - text: {contents: V, position: [0, 0, 0], height: 1}\n",
@@ -767,9 +778,40 @@ fn the_template_schema_accepts_exactly_the_templates_the_reader_accepts() {
             ),
             (place, "{}", json!({}), false),
             (place, "{value: A}", json!({"value": "A"}), false),
-            (place, "[A]", json!(["A"]), false),
         ]);
     }
+    // A list is a repeated tag's; the schema cannot see how many times the
+    // insert's block defines a tag, so a list for a tag it defines once, or
+    // one value for a tag it defines more than once, is the reader's to
+    // refuse.
+    for place in [&TEXT_CONTENTS, &MTEXT_CONTENTS] {
+        cases.push((place, "[A]", json!(["A"]), false));
+    }
+    cases.extend([
+        (&ATTRIBUTE_LIST, "[A, B, C]", json!(["A", "B", "C"]), true),
+        (
+            &ATTRIBUTE_LIST,
+            "[A, {row: TITLE}]",
+            json!(["A", {"row": "TITLE"}]),
+            true,
+        ),
+        (&ATTRIBUTE_LIST, "[null, B]", json!([null, "B"]), true),
+        (&ATTRIBUTE_LIST, "[]", json!([]), true),
+        (&ATTRIBUTE_LIST, "[[A]]", json!([["A"]]), false),
+        (
+            &ATTRIBUTE_LIST,
+            "[{row: [A]}]",
+            json!([{"row": ["A"]}]),
+            false,
+        ),
+        (
+            &ATTRIBUTE_LIST,
+            "[{value: A}]",
+            json!([{"value": "A"}]),
+            false,
+        ),
+        (&ATTRIBUTE_LIST, "[\"A\\nB\"]", json!(["A\nB"]), false),
+    ]);
     // A text's contents written in the template must show, as in a sheet
     // description; an attribute's value may be empty.
     for place in [&TEXT_CONTENTS, &MTEXT_CONTENTS] {

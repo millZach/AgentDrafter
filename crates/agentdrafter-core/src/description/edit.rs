@@ -88,7 +88,53 @@ pub(crate) struct Changed {
 pub(crate) struct InsertValues {
     pub index: usize,
     pub block: String,
-    pub values: Vec<(String, String)>,
+    pub values: Vec<GivenValue>,
+}
+
+/// A value an insert's record gives for an attribute.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GivenValue {
+    /// The tag as the record writes it, which may be in lowercase.
+    pub key: String,
+    /// The tag in capitals, as the block keeps it.
+    pub tag: String,
+    /// The value as the record writes it, such as `B`, `{row: REV}` or, for
+    /// a tag the block defines more than once, `[A, B]`.
+    pub text: String,
+    /// Whether the value is a bare null, which takes the default.
+    pub null: bool,
+    /// Each item of the value, as the record writes it, when it is a list;
+    /// none for an item written as a bare null.
+    pub items: Option<Vec<Option<String>>>,
+}
+
+impl GivenValue {
+    /// What fitting this value to a block that now carries its tag
+    /// `carried` times would take away, as AutoCAD's ATTSYNC does: the whole
+    /// value when the block no longer carries the tag, and each item past
+    /// the last occurrence it keeps, with its occurrence, counted from 1.
+    /// None when the value fits as it is; an empty list when it changes
+    /// shape only, a single value becoming a list or a list of one a single
+    /// value.
+    pub(crate) fn unfitted(&self, carried: usize) -> Option<Vec<(Option<usize>, String)>> {
+        let past = |items: &[Option<String>], keep: usize| -> Vec<(Option<usize>, String)> {
+            items
+                .iter()
+                .enumerate()
+                .skip(keep)
+                .filter_map(|(i, item)| item.clone().map(|text| (Some(i + 1), text)))
+                .collect()
+        };
+        match (carried, &self.items) {
+            (0, _) => Some(vec![(None, self.text.clone())]),
+            (1, None) => None,
+            (1, Some(items)) => Some(past(items, 1)),
+            (_, None) if self.null => None,
+            (_, None) => Some(Vec::new()),
+            (n, Some(items)) if items.len() > n => Some(past(items, n)),
+            (_, Some(_)) => None,
+        }
+    }
 }
 
 /// What setting an attribute did.
@@ -474,22 +520,25 @@ impl RecordFile {
             .collect()
     }
 
-    /// Takes the value the insert of `list` at `index` gives for the
-    /// attribute `tag` away, as operation `operation`, and its
-    /// `attributes` with it when no value is left.
-    pub(crate) fn remove_attribute(
+    /// Fits the value the insert of `list` at `index` gives under `key` to
+    /// a block that carries its tag `carried` times, as operation
+    /// `operation`, as [`GivenValue::unfitted`] says: taking it away, with
+    /// `attributes` when no value is left, cutting its list short, or
+    /// making it a list or a single value.
+    pub(crate) fn fit_attribute(
         &mut self,
         list: ObjectList,
         index: usize,
-        tag: &str,
+        key: &str,
+        carried: usize,
         operation: usize,
     ) -> Result<(), Error> {
         self.state(list);
         let items = self.items_mut(list)?;
         let keys = object_keys_mut(&mut items[index]).ok_or_else(|| record_shape("insert"))?;
-        remove_attribute_value(keys, tag);
-        let key = key_path("attributes", tag);
-        self.touch(list, index, operation, Touch::Keys(vec![key]));
+        fit_attribute_value(keys, key, carried);
+        let touched = key_path("attributes", key);
+        self.touch(list, index, operation, Touch::Keys(vec![touched]));
         Ok(())
     }
 
@@ -505,23 +554,34 @@ impl RecordFile {
     }
 
     /// The tags each insert of the block `name` carries, as the library
-    /// writes the block now: its attribute definitions' tags, but a
-    /// constant one's, whose value is the definition's on every insert.
-    /// None when the library does not define the block.
+    /// writes the block now, in capitals and in the block's order: its
+    /// attribute definitions' tags, but a constant one's, whose value is the
+    /// definition's on every insert. A tag the block defines more than once
+    /// is there more than once. None when the library does not define the
+    /// block.
     pub(crate) fn block_carried_tags(&self, name: &str) -> Option<Vec<String>> {
+        self.block_carried(name)
+            .map(|carried| carried.into_iter().map(|(tag, _)| tag).collect())
+    }
+
+    /// The attributes each insert of the block `name` carries, as
+    /// [`RecordFile::block_carried_tags`] gives them, each with its
+    /// definition's default as the library writes it.
+    pub(crate) fn block_carried(&self, name: &str) -> Option<Vec<(String, String)>> {
         let block = self.block_node(name)?;
-        let mut tags = Vec::new();
+        let mut carried = Vec::new();
         for item in block_items_of(block) {
             if let (Some("attdef"), Some(keys)) = object_parts(item) {
                 if scalar_of(keys, "constant") == Some("true") {
                     continue;
                 }
                 if let Some(tag) = scalar_of(keys, "tag") {
-                    tags.push(tag.to_owned());
+                    let default = scalar_of(keys, "default").unwrap_or_default();
+                    carried.push((tag.to_uppercase(), default.to_owned()));
                 }
             }
         }
-        Some(tags)
+        Some(carried)
     }
 
     /// Each insert among the objects of each block of a block library, with
@@ -570,14 +630,15 @@ impl RecordFile {
         Ok(())
     }
 
-    /// Takes the value the insert at `index` among the objects of the block
-    /// `block` gives for the attribute `tag` away, and its `attributes`
-    /// with it when no value is left.
-    pub(crate) fn remove_block_attribute(
+    /// Fits the value the insert at `index` among the objects of the block
+    /// `block` gives under `key` to a block that carries its tag `carried`
+    /// times, as [`RecordFile::fit_attribute`] does.
+    pub(crate) fn fit_block_attribute(
         &mut self,
         block: &str,
         index: usize,
-        tag: &str,
+        key: &str,
+        carried: usize,
     ) -> Result<(), Error> {
         self.note_block(block)?;
         let shape = || record_shape_in("a block's list of objects", &self.path);
@@ -595,7 +656,7 @@ impl RecordFile {
             .get_mut(index)
             .and_then(object_keys_mut)
             .ok_or_else(|| record_shape("insert"))?;
-        remove_attribute_value(keys, tag);
+        fit_attribute_value(keys, key, carried);
         Ok(())
     }
 
@@ -782,11 +843,26 @@ impl RecordFile {
             Some(Kind::Mapping(values)) => values
                 .iter()
                 .map(|v| {
-                    let text = match &v.value.kind {
+                    let text_of = |node: &Node| match &node.kind {
                         Kind::Scalar(text) => text.clone(),
-                        _ => self.emitter().flow(&v.value),
+                        _ => self.emitter().flow(node),
                     };
-                    (v.key.clone(), text)
+                    let items = match &v.value.kind {
+                        Kind::Sequence(items) => Some(
+                            items
+                                .iter()
+                                .map(|item| (!item.is_bare_null()).then(|| text_of(item)))
+                                .collect(),
+                        ),
+                        _ => None,
+                    };
+                    GivenValue {
+                        key: v.key.clone(),
+                        tag: v.key.to_uppercase(),
+                        text: text_of(&v.value),
+                        null: v.value.is_bare_null(),
+                        items,
+                    }
                 })
                 .collect(),
             _ => Vec::new(),
@@ -1177,8 +1253,12 @@ impl RecordFile {
         Ok(())
     }
 
-    /// Sets the attribute `tag` of the insert of `list` at `index` to
-    /// `value`, as operation `operation`. An attribute the template takes
+    /// Sets the attribute `tag`, in capitals, of the insert of `list` at
+    /// `index` to `value`, as operation `operation`: its single value, or
+    /// for a tag the block defines more than once, item `slot` of its list,
+    /// counted from 0, growing the list with bare nulls, which take their
+    /// defaults, when it is shorter. A value the record gives under the tag
+    /// in lowercase is set where it is. An attribute the template takes
     /// from the row is not set here: the row's value is returned, for the
     /// caller to set in the sheet's row.
     pub(crate) fn set_attribute(
@@ -1186,6 +1266,7 @@ impl RecordFile {
         list: ObjectList,
         index: usize,
         tag: &str,
+        slot: Option<usize>,
         value: &str,
         operation: usize,
     ) -> Result<AttributeSet, Error> {
@@ -1217,16 +1298,46 @@ impl RecordFile {
         let Kind::Mapping(values) = &mut attributes.kind else {
             return Err(record_shape(&kind));
         };
-        match values.iter().position(|e| e.key == tag) {
-            Some(p) => {
-                if let Some(name) = row_value_name(&values[p].value) {
+        let p = match values.iter().position(|e| e.key.to_uppercase() == tag) {
+            Some(p) => p,
+            None => {
+                values.push(new_entry(tag, Node::bare_null()));
+                values.len() - 1
+            }
+        };
+        let given = &mut values[p].value;
+        match slot {
+            None => {
+                if let Some(name) = row_value_name(given) {
                     return Ok(AttributeSet::FromRow(name));
                 }
-                values[p].value = Node::scalar(value);
+                *given = Node::scalar(value);
             }
-            None => values.push(new_entry(tag, Node::scalar(value))),
+            Some(i) => {
+                if !matches!(given.kind, Kind::Sequence(_)) {
+                    // A single value, which a tag defined more than once
+                    // does not take, becomes the list's first item.
+                    let single = std::mem::replace(given, Node::new(Kind::Sequence(Vec::new())));
+                    let first = if single.is_bare_null() {
+                        Vec::new()
+                    } else {
+                        vec![single]
+                    };
+                    given.kind = Kind::Sequence(first);
+                }
+                let Kind::Sequence(items) = &mut given.kind else {
+                    unreachable!("made a list above")
+                };
+                if let Some(name) = items.get(i).and_then(row_value_name) {
+                    return Ok(AttributeSet::FromRow(name));
+                }
+                while items.len() <= i {
+                    items.push(Node::bare_null());
+                }
+                items[i] = Node::scalar(value);
+            }
         }
-        let key = key_path("attributes", tag);
+        let key = key_path("attributes", &values[p].key);
         self.touch(list, index, operation, Touch::Keys(vec![key]));
         Ok(AttributeSet::Written)
     }
@@ -1670,14 +1781,48 @@ fn block_items_of(block: &Node) -> &[Node] {
     }
 }
 
-/// Takes the value an insert's `keys` give for the attribute `tag` away,
-/// and the `attributes` with it when no value is left.
-fn remove_attribute_value(keys: &mut Vec<Entry>, tag: &str) {
+/// Fits the value an insert's `keys` give under `key` to a block that
+/// carries its tag `carried` times, as [`GivenValue::unfitted`] says: none
+/// takes it away, and the `attributes` with it when no value is left; one
+/// makes a list its first item, or takes it away when that is a bare null
+/// or missing; more cut a longer list short, and make a single value the
+/// first item of a list.
+fn fit_attribute_value(keys: &mut Vec<Entry>, key: &str, carried: usize) {
     let Some(p) = keys.iter().position(|e| e.key == "attributes") else {
         return;
     };
-    if let Kind::Mapping(values) = &mut keys[p].value.kind {
-        values.retain(|v| v.key != tag);
+    let Kind::Mapping(values) = &mut keys[p].value.kind else {
+        return;
+    };
+    let Some(v) = values.iter().position(|e| e.key == key) else {
+        return;
+    };
+    let value = &mut values[v].value;
+    let null = value.is_bare_null();
+    let keep = match (carried, &mut value.kind) {
+        (0, _) => false,
+        (1, Kind::Sequence(items)) => match items.first() {
+            Some(first) if !first.is_bare_null() => {
+                let first = first.clone();
+                *value = first;
+                true
+            }
+            _ => false,
+        },
+        (1, _) => true,
+        (n, Kind::Sequence(items)) => {
+            items.truncate(n);
+            true
+        }
+        _ if null => true,
+        _ => {
+            let single = std::mem::replace(value, Node::new(Kind::Sequence(Vec::new())));
+            value.kind = Kind::Sequence(vec![single]);
+            true
+        }
+    };
+    if !keep {
+        values.remove(v);
         if values.is_empty() {
             keys.remove(p);
         }

@@ -79,15 +79,17 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
         json!({
             "description": format!(
                 "An attribute tag: the label an insert fills an attribute in by. 1 to \
-                 {LONGEST_TAG} characters in capitals, as AutoCAD keeps it, with no spaces and no \
-                 control characters. A plain number such as `100` is read as its digits."
+                 {LONGEST_TAG} characters with no spaces and no control characters; punctuation \
+                 such as NOTE#1, A/B or X.Y is kept as written. AutoCAD keeps a tag in \
+                 capitals, so one written in lowercase is taken in capitals, and the reply says \
+                 so. A plain number such as `100` is read as its digits."
             ),
             "anyOf": [
                 {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": LONGEST_TAG,
-                    "pattern": format!("^[^\\s\\p{{Lowercase}}{CONTROL}]+$"),
+                    "pattern": format!("^[^\\s{CONTROL}]+$"),
                 },
                 { "type": ["number", "boolean"] },
             ],
@@ -161,11 +163,23 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                     "description": "Degrees anticlockwise from the X axis. Without it, 0.",
                 },
                 "attributes": {
-                    "description": "The values of the block's attributes, from tag to value. An \
-                                    attribute not given takes its definition's default.",
+                    "description": "The values of the block's attributes, from tag to value. A \
+                                    tag the block defines more than once takes a list of values, \
+                                    one for each in the order the block defines them, which may \
+                                    be shorter than that; a tag it defines once takes one value. \
+                                    An attribute not given, or given as null, takes its \
+                                    definition's default.",
                     "type": "object",
                     "propertyNames": { "$ref": "#/$defs/attribute_tag" },
-                    "additionalProperties": { "$ref": "#/$defs/attribute_value" },
+                    "additionalProperties": {
+                        "anyOf": [
+                            { "$ref": "#/$defs/attribute_value" },
+                            {
+                                "type": "array",
+                                "items": { "$ref": "#/$defs/attribute_value" },
+                            },
+                        ],
+                    },
                 },
             }),
         ),

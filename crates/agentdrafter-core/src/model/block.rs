@@ -72,6 +72,30 @@ impl Block {
     pub fn carried_attributes(&self) -> impl Iterator<Item = &AttributeDefinition> {
         self.attribute_definitions().filter(|d| !d.constant)
     }
+
+    /// The value the attribute definition at `index` among the block's
+    /// objects shows on `insert`: a constant one's default, or the value
+    /// the insert carries for it, matched by its place among the carried
+    /// definitions, since a block may define a tag more than once. None
+    /// when the object there is not an attribute definition.
+    pub fn attribute_value<'a>(&'a self, insert: &'a Insert, index: usize) -> Option<&'a str> {
+        let Some(Object::AttributeDefinition(definition)) = self.objects.get(index) else {
+            return None;
+        };
+        if definition.constant {
+            return Some(&definition.default);
+        }
+        let carried = self.objects[..index]
+            .iter()
+            .filter(|o| matches!(o, Object::AttributeDefinition(d) if !d.constant))
+            .count();
+        Some(
+            insert
+                .attributes
+                .get(carried)
+                .map_or(definition.default.as_str(), |a| a.value.as_str()),
+        )
+    }
 }
 
 /// A labelled text field on a block, filled in at each insert: AutoCAD's
@@ -79,6 +103,7 @@ impl Block {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AttributeDefinition {
     /// The attribute's tag: the label an insert fills it in by, in capitals.
+    /// A block may define a tag more than once, as AutoCAD allows.
     pub tag: String,
     /// What AutoCAD asks for when a person inserts the block; empty for the tag.
     #[serde(default)]
@@ -133,7 +158,9 @@ pub struct AttributeDefinition {
 }
 
 /// One attribute an insert carries: the value of the block's attribute
-/// with this tag.
+/// with this tag. An insert carries one for each of its block's carried
+/// definitions, in order, so a tag the block defines more than once
+/// appears more than once.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attribute {
     pub tag: String,

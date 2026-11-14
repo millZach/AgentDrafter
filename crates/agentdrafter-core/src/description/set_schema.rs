@@ -235,12 +235,21 @@ pub(crate) fn template_schema() -> Value {
     let attributes = &mut defs["insert"]["properties"]["attributes"];
     attributes["description"] = json!(
         "The values of the block's attributes, from tag to value: text, or a value from the row, \
-         {row: NAME}. An attribute not given takes its definition's default."
+         {row: NAME}. A tag the block defines more than once takes a list of values, one for \
+         each in the order the block defines them, which may be shorter than that, each text or \
+         a value from the row. An attribute not given, or given as null, takes its \
+         definition's default."
     );
-    attributes["additionalProperties"] = json!({
+    let one = json!({
         "anyOf": [
             { "$ref": "#/$defs/attribute_value" },
             { "$ref": "#/$defs/row_value" },
+        ],
+    });
+    attributes["additionalProperties"] = json!({
+        "anyOf": [
+            one.clone(),
+            { "type": "array", "items": one },
         ],
     });
     for kind in ["text", "mtext"] {

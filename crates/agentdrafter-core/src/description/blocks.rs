@@ -27,8 +27,40 @@ use crate::model::{
     Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert, Layer, Linetype, Object,
     ObjectLinetype, Point3, Sheet, CONTINUOUS,
 };
+use crate::set::NoticeCode;
 use crate::text::TextStyle;
 use crate::units::Unit;
+
+/// Something reading a sheet or a block library noticed that did not stop
+/// it, such as an attribute tag written in lowercase, which is taken in
+/// capitals as AutoCAD keeps it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Noticed {
+    pub(super) code: NoticeCode,
+    pub(super) message: String,
+    /// The path to what it is about in its file, such as
+    /// `blocks.B.objects[0].attdef.tag`.
+    pub(super) field: String,
+    pub(super) at: Pos,
+    /// The file it is in, when it is not the file of the sheet's objects:
+    /// the block library, or the rows file for a row's own object.
+    pub(super) file: Option<std::path::PathBuf>,
+}
+
+/// The notice that `written`, an attribute tag written at `field`, is taken
+/// in capitals, as `tag`.
+fn in_capitals(written: &str, tag: &str, field: String, at: Pos) -> Noticed {
+    Noticed {
+        code: NoticeCode::TagInCapitals,
+        message: format!(
+            "the attribute tag `{written}` is taken as `{tag}`: AutoCAD keeps a tag in capitals, \
+             and so does AgentDrafter"
+        ),
+        field,
+        at,
+        file: None,
+    }
+}
 
 /// The keys at the top of a block library.
 pub(crate) const LIBRARY_KEYS: [&str; 6] = [
@@ -114,7 +146,17 @@ pub(crate) const FORBIDDEN_IN_PATHS: &str = "\\:<>\"|?*";
 ///
 /// Every length comes back in the library's declared unit; a number that
 /// carries its own unit is converted to it.
+///
+/// An attribute tag written in lowercase is taken in capitals, as AutoCAD
+/// keeps it.
 pub fn parse_block_library(text: &str) -> Result<BlockLibrary, Error> {
+    read_block_library(text).map(|(library, _)| library)
+}
+
+/// Reads a block library as [`parse_block_library`] does, with what the
+/// reading noticed: each attribute tag written in lowercase and taken in
+/// capitals, in the file's order.
+pub(crate) fn read_block_library(text: &str) -> Result<(BlockLibrary, Vec<Noticed>), Error> {
     let Some(root) = strict_yaml::read(text)? else {
         return Err(Error::new(
             ErrorCode::MissingKey,
@@ -171,14 +213,17 @@ pub fn parse_block_library(text: &str) -> Result<BlockLibrary, Error> {
         text_styles: text_styles.clone(),
         blocks: Vec::with_capacity(entries.len()),
     };
+    let mut noticed = Vec::new();
     for i in order {
-        let read = block(&entries[i].key, &entries[i].value, &tables, Some(&library))?;
+        let (read, found) = block(&entries[i].key, &entries[i].value, &tables, Some(&library))?;
         library.blocks.push(read);
+        noticed.extend(found);
     }
     library
         .blocks
         .sort_by_key(|b| entries.iter().position(|e| e.key == b.name));
-    Ok(library)
+    noticed.sort_by_key(|n| (n.at.line, n.at.column));
+    Ok((library, noticed))
 }
 
 /// The order to read the blocks of `entries` in: each block after every
@@ -314,7 +359,7 @@ fn block(
     node: &Node,
     tables: &Tables,
     library: Option<&BlockLibrary>,
-) -> Result<Block, Error> {
+) -> Result<(Block, Vec<Noticed>), Error> {
     let path = key_path("blocks", name);
     let fields = Fields::of(node, &path, &BLOCK_KEYS, "a block")?;
     let base_point = match fields.get("base_point") {
@@ -332,7 +377,7 @@ fn block(
         ));
     }
     let mut place = Place::Block {
-        tags: Vec::new(),
+        noticed: Vec::new(),
         library,
     };
     let mut objects = Vec::with_capacity(items.len());
@@ -344,12 +389,16 @@ fn block(
             cells.push(cell);
         }
     }
-    Ok(Block {
+    let Place::Block { noticed, .. } = place else {
+        unreachable!("a block's objects are read in a block")
+    };
+    let block = Block {
         name: name.to_owned(),
         base_point,
         objects,
         cells,
-    })
+    };
+    Ok((block, noticed))
 }
 
 /// The cell the block's object at `item`, its `index`th, declares, if it
@@ -403,34 +452,25 @@ fn cell(item: &Node, path: &str, index: usize, units: Unit) -> Result<Option<Cel
     }))
 }
 
-/// An attribute definition. `tags` holds the tags the block has defined
-/// before it, each with where it was given.
+/// An attribute definition. A block may define a tag more than once, as
+/// AutoCAD allows; an insert then gives that tag's values as a list. A tag
+/// written in lowercase is taken in capitals, and `noticed` says so.
 pub(super) fn attribute_definition(
     fields: &Fields,
     tables: &Tables,
     layer: String,
-    tags: &mut Vec<(String, Pos)>,
+    noticed: &mut Vec<Noticed>,
 ) -> Result<AttributeDefinition, Error> {
     let tag_node = fields.require_text("tag")?;
     let tag_path = fields.path_of("tag");
-    let tag = scalar(tag_node, &tag_path, "an attribute tag")?;
-    if let Some(problem) = tag_problem(tag) {
+    let written = scalar(tag_node, &tag_path, "an attribute tag")?;
+    if let Some(problem) = tag_problem(written) {
         return Err(bad_value(tag_node, &tag_path, problem));
     }
-    if let Some((_, first)) = tags.iter().find(|(t, _)| t == tag) {
-        return Err(at(
-            Error::new(
-                ErrorCode::DuplicateKey,
-                format!(
-                    "attribute tag `{tag}` is defined twice in this block, first at line {}; an insert fills in each attribute by its tag",
-                    first.line
-                ),
-            ),
-            &tag_path,
-            tag_node.at,
-        ));
+    let tag = written.to_uppercase();
+    if tag != written {
+        noticed.push(in_capitals(written, &tag, tag_path.clone(), tag_node.at));
     }
-    tags.push((tag.to_owned(), tag_node.at));
     let prompt = match fields.text("prompt") {
         Some(node) => {
             let path = fields.path_of("prompt");
@@ -479,7 +519,7 @@ pub(super) fn attribute_definition(
         }
     }
     Ok(AttributeDefinition {
-        tag: tag.to_owned(),
+        tag,
         prompt,
         default,
         position: point(
@@ -509,6 +549,7 @@ pub(super) fn insert(
     units: Unit,
     layer: String,
     library: Option<&BlockLibrary>,
+    noticed: &mut Vec<Noticed>,
 ) -> Result<Insert, Error> {
     let block = block_named(fields, library)?;
     let scale = match fields.get("scale") {
@@ -530,7 +571,7 @@ pub(super) fn insert(
         Some(node) => angle(node, &fields.path_of("rotation"))?,
         None => 0.0,
     };
-    let attributes = attributes(fields, block, library)?;
+    let attributes = attributes(fields, block, library, noticed)?;
     Ok(Insert {
         block: block.name.clone(),
         position: point(
@@ -583,12 +624,21 @@ fn block_named<'a>(fields: &Fields, library: Option<&'a BlockLibrary>) -> Result
     }
 }
 
-/// The values of every attribute of `block`, in the order it defines them:
-/// the insert's own, or the definition's default where it gives none.
+/// The values of every attribute of `block` an insert carries, in the
+/// order it defines them: the insert's own, or the definition's default
+/// where it gives none.
+///
+/// A tag the block carries once takes one value; a tag it carries more
+/// than once takes a list, one value for each in the order the block
+/// defines them, which may be shorter than that but not longer. A bare
+/// null, for the tag or for an item of its list, leaves the value out, so
+/// the definition's default holds. A tag written in lowercase is taken in
+/// capitals, and `noticed` says so.
 fn attributes(
     fields: &Fields,
     block: &Block,
     library: Option<&BlockLibrary>,
+    noticed: &mut Vec<Noticed>,
 ) -> Result<Vec<Attribute>, Error> {
     let definitions: Vec<&AttributeDefinition> = block.carried_attributes().collect();
     let mut values: Vec<Option<String>> = vec![None; definitions.len()];
@@ -601,27 +651,42 @@ fn attributes(
                 "a mapping from attribute tags to values",
             ));
         };
-        let listed = if definitions.is_empty() {
-            format!("block `{}` has no attributes", block.name)
-        } else {
-            format!(
-                "block `{}` has the attributes {}",
-                block.name,
-                definitions
-                    .iter()
-                    .map(|d| d.tag.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
+        let listed = carried_listed(block, &definitions);
+        let mut given: Vec<(String, &strict_yaml::Entry)> = Vec::new();
         for entry in entries {
-            let Some(i) = definitions.iter().position(|d| d.tag == entry.key) else {
+            let entry_path = key_path(&path, &entry.key);
+            let tag = entry.key.to_uppercase();
+            if let Some((_, first)) = given.iter().find(|(t, _)| *t == tag) {
+                return Err(Error::new(
+                    ErrorCode::DuplicateKey,
+                    format!(
+                        "the attribute `{tag}` is given twice, as `{}` at line {} and as `{}` \
+                         here; AutoCAD keeps a tag in capitals, so they are one tag. Give it once",
+                        first.key, first.key_at.line, entry.key
+                    ),
+                )
+                .at_field(entry_path)
+                .at_position(entry.key_at.line, entry.key_at.column));
+            }
+            given.push((tag.clone(), entry));
+            if tag != entry.key {
+                noticed.push(in_capitals(
+                    &entry.key,
+                    &tag,
+                    entry_path.clone(),
+                    entry.key_at,
+                ));
+            }
+            let places: Vec<usize> = (0..definitions.len())
+                .filter(|&i| definitions[i].tag == tag)
+                .collect();
+            if places.is_empty() {
                 // A constant attribute's value is its definition's, on every
                 // insert (Zach, 2026-11-13); and an attribute of a block this
                 // block inserts is filled in by this block's definition,
                 // once, as AutoCAD fills it. An insert sets neither.
-                let constant = constant_tag(block, &entry.key, library);
-                let why = match (constant, nested_tag(block, &entry.key, library)) {
+                let constant = constant_tag(block, &tag, library);
+                let why = match (constant, nested_tag(block, &tag, library)) {
                     (Some((definer, definition)), _) => {
                         let of = if definer == block.name {
                             format!("of block `{definer}`")
@@ -629,8 +694,8 @@ fn attributes(
                             format!("of block `{definer}`, nested in block `{}`,", block.name)
                         };
                         format!(
-                            "the attribute `{}` {of} is constant: its value, `{}`, is set once, as its `default` in block `{definer}`'s definition in the block library, as AutoCAD sets it, not by each insert. {listed}",
-                            entry.key, definition.default
+                            "the attribute `{tag}` {of} is constant: its value, `{}`, is set once, as its `default` in block `{definer}`'s definition in the block library, as AutoCAD sets it, not by each insert. {listed}",
+                            definition.default
                         )
                     }
                     (None, Some((setter, inner))) => {
@@ -640,19 +705,68 @@ fn attributes(
                             format!(", nested in block `{}`", block.name)
                         };
                         format!(
-                            "the attribute `{}` belongs to block `{inner}`, which block `{setter}` inserts{within}; its value is set once, in block `{setter}`'s definition in the block library, as AutoCAD sets it, not by each insert. {listed}",
-                            entry.key
+                            "the attribute `{tag}` belongs to block `{inner}`, which block `{setter}` inserts{within}; its value is set once, in block `{setter}`'s definition in the block library, as AutoCAD sets it, not by each insert. {listed}"
                         )
                     }
                     (None, None) => format!("unknown attribute `{}`; {listed}", entry.key),
                 };
                 return Err(Error::new(ErrorCode::UnknownName, why)
-                    .at_field(key_path(&path, &entry.key))
+                    .at_field(entry_path)
                     .at_position(entry.key_at.line, entry.key_at.column));
-            };
+            }
             // A bare null leaves the value out, so the definition's default holds.
-            if !entry.value.is_bare_null() {
-                values[i] = Some(value(&entry.value, &key_path(&path, &entry.key))?);
+            if entry.value.is_bare_null() {
+                continue;
+            }
+            match (&entry.value.kind, places.as_slice()) {
+                (Kind::Sequence(_), [_]) => {
+                    return Err(wrong_type(
+                        &entry.value,
+                        &entry_path,
+                        &format!(
+                            "one value: block `{}` defines the attribute `{tag}` once, so it \
+                             takes one line of text, not a list",
+                            block.name
+                        ),
+                    ));
+                }
+                (_, [i]) => values[*i] = Some(value(&entry.value, &entry_path)?),
+                (Kind::Sequence(items), _) => {
+                    if items.len() > places.len() {
+                        return Err(bad_value(
+                            &entry.value,
+                            &entry_path,
+                            format!(
+                                "block `{}` defines the attribute `{tag}` {} times, so it takes \
+                                 at most {} values, one for each in the order the block defines \
+                                 them; this list gives {}",
+                                block.name,
+                                places.len(),
+                                places.len(),
+                                items.len()
+                            ),
+                        ));
+                    }
+                    for (j, item) in items.iter().enumerate() {
+                        if !item.is_bare_null() {
+                            values[places[j]] = Some(value(item, &index_path(&entry_path, j))?);
+                        }
+                    }
+                }
+                (_, _) => {
+                    return Err(wrong_type(
+                        &entry.value,
+                        &entry_path,
+                        &format!(
+                            "a list: block `{}` defines the attribute `{tag}` {} times, so it \
+                             takes a list of values, one for each in the order the block \
+                             defines them, such as [first, second]; a value left out, or \
+                             written as null, takes its definition's default",
+                            block.name,
+                            places.len()
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -664,6 +778,33 @@ fn attributes(
             value: value.unwrap_or_else(|| definition.default.clone()),
         })
         .collect())
+}
+
+/// The attributes an insert of `block` carries, for an error: each tag
+/// once, saying how many times the block defines it when more than once.
+fn carried_listed(block: &Block, definitions: &[&AttributeDefinition]) -> String {
+    if definitions.is_empty() {
+        return format!("block `{}` has no attributes", block.name);
+    }
+    let mut tags: Vec<(&str, usize)> = Vec::new();
+    for definition in definitions {
+        match tags.iter_mut().find(|(t, _)| *t == definition.tag) {
+            Some((_, n)) => *n += 1,
+            None => tags.push((&definition.tag, 1)),
+        }
+    }
+    let each: Vec<String> = tags
+        .iter()
+        .map(|(tag, n)| match n {
+            1 => (*tag).to_owned(),
+            n => format!("{tag} ({n} times, given as a list)"),
+        })
+        .collect();
+    format!(
+        "block `{}` has the attributes {}",
+        block.name,
+        each.join(", ")
+    )
 }
 
 /// The constant attribute `tag` of `block`, or of a block nested in it,
@@ -735,28 +876,24 @@ fn one_line_problem(text: &str, what: &str) -> Option<String> {
 }
 
 /// Why `tag` cannot be an attribute tag, if it cannot. AutoCAD keeps a tag
-/// in capitals and with no spaces.
+/// with no spaces; one written in lowercase it takes in capitals.
 fn tag_problem(tag: &str) -> Option<String> {
     if tag.is_empty() {
         Some("an attribute tag cannot be empty".to_owned())
-    } else if tag.chars().count() > LONGEST_TAG {
+    } else if tag.to_uppercase().chars().count() > LONGEST_TAG {
+        // Counted in capitals, as the tag is kept.
         Some(format!(
             "an attribute tag has at most {LONGEST_TAG} characters"
         ))
     } else if tag.chars().any(char::is_whitespace) {
         Some("an attribute tag cannot hold a space".to_owned())
-    } else if let Some(c) = tag.chars().find(|c| c.is_control()) {
-        Some(format!(
-            "an attribute tag cannot hold the control character `{}`",
-            c.escape_default()
-        ))
-    } else if tag.chars().any(char::is_lowercase) {
-        Some(format!(
-            "an attribute tag is written in capitals, as AutoCAD keeps it: `{}`",
-            tag.to_uppercase()
-        ))
     } else {
-        None
+        tag.chars().find(|c| c.is_control()).map(|c| {
+            format!(
+                "an attribute tag cannot hold the control character `{}`",
+                c.escape_default()
+            )
+        })
     }
 }
 
