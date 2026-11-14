@@ -653,3 +653,35 @@ objects:
         assert!(runs.iter().any(|r| r[0] == end), "{runs:?}");
     }
 }
+
+/// A library block drawn as AutoCAD's arrowhead is shared however its
+/// objects come in turn, and whichever way round a line is written.
+#[test]
+fn a_library_arrowhead_drawn_alike_in_another_order_is_shared() {
+    let dir = scratch("library-arrowhead-reordered");
+    let lines: Vec<&str> = AUTOCAD_OPEN.lines().collect();
+    let reordered = [
+        lines[0],
+        lines[1],
+        lines[2],
+        lines[3],
+        lines[5],
+        lines[4],
+        "      - line: {from: [-1, 0, 0], to: [0, 0, 0], color: ByBlock, linetype: ByBlock, lineweight: ByBlock}",
+    ]
+    .join("\n")
+        + "\n";
+    fs::write(dir.join("blocks.yaml"), reordered).unwrap();
+    let path = dir.join("sheet.yaml");
+    fs::write(&path, OPEN_SHEET).unwrap();
+    build(&BuildRequest {
+        description: path,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    let read = read_dwg(&dir.join("sheet.dwg")).unwrap();
+    assert_eq!(read.objects_not_read, 0, "{read:?}");
+    let names: Vec<&str> = read.blocks.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["_Open"]);
+}

@@ -272,6 +272,37 @@ fn rounded(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// What `objects` draw, in an order of their own: each object as its
+/// rounded JSON, a line's two ends in an order of their own too, sorted,
+/// so that two blocks drawn alike compare equal however their objects, or
+/// a line's ends, are written in turn.
+fn drawn_alike(objects: &[Object]) -> Vec<String> {
+    fn ends_in_order(value: &mut serde_json::Value) {
+        if let serde_json::Value::Object(keys) = value {
+            if let (Some(from), Some(to)) = (keys.get("from"), keys.get("to")) {
+                if serde_json::to_string(to).ok() < serde_json::to_string(from).ok() {
+                    let (from, to) = (from.clone(), to.clone());
+                    keys.insert("from".to_owned(), to);
+                    keys.insert("to".to_owned(), from);
+                }
+            }
+            for inner in keys.values_mut() {
+                ends_in_order(inner);
+            }
+        }
+    }
+    let mut drawn: Vec<String> = objects
+        .iter()
+        .map(|object| {
+            let mut value = rounded(serde_json::to_value(object).unwrap_or_default());
+            ends_in_order(&mut value);
+            value.to_string()
+        })
+        .collect();
+    drawn.sort();
+    drawn
+}
+
 /// Refuses a block of the sheet's, from its block library, that has the
 /// name of an arrowhead block a leader of the sheet needs but is drawn
 /// otherwise than AutoCAD's: the drawing holds one block of a name. One
@@ -292,13 +323,11 @@ fn check_library_arrowheads(sheet: &Sheet, arrowheads: &[Arrowhead]) -> Result<(
             .iter()
             .map(|e| super::read_object(e, &[]))
             .collect();
-        let as_json =
-            |objects: &[Object]| rounded(serde_json::to_value(objects).unwrap_or_default());
         let same = expected.is_some_and(|expected| {
             block.base_point.x == 0.0
                 && block.base_point.y == 0.0
                 && block.base_point.z == 0.0
-                && as_json(&block.objects) == as_json(&expected)
+                && drawn_alike(&block.objects) == drawn_alike(&expected)
         });
         if !same {
             return Err(Error::new(
