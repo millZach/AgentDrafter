@@ -32,7 +32,9 @@ use agentdrafter_core::{
     JournalRequest, MeasureTextRequest, RenderRequest, StaleRequest, UndoRequest, Unit,
     FONTS_VARIABLE, PLOT_STYLES_VARIABLE,
 };
-use agentdrafter_core::{End, Matching, Measure, Query, QueryRequest, Selection};
+use agentdrafter_core::{
+    End, Matching, Measure, ObjectRef, Query, QueryRequest, Selection, SnapKind, SnapRef,
+};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
@@ -53,7 +55,7 @@ const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...";
 const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
-const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find and attributes: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [extents: --fonts <folder>...]";
+const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [extents, snap and geometry: --fonts <folder>...]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
 /// name, as the binary does: it prints the reply on standard output, or
@@ -653,16 +655,27 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
         Some(kind) => kind.into_owned(),
         None => return Err(usage("query needs what to ask".to_owned())),
     };
-    let selecting = matches!(kind.as_str(), "find" | "attributes");
-    if !selecting && !matches!(kind.as_str(), "blocks" | "measure" | "extents" | "layers") {
+    let selecting = matches!(kind.as_str(), "find" | "attributes" | "geometry");
+    if !selecting
+        && !matches!(
+            kind.as_str(),
+            "blocks" | "measure" | "extents" | "layers" | "snap"
+        )
+    {
         return Err(usage(format!(
-            "query asks find, blocks, attributes, measure, extents or layers, not `{kind}`"
+            "query asks find, blocks, attributes, measure, extents, layers, snap or geometry, not \
+             `{kind}`"
         )));
     }
     let mut source: Option<PathBuf> = None;
     let mut sheet: Option<String> = None;
     let mut selection = Selection::default();
     let (mut from, mut to) = (End::default(), End::default());
+    let (mut snap, mut with, mut snap_from) =
+        (SnapRef::default(), ObjectRef::default(), SnapRef::default());
+    // The other object of a `from` that is itself an intersection.
+    let mut from_with = ObjectRef::default();
+    let (mut snap_kind, mut from_kind): (Option<String>, Option<String>) = (None, None);
     let mut fonts = Vec::new();
     let value = |flag: &str, value: Option<OsString>| -> Result<String, Error> {
         value
@@ -705,6 +718,27 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
                 };
                 once(slot, flag, value(flag, args.next())?)?;
             }
+            Some(
+                flag @ ("--id" | "--name" | "--snap" | "--which" | "--with" | "--with-name"
+                | "--from" | "--from-name" | "--from-snap" | "--from-which" | "--from-with"
+                | "--from-with-name"),
+            ) if kind == "snap" => {
+                let slot = match flag {
+                    "--id" => &mut snap.id,
+                    "--name" => &mut snap.name,
+                    "--snap" => &mut snap_kind,
+                    "--which" => &mut snap.which,
+                    "--with" => &mut with.id,
+                    "--with-name" => &mut with.name,
+                    "--from" => &mut snap_from.id,
+                    "--from-name" => &mut snap_from.name,
+                    "--from-snap" => &mut from_kind,
+                    "--from-with" => &mut from_with.id,
+                    "--from-with-name" => &mut from_with.name,
+                    _ => &mut snap_from.which,
+                };
+                once(slot, flag, value(flag, args.next())?)?;
+            }
             Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
                 return Err(usage(format!("`query {kind}` takes no option `{flag}`")))
             }
@@ -720,8 +754,36 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
     let source = source.ok_or_else(|| {
         usage("query needs a drawing set's folder or a sheet description".to_owned())
     })?;
+    let snap_of = |name: Option<String>, flag: &str| -> Result<Option<SnapKind>, Error> {
+        name.map(|name| {
+            SnapKind::ALL
+                .into_iter()
+                .find(|k| k.name() == name)
+                .ok_or_else(|| {
+                    let kinds: Vec<&str> = SnapKind::ALL.iter().map(|k| k.name()).collect();
+                    usage(format!(
+                        "{flag} is one of {}, not `{name}`",
+                        kinds.join(", ")
+                    ))
+                })
+        })
+        .transpose()
+    };
+    snap.snap = snap_of(snap_kind, "--snap")?;
+    snap_from.snap = snap_of(from_kind, "--from-snap")?;
+    if with != ObjectRef::default() {
+        snap.with = Some(with);
+    }
+    if from_with != ObjectRef::default() {
+        snap_from.with = Some(from_with);
+    }
+    if snap_from != SnapRef::default() {
+        snap.from = Some(Box::new(snap_from));
+    }
     let query = match kind.as_str() {
         "find" => Query::Find(selection),
+        "geometry" => Query::Geometry(selection),
+        "snap" => Query::Snap(snap),
         "attributes" => Query::Attributes(selection),
         "blocks" => Query::Blocks,
         "extents" => Query::Extents,

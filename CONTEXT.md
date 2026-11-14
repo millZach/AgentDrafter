@@ -275,6 +275,14 @@ _Avoid_: approve, sign off, release
 A question an agent asks a drawing set about what is on its sheets, such as which objects carry a tag, which blocks a sheet inserts, or how far apart two objects are. It reads the records, changes nothing, and selects objects by ID, name, block, attribute or text, never by coordinates. A query that matches nothing says so.
 _Avoid_: search, lookup, select
 
+**Object snap**:
+A point AutoCAD's object snaps find on an object, an endpoint, a midpoint, a centre, a quadrant, an insertion point or a node, or between two objects, an intersection, an apparent intersection, or a perpendicular, a tangent or a nearest point from a snap of another, named by the object's ID or name, the snap and which of its points (`which`), so that it can be asked for again. An insert's snaps are those of its block's own geometry, where the insert places it, each named by its place in the block, such as `objects[3].to`.
+_Avoid_: snap point by coordinates, pick point, osnap (AutoCAD's setting of which snaps are on)
+
+**Geometry** (of an object):
+An object's length, area, extents and angles, as AutoCAD's LIST and AREA give them, from the object's own curves: not text's, whose extents are its font's.
+_Avoid_: properties, bounding box
+
 **Extents**:
 The box round everything a sheet draws, seen from above, as AutoCAD's extents are: the geometry itself, not the width of its pens.
 _Avoid_: bounds, bounding box, limits (AutoCAD's limits are a setting, not what is drawn)

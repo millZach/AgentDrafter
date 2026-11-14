@@ -1,0 +1,16 @@
+# A made-up block library for asking object snaps: a lug, a tab with a
+# screw and a stub whose end a wire lands on, and a strip of two lugs.
+units: mm
+layers:
+  symbols: {color: yellow}
+blocks:
+  LUG:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 1.5, layer: symbols}
+      - line: {from: [1.5, 0, 0], to: [6, 0, 0], layer: symbols}
+      - attdef: {tag: NUMBER, position: [0, 3, 0], height: 1.5, justify: middle_center}
+  STRIP:
+    objects:
+      - insert: {block: LUG, position: [0, 0, 0], attributes: {NUMBER: '1'}}
+      - insert: {block: LUG, position: [0, 8, 0], attributes: {NUMBER: '2'}}
+      - polyline: {points: [[-3, -3, 0], [9, -3, 0], [9, 11, 0], [-3, 11, 0]], closed: true, layer: symbols}

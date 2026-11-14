@@ -1,0 +1,17 @@
+# A made-up sheet to ask object snaps of: a strip of two lugs, turned and
+# enlarged, a wire drawn to the end of the first lug's stub, and a plate
+# with a rounded corner.
+# Ask it with: agentdrafter query snap examples/snaps/lugs.yaml --id lugs/strip
+units: mm
+block_library: blocks.yaml
+layers:
+  symbols: {color: yellow}
+  wires: {color: green}
+objects:
+  - insert: {id: strip, block: STRIP, position: [50, 40, 0], rotation: 90, scale: 2}
+  - line: {id: wire, from: [20, 60, 0], to: [50, 52, 0], layer: wires}
+  - polyline:
+      id: plate
+      points: [[0, 0, 0], {point: [30, 0, 0], arc_angle: 90}, [40, 10, 0], [40, 30, 0], [0, 30, 0]]
+      closed: true
+      layer: symbols

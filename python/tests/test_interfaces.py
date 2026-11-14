@@ -261,12 +261,16 @@ class Interfaces(unittest.TestCase):
             [(c["name"], c["does"], c["input_schema"]) for c in registry],
         )
 
-        # Each command, run through each interface, gives the same reply.
+        # Each command, run through each interface, gives the same reply; then
+        # the further calls of a command whose kinds one call cannot cover.
         calls = SHARED["calls"]
+        runs = []
         for command in registry:
             name = command["name"]
             self.assertIn(name, calls, f"`{name}` is in the registry: add a call of it to calls.json")
-            args, input = calls[name]["args"], calls[name]["input"]
+            runs.append((name, calls[name]["args"], calls[name]["input"]))
+        runs.extend((call["command"], call["args"], call["input"]) for call in SHARED["also"])
+        for name, args, input in runs:
             by_library = library(name, input, self.folders["library"])
             code, by_cli = cli(args, self.folders["cli"])
             status, by_http = http_server.run(name, input)

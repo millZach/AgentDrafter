@@ -74,6 +74,7 @@ mod display_list;
 mod draw;
 mod dwg;
 mod error;
+mod geometry;
 mod import;
 mod interface;
 mod model;
@@ -124,6 +125,9 @@ pub use draw::{
     TextRun,
 };
 pub use error::{Error, ErrorCode};
+pub use geometry::measure::{Box3, Measures};
+pub use geometry::snap::SnapPoint;
+pub use geometry::{ObjectRef, SnapKind, SnapRef};
 pub use import::{
     import_blocks, BlocksImported, ImportBlocksReport, ImportBlocksRequest, ImportNotice,
     ImportNoticeCode, ImportedBlock, NotCarried, SkippedBlock, TablesAdded,
@@ -150,8 +154,9 @@ pub use plot::{
 pub use plot_style::NotFollowed;
 pub use query::{
     query, query_with, Answer, AttributeValues, BlockInserts, BlockText, End, Extents, FoundObject,
-    InsertAttributes, LayerUse, Matching, Measure, MeasuredPoint, Query, QueryReport, QueryRequest,
-    Selection, SheetBlocks, SheetExtents, SheetLayers, WrittenAt, EXTENTS_TOLERANCE,
+    InsertAttributes, LayerUse, Matching, Measure, MeasuredPoint, ObjectGeometry, Query,
+    QueryReport, QueryRequest, Selection, SheetBlocks, SheetExtents, SheetLayers, SnapObject,
+    SnappedFrom, WrittenAt, EXTENTS_TOLERANCE,
 };
 pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;
