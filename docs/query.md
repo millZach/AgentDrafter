@@ -41,7 +41,7 @@ Every answer has the same frame, then what its kind found:
 | `--block` | An insert of the block. |
 | `--tag` | An insert carrying the attribute; with `--value`, the attribute the value is looked for in. |
 | `--value` | An insert one of whose attributes has the value, or the attribute `--tag` names: any occurrence of a tag its block defines more than once. |
-| `--text` | A text or an mtext saying it, or an insert whose block draws a text or an mtext saying it. |
+| `--text` | A text or an mtext saying it, a table one of whose cells says it, a multileader whose text or an older leader whose annotation says it, or an insert whose block draws a text or an mtext saying it. |
 
 **How each matches.** An ID, a name, a block and an attribute tag are identifiers, and no two of a kind differ only in case, so each matches the whole of it in any case: `--name TITLE-BLOCK` finds `title-block`. A value and a text match the whole of it, case and all. With `--contains`, every option matches a value that holds it, in any case: `--id border --contains` finds the border on every sheet, and `--text made-up --contains` the notes.
 

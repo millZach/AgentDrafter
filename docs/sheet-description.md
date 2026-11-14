@@ -2,7 +2,7 @@
 
 A sheet description is the text file that states what is on a new sheet. It is the sheet's record: the DWG is built from it (ADR-0003). It is written in a strict subset of YAML, set out below, so that an agent can write it, a person can read it, and a mistake is an error that names its field rather than a guess.
 
-So far a sheet description holds lines, polylines, arcs, circles, ellipses, splines and hatches, on layers that carry a colour, a linetype and a lineweight, text and multiline text in text styles that name a TrueType or an SHX font, inserts of blocks with attributes from a [block library](block-library.md), and tables in table styles. A template is written with the same keys, and leaves some values to a row of a [drawing set](drawing-set.md), which builds one sheet per row.
+So far a sheet description holds lines, polylines, arcs, circles, ellipses, splines and hatches, on layers that carry a colour, a linetype and a lineweight, text and multiline text in text styles that name a TrueType or an SHX font, inserts of blocks with attributes from a [block library](block-library.md), tables in table styles, and multileaders in multileader styles and older leaders. A template is written with the same keys, and leaves some values to a row of a [drawing set](drawing-set.md), which builds one sheet per row.
 
 `agentdrafter schema` prints the same keys as a JSON Schema (draft 2020-12), with what each means, for an agent to read before it writes a sheet description. `agentdrafter schema block-library` prints the block library's.
 
@@ -17,7 +17,7 @@ objects:
       to: [100, 50, 0]
 ```
 
-`agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on. `examples/blocks/` holds a block library and two sheets that insert its blocks, and `examples/table.yaml` two tables.
+`agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on. `examples/blocks/` holds a block library and two sheets that insert its blocks, `examples/table.yaml` two tables, and `examples/leaders.yaml` callouts on a panel layout, multileaders and older leaders.
 
 Every DWG a build writes carries AgentDrafter's build mark: a custom drawing property, `AgentDrafter` with the value `build`, which AutoCAD shows under DWGPROPS. `--overwrite` replaces only a DWG that carries it. A sheet built from a drawing set records its set in the same property, as `build; set=` and the set's folder relative to the DWG ([the drawing set](drawing-set.md#the-build-mark-names-the-set)); a sheet description built on its own records none.
 
@@ -51,6 +51,7 @@ Keys are spelled as AutoCAD spells them: `color`, `center`.
 | `hatch_patterns` | no | The sheet's hatch patterns: a mapping from each pattern's name to its lines. |
 | `text_styles` | no | The sheet's text styles: a mapping from each style's name to its font and width factor. |
 | `table_styles` | no | The sheet's table styles: a mapping from each style's name to what its tables' cells draw with. See [Table styles](#table-styles). |
+| `mleader_styles` | no | The sheet's multileader styles: a mapping from each style's name to what its multileaders draw with. See [Multileader styles](#multileader-styles). |
 | `objects` | yes | A list of objects, which may be empty, in drawing order. Each object is a mapping with one key, its type. |
 | `paper` | no | The paper the sheet is drawn on, which the checker holds it to. See [Paper](#paper). |
 
@@ -149,6 +150,35 @@ table_styles:
 
 Every border of a table style draws in one pen, and every kind of row has the same margins; a cell is not filled. AutoCAD's TABLESTYLE offers more, such as a pen for each edge of each kind of row, a fill and a text colour; a DWG table style that uses them, in its rows or in any of the cell styles AutoCAD 2010 and later keep, such as turned text, is counted as not read, and so is a table in it.
 
+### Multileader styles
+
+A multileader style is what a [multileader](#leaders) draws with unless it gives its own: AutoCAD's MLEADERSTYLE. Every drawing already has `Standard`, as AutoCAD 2026's templates have it: on a metric sheet text and arrows 4 mm, a landing 8 mm and a gap of 2 mm, and on an imperial sheet 0.18, 0.36 and 0.09 in; text in the text style `Standard`, a closed filled arrowhead, the landing at the middle of the text's top line, and the leader lines `ByBlock`. Listing `Standard` under `mleader_styles` sets what it draws with; it is written `Standard` exactly, as a text style's name is. Every key of a style is optional: one left out is as the sheet's unit's `Standard` has it.
+
+```yaml
+mleader_styles:
+  callout:
+    text_style: notes
+    text_height: 3
+    arrow_size: 3
+    landing: 6
+    landing_gap: 1.5
+    leader_lineweight: 0.25
+```
+
+| Key | What it is |
+|---|---|
+| `text_style` | The text style its text draws with: `Standard` or a name under `text_styles`. Without it, `Standard`. |
+| `text_height` | The height of its text's capitals: a length more than 0. |
+| `arrowhead` | The arrowhead: `closed_filled`, a filled triangle a third as wide as it is long; `dot`, a filled dot as wide as the arrow is long; `open`, the triangle's two sides; or `none`. These are AutoCAD's named arrowheads that AgentDrafter draws exactly; the others wait. |
+| `arrow_size` | How long the arrowhead is: a length more than 0. |
+| `landing` | How long the landing is, the short horizontal line, AutoCAD's dogleg, that the leader lines meet and the text sits beyond: a length of 0 or more, 0 for none. |
+| `landing_gap` | The space between the landing's end and the text: a length of 0 or more. |
+| `attachment` | Where the landing meets the text, up the text: `top_of_top_line`, `middle_of_top_line`, `middle_of_text`, `middle_of_bottom_line` or `bottom_of_bottom_line`. AutoCAD's attachments that underline the text wait. |
+| `leader_color` | The colour the leader lines, landing and arrowheads draw in, as an [object's own colour](#an-objects-own-colour-linetype-and-lineweight) is written. Without it, `ByBlock`: the multileader's own colour, or its layer's where that is `ByLayer`. |
+| `leader_lineweight` | The lineweight they draw with, as an object's own lineweight is written. Without it, `ByBlock`. |
+
+A multileader style's text is multiline text and its leader lines are straight; its landing is horizontal and its text upright. AutoCAD's MLEADERSTYLE offers more, such as a block as the content, spline leader lines, a frame round the text, text above or below a vertical landing, and annotative scaling; a DWG multileader style that uses them is counted as not read, and so is a multileader in it.
+
 ### Objects
 
 Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight unless it gives its own, under `color`, `linetype`, `lineweight` and `linetype_scale`; see [An object's own colour, linetype and lineweight](#an-objects-own-colour-linetype-and-lineweight). Every object may also take an `id` key, its ID in the record, and a `name` key, a name an agent selects it by; see [IDs and names](#ids-and-names).
@@ -168,6 +198,8 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 | `mtext` | `contents`, `position`, `height`; `width`, `style`, `width_factor`, `rotation`, `justify` | Text of one or more lines in a box, as AutoCAD's MTEXT draws it. See [Text](#text). |
 | `insert` | `block`, `position`; `scale`, `rotation`, `attributes` | A block from the sheet's block library, placed as AutoCAD's INSERT places it. See [Inserts](#inserts). |
 | `table` | `position`, `columns`, `rows`, `cells`; `title`, `header`, `table_style` | A grid of cells with text, as AutoCAD's TABLE draws it. See [Tables](#tables). |
+| `mleader` | `leaders`, `content`; `landing`, `arrowhead`, `arrow_size`, `mleader_style` | One or more leader lines from their arrows to a landing, and multiline text beyond it, as AutoCAD's MLEADER draws it. See [Leaders](#leaders). |
+| `leader` | `points`; `arrowhead`, `arrow_size`, `gap`, `annotation` | One leader line, arrow first, with an optional multiline text annotation beyond its end, as AutoCAD's older LEADER draws it. See [Leaders](#leaders). |
 
 Keys before the semicolon are required; keys after it are not. A `radius` is a length more than 0.
 
@@ -407,6 +439,65 @@ A cell's text is laid out as AutoCAD lays it out: as multiline text as wide as i
 The DWG holds an AutoCAD TABLE, its table style and its anonymous block of the lines and text it draws, which AutoCAD shows until it next lays the table out; AutoCAD 2026 opened made-up tables without recovery, audited them clean, and laid them out again as they were written. Reading a DWG back gives the table, and its style, when they have a model in the core; a table whose cell holds a block, a field or a formula, or overrides more than its text style, height and justification, is counted as not read, as is a table with any override of its own, a row's or a column's, such as a fill. In a [template](drawing-set.md#templates), a cell's text may be a value from the row, `{row: NAME}`, written as the cell or as its `text`.
 
 A change set adds a table with `add_table`, sets a cell with `set_cell` and adds or deletes a row or a column with `add_row`, `delete_row`, `add_column` and `delete_column`, keeping the table's merges, title and header in line ([Tables in change sets](change-sets.md#tables)).
+
+### Leaders
+
+A leader points at something on the sheet with an arrow and says what it is: a device on a panel layout, a part number, a note on a loop sheet. A sheet holds two kinds, as AutoCAD does: the multileader, `mleader`, AutoCAD's MLEADER, and the older leader, `leader`, AutoCAD's LEADER and QLEADER, which plant drawings hold. Both belong on a sheet, not in a block.
+
+An arrow is placed at a point. Pointing it at an object by its ID or name, so that it follows the object, waits for object snaps ([#74](https://github.com/millZach/AgentDrafter/issues/74)).
+
+```yaml
+- mleader:
+    id: terminals
+    mleader_style: callout
+    leaders:
+      - [[180, 80, 0], [320, 110, 0]]
+      - [[260, 85, 0], [320, 110, 0]]
+    content: {text: TB-1 TERMINALS}
+- leader:
+    id: note-3
+    points: [[210, 70, 0], [230, 30, 0], [250, 15, 0]]
+    annotation: {text: SEE NOTE 3, style: notes, height: 2.5}
+```
+
+A multileader takes these keys:
+
+| Key | Required | What it is |
+|---|---|---|
+| `leaders` | yes | Its leader lines: at least one, each a list of at least two points from its arrow's point, through any bends, to where it meets the landing, each point apart from the one before. Every leader line ends at the same point, where the landing starts: a multileader with landings in two places waits. A leader line's first segment is at least as long as its arrow, unless its arrowhead is `none`, since AutoCAD draws the line from behind the arrowhead. |
+| `content` | yes | Its text: a mapping of `text`, what it says, exactly as it shows, a line break starting a new line, as an `mtext`'s contents are written; and, instead of its style's, `style`, a text style, `height`, a length more than 0, and `attachment`, where the landing meets it, as a [multileader style](#multileader-styles) names one. |
+| `landing` | no | How long its landing is, instead of its style's: a length of 0 or more, 0 for none. |
+| `arrowhead` | no | Its arrowhead, instead of its style's: `closed_filled`, `dot`, `open` or `none`. |
+| `arrow_size` | no | How long its arrowhead is, instead of its style's: a length more than 0. |
+| `mleader_style` | no | The [multileader style](#multileader-styles) it draws with: `Standard` or a name under `mleader_styles`, written exactly as it is there. Without it, `Standard`. |
+| `layer` | no | The layer it sits on, as for every object. |
+
+A multileader is laid out as AutoCAD 2026 laid out made-up ones in SHX and TrueType fonts, and laid them out again unchanged:
+
+- The landing runs right from where the leader lines meet when the first leader line's last segment runs right, or straight up or down, and left when it runs left.
+- The text sits the style's gap beyond the landing's end: attached at its top left corner on the right, and at its top right corner on the left. It is multiline text and wraps nowhere but where its text breaks.
+- Up, the landing meets the text where its attachment says: at the top of its box, at the middle of its top line, at the middle of the text, at the middle of its bottom line, or at the bottom of its box. The box is the multiline text's own. A line here reaches from the text's height above its baseline down to the lowest point the text's last line draws: AutoCAD measures the top line and the bottom line alike by the last line's descent, so `GLAND PLATE` over `gy` sits lower than over `GY`.
+- Each leader line starts an arrow's length behind its arrow's point, where the arrowhead ends, as AutoCAD draws it: a closed filled arrowhead is a filled triangle, a sixth of its length wide each side of the line; a dot is a filled dot as wide as the arrow is long, with the line's last half arrow behind it; an open arrowhead is the triangle's sides and its middle. With `none`, the line runs to the arrow's point.
+- The leader lines, the landing and the arrowheads draw in the style's leader pen, which `ByBlock` makes the multileader's own colour and lineweight; the text draws in the multileader's own colour and lineweight. All take its linetype.
+
+An older leader takes these keys:
+
+| Key | Required | What it is |
+|---|---|---|
+| `points` | yes | Its points: at least two, its arrow's point first, each apart from the one before. Its first segment is at least as long as its arrow, unless its arrowhead is `none`. |
+| `arrowhead` | no | Its arrowhead: `closed_filled`, `dot`, `open` or `none`. Without it, `closed_filled`. |
+| `arrow_size` | no | How long its arrowhead, and its hook, are: a length more than 0. Without it, 2.5 mm on a metric sheet and 0.18 in on an imperial one, as AutoCAD's ISO-25 and Standard dimension styles have them. |
+| `gap` | no | The space between its end and its annotation: a length of 0 or more. Without it, 0.625 mm on a metric sheet and 0.09 in on an imperial one. |
+| `annotation` | no | Its annotation, multiline text: a mapping of `text`, as a multileader's content's is written, `style`, a text style, without it `Standard`, and `height`, a length more than 0, without it 2.5 mm or 0.18 in. Without it, the leader has none. |
+| `layer` | no | The layer it sits on, as for every object. |
+
+Its annotation sits its gap beyond the leader's end, attached at the middle of its left side, or of its right side when the last segment runs left. With an annotation and a last segment more than 15° from the horizontal, AutoCAD ends the leader in a hook, a horizontal segment as long as its arrow towards the annotation, which it adds as it draws; the pipeline draws it so too. The leader draws in its own pen.
+
+The DWG holds an AutoCAD MULTILEADER and its MLEADERSTYLE, and an AutoCAD LEADER with its annotation an MTEXT of its own that the leader points at, as AutoCAD writes them. A LEADER draws with a dimension style: it names `Standard`, which every drawing has, and carries its arrow's size, its gap, a scale of 1, its annotation level with its end and, but for a closed filled arrowhead, its arrowhead as AutoCAD's own overrides, so it draws the same whatever `Standard` holds. An arrowhead other than closed filled is a block AutoCAD names, such as `_Dot`, which the DWG holds once with what AutoCAD 2026 put in it. AutoCAD 2026 opened the example sheet without recovery, its audit found no errors, and laying every leader out again changed none.
+
+Reading a DWG back gives the multileaders, their styles and the older leaders, each with its annotation and not as an `mtext` of its own, when they have a model in the core. A multileader whose content is a block, whose leader lines are splines or have breaks, with more than one landing, its own leader pen, or a landing on the other side from the one its leader line runs to, is counted as not read; so is an older leader with a spline path, an annotation that is not multiline text where the model puts it, its own pen from its dimension style, or text above its end; an arrowhead block's own is read with the leader and not counted. In a [template](drawing-set.md#templates), a multileader's content's `text` and an older leader's annotation's `text` may be a value from the row, `{row: NAME}`.
+
+A change set adds a multileader with `add_mleader` (AutoCAD's `MLEADER`) and an older leader with `add_leader` (`LEADER`), and `move` moves every point of either ([The operations](change-sets.md#the-operations)). A query for text finds a leader by its text ([Queries](query.md)). The checker counts a leader's text as text and its lines, landing and arrowheads as lines, never against each other ([Checks](check.md)).
 
 ### IDs and names
 

@@ -27,7 +27,7 @@ use super::layers::{
     LONGEST_NAME, LONGEST_PATTERN, PROPERTY_KEYS,
 };
 use super::objects::{FEWEST_FIT_POINTS, HIGHEST_DEGREE, OBJECT_TYPES};
-use super::{block_schema, hatch_schema, table_schema, SHEET_KEYS};
+use super::{block_schema, hatch_schema, leader_schema, table_schema, SHEET_KEYS};
 use crate::model::{
     Lineweight, BY_BLOCK, BY_LAYER, CONTINUOUS, DEFAULT_LINEWEIGHT, FIT_DEGREE, LAYER_ZERO, WHITE,
 };
@@ -91,7 +91,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, objects_key, paper_key] =
+    let [units_key, block_library_key, ltscale_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, objects_key, paper_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -118,6 +118,7 @@ pub fn sheet_description_schema() -> Value {
             hatch_patterns_key: hatch_patterns,
             text_styles_key: text_styles,
             table_styles_key: table_schema::table_styles_property(),
+            mleader_styles_key: leader_schema::mleader_styles_property(),
             objects_key: {
                 "description": "The objects on the sheet, in drawing order. Each is a mapping \
                                 with one key, its type.",
@@ -871,6 +872,7 @@ fn defs() -> Map<String, Value> {
     hatch_schema::add_defs(&mut defs);
     text_defs(&mut defs);
     table_schema::table_defs(&mut defs);
+    leader_schema::leader_defs(&mut defs);
     block_schema::add_defs(&mut defs);
     defs
 }
@@ -1056,6 +1058,7 @@ mod tests {
     use super::*;
     use crate::description::blocks::BLOCK_KEYS;
     use crate::description::layers::{LAYER_KEYS, LINETYPE_KEYS};
+    use crate::description::leader::{ANNOTATION_KEYS, CONTENT_KEYS, MLEADER_STYLE_KEYS};
     use crate::description::objects::BLOCK_OBJECT_TYPES;
     use crate::description::table::{CELL_KEYS, ROW_STYLE_KEYS, TABLE_STYLE_KEYS};
     use crate::description::text::TEXT_STYLE_KEYS;
@@ -1104,6 +1107,18 @@ mod tests {
         assert_eq!(
             keys(&defs["table_cell"]["anyOf"][2]["properties"]),
             sorted(&CELL_KEYS)
+        );
+        assert_eq!(
+            keys(&defs["mleader_style"]["properties"]),
+            sorted(&MLEADER_STYLE_KEYS)
+        );
+        assert_eq!(
+            keys(&defs["mleader"]["properties"]["content"]["properties"]),
+            sorted(&CONTENT_KEYS)
+        );
+        assert_eq!(
+            keys(&defs["leader"]["properties"]["annotation"]["properties"]),
+            sorted(&ANNOTATION_KEYS)
         );
         let listed: Vec<String> = schema["properties"]["objects"]["items"]["oneOf"]
             .as_array()

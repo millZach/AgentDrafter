@@ -341,6 +341,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("add_solid", "SOLID"),
             ("insert_block", "INSERT"),
             ("add_table", "TABLE"),
+            ("add_mleader", "MLEADER"),
+            ("add_leader", "LEADER"),
             ("change", "CHANGE"),
             ("move", "MOVE"),
             ("delete", "ERASE"),
@@ -382,6 +384,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "SOLID", "sheet": "S", "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}),
         json!({"op": "INSERT", "sheet": "S", "block": "B", "position": [0, 0, 0], "attributes": {"TAG": "X", "NOTE": ["a", null]}}),
         json!({"op": "TABLE", "sheet": "S", "position": [0, 10, 0], "columns": [5, 5], "rows": [2], "cells": [["A", {"text": "B", "height": 1}]]}),
+        json!({"op": "MLEADER", "sheet": "S", "leaders": [[[0, 0, 0], [10, 5, 0]], [[0, 8, 0], [10, 5, 0]]], "content": {"text": "TB-1", "attachment": "middle_of_text"}, "arrowhead": "dot"}),
+        json!({"op": "add_leader", "sheet": "S", "points": [[0, 0, 0], [10, 10, 0]], "annotation": {"text": "SEE NOTE"}}),
         json!({"op": "change", "target": {"id": "S/a"}, "set": {"layer": "notes"}}),
         json!({"op": "move", "target": {"name": "n", "sheet": "S"}, "by": [1, 0, 0]}),
         json!({"op": "erase", "target": {"name": "n"}}),
@@ -742,6 +746,39 @@ fn a_table_is_added_and_moved() {
     assert!(list.header && !list.title);
     assert_eq!(list.cells[1][1].text, "PUMP");
     assert!(row_text(&set, "DEMO-003").contains("position: [1.5, 7, 0]"));
+}
+
+#[test]
+fn a_multileader_and_a_leader_are_added_and_moved() {
+    let set = demo_set("leaders");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "MLEADER", "sheet": "DEMO-003", "leaders": [[[1, 1, 0], [3, 2, 0]], [[1, 3, 0], [3, 2, 0]]], "content": {"text": "TB-1"}, "name": "callout"},
+            {"op": "LEADER", "sheet": "DEMO-003", "points": [[5, 1, 0], [6, 3, 0]], "annotation": {"text": "SEE NOTE"}, "name": "note"},
+        ]}),
+    );
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "move", "target": {"name": "callout"}, "by": [0.5, -0.5, 0]},
+            {"op": "move", "target": {"name": "note"}, "by": [1, 0, 0]},
+        ]}),
+    );
+    let objects = built(&set, "DEMO-003");
+    let Object::MLeader(callout) = &objects["DEMO-003/mleader-1"] else {
+        panic!()
+    };
+    close(callout.leaders[0][0].x, 1.5);
+    close(callout.leaders[1][1].y, 1.5);
+    assert_eq!(callout.content.text, "TB-1");
+    let Object::Leader(note) = &objects["DEMO-003/leader-1"] else {
+        panic!()
+    };
+    close(note.points[1].x, 7.0);
+    // An imperial sheet's leader takes Standard's 0.18 in arrow.
+    close(note.arrow_size, 0.18);
+    assert!(row_text(&set, "DEMO-003").contains("[[1.5, 0.5, 0], [3.5, 1.5, 0]]"));
 }
 
 #[test]

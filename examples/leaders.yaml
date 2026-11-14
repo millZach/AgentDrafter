@@ -1,0 +1,94 @@
+# Callouts on a panel layout, on an A3 sheet: multileaders in a style of
+# their own and in Standard, with one, two and bent leader lines, landings
+# on both sides, each arrowhead and each attachment, and older leaders, one
+# hooked to its annotation. Everything here is made up.
+units: mm
+paper: ISO A3 landscape
+layers:
+  border: {color: white, lineweight: 0.5}
+  panel: {color: white, lineweight: 0.35}
+  callouts: {color: cyan}
+  notes: {color: yellow}
+text_styles:
+  notes: {font: romans.shx}
+mleader_styles:
+  callout:
+    text_style: notes
+    text_height: 3
+    arrow_size: 3
+    landing: 6
+    landing_gap: 1.5
+    leader_lineweight: 0.25
+objects:
+  - polyline: {points: [[0, 0, 0], [420, 0, 0], [420, 297, 0], [0, 297, 0]], closed: true, layer: border}
+  # The panel: its enclosure, a DIN rail, a terminal strip, a PLC and a power supply.
+  - polyline: {points: [[120, 40, 0], [300, 40, 0], [300, 260, 0], [120, 260, 0]], closed: true, layer: panel}
+  - polyline: {points: [[130, 200, 0], [290, 200, 0], [290, 208, 0], [130, 208, 0]], closed: true, layer: panel}
+  - polyline: {points: [[140, 70, 0], [280, 70, 0], [280, 90, 0], [140, 90, 0]], closed: true, layer: panel}
+  - polyline: {points: [[140, 140, 0], [200, 140, 0], [200, 190, 0], [140, 190, 0]], closed: true, layer: panel}
+  - polyline: {points: [[220, 140, 0], [270, 140, 0], [270, 180, 0], [220, 180, 0]], closed: true, layer: panel}
+  - mleader:
+      id: terminals
+      mleader_style: callout
+      layer: callouts
+      leaders:
+        - [[180, 80, 0], [320, 110, 0]]
+        - [[260, 85, 0], [320, 110, 0]]
+      content: {text: TB-1 TERMINALS}
+  - mleader:
+      id: power-supply
+      mleader_style: callout
+      layer: callouts
+      arrowhead: dot
+      leaders:
+        - [[230, 170, 0], [100, 220, 0]]
+      content:
+        text: |
+          PS-1
+          24 VDC POWER SUPPLY
+  - mleader:
+      id: plc
+      mleader_style: callout
+      layer: callouts
+      arrowhead: open
+      leaders:
+        - [[160, 150, 0], [110, 150, 0], [90, 120, 0]]
+      content: {text: "PLC-1\nCONTROLLER", attachment: middle_of_text}
+  - mleader:
+      id: rail
+      mleader_style: callout
+      layer: callouts
+      leaders:
+        - [[285, 204, 0], [330, 240, 0]]
+      content: {text: "DIN RAIL\n35 MM", attachment: bottom_of_bottom_line, height: 2.5}
+  - mleader:
+      id: enclosure
+      layer: callouts
+      landing: 0
+      arrowhead: none
+      leaders:
+        - [[300, 250, 0], [340, 270, 0]]
+      content: {text: ENCLOSURE 600 x 800, attachment: top_of_top_line, height: 3}
+  - mleader:
+      id: gland
+      mleader_style: callout
+      layer: callouts
+      arrow_size: 4
+      leaders:
+        - [[150, 40, 0], [100, 25, 0]]
+      content: {text: "GLAND PLATE\ngy", attachment: middle_of_bottom_line, style: Standard}
+  - leader:
+      id: note-3
+      layer: notes
+      points: [[210, 70, 0], [230, 30, 0], [250, 15, 0]]
+      annotation: {text: SEE NOTE 3, style: notes, height: 2.5}
+  - leader:
+      id: earth
+      layer: notes
+      arrowhead: dot
+      points: [[125, 50, 0], [60, 60, 0]]
+      annotation: {text: "EARTH BAR\nPE", style: notes}
+  - leader:
+      id: vent
+      layer: notes
+      points: [[300, 150, 0], [350, 150, 0]]

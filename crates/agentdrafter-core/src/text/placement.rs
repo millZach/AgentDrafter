@@ -91,6 +91,16 @@ impl SheetFonts {
                         .any(|cell| cell.style.as_deref() == Some(STANDARD));
                     rows || cells
                 }
+                Object::MLeader(mleader) => match &mleader.content.style {
+                    Some(style) => style == STANDARD,
+                    None => sheet
+                        .mleader_style(&mleader.mleader_style)
+                        .is_some_and(|style| style.text_style == STANDARD),
+                },
+                Object::Leader(leader) => leader
+                    .annotation
+                    .as_ref()
+                    .is_some_and(|a| a.style == STANDARD),
                 _ => false,
             });
         if standard_used && !styles.iter().any(|s| s.name == STANDARD) {

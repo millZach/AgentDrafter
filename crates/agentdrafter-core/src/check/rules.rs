@@ -573,9 +573,13 @@ impl Sheet<'_> {
             Object::Hatch(_) | Object::Solid(_) | Object::Donut(_) | Object::Insert(_) => {
                 Drawn::Fill
             }
-            // A table's borders are lines; its cells' text, letters.
-            Object::Table(_) if path.is_empty() => Drawn::Line,
-            Object::Table(_) => Drawn::Letters,
+            // A table's borders are lines; its cells' text, letters. A
+            // leader's lines, landing and arrowhead are lines; its text,
+            // drawn as its part 0, letters.
+            Object::Table(_) | Object::MLeader(_) | Object::Leader(_) if path.is_empty() => {
+                Drawn::Line
+            }
+            Object::Table(_) | Object::MLeader(_) | Object::Leader(_) => Drawn::Letters,
         }
     }
 
@@ -724,7 +728,9 @@ impl Sheet<'_> {
         let Some(inner) = self.in_block(i, path) else {
             return match (&self.record.sheet.objects[i], path) {
                 (Object::Text(t), _) => format!("{words} saying `{}`", t.contents),
-                (Object::MText(_), _) => format!("{words}{on_line}"),
+                (Object::MText(_) | Object::MLeader(_) | Object::Leader(_), _) => {
+                    format!("{words}{on_line}")
+                }
                 (Object::Table(table), &[row, column]) => {
                     let says = table
                         .cells
@@ -819,11 +825,13 @@ impl InBlock<'_> {
     }
 }
 
-/// What a text or an mtext says.
+/// What a text, an mtext or a leader's text says.
 fn says(object: &Object) -> Option<String> {
     match object {
         Object::Text(t) => Some(t.contents.clone()),
         Object::MText(t) => Some(t.contents.clone()),
+        Object::MLeader(l) => Some(l.content.text.clone()),
+        Object::Leader(l) => l.annotation.as_ref().map(|a| a.text.clone()),
         _ => None,
     }
 }

@@ -201,6 +201,7 @@ pub(crate) fn read_block_library(text: &str) -> Result<(BlockLibrary, Vec<Notice
         hatch_patterns: &hatch_patterns,
         styles: &text_styles,
         table_styles: &[],
+        mleader_styles: &[],
     };
     let entries = named_entries(fields.require("blocks")?, "blocks", "block")?;
     // A block that inserts another is read after it, so that its insert can

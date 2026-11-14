@@ -17,11 +17,16 @@ use crate::units::Unit;
 
 pub(crate) mod block;
 pub(crate) mod hatch;
+pub(crate) mod leader;
 pub(crate) mod table;
 pub use block::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
 };
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
+pub use leader::{
+    Arrowhead, LaidMLeader, Leader, LeaderAnnotation, LeaderAttachment, MLeader, MLeaderContent,
+    MLeaderStyle, MTextBox, STANDARD_MLEADER_STYLE,
+};
 pub use table::{
     LaidCell, RowKind, RowStyle, Table, TableCell, TableStyle, LINE_BOX, LINE_STEP,
     STANDARD_TABLE_STYLE,
@@ -310,6 +315,11 @@ pub enum Object {
     Insert(Insert),
     /// A table, which belongs on a sheet.
     Table(Table),
+    /// A multileader, which belongs on a sheet.
+    #[serde(rename = "mleader")]
+    MLeader(MLeader),
+    /// An older leader, which belongs on a sheet.
+    Leader(Leader),
 }
 
 impl Object {
@@ -330,6 +340,8 @@ impl Object {
             Object::AttributeDefinition(_) => "attdef",
             Object::Insert(_) => "insert",
             Object::Table(_) => "table",
+            Object::MLeader(_) => "mleader",
+            Object::Leader(_) => "leader",
         }
     }
 
@@ -350,6 +362,8 @@ impl Object {
             Object::AttributeDefinition(o) => &o.layer,
             Object::Insert(o) => &o.layer,
             Object::Table(o) => &o.layer,
+            Object::MLeader(o) => &o.layer,
+            Object::Leader(o) => &o.layer,
         }
     }
 
@@ -370,6 +384,8 @@ impl Object {
             Object::AttributeDefinition(o) => &o.properties,
             Object::Insert(o) => &o.properties,
             Object::Table(o) => &o.properties,
+            Object::MLeader(o) => &o.properties,
+            Object::Leader(o) => &o.properties,
         }
     }
 
@@ -389,6 +405,8 @@ impl Object {
             Object::AttributeDefinition(o) => &mut o.properties,
             Object::Insert(o) => &mut o.properties,
             Object::Table(o) => &mut o.properties,
+            Object::MLeader(o) => &mut o.properties,
+            Object::Leader(o) => &mut o.properties,
         }
     }
 }
@@ -787,6 +805,10 @@ pub struct Sheet {
     /// drawing; listing it here sets what it draws with.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub table_styles: Vec<TableStyle>,
+    /// The multileader styles the sheet defines. Style `Standard` is in
+    /// every drawing; listing it here sets what it draws with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mleader_styles: Vec<MLeaderStyle>,
     /// The blocks the sheet's inserts place, as the block library defines
     /// them. The layers, linetypes and text styles their objects use are
     /// among the sheet's.
@@ -815,6 +837,20 @@ impl Sheet {
             .find(|s| s.name == name)
             .cloned()
             .or_else(|| (name == STANDARD_TABLE_STYLE).then(|| TableStyle::standard(self.units)))
+    }
+
+    /// The multileader style named `name` a multileader draws with: one the
+    /// sheet lists, or, for `Standard` when the sheet does not list it, the
+    /// Standard multileader style of the sheet's unit. None for a name the
+    /// sheet does not have.
+    pub fn mleader_style(&self, name: &str) -> Option<MLeaderStyle> {
+        self.mleader_styles
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
+            .or_else(|| {
+                (name == STANDARD_MLEADER_STYLE).then(|| MLeaderStyle::standard(self.units))
+            })
     }
 }
 
@@ -882,13 +918,23 @@ pub struct DrawingContents {
     /// cells.
     #[serde(default)]
     pub table_styles_not_read: usize,
+    /// The drawing's multileader styles the core has a model for,
+    /// `Standard` among them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mleader_styles: Vec<MLeaderStyle>,
+    /// How many multileader styles the core has no model for yet, such as
+    /// those whose content is a block, whose leaders are splines, or that
+    /// underline or frame their text.
+    #[serde(default)]
+    pub mleader_styles_not_read: usize,
     /// The drawing's block definitions the core has a model for, in table
     /// order, leaving out model space and the layouts.
     pub blocks: Vec<Block>,
     /// How many block definitions the core has no model for yet, such as
     /// anonymous blocks, external references and blocks holding an object
     /// the core has no model for. A table's own anonymous block, which
-    /// holds what it draws, is read with the table and not counted.
+    /// holds what it draws, is read with the table and not counted, and so
+    /// is the block of a leader's arrowhead.
     pub blocks_not_read: usize,
     /// The model-space objects the core has a model for, in drawing order.
     pub objects: Vec<Object>,
