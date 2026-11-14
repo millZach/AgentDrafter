@@ -31,7 +31,7 @@ use crate::build::is_same_file;
 use crate::description::{read_sheet_record, SavedSet, SheetRecord};
 use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
-use crate::geometry::snap::SnapPoint;
+use crate::geometry::snap::{touches, SnapPoint, Touch};
 use crate::geometry::{ObjectRef, SnapRef};
 use crate::model::{Attribute, Layer, Object, Point3, Sheet, LAYER_ZERO};
 use crate::settings::Settings;
@@ -39,7 +39,7 @@ use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
 
-mod snap;
+pub(crate) mod snap;
 
 pub use snap::{ObjectGeometry, SnapObject, SnappedFrom};
 
@@ -155,6 +155,59 @@ pub struct Selection {
     /// How the parts match. Without it, exactly.
     #[serde(default, rename = "match")]
     pub matching: Matching,
+    /// Objects wholly within this box, as AutoCAD's selection window takes
+    /// them: everything they draw inside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<SelectionBox>,
+    /// Objects within this box or crossing it, as AutoCAD's crossing
+    /// selection takes them: something they draw inside it or across its
+    /// edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crossing: Option<SelectionBox>,
+    /// Objects whose geometry meets this object's, on each sheet it is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touching: Option<ObjectRef>,
+}
+
+/// A box on the sheet, seen from above, by two opposite corners in the
+/// declared unit: `[[x1, y1], [x2, y2]]`, in either order. A corner may
+/// carry a height, `[x, y, z]`, which it does not look at.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct SelectionBox(pub [[f64; 2]; 2]);
+
+impl<'de> Deserialize<'de> for SelectionBox {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let corners: Vec<Vec<f64>> = Vec::deserialize(deserializer)?;
+        let corner = |c: &[f64]| match c {
+            [x, y] | [x, y, _] if x.is_finite() && y.is_finite() => Ok([*x, *y]),
+            _ => Err(serde::de::Error::custom(
+                "a box's corner is [x, y], or [x, y, z]: numbers in the declared unit",
+            )),
+        };
+        match corners.as_slice() {
+            [a, b] => Ok(SelectionBox([corner(a)?, corner(b)?])),
+            _ => Err(serde::de::Error::custom(
+                "a box is two opposite corners, [[x1, y1], [x2, y2]]",
+            )),
+        }
+    }
+}
+
+impl SelectionBox {
+    /// Its lower left and upper right corners.
+    fn bounds(&self) -> ([f64; 2], [f64; 2]) {
+        let [a, b] = self.0;
+        (
+            [a[0].min(b[0]), a[1].min(b[1])],
+            [a[0].max(b[0]), a[1].max(b[1])],
+        )
+    }
+
+    /// "from [0, 0] to [10, 5]".
+    fn words(&self) -> String {
+        let [a, b] = self.0;
+        format!("from [{}, {}] to [{}, {}]", a[0], a[1], b[0], b[1])
+    }
 }
 
 /// How the parts of a selection match an object's values.
@@ -345,6 +398,10 @@ pub struct FoundObject {
     /// multiline text of the block that matched.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub block_text: Vec<BlockText>,
+    /// When it is found touching another object: where it meets it, and
+    /// the part of each that meets there.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub touches: Vec<Touch>,
 }
 
 /// A text or a multiline text of an insert's block that a query's `text`
@@ -473,9 +530,9 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
     let looked_at: Vec<&SheetRecord> = records.iter().collect();
     let looked = LookedAt(&looked_at, request.sheet.is_some());
     let (message, answer) = match &request.query {
-        Query::Find(selection) => find(&looked_at, selection, &looked),
+        Query::Find(selection) => find(&looked_at, selection, settings, &looked),
         Query::Blocks => blocks(&looked_at, &looked),
-        Query::Attributes(selection) => attributes(&looked_at, selection, &looked),
+        Query::Attributes(selection) => attributes(&looked_at, selection, settings, &looked),
         Query::Measure(measure) => self::measure(&looked_at, measure, units, &looked)?,
         Query::Extents => extents(&looked_at, settings, units, &looked),
         Query::Layers => layers(&looked_at, &looked),
@@ -641,8 +698,34 @@ impl Selection {
         Some(in_block)
     }
 
+    /// Whether the selection looks at where objects are: a box, or an
+    /// object they touch.
+    fn is_spatial(&self) -> bool {
+        self.window.is_some() || self.crossing.is_some() || self.touching.is_some()
+    }
+
+    /// Where the selection looks, in words, such as "within the window from
+    /// [0, 0] to [10, 5]"; none when it does not look at where objects are.
+    fn where_words(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(window) = &self.window {
+            parts.push(format!("within the window {}", window.words()));
+        }
+        if let Some(crossing) = &self.crossing {
+            parts.push(format!("within or crossing the box {}", crossing.words()));
+        }
+        if let Some(touching) = &self.touching {
+            parts.push(match (&touching.id, &touching.name) {
+                (Some(id), _) => format!("touching `{id}`"),
+                (None, Some(name)) => format!("touching the object named `{name}`"),
+                (None, None) => "touching no object".to_owned(),
+            });
+        }
+        (!parts.is_empty()).then(|| parts.join(" and "))
+    }
+
     /// The selection in words, such as "the text `NOTES`"; none when it
-    /// has no parts.
+    /// gives no part but where objects are.
     fn words(&self) -> Option<String> {
         let contains = self.matching == Matching::Contains;
         let mut parts = Vec::new();
@@ -767,22 +850,254 @@ struct Matched<'a> {
     /// The text of its block that matched, when it is an insert found by
     /// the text its block draws.
     block_text: Vec<BlockText>,
+    /// Where it meets the object the selection's `touching` names.
+    touches: Vec<Touch>,
 }
 
-/// Each object on `sheets` that `selection` matches, in order.
+/// Each object on `sheets` that `selection` matches, in order. A box and
+/// `touching` look at each sheet as it draws and as its geometry is read,
+/// with its text measured in the fonts `settings` names.
 fn matched<'a>(
     sheets: &'a [&'a SheetRecord],
     selection: &'a Selection,
+    settings: &'a Settings,
 ) -> impl Iterator<Item = Matched<'a>> + 'a {
     sheets.iter().flat_map(move |record| {
+        let space = selection
+            .is_spatial()
+            .then(|| Space::of(record, selection, settings));
         (0..record.objects.len()).filter_map(move |index| {
-            selection.matches(record, index).map(|block_text| Matched {
+            let block_text = selection.matches(record, index)?;
+            let touches = match &space {
+                Some(space) => space.matches(selection, index)?,
+                None => Vec::new(),
+            };
+            Some(Matched {
                 record,
                 index,
                 block_text,
+                touches,
             })
         })
     })
+}
+
+/// Whether the object a selection's `touching` names is on one of
+/// `sheets`, by its ID or by its name.
+fn touching_found(sheets: &[&SheetRecord], selection: &Selection) -> bool {
+    let Some(named) = &selection.touching else {
+        return true;
+    };
+    sheets
+        .iter()
+        .any(|record| named_on(record, named).is_some())
+}
+
+/// The place on `record`'s sheet of the object `named` names, by its ID or
+/// by its name, in any case.
+fn named_on(record: &SheetRecord, named: &ObjectRef) -> Option<usize> {
+    (0..record.objects.len()).find(|&i| match (&named.id, &named.name) {
+        (Some(id), _) => Matching::Exact.identifier(&record.id(i), id),
+        (None, Some(name)) => record.objects[i]
+            .name
+            .as_deref()
+            .is_some_and(|have| Matching::Exact.identifier(have, name)),
+        (None, None) => false,
+    })
+}
+
+/// What a selection's box and `touching` look at on one sheet: what each
+/// of its objects draws, and where each meets the object `touching` names.
+struct Space {
+    /// For each of the sheet's objects, what it draws, when a box is given.
+    drawn: Vec<Drawn>,
+    /// For each of the sheet's objects, where it meets the object
+    /// `touching` names; none when the sheet does not hold that object.
+    touching: Option<Vec<Vec<Touch>>>,
+}
+
+/// What one object draws, as the one drawing pipeline draws it to measure
+/// the sheet, seen from above.
+#[derive(Default)]
+struct Drawn {
+    /// Its lines, each a run of points; a run of one point is a dot.
+    runs: Vec<Vec<draw::Point2>>,
+    /// Its filled areas, each with the rule of which points are inside.
+    fills: Vec<(draw::FillRule, Vec<Vec<draw::Point2>>)>,
+    /// The boxes round its patterned hatches' boundaries, which count
+    /// though the pattern's lines may stop short of them.
+    boundaries: Vec<Bounds>,
+}
+
+impl Space {
+    fn of(record: &SheetRecord, selection: &Selection, settings: &Settings) -> Space {
+        let fonts = SheetFonts::find(&record.sheet, settings);
+        let mut drawn: Vec<Drawn> = Vec::new();
+        if selection.window.is_some() || selection.crossing.is_some() {
+            drawn = (0..record.objects.len())
+                .map(|_| Drawn::default())
+                .collect();
+            let list = measuring_drawing(&record.sheet, &fonts);
+            for item in list.items {
+                // An older leader's annotation is an MTEXT of its own in
+                // the DWG, which AutoCAD selects apart from its LEADER: the
+                // leader is selected by its own lines and arrow.
+                let annotation = matches!(
+                    record.sheet.objects.get(item.object),
+                    Some(Object::Leader(_))
+                ) && item.part.is_some();
+                let Some(d) = drawn.get_mut(item.object).filter(|_| !annotation) else {
+                    continue;
+                };
+                match item.shape {
+                    draw::Shape::Stroke { runs, .. } => d.runs.extend(runs),
+                    draw::Shape::Fill { rule, contours } => d.fills.push((rule, contours)),
+                }
+            }
+            for (object, bounds) in list.boundaries {
+                if let Some(d) = drawn.get_mut(object) {
+                    d.boundaries.push(bounds);
+                }
+            }
+        }
+        let touching = selection.touching.as_ref().and_then(|named| {
+            let index = named_on(record, named)?;
+            let reader = crate::geometry::Reader {
+                sheet: &record.sheet,
+                fonts: &fonts,
+            };
+            let theirs = reader.parts(&record.sheet.objects[index]);
+            let met = record
+                .sheet
+                .objects
+                .iter()
+                .enumerate()
+                .map(|(i, object)| {
+                    if i == index || theirs.is_empty() {
+                        return Vec::new();
+                    }
+                    touches(&reader.parts(object), &theirs)
+                })
+                .collect();
+            Some(met)
+        });
+        Space { drawn, touching }
+    }
+
+    /// Whether the object at `index` lies where `selection` looks: none
+    /// when it does not; when it does, where it meets the object the
+    /// selection's `touching` names, empty without one.
+    fn matches(&self, selection: &Selection, index: usize) -> Option<Vec<Touch>> {
+        if let Some(window) = &selection.window {
+            if !self.drawn[index].within(window.bounds()) {
+                return None;
+            }
+        }
+        if let Some(crossing) = &selection.crossing {
+            if !self.drawn[index].reaches(crossing.bounds()) {
+                return None;
+            }
+        }
+        if selection.touching.is_some() {
+            let met = &self.touching.as_ref()?[index];
+            if met.is_empty() {
+                return None;
+            }
+            return Some(met.clone());
+        }
+        Some(Vec::new())
+    }
+}
+
+impl Drawn {
+    /// Every point it draws through, its hatches' boundary boxes' corners
+    /// among them.
+    fn points(&self) -> impl Iterator<Item = draw::Point2> + '_ {
+        self.runs
+            .iter()
+            .flatten()
+            .chain(self.fills.iter().flat_map(|(_, c)| c.iter().flatten()))
+            .copied()
+            .chain(self.boundaries.iter().flat_map(|b| [b.min, b.max]))
+    }
+
+    /// Whether it draws something and everything it draws is within the
+    /// box from `min` to `max`, edges included: AutoCAD's window.
+    fn within(&self, (min, max): ([f64; 2], [f64; 2])) -> bool {
+        let mut any = false;
+        for p in self.points() {
+            if !inside_box(p, min, max) {
+                return false;
+            }
+            any = true;
+        }
+        any
+    }
+
+    /// Whether something it draws is within the box from `min` to `max` or
+    /// crosses its edge, or a filled area of it holds the box: AutoCAD's
+    /// crossing selection.
+    fn reaches(&self, (min, max): ([f64; 2], [f64; 2])) -> bool {
+        if self.points().any(|p| inside_box(p, min, max)) {
+            return true;
+        }
+        let crosses = |run: &[draw::Point2], closed: bool| {
+            let n = run.len();
+            let edges = if closed { n } else { n.saturating_sub(1) };
+            (0..edges).any(|i| segment_meets_box(run[i], run[(i + 1) % n], min, max))
+        };
+        if self.runs.iter().any(|run| crosses(run, false)) {
+            return true;
+        }
+        for (rule, contours) in &self.fills {
+            if contours.iter().any(|c| crosses(c, true)) {
+                return true;
+            }
+            if draw::inside(min, *rule, contours) {
+                return true;
+            }
+        }
+        self.boundaries.iter().any(|b| {
+            let ring = [b.min, [b.max[0], b.min[1]], b.max, [b.min[0], b.max[1]]];
+            crosses(&ring, true)
+        })
+    }
+}
+
+/// Whether `p` is within the box from `min` to `max`, edges included.
+fn inside_box(p: draw::Point2, min: [f64; 2], max: [f64; 2]) -> bool {
+    p[0] >= min[0] && p[0] <= max[0] && p[1] >= min[1] && p[1] <= max[1]
+}
+
+/// Whether the segment from `a` to `b` meets the box from `min` to `max`,
+/// edges included: the segment clipped to the box, as Liang and Barsky clip
+/// it, leaves something.
+fn segment_meets_box(a: draw::Point2, b: draw::Point2, min: [f64; 2], max: [f64; 2]) -> bool {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for axis in 0..2 {
+        for (p, q) in [
+            (-d[axis], a[axis] - min[axis]),
+            (d[axis], max[axis] - a[axis]),
+        ] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return false;
+                }
+            } else {
+                let r = q / p;
+                if p < 0.0 {
+                    t0 = t0.max(r);
+                } else {
+                    t1 = t1.min(r);
+                }
+                if t0 > t1 {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Where the object at `index` of `record`'s sheet is written.
@@ -796,15 +1111,39 @@ pub(crate) fn written_at(record: &SheetRecord, index: usize) -> WrittenAt {
     }
 }
 
-/// What a query found, in words: `count` of `thing` that match `words`,
-/// the selection in words, on the sheets `on` names; or that none did.
-fn found_message(count: usize, thing: &str, words: Option<String>, on: &str) -> String {
-    match (count, words) {
-        (0, Some(words)) => format!("nothing matches: no {thing} {on} has {words}"),
-        (0, None) => format!("nothing matches: there is no {thing} {on}"),
-        (1, Some(words)) => format!("1 {thing} has {words}, {on}"),
-        (count, Some(words)) => format!("{count} {thing}s have {words}, {on}"),
-        (count, None) => format!("{}, {on}", counted(count, thing)),
+/// What a query found, in words: `count` of `thing` that match
+/// `selection` on `sheets`, which `on` names; or that none did.
+fn found_message(
+    count: usize,
+    thing: &str,
+    selection: &Selection,
+    sheets: &[&SheetRecord],
+    on: &str,
+) -> String {
+    if let (0, Some(touching)) = (count, &selection.touching) {
+        if !touching_found(sheets, selection) {
+            return format!(
+                "nothing matches: no object {on} has {}, the object to touch",
+                touching.words()
+            );
+        }
+    }
+    match (count, selection.words(), selection.where_words()) {
+        (0, Some(has), Some(lies)) => {
+            format!("nothing matches: no {thing} {on} has {has} and is {lies}")
+        }
+        (0, Some(has), None) => format!("nothing matches: no {thing} {on} has {has}"),
+        (0, None, Some(lies)) => format!("nothing matches: no {thing} {on} is {lies}"),
+        (0, None, None) => format!("nothing matches: there is no {thing} {on}"),
+        (1, Some(has), Some(lies)) => format!("1 {thing} has {has} and is {lies}, {on}"),
+        (1, Some(has), None) => format!("1 {thing} has {has}, {on}"),
+        (1, None, Some(lies)) => format!("1 {thing} is {lies}, {on}"),
+        (count, Some(has), Some(lies)) => {
+            format!("{count} {thing}s have {has} and are {lies}, {on}")
+        }
+        (count, Some(has), None) => format!("{count} {thing}s have {has}, {on}"),
+        (count, None, Some(lies)) => format!("{count} {thing}s are {lies}, {on}"),
+        (count, None, None) => format!("{}, {on}", counted(count, thing)),
     }
 }
 
@@ -817,8 +1156,13 @@ fn counted(count: usize, thing: &str) -> String {
     }
 }
 
-fn find(sheets: &[&SheetRecord], selection: &Selection, looked: &LookedAt) -> (String, Answer) {
-    let objects: Vec<FoundObject> = matched(sheets, selection)
+fn find(
+    sheets: &[&SheetRecord],
+    selection: &Selection,
+    settings: &Settings,
+    looked: &LookedAt,
+) -> (String, Answer) {
+    let objects: Vec<FoundObject> = matched(sheets, selection, settings)
         .map(|m| FoundObject {
             sheet: m.record.name.clone(),
             id: m.record.id(m.index),
@@ -826,10 +1170,11 @@ fn find(sheets: &[&SheetRecord], selection: &Selection, looked: &LookedAt) -> (S
             written_at: written_at(m.record, m.index),
             object: m.record.sheet.objects[m.index].clone(),
             block_text: m.block_text,
+            touches: m.touches,
         })
         .collect();
     let count = objects.len();
-    let message = found_message(count, "object", selection.words(), &looked.on());
+    let message = found_message(count, "object", selection, sheets, &looked.on());
     (message, Answer::Find { count, objects })
 }
 
@@ -951,9 +1296,10 @@ fn blocks(sheets: &[&SheetRecord], looked: &LookedAt) -> (String, Answer) {
 fn attributes(
     sheets: &[&SheetRecord],
     selection: &Selection,
+    settings: &Settings,
     looked: &LookedAt,
 ) -> (String, Answer) {
-    let inserts: Vec<InsertAttributes> = matched(sheets, selection)
+    let inserts: Vec<InsertAttributes> = matched(sheets, selection, settings)
         .filter_map(|m| match &m.record.sheet.objects[m.index] {
             Object::Insert(insert) => Some(InsertAttributes {
                 sheet: m.record.name.clone(),
@@ -968,7 +1314,7 @@ fn attributes(
         })
         .collect();
     let count = inserts.len();
-    let message = found_message(count, "insert", selection.words(), &looked.on());
+    let message = found_message(count, "insert", selection, sheets, &looked.on());
     (message, Answer::Attributes { count, inserts })
 }
 

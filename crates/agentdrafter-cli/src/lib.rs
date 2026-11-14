@@ -33,7 +33,8 @@ use agentdrafter_core::{
     FONTS_VARIABLE, PLOT_STYLES_VARIABLE,
 };
 use agentdrafter_core::{
-    End, Matching, Measure, ObjectRef, Query, QueryRequest, Selection, SnapKind, SnapRef,
+    End, Matching, Measure, ObjectRef, Query, QueryRequest, Selection, SelectionBox, SnapKind,
+    SnapRef,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -55,7 +56,7 @@ const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...";
 const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
-const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [extents, snap and geometry: --fonts <folder>...]";
+const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
 /// name, as the binary does: it prints the reply on standard output, or
@@ -691,6 +692,39 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
             Some("--sheet") => once(&mut sheet, "--sheet", value("--sheet", args.next())?)?,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
             Some("--contains") if selecting => selection.matching = Matching::Contains,
+            Some(flag @ ("--window" | "--crossing")) if selecting => {
+                let given = value(flag, args.next())?;
+                let numbers: Vec<f64> = given
+                    .split(',')
+                    .map(|n| n.trim().parse::<f64>())
+                    .collect::<Result<_, _>>()
+                    .ok()
+                    .filter(|n: &Vec<f64>| n.len() == 4 && n.iter().all(|n| n.is_finite()))
+                    .ok_or_else(|| {
+                        usage(format!(
+                            "{flag} is a box's two opposite corners, x1,y1,x2,y2, four numbers in \
+                             the declared unit, not `{given}`"
+                        ))
+                    })?;
+                let corners = SelectionBox([[numbers[0], numbers[1]], [numbers[2], numbers[3]]]);
+                let slot = if flag == "--window" {
+                    &mut selection.window
+                } else {
+                    &mut selection.crossing
+                };
+                if slot.replace(corners).is_some() {
+                    return Err(Error::usage(format!("{flag} is given twice")));
+                }
+            }
+            Some(flag @ ("--touching" | "--touching-name")) if selecting => {
+                let touching = selection.touching.get_or_insert_with(ObjectRef::default);
+                let slot = if flag == "--touching" {
+                    &mut touching.id
+                } else {
+                    &mut touching.name
+                };
+                once(slot, flag, value(flag, args.next())?)?;
+            }
             Some(flag @ ("--id" | "--name" | "--block" | "--tag" | "--value" | "--text"))
                 if selecting =>
             {

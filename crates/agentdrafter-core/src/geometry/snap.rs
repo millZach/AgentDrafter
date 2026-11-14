@@ -328,6 +328,76 @@ pub(crate) fn intersections(parts: &[Part], others: &[Part], apparent: bool) -> 
     numbered(kept.into_iter().map(|c| c.point).collect())
 }
 
+/// Where one object's geometry meets another's, and the part of each that
+/// meets there.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Touch {
+    /// The place in the object of the part that meets the other, such as
+    /// `segments[1]` or `objects[3]`; none for the object itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+    /// The place in the other object of the part it meets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub with_part: Option<String>,
+    /// Where they meet, in the declared unit.
+    pub at: Point3,
+}
+
+/// Where `parts` meet `others` in space: where a part of one crosses or
+/// touches a part of the other, as an intersection snap finds it, and where
+/// an end of a part of either lies on a part of the other within the
+/// tolerance of their size, as a wire drawn to a terminal's end, or along
+/// it, meets it. Each place is given once, with the first parts found
+/// there, in the order of `parts`.
+pub(crate) fn touches(parts: &[Part], others: &[Part]) -> Vec<Touch> {
+    let mut found: Vec<(P3, f64, Touch)> = Vec::new();
+    let place = |p: &Part| (!p.path.is_empty()).then(|| p.path.clone());
+    let mut add = |at: P3, size: f64, part: &Part, other: &Part| {
+        if found
+            .iter()
+            .any(|(seen, s, _)| length_of(sub(*seen, at)) <= tolerance(s.max(size)))
+        {
+            return;
+        }
+        found.push((
+            at,
+            size,
+            Touch {
+                part: place(part),
+                with_part: place(other),
+                at: point3(at),
+            },
+        ));
+    };
+    for part in parts {
+        for other in others {
+            let size = scale_of(&part.curve).max(scale_of(&other.curve));
+            for (t, u) in crossings(&part.curve, &other.curve) {
+                let (p, q) = (part.curve.point(t), other.curve.point(u));
+                if length_of(sub(p, q)) <= tolerance(size) {
+                    add(p, size, part, other);
+                }
+            }
+            for end in [part.curve.start(), part.curve.end()] {
+                if lies_on(end, &other.curve, size) {
+                    add(end, size, part, other);
+                }
+            }
+            for end in [other.curve.start(), other.curve.end()] {
+                if lies_on(end, &part.curve, size) {
+                    add(end, size, part, other);
+                }
+            }
+        }
+    }
+    found.into_iter().map(|(_, _, t)| t).collect()
+}
+
+/// Whether `p` lies on the curve, in space, within the tolerance of `size`.
+fn lies_on(p: P3, c: &Curve, size: f64) -> bool {
+    nearest_on(c, p).is_some_and(|q| length_of(sub(p, q)) <= tolerance(size))
+}
+
 /// A crossing found between a part of the first object and one of the
 /// other's.
 struct Crossed {

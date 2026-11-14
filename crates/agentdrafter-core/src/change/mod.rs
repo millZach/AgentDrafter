@@ -196,6 +196,10 @@ pub struct OperationOutcome {
     /// tables, what it could not carry, block by block, and its notices.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub imported: Option<crate::import::BlocksImported>,
+    /// Each snapped point it took, and the point it was worked out to,
+    /// which the record writes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub snapped: Vec<SnapResolved>,
     /// Why it did not land.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
@@ -226,6 +230,24 @@ pub struct AttributeRemoved {
     /// The value as the record wrote it, such as `B` or `{row: REV}`; a
     /// row's value itself stays in its row.
     pub value: String,
+}
+
+/// A snapped point an operation took, and the point it named when the
+/// operation applied, which the record writes as coordinates.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SnapResolved {
+    /// Its place in the operation, such as `from` or `points[0]`.
+    pub field: String,
+    /// The object it snapped to: on the sheet its ID gives, or for one
+    /// named by its name, on the first sheet the operation reaches.
+    pub id: String,
+    pub snap: crate::geometry::SnapKind,
+    /// Which of the object's points of the snap, when it has several.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub which: Option<String>,
+    /// Where it is, in the declared unit, on every sheet the operation
+    /// reaches.
+    pub at: crate::model::Point3,
 }
 
 /// A row's value an operation sets, because the template takes the value

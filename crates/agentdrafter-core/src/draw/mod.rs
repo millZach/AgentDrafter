@@ -75,6 +75,7 @@ use crate::text::placement::SheetFonts;
 
 pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
+pub(crate) use pick::inside;
 pub use pick::{object_bounds, pick};
 pub(crate) use polyline::bulge_of;
 pub(crate) use text::{mtext_box, mtext_lines};

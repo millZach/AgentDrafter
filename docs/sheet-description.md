@@ -444,7 +444,7 @@ A change set adds a table with `add_table`, sets a cell with `set_cell` and adds
 
 A leader points at something on the sheet with an arrow and says what it is: a device on a panel layout, a part number, a note on a loop sheet. A sheet holds two kinds, as AutoCAD does: the multileader, `mleader`, AutoCAD's MLEADER, and the older leader, `leader`, AutoCAD's LEADER and QLEADER, which plant drawings hold. Both belong on a sheet, not in a block.
 
-An arrow is placed at a point: a multileader's, an older leader's, and one `add_leader_line` adds. Pointing it at an object by its ID or name, so that it follows the object, waits for object snaps ([#74](https://github.com/millZach/AgentDrafter/issues/74)).
+An arrow is placed at a point: a multileader's, an older leader's, and one `add_leader_line` adds. An operation may give it as a [snapped point](change-sets.md#snapped-points), such as an insert's insertion point, which is written as the point it names: it does not follow the object afterwards.
 
 ```yaml
 - mleader:
