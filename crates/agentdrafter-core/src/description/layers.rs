@@ -235,10 +235,7 @@ pub(super) fn named_entries<'a>(
     };
     for (i, entry) in entries.iter().enumerate() {
         check_name(entry, table, what)?;
-        if let Some(first) = entries[..i]
-            .iter()
-            .find(|e| e.key.to_lowercase() == entry.key.to_lowercase())
-        {
+        if let Some(first) = entries[..i].iter().find(|e| one_name(&e.key, &entry.key)) {
             return Err(Error::new(
                 ErrorCode::DuplicateKey,
                 format!(
@@ -251,6 +248,13 @@ pub(super) fn named_entries<'a>(
         }
     }
     Ok(entries)
+}
+
+/// Whether `a` and `b` are one name of a layer, a linetype or a block,
+/// as AutoCAD ignores case in names: the reader's own test for a name
+/// given twice.
+pub(crate) fn one_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
 }
 
 /// Refuses a name AutoCAD would not accept for a layer or linetype.

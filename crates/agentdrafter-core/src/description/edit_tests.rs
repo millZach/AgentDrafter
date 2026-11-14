@@ -334,3 +334,210 @@ objects: []
 "
     );
 }
+
+const LIBRARY: &str = include_str!("../../../../examples/demo-set/blocks.yaml");
+
+/// A made-up block library with comments between its blocks, and a block
+/// written in braces.
+const COMMENTED: &str = "# head
+units: in
+blocks:
+  # the first
+  OUTER:
+    objects:
+      - line: {from: [0, 0, 0], to: [1, 0, 0]}
+      - insert: {block: INNER, position: [0, 0, 0], attributes: {LETTER: A, NOTE: kept}}
+  # the second
+  INNER: {objects: [{attdef: {tag: LETTER, position: [0, 0, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 1, 0], height: 1}}]}
+  # the third
+  LAST:
+    base_point: [1, 1, 0]
+    objects:
+      - circle: {center: [0, 0, 0], radius: 2}
+# tail
+";
+
+#[test]
+fn a_block_added_goes_after_the_last_and_keeps_every_other_byte() {
+    let mut record = file(LIBRARY);
+    let objects = [
+        json!({"line": {"to": [10, 0, 0], "from": [0, 0, 0]}}),
+        json!({"attdef": {"height": 2, "position": [0, 5, 0], "tag": "CODE"}}),
+    ];
+    record
+        .block_set("BADGE", Some(&json!([1, 0, 0])), &objects)
+        .unwrap();
+    let after = record.new_text().unwrap().unwrap();
+    assert_eq!(
+        after,
+        format!(
+            "{LIBRARY}  BADGE:
+    base_point: [1, 0, 0]
+    objects:
+      - line: {{from: [0, 0, 0], to: [10, 0, 0]}}
+      - attdef: {{tag: CODE, position: [0, 5, 0], height: 2}}
+"
+        )
+    );
+    assert_eq!(record.block_names(), ["TITLE_BLOCK", "BADGE"]);
+}
+
+#[test]
+fn a_block_redefined_rewrites_its_own_lines_alone() {
+    let mut record = file(COMMENTED);
+    record
+        .block_set(
+            "INNER",
+            None,
+            &[json!({"attdef": {"tag": "LETTER", "position": [0, 0, 0], "height": 1}})],
+        )
+        .unwrap();
+    let after = record.new_text().unwrap().unwrap();
+    assert_eq!(
+        after,
+        COMMENTED.replace(
+            "  INNER: {objects: [{attdef: {tag: LETTER, position: [0, 0, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 1, 0], height: 1}}]}\n",
+            "  INNER:
+    objects:
+      - attdef: {tag: LETTER, position: [0, 0, 0], height: 1}
+"
+        )
+    );
+    assert_eq!(record.block_carried_tags("INNER").unwrap(), ["LETTER"]);
+
+    // The last block, before the file's last comment, and one added after
+    // it, keep the comment where it was.
+    let mut record = file(COMMENTED);
+    record
+        .block_set(
+            "LAST",
+            Some(&json!([0, 0, 0])),
+            &[json!({"circle": {"center": [0, 0, 0], "radius": 3}})],
+        )
+        .unwrap();
+    record
+        .block_set(
+            "ADDED",
+            None,
+            &[json!({"line": {"from": [0, 0, 0], "to": [1, 1, 0]}})],
+        )
+        .unwrap();
+    let after = record.new_text().unwrap().unwrap();
+    assert_eq!(
+        after,
+        COMMENTED.replace(
+            "    base_point: [1, 1, 0]
+    objects:
+      - circle: {center: [0, 0, 0], radius: 2}
+",
+            "    base_point: [0, 0, 0]
+    objects:
+      - circle: {center: [0, 0, 0], radius: 3}
+  ADDED:
+    objects:
+      - line: {from: [0, 0, 0], to: [1, 1, 0]}
+"
+        )
+    );
+}
+
+#[test]
+fn a_nested_inserts_value_is_removed_from_its_block_alone() {
+    let mut record = file(COMMENTED);
+    let inserts = record.block_inserts();
+    assert_eq!(inserts.len(), 1);
+    let (outer, insert) = &inserts[0];
+    assert_eq!(outer, "OUTER");
+    assert_eq!(insert.block, "INNER");
+    assert_eq!(
+        insert.values,
+        [
+            ("LETTER".to_owned(), "A".to_owned()),
+            ("NOTE".to_owned(), "kept".to_owned())
+        ]
+    );
+    record.remove_block_attribute("OUTER", 1, "LETTER").unwrap();
+    let after = record.new_text().unwrap().unwrap();
+    assert_eq!(
+        after,
+        COMMENTED.replace(
+            "attributes: {LETTER: A, NOTE: kept}",
+            "attributes: {NOTE: kept}"
+        )
+    );
+    // The last value takes `attributes` with it.
+    record.remove_block_attribute("OUTER", 1, "NOTE").unwrap();
+    let after = record.new_text().unwrap().unwrap();
+    assert_eq!(
+        after,
+        COMMENTED.replace(", attributes: {LETTER: A, NOTE: kept}}", "}")
+    );
+}
+
+#[test]
+fn a_templates_attribute_value_is_removed_and_its_row_reference_with_it() {
+    let mut record = file(TEMPLATE);
+    let inserts = record.inserts(ObjectList::Template);
+    assert_eq!(inserts.len(), 1);
+    assert_eq!(inserts[0].index, 2);
+    assert!(inserts[0]
+        .values
+        .contains(&("REV".to_owned(), "{row: REV}".to_owned())));
+    assert!(inserts[0]
+        .values
+        .contains(&("DRAWN".to_owned(), "AD".to_owned())));
+    record
+        .remove_attribute(ObjectList::Template, 2, "REV", 0)
+        .unwrap();
+    record
+        .remove_attribute(ObjectList::Template, 2, "DRAWN", 0)
+        .unwrap();
+    let after = record.new_text().unwrap().unwrap();
+    let (new, gone) = diff(TEMPLATE, &after);
+    assert!(new.is_empty(), "{new:?}");
+    assert_eq!(gone, ["        REV: {row: REV}", "        DRAWN: AD"]);
+}
+
+/// A library whose blocks are written `{}` takes its first block, written
+/// a key to a line in their place.
+#[test]
+fn the_first_block_of_a_library_written_empty_in_braces_is_added() {
+    let text = "# a made-up library\nunits: in\nblocks: {}\n# tail\n";
+    let mut record = file(text);
+    record
+        .block_set(
+            "BADGE",
+            None,
+            &[json!({"circle": {"center": [0, 0, 0], "radius": 1}})],
+        )
+        .unwrap();
+    assert_eq!(
+        record.new_text().unwrap().unwrap(),
+        "# a made-up library
+units: in
+blocks:
+  BADGE:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 1}
+# tail
+"
+    );
+}
+
+/// Blocks written in braces that hold a comment are not rewritten, so the
+/// comment is not lost: the add is refused and nothing is written.
+#[test]
+fn a_library_whose_empty_braces_hold_a_comment_is_not_rewritten() {
+    let text = "units: in\nblocks: { # kept\n  }\n";
+    let mut record = file(text);
+    let added = record
+        .block_set(
+            "BADGE",
+            None,
+            &[json!({"circle": {"center": [0, 0, 0], "radius": 1}})],
+        )
+        .and_then(|()| record.new_text().map(|_| ()));
+    let e = added.unwrap_err();
+    assert_eq!(e.code, crate::error::ErrorCode::WriteFailed, "{e:?}");
+    assert!(e.message.contains("written in braces"), "{}", e.message);
+}

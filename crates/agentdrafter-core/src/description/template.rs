@@ -97,8 +97,9 @@ pub(crate) fn template_at(
 }
 
 /// Reads a template's text as [`template_at`] does, with the block library
-/// it names read from `files`.
-fn template_in(
+/// it names read from `files`, such as a change set's edited library over
+/// the disk.
+pub(crate) fn template_in(
     files: &dyn ReadFiles,
     text: &str,
     path: &Path,
@@ -125,6 +126,21 @@ fn template_in(
         rows_file: Some(rows_file.to_owned()),
     };
     Ok((record, library))
+}
+
+/// The block library a template's text names under `block_library`, as it
+/// writes the path; none when it names none or cannot be read.
+pub(crate) fn library_named(text: &str) -> Option<String> {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let root = strict_yaml::read(text).ok()??;
+    let Kind::Mapping(entries) = &root.kind else {
+        return None;
+    };
+    let entry = entries.iter().find(|e| e.key == "block_library")?;
+    match &entry.value.kind {
+        Kind::Scalar(path) if !entry.value.is_bare_null() => Some(path.clone()),
+        _ => None,
+    }
 }
 
 /// Fills a template in from a row as [`fill_with_records`] does, without

@@ -23,7 +23,7 @@ mod hatch;
 mod hatch_schema;
 pub(crate) mod ids;
 mod layers;
-pub(crate) use layers::{LAYER_KEYS, LINETYPE_KEYS};
+pub(crate) use layers::{one_name, LAYER_KEYS, LINETYPE_KEYS};
 mod mark;
 mod objects;
 pub(crate) mod paper;
@@ -59,7 +59,9 @@ pub(crate) use set::{
     read_rows, read_rows_in, read_set_settings, read_set_settings_in, rows_at, template_path, Row,
 };
 pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
-pub(crate) use template::{read_template, read_template_in, template_at};
+pub(crate) use template::{
+    library_named, read_template, read_template_in, template_at, template_in,
+};
 
 /// The keys at the top of a sheet description.
 pub(crate) const SHEET_KEYS: [&str; 9] = [

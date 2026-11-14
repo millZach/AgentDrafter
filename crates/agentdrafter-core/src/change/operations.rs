@@ -9,7 +9,7 @@
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-use crate::description::schema::sheet_description_schema;
+use crate::description::schema::{block_library_schema, sheet_description_schema};
 use crate::description::{
     article, objects_table, rows_schema, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
 };
@@ -28,6 +28,22 @@ pub(crate) enum Kind {
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
+    /// Adds or redefines a block of a block library, or brings the inserts
+    /// of its blocks into line with their definitions.
+    Block(BlockOp),
+}
+
+/// What a block operation does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockOp {
+    /// Adds a block: AutoCAD's BLOCK.
+    Add,
+    /// Replaces a block's whole definition, then brings its inserts into
+    /// line: AutoCAD's BEDIT.
+    Redefine,
+    /// Brings inserts into line with their block's definition alone:
+    /// AutoCAD's ATTSYNC.
+    Sync,
 }
 
 /// A table of a template's definitions that an operation edits.
@@ -117,7 +133,7 @@ pub(crate) struct Spec {
 }
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 28] = [
+pub(crate) const SPECS: [Spec; 31] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -162,7 +178,18 @@ pub(crate) const SPECS: [Spec; 28] = [
     table("change_text_style", "", TableOp::Change, Table::TextStyle),
     table("rename_text_style", "", TableOp::Rename, Table::TextStyle),
     table("delete_text_style", "", TableOp::Delete, Table::TextStyle),
+    block("add_block", "BLOCK", BlockOp::Add),
+    block("redefine_block", "BEDIT", BlockOp::Redefine),
+    block("attsync", "ATTSYNC", BlockOp::Sync),
 ];
+
+const fn block(name: &'static str, alias: &'static str, op: BlockOp) -> Spec {
+    Spec {
+        name,
+        alias,
+        kind: Kind::Block(op),
+    }
+}
 
 const fn table(name: &'static str, alias: &'static str, op: TableOp, table: Table) -> Spec {
     Spec {
@@ -312,6 +339,41 @@ fn does(spec: &Spec) -> String {
                  nothing.{builtin}{alias}"
             )
         }
+        Kind::Block(op) => {
+            let what = match op {
+                BlockOp::Add => {
+                    "Adds a block named name to a block library: its base_point, which may be \
+                     left out for [0, 0, 0], and its objects, each written as a block library \
+                     writes a block's objects, attribute definitions (attdef) and inserts of the \
+                     library's other blocks among them. A name the library has already, in any \
+                     case, is refused, since AutoCAD ignores case in names. AutoCAD's BLOCK."
+                }
+                BlockOp::Redefine => {
+                    "Replaces the whole definition of the block named name in a block library: \
+                     its base_point, [0, 0, 0] when left out, and its full list of objects, \
+                     written as for add_block. As it lands it brings every insert of the block \
+                     into line, as attsync does: a value an insert gives for a tag the block no \
+                     longer carries is removed from its record, and the reply lists each under \
+                     attributes_removed. AutoCAD's BEDIT."
+                }
+                BlockOp::Sync => {
+                    "Brings every insert of the block named name, or of every block of the \
+                     library when name is left out, into line with the block's definition as \
+                     the library writes it now, such as after the library was edited by hand: a \
+                     value an insert gives for a tag the block no longer carries, because it no \
+                     longer defines it or defines it constant, is removed from its record, in a \
+                     template, a row or another block of the library; a new tag takes its \
+                     default. The reply lists the inserts it reached under inserts and each \
+                     value removed under attributes_removed. AutoCAD's ATTSYNC."
+                }
+            };
+            format!(
+                "{what} The library is named by library, its path in the set as the rows write \
+                 a template's path, such as blocks.yaml, which may be left out when every \
+                 template of the set names the same library. It reaches every sheet whose \
+                 template names the library, all or nothing."
+            )
+        }
         Kind::SetAttribute => "Sets the value of the attribute tag of an insert. When the \
                                insert's template takes that attribute from the row, the \
                                sheet's row value is set instead, on that sheet alone, and the \
@@ -375,6 +437,7 @@ fn definitions() -> Map<String, Value> {
             "minLength": 1,
         }),
     );
+    add_block_definitions(&mut defs);
     defs.insert(
         "target".into(),
         json!({
@@ -413,6 +476,40 @@ fn definitions() -> Map<String, Value> {
         }),
     );
     defs
+}
+
+/// Adds the block library's definition of a block to `defs`, as
+/// `block_definition`, with each object a block holds as the library's
+/// schema defines it, under `block_` and its type, such as `block_line`,
+/// and the cell. A block's objects differ from a sheet's: they carry no
+/// `id` or `name`, and a text or an attribute definition takes a cell.
+fn add_block_definitions(defs: &mut Map<String, Value>) {
+    let mut library = match block_library_schema()["$defs"].take() {
+        Value::Object(defs) => defs,
+        _ => Map::new(),
+    };
+    let mut block = library.remove("block").unwrap_or(Value::Null);
+    let mut types = Vec::new();
+    if let Some(choices) = block["properties"]["objects"]["items"]["oneOf"].as_array_mut() {
+        for choice in choices {
+            let Some(properties) = choice["properties"].as_object_mut() else {
+                continue;
+            };
+            for (kind, object) in properties.iter_mut() {
+                object["$ref"] = Value::String(format!("#/$defs/block_{kind}"));
+                types.push(kind.clone());
+            }
+        }
+    }
+    defs.insert("block_definition".into(), block);
+    for kind in types {
+        if let Some(def) = library.remove(&kind) {
+            defs.insert(format!("block_{kind}"), def);
+        }
+    }
+    if let Some(cell) = library.remove("cell") {
+        defs.insert("cell".into(), cell);
+    }
 }
 
 /// The schema of one operation, referring to `defs`.
@@ -505,6 +602,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             "properties": { "target": target },
         }),
         Kind::Table(op, table) => table_schema(op, table, defs),
+        Kind::Block(op) => block_schema(op, defs),
         Kind::SetAttribute => json!({
             "type": "object",
             "required": ["target", "tag", "value"],
@@ -598,6 +696,50 @@ fn table_schema(op: TableOp, table: Table, defs: &Map<String, Value>) -> Value {
         "additionalProperties": false,
         "properties": properties,
         "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }],
+    })
+}
+
+/// The schema of a block operation, before its `op`. A block's objects are
+/// those the block library's schema gives a block, whose text and
+/// attribute definitions take a cell, as `block_text` and `block_attdef`.
+fn block_schema(op: BlockOp, defs: &Map<String, Value>) -> Value {
+    let block = &defs["block_definition"];
+    let mut properties = Map::new();
+    properties.insert(
+        "library".into(),
+        json!({
+            "description": "The block library, by its path in the set, relative to the set's \
+                            folder as the rows write a template's path, such as blocks.yaml. It \
+                            may be left out when every template of the set names the same \
+                            library.",
+            "type": "string",
+            "minLength": 1,
+        }),
+    );
+    let name_description = match op {
+        BlockOp::Add => "The new block's name, which the library does not have in any case.",
+        BlockOp::Redefine => "The block to redefine, written exactly as the library writes it.",
+        BlockOp::Sync => {
+            "The block whose inserts to bring into line, written exactly as the library writes \
+             it. Without it, every block of the library."
+        }
+    };
+    properties.insert(
+        "name".into(),
+        json!({ "description": name_description, "$ref": "#/$defs/name" }),
+    );
+    let mut required = Vec::new();
+    if op != BlockOp::Sync {
+        for key in ["base_point", "objects"] {
+            properties.insert(key.into(), block["properties"][key].clone());
+        }
+        required = vec![json!("name"), json!("objects")];
+    }
+    json!({
+        "type": "object",
+        "required": required,
+        "additionalProperties": false,
+        "properties": properties,
     })
 }
 
@@ -697,6 +839,16 @@ pub(crate) enum Body {
         name: String,
         keys: Map<String, Value>,
         new_name: Option<String>,
+    },
+    /// A block operation: on the block `name`, or every block for an
+    /// attsync without one, of the block library `library` names, with the
+    /// definition an add or a redefinition writes, as sent.
+    Block {
+        op: BlockOp,
+        library: Option<String>,
+        name: Option<String>,
+        base_point: Option<Value>,
+        objects: Option<Vec<Value>>,
     },
 }
 
@@ -1064,6 +1216,75 @@ fn operation(
                 }
             };
             Body::SetAttribute { target, tag, value }
+        }
+        Kind::Block(op) => {
+            let allowed: &[&str] = match op {
+                BlockOp::Sync => &["library", "name"],
+                BlockOp::Add | BlockOp::Redefine => &["library", "name", "base_point", "objects"],
+            };
+            keys(allowed)?;
+            let library = match map.get("library") {
+                None => None,
+                Some(Value::String(path)) if !path.is_empty() => Some(path.clone()),
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected the block library's path in the set, such as blocks.yaml"
+                            .to_owned(),
+                        "library",
+                    ))
+                }
+            };
+            let name = match map.get("name") {
+                Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
+                None if op == BlockOp::Sync => None,
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected the block's name".to_owned(),
+                        "name",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `name`, the block's name".to_owned(),
+                        "name",
+                    ))
+                }
+            };
+            let objects =
+                match (op, map.get("objects")) {
+                    (BlockOp::Sync, _) => None,
+                    (_, Some(Value::Array(items))) if !items.is_empty() => Some(items.clone()),
+                    (_, Some(Value::Array(_))) => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "a block holds at least one object".to_owned(),
+                            "objects",
+                        ))
+                    }
+                    (_, Some(_)) => return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected the block's objects, a list of mappings each with one key, its \
+                         type, such as {\"line\": {\"from\": [0, 0, 0], \"to\": [1, 0, 0]}}"
+                            .to_owned(),
+                        "objects",
+                    )),
+                    (_, None) => return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `objects`, the block's objects; a block holds at least one"
+                            .to_owned(),
+                        "objects",
+                    )),
+                };
+            Body::Block {
+                op,
+                library,
+                name,
+                base_point: map.get("base_point").cloned(),
+                objects,
+            }
         }
         Kind::Table(op, table) => {
             let mut allowed = vec!["sheet", "template", "name"];

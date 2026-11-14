@@ -7,7 +7,8 @@
 //! its part fails, and so does every operation that reaches it; a template
 //! edit reaches every sheet built from the template, so it fails with any
 //! of them, and takes those sheets' other operations with it (Zach's
-//! decision of 2026-11-11). The operations left are applied again from the
+//! decision of 2026-11-11). An edit to a block library reaches every sheet
+//! whose template names the library, in the same way. The operations left are applied again from the
 //! records as they were, until every sheet they reach takes its part. Only
 //! then is anything written, all of it together or none of it, with the
 //! change set's entry in the journal (`commit.rs`, `journal.rs`).
@@ -15,22 +16,26 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
+
+use serde_json::Value;
 
 use super::commit::Replacement;
 use super::journal::{commit_change_set, HowChanged, Landing, ObjectChanged, SheetFailed};
 use super::operations::{
-    op_error, read_change_set, AddTo, Body, Kind, Operation, Table, TableOp, Target,
+    op_error, read_change_set, AddTo, BlockOp, Body, Kind, Operation, Table, TableOp, Target,
 };
 use super::MARK_FILE;
 use super::{
-    mark_report, quoted_list, read_mark, ChangeReport, ChangeRequest, Fill, OperationOutcome,
-    RowValueSet, SheetChange,
+    mark_report, quoted_list, read_mark, relative_to, AttributeRemoved, ChangeReport,
+    ChangeRequest, Fill, OperationOutcome, RowValueSet, SheetChange,
 };
 use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::{
-    article, mark_text, read_file, read_set_settings, rows_at, template_at, template_path,
-    AttributeSet, Listed, MarkFailure, ObjectList, RecordFile, Row, ID_SEPARATOR,
+    article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
+    template_at, template_in, template_path, AttributeSet, Disk, Listed, MarkFailure, ObjectList,
+    ReadFiles, RecordFile, Row, ID_SEPARATOR,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -55,6 +60,29 @@ struct SetFiles {
     templates: Vec<TemplateFile>,
     /// For each row, its template's place in `templates`.
     template_of: Vec<usize>,
+    /// The block libraries the templates name, each once.
+    libraries: Vec<LibraryOfSet>,
+    /// For each template, the place in `libraries` of the library it names.
+    library_of: Vec<Option<usize>>,
+}
+
+/// A block library the set's templates name.
+struct LibraryOfSet {
+    /// Its path relative to the set's folder, with `/` between folders,
+    /// as the first template that names it reaches it, such as
+    /// `blocks.yaml`: how a block operation names it.
+    written: String,
+    /// Every path the templates reach it by, relative to the set's folder.
+    /// More than one when templates name one file by different paths,
+    /// such as a link and the file it links to.
+    spellings: Vec<String>,
+    /// Its path as the first template that names it reaches it, joined
+    /// onto that template's folder as the reader joins it.
+    path: PathBuf,
+    /// The templates that name it.
+    templates: Vec<usize>,
+    /// The rows of the sheets built from those templates, in order.
+    sheets: Vec<usize>,
 }
 
 struct TemplateFile {
@@ -102,6 +130,41 @@ impl SetFiles {
             templates[t].sheets.push(k);
             template_of.push(t);
         }
+        let mut libraries: Vec<LibraryOfSet> = Vec::new();
+        let mut library_of = Vec::with_capacity(templates.len());
+        for (t, template) in templates.iter().enumerate() {
+            let Some(named) = template.text.as_ref().ok().and_then(|t| library_named(t)) else {
+                library_of.push(None);
+                continue;
+            };
+            let path = template.path.parent().unwrap_or(Path::new("")).join(&named);
+            let written = relative_to(folder, &path);
+            let same = libraries
+                .iter()
+                .position(|l| l.spellings.contains(&written) || one_file(&l.path, &path));
+            let l = match same {
+                Some(l) => {
+                    if !libraries[l].spellings.contains(&written) {
+                        libraries[l].spellings.push(written);
+                    }
+                    l
+                }
+                None => {
+                    libraries.push(LibraryOfSet {
+                        written: written.clone(),
+                        spellings: vec![written],
+                        path,
+                        templates: Vec::new(),
+                        sheets: Vec::new(),
+                    });
+                    libraries.len() - 1
+                }
+            };
+            libraries[l].templates.push(t);
+            libraries[l].sheets.extend(&template.sheets);
+            libraries[l].sheets.sort_unstable();
+            library_of.push(Some(l));
+        }
         Ok(Self {
             folder: folder.to_owned(),
             units: settings.units,
@@ -114,7 +177,66 @@ impl SetFiles {
             rows,
             templates,
             template_of,
+            libraries,
+            library_of,
         })
+    }
+
+    /// The block library a block operation names by `given`, its path in
+    /// the set, or, when it gives none, the one library every template
+    /// names: its place in `libraries`, or the code and message of why
+    /// there is none.
+    fn library(&self, given: Option<&str>) -> Result<usize, (ErrorCode, String)> {
+        let listed = || {
+            self.libraries
+                .iter()
+                .map(|l| format!("`{}`", l.written))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if self.libraries.is_empty() {
+            return Err((
+                ErrorCode::UnknownName,
+                "no template of the set names a block library, so there is none to edit; a \
+                 template names its library under block_library"
+                    .to_owned(),
+            ));
+        }
+        match given {
+            Some(given) => {
+                let wanted = self.folder.join(given);
+                let written = relative_to(&self.folder, &wanted);
+                self.libraries
+                    .iter()
+                    .position(|l| l.spellings.contains(&written) || one_file(&l.path, &wanted))
+                    .ok_or_else(|| {
+                        (
+                            ErrorCode::UnknownName,
+                            format!(
+                                "no template of the set names the block library `{given}`; the \
+                                 set's block libraries, by their paths in the set: {}",
+                                listed()
+                            ),
+                        )
+                    })
+            }
+            None if self.libraries.len() == 1 => Ok(0),
+            None => Err((
+                ErrorCode::MissingKey,
+                format!(
+                    "missing key `library`: the set's templates name more than one block \
+                     library, so name the one to edit by its path in the set: {}",
+                    listed()
+                ),
+            )),
+        }
+    }
+
+    /// Whether `path` is the block library `l`.
+    fn is_library(&self, l: usize, path: &Path) -> bool {
+        let library = &self.libraries[l];
+        library.spellings.contains(&relative_to(&self.folder, path))
+            || one_file(&library.path, path)
     }
 
     /// The row of the sheet named `name`, in any case.
@@ -177,6 +299,10 @@ struct Attempt<'a> {
     /// The operation that last set each row value: the row, the value's
     /// name and the operation.
     values: Vec<(usize, String, usize)>,
+    libraries: Vec<Option<Result<RecordFile, Error>>>,
+    /// The operation that last wrote each block of a library: the
+    /// library, the block's name and the operation.
+    blocks: Vec<(usize, String, usize)>,
 }
 
 impl<'a> Attempt<'a> {
@@ -186,7 +312,17 @@ impl<'a> Attempt<'a> {
             rows: RecordFile::from_text(&files.rows_path, files.rows_text.clone())?,
             templates: files.templates.iter().map(|_| None).collect(),
             values: Vec::new(),
+            libraries: files.libraries.iter().map(|_| None).collect(),
+            blocks: Vec::new(),
         })
+    }
+
+    fn library(&mut self, l: usize) -> Result<&mut RecordFile, Error> {
+        let path = &self.files.libraries[l].path;
+        let slot = self.libraries[l].get_or_insert_with(|| {
+            read_file(path, "the block library").and_then(|text| RecordFile::from_text(path, text))
+        });
+        slot.as_mut().map_err(|e| e.clone())
     }
 
     fn template(&mut self, t: usize) -> Result<&mut RecordFile, Error> {
@@ -264,6 +400,9 @@ struct Done {
     after: Option<String>,
     row_value: Option<RowValueSet>,
     ids_written: Vec<String>,
+    /// The inserts a block operation brought into line.
+    inserts: Vec<String>,
+    attributes_removed: Vec<AttributeRemoved>,
     message: String,
 }
 
@@ -308,6 +447,11 @@ fn objects_changed(
         }
         for fill in d.row_value.iter().flat_map(|row| &row.fills) {
             add(fill.id.clone(), HowChanged::Changed);
+        }
+        // Each insert of a block an operation redefined or brought into
+        // line draws as the block now does.
+        for id in &d.inserts {
+            add(id.clone(), HowChanged::Changed);
         }
     }
     objects
@@ -444,6 +588,13 @@ pub(super) fn apply(
                 }
             }
         }
+        for (l, file) in attempt.libraries.iter().enumerate() {
+            if let Some(Ok(file)) = file {
+                if let Some(text) = file.new_text()? {
+                    records.push((files.libraries[l].path.clone(), text));
+                }
+            }
+        }
     }
     let mut dwgs: Vec<(usize, PathBuf)> = Vec::new();
     for &k in &landed {
@@ -574,7 +725,12 @@ pub(super) fn apply(
                 before: d.as_ref().and_then(|d| d.before.clone()),
                 after: d.as_ref().and_then(|d| d.after.clone()),
                 row_value: d.as_ref().and_then(|d| d.row_value.clone()),
-                ids_written: d.map(|d| d.ids_written).unwrap_or_default(),
+                ids_written: d
+                    .as_ref()
+                    .map(|d| d.ids_written.clone())
+                    .unwrap_or_default(),
+                inserts: d.as_ref().map(|d| d.inserts.clone()).unwrap_or_default(),
+                attributes_removed: d.map(|d| d.attributes_removed).unwrap_or_default(),
                 error: if included[i] {
                     None
                 } else {
@@ -666,6 +822,12 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                         ),
                         "template",
                     ));
+                }
+                continue;
+            }
+            Body::Block { library, .. } => {
+                if let Err((code, message)) = files.library(library.as_deref()) {
+                    return Err(op_error(op.index, op.spec.name, code, message, "library"));
                 }
                 continue;
             }
@@ -826,6 +988,8 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 after: Some(after),
                 row_value: None,
                 ids_written: Vec::new(),
+                inserts: Vec::new(),
+                attributes_removed: Vec::new(),
                 message: format!("adds {} {object}, `{id}`, {place}", article(object)),
             }),
             sheets,
@@ -854,12 +1018,33 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         );
     }
 
+    if let Body::Block {
+        op: block_op,
+        library,
+        name,
+        base_point,
+        objects,
+    } = &op.body
+    {
+        return apply_block(
+            at,
+            op,
+            *block_op,
+            library.as_deref(),
+            name.as_deref(),
+            base_point.as_ref(),
+            objects.as_deref().unwrap_or_default(),
+        );
+    }
+
     let target = match &op.body {
         Body::Change { target, .. }
         | Body::Move { target, .. }
         | Body::Delete { target }
         | Body::SetAttribute { target, .. } => target,
-        Body::Add { .. } | Body::Table { .. } => unreachable!("handled above"),
+        Body::Add { .. } | Body::Table { .. } | Body::Block { .. } => {
+            unreachable!("handled above")
+        }
     };
     let found = match resolve(at, target, op) {
         Ok(found) => found,
@@ -915,6 +1100,8 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         after: None,
         row_value: None,
         ids_written: Vec::new(),
+        inserts: Vec::new(),
+        attributes_removed: Vec::new(),
         message: String::new(),
     };
     let mut sheets = reach.clone();
@@ -997,7 +1184,9 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 }
             }
         }
-        Body::Add { .. } | Body::Table { .. } => unreachable!("handled above"),
+        Body::Add { .. } | Body::Table { .. } | Body::Block { .. } => {
+            unreachable!("handled above")
+        }
     }
     if let (Some(layer), true) = (&target_locked, edits_object) {
         return fail(reach, locked(&id, layer));
@@ -1338,11 +1527,396 @@ fn apply_table(
             after,
             row_value: None,
             ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
             message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
         }),
         sheets,
         refuse: false,
     }
+}
+
+/// Applies a block operation to the block library `library` names: adds
+/// the block `name`, redefines it, or brings the inserts of it, or of every
+/// block of the library, into line. It reaches every sheet whose template
+/// names the library.
+fn apply_block(
+    at: &mut Attempt,
+    op: &Operation,
+    block_op: BlockOp,
+    library: Option<&str>,
+    name: Option<&str>,
+    base_point: Option<&Value>,
+    objects: &[Value],
+) -> Applied {
+    let files = at.files;
+    let l = files.library(library).expect("checked before");
+    let sheets = files.libraries[l].sheets.clone();
+    let written = files.libraries[l].written.clone();
+    let fail = |e: Error| Applied {
+        sheets: sheets.clone(),
+        outcome: Err(e),
+        refuse: false,
+    };
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    if let Some(refusal) = library_many_paths(files, l, op) {
+        return refusal;
+    }
+    let record = match at.library(l) {
+        Ok(record) => record,
+        Err(e) => return fail(e),
+    };
+    let path = record.path.clone();
+    let names = record.block_names();
+    let unknown = |name: &str| {
+        op_err(
+            ErrorCode::UnknownName,
+            format!(
+                "the block library `{written}` has no block `{name}`; its blocks: {}",
+                names.join(", ")
+            ),
+            "name",
+        )
+    };
+    let mut before = None;
+    let to_sync: Vec<String> = match (block_op, name) {
+        (BlockOp::Add, Some(name)) => {
+            if let Some(same) = names.iter().find(|n| one_name(n, name)) {
+                return fail(op_err(
+                    ErrorCode::DuplicateName,
+                    format!(
+                        "the block library `{written}` has a block `{same}` already, and AutoCAD \
+                         ignores case in names; change it with redefine_block or give another \
+                         name"
+                    ),
+                    "name",
+                ));
+            }
+            if let Err(e) = record.block_set(name, base_point, objects) {
+                return fail(op_err(e.code, e.message, ""));
+            }
+            at.blocks.push((l, name.to_owned(), op.index));
+            Vec::new()
+        }
+        (BlockOp::Redefine, Some(name)) => {
+            if !names.iter().any(|n| n == name) {
+                return fail(unknown(name));
+            }
+            before = record.block_text(name);
+            if let Err(e) = record.block_set(name, base_point, objects) {
+                return fail(op_err(e.code, e.message, ""));
+            }
+            at.blocks.push((l, name.to_owned(), op.index));
+            vec![name.to_owned()]
+        }
+        (BlockOp::Sync, Some(name)) => {
+            if !names.iter().any(|n| n == name) {
+                return fail(unknown(name));
+            }
+            vec![name.to_owned()]
+        }
+        (BlockOp::Sync, None) => names.clone(),
+        (BlockOp::Add | BlockOp::Redefine, None) => unreachable!("read with a name"),
+    };
+    let synced = if block_op == BlockOp::Add {
+        Synced::default()
+    } else {
+        match sync(at, l, &to_sync, op) {
+            Ok(synced) => synced,
+            Err(applied) => return *applied,
+        }
+    };
+    let after = name.and_then(|name| {
+        at.library(l)
+            .ok()
+            .and_then(|record| record.block_text(name))
+    });
+    let reached = match synced.inserts.len() {
+        1 => ", reaching 1 insert".to_owned(),
+        n => format!(", reaching {n} inserts"),
+    };
+    let what = match (block_op, name) {
+        (BlockOp::Add, Some(name)) => {
+            format!("adds the block `{name}` to the block library `{written}`")
+        }
+        (BlockOp::Redefine, Some(name)) => {
+            format!("redefines the block `{name}` in the block library `{written}`{reached}")
+        }
+        (BlockOp::Sync, Some(name)) => format!(
+            "brings the inserts of the block `{name}` of the block library `{written}` into line \
+             with its definition{reached}"
+        ),
+        _ => format!(
+            "brings the inserts of every block of the block library `{written}` into line with \
+             their definitions{reached}"
+        ),
+    };
+    let removed = match synced.removed.as_slice() {
+        [] if block_op == BlockOp::Add => String::new(),
+        [] => "; no insert gives a value for a tag its block no longer carries".to_owned(),
+        list => {
+            let each: Vec<String> = list
+                .iter()
+                .map(|r| {
+                    let place = match r.ids.as_slice() {
+                        [] => format!(
+                            "`{}` in `{}`",
+                            r.field,
+                            relative_to(&files.folder, Path::new(&r.record))
+                        ),
+                        ids => quoted_list(&ids.iter().map(String::as_str).collect::<Vec<_>>()),
+                    };
+                    format!("{} (`{}`) of {place}", r.tag, r.value)
+                })
+                .collect();
+            let s = if list.len() == 1 { "" } else { "s" };
+            format!(
+                "; removes {} attribute value{s} its block no longer carries: {}",
+                list.len(),
+                each.join(", ")
+            )
+        }
+    };
+    let names_of = files.names(&sheets);
+    let on = if names_of.is_empty() {
+        String::new()
+    } else {
+        let refs: Vec<&str> = names_of.iter().map(String::as_str).collect();
+        format!(
+            ", so on every sheet whose template names it: {}",
+            quoted_list(&refs)
+        )
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: None,
+            before,
+            after,
+            row_value: None,
+            ids_written: Vec::new(),
+            inserts: synced.inserts,
+            attributes_removed: synced.removed,
+            message: format!("{what}{removed}{on}"),
+        }),
+        sheets,
+        refuse: false,
+    }
+}
+
+/// What bringing inserts into line did.
+#[derive(Default)]
+struct Synced {
+    /// The inserts reached, by ID, in the set's order of sheets.
+    inserts: Vec<String>,
+    removed: Vec<AttributeRemoved>,
+}
+
+/// Brings every insert of each of `blocks`, of the block library `l`, into
+/// line with the block's definition as the library holds it now, as
+/// AutoCAD's ATTSYNC does: each value an insert gives for a tag its block
+/// no longer carries is removed, in the templates that name the library,
+/// in the rows of the sheets built from them, and in the library's own
+/// blocks. A new tag needs nothing written, since an insert that gives no
+/// value takes the definition's default.
+fn sync(
+    at: &mut Attempt,
+    l: usize,
+    blocks: &[String],
+    op: &Operation,
+) -> Result<Synced, Box<Applied>> {
+    let files = at.files;
+    let library = &files.libraries[l];
+    let fail = |e: Error| {
+        Box::new(Applied {
+            sheets: library.sheets.clone(),
+            outcome: Err(op_error(op.index, op.spec.name, e.code, e.message, "")),
+            refuse: false,
+        })
+    };
+    let record = at.library(l).map_err(fail)?;
+    let carried: Vec<(String, Vec<String>)> = blocks
+        .iter()
+        .map(|b| (b.clone(), record.block_carried_tags(b).unwrap_or_default()))
+        .collect();
+    let gone = |block: &str, tag: &str| {
+        carried
+            .iter()
+            .find(|(b, _)| b == block)
+            .is_some_and(|(_, tags)| !tags.iter().any(|t| t == tag))
+    };
+    let synced = |block: &str| carried.iter().any(|(b, _)| b == block);
+    // The blocks an insert on a sheet reaches through: these, and every
+    // block of the library that nests one of them, however deep, as the
+    // library holds them now. An insert of any of them draws as the
+    // definitions now do; only a direct insert of one of these has values
+    // to bring into line.
+    let nesting = record.block_inserts();
+    let mut reaching: Vec<&str> = blocks.iter().map(String::as_str).collect();
+    loop {
+        let before = reaching.len();
+        for (outer, insert) in &nesting {
+            if reaching.contains(&insert.block.as_str()) && !reaching.contains(&outer.as_str()) {
+                reaching.push(outer);
+            }
+        }
+        if reaching.len() == before {
+            break;
+        }
+    }
+    let reaches = |block: &str| reaching.contains(&block);
+    let mut reached: Vec<(usize, String)> = Vec::new();
+    let mut removed = Vec::new();
+
+    // The library's own blocks, whose definitions insert these.
+    let library_path = record.path.display().to_string();
+    let nested: Vec<(String, usize, String, String)> = record
+        .block_inserts()
+        .into_iter()
+        .filter(|(_, insert)| synced(&insert.block))
+        .flat_map(|(outer, insert)| {
+            let block = insert.block.clone();
+            insert
+                .values
+                .into_iter()
+                .filter(|(tag, _)| gone(&block, tag))
+                .map(move |(tag, value)| (outer.clone(), insert.index, tag, value))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for (outer, index, tag, value) in nested {
+        record
+            .remove_block_attribute(&outer, index, &tag)
+            .map_err(fail)?;
+        removed.push(AttributeRemoved {
+            record: library_path.clone(),
+            field: format!("blocks.{outer}.objects[{index}]"),
+            ids: Vec::new(),
+            tag,
+            value,
+        });
+    }
+
+    // Each template that names the library: its inserts are on every
+    // sheet built from it.
+    for &t in &library.templates {
+        let sheets = &files.templates[t].sheets;
+        let template = at.template(t).map_err(fail)?;
+        let listed = template.objects(ObjectList::Template);
+        let mut edits = Vec::new();
+        for insert in template.inserts(ObjectList::Template) {
+            if !reaches(&insert.block) {
+                continue;
+            }
+            let id = &listed[insert.index].id;
+            let ids: Vec<String> = sheets
+                .iter()
+                .map(|&k| format!("{}/{id}", files.name(k)))
+                .collect();
+            reached.extend(
+                sheets
+                    .iter()
+                    .map(|&k| (k, format!("{}/{id}", files.name(k)))),
+            );
+            for (tag, value) in insert.values {
+                if gone(&insert.block, &tag) {
+                    edits.push((insert.index, tag, value, ids.clone()));
+                }
+            }
+        }
+        if edits.is_empty() {
+            continue;
+        }
+        if let Some(refusal) = many_paths(files, FileRef::Template(t), op, "") {
+            return Err(Box::new(refusal));
+        }
+        let template = at.template(t).map_err(fail)?;
+        let path = template.path.display().to_string();
+        for (index, tag, value, ids) in edits {
+            template
+                .remove_attribute(ObjectList::Template, index, &tag, op.index)
+                .map_err(fail)?;
+            removed.push(AttributeRemoved {
+                record: path.clone(),
+                field: ObjectList::Template.place(index),
+                ids,
+                tag,
+                value,
+            });
+        }
+    }
+
+    // Each sheet's row's own inserts.
+    let rows_path = files.rows_path.display().to_string();
+    for &k in &library.sheets {
+        let list = ObjectList::Row(k);
+        let listed = at.rows.objects(list);
+        let mut edits = Vec::new();
+        for insert in at.rows.inserts(list) {
+            if !reaches(&insert.block) {
+                continue;
+            }
+            let id = format!("{}/{}", files.name(k), listed[insert.index].id);
+            reached.push((k, id.clone()));
+            for (tag, value) in insert.values {
+                if gone(&insert.block, &tag) {
+                    edits.push((insert.index, tag, value, id.clone()));
+                }
+            }
+        }
+        for (index, tag, value, id) in edits {
+            at.rows
+                .remove_attribute(list, index, &tag, op.index)
+                .map_err(fail)?;
+            removed.push(AttributeRemoved {
+                record: rows_path.clone(),
+                field: list.place(index),
+                ids: vec![id],
+                tag,
+                value,
+            });
+        }
+    }
+    reached.sort_by_key(|(k, _)| *k);
+    Ok(Synced {
+        inserts: reached.into_iter().map(|(_, id)| id).collect(),
+        removed,
+    })
+}
+
+/// The refusal of block operation `op` on the library `l` when the set's
+/// templates reach it by more than one path, as [`many_paths`] refuses an
+/// edit to a template so reached.
+fn library_many_paths(files: &SetFiles, l: usize, op: &Operation) -> Option<Applied> {
+    let library = &files.libraries[l];
+    if library.spellings.len() < 2 {
+        return None;
+    }
+    let listed: Vec<String> = library
+        .spellings
+        .iter()
+        .map(|path| format!("`{path}`"))
+        .collect();
+    let error = op_error(
+        op.index,
+        op.spec.name,
+        ErrorCode::BadValue,
+        format!(
+            "it edits a block library the templates reach by more than one path to one file: {}. \
+             A change set writes a library through one path, so a sheet that reaches it by \
+             another would not follow; write one path to the library in every template that \
+             names it, then send the change set again",
+            listed.join(", ")
+        ),
+        "library",
+    );
+    Some(Applied {
+        sheets: Vec::new(),
+        outcome: Err(error),
+        refuse: true,
+    })
 }
 
 /// The refusal of operation `op`, which edits `file`, when `file` is a
@@ -1535,7 +2109,21 @@ fn validate(
         Some(Err(e)) => return Err(e.clone()),
         None => template.text.clone()?,
     };
-    let (record, _) = template_at(
+    // The block library the template names, as the change set edited it.
+    let mut edited = Edited { library: None };
+    if let Some(l) = files.library_of[t] {
+        match &at.libraries[l] {
+            Some(Ok(file)) => {
+                if let Some(text) = file.new_text()? {
+                    edited.library = Some((l, files, text));
+                }
+            }
+            Some(Err(e)) => return Err(e.clone()),
+            None => {}
+        }
+    }
+    let (record, _) = template_in(
+        &edited,
         &text,
         &template.path,
         &rows[k],
@@ -1546,6 +2134,24 @@ fn validate(
     let dwg = files.dwg(k);
     writable(&dwg)?;
     prepare_sheet(&record, &template.path, &dwg, &files.mark, true, settings)
+}
+
+/// The files a sheet is read from while a change set is applied: the block
+/// library it edited, as edited, and every other file as it is on disk.
+struct Edited<'a> {
+    /// The library, the set's files and the library's new text.
+    library: Option<(usize, &'a SetFiles, String)>,
+}
+
+impl ReadFiles for Edited<'_> {
+    fn text(&self, path: &Path) -> io::Result<String> {
+        if let Some((l, files, text)) = &self.library {
+            if files.is_library(*l, path) {
+                return Ok(text.clone());
+            }
+        }
+        Disk.text(path)
+    }
 }
 
 /// Refuses a DWG that is there but cannot be written, such as one open in
@@ -1588,7 +2194,46 @@ fn attribute(
         error.file.as_deref().map(Path::new) == Some(files.templates[t].path.as_path());
     let field = error.field.clone().unwrap_or_default();
     let mut cause: Option<(usize, String)> = None;
-    if in_rows {
+    let in_library = files.library_of[t].filter(|&l| {
+        error
+            .file
+            .as_deref()
+            .is_some_and(|file| files.is_library(l, Path::new(file)))
+    });
+    if let (Some(l), Some(rest)) = (in_library, field.strip_prefix("blocks.")) {
+        // The block the error is in: the longest of the library's names
+        // the place starts with, since a name may hold a dot, as `A.B`,
+        // followed by nothing or by one of a block's own keys, so that a
+        // name such as `A.objects[0].line` is not taken for a place in `A`.
+        let names = match &at.libraries[l] {
+            Some(Ok(library)) => library.block_names(),
+            _ => Vec::new(),
+        };
+        let within = |name: &str| -> Option<String> {
+            let after = rest.strip_prefix(name)?;
+            if after.is_empty() {
+                return Some(String::new());
+            }
+            let within = after.strip_prefix('.')?;
+            let key = within.split(['.', '[']).next().unwrap_or_default();
+            ["base_point", "objects"]
+                .contains(&key)
+                .then(|| within.to_owned())
+        };
+        let block = names
+            .iter()
+            .filter(|name| within(name).is_some())
+            .max_by_key(|name| name.len());
+        // The last operation that wrote that block.
+        if let Some(block) = block {
+            cause = at
+                .blocks
+                .iter()
+                .rev()
+                .find(|(lib, name, _)| *lib == l && name == block)
+                .and_then(|(_, name, i)| within(name).map(|within| (*i, within)));
+        }
+    } else if in_rows {
         if let Some((list @ ObjectList::Row(_), index, rest)) = split_place(&field) {
             if let Some(i) = at.rows.blame(list, index, rest) {
                 cause = Some((i, rest.to_owned()));
@@ -1696,6 +2341,9 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
                 .is_some_and(|s| s == k || files.template_of[s] == files.template_of[k]),
             Target::Name { sheet: None, .. } => true,
         },
+        Body::Block { library, .. } => {
+            files.library(library.as_deref()).ok() == files.library_of[files.template_of[k]]
+        }
     }
 }
 
@@ -1782,6 +2430,9 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode) -> String {
         }
         Body::Move { .. } => "by".to_owned(),
         Body::Delete { .. } => String::new(),
+        // A place within the block it wrote, such as `objects[0].line.layer`,
+        // is that place in the operation.
+        Body::Block { .. } => rest.to_owned(),
         Body::SetAttribute { .. } => {
             if code == ErrorCode::UnknownName {
                 "tag".to_owned()
@@ -1795,11 +2446,20 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode) -> String {
 /// The error of a sheet that failed only because operation `op`, which it
 /// shares with sheet `cause`, could not land there.
 fn held_back(files: &SetFiles, op: &Operation, cause: usize, why: &Error) -> Error {
+    let (edits, lands) = match op.body {
+        Body::Block { .. } => (
+            "the block library this sheet's template names",
+            "an edit to a block library lands only if every sheet whose template names it",
+        ),
+        _ => (
+            "a template this sheet is built from",
+            "a template edit lands only if every sheet built from the template",
+        ),
+    };
     Error::new(
         ErrorCode::SharedEditFailed,
         format!(
-            "operation {} (`{}`) edits a template this sheet is built from, and a template edit \
-             lands only if every sheet built from the template takes its whole part; sheet `{}` \
+            "operation {} (`{}`) edits {edits}, and {lands} takes its whole part; sheet `{}` \
              could not, so it lands on none of them and this sheet was left as it was: {}",
             op.index,
             op.spec.name,
@@ -1909,6 +2569,10 @@ fn target_words(op: &Operation) -> String {
             to: AddTo::Sheet(s),
             ..
         } => format!("the {} `{name}` of sheet `{s}`'s template", table.word()),
+        Body::Block {
+            name: Some(name), ..
+        } => format!("the block `{name}`"),
+        Body::Block { name: None, .. } => "every block of the block library".to_owned(),
     }
 }
 

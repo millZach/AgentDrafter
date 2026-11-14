@@ -58,6 +58,9 @@ A sheet's template is the file its row's path names, as the file system resolves
 | `add_layer`, `change_layer`, `rename_layer`, `delete_layer` | `LAYER`, none, `RENAME`, `LAYDEL` | Adds, changes, renames or deletes a layer of a template. |
 | `add_linetype`, `change_linetype`, `rename_linetype`, `delete_linetype` | `LINETYPE`, none, none, none | The same for a linetype. |
 | `add_text_style`, `change_text_style`, `rename_text_style`, `delete_text_style` | `STYLE`, none, none, none | The same for a text style. |
+| `add_block` | `BLOCK` | Adds a block to a block library. |
+| `redefine_block` | `BEDIT` | Replaces a block's whole definition, and brings its inserts into line. |
+| `attsync` | `ATTSYNC` | Brings the inserts of a block, or of every block of a library, into line with its definition. |
 
 `agentdrafter operations` gives each with what it does and its JSON Schema (draft 2020-12), with the definitions it refers to, so an agent can check an operation before it sends it:
 
@@ -73,7 +76,7 @@ A sheet's template is the file its row's path names, as the file system resolves
 
 **`delete`** takes `target`.
 
-**Layers, linetypes and text styles.** Zach decided on 2026-11-13 how a change set edits a template's tables, which every sheet built from it shares. Each operation names its template by `template`, its path as the rows write it, or by `sheet`, a sheet built from it, and the entry by `name`, written exactly as the template writes it. Like any template edit it reaches every sheet built from the template, all or nothing, and the reply lists them. The block library's layers are not edited here; that waits for the block operations ([#69](https://github.com/millZach/AgentDrafter/issues/69)).
+**Layers, linetypes and text styles.** Zach decided on 2026-11-13 how a change set edits a template's tables, which every sheet built from it shares. Each operation names its template by `template`, its path as the rows write it, or by `sheet`, a sheet built from it, and the entry by `name`, written exactly as the template writes it. Like any template edit it reaches every sheet built from the template, all or nothing, and the reply lists them. The block library's own layers, linetypes and text styles are not edited here, nor by the [block operations](#blocks).
 
 - **`add_layer`** (`LAYER`), **`add_linetype`** (`LINETYPE`) and **`add_text_style`** (`STYLE`) take `name` and the keys the entry takes in a [sheet description](sheet-description.md#layers), such as `color` and `plot` for a layer or `pattern` for a linetype. A name the template has already, in any case, or a drawing's own, is `duplicate_name`.
 - **`change_layer`**, **`change_linetype`** and **`change_text_style`** take `name` and `set`, each key to its new value; `null` takes a key away. Layer `0` and `Standard` can be changed even where the template does not write them; `Standard` written for the first time takes the drawing's own font, `txt.shx`, unless `set` gives one. `Continuous`, `ByLayer` and `ByBlock` are AutoCAD's own linetypes and are not changed.
@@ -86,6 +89,24 @@ The table is written again whole, one entry to a line in braces, where the templ
 **A locked layer.** An object whose layer is `locked` is not edited: `change`, `move`, `delete` and `set_attribute` on it are refused with `locked`, naming the layer, as AutoCAD will not edit it. A row's value is not set either when any place on the sheet it fills, such as a heading, is on a locked layer; that refusal reaches only that sheet. An object can still be added onto a locked layer, as in AutoCAD. To edit one, unlock its layer first with `change_layer`, `set: {"locked": false}` or `null`, in the same change set or an earlier one.
 
 **`set_attribute`** takes `target`, an insert, `tag` and `value`, one line of text. An attribute the insert leaves out is added. When the insert's template takes the attribute from the row, the sheet's row value is set instead (decision 5), and the reply's `row_value` names the value and every place on the sheet it fills: the demo set's `TITLE` fills both the title block's `TITLE` and the heading's contents.
+
+### Blocks
+
+Zach decided on 2026-11-13 how a change set defines and redefines the blocks of a [block library](block-library.md), as AutoCAD's BLOCK, BEDIT and ATTSYNC do.
+
+- **`add_block`** (`BLOCK`) takes `name` and the block's definition as a block library writes it: `objects`, at least one, each a mapping with one key, its type, the objects a sheet holds, inserts of the library's other blocks and attribute definitions (`attdef`) among them, and `base_point`, `[0, 0, 0]` when left out. Lengths are in the set's declared unit, as the library is, or carry their own. A name the library has already, in any case, is `duplicate_name`, since AutoCAD ignores case in names.
+- **`redefine_block`** (`BEDIT`) takes the same keys and replaces the block's whole definition, the base point and the full list of objects: what it leaves out is gone, and a `base_point` left out is `[0, 0, 0]`. A name the library does not have, written exactly as it writes it, is `unknown_name`, and the error lists the library's blocks. As it lands it brings every insert of the block into line, as `attsync` does.
+- **`attsync`** (`ATTSYNC`) brings the inserts of the block `name`, or of every block of the library when `name` is left out, into line with the block's definition as the library writes it now, such as after the library was edited by hand. It writes nothing when every insert is in line already.
+
+**Naming the library.** A block operation names its library by `library`, its path relative to the set's folder, as the rows write a template's path, such as `blocks.yaml`. It may be left out when every template of the set names the same library, as in the demo set. The set's libraries are the ones its templates name under `block_library`; two templates that name one file are one library. A `library` the templates do not name is `unknown_name`, and one left out while they name more than one is `missing_key`; each error lists the set's libraries by their paths in the set, and refuses the change set whole. A library the templates reach by more than one path to one file, such as a link and the file it links to, is refused whole as a template so reached is.
+
+**Reach.** An edit to a library reaches every sheet whose template names it, all or nothing, as a template edit reaches every sheet built from the template: each is read back with the library as edited and built, a sheet that fails holds the operation back on every other sheet, with `shared_edit_failed`, and a sheet whose DWG comes out byte for byte the same is not written again. A block the library cannot read, such as one whose object names a layer the library does not define, fails every one of those sheets, and the error is placed in the operation that wrote the block, at the key within it, such as `operations[0].objects[0].line.layer`.
+
+**Bringing inserts into line.** An insert carries a value for each tag its block carries: each of its attribute definitions' tags but a constant one's. A value an insert gives for a tag its block no longer carries, because the block no longer defines the tag or now defines it constant, is removed from the insert's record, as AutoCAD's ATTSYNC removes it: from the inserts of the templates that name the library, from the rows' own inserts of the sheets built from them, and from the inserts nested in the library's other blocks. A value the template takes from the row, `{row: REV}`, is removed from the template in the same way; the row's value stays in the row. An insert left with no value loses its `attributes`. A new tag needs nothing written: an insert that gives no value takes the definition's default. An insert stores no place for its attributes, so nothing else needs bringing into line. `agentdrafter undo` puts every value removed back, with the library, byte for byte.
+
+The reply's operation lists the inserts it reached under `inserts`, by ID, on every sheet it reaches, an insert of a template on every sheet built from it: each insert of the block, and each insert of a block that nests it, however deep, which draws as the new definition does though it has no values of the block's to bring into line; and each value it removed under `attributes_removed`: the `record`, the insert's place in it under `field`, such as `objects[2]`, `rows[1].objects[0]` or, for an insert nested in another block, `blocks.STAMP.objects[0]`, its IDs on the sheets (none for an insert in a block), the `tag`, and the `value` as the record wrote it, such as `B` or `{row: REV}`. The journal entry marks each insert reached as changed, so the viewer shows it. The operation's `before` and `after` are the block as the library writes it, on one line.
+
+The library is written as a template's objects are: the block an operation sets is written again whole, a key to a line, its base point in brackets and its objects an item to a line, in the place of its entry, and a block added goes after the library's last; a library whose blocks are written `{}` takes its first block a key to a line under `blocks:`. A block that only lost a nested insert's value is written again the same way. Every other block, comment and byte of the library stays as it was; a comment inside a block written again is lost.
 
 ## IDs stay put
 
@@ -136,7 +157,7 @@ failures:
 | `message` | What the change set did, in words. |
 | `landed`, `failed` | How many sheets took their part, and how many did not. |
 | `sheets` | Each sheet the change set touched, in the set's order: whether it took its part, the operations that were its part, whether it was cleared from the mark (`fixed`), whether its DWG was written, what its build wrote (`result`, as `build` reports a sheet), and why it failed (`error`). |
-| `operations` | Each operation, in the order sent: whether it landed, what it does in words, the sheets it reaches, the record it writes, the object's ID, the object as its record writes it `before` and `after`, the row value it sets (`row_value`), the IDs it wrote (`ids_written`), and why it did not land (`error`). |
+| `operations` | Each operation, in the order sent: whether it landed, what it does in words, the sheets it reaches, the record it writes, the object's ID, the object as its record writes it `before` and `after`, the row value it sets (`row_value`), the IDs it wrote (`ids_written`), the inserts a block operation brought into line (`inserts`) and the attribute values it removed (`attributes_removed`, [Blocks](#blocks)), and why it did not land (`error`). |
 | `records` | The records written, or that a dry run would write. |
 | `inconsistent` | The set's mark as it stands after the change set, or would after a dry run; absent when the set is consistent. |
 | `checks` | The [checker](check.md)'s reply on the sheets the change set landed on, read back from their saved files once they were written: `{"ok": true, "result": {...}}`, with each failed check under `findings`. A failed check does not stop a change set from landing, and does not make its reply not `ok`. Absent for a dry run, which saves nothing to read back, and when no sheet took its part. |
@@ -153,14 +174,14 @@ An error from an operation names it, `operation 1 (`add_circle`)`, and the sheet
 
 | Code | In a change set it means |
 |---|---|
-| `unknown_name` | No operation, sheet, template, ID or name of that name; or a layer, text style, block or attribute tag the sheet does not have. |
+| `unknown_name` | No operation, sheet, template, ID or name of that name; or a layer, text style, block or attribute tag the sheet does not have; or a block library the set's templates do not name, or a block it does not have. |
 | `unknown_key` | A key the change set, an operation or the object's type does not take. |
-| `missing_key`, `wrong_type`, `bad_number`, `bad_value` | As in a sheet description, for an operation's keys or the object it writes. `bad_value` also: a name with no sheet on more than one sheet, a `change` of an `id`, `fixes` naming a sheet the mark does not hold. |
+| `missing_key`, `wrong_type`, `bad_number`, `bad_value` | As in a sheet description, for an operation's keys or the object it writes. `missing_key` also: a block operation with no `library` when the set's templates name more than one. `bad_value` also: a name with no sheet on more than one sheet, a `change` of an `id`, `fixes` naming a sheet the mark does not hold. |
 | `usage` | An add given both `sheet` and `template`, or a target given both an ID and a name. |
-| `duplicate_id`, `duplicate_name` | An `id` or a name the sheet has already, the template's and the row's objects together; or a layer, linetype or text style the template has already. |
+| `duplicate_id`, `duplicate_name` | An `id` or a name the sheet has already, the template's and the row's objects together; or a layer, linetype or text style the template has already; or a block the block library has already. |
 | `locked` | An edit to an object on a locked layer. |
 | `in_use` | A delete of a layer, linetype or text style that something still uses. |
-| `shared_edit_failed` | The sheet was left as it was because a template edit in its part could not land on another sheet built from the same template. |
+| `shared_edit_failed` | The sheet was left as it was because a template edit in its part could not land on another sheet built from the same template, or an edit to a block library on another sheet whose template names it. |
 | `not_a_build`, `write_failed` | The sheet's DWG is not one AgentDrafter built, or cannot be written. |
 | `sheets_failed` | Some sheets failed and were left as they were; the others took their part. |
 | `read_failed` | A file of the set, or the mark, cannot be read. |
@@ -178,7 +199,7 @@ Only what an operation touched is rewritten. Each record is read into the strict
 - Failed checks in a dry run: the [checker](check.md) reads saved files, and a dry run saves none.
 - Revising an existing DWG: a change set edits a drawing set's records, not an original.
 - Change sets on a sheet description outside a drawing set.
-- Operations on the set's other parts: hatch patterns, blocks and the block library's own layers ([#69](https://github.com/millZach/AgentDrafter/issues/69)), rows and their values directly, and a sheet's template.
+- Operations on the set's other parts: hatch patterns, the block library's own layers, linetypes and text styles, renaming or deleting a block, rows and their values directly, and a sheet's template.
 - Choosing where in its list an added object goes; it is drawn after the others.
 - Moving an object from a template to a row, or the reverse.
 - The MCP server, the Python library and the HTTP API ([#14](https://github.com/millZach/AgentDrafter/issues/14)), which will reach the same core entry point.
