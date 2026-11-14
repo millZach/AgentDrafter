@@ -612,16 +612,22 @@ impl RecordFile {
         }
         let blocks = mapping_entry(&self.root, BLOCKS_KEY);
         // Blocks written `{}` take their first block a key to a line in
-        // their place; blocks written in braces that hold any are not
-        // rewritten.
-        let in_braces = blocks
+        // their place; blocks written in braces that hold any, or anything
+        // but spaces and line breaks, such as a comment, are not rewritten,
+        // so that nothing the file wrote is lost.
+        let braces = blocks
             .and_then(|b| b.source)
-            .is_some_and(|s| s.style == Style::Flow);
+            .filter(|s| s.style == Style::Flow);
         let any_written = matches!(
             blocks.map(|b| &b.kind),
             Some(Kind::Mapping(entries)) if entries.iter().any(|e| e.key_end > 0)
         );
-        if in_braces && any_written {
+        let only_braces = braces.is_some_and(|s| {
+            self.text[s.start..s.end]
+                .chars()
+                .all(|c| c == '{' || c == '}' || c.is_whitespace())
+        });
+        if braces.is_some() && (any_written || !only_braces) {
             return Err(self.cannot_write("its blocks are written in braces"));
         }
         let lines = match blocks.map(|b| &b.kind) {

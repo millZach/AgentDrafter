@@ -523,3 +523,21 @@ blocks:
 "
     );
 }
+
+/// Blocks written in braces that hold a comment are not rewritten, so the
+/// comment is not lost: the add is refused and nothing is written.
+#[test]
+fn a_library_whose_empty_braces_hold_a_comment_is_not_rewritten() {
+    let text = "units: in\nblocks: { # kept\n  }\n";
+    let mut record = file(text);
+    let added = record
+        .block_set(
+            "BADGE",
+            None,
+            &[json!({"circle": {"center": [0, 0, 0], "radius": 1}})],
+        )
+        .and_then(|()| record.new_text().map(|_| ()));
+    let e = added.unwrap_err();
+    assert_eq!(e.code, crate::error::ErrorCode::WriteFailed, "{e:?}");
+    assert!(e.message.contains("written in braces"), "{}", e.message);
+}

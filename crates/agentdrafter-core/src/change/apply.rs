@@ -2202,18 +2202,23 @@ fn attribute(
     });
     if let (Some(l), Some(rest)) = (in_library, field.strip_prefix("blocks.")) {
         // The block the error is in: the longest of the library's names
-        // the place starts with, since a name may hold a dot, as `A.B`.
+        // the place starts with, since a name may hold a dot, as `A.B`,
+        // followed by nothing or by one of a block's own keys, so that a
+        // name such as `A.objects[0].line` is not taken for a place in `A`.
         let names = match &at.libraries[l] {
             Some(Ok(library)) => library.block_names(),
             _ => Vec::new(),
         };
         let within = |name: &str| -> Option<String> {
             let after = rest.strip_prefix(name)?;
-            match after.strip_prefix('.') {
-                Some(within) => Some(within.to_owned()),
-                None if after.is_empty() => Some(String::new()),
-                None => None,
+            if after.is_empty() {
+                return Some(String::new());
             }
+            let within = after.strip_prefix('.')?;
+            let key = within.split(['.', '[']).next().unwrap_or_default();
+            ["base_point", "objects"]
+                .contains(&key)
+                .then(|| within.to_owned())
         };
         let block = names
             .iter()

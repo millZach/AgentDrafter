@@ -2366,3 +2366,36 @@ fn add_block_refuses_a_name_the_library_has_in_another_case_beyond_ascii() {
     assert_eq!(e.field.as_deref(), Some("operations[0].name"));
     assert!(e.message.contains("`ÉQUIPE` already"), "{}", e.message);
 }
+
+/// A block whose name reads as a place in another block, such as
+/// `A.objects[0].line`, does not take the blame for an error in that other
+/// block's own objects.
+#[test]
+fn an_error_in_a_block_is_not_placed_in_a_block_whose_name_reads_as_its_place() {
+    let set = demo_set("place-like-names");
+    append(
+        &set.join("blocks.yaml"),
+        "  A:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 1}
+  A.objects[0].line:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 1}
+",
+    );
+    rebuild(&set);
+    let reply = apply(
+        &set,
+        json!({"operations": [
+            {"op": "redefine_block", "name": "A", "objects": [{"line": {"from": [0, 0, 0], "to": [1, 0, 0], "layer": "nope"}}]}
+        ]}),
+    );
+    let report = reply.result.unwrap();
+    let e = report.operations[0].error.clone().unwrap();
+    assert_eq!(e.code, ErrorCode::UnknownName);
+    assert_eq!(
+        e.field.as_deref(),
+        Some("operations[0].objects[0].line.layer"),
+        "{e:#?}"
+    );
+}
