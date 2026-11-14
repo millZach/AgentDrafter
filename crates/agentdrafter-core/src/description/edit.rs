@@ -611,10 +611,17 @@ impl RecordFile {
             return Ok(());
         }
         let blocks = mapping_entry(&self.root, BLOCKS_KEY);
-        if blocks
+        // Blocks written `{}` take their first block a key to a line in
+        // their place; blocks written in braces that hold any are not
+        // rewritten.
+        let in_braces = blocks
             .and_then(|b| b.source)
-            .is_some_and(|s| s.style == Style::Flow)
-        {
+            .is_some_and(|s| s.style == Style::Flow);
+        let any_written = matches!(
+            blocks.map(|b| &b.kind),
+            Some(Kind::Mapping(entries)) if entries.iter().any(|e| e.key_end > 0)
+        );
+        if in_braces && any_written {
             return Err(self.cannot_write("its blocks are written in braces"));
         }
         let lines = match blocks.map(|b| &b.kind) {
@@ -685,6 +692,26 @@ impl RecordFile {
             return Err(record_shape_in("a mapping under `blocks`", &self.path));
         };
         let nl = self.newline;
+        // Blocks the file wrote `{}`: every block is new, written a key to
+        // a line under `blocks:` in place of the braces.
+        let root_entry = match &self.root.kind {
+            Kind::Mapping(root) => root.iter().find(|e| e.key == BLOCKS_KEY && e.key_end > 0),
+            _ => None,
+        };
+        if let Some(entry) = root_entry {
+            if let Some(source) = entry.value.source.filter(|s| s.style == Style::Flow) {
+                let column = entry.key_at.column.saturating_sub(1) + 2;
+                let mut with = format!(":{nl}");
+                for edit in &self.blocks {
+                    if let Some(block) = entries.iter().find(|e| e.key == edit.name) {
+                        with.push_str(&self.block_lines(&edit.name, &block.value, column));
+                    }
+                }
+                with.truncate(with.len() - nl.len());
+                splices.push((entry.key_end, source.end, with));
+                return Ok(());
+            }
+        }
         // The end of the last block the file wrote, and the column of its
         // blocks' names.
         let written: Vec<(usize, usize)> = entries

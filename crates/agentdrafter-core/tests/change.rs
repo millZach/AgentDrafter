@@ -2095,7 +2095,9 @@ fn attsync_brings_inserts_into_line_with_a_library_edited_by_hand() {
     );
     assert_eq!(report.landed, 3);
     let outcome = &report.operations[0];
-    assert_eq!(outcome.inserts, ["DEMO-001/mark"]);
+    // DEMO-003's STAMP nests MARK, so it is reached too, with no value of
+    // its own to remove.
+    assert_eq!(outcome.inserts, ["DEMO-001/mark", "DEMO-003/stamp"]);
     let removed: Vec<(&str, &[String], &str, &str)> = outcome
         .attributes_removed
         .iter()
@@ -2200,4 +2202,167 @@ fn a_block_operation_names_its_library_when_the_set_has_more_than_one() {
     assert!(!fs::read_to_string(set.join("blocks.yaml"))
         .unwrap()
         .contains("BADGE"));
+}
+
+/// An insert of a block that nests the redefined block, however deep, on a
+/// template or in a row, draws as the new definition does: it is reached,
+/// listed under `inserts`, and marked changed in the journal.
+#[test]
+fn a_redefinition_reaches_the_inserts_of_every_block_that_nests_it() {
+    let set = demo_set("nested-reach");
+    append(
+        &set.join("blocks.yaml"),
+        "  INNER:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 0.2}
+  OUTER:
+    objects:
+      - insert: {block: INNER, position: [0, 0, 0]}
+  TOP:
+    objects:
+      - insert: {block: OUTER, position: [1, 0, 0]}
+",
+    );
+    append(
+        &set.join("templates").join("ansi-b.yaml"),
+        "  - insert: {block: OUTER, position: [3, 3, 0], id: outer}\n",
+    );
+    rebuild(&set);
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "INSERT", "sheet": "DEMO-002", "block": "TOP", "position": [6, 3, 0], "id": "top"}
+        ]}),
+    );
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "redefine_block", "name": "INNER", "objects": [{"circle": {"center": [0, 0, 0], "radius": 0.4}}]}
+        ]}),
+    );
+    let outcome = &report.operations[0];
+    assert_eq!(
+        outcome.inserts,
+        [
+            "DEMO-001/outer",
+            "DEMO-002/outer",
+            "DEMO-002/top",
+            "DEMO-003/outer"
+        ]
+    );
+    assert!(
+        outcome.message.contains("reaching 4 inserts"),
+        "{}",
+        outcome.message
+    );
+    let journal = agentdrafter_core::journal(&JournalRequest { set: set.clone() })
+        .result
+        .unwrap();
+    let recorded = &journal
+        .entries
+        .iter()
+        .find(|e| Some(e.recorded.entry) == report.journal_entry)
+        .unwrap()
+        .recorded;
+    let changed: Vec<&str> = recorded.objects.iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(changed, outcome.inserts);
+}
+
+/// The block schema takes exactly what the block library's reader takes:
+/// a block's objects carry no `id` or `name`, which only a sheet's do.
+#[test]
+fn a_block_operations_schema_refuses_an_id_or_a_name_on_a_blocks_object() {
+    let set = demo_set("block-object-ids");
+    let listed = operations();
+    let objects = [
+        json!({"line": {"from": [0, 0, 0], "to": [1, 0, 0]}}),
+        json!({"circle": {"center": [0, 0, 0], "radius": 1}}),
+        json!({"text": {"contents": "A", "position": [0, 0, 0], "height": 1}}),
+        json!({"attdef": {"tag": "CODE", "position": [0, 0, 0], "height": 1}}),
+        json!({"insert": {"block": "TITLE_BLOCK", "position": [0, 0, 0]}}),
+    ];
+    let library_schema =
+        jsonschema::validator_for(&agentdrafter_core::block_library_schema()).unwrap();
+    for op in ["add_block", "redefine_block"] {
+        let info = listed.operations.iter().find(|o| o.name == op).unwrap();
+        let validator = jsonschema::validator_for(&info.schema).unwrap();
+        let name = if op == "add_block" {
+            "BADGE"
+        } else {
+            "TITLE_BLOCK"
+        };
+        for object in &objects {
+            let plain = json!({"op": op, "name": name, "objects": [object]});
+            assert!(validator.is_valid(&plain), "{op} takes {plain}");
+            for key in ["id", "name"] {
+                let mut with = object.clone();
+                let kind = with.as_object().unwrap().keys().next().unwrap().clone();
+                with[&kind][key] = json!("x");
+                let sent = json!({"op": op, "name": name, "objects": [with.clone()]});
+                assert!(!validator.is_valid(&sent), "{op}'s schema takes {sent}");
+                let reply = dry_run(&set, json!({"operations": [sent]}));
+                assert!(!reply.ok, "the change set takes {with}");
+                let library = json!({"units": "in", "blocks": {"B": {"objects": [with]}}});
+                assert!(
+                    !library_schema.is_valid(&library),
+                    "the library's schema takes {library}"
+                );
+            }
+        }
+    }
+}
+
+/// An error in the block `A.B` is placed in the operation that wrote
+/// `A.B`, not the one that wrote `A`.
+#[test]
+fn an_error_in_a_block_whose_name_holds_a_dot_is_placed_in_its_own_operation() {
+    let set = demo_set("dotted-names");
+    append(
+        &set.join("blocks.yaml"),
+        "  A:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 1}
+  A.B:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 1}
+",
+    );
+    rebuild(&set);
+    let reply = apply(
+        &set,
+        json!({"operations": [
+            {"op": "redefine_block", "name": "A.B", "objects": [{"line": {"from": [0, 0, 0], "to": [1, 0, 0], "layer": "nope"}}]},
+            {"op": "redefine_block", "name": "A", "objects": [{"circle": {"center": [0, 0, 0], "radius": 2}}]}
+        ]}),
+    );
+    let report = reply.result.unwrap();
+    let e = report.operations[0].error.clone().unwrap();
+    assert_eq!(e.code, ErrorCode::UnknownName);
+    assert_eq!(
+        e.field.as_deref(),
+        Some("operations[0].objects[0].line.layer"),
+        "{e:#?}"
+    );
+}
+
+/// A name the library has in another case, by the reader's own rule for
+/// case, is a duplicate, beyond ASCII too.
+#[test]
+fn add_block_refuses_a_name_the_library_has_in_another_case_beyond_ascii() {
+    let set = demo_set("non-ascii-case");
+    append(
+        &set.join("blocks.yaml"),
+        "  ÉQUIPE:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 1}
+",
+    );
+    rebuild(&set);
+    let e = failed_operation(
+        &set,
+        json!({"operations": [{"op": "add_block", "name": "équipe", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1}}]}]}),
+    );
+    assert_eq!(e.code, ErrorCode::DuplicateName);
+    assert_eq!(e.field.as_deref(), Some("operations[0].name"));
+    assert!(e.message.contains("`ÉQUIPE` already"), "{}", e.message);
 }

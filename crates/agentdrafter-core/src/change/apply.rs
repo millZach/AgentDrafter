@@ -33,9 +33,9 @@ use super::{
 };
 use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::{
-    article, library_named, mark_text, read_file, read_set_settings, rows_at, template_at,
-    template_in, template_path, AttributeSet, Disk, Listed, MarkFailure, ObjectList, ReadFiles,
-    RecordFile, Row, ID_SEPARATOR,
+    article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
+    template_at, template_in, template_path, AttributeSet, Disk, Listed, MarkFailure, ObjectList,
+    ReadFiles, RecordFile, Row, ID_SEPARATOR,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -1583,7 +1583,7 @@ fn apply_block(
     let mut before = None;
     let to_sync: Vec<String> = match (block_op, name) {
         (BlockOp::Add, Some(name)) => {
-            if let Some(same) = names.iter().find(|n| n.eq_ignore_ascii_case(name)) {
+            if let Some(same) = names.iter().find(|n| one_name(n, name)) {
                 return fail(op_err(
                     ErrorCode::DuplicateName,
                     format!(
@@ -1748,6 +1748,25 @@ fn sync(
             .is_some_and(|(_, tags)| !tags.iter().any(|t| t == tag))
     };
     let synced = |block: &str| carried.iter().any(|(b, _)| b == block);
+    // The blocks an insert on a sheet reaches through: these, and every
+    // block of the library that nests one of them, however deep, as the
+    // library holds them now. An insert of any of them draws as the
+    // definitions now do; only a direct insert of one of these has values
+    // to bring into line.
+    let nesting = record.block_inserts();
+    let mut reaching: Vec<&str> = blocks.iter().map(String::as_str).collect();
+    loop {
+        let before = reaching.len();
+        for (outer, insert) in &nesting {
+            if reaching.contains(&insert.block.as_str()) && !reaching.contains(&outer.as_str()) {
+                reaching.push(outer);
+            }
+        }
+        if reaching.len() == before {
+            break;
+        }
+    }
+    let reaches = |block: &str| reaching.contains(&block);
     let mut reached: Vec<(usize, String)> = Vec::new();
     let mut removed = Vec::new();
 
@@ -1788,7 +1807,7 @@ fn sync(
         let listed = template.objects(ObjectList::Template);
         let mut edits = Vec::new();
         for insert in template.inserts(ObjectList::Template) {
-            if !synced(&insert.block) {
+            if !reaches(&insert.block) {
                 continue;
             }
             let id = &listed[insert.index].id;
@@ -1836,7 +1855,7 @@ fn sync(
         let listed = at.rows.objects(list);
         let mut edits = Vec::new();
         for insert in at.rows.inserts(list) {
-            if !synced(&insert.block) {
+            if !reaches(&insert.block) {
                 continue;
             }
             let id = format!("{}/{}", files.name(k), listed[insert.index].id);
@@ -2182,20 +2201,33 @@ fn attribute(
             .is_some_and(|file| files.is_library(l, Path::new(file)))
     });
     if let (Some(l), Some(rest)) = (in_library, field.strip_prefix("blocks.")) {
-        // The last operation that wrote the block the error is in.
-        cause = at
-            .blocks
+        // The block the error is in: the longest of the library's names
+        // the place starts with, since a name may hold a dot, as `A.B`.
+        let names = match &at.libraries[l] {
+            Some(Ok(library)) => library.block_names(),
+            _ => Vec::new(),
+        };
+        let within = |name: &str| -> Option<String> {
+            let after = rest.strip_prefix(name)?;
+            match after.strip_prefix('.') {
+                Some(within) => Some(within.to_owned()),
+                None if after.is_empty() => Some(String::new()),
+                None => None,
+            }
+        };
+        let block = names
             .iter()
-            .rev()
-            .filter(|(lib, _, _)| *lib == l)
-            .find_map(|(_, name, i)| {
-                let within = rest.strip_prefix(name.as_str())?;
-                match within.strip_prefix('.') {
-                    Some(within) => Some((*i, within.to_owned())),
-                    None if within.is_empty() => Some((*i, String::new())),
-                    None => None,
-                }
-            });
+            .filter(|name| within(name).is_some())
+            .max_by_key(|name| name.len());
+        // The last operation that wrote that block.
+        if let Some(block) = block {
+            cause = at
+                .blocks
+                .iter()
+                .rev()
+                .find(|(lib, name, _)| *lib == l && name == block)
+                .and_then(|(_, name, i)| within(name).map(|within| (*i, within)));
+        }
     } else if in_rows {
         if let Some((list @ ObjectList::Row(_), index, rest)) = split_place(&field) {
             if let Some(i) = at.rows.blame(list, index, rest) {

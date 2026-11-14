@@ -497,3 +497,29 @@ fn a_templates_attribute_value_is_removed_and_its_row_reference_with_it() {
     assert!(new.is_empty(), "{new:?}");
     assert_eq!(gone, ["        REV: {row: REV}", "        DRAWN: AD"]);
 }
+
+/// A library whose blocks are written `{}` takes its first block, written
+/// a key to a line in their place.
+#[test]
+fn the_first_block_of_a_library_written_empty_in_braces_is_added() {
+    let text = "# a made-up library\nunits: in\nblocks: {}\n# tail\n";
+    let mut record = file(text);
+    record
+        .block_set(
+            "BADGE",
+            None,
+            &[json!({"circle": {"center": [0, 0, 0], "radius": 1}})],
+        )
+        .unwrap();
+    assert_eq!(
+        record.new_text().unwrap().unwrap(),
+        "# a made-up library
+units: in
+blocks:
+  BADGE:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 1}
+# tail
+"
+    );
+}

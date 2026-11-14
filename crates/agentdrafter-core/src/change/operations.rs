@@ -479,44 +479,36 @@ fn definitions() -> Map<String, Value> {
 }
 
 /// Adds the block library's definition of a block to `defs`, as
-/// `block_definition`, with its text and attribute definitions, which take
-/// a cell as a sheet's do not, as `block_text` and `block_attdef`, and the
-/// cell.
+/// `block_definition`, with each object a block holds as the library's
+/// schema defines it, under `block_` and its type, such as `block_line`,
+/// and the cell. A block's objects differ from a sheet's: they carry no
+/// `id` or `name`, and a text or an attribute definition takes a cell.
 fn add_block_definitions(defs: &mut Map<String, Value>) {
     let mut library = match block_library_schema()["$defs"].take() {
         Value::Object(defs) => defs,
         _ => Map::new(),
     };
     let mut block = library.remove("block").unwrap_or(Value::Null);
-    renamed_refs(&mut block);
-    defs.insert("block_definition".into(), block);
-    for (name, own) in [
-        ("text", "block_text"),
-        ("attdef", "block_attdef"),
-        ("cell", "cell"),
-    ] {
-        if let Some(def) = library.remove(name) {
-            defs.insert(own.into(), def);
+    let mut types = Vec::new();
+    if let Some(choices) = block["properties"]["objects"]["items"]["oneOf"].as_array_mut() {
+        for choice in choices {
+            let Some(properties) = choice["properties"].as_object_mut() else {
+                continue;
+            };
+            for (kind, object) in properties.iter_mut() {
+                object["$ref"] = Value::String(format!("#/$defs/block_{kind}"));
+                types.push(kind.clone());
+            }
         }
     }
-}
-
-/// Points each reference in `value` to a block's text or attribute
-/// definition at the block's own, which takes a cell.
-fn renamed_refs(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            if let Some(Value::String(target)) = map.get_mut("$ref") {
-                match target.as_str() {
-                    "#/$defs/text" => *target = "#/$defs/block_text".into(),
-                    "#/$defs/attdef" => *target = "#/$defs/block_attdef".into(),
-                    _ => {}
-                }
-            }
-            map.values_mut().for_each(renamed_refs);
+    defs.insert("block_definition".into(), block);
+    for kind in types {
+        if let Some(def) = library.remove(&kind) {
+            defs.insert(format!("block_{kind}"), def);
         }
-        Value::Array(items) => items.iter_mut().for_each(renamed_refs),
-        _ => {}
+    }
+    if let Some(cell) = library.remove("cell") {
+        defs.insert("cell".into(), cell);
     }
 }
 

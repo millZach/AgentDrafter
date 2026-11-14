@@ -23,7 +23,7 @@ mod hatch;
 mod hatch_schema;
 pub(crate) mod ids;
 mod layers;
-pub(crate) use layers::{LAYER_KEYS, LINETYPE_KEYS};
+pub(crate) use layers::{one_name, LAYER_KEYS, LINETYPE_KEYS};
 mod mark;
 mod objects;
 pub(crate) mod paper;
