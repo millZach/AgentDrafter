@@ -121,15 +121,21 @@ pub(super) fn dwg_attribute_definition(
     dwg.vertical_alignment = vertical;
     dwg.flags = AttributeFlags {
         invisible: definition.invisible,
+        constant: definition.constant,
+        verify: definition.verify,
+        preset: definition.preset,
         ..AttributeFlags::default()
     };
+    // AutoCAD keeps Lock position in a bit of its own, not among the flags.
+    dwg.lock_position = definition.lock_position;
     definition.layer.clone_into(&mut dwg.common.layer);
     super::set_properties(&mut dwg.common, &definition.properties);
     dwg
 }
 
 /// The DWG insert for one of ours, of `block`, with an attribute for each
-/// of the block's attribute definitions.
+/// of the block's attribute definitions but the constant ones, which the
+/// block's definition draws, as AutoCAD writes an insert.
 pub(super) fn dwg_insert(
     insert: &Insert,
     block: &Block,
@@ -138,7 +144,7 @@ pub(super) fn dwg_insert(
     let mut dwg = DwgInsert::new(insert.block.clone(), vector(insert.position))
         .with_uniform_scale(insert.scale)
         .with_rotation(insert.rotation.to_radians());
-    let definitions: Vec<&AttributeDefinition> = block.attribute_definitions().collect();
+    let definitions: Vec<&AttributeDefinition> = block.carried_attributes().collect();
     let tags: Vec<&str> = insert.attributes.iter().map(|a| a.tag.as_str()).collect();
     if tags
         != definitions
@@ -167,10 +173,8 @@ pub(super) fn dwg_insert(
         dwg_attribute.text_style.clone_from(&text.style);
         dwg_attribute.horizontal_alignment = horizontal;
         dwg_attribute.vertical_alignment = vertical;
-        dwg_attribute.flags = AttributeFlags {
-            invisible: definition.invisible,
-            ..AttributeFlags::default()
-        };
+        dwg_attribute.flags = attribute_flags(definition);
+        dwg_attribute.lock_position = definition.lock_position;
         super::set_properties(&mut dwg_attribute.common, &text.properties);
         dwg_attribute.common.layer = text.layer;
         dwg.attributes.push(dwg_attribute);
@@ -231,6 +235,10 @@ pub(super) fn read_attribute_definition(
         rotation: normalize_degrees(dwg.rotation.to_degrees()),
         justify,
         invisible: dwg.flags.invisible,
+        constant: dwg.flags.constant,
+        verify: dwg.flags.verify,
+        preset: dwg.flags.preset,
+        lock_position: dwg.lock_position,
         layer,
         properties: Default::default(),
     })
@@ -238,7 +246,8 @@ pub(super) fn read_attribute_definition(
 
 /// An insert the core can read back exactly: of a block it read, flat, not
 /// an array, scaled the same along every axis, with one attribute for each
-/// of the block's attribute definitions, each where the block puts it.
+/// of the block's attribute definitions but the constant ones, each where
+/// the block puts it.
 pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> Option<Insert> {
     let scale = dwg.x_scale();
     let plain = dwg.normal == Vector3::UNIT_Z
@@ -252,7 +261,7 @@ pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> O
         return None;
     }
     let block = blocks.iter().find(|b| b.name == dwg.block_name)?;
-    let definitions: Vec<&AttributeDefinition> = block.attribute_definitions().collect();
+    let definitions: Vec<&AttributeDefinition> = block.carried_attributes().collect();
     if definitions.len() != dwg.attributes.len() {
         return None;
     }
@@ -304,8 +313,8 @@ fn read_attribute(
         && dwg.oblique_angle == 0.0
         && dwg.thickness == 0.0
         && dwg.text_generation_flags == 0
-        && plain_flags(dwg.flags)
-        && dwg.flags.invisible == definition.invisible
+        && dwg.flags == attribute_flags(definition)
+        && dwg.lock_position == definition.lock_position
         && single_line(
             dwg.mtext_flag,
             dwg.is_multiline,
@@ -322,10 +331,23 @@ fn read_attribute(
     same.then_some(value)
 }
 
-/// Whether an attribute's modes are those the core models: none, or
-/// Invisible. Constant, Verify and Preset attributes are not read.
+/// Whether an attribute definition's modes are those the core models:
+/// Invisible, Constant, Verify and Preset, with Lock position in a bit of
+/// its own. Annotative attributes, and the Lock position flag AutoCAD keeps
+/// in its own bit rather than here, are not read.
 fn plain_flags(flags: AttributeFlags) -> bool {
-    !flags.constant && !flags.verify && !flags.preset && !flags.annotative
+    !flags.annotative && !flags.locked_position
+}
+
+/// The modes an insert's attribute carries: its definition's Invisible,
+/// Verify and Preset, as AutoCAD gives an inserted attribute them.
+fn attribute_flags(definition: &AttributeDefinition) -> AttributeFlags {
+    AttributeFlags {
+        invisible: definition.invisible,
+        verify: definition.verify,
+        preset: definition.preset,
+        ..AttributeFlags::default()
+    }
 }
 
 fn single_line(flag: MTextFlag, multiline: bool, embedded: bool) -> bool {
@@ -375,6 +397,10 @@ mod tests {
             invisible: false,
             layer: LAYER_ZERO.into(),
             properties: Default::default(),
+            constant: false,
+            lock_position: false,
+            preset: false,
+            verify: false,
         }
     }
 

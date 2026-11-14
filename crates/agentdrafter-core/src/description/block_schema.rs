@@ -190,8 +190,8 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                 })),
                 "default": {
                     "$ref": "#/$defs/attribute_value",
-                    "description": "The value an insert takes when it gives none. Without it, \
-                                    empty.",
+                    "description": "The value an insert takes when it gives none; a constant \
+                                    attribute's value on every insert. Without it, empty.",
                 },
                 "position": {
                     "$ref": "#/$defs/point",
@@ -216,6 +216,31 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                 "invisible": {
                     "description": "Whether the attribute is hidden on every insert, as \
                                     AutoCAD's Invisible mode hides it. Without it, false.",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+                "constant": {
+                    "description": "Whether the attribute's value is its `default` on every \
+                                    insert, as AutoCAD's Constant mode: an insert gives no value \
+                                    for it. A constant attribute takes no `verify` or `preset`. \
+                                    Without it, false.",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+                "verify": {
+                    "description": "Whether AutoCAD asks a person to confirm the value they \
+                                    type when they insert the block, as its Verify mode does. It \
+                                    changes nothing that is drawn. Without it, false.",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+                "preset": {
+                    "description": "Whether AutoCAD takes the default without asking a person \
+                                    who inserts the block, as its Preset mode does. It changes \
+                                    nothing that is drawn. Without it, false.",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+                "lock_position": {
+                    "description": "Whether a person in AutoCAD cannot move the attribute apart \
+                                    from its insert, as its Lock position mode keeps it. It \
+                                    changes nothing that is drawn. Without it, false.",
                     "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
                 },
             }),

@@ -853,3 +853,21 @@ fn a_nested_insert_on_a_frozen_layer_draws_nothing() {
     assert_eq!(parts, [Some(0)], "{:?}", list.items);
     assert!(list.text.is_empty());
 }
+
+/// A constant attribute draws its definition's value on every insert, and
+/// an invisible one nothing, as AutoCAD 2026 plotted a made-up probe; its
+/// part is its attribute definition's place in the block.
+#[test]
+fn a_constant_attribute_draws_its_value_on_every_insert() {
+    let library = LIBRARY.replace(
+        "      - attdef: {tag: HIDDEN,",
+        "      - attdef: {tag: FIXED, position: [0, 8, 0], height: 2, default: K-1, constant: true}\n      - attdef: {tag: SECRET, position: [0, 11, 0], height: 2, default: S, constant: true, invisible: true}\n      - attdef: {tag: HIDDEN,",
+    );
+    let list = draw_with_library("constant", &library, INSERTS);
+    let read: Vec<(Option<usize>, String)> = list
+        .text
+        .iter()
+        .map(|r| (r.part, r.characters.iter().map(|&(c, _)| c).collect()))
+        .collect();
+    assert_eq!(read, [(Some(2), "X".into()), (Some(3), "K-1".into())]);
+}

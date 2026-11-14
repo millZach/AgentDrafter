@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{layer_zero, Layer, Linetype, Object, Point3, LAYER_ZERO};
+use super::{is_false, layer_zero, Layer, Linetype, Object, Point3, LAYER_ZERO};
 use crate::description::normalize_degrees;
 use crate::text::{Justify, Text, TextStyle, STANDARD};
 use crate::units::Unit;
@@ -58,13 +58,19 @@ pub struct Cell {
 }
 
 impl Block {
-    /// The block's attribute definitions, in the order it defines them,
-    /// which is the order an insert carries its attributes in.
+    /// The block's attribute definitions, in the order it defines them.
     pub fn attribute_definitions(&self) -> impl Iterator<Item = &AttributeDefinition> {
         self.objects.iter().filter_map(|object| match object {
             Object::AttributeDefinition(definition) => Some(definition),
             _ => None,
         })
+    }
+
+    /// The attribute definitions an insert carries a value for, in the
+    /// order it carries them: every one but the constant ones, whose value
+    /// the block's definition holds, as in AutoCAD.
+    pub fn carried_attributes(&self) -> impl Iterator<Item = &AttributeDefinition> {
+        self.attribute_definitions().filter(|d| !d.constant)
     }
 }
 
@@ -77,7 +83,8 @@ pub struct AttributeDefinition {
     /// What AutoCAD asks for when a person inserts the block; empty for the tag.
     #[serde(default)]
     pub prompt: String,
-    /// The value an insert takes when it gives none.
+    /// The value an insert takes when it gives none; a constant
+    /// attribute's value on every insert.
     #[serde(default)]
     pub default: String,
     /// The point the attribute's text is justified at, in the block's own
@@ -101,6 +108,24 @@ pub struct AttributeDefinition {
     /// Invisible mode hides it.
     #[serde(default)]
     pub invisible: bool,
+    /// Whether the attribute has the same value, its `default`, on every
+    /// insert, as AutoCAD's Constant mode: no insert carries a value for it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub constant: bool,
+    /// Whether AutoCAD asks a person to confirm the value they type, as its
+    /// Verify mode does. It changes nothing that is drawn.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub verify: bool,
+    /// Whether AutoCAD takes the default without asking a person when the
+    /// block is inserted, as its Preset mode does. It changes nothing that
+    /// is drawn.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preset: bool,
+    /// Whether a person in AutoCAD cannot move the attribute apart from its
+    /// insert, as its Lock position mode keeps it. It changes nothing that
+    /// is drawn.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub lock_position: bool,
     #[serde(default = "layer_zero")]
     pub layer: String,
     #[serde(flatten)]
@@ -284,6 +309,10 @@ mod tests {
             invisible: false,
             layer: layer.into(),
             properties: Default::default(),
+            constant: false,
+            lock_position: false,
+            preset: false,
+            verify: false,
         }
     }
 

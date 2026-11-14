@@ -74,7 +74,7 @@ An `attdef` is AutoCAD's ATTDEF: a labelled text field each insert of the block 
 |---|---|---|
 | `tag` | yes | The attribute's tag: the label an insert fills it in by, such as `TAG` or `TERMINAL`. 1 to 255 characters, written in capitals as AutoCAD keeps it, with no spaces and no control characters. A block defines each tag once. |
 | `prompt` | no | What AutoCAD asks for when a person inserts the block: one line of text with no control characters. Without it, empty, and AutoCAD asks with the tag. |
-| `default` | no | The value an insert takes when it gives none: one line of text, as a `text`'s contents are, which may be empty. Without it, empty. |
+| `default` | no | The value an insert takes when it gives none: one line of text, as a `text`'s contents are, which may be empty. A constant attribute's value on every insert. Without it, empty. |
 | `position` | yes | The point the attribute's text is justified at, in the block's own coordinates. |
 | `height` | yes | The height of the capitals: a length more than 0. |
 | `style` | no | The text style: `Standard` or a name under `text_styles`. Without it, `Standard`. |
@@ -82,9 +82,27 @@ An `attdef` is AutoCAD's ATTDEF: a labelled text field each insert of the block 
 | `rotation` | no | Degrees anticlockwise from the block's X axis. Without it, 0. |
 | `justify` | no | Where the text sits against its position: one of a `text`'s justifications. Without it, `left`. |
 | `invisible` | no | `true` to hide the attribute on every insert, as AutoCAD's Invisible mode hides it. Without it, `false`. |
+| `constant` | no | `true` to give the attribute the same value, its `default`, on every insert, as AutoCAD's Constant mode does. See [Attribute modes](#attribute-modes). Without it, `false`. |
+| `verify` | no | `true` to have AutoCAD ask a person to confirm the value they type when they insert the block, as its Verify mode does. Without it, `false`. |
+| `preset` | no | `true` to have AutoCAD take the default without asking a person who inserts the block, as its Preset mode does. Without it, `false`. |
+| `lock_position` | no | `true` to stop a person in AutoCAD moving the attribute apart from its insert, as its Lock position mode does. Without it, `false`, so every DWG built before stays the same (Zach decided on 2026-11-13). |
 | `layer` | no | The layer, as for every object. An attribute defined on layer `0` sits on the layer of each insert; one defined on any other layer sits on that layer. |
 | `color`, `linetype`, `lineweight`, `linetype_scale` | no | The attribute's own, as for every object; each insert's attribute is written with them. `ByBlock` takes the insert's. |
 | `cell` | no | The box the attribute draws within on each insert, such as its title-block cell. See [Cells](#cells). |
+
+### Attribute modes
+
+An attribute definition takes AutoCAD's ATTDEF modes, each `true` or `false`: `invisible`, `constant`, `verify`, `preset` and `lock_position`.
+
+Zach decided on 2026-11-13 how a constant attribute behaves:
+
+- Its value is its `default`, the same on every insert, as AutoCAD's ATTDEF relabels its Default box Value for one. No new key holds it.
+- An insert carries no value for it, as an AutoCAD insert carries none. An insert that gives one is an error saying where its value is set, and so is a change set's `set_attribute` on it. This holds through a [nested block](#nested-blocks) too.
+- It draws its value on every insert, unless it is invisible too.
+- `query` and the viewer's inspector list only the attributes an insert carries, as AutoCAD's Properties palette shows them. A query for text finds a constant attribute's value as it finds a block's own text ([query.md](query.md)).
+- It takes no `verify` or `preset`, which AutoCAD's ATTDEF turns off for a constant attribute, since nobody is asked for its value.
+
+`verify`, `preset` and `lock_position` change only what AutoCAD does when a person inserts the block or edits it: nothing draws differently. Each insert's attribute carries its definition's Invisible, Verify, Preset and Lock position, as AutoCAD 2026 gave an insert of the same block it made itself.
 
 ### Cells
 
@@ -102,7 +120,7 @@ A sheet holds the blocks it inserts, as the library defines them, and the librar
 
 ## How it is written
 
-Each block is written as AutoCAD writes one: a block definition with the library's base point, in the drawing's unit so that AutoCAD scales no insert again, holding its objects in order, its attribute definitions among them. An insert is AutoCAD's block reference, with one attribute for each attribute definition of its block, in the order the block defines them, each drawn where its definition is, moved, scaled and turned with the insert. In AutoCAD the result is an ordinary block whose attributes a person edits as any other: AutoCAD 2026 opened two built sheets and their audit found no errors, read each block's attribute definitions and each insert's values, and an attribute value changed in AutoCAD saved and audited clean.
+Each block is written as AutoCAD writes one: a block definition with the library's base point, in the drawing's unit so that AutoCAD scales no insert again, holding its objects in order, its attribute definitions among them. An insert is AutoCAD's block reference, with one attribute for each attribute definition of its block but the constant ones, in the order the block defines them, each drawn where its definition is, moved, scaled and turned with the insert. In AutoCAD the result is an ordinary block whose attributes a person edits as any other: AutoCAD 2026 opened two built sheets and their audit found no errors, read each block's attribute definitions and each insert's values, and an attribute value changed in AutoCAD saved and audited clean.
 
 An insert's ID and name are kept in the DWG as extended data under the registered application `AGENTDRAFTER`, as every object's [ID and name](sheet-description.md#ids-and-names) are: the text `sheet` followed by the sheet's name, `id` followed by the insert's `id` or its place, then, when it has a name, `name` followed by the name. AutoCAD carries them through a save.
 
@@ -113,6 +131,6 @@ Reading a DWG back gives its block definitions, the inserts nested in them among
 - Dynamic blocks, which come in a later ticket.
 - Cells in a nested block: the checker holds only the cells of the block a sheet inserts.
 - Annotative blocks and attributes.
-- Constant, Verify and Preset attributes, multiline attributes, and attributes whose place an insert changes.
+- Multiline attributes ([#117](https://github.com/millZach/AgentDrafter/issues/117)), and attributes whose place an insert changes.
 - Mirrored and stretched inserts: an insert's scale is the same along every axis and more than 0.
 - Arrays of inserts (AutoCAD's MINSERT).

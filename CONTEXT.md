@@ -112,6 +112,10 @@ _Avoid_: property, field, parameter
 An attribute as its block defines it, once: its attribute tag, its prompt, its default value and how its text draws. AutoCAD's ATTDEF.
 _Avoid_: attribute template
 
+**Constant attribute**:
+An attribute whose value its block's definition holds, the same on every insert, as AutoCAD's Constant mode. An insert carries no value for it and cannot set one.
+_Avoid_: fixed attribute, static attribute
+
 **Attribute tag**:
 The label an attribute is filled in by, such as `TAG` or `TERMINAL`, written in capitals as AutoCAD keeps it. A plain tag is what an instrument or device is called on the drawing, which is often an attribute's value.
 _Avoid_: attribute name, field name
