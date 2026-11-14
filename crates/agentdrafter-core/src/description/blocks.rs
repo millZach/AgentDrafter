@@ -499,7 +499,7 @@ pub(super) fn insert(
         Some(node) => angle(node, &fields.path_of("rotation"))?,
         None => 0.0,
     };
-    let attributes = attributes(fields, block)?;
+    let attributes = attributes(fields, block, library)?;
     Ok(Insert {
         block: block.name.clone(),
         position: point(
@@ -554,7 +554,11 @@ fn block_named<'a>(fields: &Fields, library: Option<&'a BlockLibrary>) -> Result
 
 /// The values of every attribute of `block`, in the order it defines them:
 /// the insert's own, or the definition's default where it gives none.
-fn attributes(fields: &Fields, block: &Block) -> Result<Vec<Attribute>, Error> {
+fn attributes(
+    fields: &Fields,
+    block: &Block,
+    library: Option<&BlockLibrary>,
+) -> Result<Vec<Attribute>, Error> {
     let definitions: Vec<&AttributeDefinition> = block.attribute_definitions().collect();
     let mut values: Vec<Option<String>> = vec![None; definitions.len()];
     if let Some(node) = fields.get("attributes") {
@@ -584,19 +588,18 @@ fn attributes(fields: &Fields, block: &Block) -> Result<Vec<Attribute>, Error> {
                 // An attribute of a block this block inserts is filled in by
                 // this block's definition, once, as AutoCAD fills it (Zach,
                 // 2026-11-13); an insert of this block cannot set it.
-                let nested = block.objects.iter().find_map(|o| match o {
-                    Object::Insert(inner)
-                        if inner.attributes.iter().any(|a| a.tag == entry.key) =>
-                    {
-                        Some(inner.block.as_str())
+                let why = match nested_tag(block, &entry.key, library) {
+                    Some((setter, inner)) => {
+                        let within = if setter == block.name {
+                            String::new()
+                        } else {
+                            format!(", nested in block `{}`", block.name)
+                        };
+                        format!(
+                            "the attribute `{}` belongs to block `{inner}`, which block `{setter}` inserts{within}; its value is set once, in block `{setter}`'s definition in the block library, as AutoCAD sets it, not by each insert. {listed}",
+                            entry.key
+                        )
                     }
-                    _ => None,
-                });
-                let why = match nested {
-                    Some(inner) => format!(
-                        "the attribute `{}` belongs to block `{inner}`, which block `{}` inserts; its value is set once, in block `{}`'s definition in the block library, as AutoCAD sets it, not by each insert. {listed}",
-                        entry.key, block.name, block.name
-                    ),
                     None => format!("unknown attribute `{}`; {listed}", entry.key),
                 };
                 return Err(Error::new(ErrorCode::UnknownName, why)
@@ -617,6 +620,28 @@ fn attributes(fields: &Fields, block: &Block) -> Result<Vec<Attribute>, Error> {
             value: value.unwrap_or_else(|| definition.default.clone()),
         })
         .collect())
+}
+
+/// Where the attribute `tag` of a block nested in `block`, however deep, is
+/// filled in: the block whose definition holds the nested insert that gives
+/// its value, and the block that defines the tag. None when no nested
+/// insert gives it.
+fn nested_tag<'a>(
+    block: &'a Block,
+    tag: &str,
+    library: Option<&'a BlockLibrary>,
+) -> Option<(&'a str, &'a str)> {
+    block.objects.iter().find_map(|object| {
+        let Object::Insert(inner) = object else {
+            return None;
+        };
+        if inner.attributes.iter().any(|a| a.tag == tag) {
+            return Some((block.name.as_str(), inner.block.as_str()));
+        }
+        // The reader refuses a block that inserts itself, so this ends.
+        let nested = library?.blocks.iter().find(|b| b.name == inner.block)?;
+        nested_tag(nested, tag, library)
+    })
 }
 
 /// An attribute's value: one line of text, which may be empty.

@@ -241,7 +241,8 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                 objects_key: {
                     "description": "The block's objects, in drawing order: at least one. Each is \
                                     a mapping with one key, its type. A block holds the objects a \
-                                    sheet holds and attribute definitions, but no inserts.",
+                                    sheet holds, inserts of the library's other blocks among \
+                                    them, and attribute definitions.",
                     "type": "array",
                     "minItems": 1,
                     "items": { "oneOf": super::schema::object_choices(&super::objects::BLOCK_OBJECT_TYPES) },

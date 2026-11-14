@@ -778,6 +778,36 @@ fn a_block_inserts_another_block_and_fills_in_its_attributes() {
             "set once",
         ],
     );
+
+    // Nested two deep, the tag is found where it is set: in PANEL's insert
+    // of STRIP, STRIP's definition sets it.
+    let deeper = NESTED.replace(
+        "blocks:
+",
+        "blocks:
+  PANEL:
+    objects:
+      - insert: {block: STRIP, position: [0, 0, 0]}
+",
+    );
+    let e = read_with(
+        "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {block: PANEL, position: [0, 0, 0], attributes: {TAG: X}}
+",
+        &deeper,
+    )
+    .unwrap_err();
+    assert_names(
+        &e,
+        ErrorCode::UnknownName,
+        "objects[0].insert.attributes.TAG",
+        &[
+            "belongs to block `TERMINAL`, which block `STRIP` inserts, nested in block `PANEL`",
+            "in block `STRIP`'s definition",
+        ],
+    );
 }
 
 #[test]
