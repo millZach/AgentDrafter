@@ -301,23 +301,20 @@ pub(super) fn fill_block(
     // the origin.
     let origin = table.position;
     let laid = table.laid_out(style);
-    // How far a text's point may be from where the layout puts it: a
-    // billionth of the table's reach, room for the rounding of sums made
-    // from another corner.
-    let reach = origin.x.abs()
-        + origin.y.abs()
-        + table.columns.iter().sum::<f64>()
-        + table.rows.iter().sum::<f64>();
-    let tolerance = 1e-9 * (1.0 + reach);
+    // How far a text's point may be from where the layout puts it, both in
+    // the table's own coordinates: a billionth of the table's size, room
+    // for sums made from another corner, and the rounding of taking a far
+    // position away, which grows with the position but stays far below
+    // any cell.
+    let size = table.columns.iter().sum::<f64>() + table.rows.iter().sum::<f64>();
+    let tolerance = 1e-9 * (1.0 + size) + 8.0 * f64::EPSILON * (origin.x.abs() + origin.y.abs());
     for member in members {
         match drawing.get_entity_mut(member) {
             Some(EntityType::MText(text)) => {
                 let justify = attachment_of(text.attachment_point).ok_or_else(failed)?;
-                let at = [
-                    text.insertion_point.x + origin.x,
-                    text.insertion_point.y + origin.y,
-                ];
-                let cell = cell_of(&laid, at, justify, tolerance).ok_or_else(failed)?;
+                let at = [text.insertion_point.x, text.insertion_point.y];
+                let cell = cell_of(&laid, [origin.x, origin.y], at, justify, tolerance)
+                    .ok_or_else(failed)?;
                 if let Some(cell_text) = &cell.text {
                     text.style.clone_from(&cell_text.style);
                 }
@@ -336,21 +333,24 @@ pub(super) fn fill_block(
     Ok(())
 }
 
-/// The cell whose text acadrust placed at `at`, attached at `justify`: the
-/// one cell with text so justified whose text the layout attaches at `at`,
-/// within `tolerance`. The layout and acadrust place a cell's text alike,
+/// The cell whose text acadrust placed at `at`, in the table's own
+/// coordinates, attached at `justify`: the one cell with text so justified
+/// whose text the layout attaches at `at`, measured from `origin`, the
+/// table's position, within `tolerance`. The layout and acadrust place a cell's text alike,
 /// from the cell's box, its margins and its justification, so a text on an
 /// edge two cells share, or in a row lower than its margins, is found all
 /// the same. None when no cell, or more than one, is there.
 fn cell_of(
     laid: &[LaidCell],
+    origin: [f64; 2],
     at: [f64; 2],
     justify: Attachment,
     tolerance: f64,
 ) -> Option<&LaidCell> {
     let mut found = laid.iter().filter(|cell| {
         cell.text.as_ref().is_some_and(|t| {
-            t.justify == justify && (t.position.x - at[0]).hypot(t.position.y - at[1]) <= tolerance
+            let own = [t.position.x - origin[0], t.position.y - origin[1]];
+            t.justify == justify && (own[0] - at[0]).hypot(own[1] - at[1]) <= tolerance
         })
     });
     let cell = found.next()?;
@@ -966,6 +966,31 @@ objects:
             styles_by_text(&drawing),
             [("A".to_owned(), "Standard".to_owned())]
         );
+    }
+
+    #[test]
+    fn a_table_far_from_the_origin_finds_each_text_its_own_cell() {
+        // 500 km east and 5,000 km north, in millimetres: two rows 5 apart
+        // are told apart however far the table sits from the origin.
+        let (_, drawing) = built(
+            "far-table",
+            "units: mm
+table_styles:
+  S: {text_height: 2, horizontal_margin: 0.5, vertical_margin: 0.5}
+objects:
+  - table:
+      position: [500000000, 5000000000, 0]
+      columns: [30]
+      rows: [5, 5]
+      table_style: S
+      cells: [[A], [B]]
+",
+        );
+        let texts: Vec<String> = styles_by_text(&drawing)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        assert_eq!(texts, ["A", "B"]);
     }
 
     #[test]
