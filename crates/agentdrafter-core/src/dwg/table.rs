@@ -13,6 +13,8 @@
 //! acadrust has filled the block, each of its texts is given the text style
 //! its cell draws with, and each of its lines the border pen, all on the
 //! table's layer, as AutoCAD 2026 wrote them laying out made-up tables.
+//! Each text is matched to its cell by where the layout attaches that
+//! cell's text, which is where acadrust puts it.
 //!
 //! A cell's text is coded as multiline text is, and its own text style,
 //! height and justification are written as AutoCAD 2026 wrote them on a
@@ -299,13 +301,14 @@ pub(super) fn fill_block(
     // the origin.
     let origin = table.position;
     let laid = table.laid_out(style);
-    // How far a text's point is moved into its own cell before it is looked
-    // for: a quarter of the narrowest column and of the lowest row, so a
-    // point on an edge two cells share lies inside one of them only.
-    let nudge = [
-        table.columns.iter().copied().fold(f64::INFINITY, f64::min) / 4.0,
-        table.rows.iter().copied().fold(f64::INFINITY, f64::min) / 4.0,
-    ];
+    // How far a text's point may be from where the layout puts it: a
+    // billionth of the table's reach, room for the rounding of sums made
+    // from another corner.
+    let reach = origin.x.abs()
+        + origin.y.abs()
+        + table.columns.iter().sum::<f64>()
+        + table.rows.iter().sum::<f64>();
+    let tolerance = 1e-9 * (1.0 + reach);
     for member in members {
         match drawing.get_entity_mut(member) {
             Some(EntityType::MText(text)) => {
@@ -314,7 +317,7 @@ pub(super) fn fill_block(
                     text.insertion_point.x + origin.x,
                     text.insertion_point.y + origin.y,
                 ];
-                let cell = cell_of(&laid, at, justify, nudge).ok_or_else(failed)?;
+                let cell = cell_of(&laid, at, justify, tolerance).ok_or_else(failed)?;
                 if let Some(cell_text) = &cell.text {
                     text.style.clone_from(&cell_text.style);
                 }
@@ -334,26 +337,21 @@ pub(super) fn fill_block(
 }
 
 /// The cell whose text acadrust placed at `at`, attached at `justify`: the
-/// one cell with text so justified whose inside holds `at` moved by `nudge`
-/// toward the side the text is attached at, inward from a left, right, top
-/// or bottom margin. A point on an edge two cells share is so inside one
-/// cell only.
+/// one cell with text so justified whose text the layout attaches at `at`,
+/// within `tolerance`. The layout and acadrust place a cell's text alike,
+/// from the cell's box, its margins and its justification, so a text on an
+/// edge two cells share, or in a row lower than its margins, is found all
+/// the same. None when no cell, or more than one, is there.
 fn cell_of(
     laid: &[LaidCell],
     at: [f64; 2],
     justify: Attachment,
-    nudge: [f64; 2],
+    tolerance: f64,
 ) -> Option<&LaidCell> {
-    let place = Attachment::ALL.iter().position(|a| *a == justify)?;
-    let across = [1.0, 0.0, -1.0][place % 3];
-    let up = [-1.0, 0.0, 1.0][place / 3];
-    let p = [at[0] + across * nudge[0], at[1] + up * nudge[1]];
     let mut found = laid.iter().filter(|cell| {
-        cell.text.as_ref().is_some_and(|t| t.justify == justify)
-            && cell.x[0] < p[0]
-            && p[0] < cell.x[1]
-            && cell.y[0] < p[1]
-            && p[1] < cell.y[1]
+        cell.text.as_ref().is_some_and(|t| {
+            t.justify == justify && (t.position.x - at[0]).hypot(t.position.y - at[1]) <= tolerance
+        })
     });
     let cell = found.next()?;
     found.next().is_none().then_some(cell)
@@ -936,6 +934,67 @@ objects:
         assert_eq!(style_of("LEFT"), "A");
         assert_eq!(style_of("RIGHT"), "B");
         assert_eq!(style_of("TWO"), "Standard");
+    }
+
+    /// The text style each text of the table's block draws with, by what
+    /// it says.
+    fn styles_by_text(drawing: &CadDocument) -> Vec<(String, String)> {
+        let mut styles: Vec<(String, String)> = block_texts(drawing)
+            .into_iter()
+            .map(|(says, style, ..)| (says, style))
+            .collect();
+        styles.sort();
+        styles
+    }
+
+    #[test]
+    fn a_row_lower_than_its_margins_builds_with_its_text_in_the_block() {
+        // Standard's margins are 1.5 mm, so a row 2 high puts its top
+        // centre text 0.5 above its bottom edge.
+        let (_, drawing) = built(
+            "short-row",
+            "units: mm
+objects:
+  - table:
+      position: [0, 10, 0]
+      columns: [20]
+      rows: [2]
+      cells: [[A]]
+",
+        );
+        assert_eq!(
+            styles_by_text(&drawing),
+            [("A".to_owned(), "Standard".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_merged_cell_across_a_row_lower_than_both_margins_builds() {
+        // The second row is 2 high, less than the 3 its margins take; the
+        // first column's cell spans both rows.
+        let (_, drawing) = built(
+            "short-merged",
+            "units: mm
+text_styles:
+  B: {font: romans.shx}
+objects:
+  - table:
+      position: [0, 10, 0]
+      columns: [20, 20]
+      rows: [2.5, 2]
+      cells:
+        - [{text: M, merge: [2, 1]}, X]
+        - ['', {text: Y, style: B}]
+",
+        );
+        assert_eq!(
+            styles_by_text(&drawing),
+            [
+                ("M".to_owned(), "Standard".to_owned()),
+                ("X".to_owned(), "Standard".to_owned()),
+                ("Y".to_owned(), "B".to_owned()),
+            ]
+        );
     }
 
     #[test]
