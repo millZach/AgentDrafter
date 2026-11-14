@@ -55,6 +55,9 @@ A sheet's template is the file its row's path names, as the file system resolves
 | `move` | `MOVE` | Moves an object. |
 | `delete` | `ERASE` | Deletes an object. |
 | `set_attribute` | `ATTEDIT` | Sets one attribute value of an insert. |
+| `add_layer`, `change_layer`, `rename_layer`, `delete_layer` | `LAYER`, none, `RENAME`, `LAYDEL` | Adds, changes, renames or deletes a layer of a template. |
+| `add_linetype`, `change_linetype`, `rename_linetype`, `delete_linetype` | `LINETYPE`, none, none, none | The same for a linetype. |
+| `add_text_style`, `change_text_style`, `rename_text_style`, `delete_text_style` | `STYLE`, none, none, none | The same for a text style. |
 
 `agentdrafter operations` gives each with what it does and its JSON Schema (draft 2020-12), with the definitions it refers to, so an agent can check an operation before it sends it:
 
@@ -69,6 +72,18 @@ A sheet's template is the file its row's path names, as the file system resolves
 **`move`** takes `target` and `by`, `[dx, dy, dz]`. Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, and the position of a text, an mtext or an insert. A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
 
 **`delete`** takes `target`.
+
+**Layers, linetypes and text styles.** Zach decided on 2026-11-13 how a change set edits a template's tables, which every sheet built from it shares. Each operation names its template by `template`, its path as the rows write it, or by `sheet`, a sheet built from it, and the entry by `name`, written exactly as the template writes it. Like any template edit it reaches every sheet built from the template, all or nothing, and the reply lists them. The block library's layers are not edited here; that waits for the block operations ([#69](https://github.com/millZach/AgentDrafter/issues/69)).
+
+- **`add_layer`** (`LAYER`), **`add_linetype`** (`LINETYPE`) and **`add_text_style`** (`STYLE`) take `name` and the keys the entry takes in a [sheet description](sheet-description.md#layers), such as `color` and `plot` for a layer or `pattern` for a linetype. A name the template has already, in any case, or a drawing's own, is `duplicate_name`.
+- **`change_layer`**, **`change_linetype`** and **`change_text_style`** take `name` and `set`, each key to its new value; `null` takes a key away. Layer `0` and `Standard` can be changed even where the template does not write them.
+- **`rename_layer`** (`RENAME`), **`rename_linetype`** and **`rename_text_style`** take `name` and `to`, and rewrite everything that names the entry: every object's `layer`, `linetype` or `style`, in the template and in the rows of the sheets built from it, and, for a linetype, every layer's `linetype`. The reply counts the objects.
+- **`delete_layer`** (`LAYDEL`), **`delete_linetype`** and **`delete_text_style`** take `name`, and are refused with `in_use` while anything still uses the entry: the error lists the objects by ID, and the layers that use a linetype. Move them, or delete them, first.
+- Layer `0`, `Continuous` and `Standard`, which every drawing has, are never renamed or deleted (`bad_value`).
+
+The table is written again whole, one entry to a line in braces, where the template wrote it; a table the template did not have goes just before its `objects`. A comment inside the table is lost; everything else in the file stays byte for byte.
+
+**A locked layer.** An object whose layer is `locked` is not edited: `change`, `move`, `delete` and `set_attribute` on it are refused with `locked`, naming the layer, as AutoCAD will not edit it. An object can still be added onto a locked layer, as in AutoCAD. To edit one, unlock its layer first with `change_layer`, `set: {"locked": false}` or `null`, in the same change set or an earlier one.
 
 **`set_attribute`** takes `target`, an insert, `tag` and `value`, one line of text. An attribute the insert leaves out is added. When the insert's template takes the attribute from the row, the sheet's row value is set instead (decision 5), and the reply's `row_value` names the value and every place on the sheet it fills: the demo set's `TITLE` fills both the title block's `TITLE` and the heading's contents.
 
@@ -142,7 +157,9 @@ An error from an operation names it, `operation 1 (`add_circle`)`, and the sheet
 | `unknown_key` | A key the change set, an operation or the object's type does not take. |
 | `missing_key`, `wrong_type`, `bad_number`, `bad_value` | As in a sheet description, for an operation's keys or the object it writes. `bad_value` also: a name with no sheet on more than one sheet, a `change` of an `id`, `fixes` naming a sheet the mark does not hold. |
 | `usage` | An add given both `sheet` and `template`, or a target given both an ID and a name. |
-| `duplicate_id`, `duplicate_name` | An `id` or a name the sheet has already, the template's and the row's objects together. |
+| `duplicate_id`, `duplicate_name` | An `id` or a name the sheet has already, the template's and the row's objects together; or a layer, linetype or text style the template has already. |
+| `locked` | An edit to an object on a locked layer. |
+| `in_use` | A delete of a layer, linetype or text style that something still uses. |
 | `shared_edit_failed` | The sheet was left as it was because a template edit in its part could not land on another sheet built from the same template. |
 | `not_a_build`, `write_failed` | The sheet's DWG is not one AgentDrafter built, or cannot be written. |
 | `sheets_failed` | Some sheets failed and were left as they were; the others took their part. |
@@ -161,7 +178,7 @@ Only what an operation touched is rewritten. Each record is read into the strict
 - Failed checks in a dry run: the [checker](check.md) reads saved files, and a dry run saves none.
 - Revising an existing DWG: a change set edits a drawing set's records, not an original.
 - Change sets on a sheet description outside a drawing set.
-- Operations on the set's other parts: layers, linetypes, text styles, hatch patterns, blocks, rows and their values directly, and a sheet's template.
+- Operations on the set's other parts: hatch patterns, blocks and the block library's own layers ([#69](https://github.com/millZach/AgentDrafter/issues/69)), rows and their values directly, and a sheet's template.
 - Choosing where in its list an added object goes; it is drawn after the others.
 - Moving an object from a template to a row, or the reverse.
 - The MCP server, the Python library and the HTTP API ([#14](https://github.com/millZach/AgentDrafter/issues/14)), which will reach the same core entry point.

@@ -73,7 +73,7 @@ A layer is a named group of objects that draw with its colour, linetype and line
 | `lineweight` | no | The pen width the layer plots with, in millimetres, with or without `mm`, written out as digits with a `.` and digits if any, such as `0.35` or `0.50`, with no sign or exponent: one of AutoCAD's standard lineweights, 0, 0.05, 0.09, 0.13, 0.15, 0.18, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.53, 0.6, 0.7, 0.8, 0.9, 1, 1.06, 1.2, 1.4, 1.58, 2 or 2.11. Without it, AutoCAD's default lineweight. |
 | `on` | no | Whether the layer is on, `true` or `false`. An object on a layer that is off draws nothing, in the PNG, the PDF or the viewer, and still counts towards the extents, as in AutoCAD. Without it, `true`. |
 | `frozen` | no | Whether the layer is frozen. An object on a frozen layer draws nothing and does not count towards the extents, as in AutoCAD. Without it, `false`. |
-| `locked` | no | Whether the layer is locked against editing, as AutoCAD locks it. It changes nothing a sheet draws; change sets do not refuse an edit on it yet. Without it, `false`. |
+| `locked` | no | Whether the layer is locked against editing, as AutoCAD locks it. It changes nothing a sheet draws; a [change set](change-sets.md#the-operations) does not edit an object on it. Without it, `false`. |
 | `plot` | no | Whether the layer plots. An object on a layer that does not plot, such as a sheet's trim marks, is left out of the PDF and drawn in the PNG and the viewer, as AutoCAD's screen shows it, and counts towards the extents. Without it, `true`. |
 | `description` | no | What AutoCAD's layer manager shows beside the name: one line of text, at most 255 characters. Without it, none. |
 

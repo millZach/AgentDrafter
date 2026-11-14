@@ -10,7 +10,9 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::description::schema::sheet_description_schema;
-use crate::description::{article, objects_table, rows_schema};
+use crate::description::{
+    article, objects_table, rows_schema, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
+};
 use crate::error::{Error, ErrorCode};
 use crate::units::{parse_length, LengthError, Unit};
 
@@ -23,6 +25,86 @@ pub(crate) enum Kind {
     Move,
     Delete,
     SetAttribute,
+    /// Adds, changes, renames or deletes a layer, a linetype or a text
+    /// style of a template.
+    Table(TableOp, Table),
+}
+
+/// A table of a template's definitions that an operation edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Table {
+    Layer,
+    Linetype,
+    TextStyle,
+}
+
+impl Table {
+    /// The key the table sits under in a template, such as `layers`.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Table::Layer => "layers",
+            Table::Linetype => "linetypes",
+            Table::TextStyle => "text_styles",
+        }
+    }
+
+    /// One entry, in words, such as `text style`.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Table::Layer => "layer",
+            Table::Linetype => "linetype",
+            Table::TextStyle => "text style",
+        }
+    }
+
+    /// The definition of one entry in the sheet description's schema.
+    fn def(self) -> &'static str {
+        match self {
+            Table::Layer => "layer",
+            Table::Linetype => "linetype",
+            Table::TextStyle => "text_style",
+        }
+    }
+
+    /// The keys one entry takes, in the order a sheet description writes
+    /// them.
+    pub(crate) fn entry_keys(self) -> &'static [&'static str] {
+        match self {
+            Table::Layer => &LAYER_KEYS,
+            Table::Linetype => &LINETYPE_KEYS,
+            Table::TextStyle => &TEXT_STYLE_KEYS,
+        }
+    }
+
+    /// The names every drawing has in the table, which are never renamed
+    /// or deleted: layer `0`, `Continuous` (with AutoCAD's `ByLayer` and
+    /// `ByBlock`) and `Standard`.
+    pub(crate) fn built_in(self) -> &'static [&'static str] {
+        match self {
+            Table::Layer => &["0"],
+            Table::Linetype => &["Continuous", "ByLayer", "ByBlock"],
+            Table::TextStyle => &["Standard"],
+        }
+    }
+
+    /// The key an object, or a layer, names an entry by: `layer`,
+    /// `linetype` or `style`.
+    pub(crate) fn named_by(self) -> &'static str {
+        match self {
+            Table::Layer => "layer",
+            Table::Linetype => "linetype",
+            Table::TextStyle => "style",
+        }
+    }
+}
+
+/// What a table operation does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TableOp {
+    Add,
+    Change,
+    Rename,
+    Delete,
 }
 
 /// One operation: its name, the AutoCAD command it is aliased to, and what
@@ -35,7 +117,7 @@ pub(crate) struct Spec {
 }
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 16] = [
+pub(crate) const SPECS: [Spec; 28] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -68,7 +150,27 @@ pub(crate) const SPECS: [Spec; 16] = [
         alias: "ATTEDIT",
         kind: Kind::SetAttribute,
     },
+    table("add_layer", "LAYER", TableOp::Add, Table::Layer),
+    table("change_layer", "", TableOp::Change, Table::Layer),
+    table("rename_layer", "RENAME", TableOp::Rename, Table::Layer),
+    table("delete_layer", "LAYDEL", TableOp::Delete, Table::Layer),
+    table("add_linetype", "LINETYPE", TableOp::Add, Table::Linetype),
+    table("change_linetype", "", TableOp::Change, Table::Linetype),
+    table("rename_linetype", "", TableOp::Rename, Table::Linetype),
+    table("delete_linetype", "", TableOp::Delete, Table::Linetype),
+    table("add_text_style", "STYLE", TableOp::Add, Table::TextStyle),
+    table("change_text_style", "", TableOp::Change, Table::TextStyle),
+    table("rename_text_style", "", TableOp::Rename, Table::TextStyle),
+    table("delete_text_style", "", TableOp::Delete, Table::TextStyle),
 ];
+
+const fn table(name: &'static str, alias: &'static str, op: TableOp, table: Table) -> Spec {
+    Spec {
+        name,
+        alias,
+        kind: Kind::Table(op, table),
+    }
+}
 
 const fn add(name: &'static str, alias: &'static str, object: &'static str) -> Spec {
     Spec {
@@ -171,6 +273,45 @@ fn does(spec: &Spec) -> String {
                          given its place as its id, such as objects[3], so that its ID does not \
                          move. AutoCAD's ERASE."
             .to_owned(),
+        Kind::Table(op, table) => {
+            let word = table.word();
+            let what = match op {
+                TableOp::Add => format!(
+                    "Adds a {word} named name to a template, written with the keys a {word} takes \
+                     in a sheet description, so that every sheet built from the template has it"
+                ),
+                TableOp::Change => format!(
+                    "Sets keys of the {word} named name in a template: each key under set takes \
+                     its new value, and null takes a key away"
+                ),
+                TableOp::Rename => format!(
+                    "Renames the {word} named name in a template to to, and everything in the \
+                     template, and in the rows of the sheets built from it, that names it"
+                ),
+                TableOp::Delete => format!(
+                    "Deletes the {word} named name from a template; refused while anything in the \
+                     template, or in the rows of the sheets built from it, uses it, and the error \
+                     lists what does"
+                ),
+            };
+            let builtin = match (op, table) {
+                (TableOp::Rename | TableOp::Delete, _) => format!(
+                    " {} is every drawing's own and is never renamed or deleted.",
+                    table.built_in()[0]
+                ),
+                _ => String::new(),
+            };
+            let alias = if spec.alias.is_empty() {
+                String::new()
+            } else {
+                format!(" AutoCAD's {}.", spec.alias)
+            };
+            format!(
+                "{what}. The template is named by template, as the rows write its path, or by \
+                 sheet, a sheet built from it; every sheet built from it follows, all or \
+                 nothing.{builtin}{alias}"
+            )
+        }
         Kind::SetAttribute => "Sets the value of the attribute tag of an insert. When the \
                                insert's template takes that attribute from the row, the \
                                sheet's row value is set instead, on that sheet alone, and the \
@@ -276,16 +417,23 @@ fn definitions() -> Map<String, Value> {
 
 /// The schema of one operation, referring to `defs`.
 fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
-    let op = json!({
-        "description": format!(
-            "The operation: {}, or its AutoCAD alias {} in any case.",
-            spec.name, spec.alias
-        ),
-        "anyOf": [
-            { "const": spec.name },
-            { "type": "string", "pattern": format!("^{}$", any_case(spec.alias)) },
-        ],
-    });
+    let op = if spec.alias.is_empty() {
+        json!({
+            "description": format!("The operation: {}.", spec.name),
+            "const": spec.name,
+        })
+    } else {
+        json!({
+            "description": format!(
+                "The operation: {}, or its AutoCAD alias {} in any case.",
+                spec.name, spec.alias
+            ),
+            "anyOf": [
+                { "const": spec.name },
+                { "type": "string", "pattern": format!("^{}$", any_case(spec.alias)) },
+            ],
+        })
+    };
     let target = json!({ "$ref": "#/$defs/target" });
     let mut schema = match spec.kind {
         Kind::Add(object) => {
@@ -356,6 +504,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             "additionalProperties": false,
             "properties": { "target": target },
         }),
+        Kind::Table(op, table) => table_schema(op, table, defs),
         Kind::SetAttribute => json!({
             "type": "object",
             "required": ["target", "tag", "value"],
@@ -372,6 +521,84 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
     let required = schema["required"].as_array_mut().expect("a list");
     required.insert(0, json!(OP_KEY));
     schema
+}
+
+/// The schema of a table operation, before its `op`.
+fn table_schema(op: TableOp, table: Table, defs: &Map<String, Value>) -> Value {
+    let word = table.word();
+    let mut properties = Map::new();
+    properties.insert(
+        "name".into(),
+        json!({
+            "description": format!("The {word}'s name, written exactly as the template writes it."),
+            "type": "string",
+            "minLength": 1,
+        }),
+    );
+    properties.insert(
+        "sheet".into(),
+        json!({
+            "description": "A sheet built from the template to edit: the template is that \
+                            sheet's. Give sheet or template.",
+            "$ref": "#/$defs/sheet_name",
+        }),
+    );
+    properties.insert(
+        "template".into(),
+        json!({
+            "description": "The template to edit. Give sheet or template.",
+            "$ref": "#/$defs/template_path",
+        }),
+    );
+    let mut required = vec![json!("name")];
+    match op {
+        TableOp::Add => {
+            let def = &defs[table.def()];
+            if let Some(own) = def["properties"].as_object() {
+                for (key, value) in own {
+                    properties.insert(key.clone(), value.clone());
+                }
+            }
+            if let Some(own) = def["required"].as_array() {
+                required.extend(own.iter().cloned());
+            }
+        }
+        TableOp::Change => {
+            properties.insert(
+                "set".into(),
+                json!({
+                    "description": format!(
+                        "The keys to set, each to its new value as a sheet description writes it; \
+                         null takes a key away. Any key a {word} takes: {}.",
+                        table.entry_keys().join(", ")
+                    ),
+                    "type": "object",
+                    "minProperties": 1,
+                    "propertyNames": { "enum": table.entry_keys() },
+                }),
+            );
+            required.push(json!("set"));
+        }
+        TableOp::Rename => {
+            properties.insert(
+                "to".into(),
+                json!({
+                    "description": format!("The {word}'s new name."),
+                    "type": "string",
+                    "minLength": 1,
+                }),
+            );
+            required.push(json!("to"));
+        }
+        TableOp::Delete => {}
+    }
+    json!({
+        "type": "object",
+        "required": required,
+        "additionalProperties": false,
+        "properties": properties,
+        "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }],
+    })
 }
 
 /// `schema` with the definitions it refers to, from `defs`, under `$defs`.
@@ -460,6 +687,16 @@ pub(crate) enum Body {
         target: Target,
         tag: String,
         value: String,
+    },
+    /// A table operation: on the entry `name` of the template `to` names,
+    /// with the keys it adds or sets, and the new name a rename gives.
+    Table {
+        op: TableOp,
+        table: Table,
+        to: AddTo,
+        name: String,
+        keys: Map<String, Value>,
+        new_name: Option<String>,
     },
 }
 
@@ -602,7 +839,13 @@ fn operation(
     let listed = || {
         SPECS
             .iter()
-            .map(|s| format!("{} ({})", s.name, s.alias))
+            .map(|s| {
+                if s.alias.is_empty() {
+                    s.name.to_owned()
+                } else {
+                    format!("{} ({})", s.name, s.alias)
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -621,7 +864,7 @@ fn operation(
     };
     let Some(spec) = SPECS
         .iter()
-        .find(|s| s.name == name || s.alias.eq_ignore_ascii_case(name))
+        .find(|s| s.name == name || (!s.alias.is_empty() && s.alias.eq_ignore_ascii_case(name)))
     else {
         return Err(Error::new(
             ErrorCode::UnknownName,
@@ -822,6 +1065,133 @@ fn operation(
             };
             Body::SetAttribute { target, tag, value }
         }
+        Kind::Table(op, table) => {
+            let mut allowed = vec!["sheet", "template", "name"];
+            match op {
+                TableOp::Add => allowed.extend(table.entry_keys()),
+                TableOp::Change => allowed.push("set"),
+                TableOp::Rename => allowed.push("to"),
+                TableOp::Delete => {}
+            }
+            keys(&allowed)?;
+            let to = match (map.get("sheet"), map.get("template")) {
+                (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
+                (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
+                (Some(_), Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::Usage,
+                        "give sheet or template, not both: either names the template to edit"
+                            .to_owned(),
+                        "",
+                    ))
+                }
+                (None, None) => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `template`: name the template to edit, or a sheet built \
+                         from it with sheet"
+                            .to_owned(),
+                        "template",
+                    ))
+                }
+                (Some(_), None) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a sheet's name".to_owned(),
+                        "sheet",
+                    ))
+                }
+                (None, Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a template's path".to_owned(),
+                        "template",
+                    ))
+                }
+            };
+            let text = |key: &str, what: &str| -> Result<String, Error> {
+                match map.get(key) {
+                    Some(Value::String(text)) if !text.is_empty() => Ok(text.clone()),
+                    Some(_) => Err(fail(
+                        ErrorCode::WrongType,
+                        format!("expected {what}, a name"),
+                        key,
+                    )),
+                    None => Err(fail(
+                        ErrorCode::MissingKey,
+                        format!("missing key `{key}`, {what}"),
+                        key,
+                    )),
+                }
+            };
+            let name = text("name", &format!("the {}'s name", table.word()))?;
+            let new_name = match op {
+                TableOp::Rename => Some(text("to", &format!("the {}'s new name", table.word()))?),
+                _ => None,
+            };
+            let keys: Map<String, Value> = match op {
+                TableOp::Add => {
+                    if let Some(missing) = missing_required(&objects[table.def()], map) {
+                        return Err(fail(
+                            ErrorCode::MissingKey,
+                            format!(
+                                "missing key `{}`; a {} needs {}",
+                                missing.first,
+                                table.word(),
+                                missing.needs
+                            ),
+                            &missing.first,
+                        ));
+                    }
+                    map.iter()
+                        .filter(|(k, _)| table.entry_keys().contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                }
+                TableOp::Change => match map.get("set") {
+                    Some(Value::Object(set)) if !set.is_empty() => {
+                        if let Some(key) = set
+                            .keys()
+                            .find(|k| !table.entry_keys().contains(&k.as_str()))
+                        {
+                            return Err(fail(
+                                ErrorCode::UnknownKey,
+                                format!(
+                                    "unknown key `{key}`; a {} takes {}",
+                                    table.word(),
+                                    table.entry_keys().join(", ")
+                                ),
+                                &format!("set.{key}"),
+                            ));
+                        }
+                        set.clone()
+                    }
+                    Some(_) => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected a mapping of at least one key to its new value".to_owned(),
+                            "set",
+                        ))
+                    }
+                    None => {
+                        return Err(fail(
+                            ErrorCode::MissingKey,
+                            "missing key `set`, the keys to set and their new values".to_owned(),
+                            "set",
+                        ))
+                    }
+                },
+                TableOp::Rename | TableOp::Delete => Map::new(),
+            };
+            Body::Table {
+                op,
+                table,
+                to,
+                name,
+                keys,
+                new_name,
+            }
+        }
     };
     Ok(Operation {
         index,
@@ -998,7 +1368,8 @@ mod tests {
         for (i, a) in SPECS.iter().enumerate() {
             for b in &SPECS[i + 1..] {
                 assert_ne!(a.name, b.name);
-                assert!(!a.alias.eq_ignore_ascii_case(b.alias));
+                // An operation with no AutoCAD alias has none to share.
+                assert!(a.alias.is_empty() || !a.alias.eq_ignore_ascii_case(b.alias));
             }
         }
     }

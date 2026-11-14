@@ -41,6 +41,11 @@ pub enum ErrorCode {
     WrongType,
     /// A value that should be a number is not one.
     BadNumber,
+    /// An edit to an object on a locked layer, which AutoCAD refuses too.
+    Locked,
+    /// A layer, linetype or text style cannot be deleted while something
+    /// still uses it.
+    InUse,
     /// A value of the right shape that is not allowed, such as a colour
     /// outside 1 to 255 or a radius that is not positive.
     BadValue,

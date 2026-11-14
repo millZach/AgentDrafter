@@ -96,6 +96,9 @@ pub(crate) struct RecordFile {
     root: Node,
     lists: Vec<(ObjectList, ListState)>,
     values: Vec<ValueEdit>,
+    /// The tables at the top of the file an edit changed, such as
+    /// `layers`, each written again whole, one entry to a line.
+    tables: Vec<String>,
 }
 
 /// What became of one list's objects: where the file wrote each at first,
@@ -175,12 +178,15 @@ impl RecordFile {
             root,
             lists: Vec::new(),
             values: Vec::new(),
+            tables: Vec::new(),
         })
     }
 
     /// Whether any edit has been made.
     pub(crate) fn changed(&self) -> bool {
-        !self.values.is_empty() || self.lists.iter().any(|(_, state)| state.dirty())
+        !self.values.is_empty()
+            || !self.tables.is_empty()
+            || self.lists.iter().any(|(_, state)| state.dirty())
     }
 
     /// The objects of `list` as the record writes them now. A row with no
@@ -203,6 +209,332 @@ impl RecordFile {
                 }
             })
             .collect()
+    }
+
+    /// The names `table`, such as `layers`, defines, in the file's order.
+    pub(crate) fn table_names(&self, table: &str) -> Vec<String> {
+        match mapping_entry(&self.root, table).map(|t| &t.kind) {
+            Some(Kind::Mapping(entries)) => entries.iter().map(|e| e.key.clone()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The entry `name` of `table` as one line of the record's YAML, such
+    /// as `{color: red}`; none when the table does not define it.
+    pub(crate) fn table_entry_text(&self, table: &str, name: &str) -> Option<String> {
+        let Some(Kind::Mapping(entries)) = mapping_entry(&self.root, table).map(|t| &t.kind) else {
+            return None;
+        };
+        entries
+            .iter()
+            .find(|e| e.key == name)
+            .map(|e| self.emitter().flow(&e.value))
+    }
+
+    /// The text value of `key` in the entry `name` of `table`, such as a
+    /// layer's `locked`.
+    pub(crate) fn table_value(&self, table: &str, name: &str, key: &str) -> Option<String> {
+        let Some(Kind::Mapping(entries)) = mapping_entry(&self.root, table).map(|t| &t.kind) else {
+            return None;
+        };
+        let entry = entries.iter().find(|e| e.key == name)?;
+        let Kind::Mapping(keys) = &entry.value.kind else {
+            return None;
+        };
+        scalar_of(keys, key).map(str::to_owned)
+    }
+
+    /// The names of the entries of `table` whose `key` is `value`, such as
+    /// the layers whose linetype is `DASHED`.
+    pub(crate) fn table_users(&self, table: &str, key: &str, value: &str) -> Vec<String> {
+        let Some(Kind::Mapping(entries)) = mapping_entry(&self.root, table).map(|t| &t.kind) else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter(|e| match &e.value.kind {
+                Kind::Mapping(keys) => scalar_of(keys, key) == Some(value),
+                _ => false,
+            })
+            .map(|e| e.key.clone())
+            .collect()
+    }
+
+    /// Adds the entry `name`, with `keys` written in the order of
+    /// `order`, to `table` at the top of the file, making the table when
+    /// the file has none.
+    pub(crate) fn table_add(
+        &mut self,
+        table: &str,
+        order: &[&str],
+        name: &str,
+        keys: &Map<String, Value>,
+    ) -> Result<(), Error> {
+        let mut ordered: Vec<(&String, &Value)> = keys.iter().collect();
+        ordered.sort_by_key(|(key, _)| order.iter().position(|k| k == key).unwrap_or(order.len()));
+        let value = Node::new(Kind::Mapping(
+            ordered
+                .into_iter()
+                .map(|(key, value)| new_entry(key, node_of(value)))
+                .collect(),
+        ));
+        self.table_mut(table)?.push(new_entry(name, value));
+        self.note_table(table);
+        Ok(())
+    }
+
+    /// Sets keys of the entry `name` of `table`: each key of `set` to its
+    /// new value, and a null takes a key away. An entry the file does not
+    /// write, such as layer `0`, is made.
+    pub(crate) fn table_change(
+        &mut self,
+        table: &str,
+        order: &[&str],
+        name: &str,
+        set: &Map<String, Value>,
+    ) -> Result<(), Error> {
+        let entries = self.table_mut(table)?;
+        if !entries.iter().any(|e| e.key == name) {
+            entries.push(new_entry(name, Node::new(Kind::Mapping(Vec::new()))));
+        }
+        let entry = entries
+            .iter_mut()
+            .find(|e| e.key == name)
+            .expect("just made");
+        if !matches!(entry.value.kind, Kind::Mapping(_)) {
+            entry.value = Node::new(Kind::Mapping(Vec::new()));
+        }
+        let Kind::Mapping(keys) = &mut entry.value.kind else {
+            unreachable!("a mapping")
+        };
+        for (key, value) in set {
+            let position = keys.iter().position(|e| e.key == *key);
+            match (value, position) {
+                (Value::Null, Some(p)) => {
+                    keys.remove(p);
+                }
+                (Value::Null, None) => {}
+                (value, Some(p)) => keys[p].value = node_of(value),
+                (value, None) => keys.push(new_entry(key, node_of(value))),
+            }
+        }
+        keys.sort_by_key(|k| {
+            order
+                .iter()
+                .position(|o| *o == k.key)
+                .unwrap_or(order.len())
+        });
+        self.note_table(table);
+        Ok(())
+    }
+
+    /// Renames the entry `name` of `table` to `to`.
+    pub(crate) fn table_rename(&mut self, table: &str, name: &str, to: &str) -> Result<(), Error> {
+        let entries = self.table_mut(table)?;
+        if let Some(entry) = entries.iter_mut().find(|e| e.key == name) {
+            to.clone_into(&mut entry.key);
+        }
+        self.note_table(table);
+        Ok(())
+    }
+
+    /// Sets `key` to `to` in every entry of `table` where it is `from`,
+    /// such as each layer's linetype when the linetype is renamed.
+    pub(crate) fn table_rename_values(&mut self, table: &str, key: &str, from: &str, to: &str) {
+        if self.table_users(table, key, from).is_empty() {
+            return;
+        }
+        let Some(Kind::Mapping(entries)) =
+            mapping_entry_mut(&mut self.root, table).map(|t| &mut t.kind)
+        else {
+            return;
+        };
+        for entry in entries {
+            if let Kind::Mapping(keys) = &mut entry.value.kind {
+                for k in keys.iter_mut().filter(|k| k.key == key) {
+                    if matches!(&k.value.kind, Kind::Scalar(text) if text == from) {
+                        k.value = Node::scalar(to.to_owned());
+                    }
+                }
+            }
+        }
+        self.note_table(table);
+    }
+
+    /// Takes the entry `name` away from `table`.
+    pub(crate) fn table_delete(&mut self, table: &str, name: &str) -> Result<(), Error> {
+        self.table_mut(table)?.retain(|e| e.key != name);
+        self.note_table(table);
+        Ok(())
+    }
+
+    /// The IDs in its file of each object of `list` whose `key` is
+    /// `value`, such as every object on a layer.
+    pub(crate) fn object_users(&self, list: ObjectList, key: &str, value: &str) -> Vec<String> {
+        let listed = self.objects(list);
+        self.items(list)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                object_parts(item)
+                    .1
+                    .is_some_and(|keys| scalar_of(keys, key) == Some(value))
+            })
+            .map(|(i, _)| listed[i].id.clone())
+            .collect()
+    }
+
+    /// The text value of `key` in the object of `list` at `index`, such
+    /// as its `layer`; none when it does not write it.
+    pub(crate) fn object_value(&self, list: ObjectList, index: usize, key: &str) -> Option<String> {
+        let item = self.items(list)?.get(index)?;
+        object_parts(item)
+            .1
+            .and_then(|keys| scalar_of(keys, key))
+            .map(str::to_owned)
+    }
+
+    /// Sets `key` to `to` in every object of `list` where it is `from`, as
+    /// operation `operation`, and gives how many it set.
+    pub(crate) fn rename_values(
+        &mut self,
+        list: ObjectList,
+        key: &str,
+        from: &str,
+        to: &str,
+        operation: usize,
+    ) -> usize {
+        let users: Vec<usize> = self
+            .items(list)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                object_parts(item)
+                    .1
+                    .is_some_and(|keys| scalar_of(keys, key) == Some(from))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if users.is_empty() {
+            return 0;
+        }
+        self.state(list);
+        for &index in &users {
+            if let Ok(items) = self.items_mut(list) {
+                if let Some(keys) = object_keys_mut(&mut items[index]) {
+                    for k in keys.iter_mut().filter(|k| k.key == key) {
+                        k.value = Node::scalar(to.to_owned());
+                    }
+                }
+            }
+            self.touch(list, index, operation, Touch::Keys(vec![key.to_owned()]));
+        }
+        users.len()
+    }
+
+    /// The entries of `table` at the top of the file, to edit, made when
+    /// the file has none.
+    fn table_mut(&mut self, table: &str) -> Result<&mut Vec<Entry>, Error> {
+        let path = self.path.clone();
+        let Kind::Mapping(entries) = &mut self.root.kind else {
+            return Err(record_shape_in("a mapping", &path));
+        };
+        if !entries.iter().any(|e| e.key == table) {
+            // Before the objects, where the text writes it.
+            let at = entries
+                .iter()
+                .position(|e| e.key == "objects")
+                .unwrap_or(entries.len());
+            entries.insert(at, new_entry(table, Node::new(Kind::Mapping(Vec::new()))));
+        }
+        let entry = entries
+            .iter_mut()
+            .find(|e| e.key == table)
+            .expect("just made");
+        if entry.value.is_bare_null() {
+            entry.value = Node::new(Kind::Mapping(Vec::new()));
+        }
+        match &mut entry.value.kind {
+            Kind::Mapping(entries) => Ok(entries),
+            _ => Err(record_shape_in(
+                &format!("a mapping under `{table}`"),
+                &path,
+            )),
+        }
+    }
+
+    fn note_table(&mut self, table: &str) {
+        if !self.tables.iter().any(|t| t == table) {
+            self.tables.push(table.to_owned());
+        }
+    }
+
+    /// The splice that writes `table` again whole, one entry to a line, in
+    /// the place the file wrote it, or else before the file's `objects`.
+    fn table_splice(&self, table: &str) -> Result<(usize, usize, String), Error> {
+        let Kind::Mapping(root) = &self.root.kind else {
+            return Err(record_shape_in("a mapping", &self.path));
+        };
+        if self.root.source.is_some_and(|s| s.style == Style::Flow) {
+            return Err(self.cannot_write("the file is written in braces"));
+        }
+        let entry = root
+            .iter()
+            .find(|e| e.key == table)
+            .expect("an edited table is in the file");
+        let nl = self.newline;
+        let emitter = self.emitter();
+        let Kind::Mapping(entries) = &entry.value.kind else {
+            return Err(record_shape_in(
+                &format!("a mapping under `{table}`"),
+                &self.path,
+            ));
+        };
+        let render = |column: usize| -> String {
+            let indent = " ".repeat(column);
+            if entries.is_empty() {
+                return format!("{indent}{table}: {{}}{nl}");
+            }
+            let mut with = format!("{indent}{table}:{nl}");
+            for e in entries {
+                with.push_str(&" ".repeat(column + 2));
+                with.push_str(&scalar_text(&e.key, Context::Flow, column + 2, nl));
+                with.push_str(": ");
+                with.push_str(&emitter.flow(&e.value));
+                with.push_str(nl);
+            }
+            with
+        };
+        if entry.key_end > 0 {
+            let column = entry.key_at.column.saturating_sub(1);
+            let start = line_start(&self.text, entry.key_end);
+            let end = entry.value.source.map_or_else(
+                || line_end(&self.text, entry.key_end),
+                |s| line_end(&self.text, s.end),
+            );
+            let mut with = render(column);
+            if end == self.text.len() && !self.text.ends_with('\n') {
+                with.truncate(with.len() - nl.len());
+            }
+            return Ok((start, end, with));
+        }
+        // A table the file did not write goes before its objects.
+        let column = root
+            .first()
+            .map_or(0, |e| e.key_at.column.saturating_sub(1));
+        match root.iter().find(|e| e.key == "objects" && e.key_end > 0) {
+            Some(objects) => {
+                let at = line_start(&self.text, objects.key_end);
+                Ok((at, at, render(column)))
+            }
+            None => {
+                let at = self.text.len();
+                let lead = if self.text.ends_with('\n') { "" } else { nl };
+                Ok((at, at, format!("{lead}{}", render(column))))
+            }
+        }
     }
 
     /// The operation to blame for what is wrong at `within` in the object
@@ -771,6 +1103,9 @@ impl RecordFile {
     /// Where the text changes: each a range of bytes and what replaces it.
     fn splices(&self) -> Result<Vec<(usize, usize, String)>, Error> {
         let mut splices = Vec::new();
+        for table in &self.tables {
+            splices.push(self.table_splice(table)?);
+        }
         for (list, state) in &self.lists {
             if state.dirty() {
                 self.list_splices(*list, state, &mut splices)?;

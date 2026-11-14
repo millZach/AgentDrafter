@@ -341,6 +341,18 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("move", "MOVE"),
             ("delete", "ERASE"),
             ("set_attribute", "ATTEDIT"),
+            ("add_layer", "LAYER"),
+            ("change_layer", ""),
+            ("rename_layer", "RENAME"),
+            ("delete_layer", "LAYDEL"),
+            ("add_linetype", "LINETYPE"),
+            ("change_linetype", ""),
+            ("rename_linetype", ""),
+            ("delete_linetype", ""),
+            ("add_text_style", "STYLE"),
+            ("change_text_style", ""),
+            ("rename_text_style", ""),
+            ("delete_text_style", ""),
         ]
     );
     let samples = [
@@ -360,6 +372,18 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "move", "target": {"name": "n", "sheet": "S"}, "by": [1, 0, 0]}),
         json!({"op": "erase", "target": {"name": "n"}}),
         json!({"op": "set_attribute", "target": {"id": "S/objects[2]"}, "tag": "REV", "value": "B"}),
+        json!({"op": "layer", "sheet": "S", "name": "markup", "color": "red", "plot": false}),
+        json!({"op": "change_layer", "sheet": "S", "name": "markup", "set": {"locked": true}}),
+        json!({"op": "rename", "sheet": "S", "name": "markup", "to": "redline"}),
+        json!({"op": "LAYDEL", "template": "templates/ansi-b.yaml", "name": "redline"}),
+        json!({"op": "add_linetype", "sheet": "S", "name": "DASHED", "pattern": [0.25, -0.125]}),
+        json!({"op": "change_linetype", "sheet": "S", "name": "DASHED", "set": {"description": "Dashes"}}),
+        json!({"op": "rename_linetype", "sheet": "S", "name": "DASHED", "to": "HIDDEN"}),
+        json!({"op": "delete_linetype", "template": "templates/ansi-b.yaml", "name": "HIDDEN"}),
+        json!({"op": "STYLE", "sheet": "S", "name": "tags", "font": "romans.shx"}),
+        json!({"op": "change_text_style", "sheet": "S", "name": "tags", "set": {"width_factor": 0.8}}),
+        json!({"op": "rename_text_style", "template": "t.yaml", "name": "tags", "to": "labels"}),
+        json!({"op": "delete_text_style", "sheet": "S", "name": "labels"}),
     ];
     for (info, sample) in listed.operations.iter().zip(&samples) {
         assert!(info.does.contains(&info.alias), "{}", info.does);
@@ -1452,5 +1476,112 @@ fn an_adds_schema_takes_exactly_what_the_add_takes() {
         "{} disagreements:\n{}",
         disagreements.len(),
         disagreements.join("\n")
+    );
+}
+
+/// Zach decided on 2026-11-13 how a change set edits a template's layers,
+/// linetypes and text styles, and that it respects a locked layer.
+#[test]
+fn a_templates_layers_linetypes_and_styles_are_added_changed_renamed_and_deleted() {
+    let set = demo_set("tables");
+    let template = set.join("templates").join("ansi-b.yaml");
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "LAYER", "sheet": "DEMO-001", "name": "markup", "color": "red", "plot": false},
+            {"op": "add_linetype", "template": "templates/ansi-b.yaml", "name": "DASHED", "pattern": [0.25, -0.125]},
+            {"op": "change_layer", "sheet": "DEMO-002", "name": "markup", "set": {"linetype": "DASHED"}},
+            {"op": "add_line", "sheet": "DEMO-003", "from": [1, 1, 0], "to": [2, 2, 0], "layer": "trim", "id": "cut"},
+            {"op": "RENAME", "sheet": "DEMO-001", "name": "trim", "to": "trim-marks"},
+            {"op": "rename_linetype", "sheet": "DEMO-001", "name": "DASHED", "to": "HIDDEN"},
+            {"op": "STYLE", "sheet": "DEMO-001", "name": "tags", "font": "romans.shx"},
+            {"op": "delete_text_style", "sheet": "DEMO-001", "name": "tags"},
+        ]}),
+    );
+    assert_eq!(
+        report.landed, 3,
+        "a template edit reaches every sheet built from it"
+    );
+    let text = fs::read_to_string(&template).unwrap();
+    assert!(
+        text.contains("  trim-marks: {color: 8, lineweight: 0.13}\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  markup: {color: red, linetype: HIDDEN, plot: false}\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("linetypes:\n  HIDDEN: {pattern: [0.25, -0.125]}\n"),
+        "{text}"
+    );
+    assert!(!text.contains("tags"), "{text}");
+    assert!(
+        text.contains("closed: true, layer: trim-marks}"),
+        "the template's object follows"
+    );
+    assert!(
+        text.starts_with("# A made-up 11 x 17 inch sheet"),
+        "the rest of the file is kept"
+    );
+    assert!(
+        row_text(&set, "DEMO-003").contains("layer: trim-marks"),
+        "a row's object follows the rename"
+    );
+
+    // A delete of what is still in use is refused, listing what uses it;
+    // a drawing's own names are never renamed or deleted.
+    let refused = |change_set: Value| {
+        let reply = apply(&set, change_set);
+        assert!(!reply.ok);
+        let report = reply.result.unwrap();
+        report
+            .operations
+            .into_iter()
+            .find(|o| !o.ok)
+            .unwrap()
+            .error
+            .unwrap()
+    };
+    let e = refused(
+        json!({"operations": [{"op": "LAYDEL", "sheet": "DEMO-001", "name": "trim-marks"}]}),
+    );
+    assert_eq!(e.code, ErrorCode::InUse);
+    assert!(
+        e.message.contains("DEMO-001/objects[0]") && e.message.contains("DEMO-003/cut"),
+        "{}",
+        e.message
+    );
+    let e = refused(
+        json!({"operations": [{"op": "delete_linetype", "sheet": "DEMO-001", "name": "HIDDEN"}]}),
+    );
+    assert_eq!(e.code, ErrorCode::InUse);
+    assert!(e.message.contains("the layer markup"), "{}", e.message);
+    let e = refused(
+        json!({"operations": [{"op": "rename_text_style", "sheet": "DEMO-001", "name": "Standard", "to": "plain"}]}),
+    );
+    assert_eq!(e.code, ErrorCode::BadValue);
+    let e =
+        refused(json!({"operations": [{"op": "LAYER", "sheet": "DEMO-001", "name": "MARKUP"}]}));
+    assert_eq!(e.code, ErrorCode::DuplicateName);
+
+    // A locked layer's objects are not edited, and are once it is unlocked.
+    lands(
+        &set,
+        json!({"operations": [{"op": "change_layer", "sheet": "DEMO-001", "name": "notes", "set": {"locked": true}}]}),
+    );
+    let e = refused(
+        json!({"operations": [{"op": "move", "target": {"id": "DEMO-001/heading"}, "by": [0.1, 0, 0]}]}),
+    );
+    assert_eq!(e.code, ErrorCode::Locked);
+    assert_eq!(e.field.as_deref(), Some("operations[0].target"));
+    assert!(e.message.contains("layer `notes`"), "{}", e.message);
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "add_text", "sheet": "DEMO-001", "contents": "ON A LOCKED LAYER", "position": [1, 9, 0], "height": 0.1, "layer": "notes"},
+            {"op": "change_layer", "sheet": "DEMO-001", "name": "notes", "set": {"locked": null}},
+            {"op": "move", "target": {"id": "DEMO-001/heading"}, "by": [0.1, 0, 0]},
+        ]}),
     );
 }
