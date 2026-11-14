@@ -8,7 +8,7 @@ Every capability is done the same way, and each issue says so: the schema and th
 
 - **Objects:** lines, polylines of straight segments, arcs, circles, ellipses, splines, hatches, text and mtext in SHX and TrueType styles, and inserts of blocks with attributes from a block library, on layers with linetypes. An object draws in its layer's colour, linetype and lineweight; it has none of its own.
 - **New sheets:** built from sheet descriptions, or from a drawing set's template and rows, into DWG 2018; rendered to PNG and plotted to PDF through a CTB at 1:1 to extents.
-- **Operations:** add each kind of object, `change`, `move`, `delete` and `set_attribute`, in change sets that land on a set's own files, with a journal, undo and accept.
+- **Operations:** add each kind of object, `change`, `move`, `delete`, `set_attribute`, and a table's `set_cell` and its row and column operations, in change sets that land on a set's own files, with a journal, undo and accept.
 - **Queries:** find by ID, name, block, attribute or text; a sheet's blocks; an insert's attributes; the distance between two objects' own points; a sheet's extents.
 - **Checks:** the exact paper size, nothing off the sheet, no text overflowing its cell, no text on other text.
 - **Existing DWGs:** `render` and `plot` read a DWG's model space, drawing what the core models and counting the rest. Nothing revises one yet.

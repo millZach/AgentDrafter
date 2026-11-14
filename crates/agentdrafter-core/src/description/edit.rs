@@ -35,6 +35,9 @@ use super::template::ROW_KEY;
 use crate::error::{Error, ErrorCode};
 use crate::units::{parse_length, LengthError, Unit};
 
+mod cells;
+pub(crate) use cells::{Axis, TableEdit, TableEdited};
+
 /// A list of objects in a record: a template's own, at `objects`, or one
 /// row's, at `rows[N].objects`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -206,22 +209,40 @@ enum Touch {
     Whole,
     /// These keys, such as `layer` or `attributes.REV`.
     Keys(Vec<String>),
+    /// These places, each with the key of the operation that gave its
+    /// value, such as a table's cell `cells[2][1]` that an add_row's
+    /// `cells[1]` gave. A place moves when a later edit moves it; the
+    /// operation's key does not.
+    Given(Vec<(String, String)>),
+}
+
+/// Whether setting the value at `set` set the value at `key`, each a path
+/// within an object such as `layer`, `points[2]` or `attributes.REV`.
+fn path_covers(set: &str, key: &str) -> bool {
+    key == set
+        || key.starts_with(&format!("{set}."))
+        || key.starts_with(&format!("{set}["))
+        || set.starts_with(&format!("{key}."))
 }
 
 impl Touch {
-    /// Whether it set the value at `key`, a path within the object such as
-    /// `layer`, `points[2]` or `attributes.REV`.
+    /// Whether it set the value at `key`, a path within the object.
     fn covers(&self, key: &str) -> bool {
         match self {
             Touch::Whole => true,
-            Touch::Keys(keys) => keys.iter().any(|set| {
-                key == set
-                    || key.starts_with(&format!("{set}."))
-                    || key.starts_with(&format!("{set}["))
-                    || set.starts_with(&format!("{key}."))
-            }),
+            Touch::Keys(keys) => keys.iter().any(|set| path_covers(set, key)),
+            Touch::Given(given) => given.iter().any(|(set, _)| path_covers(set, key)),
         }
     }
+}
+
+/// The place within an object an operation set that covers a place
+/// blamed on it, and the key of the operation that gave its value, when
+/// the touch keeps one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Matched {
+    pub path: String,
+    pub given: Option<String>,
 }
 
 /// A row's value an edit set: where its old text was written.
@@ -1079,7 +1100,14 @@ impl RecordFile {
     /// of `list` at `index`, such as `circle.layer`: the last that set that
     /// value, or else the last that touched the object at all. `None` when
     /// no operation touched it.
-    pub(crate) fn blame(&self, list: ObjectList, index: usize, within: &str) -> Option<usize> {
+    /// With it, the place within the object that operation set that covers
+    /// `within`, such as `cells[2][0].style`, when one does.
+    pub(crate) fn blame_at(
+        &self,
+        list: ObjectList,
+        index: usize,
+        within: &str,
+    ) -> Option<(usize, Option<Matched>)> {
         let item = self
             .lists
             .iter()
@@ -1093,7 +1121,30 @@ impl RecordFile {
             .iter()
             .rev()
             .find(|(_, touch)| !key.is_empty() && touch.covers(key));
-        set_it.or(item.touches.last()).map(|(op, _)| *op)
+        match set_it {
+            Some((op, Touch::Keys(keys))) => {
+                let matched = keys.iter().find(|set| path_covers(set, key));
+                Some((
+                    *op,
+                    matched.map(|path| Matched {
+                        path: path.clone(),
+                        given: None,
+                    }),
+                ))
+            }
+            Some((op, Touch::Given(given))) => {
+                let matched = given.iter().find(|(set, _)| path_covers(set, key));
+                Some((
+                    *op,
+                    matched.map(|(path, given)| Matched {
+                        path: path.clone(),
+                        given: Some(given.clone()),
+                    }),
+                ))
+            }
+            Some((op, Touch::Whole)) => Some((*op, None)),
+            None => item.touches.last().map(|(op, _)| (*op, None)),
+        }
     }
 
     /// The object of `list` at `index` as one line of the record's YAML,
@@ -1444,6 +1495,65 @@ impl RecordFile {
         };
         self.touch(list, index, operation, Touch::Keys(vec![key]));
         Ok(AttributeSet::Written)
+    }
+
+    /// Edits the grid of the table of `list` at `index`, as operation
+    /// `operation`: sets a cell's keys, or adds or deletes a row or a
+    /// column, keeping its merges, title and header in line. A cell's text
+    /// the template takes from the row is not set here: the row's value and
+    /// its new text are returned, for the caller to set in the sheet's row.
+    /// An error's field is in the operation, such as `set.merge` or `at`.
+    pub(crate) fn table_edit(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        edit: &TableEdit,
+        operation: usize,
+    ) -> Result<TableEdited, Error> {
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let item = &mut items[index];
+        let kind = object_parts(item).0.unwrap_or_default().to_owned();
+        if kind != "table" {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "the object is {} {kind}, and only a table has cells, rows and columns",
+                    article(&kind)
+                ),
+            )
+            .at_field("target"));
+        }
+        let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
+        let edited = cells::edit_table(keys, edit)?;
+        // A row or column inserted or deleted moves the cells after it, so
+        // the places earlier edits touched follow their cells.
+        if let Some(shift) = edited.shift {
+            let item = &mut self.list_state(list).items[index];
+            for (_, touch) in &mut item.touches {
+                match touch {
+                    Touch::Keys(keys) => {
+                        *keys = keys.iter().filter_map(|k| shift.path(k)).collect();
+                    }
+                    // The place moves, or goes with its cell; the
+                    // operation's own key stays as it sent it.
+                    Touch::Given(given) => {
+                        *given = given
+                            .iter()
+                            .filter_map(|(k, by)| shift.path(k).map(|k| (k, by.clone())))
+                            .collect();
+                    }
+                    Touch::Whole => {}
+                }
+            }
+        }
+        if edited.edited {
+            self.touch(list, index, operation, Touch::Keys(edited.touched.clone()));
+            if !edited.given.is_empty() {
+                self.touch(list, index, operation, Touch::Given(edited.given.clone()));
+            }
+        }
+        Ok(edited)
     }
 
     /// The text of row `row`'s value `name`, if the row gives it.

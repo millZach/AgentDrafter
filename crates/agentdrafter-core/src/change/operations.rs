@@ -4,14 +4,16 @@
 //! Every object a sheet description holds has an operation that adds it,
 //! named after the object and aliased to the AutoCAD command that draws it.
 //! `change`, `move`, `delete` and `set_attribute` edit an object an agent
-//! names by its ID or by its name.
+//! names by its ID or by its name, and `set_cell`, `add_row`, `delete_row`,
+//! `add_column` and `delete_column` a table's grid.
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::description::schema::{block_library_schema, sheet_description_schema};
 use crate::description::{
-    article, objects_table, rows_schema, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
+    article, objects_table, rows_schema, template_schema, Axis, TableEdit, CELL_KEYS, LAYER_KEYS,
+    LINETYPE_KEYS, TEXT_STYLE_KEYS,
 };
 use crate::error::{Error, ErrorCode};
 use crate::units::{parse_length, LengthError, Unit};
@@ -31,6 +33,19 @@ pub(crate) enum Kind {
     /// Adds or redefines a block of a block library, or brings the inserts
     /// of its blocks into line with their definitions.
     Block(BlockOp),
+    /// Sets a cell of a table, or adds or deletes a row or a column.
+    Grid(GridOp),
+}
+
+/// What an operation on a table's grid does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GridOp {
+    /// Sets keys of a cell: AutoCAD's TABLEDIT.
+    SetCell,
+    /// Adds a row or a column.
+    Add(Axis),
+    /// Deletes a row or a column.
+    Delete(Axis),
 }
 
 /// What a block operation does.
@@ -136,7 +151,7 @@ pub(crate) struct Spec {
 }
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 33] = [
+pub(crate) const SPECS: [Spec; 38] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -170,6 +185,11 @@ pub(crate) const SPECS: [Spec; 33] = [
         alias: "ATTEDIT",
         kind: Kind::SetAttribute,
     },
+    grid("set_cell", "TABLEDIT", GridOp::SetCell),
+    grid("add_row", "", GridOp::Add(Axis::Row)),
+    grid("delete_row", "", GridOp::Delete(Axis::Row)),
+    grid("add_column", "", GridOp::Add(Axis::Column)),
+    grid("delete_column", "", GridOp::Delete(Axis::Column)),
     table("add_layer", "LAYER", TableOp::Add, Table::Layer),
     table("change_layer", "", TableOp::Change, Table::Layer),
     table("rename_layer", "RENAME", TableOp::Rename, Table::Layer),
@@ -187,6 +207,14 @@ pub(crate) const SPECS: [Spec; 33] = [
     block("attsync", "ATTSYNC", BlockOp::Sync),
     block("import_blocks", "ADCENTER", BlockOp::Import),
 ];
+
+const fn grid(name: &'static str, alias: &'static str, op: GridOp) -> Spec {
+    Spec {
+        name,
+        alias,
+        kind: Kind::Grid(op),
+    }
+}
 
 const fn block(name: &'static str, alias: &'static str, op: BlockOp) -> Spec {
     Spec {
@@ -392,6 +420,7 @@ fn does(spec: &Spec) -> String {
                  template names the library, all or nothing."
             )
         }
+        Kind::Grid(op) => grid_does(op),
         Kind::SetAttribute => "Sets the value of the attribute tag of an insert. When the \
                                insert's block defines the tag more than once, occurrence names \
                                which, counted from 1 in the order the block defines them, and \
@@ -402,6 +431,57 @@ fn does(spec: &Spec) -> String {
                                instead, on that sheet alone, and the reply names every place on \
                                the sheet the value fills. AutoCAD's ATTEDIT."
             .to_owned(),
+    }
+}
+
+/// What an operation on a table's grid does, in words.
+fn grid_does(op: GridOp) -> String {
+    const GRID: &str = "The table is named by target, by its ID or its name. Cells, rows and \
+                        columns count from 0 from the top left, a cell [row, column]. A table of \
+                        a template is edited in the template, so every sheet built from it \
+                        follows, all or nothing.";
+    match op {
+        GridOp::SetCell => format!(
+            "Sets keys of the cell [row, column] of a table: each key under set, text, style, \
+             height, justify or merge, takes its new value as a sheet description writes a \
+             cell's, and null takes it away. A cell inside another cell's merge is refused, \
+             naming that cell; a merge keeps within the table and off other merges, and the \
+             cells it covers must be empty. A cell's text its template takes from the row is \
+             set in that sheet's row, on that sheet alone. {GRID} AutoCAD's TABLEDIT."
+        ),
+        GridOp::Add(axis) => {
+            let (word, size, across) = match axis {
+                Axis::Row => ("row", "height", "column"),
+                Axis::Column => ("column", "width", "row"),
+            };
+            let head = match axis {
+                Axis::Row => {
+                    " A row is not added above a title or header row, which are the table's \
+                     first rows."
+                }
+                Axis::Column => "",
+            };
+            format!(
+                "Adds a {word} to a table at at, its place counted from 0, or after the last \
+                 without it; {size} high or wide, or as the {word} before it without it, or the \
+                 first {word} when added at 0; with cells, one for each {across}, each as a sheet \
+                 description writes a cell, or empty without them. A merge it falls inside, \
+                 between its first and last {word}s, grows by one {word}.{head} {GRID}"
+            )
+        }
+        GridOp::Delete(axis) => {
+            let word = axis.word();
+            let flags = match axis {
+                Axis::Row => " Deleting the title or header row leaves the table without one.",
+                Axis::Column => "",
+            };
+            format!(
+                "Deletes the {word} of a table that {word} names, counted from 0. A merge it cuts through \
+                 shrinks by one {word}; a {word} that holds a merged cell spanning more {word}s \
+                 than it is refused, naming the cell, so take its merge away first with set_cell. \
+                 The last {word} is not deleted.{flags} {GRID}"
+            )
+        }
     }
 }
 
@@ -460,6 +540,20 @@ fn definitions() -> Map<String, Value> {
         }),
     );
     add_block_definitions(&mut defs);
+    // A table's cell as a template writes it: the cell, or its text, may be
+    // a value from the row, which the reader takes only in a template.
+    let mut template_defs = template_schema()["$defs"].take();
+    for name in ["row_value", "value_name"] {
+        defs.insert(name.into(), template_defs[name].take());
+    }
+    let mut cell = template_defs["table_cell"].take();
+    cell["description"] = json!(
+        "A cell, as a sheet description writes one: its text alone, '' or null for an empty \
+         cell, or a mapping that gives its text and what it draws with. In a template's table, \
+         the cell or its text may be a value from the row, {row: NAME}; a row's own table takes \
+         none."
+    );
+    defs.insert("template_cell".into(), cell);
     defs.insert(
         "target".into(),
         json!({
@@ -625,6 +719,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
         }),
         Kind::Table(op, table) => table_schema(op, table, defs),
         Kind::Block(op) => block_schema(op, defs),
+        Kind::Grid(op) => grid_schema(op, defs),
         Kind::SetAttribute => json!({
             "type": "object",
             "required": ["target", "tag", "value"],
@@ -726,6 +821,143 @@ fn table_schema(op: TableOp, table: Table, defs: &Map<String, Value>) -> Value {
         "additionalProperties": false,
         "properties": properties,
         "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }],
+    })
+}
+
+/// The schema of an operation on a table's grid, before its `op`.
+fn grid_schema(op: GridOp, defs: &Map<String, Value>) -> Value {
+    let place = |what: &str| {
+        json!({
+            "description": what,
+            "type": "integer",
+            "minimum": 0,
+        })
+    };
+    // An optional key sent as null is left out.
+    let or_null = |mut schema: Value| {
+        let description = schema
+            .as_object_mut()
+            .and_then(|own| own.remove("description"));
+        let mut optional = json!({ "anyOf": [schema, { "type": "null" }] });
+        if let Some(description) = description {
+            optional["description"] = description;
+        }
+        optional
+    };
+    let mut properties = Map::new();
+    properties.insert(
+        "target".into(),
+        json!({
+            "description": "The table, by its ID or its name.",
+            "$ref": "#/$defs/target",
+        }),
+    );
+    let mut required = vec![json!("target")];
+    match op {
+        GridOp::SetCell => {
+            // A cell's keys, as a cell written as a mapping takes them, each
+            // of which null takes away.
+            let mut keys = Map::new();
+            let cell = &defs["template_cell"]["anyOf"];
+            if let Some(own) = cell
+                .as_array()
+                .and_then(|choices| choices.iter().find_map(|c| c["properties"].as_object()))
+            {
+                for (key, value) in own {
+                    let mut value = value.clone();
+                    let description = value.as_object_mut().and_then(|v| v.remove("description"));
+                    let mut optional = json!({ "anyOf": [value, { "type": "null" }] });
+                    if let Some(description) = description {
+                        optional["description"] = description;
+                    }
+                    if key == "text" {
+                        optional["description"] = json!(
+                            "What the cell says, exactly as it shows; null takes it away. In a \
+                             template's table it may be a value from the row, {row: NAME}, \
+                             which only a template takes. Text sent for a cell whose template \
+                             takes its text from the row sets that sheet's row value instead."
+                        );
+                    }
+                    keys.insert(key.clone(), optional);
+                }
+            }
+            properties.insert(
+                "cell".into(),
+                json!({
+                    "description": "The cell, [row, column], each counted from 0 from the top \
+                                    left.",
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 0 },
+                    "minItems": 2,
+                    "maxItems": 2,
+                }),
+            );
+            properties.insert(
+                "set".into(),
+                json!({
+                    "description": "The cell's keys to set, each to its new value as a sheet \
+                                    description writes a cell's, such as {\"text\": \"C-104\"} \
+                                    or {\"merge\": [1, 2]}; null takes a key away.",
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": false,
+                    "properties": keys,
+                }),
+            );
+            required.extend([json!("cell"), json!("set")]);
+        }
+        GridOp::Add(axis) => {
+            let (word, across) = match axis {
+                Axis::Row => ("row", "column"),
+                Axis::Column => ("column", "row"),
+            };
+            properties.insert(
+                "at".into(),
+                or_null(place(&format!(
+                    "The new {word}'s place, counted from 0: the {word} now there and those \
+                     after it move along. Without it, or null, after the last."
+                ))),
+            );
+            properties.insert(
+                axis.size_key().into(),
+                or_null(json!({
+                    "description": format!(
+                        "The new {word}'s {}: a length more than 0. Without it, or null, the {} \
+                         of the {word} before it, or of the first {word} when it is added at 0.",
+                        axis.size_key(),
+                        axis.size_key()
+                    ),
+                    "$ref": "#/$defs/length_more_than_0",
+                })),
+            );
+            properties.insert(
+                "cells".into(),
+                or_null(json!({
+                    "description": format!(
+                        "The new {word}'s cells, one for each {across}, each as a sheet \
+                         description writes a cell, or in a template's table a value from the \
+                         row, {{row: NAME}}, as the cell or its text. Without them, or null, \
+                         empty."
+                    ),
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/template_cell" },
+                })),
+            );
+        }
+        GridOp::Delete(axis) => {
+            let word = axis.word();
+            properties.insert(
+                word.into(),
+                place(&format!("The {word} to delete, counted from 0.")),
+            );
+            required.push(json!(word));
+        }
+    }
+    json!({
+        "type": "object",
+        "required": required,
+        "additionalProperties": false,
+        "properties": properties,
     })
 }
 
@@ -915,6 +1147,12 @@ pub(crate) enum Body {
         name: String,
         keys: Map<String, Value>,
         new_name: Option<String>,
+    },
+    /// An edit of a table's grid: a cell set, or a row or a column added or
+    /// deleted.
+    TableEdit {
+        target: Target,
+        edit: TableEdit,
     },
     /// A block operation: on the block `name`, or every block for an
     /// attsync without one, of the block library `library` names, with the
@@ -1112,6 +1350,125 @@ fn read_import(map: &Map<String, Value>) -> Result<Import, (ErrorCode, String, &
         blocks,
         replace,
         units,
+    })
+}
+
+/// The edit an operation on a table's grid sent as `map` makes, or the
+/// code, message and key of what is wrong with it.
+fn read_grid_edit(
+    op: GridOp,
+    map: &Map<String, Value>,
+) -> Result<TableEdit, (ErrorCode, String, String)> {
+    let place = |key: &str, what: &str, required: bool| match map.get(key) {
+        None | Some(Value::Null) if !required => Ok(None),
+        Some(Value::Number(n)) if whole(n).is_some() => {
+            Ok(whole(n).and_then(|n| usize::try_from(n).ok()))
+        }
+        None => Err((
+            ErrorCode::MissingKey,
+            format!("missing key `{key}`, {what}"),
+            key.to_owned(),
+        )),
+        Some(_) => Err((
+            ErrorCode::WrongType,
+            format!("expected {what}, a whole number from 0"),
+            key.to_owned(),
+        )),
+    };
+    Ok(match op {
+        GridOp::SetCell => {
+            let shape = "the cell, [row, column], two whole numbers from 0, counted from the top \
+                         left";
+            let cell = match map.get("cell") {
+                Some(Value::Array(items)) if items.len() == 2 => {
+                    let mut cell = [0; 2];
+                    for (i, item) in items.iter().enumerate() {
+                        cell[i] = match item {
+                            Value::Number(n) => whole(n).and_then(|n| usize::try_from(n).ok()),
+                            _ => None,
+                        }
+                        .ok_or_else(|| {
+                            (
+                                ErrorCode::WrongType,
+                                format!("expected {shape}"),
+                                format!("cell[{i}]"),
+                            )
+                        })?;
+                    }
+                    cell
+                }
+                Some(_) => {
+                    return Err((
+                        ErrorCode::WrongType,
+                        format!("expected {shape}"),
+                        "cell".to_owned(),
+                    ))
+                }
+                None => {
+                    return Err((
+                        ErrorCode::MissingKey,
+                        format!("missing key `cell`, {shape}"),
+                        "cell".to_owned(),
+                    ))
+                }
+            };
+            let set = match map.get("set") {
+                Some(Value::Object(set)) if !set.is_empty() => {
+                    if let Some(key) = set.keys().find(|k| !CELL_KEYS.contains(&k.as_str())) {
+                        return Err((
+                            ErrorCode::UnknownKey,
+                            format!("unknown key `{key}`; a cell takes {}", CELL_KEYS.join(", ")),
+                            format!("set.{key}"),
+                        ));
+                    }
+                    set.clone()
+                }
+                Some(_) => {
+                    return Err((
+                        ErrorCode::WrongType,
+                        "expected a mapping of at least one of the cell's keys to its new value, \
+                         such as {\"text\": \"C-104\"}"
+                            .to_owned(),
+                        "set".to_owned(),
+                    ))
+                }
+                None => {
+                    return Err((
+                        ErrorCode::MissingKey,
+                        "missing key `set`, the cell's keys to set and their new values".to_owned(),
+                        "set".to_owned(),
+                    ))
+                }
+            };
+            TableEdit::SetCell { cell, set }
+        }
+        GridOp::Add(axis) => {
+            let word = axis.word();
+            let at = place("at", &format!("the new {word}'s place"), false)?;
+            let size = map.get(axis.size_key()).filter(|v| !v.is_null()).cloned();
+            let cells = match map.get("cells") {
+                None | Some(Value::Null) => None,
+                Some(Value::Array(items)) => Some(items.clone()),
+                Some(_) => {
+                    return Err((
+                        ErrorCode::WrongType,
+                        format!("expected the new {word}'s cells, a list of cells"),
+                        "cells".to_owned(),
+                    ))
+                }
+            };
+            TableEdit::Add {
+                axis,
+                at,
+                size,
+                cells,
+            }
+        }
+        GridOp::Delete(axis) => {
+            let word = axis.word();
+            let index = place(word, &format!("the {word} to delete"), true)?.unwrap_or_default();
+            TableEdit::Delete { axis, index }
+        }
     })
 }
 
@@ -1401,6 +1758,18 @@ fn operation(
                 occurrence,
                 value,
             }
+        }
+        Kind::Grid(grid_op) => {
+            let allowed: Vec<&str> = match grid_op {
+                GridOp::SetCell => vec!["target", "cell", "set"],
+                GridOp::Add(axis) => vec!["target", "at", axis.size_key(), "cells"],
+                GridOp::Delete(axis) => vec!["target", axis.word()],
+            };
+            keys(&allowed)?;
+            let target = target()?;
+            let edit = read_grid_edit(grid_op, map)
+                .map_err(|(code, message, field)| fail(code, message, &field))?;
+            Body::TableEdit { target, edit }
         }
         Kind::Block(op) => {
             let allowed: &[&str] = match op {

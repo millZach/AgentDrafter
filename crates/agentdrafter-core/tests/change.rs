@@ -345,6 +345,11 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("move", "MOVE"),
             ("delete", "ERASE"),
             ("set_attribute", "ATTEDIT"),
+            ("set_cell", "TABLEDIT"),
+            ("add_row", ""),
+            ("delete_row", ""),
+            ("add_column", ""),
+            ("delete_column", ""),
             ("add_layer", "LAYER"),
             ("change_layer", ""),
             ("rename_layer", "RENAME"),
@@ -381,6 +386,11 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "move", "target": {"name": "n", "sheet": "S"}, "by": [1, 0, 0]}),
         json!({"op": "erase", "target": {"name": "n"}}),
         json!({"op": "set_attribute", "target": {"id": "S/objects[2]"}, "tag": "NOTE", "occurrence": 2, "value": "B"}),
+        json!({"op": "tabledit", "target": {"id": "S/cables"}, "cell": [2, 1], "set": {"text": "JB-9", "merge": null}}),
+        json!({"op": "add_row", "target": {"id": "S/cables"}, "at": 2, "height": "6 mm", "cells": ["A", "", {"text": "B", "justify": "middle_left"}]}),
+        json!({"op": "delete_row", "target": {"name": "cables", "sheet": "S"}, "row": 3}),
+        json!({"op": "add_column", "target": {"id": "S/cables"}, "width": 20}),
+        json!({"op": "delete_column", "target": {"id": "S/cables"}, "column": 0}),
         json!({"op": "layer", "sheet": "S", "name": "markup", "color": "red", "plot": false}),
         json!({"op": "change_layer", "sheet": "S", "name": "markup", "set": {"locked": true}}),
         json!({"op": "rename", "sheet": "S", "name": "markup", "to": "redline"}),
@@ -408,6 +418,34 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             }
         }
     }
+    // What the reader takes beyond the samples: a value from the row in a
+    // template's cell, and null for an optional key, which leaves it out.
+    for (name, more) in [
+        (
+            "set_cell",
+            json!({"op": "set_cell", "target": {"id": "S/t"}, "cell": [0, 0], "set": {"text": {"row": "PUMP"}}}),
+        ),
+        (
+            "add_row",
+            json!({"op": "add_row", "target": {"id": "S/t"}, "at": null, "height": null, "cells": [{"row": "PUMP"}, {"text": {"row": "TAG"}, "height": 2}, null, ""]}),
+        ),
+        (
+            "add_row",
+            json!({"op": "add_row", "target": {"id": "S/t"}, "cells": null}),
+        ),
+        (
+            "add_column",
+            json!({"op": "add_column", "target": {"id": "S/t"}, "at": null, "width": null, "cells": null}),
+        ),
+        (
+            "add_column",
+            json!({"op": "add_column", "target": {"id": "S/t"}, "at": 1, "cells": [{"row": "PUMP"}, "A"]}),
+        ),
+    ] {
+        let info = listed.operations.iter().find(|o| o.name == name).unwrap();
+        let validator = jsonschema::validator_for(&info.schema).unwrap();
+        assert!(validator.is_valid(&more), "{name}: {more}");
+    }
     let whole = jsonschema::validator_for(&change_set_schema()).unwrap();
     assert!(whole.is_valid(&json!({"operations": samples.to_vec(), "fixes": ["DEMO-002"]})));
     for wrong in [
@@ -420,6 +458,10 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"operations": [], "undo": true}),
         json!({"operations": [{"op": "set_attribute", "target": {"id": "S/a"}, "tag": "NOTE", "occurrence": 0, "value": "B"}]}),
         json!({"operations": [{"op": "set_attribute", "target": {"id": "S/a"}, "tag": "NOTE", "occurrence": "2", "value": "B"}]}),
+        json!({"operations": [{"op": "set_cell", "target": {"id": "S/a"}, "cell": [0], "set": {"text": "A"}}]}),
+        json!({"operations": [{"op": "set_cell", "target": {"id": "S/a"}, "cell": [0, 0], "set": {"colour": "red"}}]}),
+        json!({"operations": [{"op": "delete_row", "target": {"id": "S/a"}, "row": -1}]}),
+        json!({"operations": [{"op": "add_column", "target": {"id": "S/a"}, "height": 2}]}),
     ] {
         assert!(!whole.is_valid(&wrong), "the schema refuses {wrong}");
     }

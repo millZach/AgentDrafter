@@ -406,6 +406,8 @@ A cell's text is laid out as AutoCAD lays it out: as multiline text as wide as i
 
 The DWG holds an AutoCAD TABLE, its table style and its anonymous block of the lines and text it draws, which AutoCAD shows until it next lays the table out; AutoCAD 2026 opened made-up tables without recovery, audited them clean, and laid them out again as they were written. Reading a DWG back gives the table, and its style, when they have a model in the core; a table whose cell holds a block, a field or a formula, or overrides more than its text style, height and justification, is counted as not read, as is a table with any override of its own, a row's or a column's, such as a fill. In a [template](drawing-set.md#templates), a cell's text may be a value from the row, `{row: NAME}`, written as the cell or as its `text`.
 
+A change set adds a table with `add_table`, sets a cell with `set_cell` and adds or deletes a row or a column with `add_row`, `delete_row`, `add_column` and `delete_column`, keeping the table's merges, title and header in line ([Tables in change sets](change-sets.md#tables)).
+
 ### IDs and names
 
 ```yaml
