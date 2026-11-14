@@ -32,6 +32,7 @@ use super::{
     ChangeRequest, Fill, OperationOutcome, RowValueSet, SheetChange,
 };
 use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
+use crate::description::blocks::tag_in_capitals;
 use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
     template_at, template_in, template_path, AttributeSet, Disk, GivenValue, Listed, MarkFailure,
@@ -1188,7 +1189,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
             value,
             ..
         } => {
-            let capitals = tag.to_uppercase();
+            let capitals = tag_in_capitals(tag);
             let item = match set_which(
                 &capitals,
                 *occurrence,
@@ -1754,7 +1755,7 @@ fn apply_block(
 /// 0, `occurrence 2 of the attribute NOTE`. A tag written in lowercase is
 /// named in capitals, saying so.
 fn attribute_words(tag: &str, item: Option<usize>) -> String {
-    let capitals = tag.to_uppercase();
+    let capitals = tag_in_capitals(tag);
     let written = if capitals == tag {
         String::new()
     } else {

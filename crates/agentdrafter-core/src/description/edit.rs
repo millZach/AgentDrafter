@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use super::blocks::tag_in_capitals;
 use super::emit::{number_text, scalar_text, Context, Emitter};
 use super::ids::{ID_KEY, NAME_KEY};
 use super::objects::{article, BLOCK_OBJECT_TYPES, OBJECT_TYPES};
@@ -215,6 +216,7 @@ impl Touch {
                     || key.starts_with(&format!("{set}."))
                     || key.starts_with(&format!("{set}["))
                     || set.starts_with(&format!("{key}."))
+                    || set.starts_with(&format!("{key}["))
             }),
         }
     }
@@ -577,7 +579,7 @@ impl RecordFile {
                 }
                 if let Some(tag) = scalar_of(keys, "tag") {
                     let default = scalar_of(keys, "default").unwrap_or_default();
-                    carried.push((tag.to_uppercase(), default.to_owned()));
+                    carried.push((tag_in_capitals(tag), default.to_owned()));
                 }
             }
         }
@@ -858,7 +860,7 @@ impl RecordFile {
                     };
                     GivenValue {
                         key: v.key.clone(),
-                        tag: v.key.to_uppercase(),
+                        tag: tag_in_capitals(&v.key),
                         text: text_of(&v.value),
                         null: v.value.is_bare_null(),
                         items,
@@ -1298,7 +1300,7 @@ impl RecordFile {
         let Kind::Mapping(values) = &mut attributes.kind else {
             return Err(record_shape(&kind));
         };
-        let p = match values.iter().position(|e| e.key.to_uppercase() == tag) {
+        let p = match values.iter().position(|e| tag_in_capitals(&e.key) == tag) {
             Some(p) => p,
             None => {
                 values.push(new_entry(tag, Node::bare_null()));
@@ -1337,7 +1339,13 @@ impl RecordFile {
                 items[i] = Node::scalar(value);
             }
         }
-        let key = key_path("attributes", &values[p].key);
+        // A repeated tag's occurrence is its own place, so an error in one
+        // occurrence is not laid on an edit of another.
+        let tag_key = key_path("attributes", &values[p].key);
+        let key = match slot {
+            Some(i) => index_path(&tag_key, i),
+            None => tag_key,
+        };
         self.touch(list, index, operation, Touch::Keys(vec![key]));
         Ok(AttributeSet::Written)
     }

@@ -1204,8 +1204,10 @@ fn operation(
             let occurrence =
                 match map.get("occurrence") {
                     None => None,
-                    Some(Value::Number(n)) if n.as_u64().is_some_and(|n| n >= 1) => {
-                        usize::try_from(n.as_u64().unwrap_or(1)).ok()
+                    // A whole number, written `1` or `1.0`, as JSON Schema's
+                    // integer takes it.
+                    Some(Value::Number(n)) if whole(n).is_some_and(|n| n >= 1) => {
+                        whole(n).and_then(|n| usize::try_from(n).ok())
                     }
                     Some(_) => return Err(fail(
                         ErrorCode::WrongType,
@@ -1599,6 +1601,15 @@ fn length(value: &Value, units: Unit) -> Result<f64, String> {
             "expected a length such as 1 or \"4 in\", found `{text}`"
         )),
     }
+}
+
+/// `n` as a whole number from 0, whether JSON writes it `2` or `2.0`.
+fn whole(n: &serde_json::Number) -> Option<u64> {
+    n.as_u64().or_else(|| {
+        n.as_f64()
+            .filter(|f| f.fract() == 0.0 && *f >= 0.0 && *f <= u64::MAX as f64)
+            .map(|f| f as u64)
+    })
 }
 
 #[cfg(test)]

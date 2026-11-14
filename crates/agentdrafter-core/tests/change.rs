@@ -2661,3 +2661,32 @@ fn redefining_a_repeated_tag_keeps_its_values_by_occurrence() {
     assert_eq!(values_of(&set, "DEMO-001/n", "NOTE"), ["a", "-"]);
     assert_eq!(values_of(&set, "DEMO-003/revs", "NOTE"), ["A", "-"]);
 }
+
+/// An error in one occurrence of a repeated tag is laid on the operation
+/// that set that occurrence, not on a later one that set another; and an
+/// occurrence written `2.0`, a whole number as JSON Schema's integer takes
+/// it, is read as 2.
+#[test]
+fn an_occurrences_error_is_laid_on_its_own_operation_and_a_whole_float_is_taken() {
+    let set = set_with_notes("occurrence-blame");
+    let e = failed_operation(
+        &set,
+        json!({"operations": [
+            {"op": "set_attribute", "target": {"id": "DEMO-001/n"}, "tag": "NOTE", "occurrence": 1, "value": "bad\nvalue"},
+            {"op": "set_attribute", "target": {"id": "DEMO-001/n"}, "tag": "NOTE", "occurrence": 2, "value": "good"}
+        ]}),
+    );
+    assert!(
+        e.field
+            .as_deref()
+            .is_some_and(|f| f.starts_with("operations[0].")),
+        "{e:#?}"
+    );
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "set_attribute", "target": {"id": "DEMO-001/n"}, "tag": "NOTE", "occurrence": 2.0, "value": "two"}
+        ]}),
+    );
+    assert_eq!(values_of(&set, "DEMO-001/n", "NOTE"), ["a", "two", "-"]);
+}

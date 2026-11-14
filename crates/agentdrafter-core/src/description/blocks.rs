@@ -467,7 +467,7 @@ pub(super) fn attribute_definition(
     if let Some(problem) = tag_problem(written) {
         return Err(bad_value(tag_node, &tag_path, problem));
     }
-    let tag = written.to_uppercase();
+    let tag = tag_in_capitals(written);
     if tag != written {
         noticed.push(in_capitals(written, &tag, tag_path.clone(), tag_node.at));
     }
@@ -655,7 +655,7 @@ fn attributes(
         let mut given: Vec<(String, &strict_yaml::Entry)> = Vec::new();
         for entry in entries {
             let entry_path = key_path(&path, &entry.key);
-            let tag = entry.key.to_uppercase();
+            let tag = tag_in_capitals(&entry.key);
             if let Some((_, first)) = given.iter().find(|(t, _)| *t == tag) {
                 return Err(Error::new(
                     ErrorCode::DuplicateKey,
@@ -875,13 +875,28 @@ fn one_line_problem(text: &str, what: &str) -> Option<String> {
     })
 }
 
+/// An attribute tag in capitals, as AutoCAD keeps it, letter for letter:
+/// a letter whose capital is more than one letter, such as `ß`, stays as
+/// it is written, so the tag keeps the length the schema counts.
+pub(crate) fn tag_in_capitals(tag: &str) -> String {
+    tag.chars()
+        .map(|c| {
+            let mut upper = c.to_uppercase();
+            match (upper.next(), upper.next()) {
+                (Some(one), None) => one,
+                _ => c,
+            }
+        })
+        .collect()
+}
+
 /// Why `tag` cannot be an attribute tag, if it cannot. AutoCAD keeps a tag
 /// with no spaces; one written in lowercase it takes in capitals.
 fn tag_problem(tag: &str) -> Option<String> {
     if tag.is_empty() {
         Some("an attribute tag cannot be empty".to_owned())
-    } else if tag.to_uppercase().chars().count() > LONGEST_TAG {
-        // Counted in capitals, as the tag is kept.
+    } else if tag.chars().count() > LONGEST_TAG {
+        // Counted as written, as the schema counts it.
         Some(format!(
             "an attribute tag has at most {LONGEST_TAG} characters"
         ))

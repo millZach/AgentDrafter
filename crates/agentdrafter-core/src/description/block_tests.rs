@@ -921,3 +921,22 @@ fn a_constant_attribute_is_set_only_by_its_definition() {
     parse_block_library(&MODES.replace("constant: true}", "constant: true, verify: false}"))
         .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// A tag is taken in capitals letter for letter: a letter whose capital is
+/// more than one letter, such as `ß`, stays as written, so a tag the
+/// schema takes at 255 characters or fewer is read at the same length.
+#[test]
+fn a_tag_keeps_its_length_in_capitals() {
+    assert_eq!(super::blocks::tag_in_capitals("straße"), "STRAßE");
+    let tag = "ß".repeat(128);
+    let library = parse_block_library(&format!(
+        "units: mm\nblocks:\n  B:\n    objects:\n      - attdef: {{tag: {tag}, position: [0, 0, 0], height: 1}}\n"
+    ))
+    .unwrap_or_else(|e| panic!("{e}"));
+    let read = &library.blocks[0]
+        .attribute_definitions()
+        .next()
+        .unwrap()
+        .tag;
+    assert_eq!(read.chars().count(), 128);
+}
