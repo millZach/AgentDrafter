@@ -304,7 +304,7 @@ A block is defined once, in the block library of the drawing set, and inserted o
 | `position` | yes | Where the block's base point sits: a point. |
 | `scale` | no | How much the block is enlarged, the same along every axis: a number more than 0, with no unit. Without it, 1. |
 | `rotation` | no | An angle: degrees anticlockwise from the X axis. Without it, 0. |
-| `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty, written `''`. An attribute the insert leaves out takes its definition's default, and so does one whose value is a bare null, such as `TAG:` ([the YAML subset](#the-yaml-subset), rule 8). |
+| `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty, written `''`. An attribute the insert leaves out takes its definition's default, and so does one whose value is a bare null, such as `TAG:` ([the YAML subset](#the-yaml-subset), rule 8). A [constant attribute](block-library.md#attribute-modes) takes no value from an insert. |
 | `layer` | no | The layer the insert sits on, as for every object. |
 
 An insert takes an `id` and a `name` as every object does ([IDs and names](#ids-and-names)).

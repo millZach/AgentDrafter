@@ -641,7 +641,8 @@ impl Selection {
 }
 
 /// The text and multiline text of `block`, as the block library of
-/// `record`'s sheet defines it, whose contents `wanted` takes.
+/// `record`'s sheet defines it, and the values of its constant attributes,
+/// which its definition holds, whose contents `wanted` takes.
 fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) -> Vec<BlockText> {
     let Some(definition) = record.sheet.blocks.iter().find(|b| b.name == block) else {
         return Vec::new();
@@ -663,6 +664,7 @@ fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) 
             let contents = match object {
                 Object::Text(t) => &t.contents,
                 Object::MText(t) => &t.contents,
+                Object::AttributeDefinition(d) if d.constant => &d.default,
                 _ => return None,
             };
             wanted(contents).then(|| BlockText {

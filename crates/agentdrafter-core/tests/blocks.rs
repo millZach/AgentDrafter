@@ -360,3 +360,51 @@ objects:
         .collect();
     assert_eq!(numbers, ["1", "2"]);
 }
+
+/// Every attribute mode reads back from the DWG: a constant attribute in
+/// the block's definition only, as AutoCAD writes it, and an insert's
+/// attributes with their definition's Invisible, Verify, Preset and Lock
+/// position.
+#[test]
+fn attribute_modes_read_back() {
+    let dir = scratch("modes");
+    fs::write(
+        dir.join("blocks.yaml"),
+        "units: mm
+blocks:
+  MODES:
+    objects:
+      - attdef: {tag: PLAIN, position: [0, 0, 0], height: 2, default: P}
+      - attdef: {tag: HIDDEN, position: [0, 3, 0], height: 2, invisible: true}
+      - attdef: {tag: FIXED, position: [0, 6, 0], height: 2, default: K-1, constant: true}
+      - attdef: {tag: CHECKED, position: [0, 9, 0], height: 2, verify: true}
+      - attdef: {tag: QUIET, position: [0, 12, 0], height: 2, preset: true}
+      - attdef: {tag: PINNED, position: [0, 15, 0], height: 2, lock_position: true}
+      - attdef: {tag: SECRET, position: [0, 18, 0], height: 2, default: S, constant: true, invisible: true}
+",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("sheet.yaml"),
+        "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {block: MODES, position: [0, 0, 0], attributes: {PLAIN: A, HIDDEN: B, CHECKED: C, QUIET: D, PINNED: E}}
+  - insert: {block: MODES, position: [50, 0, 0], rotation: 30, scale: 2}
+",
+    )
+    .unwrap();
+    let (sheet, _, read) = build_and_read(&dir.join("sheet.yaml"));
+    assert_same_objects(&sheet, &read);
+    assert_same_block(&sheet.blocks[0], &read);
+    let modes = block(&read, "MODES");
+    let constant: Vec<&str> = modes
+        .attribute_definitions()
+        .filter(|d| d.constant)
+        .map(|d| d.tag.as_str())
+        .collect();
+    assert_eq!(constant, ["FIXED", "SECRET"]);
+    for insert in inserts(&read.objects) {
+        assert_eq!(insert.attributes.len(), 5, "{insert:?}");
+    }
+}

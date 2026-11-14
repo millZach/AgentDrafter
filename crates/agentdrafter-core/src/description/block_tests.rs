@@ -125,6 +125,10 @@ fn a_library_reads_its_blocks_with_their_attribute_definitions() {
             invisible: false,
             layer: "symbols".into(),
             properties: Default::default(),
+            constant: false,
+            lock_position: false,
+            preset: false,
+            verify: false,
         })
     );
     assert_eq!(
@@ -142,6 +146,10 @@ fn a_library_reads_its_blocks_with_their_attribute_definitions() {
             invisible: true,
             layer: "hidden".into(),
             properties: Default::default(),
+            constant: false,
+            lock_position: false,
+            preset: false,
+            verify: false,
         })
     );
     let arrow = &library.blocks[1];
@@ -821,4 +829,107 @@ fn a_block_that_inserts_itself_is_refused() {
         "{}",
         e.message
     );
+}
+
+const MODES: &str = "units: mm
+blocks:
+  MODES:
+    objects:
+      - attdef: {tag: PLAIN, position: [0, 0, 0], height: 2, default: P}
+      - attdef: {tag: FIXED, position: [0, 3, 0], height: 2, default: K-1, constant: true}
+      - attdef: {tag: CHECKED, position: [0, 6, 0], height: 2, verify: true}
+      - attdef: {tag: QUIET, position: [0, 9, 0], height: 2, preset: 'true'}
+      - attdef: {tag: PINNED, position: [0, 12, 0], height: 2, lock_position: true}
+  STRIP:
+    objects:
+      - insert: {block: MODES, position: [0, 0, 0]}
+";
+
+/// An attribute definition reads AutoCAD's Constant, Verify, Preset and
+/// Lock position modes, each off unless it says so; an insert carries a
+/// value for every attribute but the constant ones.
+#[test]
+fn an_attribute_definition_reads_its_modes_and_an_insert_skips_constant_ones() {
+    let library = parse_block_library(MODES).unwrap_or_else(|e| panic!("{e}"));
+    let modes: Vec<(&str, bool, bool, bool, bool)> = library.blocks[0]
+        .attribute_definitions()
+        .map(|d| {
+            (
+                d.tag.as_str(),
+                d.constant,
+                d.verify,
+                d.preset,
+                d.lock_position,
+            )
+        })
+        .collect();
+    assert_eq!(
+        modes,
+        [
+            ("PLAIN", false, false, false, false),
+            ("FIXED", true, false, false, false),
+            ("CHECKED", false, true, false, false),
+            ("QUIET", false, false, true, false),
+            ("PINNED", false, false, false, true),
+        ]
+    );
+    let sheet = read_with(
+        "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {block: MODES, position: [0, 0, 0], attributes: {PLAIN: X}}\n",
+        MODES,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let Object::Insert(insert) = &sheet.objects[0] else {
+        panic!("an insert")
+    };
+    let tags: Vec<&str> = insert.attributes.iter().map(|a| a.tag.as_str()).collect();
+    assert_eq!(tags, ["PLAIN", "CHECKED", "QUIET", "PINNED"]);
+    assert_eq!(insert.attributes[0].value, "X");
+}
+
+/// A constant attribute's value is its definition's: an insert that gives
+/// one is refused, saying where it is set, through a nested block too; and
+/// a constant attribute takes no Verify or Preset, as AutoCAD's ATTDEF.
+#[test]
+fn a_constant_attribute_is_set_only_by_its_definition() {
+    for (block, words) in [
+        (
+            "MODES",
+            "the attribute `FIXED` of block `MODES` is constant: its value, `K-1`, is set once, as its `default` in block `MODES`'s definition",
+        ),
+        (
+            "STRIP",
+            "the attribute `FIXED` of block `MODES`, nested in block `STRIP`, is constant",
+        ),
+    ] {
+        let e = read_with(
+            &format!("units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {{block: {block}, position: [0, 0, 0], attributes: {{FIXED: X}}}}\n"),
+            MODES,
+        )
+        .unwrap_err();
+        assert_names(
+            &e,
+            ErrorCode::UnknownName,
+            "objects[0].insert.attributes.FIXED",
+            &[words],
+        );
+    }
+    for key in ["verify", "preset"] {
+        let e = library_error(
+            &MODES.replace("constant: true}", &format!("constant: true, {key}: true}}")),
+        );
+        assert_eq!(e.code, ErrorCode::BadValue, "{e:?}");
+        assert_eq!(
+            e.field.as_deref(),
+            Some(format!("blocks.MODES.objects[1].attdef.{key}").as_str())
+        );
+        assert!(
+            e.message
+                .contains(&format!("a constant attribute takes no `{key}`")),
+            "{}",
+            e.message
+        );
+    }
+    // Saying false is no conflict.
+    parse_block_library(&MODES.replace("constant: true}", "constant: true, verify: false}"))
+        .unwrap_or_else(|e| panic!("{e}"));
 }

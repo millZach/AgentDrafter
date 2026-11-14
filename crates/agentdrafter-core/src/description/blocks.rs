@@ -47,7 +47,7 @@ pub(crate) const BLOCK_KEYS: [&str; 2] = ["base_point", "objects"];
 pub(crate) const CELL_KEY: &str = "cell";
 
 /// The keys an attribute definition takes.
-pub(crate) const ATTDEF_KEYS: [&str; 16] = [
+pub(crate) const ATTDEF_KEYS: [&str; 20] = [
     "tag",
     "prompt",
     "default",
@@ -58,6 +58,10 @@ pub(crate) const ATTDEF_KEYS: [&str; 16] = [
     "rotation",
     "justify",
     "invisible",
+    "constant",
+    "verify",
+    "preset",
+    "lock_position",
     "layer",
     "color",
     "linetype",
@@ -447,10 +451,33 @@ pub(super) fn attribute_definition(
         Some(node) => width_factor(node, &fields.path_of("width_factor"))?,
         None => style_of(&style, tables.styles).map_or(1.0, |s| s.width_factor),
     };
-    let invisible = match fields.get("invisible") {
-        Some(node) => boolean(node, &fields.path_of("invisible"))?,
-        None => false,
+    let mode = |key: &str| match fields.get(key) {
+        Some(node) => boolean(node, &fields.path_of(key)),
+        None => Ok(false),
     };
+    let invisible = mode("invisible")?;
+    let constant = mode("constant")?;
+    let verify = mode("verify")?;
+    let preset = mode("preset")?;
+    let lock_position = mode("lock_position")?;
+    // A constant attribute asks nobody for its value, so Verify and Preset,
+    // which change how AutoCAD asks, do not go with it: AutoCAD's ATTDEF
+    // turns them off for a constant attribute.
+    if constant {
+        for key in ["verify", "preset"] {
+            if let (Some(node), true) = (fields.get(key), mode(key)?) {
+                return Err(bad_value(
+                    node,
+                    &fields.path_of(key),
+                    format!(
+                        "a constant attribute takes no `{key}`: its value is its `default` on \
+                         every insert, and AutoCAD asks nobody for it, as its ATTDEF turns \
+                         Verify and Preset off for a constant attribute"
+                    ),
+                ));
+            }
+        }
+    }
     Ok(AttributeDefinition {
         tag: tag.to_owned(),
         prompt,
@@ -466,6 +493,10 @@ pub(super) fn attribute_definition(
         rotation: rotation(fields)?,
         justify: justify(fields)?,
         invisible,
+        constant,
+        verify,
+        preset,
+        lock_position,
         layer,
         properties: Default::default(),
     })
@@ -559,7 +590,7 @@ fn attributes(
     block: &Block,
     library: Option<&BlockLibrary>,
 ) -> Result<Vec<Attribute>, Error> {
-    let definitions: Vec<&AttributeDefinition> = block.attribute_definitions().collect();
+    let definitions: Vec<&AttributeDefinition> = block.carried_attributes().collect();
     let mut values: Vec<Option<String>> = vec![None; definitions.len()];
     if let Some(node) = fields.get("attributes") {
         let path = fields.path_of("attributes");
@@ -585,11 +616,24 @@ fn attributes(
         };
         for entry in entries {
             let Some(i) = definitions.iter().position(|d| d.tag == entry.key) else {
-                // An attribute of a block this block inserts is filled in by
-                // this block's definition, once, as AutoCAD fills it (Zach,
-                // 2026-11-13); an insert of this block cannot set it.
-                let why = match nested_tag(block, &entry.key, library) {
-                    Some((setter, inner)) => {
+                // A constant attribute's value is its definition's, on every
+                // insert (Zach, 2026-11-13); and an attribute of a block this
+                // block inserts is filled in by this block's definition,
+                // once, as AutoCAD fills it. An insert sets neither.
+                let constant = constant_tag(block, &entry.key, library);
+                let why = match (constant, nested_tag(block, &entry.key, library)) {
+                    (Some((definer, definition)), _) => {
+                        let of = if definer == block.name {
+                            format!("of block `{definer}`")
+                        } else {
+                            format!("of block `{definer}`, nested in block `{}`,", block.name)
+                        };
+                        format!(
+                            "the attribute `{}` {of} is constant: its value, `{}`, is set once, as its `default` in block `{definer}`'s definition in the block library, as AutoCAD sets it, not by each insert. {listed}",
+                            entry.key, definition.default
+                        )
+                    }
+                    (None, Some((setter, inner))) => {
                         let within = if setter == block.name {
                             String::new()
                         } else {
@@ -600,7 +644,7 @@ fn attributes(
                             entry.key
                         )
                     }
-                    None => format!("unknown attribute `{}`; {listed}", entry.key),
+                    (None, None) => format!("unknown attribute `{}`; {listed}", entry.key),
                 };
                 return Err(Error::new(ErrorCode::UnknownName, why)
                     .at_field(key_path(&path, &entry.key))
@@ -620,6 +664,29 @@ fn attributes(
             value: value.unwrap_or_else(|| definition.default.clone()),
         })
         .collect())
+}
+
+/// The constant attribute `tag` of `block`, or of a block nested in it,
+/// however deep, with the name of the block that defines it.
+fn constant_tag<'a>(
+    block: &'a Block,
+    tag: &str,
+    library: Option<&'a BlockLibrary>,
+) -> Option<(&'a str, &'a AttributeDefinition)> {
+    if let Some(definition) = block
+        .attribute_definitions()
+        .find(|d| d.constant && d.tag == tag)
+    {
+        return Some((block.name.as_str(), definition));
+    }
+    block.objects.iter().find_map(|object| {
+        let Object::Insert(inner) = object else {
+            return None;
+        };
+        // The reader refuses a block that inserts itself, so this ends.
+        let nested = library?.blocks.iter().find(|b| b.name == inner.block)?;
+        constant_tag(nested, tag, library)
+    })
 }
 
 /// Where the attribute `tag` of a block nested in `block`, however deep, is

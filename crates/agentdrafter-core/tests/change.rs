@@ -1660,3 +1660,66 @@ fn set_attribute_on_a_nested_blocks_attribute_is_refused_saying_why() {
     );
     assert_eq!(fs::read(set.join("rows.yaml")).unwrap(), before);
 }
+
+/// A constant attribute's value is its definition's: an insert of its
+/// block carries no value for it, `set_attribute` on it is refused, saying
+/// so, and a query for its text finds the insert, as it finds a block's own
+/// text.
+#[test]
+fn a_constant_attribute_is_refused_to_set_attribute_and_found_by_its_text() {
+    let set = demo_set("constant-attribute");
+    let library = set.join("blocks.yaml");
+    let mut text = fs::read_to_string(&library).unwrap();
+    text.push_str(
+        "  BADGE:
+    objects:
+      - attdef: {tag: CODE, position: [0, 0, 0], height: 0.2, default: ZONE-7, constant: true}
+      - attdef: {tag: NOTE, position: [0, -0.3, 0], height: 0.1}
+",
+    );
+    fs::write(&library, text).unwrap();
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "INSERT", "sheet": "DEMO-001", "block": "BADGE", "position": [2, 2, 0], "id": "badge"}
+        ]}),
+    );
+    let Object::Insert(badge) = &recorded(&set)["DEMO-001/badge"] else {
+        panic!("an insert")
+    };
+    let tags: Vec<&str> = badge.attributes.iter().map(|a| a.tag.as_str()).collect();
+    assert_eq!(tags, ["NOTE"]);
+
+    let reply = apply(
+        &set,
+        json!({"operations": [
+            {"op": "set_attribute", "target": {"id": "DEMO-001/badge"}, "tag": "CODE", "value": "X"}
+        ]}),
+    );
+    let report = reply.result.expect("a report");
+    assert_eq!(report.failed, 1, "{report:#?}");
+    let said = format!("{report:?}");
+    assert!(
+        said.contains("the attribute `CODE` of block `BADGE` is constant: its value, `ZONE-7`"),
+        "{said}"
+    );
+
+    let found = query_with(
+        &QueryRequest {
+            source: set.clone(),
+            sheet: None,
+            query: Query::Find(Selection {
+                text: Some("ZONE-7".into()),
+                ..Selection::default()
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Find { objects, .. } = found.answer else {
+        panic!("a find's answer")
+    };
+    assert_eq!(objects.len(), 1, "{objects:#?}");
+    assert_eq!(objects[0].id, "DEMO-001/badge");
+    assert_eq!(objects[0].block_text[0].field, "blocks.BADGE.objects[0]");
+}
