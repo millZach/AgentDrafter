@@ -671,6 +671,11 @@ fn add_snap_definitions(defs: &mut Map<String, Value>) {
                 "minLength": 1,
             },
         },
+        // By its ID or by its name, and not both, as the reader takes it.
+        "oneOf": [
+            { "required": ["id"], "not": { "required": ["name"] } },
+            { "required": ["name"], "not": { "required": ["id"] } },
+        ],
     });
     let mut snap = object.clone();
     snap["description"] = json!(
@@ -716,6 +721,25 @@ fn add_snap_definitions(defs: &mut Map<String, Value>) {
             "$ref": "#/$defs/snap_ref",
         }),
     );
+    // `with` just for the two intersections, which need it, and `from`
+    // just for a perpendicular, a tangent and a nearest point, which need
+    // it, as the reader takes them.
+    let only = |takes: fn(SnapKind) -> bool, key: &str| {
+        let kinds: Vec<&str> = SnapKind::ALL
+            .iter()
+            .filter(|k| takes(**k))
+            .map(|k| k.name())
+            .collect();
+        json!({
+            "if": { "properties": { "snap": { "enum": kinds } } },
+            "then": { "required": [key] },
+            "else": { "not": { "required": [key] } },
+        })
+    };
+    snap["allOf"] = json!([
+        only(SnapKind::takes_with, "with"),
+        only(SnapKind::takes_from, "from"),
+    ]);
     defs.insert("snap_ref".into(), snap);
     defs.insert(
         "snapped_point".into(),
@@ -2647,8 +2671,9 @@ fn read_snap(
 /// Adds to `out` each snapped point `value` holds where one of `slots`, the
 /// schemas that may take it, takes a point. `pointer` and `field` are its
 /// place in an add's keys, as a JSON pointer and as a field. A snapped
-/// point anywhere else, such as an ellipse's `major_axis`, a direction, is
-/// an error.
+/// point where a direction is taken, such as an ellipse's `major_axis`, is
+/// an error; a mapping anywhere else is the object's own, whatever its
+/// keys, such as an insert's attributes with a tag `SNAP`.
 fn snaps_in(
     value: &Value,
     slots: &[&Value],
@@ -2661,9 +2686,14 @@ fn snaps_in(
     for slot in slots {
         expand(slot, defs, &mut schemas, 0);
     }
-    let takes_snap = schemas
-        .iter()
-        .any(|s| s.get("$ref").and_then(Value::as_str) == Some("#/$defs/snapped_point"));
+    let refers = |to: &str| {
+        schemas
+            .iter()
+            .any(|s| s.get("$ref").and_then(Value::as_str) == Some(to))
+    };
+    // Where a point is taken that may be snapped, and where a point is
+    // taken that may not, a direction.
+    let (takes_snap, takes_point) = (refers("#/$defs/snapped_point"), refers("#/$defs/point"));
     match value {
         Value::Object(map) if map.contains_key("snap") && takes_snap => {
             out.push(PointSnap {
@@ -2672,12 +2702,12 @@ fn snaps_in(
                 snap: read_snap(map, field)?,
             });
         }
-        Value::Object(map) if map.len() == 1 && map.contains_key("snap") => {
+        Value::Object(map) if map.contains_key("snap") && takes_point => {
             return Err((
                 ErrorCode::BadValue,
                 format!(
-                    "`{field}` takes no snapped point: a snapped point is taken where a point \
-                     is, not a direction or any other value"
+                    "`{field}` takes no snapped point: it is a direction, [dx, dy, dz], and a \
+                     snapped point is taken where a point is"
                 ),
                 field.to_owned(),
             ));

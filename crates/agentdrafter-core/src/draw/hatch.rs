@@ -30,6 +30,8 @@ pub(super) struct Drawn {
     pub shapes: Vec<Shape>,
     /// The points of its boundary, curves as chords.
     pub boundary: Vec<Point2>,
+    /// Its boundary's loops, each closed, curves as chords.
+    pub loops: Vec<Vec<Point2>>,
     /// Whether its pattern stopped at the most lines or dashes a hatch
     /// draws, so that it is not drawn in full.
     pub cut_short: bool,
@@ -44,10 +46,11 @@ pub(super) fn draw(hatch: &Hatch, lineweight: f64, tolerance: f64, most_dashes: 
         .filter(|l| l.len() >= 3)
         .collect();
     let boundary = loops.iter().flatten().copied().collect();
-    let (shapes, cut_short) = shapes(hatch, loops, lineweight, most_dashes);
+    let (shapes, cut_short) = shapes(hatch, loops.clone(), lineweight, most_dashes);
     Drawn {
         shapes,
         boundary,
+        loops,
         cut_short,
     }
 }

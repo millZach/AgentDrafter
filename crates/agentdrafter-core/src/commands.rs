@@ -639,7 +639,7 @@ fn query_schema() -> Value {
                     "enum": ["exact", "contains"],
                 },
                 "window": selection_box("Objects wholly within this box, as AutoCAD's selection window takes them: everything they draw, text and inserts' blocks among it, inside it, edges included."),
-                "crossing": selection_box("Objects within this box or crossing it, as AutoCAD's crossing selection takes them: something they draw inside it or across its edge, or a filled area holding it."),
+                "crossing": selection_box("Objects within this box or crossing it, as AutoCAD's crossing selection takes them: something they draw inside it or across its edge, a line, the outline of a filled area, a hatch's boundary or pattern, a wide polyline's centreline; a box wholly inside an area crosses nothing."),
                 "touching": {
                     "description": "Objects whose geometry meets this object's, on each sheet it is on: crossing it, or an end of one lying on the other; each found with where it meets it, `part` its own and `with_part` the object's.",
                     "type": "object",

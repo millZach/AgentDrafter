@@ -75,7 +75,6 @@ use crate::text::placement::SheetFonts;
 
 pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
-pub(crate) use pick::inside;
 pub use pick::{object_bounds, pick};
 pub(crate) use polyline::bulge_of;
 pub(crate) use text::{mtext_box, mtext_lines};
@@ -139,6 +138,12 @@ pub struct DisplayList {
     /// The hatches whose pattern needed more lines or dashes than one hatch
     /// draws, and so are not drawn in full.
     pub hatches_cut_short: Vec<HatchCutShort>,
+    /// Each hatch's boundary loops, each closed, with the sheet's object
+    /// that draws the hatch, as `boundaries` gives its box: what a query's
+    /// box selects a hatch by, its edges and the area they fill. Not part
+    /// of the list an output reads, so not written with it.
+    #[serde(skip)]
+    pub hatch_loops: Vec<(usize, Vec<Vec<Point2>>)>,
 }
 
 /// A hatch whose pattern needed more lines or dashes than one hatch draws:
@@ -377,6 +382,8 @@ struct Drawn {
     /// The points that count towards the extents without drawing: a
     /// patterned hatch's boundary.
     reach: Vec<Point2>,
+    /// A hatch's boundary loops, placed on the sheet.
+    loops: Vec<Vec<Point2>>,
     /// Whether it is a hatch whose pattern was cut short.
     cut_short: bool,
 }
@@ -940,6 +947,7 @@ impl<'a> Drawer<'a> {
                 let drawn = hatch::draw(h, pen.lineweight, tolerance, self.most_dashes);
                 Drawn {
                     reach: path(drawn.boundary),
+                    loops: drawn.loops.into_iter().map(path).collect(),
                     cut_short: drawn.cut_short,
                     ..shapes(drawn.shapes)
                 }
@@ -1168,6 +1176,9 @@ impl DisplayList {
     ) {
         match shown {
             Shown::Drawn => {
+                if !drawn.loops.is_empty() {
+                    self.hatch_loops.push((index, drawn.loops));
+                }
                 self.add(index, path, color, drawn.shapes, drawn.reach);
                 self.add_text(index, path, drawn.runs);
             }

@@ -66,8 +66,8 @@ An attribute's value is not text the block draws: it is found with `--value`.
 
 `--window` and `--crossing` take a box by two opposite corners, `x1,y1,x2,y2`, in the declared unit and in either order; in JSON, `"window": [[x1, y1], [x2, y2]]`, a corner taking a height that is not looked at. Everything is seen from above. An object is looked at as it draws, through the one drawing pipeline (ADR-0011), every layer continuous as for [extents](#extents), so its text counts as its font draws it, an insert as everything its block draws, its attributes among it, and a table or a multileader as its lines and its text; an object on a layer that is off or frozen draws nothing and is not selected, as in AutoCAD. The box's edges are in it.
 
-- **A window** takes an object that draws something and draws all of it inside the box, a patterned hatch's boundary too, which its pattern's lines may stop short of.
-- **A crossing** takes an object that draws something inside the box or across its edge, or whose filled area holds the box, as a solid hatch, a solid, a wide polyline or a donut does: a box inside a circle's outline, or inside a hatch's hole, crosses nothing.
+- **A window** takes an object that draws something and draws all of it inside the box, a hatch's boundary too, which its pattern's lines may stop short of, and a wide polyline's or a donut's whole band.
+- **A crossing** takes an object that draws something inside the box or across its edge: a line or a curve, the outline of a filled area such as a solid or a wide polyline's band, a hatch's boundary or its pattern's lines, and a wide polyline's or a donut's centreline. A box wholly inside a filled area crosses nothing, as in AutoCAD 2026: inside a solid, a band, a hatch, solid or patterned, between its lines, or a circle's outline, and in the corner of a hatch's box outside it.
 - **An older leader** is selected by its own line, hook and arrow: AutoCAD holds its annotation as an MTEXT of its own, which AutoCAD's window selects apart from the LEADER. A multileader is one object with its text, as in AutoCAD.
 
 ```json
@@ -82,7 +82,7 @@ An attribute's value is not text the block draws: it is found with `--value`.
 
 A box and `--touching` combine with every other option, and work in `attributes` and `geometry` as in `find`: `query find <set> --touching-name wire-12 --block TERMINAL` finds the terminals a wire reaches. An object to touch that no sheet looked at holds is not an error: nothing matches, and the message names it.
 
-**What AutoCAD 2026 gave.** On a made-up sheet of every kind of object, with inserts scaled, turned and nested, a solid and a patterned hatch, a wide polyline and turned text, 113 boxes, each asked as a window and as a crossing, selected the same objects as AutoCAD 2026's `ssget "_W"` and `ssget "_C"` with the box zoomed into view, but one: a crossing whose edge passed 0.05 mm from a solid that AutoCAD took at a zoom where a pixel spans more than that, and did not take zoomed onto that edge.
+**What AutoCAD 2026 gave.** On a made-up sheet of every kind of object, with inserts scaled, turned and nested, a solid, solid and patterned hatches of straight and curved edges, a wide polyline, a donut and turned text, 141 boxes, each asked as a window and as a crossing, selected the same objects as AutoCAD 2026's `ssget "_W"` and `ssget "_C"` with the box zoomed into view, 276 of 282, but six crossings. Two passed 0.04 and 0.05 mm from a hatch and a solid, which AutoCAD took at a zoom where a pixel spans more than that, and did not take zoomed onto the edge. Four lay wholly inside a solid hatch and crossed none of its edges, yet AutoCAD took them: it takes a solid hatch across the edges of the triangles it fills it with, which are its own, so a box on a square hatch's one diagonal took it and a box off it, or on the other diagonal, did not. AgentDrafter does not take a solid hatch by a box inside it.
 
 ## Attributes
 

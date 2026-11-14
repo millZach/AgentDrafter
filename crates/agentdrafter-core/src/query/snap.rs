@@ -93,31 +93,54 @@ impl Located<'_> {
 struct Resolved<'a> {
     object: Option<Located<'a>>,
     with: Option<Option<Located<'a>>>,
-    from: Option<Option<Box<SnappedFrom>>>,
+    /// The point `from` names, or the objects it names, however deep, that
+    /// match nothing.
+    from: Option<Result<Box<SnappedFrom>, Vec<Missing>>>,
     points: Vec<SnapPoint>,
     /// What the object has none of the kind asked, in words, when it found
     /// no point.
     none: Option<String>,
 }
 
+/// An object a snap names that no sheet looked at holds: as it is named,
+/// what it is for, and the place of its ID or name in the request.
+#[derive(Clone, Debug)]
+struct Missing {
+    named: ObjectRef,
+    what: &'static str,
+    field: String,
+}
+
+impl Missing {
+    fn new(named: &ObjectRef, what: &'static str, at: &str) -> Missing {
+        let key = if named.id.is_some() { "id" } else { "name" };
+        Missing {
+            named: named.clone(),
+            what,
+            field: format!("{at}.{key}"),
+        }
+    }
+
+    /// "the ID `S/ring`, the object to snap to".
+    fn words(&self) -> String {
+        format!("{}, the object {}", self.named.words(), self.what)
+    }
+}
+
 impl Resolved<'_> {
-    /// The objects it names that match nothing, in words.
-    fn missing(&self, request: &SnapRef) -> Vec<String> {
+    /// The objects `request`, at `field`, names that match nothing: its
+    /// own, its `with`, and those its `from` names, at their places.
+    fn missing(&self, request: &SnapRef, field: &str) -> Vec<Missing> {
         let mut missing = Vec::new();
         if self.object.is_none() {
-            missing.push(format!(
-                "{}, the object to snap to",
-                request.object().words()
-            ));
+            missing.push(Missing::new(&request.object(), "to snap to", field));
         }
         if let (Some(None), Some(with)) = (&self.with, &request.with) {
-            missing.push(format!("{}, the object to intersect with", with.words()));
+            let at = format!("{field}.with");
+            missing.push(Missing::new(with, "to intersect with", &at));
         }
-        if let (Some(None), Some(from)) = (&self.from, &request.from) {
-            missing.push(format!(
-                "{}, the object to snap from",
-                from.object().words()
-            ));
+        if let Some(Err(within)) = &self.from {
+            missing.extend(within.iter().cloned());
         }
         missing
     }
@@ -241,7 +264,7 @@ fn resolve<'a>(
     let Some(object) = object else {
         return Ok(resolved);
     };
-    if matches!(resolved.with, Some(None)) || matches!(resolved.from, Some(None)) {
+    if matches!(resolved.with, Some(None)) || matches!(resolved.from, Some(Err(_))) {
         return Ok(resolved);
     }
     let on_sheet = |other: &str, sheet: &str, at: &str| -> Result<(), Error> {
@@ -276,7 +299,7 @@ fn resolve<'a>(
             .at_field(format!("{field}.with")));
         }
     }
-    if let Some(Some(from)) = &resolved.from {
+    if let Some(Ok(from)) = &resolved.from {
         on_sheet(
             &format!("the point to snap from, of `{}`,", from.object.id),
             &from.object.sheet,
@@ -299,7 +322,7 @@ fn resolve<'a>(
             );
             points.into_iter().map(|p| (which_of(&p), p)).collect()
         }
-        (Some(k), _, Some(Some(from))) => {
+        (Some(k), _, Some(Ok(from))) => {
             let at = p3(from.at);
             from_point(&reader.parts(object.object()), k, at)
                 .into_iter()
@@ -372,7 +395,7 @@ fn none_words(object: &Located, kind: Option<SnapKind>, resolved: &Resolved) -> 
                 "cross"
             }
         ),
-        (Some(k), _, Some(Some(from))) => format!(
+        (Some(k), _, Some(Ok(from))) => format!(
             "there is no {} from the {} of `{}` to {}",
             k.name(),
             from.snap.word(),
@@ -394,13 +417,22 @@ fn from_of(
     request: &SnapRef,
     settings: &Settings,
     field: &str,
-) -> Result<Option<Box<SnappedFrom>>, Error> {
+) -> Result<Result<Box<SnappedFrom>, Vec<Missing>>, Error> {
     let resolved = resolve(sheets, request, settings, field)?;
-    if !resolved.missing(request).is_empty() {
-        return Ok(None);
-    }
-    let Some(object) = resolved.object else {
-        return Ok(None);
+    let missing = resolved.missing(request, field);
+    let Some(object) = resolved.object.filter(|_| missing.is_empty()) else {
+        // Its own object is the one to snap from.
+        let own = format!("{field}.");
+        return Ok(Err(missing
+            .into_iter()
+            .map(|m| {
+                let mine = m.field.strip_prefix(&own).is_some_and(|k| !k.contains('.'));
+                Missing {
+                    what: if mine { "to snap from" } else { m.what },
+                    ..m
+                }
+            })
+            .collect()));
     };
     let kind = request.snap.unwrap_or(SnapKind::Endpoint);
     match resolved.points.as_slice() {
@@ -409,7 +441,7 @@ fn from_of(
             format!("{} has no {} to snap from", object.words(), kind.word()),
         )
         .at_field(field.to_owned())),
-        [one] => Ok(Some(Box::new(SnappedFrom {
+        [one] => Ok(Ok(Box::new(SnappedFrom {
             object: object.described(),
             snap: one.snap,
             which: request.which.clone().or_else(|| one.which.clone()),
@@ -467,30 +499,22 @@ pub(crate) fn one_point(
             .collect();
         listed_ids(&listed)
     };
-    let missing = |named: &ObjectRef, at: String, what: &str| {
-        let by_id = named.id.is_some();
-        let key = if by_id { "id" } else { "name" };
-        Error::new(
+    // The first object it names, however deep, that the sheet does not
+    // hold, at its place.
+    if let Some(m) = resolved.missing(request, field).first() {
+        let by_id = m.named.id.is_some();
+        return Err(Error::new(
             ErrorCode::UnknownName,
             format!(
-                "no object {on} has {}, the object {what}; its {}: {}",
-                named.words(),
+                "no object {on} has {}; its {}: {}",
+                m.words(),
                 if by_id { "IDs" } else { "names" },
                 choices(by_id)
             ),
         )
-        .at_field(format!("{at}.{key}"))
-    };
-    let Some(object) = resolved.object else {
-        return Err(missing(&request.object(), field.to_owned(), "to snap to"));
-    };
-    if let (Some(None), Some(with)) = (&resolved.with, &request.with) {
-        return Err(missing(with, format!("{field}.with"), "to intersect with"));
+        .at_field(m.field.clone()));
     }
-    if let (Some(None), Some(from)) = (&resolved.from, &request.from) {
-        let at = format!("{field}.from");
-        return Err(missing(&from.object(), at, "to snap from"));
-    }
+    let object = resolved.object.expect("an object that matched");
     match resolved.points.as_slice() {
         [] => Err(Error::new(
             ErrorCode::BadValue,
@@ -564,12 +588,16 @@ pub(super) fn snap(
     looked: &LookedAt,
 ) -> Result<(String, Answer), Error> {
     let resolved = resolve(sheets, request, settings, "query")?;
-    let missing = resolved.missing(request);
+    let missing: Vec<String> = resolved
+        .missing(request, "query")
+        .iter()
+        .map(Missing::words)
+        .collect();
     let answer = |points: Vec<SnapPoint>| Answer::Snap {
         count: points.len(),
         object: resolved.object.map(|o| o.described()),
         with: resolved.with.flatten().map(|o| o.described()),
-        from: resolved.from.clone().flatten(),
+        from: resolved.from.clone().and_then(Result::ok),
         points,
     };
     if !missing.is_empty() {
@@ -597,8 +625,7 @@ pub(super) fn snap(
             counted(k, points.len()),
             object.words(),
             match &resolved.from {
-                Some(Some(from)) =>
-                    format!(" from the {} of `{}`", from.snap.word(), from.object.id),
+                Some(Ok(from)) => format!(" from the {} of `{}`", from.snap.word(), from.object.id),
                 _ => match resolved.with.flatten() {
                     Some(with) => format!(" with {}", with.words()),
                     None => String::new(),

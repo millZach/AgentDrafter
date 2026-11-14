@@ -108,7 +108,7 @@ fn distance(a: Point2, b: Point2) -> f64 {
 
 /// Whether `p` is inside the contours by `rule`: inside an odd number of
 /// them, or where they wind round it other than zero times.
-pub(crate) fn inside(p: Point2, rule: FillRule, contours: &[Vec<Point2>]) -> bool {
+fn inside(p: Point2, rule: FillRule, contours: &[Vec<Point2>]) -> bool {
     let mut winding = 0i32;
     let mut crossings = 0u32;
     for ring in contours.iter().filter(|r| r.len() >= 3) {

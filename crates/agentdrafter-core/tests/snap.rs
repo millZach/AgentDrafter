@@ -1005,7 +1005,7 @@ fn a_window_takes_what_lies_wholly_within_it_and_a_crossing_what_reaches_it() {
         .1
         .is_empty());
     // A crossing takes a curve that runs across the box, not one the box
-    // lies inside; a filled area takes a box inside it, but not in its hole.
+    // lies inside; a hatch across its boundary, not inside it or its hole.
     assert_eq!(
         ids(&found(&sheet, crossing([14.0, 9.0], [16.0, 11.0])).1),
         ["kinds/circle"]
@@ -1014,7 +1014,7 @@ fn a_window_takes_what_lies_wholly_within_it_and_a_crossing_what_reaches_it() {
         .1
         .is_empty());
     assert_eq!(
-        ids(&found(&sheet, crossing([51.0, 31.0], [52.0, 32.0])).1),
+        ids(&found(&sheet, crossing([49.0, 31.0], [51.0, 32.0])).1),
         ["kinds/hatch"]
     );
     let (message, objects) = found(&sheet, crossing([56.0, 36.0], [57.0, 37.0]));
@@ -1138,4 +1138,108 @@ objects:
     assert_eq!(ids(&objects), ["ends/on", "ends/along"]);
     close(objects[0].touches[0].at, [0.0, 10.0, 0.0]);
     close(objects[1].touches[0].at, [0.0, 30.0, 0.0]);
+}
+
+#[test]
+fn a_crossing_takes_a_hatch_or_a_band_by_its_edges_and_lines_not_its_box_or_inside() {
+    // As AutoCAD 2026's ssget "_C" took them on a made-up sheet: a hatch,
+    // solid or patterned, across its boundary or its pattern's lines; a
+    // wide polyline or a donut across its band's edge or its centreline;
+    // none of them by a box wholly inside, nor one in the corner of its box.
+    let dir = scratch("crossing-areas");
+    let sheet = dir.join("areas.yaml");
+    fs::write(
+        &sheet,
+        "units: mm
+hatch_patterns:
+  DIAG:
+    lines:
+      - {angle: 45, delta: [0, 10]}
+objects:
+  - hatch:
+      id: triangle
+      pattern: SOLID
+      boundary:
+        - polyline: {points: [[100, 0, 0], [140, 0, 0], [120, 30, 0]]}
+  - hatch:
+      id: half
+      pattern: DIAG
+      boundary:
+        - edges:
+            - line: {from: [130, 80, 0], to: [170, 80, 0]}
+            - arc: {center: [150, 80, 0], radius: 20, start_angle: 0, end_angle: 180}
+  - polyline: {id: wide, points: [[0, 0, 0], [60, 30, 0]], width: 6}
+  - donut: {id: ring, center: [60, 80, 0], inside_diameter: 8, outside_diameter: 16}
+",
+    )
+    .unwrap();
+    let crossed = |a: [f64; 2], b: [f64; 2]| -> Vec<String> {
+        found(&sheet, crossing(a, b))
+            .1
+            .iter()
+            .map(|o| o.id.clone())
+            .collect()
+    };
+    let none: Vec<String> = Vec::new();
+    // The corner of the triangle's box, and of the half disc's, beyond the arc.
+    assert_eq!(crossed([99.0, 28.0], [101.0, 29.0]), none);
+    assert_eq!(crossed([132.0, 96.0], [134.0, 98.0]), none);
+    // Wholly inside: the solid triangle, between the half disc's lines, the
+    // band, clear of its centreline.
+    assert_eq!(crossed([118.0, 5.0], [122.0, 8.0]), none);
+    assert_eq!(crossed([148.0, 84.0], [150.0, 86.0]), none);
+    assert_eq!(crossed([29.5, 16.2], [30.5, 16.9]), none);
+    // Across an edge, the arc, a band's edge, a centreline.
+    assert_eq!(crossed([99.0, 1.0], [101.0, 2.0]), ["areas/triangle"]);
+    assert_eq!(crossed([168.0, 84.0], [172.0, 86.0]), ["areas/half"]);
+    assert_eq!(crossed([16.0, 10.5], [20.0, 12.6]), ["areas/wide"]);
+    assert_eq!(crossed([65.5, 79.5], [66.5, 80.5]), ["areas/ring"]);
+    // A window takes a band whole, not its centreline alone.
+    assert!(found(&sheet, window([-0.5, -0.5], [60.5, 30.5]))
+        .1
+        .is_empty());
+}
+
+#[test]
+fn a_line_seen_end_on_touches_one_it_lies_along() {
+    let dir = scratch("touch-vertical");
+    let sheet = dir.join("upright.yaml");
+    fs::write(
+        &sheet,
+        "units: mm
+objects:
+  - line: {id: post, from: [0, 0, 0], to: [0, 0, 30]}
+  - line: {id: along, from: [0, 0, 10], to: [0, 0, 20]}
+  - line: {id: beside, from: [1, 0, 10], to: [1, 0, 20]}
+",
+    )
+    .unwrap();
+    let (_, objects) = found(&sheet, touching("upright/post"));
+    assert_eq!(ids(&objects), ["upright/along"]);
+    close(objects[0].touches[0].at, [0.0, 0.0, 10.0]);
+}
+
+#[test]
+fn an_object_a_snaps_from_names_that_is_not_there_is_named_at_its_place() {
+    // The nearest point to the circle from an intersection of the line with
+    // an object no sheet holds: the missing object is the intersection's.
+    let report = ask(
+        &every_kind("nested-missing"),
+        Query::Snap(SnapRef {
+            from: Some(Box::new(SnapRef {
+                snap: Some(SnapKind::Intersection),
+                with: Some(ObjectRef {
+                    id: Some("kinds/missing".into()),
+                    name: None,
+                }),
+                ..of("kinds/line")
+            })),
+            ..kind("kinds/circle", SnapKind::Nearest)
+        }),
+    );
+    assert_eq!(
+        report.message,
+        "nothing matches: no object on the sheet `kinds` has the ID `kinds/missing`, the object \
+         to intersect with"
+    );
 }

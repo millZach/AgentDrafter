@@ -394,8 +394,30 @@ pub(crate) fn touches(parts: &[Part], others: &[Part]) -> Vec<Touch> {
 }
 
 /// Whether `p` lies on the curve, in space, within the tolerance of `size`.
+/// A straight segment's nearest point is found in space, so that a point
+/// along a line seen end on, a vertical one, lies on it; on any other
+/// curve, each point nearest or perpendicular to `p` seen from above, and
+/// its ends, are measured in space, as an arc or an ellipse is level, and
+/// a spline passing over `p` at several heights is looked at at each.
 fn lies_on(p: P3, c: &Curve, size: f64) -> bool {
-    nearest_on(c, p).is_some_and(|q| length_of(sub(p, q)) <= tolerance(size))
+    let near = |q: P3| length_of(sub(p, q)) <= tolerance(size);
+    match c {
+        Curve::Segment { a, b } => {
+            let d = sub(*b, *a);
+            let w = sub(p, *a);
+            let l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            let t = if l2 == 0.0 {
+                0.0
+            } else {
+                ((w[0] * d[0] + w[1] * d[1] + w[2] * d[2]) / l2).clamp(0.0, 1.0)
+            };
+            near([a[0] + t * d[0], a[1] + t * d[1], a[2] + t * d[2]])
+        }
+        _ => perpendiculars(c, p, false)
+            .into_iter()
+            .chain([c.start(), c.end()])
+            .any(near),
+    }
 }
 
 /// A crossing found between a part of the first object and one of the

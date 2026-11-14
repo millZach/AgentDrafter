@@ -57,6 +57,10 @@ blocks:
       - circle: {center: [0, 0, 0], radius: 1.5, layer: symbols}
       - line: {from: [1.5, 0, 0], to: [6, 0, 0], layer: symbols}
       - attdef: {tag: NUMBER, position: [0, 3, 0], height: 1.5, justify: middle_center}
+  TAG:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 1}
+      - attdef: {tag: SNAP, position: [0, 2, 0], height: 1}
   STRIP:
     objects:
       - insert: {block: LUG, position: [0, 0, 0], attributes: {NUMBER: '1'}}
@@ -602,4 +606,138 @@ fn the_operations_schemas_take_a_snapped_point_wherever_a_point_is_and_a_descrip
     ));
     assert!(!description
         .is_valid(&json!({"units": "mm", "objects": [{"line": {"from": snap, "to": [1, 0, 0]}}]})));
+}
+
+#[test]
+fn a_mapping_that_is_not_a_point_is_never_taken_for_a_snapped_point() {
+    let set = panel_set("not-a-point");
+    // An attribute tagged SNAP, written as an agent may write a tag.
+    let reply = apply(
+        &set,
+        json!([{
+            "op": "insert_block", "sheet": "SNAP-001", "id": "tag", "block": "TAG",
+            "position": [10, 10, 0], "attributes": {"snap": "7"},
+        }]),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    assert!(
+        rows(&set).contains(
+            "insert: {block: TAG, position: [10, 10, 0], attributes: {snap: 7}, id: tag}"
+        ),
+        "{}",
+        rows(&set)
+    );
+    assert!(reply.result.unwrap().operations[0].snapped.is_empty());
+}
+
+#[test]
+fn an_object_a_snapped_points_from_names_that_is_not_there_is_named_at_its_place() {
+    let set = panel_set("nested-missing");
+    let reply = apply(
+        &set,
+        json!([{
+            "op": "add_line", "sheet": "SNAP-001", "from": [0, 0, 0],
+            "to": {"snap": {"id": "SNAP-001/ring", "snap": "nearest",
+                            "from": {"id": "SNAP-001/frame", "snap": "intersection",
+                                     "with": {"id": "SNAP-001/missing"}}}},
+        }]),
+    );
+    let error = op_error(&reply, 0);
+    assert_eq!(
+        (error.code, error.field.as_deref()),
+        (
+            ErrorCode::UnknownName,
+            Some("operations[0].to.snap.from.with.id")
+        )
+    );
+    assert!(
+        error
+            .message
+            .contains("has the ID `SNAP-001/missing`, the object to intersect with"),
+        "{}",
+        error.message
+    );
+    // The object to snap from, missing, is named as that.
+    let reply = apply(
+        &set,
+        json!([{
+            "op": "add_line", "sheet": "SNAP-001", "from": [0, 0, 0],
+            "to": {"snap": {"id": "SNAP-001/ring", "snap": "nearest",
+                            "from": {"name": "nowhere", "snap": "center"}}},
+        }]),
+    );
+    let error = op_error(&reply, 0);
+    assert_eq!(
+        error.field.as_deref(),
+        Some("operations[0].to.snap.from.name")
+    );
+    assert!(
+        error
+            .message
+            .contains("has the name `nowhere`, the object to snap from"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_snaps_schema_takes_what_its_reader_takes() {
+    let listed = operations();
+    let info = listed
+        .operations
+        .iter()
+        .find(|o| o.name == "add_line")
+        .unwrap();
+    let validator = jsonschema::validator_for(&info.schema).unwrap();
+    let line = |snap: Value| json!({"op": "add_line", "sheet": "S", "from": [0, 0, 0], "to": {"snap": snap}});
+    let center = json!({"id": "S/ring", "snap": "center"});
+    for (snap, taken) in [
+        (center.clone(), true),
+        (json!({"name": "ring", "snap": "center"}), true),
+        (json!({"snap": "center"}), false),
+        (
+            json!({"id": "S/ring", "name": "ring", "snap": "center"}),
+            false,
+        ),
+        (
+            json!({"id": "S/a", "snap": "intersection", "with": {"id": "S/b"}}),
+            true,
+        ),
+        (json!({"id": "S/a", "snap": "intersection"}), false),
+        (
+            json!({"id": "S/a", "snap": "intersection", "with": {}}),
+            false,
+        ),
+        (
+            json!({"id": "S/a", "snap": "endpoint", "with": {"id": "S/b"}}),
+            false,
+        ),
+        (
+            json!({"id": "S/a", "snap": "nearest", "from": center}),
+            true,
+        ),
+        (json!({"id": "S/a", "snap": "nearest"}), false),
+        (
+            json!({"id": "S/a", "snap": "center", "from": center}),
+            false,
+        ),
+        (
+            json!({"id": "S/a", "snap": "tangent", "from": {"id": "S/b", "snap": "endpoint", "with": {"id": "S/c"}}}),
+            false,
+        ),
+    ] {
+        let op = line(snap.clone());
+        assert_eq!(validator.is_valid(&op), taken, "the schema on {snap}");
+        // The reader agrees: a snap it refuses is refused whole.
+        let set = panel_set("snap-schema");
+        let mut sent = op.clone();
+        sent["sheet"] = json!("SNAP-001");
+        let reply = apply(&set, json!([sent]));
+        assert_eq!(
+            reply.result.is_some(),
+            taken,
+            "the reader on {snap}: {:#?}",
+            reply.error
+        );
+    }
 }

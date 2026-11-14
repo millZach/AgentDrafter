@@ -922,11 +922,45 @@ struct Space {
 struct Drawn {
     /// Its lines, each a run of points; a run of one point is a dot.
     runs: Vec<Vec<draw::Point2>>,
-    /// Its filled areas, each with the rule of which points are inside.
+    /// Its filled areas' outlines, each with the rule of which points are
+    /// inside.
     fills: Vec<(draw::FillRule, Vec<Vec<draw::Point2>>)>,
-    /// The boxes round its patterned hatches' boundaries, which count
-    /// though the pattern's lines may stop short of them.
-    boundaries: Vec<Bounds>,
+    /// Its hatches' boundary loops, each closed: a hatch is selected by its
+    /// boundary as well as its pattern's lines, which may stop short of it.
+    hatches: Vec<Vec<Vec<draw::Point2>>>,
+    /// What it draws with every width taken away, a wide polyline's or a
+    /// donut's centreline, which a crossing takes it by too.
+    centrelines: Vec<Vec<draw::Point2>>,
+}
+
+/// `sheet` with every wide polyline and donut drawn as its centreline, in
+/// its blocks too, or none when it has none: a crossing takes a wide
+/// polyline or a donut across its centreline as well as across its band's
+/// edge, as AutoCAD 2026's did.
+fn centrelines(sheet: &Sheet) -> Option<Sheet> {
+    let mut sheet = sheet.clone();
+    let mut any = false;
+    let mut thin = |object: &mut Object| match object {
+        Object::Polyline(polyline)
+            if polyline.width != 0.0 || polyline.widths.iter().any(|w| *w != [0.0, 0.0]) =>
+        {
+            any = true;
+            polyline.width = 0.0;
+            polyline.widths.fill([0.0, 0.0]);
+        }
+        Object::Donut(donut) => {
+            any = true;
+            let middle = (donut.inside_diameter + donut.outside_diameter) / 2.0;
+            donut.inside_diameter = middle;
+            donut.outside_diameter = middle;
+        }
+        _ => {}
+    };
+    sheet.objects.iter_mut().for_each(&mut thin);
+    for block in &mut sheet.blocks {
+        block.objects.iter_mut().for_each(&mut thin);
+    }
+    any.then_some(sheet)
 }
 
 impl Space {
@@ -954,9 +988,24 @@ impl Space {
                     draw::Shape::Fill { rule, contours } => d.fills.push((rule, contours)),
                 }
             }
-            for (object, bounds) in list.boundaries {
+            for (object, loops) in list.hatch_loops {
                 if let Some(d) = drawn.get_mut(object) {
-                    d.boundaries.push(bounds);
+                    d.hatches.push(loops);
+                }
+            }
+            if let Some(thin) = centrelines(&record.sheet) {
+                for item in measuring_drawing(&thin, &fonts).items {
+                    // Only what a width was taken from: a polyline, a
+                    // donut, or an insert, whose block may hold them.
+                    let thinned = matches!(
+                        record.sheet.objects.get(item.object),
+                        Some(Object::Polyline(_) | Object::Donut(_) | Object::Insert(_))
+                    );
+                    if let (Some(d), draw::Shape::Stroke { runs, .. }, true) =
+                        (drawn.get_mut(item.object), item.shape, thinned)
+                    {
+                        d.centrelines.extend(runs);
+                    }
                 }
             }
         }
@@ -1010,15 +1059,14 @@ impl Space {
 }
 
 impl Drawn {
-    /// Every point it draws through, its hatches' boundary boxes' corners
-    /// among them.
+    /// Every point it draws through, its hatches' boundaries among them.
     fn points(&self) -> impl Iterator<Item = draw::Point2> + '_ {
         self.runs
             .iter()
             .flatten()
             .chain(self.fills.iter().flat_map(|(_, c)| c.iter().flatten()))
+            .chain(self.hatches.iter().flatten().flatten())
             .copied()
-            .chain(self.boundaries.iter().flat_map(|b| [b.min, b.max]))
     }
 
     /// Whether it draws something and everything it draws is within the
@@ -1035,8 +1083,11 @@ impl Drawn {
     }
 
     /// Whether something it draws is within the box from `min` to `max` or
-    /// crosses its edge, or a filled area of it holds the box: AutoCAD's
-    /// crossing selection.
+    /// crosses its edge: a line, a hatch's pattern line or boundary, or the
+    /// outline of a filled area, or a wide polyline's or a donut's
+    /// centreline. A box wholly inside a filled area crosses nothing, as
+    /// AutoCAD 2026's crossing selection found: inside a solid, a wide
+    /// polyline's band or a hatch, solid or patterned, it took none.
     fn reaches(&self, (min, max): ([f64; 2], [f64; 2])) -> bool {
         if self.points().any(|p| inside_box(p, min, max)) {
             return true;
@@ -1046,21 +1097,24 @@ impl Drawn {
             let edges = if closed { n } else { n.saturating_sub(1) };
             (0..edges).any(|i| segment_meets_box(run[i], run[(i + 1) % n], min, max))
         };
-        if self.runs.iter().any(|run| crosses(run, false)) {
+        if self
+            .runs
+            .iter()
+            .chain(&self.centrelines)
+            .any(|run| crosses(run, false))
+        {
             return true;
         }
-        for (rule, contours) in &self.fills {
-            if contours.iter().any(|c| crosses(c, true)) {
-                return true;
-            }
-            if draw::inside(min, *rule, contours) {
-                return true;
-            }
+        if self
+            .fills
+            .iter()
+            .any(|(_, contours)| contours.iter().any(|c| crosses(c, true)))
+        {
+            return true;
         }
-        self.boundaries.iter().any(|b| {
-            let ring = [b.min, [b.max[0], b.min[1]], b.max, [b.min[0], b.max[1]]];
-            crosses(&ring, true)
-        })
+        self.hatches
+            .iter()
+            .any(|loops| loops.iter().any(|l| crosses(l, true)))
     }
 }
 
