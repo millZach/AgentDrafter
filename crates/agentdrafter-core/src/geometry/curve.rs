@@ -635,13 +635,14 @@ pub(crate) type Crossing = (f64, f64);
 /// Where curves `c` and `d` cross or touch seen from above, in the order
 /// they lie along `c`.
 ///
-/// One of the two is taken as a signed function of a point that is 0 on
-/// it, its [`Shape`], and that function is followed along the other:
-/// see [`meetings`]. A crossing is a change of its sign and a touch a dip
-/// of its size to 0 that does not change it, so each point is found once,
-/// however close another is, and no point is found that is not on both.
-/// The shape is the simpler of the two, a line before a circle or an arc,
-/// before an ellipse, before a spline, whose shape is its signed distance.
+/// Where one of the two is a line, a circle or an arc, or an ellipse, it is
+/// taken as a signed function of a point that is 0 on it, its [`Shape`],
+/// and that function is followed along the other: see [`meetings`]. A
+/// crossing is a change of its sign and a touch a dip of its size to 0 that
+/// does not change it, so each point is found once, however close another
+/// is, and no point is found that is not on both. The shape is the simpler
+/// of the two, a line before a circle or an arc, before an ellipse. Two
+/// splines have no such function, and meet as [`splines_meet`] finds.
 pub(crate) fn crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
     let size = scale_of(c).max(scale_of(d));
     let swap = |found: Vec<Crossing>| found.into_iter().map(|(u, t)| (t, u)).collect();
@@ -649,6 +650,8 @@ pub(crate) fn crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
         seen_end_on(c, d, size)
     } else if end_on(d).is_some() {
         swap(seen_end_on(d, c, size))
+    } else if matches!((c, d), (Curve::Spline(_), Curve::Spline(_))) {
+        splines_meet(c, d, size)
     } else if rank(c) < rank(d) {
         swap(meet(d, c, size))
     } else {
@@ -661,8 +664,10 @@ pub(crate) fn crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
         *t = t.clamp(c0, c1);
         *u = u.clamp(d0, d1);
     }
-    found.sort_by(|a, b| a.0.total_cmp(&b.0));
-    found.dedup_by(|a, b| a.0 == b.0);
+    // One curve can pass one point of the other twice, at two heights: each
+    // parameter pair is a point of its own.
+    found.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    found.dedup();
     found
 }
 
@@ -685,8 +690,8 @@ pub(crate) fn scale_of(c: &Curve) -> f64 {
 }
 
 /// A curve as a signed function of a point seen from above, 0 on the line,
-/// circle or ellipse it runs along, or, for a spline, on the spline.
-enum Shape<'a> {
+/// circle or ellipse it runs along.
+enum Shape {
     /// The signed distance from the line through `a` square to `n`, a unit
     /// vector.
     Line { a: [f64; 2], n: [f64; 2] },
@@ -702,17 +707,18 @@ enum Shape<'a> {
         start: f64,
         sweep: f64,
     },
-    /// The signed distance from the spline, at the foot on it nearest the
-    /// point, found from the nearest of `near`, points along it.
-    Curve { d: &'a Curve, near: Vec<(f64, P3)> },
 }
 
-impl<'a> Shape<'a> {
-    fn of(d: &'a Curve) -> Shape<'a> {
-        match d {
+impl Shape {
+    /// The shape of `d`; none for a spline, or for a segment seen end on.
+    fn of(d: &Curve) -> Option<Shape> {
+        Some(match d {
             Curve::Segment { a, b } => {
                 let v = [b[0] - a[0], b[1] - a[1]];
                 let l = v[0].hypot(v[1]);
+                if l == 0.0 {
+                    return None;
+                }
                 Shape::Line {
                     a: [a[0], a[1]],
                     n: [-v[1] / l, v[0] / l],
@@ -741,17 +747,8 @@ impl<'a> Shape<'a> {
                     sweep: *sweep,
                 }
             }
-            Curve::Spline(_) => {
-                let mut near = Vec::new();
-                for w in d.breaks().windows(2) {
-                    for i in 0..=32 {
-                        let u = w[0] + (w[1] - w[0]) * f64::from(i) / 32.0;
-                        near.push((u, d.point(u)));
-                    }
-                }
-                Shape::Curve { d, near }
-            }
-        }
+            Curve::Spline(_) => return None,
+        })
     }
 
     /// The function's value at `p`, its gradient there, and how far `p`
@@ -786,38 +783,7 @@ impl<'a> Shape<'a> {
                 };
                 (v, g, far)
             }
-            Shape::Curve { d, .. } => {
-                let u = self.foot(p);
-                let (q, v) = (d.point(u), d.tangent(u));
-                let l = v[0].hypot(v[1]);
-                let n = if l > 0.0 {
-                    [-v[1] / l, v[0] / l]
-                } else {
-                    [0.0, 0.0]
-                };
-                let w = [p[0] - q[0], p[1] - q[1]];
-                (w[0] * n[0] + w[1] * n[1], n, w[0].hypot(w[1]))
-            }
         }
-    }
-
-    /// The spline's parameter at the foot nearest `p`.
-    fn foot(&self, p: P3) -> f64 {
-        let Shape::Curve { d, near } = self else {
-            return 0.0;
-        };
-        // A spline can come near a point more than once, and the nearest of
-        // the points along it need not lie by the nearest foot: start from
-        // each place the points come nearest, and keep the nearest foot.
-        let (a, b) = d.domain();
-        let far: Vec<f64> = near.iter().map(|n| plan_distance(n.1, p)).collect();
-        (0..near.len())
-            .filter(|&i| {
-                (i == 0 || far[i] <= far[i - 1]) && (i + 1 == far.len() || far[i] <= far[i + 1])
-            })
-            .map(|i| foot_on(d, p, near[i].0).clamp(a, b))
-            .min_by(|&u, &v| plan_distance(d.point(u), p).total_cmp(&plan_distance(d.point(v), p)))
-            .unwrap_or(a)
     }
 
     /// The parameter along `d`, the curve this is the shape of, of `p`, a
@@ -843,7 +809,6 @@ impl<'a> Shape<'a> {
                     share
                 })
             }
-            Shape::Curve { .. } => Some(self.foot(p)),
         }
     }
 }
@@ -858,11 +823,257 @@ fn closed(c: &Curve) -> bool {
 
 /// Where `c` meets `d`, seen from above: the parameter along each.
 fn meet(c: &Curve, d: &Curve, size: f64) -> Vec<Crossing> {
-    let shape = Shape::of(d);
+    let Some(shape) = Shape::of(d) else {
+        return Vec::new();
+    };
     meetings(c, &shape, size)
         .into_iter()
         .filter_map(|t| Some((t, shape.parameter(d, c.point(t))?)))
         .collect()
+}
+
+/// Where two splines `c` and `d` cross or touch seen from above: the
+/// parameter along each.
+///
+/// A spline has no signed function to follow along the other, since its
+/// nearest foot to a point jumps. So both are cut into [`straight_pieces`],
+/// and every place they may meet is a start for [`refined`], which solves
+/// `c(t) = d(u)` itself: where `c` crosses one of `d`'s chords within it,
+/// found by following the chord's line along `c` with [`meetings`], and
+/// where a chord of each comes within the two pieces' bends of the other,
+/// from the nearest points of the two, which is where splines that touch
+/// are found. A start gives a point only where it converges to one on both
+/// curves, within the tolerance and their domains. Two starts give one
+/// point only when they converge to the same parameters on both, which is
+/// identity, not closeness; so one spline passing a point of the other
+/// twice, at two heights, gives two, each then checked in height on its
+/// own.
+fn splines_meet(c: &Curve, d: &Curve, size: f64) -> Vec<Crossing> {
+    let tolerance = 1e-9 * (1.0 + size) + 8.0 * f64::EPSILON * size;
+    let (on_c, on_d) = (straight_pieces(c), straight_pieces(d));
+    let mut starts: Vec<Crossing> = Vec::new();
+    for piece in &on_d {
+        let chord = Curve::Segment {
+            a: piece.a,
+            b: piece.b,
+        };
+        let Some(line) = Shape::of(&chord) else {
+            continue;
+        };
+        for t in meetings(c, &line, size) {
+            let Some(s) = chord.parameter_of(c.point(t)) else {
+                continue;
+            };
+            if (-0.25..=1.25).contains(&s) {
+                starts.push((t, piece.at(s)));
+            }
+        }
+    }
+    for p in &on_c {
+        for q in &on_d {
+            let (s, r, apart) = nearest_on_chords(p, q);
+            if apart <= 2.0 * (p.bend + q.bend) + tolerance {
+                starts.push((p.at(s), q.at(r)));
+            }
+        }
+    }
+    let (c0, c1) = c.domain();
+    let (d0, d1) = d.domain();
+    let (t_slack, u_slack) = ((c1 - c0) * 1e-9, (d1 - d0) * 1e-9);
+    let mut found: Vec<Crossing> = Vec::new();
+    for start in starts {
+        let Some((t, u)) = refined(c, d, start, tolerance) else {
+            continue;
+        };
+        let seen = found
+            .iter()
+            .any(|&(a, b)| (a - t).abs() <= t_slack && (b - u).abs() <= u_slack);
+        if !seen {
+            found.push((t, u));
+        }
+    }
+    found
+}
+
+/// A nearly straight piece of a curve, from parameter `u0` to `u1`: its
+/// ends, and how far the curve bends from the chord between them, seen
+/// from above.
+struct Piece {
+    u0: f64,
+    u1: f64,
+    a: P3,
+    b: P3,
+    bend: f64,
+}
+
+impl Piece {
+    /// The parameter along the curve at the share `s` of the chord.
+    fn at(&self, s: f64) -> f64 {
+        self.u0 + (self.u1 - self.u0) * s.clamp(0.0, 1.0)
+    }
+}
+
+/// The curve cut at its breaks into pieces, each halved until it bends
+/// from its chord by no more than a thousandth of the chord's length.
+fn straight_pieces(c: &Curve) -> Vec<Piece> {
+    fn cut(c: &Curve, u0: f64, u1: f64, depth: u32, out: &mut Vec<Piece>) {
+        let (a, b) = (c.point(u0), c.point(u1));
+        let bend = (1..8)
+            .map(|i| off_segment(c.point(u0 + (u1 - u0) * f64::from(i) / 8.0), a, b).0)
+            .fold(0.0_f64, f64::max);
+        if depth >= 16 || bend <= 1e-3 * plan_distance(a, b) {
+            out.push(Piece { u0, u1, a, b, bend });
+        } else {
+            let m = (u0 + u1) / 2.0;
+            cut(c, u0, m, depth + 1, out);
+            cut(c, m, u1, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    for w in c.breaks().windows(2) {
+        let u = |k: u32| w[0] + (w[1] - w[0]) * f64::from(k) / 4.0;
+        for i in 0..4 {
+            cut(c, u(i), u(i + 1), 0, &mut out);
+        }
+    }
+    out
+}
+
+/// How far `p` is from the segment `a` to `b`, seen from above, and the
+/// share of the segment its nearest point there lies at.
+fn off_segment(p: P3, a: P3, b: P3) -> (f64, f64) {
+    let v = [b[0] - a[0], b[1] - a[1]];
+    let l2 = v[0] * v[0] + v[1] * v[1];
+    let s = if l2 > 0.0 {
+        (((p[0] - a[0]) * v[0] + (p[1] - a[1]) * v[1]) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let q = [a[0] + v[0] * s, a[1] + v[1] * s, 0.0];
+    (plan_distance(p, q), s)
+}
+
+/// The nearest points of two pieces' chords seen from above: the share of
+/// each chord they lie at, and how far apart they are, 0 where they cross.
+fn nearest_on_chords(p: &Piece, q: &Piece) -> (f64, f64, f64) {
+    let (v, w) = (sub(p.b, p.a), sub(q.b, q.a));
+    let x = sub(q.a, p.a);
+    let cross = v[0] * w[1] - v[1] * w[0];
+    if cross != 0.0 {
+        let s = (x[0] * w[1] - x[1] * w[0]) / cross;
+        let r = (x[0] * v[1] - x[1] * v[0]) / cross;
+        if (0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&r) {
+            return (s, r, 0.0);
+        }
+    }
+    let mut best = (0.0, 0.0, f64::INFINITY);
+    for (s, end) in [(0.0, p.a), (1.0, p.b)] {
+        let (apart, r) = off_segment(end, q.a, q.b);
+        if apart < best.2 {
+            best = (s, r, apart);
+        }
+    }
+    for (r, end) in [(0.0, q.a), (1.0, q.b)] {
+        let (apart, s) = off_segment(end, p.a, p.b);
+        if apart < best.2 {
+            best = (s, r, apart);
+        }
+    }
+    best
+}
+
+/// The sine of the angle between `c` at `t` and `d` at `u`, seen from
+/// above.
+fn sine_between(c: &Curve, t: f64, d: &Curve, u: f64) -> f64 {
+    let (v, w) = (c.tangent(t), d.tangent(u));
+    (v[0] * w[1] - v[1] * w[0]) / (v[0].hypot(v[1]) * w[0].hypot(w[1]))
+}
+
+/// The parameters where `c(t) = d(u)` seen from above, refined from
+/// `start`, if they converge to a point on both curves within `tolerance`
+/// and within their domains.
+///
+/// Newton's method on the two coordinates, with the curves' tangents for
+/// its Jacobian, fixes a crossing to the last digit. Where the curves run
+/// parallel there, or it finds none, they may touch, where the parameters
+/// are fixed only to the square root of the last digit; so the touch is
+/// taken where the two run parallel, [`parallel`], which a touch fixes to
+/// the last digit, and kept only where the curves are within the tolerance
+/// of each other there. Where they run parallel but apart, a crossing
+/// found is one of two at a shallow angle, and kept.
+fn refined(c: &Curve, d: &Curve, start: Crossing, tolerance: f64) -> Option<Crossing> {
+    let on_both = |(t, u): Crossing| {
+        c.holds(t) && d.holds(u) && plan_distance(c.point(t), d.point(u)) <= tolerance
+    };
+    let crossing = newton(c, d, start).filter(|&p| on_both(p));
+    if let Some((t, u)) = crossing {
+        if sine_between(c, t, d, u).abs() > 1e-6 {
+            return crossing;
+        }
+    }
+    parallel(c, d, crossing.unwrap_or(start))
+        .filter(|&p| on_both(p))
+        .or(crossing)
+}
+
+/// Newton's method on `c(t) − d(u) = 0` seen from above, from `start`;
+/// none where it runs off or meets a Jacobian that cannot be solved.
+fn newton(c: &Curve, d: &Curve, start: Crossing) -> Option<Crossing> {
+    let (c0, c1) = c.domain();
+    let (d0, d1) = d.domain();
+    let (mut t, mut u) = start;
+    for _ in 0..100 {
+        let (p, q) = (c.point(t), d.point(u));
+        let (v, w) = (c.tangent(t), d.tangent(u));
+        let r = [p[0] - q[0], p[1] - q[1]];
+        // v·dt − w·du = −r, by Cramer's rule.
+        let det = w[0] * v[1] - v[0] * w[1];
+        if det == 0.0 || !det.is_finite() {
+            return None;
+        }
+        let dt = (r[0] * w[1] - r[1] * w[0]) / det;
+        let du = (r[0] * v[1] - r[1] * v[0]) / det;
+        t += dt;
+        u += du;
+        let off = |x: f64, a: f64, b: f64| !x.is_finite() || x < a - (b - a) || x > b + (b - a);
+        if off(t, c0, c1) || off(u, d0, d1) {
+            return None;
+        }
+        if dt.abs() <= 1e-15 * (1.0 + t.abs()) && du.abs() <= 1e-15 * (1.0 + u.abs()) {
+            break;
+        }
+    }
+    Some((t, u))
+}
+
+/// Where `c` runs parallel to `d` at its foot on it, seen from above, near
+/// `start`: the parameters of the point on `c` and of its foot on `d`.
+fn parallel(c: &Curve, d: &Curve, start: Crossing) -> Option<Crossing> {
+    let (c0, c1) = c.domain();
+    let (mut t, mut u) = start;
+    u = foot_on(d, c.point(t), u);
+    let h = (c1 - c0) * 1e-7;
+    for _ in 0..100 {
+        let g = sine_between(c, t, d, u);
+        if g == 0.0 {
+            break;
+        }
+        let ahead = foot_on(d, c.point(t + h), u);
+        let slope = (sine_between(c, t + h, d, ahead) - g) / h;
+        if slope == 0.0 || !slope.is_finite() {
+            return None;
+        }
+        let step = g / slope;
+        t -= step;
+        if !t.is_finite() || t < c0 - (c1 - c0) || t > c1 + (c1 - c0) {
+            return None;
+        }
+        u = foot_on(d, c.point(t), u);
+        if step.abs() <= 1e-15 * (1.0 + t.abs()) {
+            break;
+        }
+    }
+    u.is_finite().then_some((t, u))
 }
 
 /// The parameters along `c` where it meets `shape`.
@@ -946,8 +1157,7 @@ fn meetings(c: &Curve, shape: &Shape, size: f64) -> Vec<f64> {
         |i: usize| fs[i] != 0.0 && fs[i + 1] != 0.0 && fs[i].signum() != fs[i + 1].signum();
     let mut crossing: Vec<bool> = (0..n - 1).map(changes).collect();
     // A zero of the function is a meeting only where the point lies on the
-    // other curve: a spline's signed distance is zero along its end's
-    // tangent, past the spline itself.
+    // other curve.
     let mut found: Vec<f64> = (0..n)
         .filter(|&i| fs[i] == 0.0 && distance(ts[i]) <= tolerance)
         .map(|i| ts[i])
@@ -1167,5 +1377,34 @@ mod tests {
             close(line.point(t)[1], 0.0);
             close(spline.point(u)[1], 0.0);
         }
+    }
+
+    /// The quadratic spline through `[-1, y(-1)]`, `[1, y(1)]` with its
+    /// middle control point at `[0, m]`.
+    fn parabola(ends: f64, m: f64) -> Curve {
+        Curve::Spline(BSpline::new(
+            2,
+            vec![[-1.0, ends, 0.0], [0.0, m, 0.0], [1.0, ends, 0.0]],
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        ))
+    }
+
+    #[test]
+    fn two_splines_that_touch_meet_once_and_two_that_nearly_touch_do_not() {
+        // y = x² touches y = −x² from outside and y = 2x² from inside, at
+        // the origin; y = −x² − 0.001 passes it by.
+        let cup = parabola(1.0, -1.0);
+        for other in [parabola(-1.0, 1.0), parabola(2.0, -2.0)] {
+            for (c, d) in [(&cup, &other), (&other, &cup)] {
+                let found = crossings(c, d);
+                assert_eq!(found.len(), 1, "{found:?}");
+                let (t, u) = found[0];
+                close(t, 0.5);
+                close(u, 0.5);
+            }
+        }
+        let apart = parabola(-1.001, 0.999);
+        assert!(crossings(&cup, &apart).is_empty());
+        assert!(crossings(&apart, &cup).is_empty());
     }
 }

@@ -868,3 +868,70 @@ fn a_point_is_found_once_and_only_where_both_objects_are() {
     );
     assert_eq!(points.len(), 1, "{points:#?}");
 }
+
+/// A made-up sheet of two splines that cross once, and a spline that starts
+/// on another which passes its start twice seen from above, once at its
+/// height and once below it.
+fn two_splines(test: &str) -> PathBuf {
+    let dir = scratch(test);
+    let sheet = dir.join("splines.yaml");
+    fs::write(
+        &sheet,
+        "units: mm
+objects:
+  - spline: {id: swoop, degree: 3, control_points: [[-75, -40, 0], [-25, -90, 0], [25, -30, 0], [75, -30, 0]]}
+  - spline: {id: hook, degree: 3, control_points: [[60, -60, 0], [100, -100, 0], [-50, -20, 0], [20, 50, 0]]}
+  - spline: {id: rising, degree: 3, control_points: [[15, 0, 75], [18, 3, 75], [19, 6, 75], [20, 10, 75]]}
+  - spline: {id: arch, degree: 2, control_points: [[0, 0, 0], [47.5, 0, 50], [-5, 0, 100]]}
+",
+    )
+    .unwrap();
+    sheet
+}
+
+#[test]
+fn two_splines_that_cross_once_cross_once() {
+    let sheet = two_splines("cross");
+    for kind_of in [SnapKind::Intersection, SnapKind::ApparentIntersection] {
+        for (first, second) in [
+            ("splines/swoop", "splines/hook"),
+            ("splines/hook", "splines/swoop"),
+        ] {
+            let (_, points) = snap(&sheet, with(kind(first, kind_of), second));
+            assert_eq!(points.len(), 1, "{kind_of:?} {first}: {points:#?}");
+            let at = points[0].at;
+            assert!(
+                (at.x - 25.907_864_937_4).abs() < 1e-8
+                    && (at.y + 43.320_786_962_9).abs() < 1e-8
+                    && at.z == 0.0,
+                "{kind_of:?} {first}: {points:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_spline_passing_a_point_twice_meets_another_there_at_its_height() {
+    // The arch runs along y = 0 out to x = 22.56 and back, passing [15, 0]
+    // at heights 20 and 75; the rising spline starts there at 75.
+    let sheet = two_splines("twice");
+    for (first, second) in [
+        ("splines/rising", "splines/arch"),
+        ("splines/arch", "splines/rising"),
+    ] {
+        let (_, points) = snap(&sheet, with(kind(first, SnapKind::Intersection), second));
+        assert_eq!(points.len(), 1, "{first}: {points:#?}");
+        close(points[0].at, [15.0, 0.0, 75.0]);
+        // Seen from above it is one point: both finds are at one parameter
+        // of the other spline, its start.
+        let (_, points) = snap(
+            &sheet,
+            with(kind(first, SnapKind::ApparentIntersection), second),
+        );
+        assert_eq!(points.len(), 1, "{first}: {points:#?}");
+        assert!(
+            (points[0].at.x - 15.0).abs() < 1e-9 && points[0].at.y.abs() < 1e-9,
+            "{first}: {points:#?}"
+        );
+    }
+}
