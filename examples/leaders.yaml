@@ -74,6 +74,7 @@ objects:
       mleader_style: callout
       layer: callouts
       arrow_size: 4
+      gap: 3
       leaders:
         - [[150, 40, 0], [100, 25, 0]]
       content: {text: "GLAND PLATE\ngy", attachment: middle_of_bottom_line, style: Standard}

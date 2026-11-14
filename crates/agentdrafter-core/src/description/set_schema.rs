@@ -264,7 +264,14 @@ pub(crate) fn template_schema() -> Value {
         choices.push(row_value);
     }
     for (kind, holder) in [("mleader", "content"), ("leader", "annotation")] {
-        let text = &mut defs[kind]["properties"][holder]["properties"]["text"];
+        let held = &mut defs[kind]["properties"][holder];
+        // An optional mapping is one choice of two, beside null.
+        let held = if held["anyOf"].is_array() {
+            &mut held["anyOf"][0]
+        } else {
+            held
+        };
+        let text = &mut held["properties"]["text"];
         let written = text.take();
         *text = json!({
             "description": format!(

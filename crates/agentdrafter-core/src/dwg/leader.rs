@@ -82,6 +82,21 @@ fn base_overrides() -> Override {
     Override::CONTENT_TYPE | Override::TEXT_ALIGNMENT | Override::ENABLE_USE_DEFAULT_MTEXT
 }
 
+/// What a multileader may override of its style and still be read: what
+/// AutoCAD flags on every one, and what the model holds of its own.
+fn overrides_read() -> Override {
+    base_overrides()
+        | Override::ARROWHEAD
+        | Override::ARROWHEAD_SIZE
+        | Override::LANDING_DISTANCE
+        | Override::ENABLE_DOGLEG
+        | Override::LANDING_GAP
+        | Override::TEXT_STYLE
+        | Override::TEXT_HEIGHT
+        | Override::TEXT_LEFT_ATTACHMENT
+        | Override::TEXT_RIGHT_ATTACHMENT
+}
+
 fn dwg_color(color: ObjectColor) -> Color {
     match color {
         ObjectColor::ByLayer => Color::ByLayer,
@@ -185,13 +200,27 @@ fn add_arrow_block(drawing: &mut CadDocument, arrowhead: Arrowhead) -> Result<()
             format!("could not add the arrowhead block `{name}` to the drawing: {e}"),
         )
     })?;
+    for mut entity in arrow_entities(arrowhead) {
+        entity.common_mut().owner_handle = owner;
+        drawing.add_entity(entity).map_err(|e| {
+            Error::new(
+                ErrorCode::DwgWrite,
+                format!("could not fill the arrowhead block `{name}`: {e}"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// What AutoCAD 2026 put in the block of `arrowhead`, before it has an
+/// owner.
+fn arrow_entities(arrowhead: Arrowhead) -> Vec<EntityType> {
     let by_block = |common: &mut acadrust::entities::EntityCommon, weight: bool| {
         common.color = Color::ByBlock;
         "ByBlock".clone_into(&mut common.linetype);
         if weight {
             common.line_weight = LineWeight::ByBlock;
         }
-        common.owner_handle = owner;
     };
     let line = |from: (f64, f64), to: (f64, f64)| {
         let mut line = DwgLine::from_points(
@@ -202,7 +231,7 @@ fn add_arrow_block(drawing: &mut CadDocument, arrowhead: Arrowhead) -> Result<()
         EntityType::Line(line)
     };
     let wing = 1.0 / 6.0;
-    let entities = match arrowhead {
+    match arrowhead {
         Arrowhead::Dot => {
             let mut dot = LwPolyline::new();
             dot.is_closed = true;
@@ -223,14 +252,63 @@ fn add_arrow_block(drawing: &mut CadDocument, arrowhead: Arrowhead) -> Result<()
             line((0.0, 0.0), (-1.0, 0.0)),
         ],
         Arrowhead::ClosedFilled | Arrowhead::None => Vec::new(),
-    };
-    for entity in entities {
-        drawing.add_entity(entity).map_err(|e| {
-            Error::new(
-                ErrorCode::DwgWrite,
-                format!("could not fill the arrowhead block `{name}`: {e}"),
-            )
-        })?;
+    }
+}
+
+/// Numbers rounded to a billionth, so that two objects a rounding apart
+/// compare the same.
+fn rounded(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Number(n) => n
+            .as_f64()
+            .and_then(|x| serde_json::Number::from_f64((x * 1e9).round() / 1e9 + 0.0))
+            .map_or(Value::Number(n), Value::Number),
+        Value::Array(items) => Value::Array(items.into_iter().map(rounded).collect()),
+        Value::Object(keys) => {
+            Value::Object(keys.into_iter().map(|(k, v)| (k, rounded(v))).collect())
+        }
+        other => other,
+    }
+}
+
+/// Refuses a block of the sheet's, from its block library, that has the
+/// name of an arrowhead block a leader of the sheet needs but is drawn
+/// otherwise than AutoCAD's: the drawing holds one block of a name. One
+/// drawn as AutoCAD's is written once and shared.
+fn check_library_arrowheads(sheet: &Sheet, arrowheads: &[Arrowhead]) -> Result<(), Error> {
+    for arrowhead in arrowheads {
+        let Some(name) = arrowhead.block() else {
+            continue;
+        };
+        let Some(block) = sheet
+            .blocks
+            .iter()
+            .find(|b| b.name.eq_ignore_ascii_case(name))
+        else {
+            continue;
+        };
+        let expected: Option<Vec<Object>> = arrow_entities(*arrowhead)
+            .iter()
+            .map(|e| super::read_object(e, &[]))
+            .collect();
+        let as_json =
+            |objects: &[Object]| rounded(serde_json::to_value(objects).unwrap_or_default());
+        let same = expected.is_some_and(|expected| {
+            block.base_point.x == 0.0
+                && block.base_point.y == 0.0
+                && block.base_point.z == 0.0
+                && as_json(&block.objects) == as_json(&expected)
+        });
+        if !same {
+            return Err(Error::new(
+                ErrorCode::DuplicateName,
+                format!(
+                    "the block library's block `{}` differs from AutoCAD's arrowhead block that a leader needs, `{name}`, and a drawing holds one block of a name; rename the library's block, or draw it as AutoCAD's",
+                    block.name
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -257,6 +335,7 @@ pub(super) fn add_leader_styles(drawing: &mut CadDocument, sheet: &Sheet) -> Res
         }
     }
     arrowheads.extend(wanted.iter().map(|s| s.arrowhead));
+    check_library_arrowheads(sheet, &arrowheads)?;
     for arrowhead in arrowheads {
         add_arrow_block(drawing, arrowhead)?;
     }
@@ -373,6 +452,9 @@ pub(super) fn dwg_mleader(
         if (laid.landing > 0.0) != (style.landing > 0.0) {
             overrides |= Override::ENABLE_DOGLEG;
         }
+    }
+    if laid.landing_gap != style.landing_gap {
+        overrides |= Override::LANDING_GAP;
     }
     if *text_style != style.text_style {
         overrides |= Override::TEXT_STYLE;
@@ -681,6 +763,11 @@ pub(super) fn read_mleader(
     let arrowhead = arrowhead_of(drawing, written.arrowhead_handle)?;
     let attachment = LeaderAttachment::of_code(written.text_left_attachment as i16)?;
     let text_style = text_style_name(drawing, context.text_style_handle)?;
+    // An override the model does not hold, such as the text's colour,
+    // would be lost.
+    if !overrides_read().contains(written.property_override_flags) {
+        return None;
+    }
     let differs = |same: bool| !same;
     let read = MLeader {
         leaders,
@@ -692,6 +779,7 @@ pub(super) fn read_mleader(
             attachment: differs(attachment == style.attachment).then_some(attachment),
         },
         landing: differs(landing == style.landing).then_some(landing),
+        gap: differs(context.landing_gap == style.landing_gap).then_some(context.landing_gap),
         arrowhead: differs(arrowhead == style.arrowhead).then_some(arrowhead),
         arrow_size: differs(written.arrowhead_size == style.arrow_size)
             .then_some(written.arrowhead_size),
@@ -836,6 +924,16 @@ pub(super) fn read_leader(
             let Some(EntityType::MText(t)) = drawing.get_entity(written.annotation_handle) else {
                 return None;
             };
+            // The annotation draws as the model writes it: on the leader's
+            // layer, in its pen, and shown.
+            let pen = super::read_properties(&t.common);
+            let presented = !t.common.invisible
+                && pen.is_some()
+                && pen == super::read_properties(&written.common)
+                && super::layer_of(&t.common) == super::layer_of(&written.common);
+            if !presented {
+                return None;
+            }
             let text = super::text::read_mtext(t, read.layer.clone())?;
             read.annotation = Some(LeaderAnnotation {
                 text: text.contents.clone(),
@@ -877,6 +975,15 @@ pub(super) fn read_leader(
     Some((read, annotation))
 }
 
+/// The MTEXT that is an older leader's annotation, if it has one.
+pub(super) fn annotation_of(drawing: &CadDocument, written: &DwgLeader) -> Option<Handle> {
+    let handle = written.annotation_handle;
+    (written.creation_type == LeaderCreationType::WithText
+        && !handle.is_null()
+        && matches!(drawing.get_entity(handle), Some(EntityType::MText(_))))
+    .then_some(handle)
+}
+
 /// The handles of the arrowhead blocks the drawing's leaders and
 /// multileader styles draw with, which are read with them and not as
 /// blocks of their own.
@@ -902,4 +1009,147 @@ pub(super) fn arrow_blocks(drawing: &CadDocument) -> Vec<Handle> {
     }
     handles.retain(|h| !h.is_null());
     handles
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::Cursor;
+    use std::path::{Path, PathBuf};
+
+    use acadrust::entities::multileader::MultiLeaderPropertyOverrideFlags as Override;
+    use acadrust::entities::{EntityType, Insert as DwgInsert};
+    use acadrust::types::{Color, Vector3};
+    use acadrust::{CadDocument, DwgReader, DwgWriter};
+
+    use crate::build::{build, BuildRequest};
+    use crate::model::{DrawingContents, Object};
+
+    /// An empty folder for one test under the system's temporary folder.
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("agentdrafter-dwg-leader-{}", std::process::id()))
+            .join(test);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A made-up sheet: a multileader with a dot, and an older leader with
+    /// its annotation, on layer `notes`.
+    const SHEET: &str = "units: mm
+layers:
+  notes: {color: yellow}
+objects:
+  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {text: TB-1}, arrowhead: dot, layer: notes}
+  - leader: {points: [[50, 0, 0], [60, 20, 0]], annotation: {text: SEE NOTE}, layer: notes}
+";
+
+    /// Builds `text` in a folder of its own, and gives the folder and the
+    /// drawing the DWG holds.
+    fn built(test: &str, text: &str) -> (PathBuf, CadDocument) {
+        let dir = scratch(test);
+        let description = dir.join("sheet.yaml");
+        fs::write(&description, text).unwrap();
+        build(&BuildRequest {
+            description,
+            output: None,
+            overwrite: false,
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        let bytes = fs::read(dir.join("sheet.dwg")).unwrap();
+        let drawing = DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
+        (dir, drawing)
+    }
+
+    /// Writes `drawing` beside the built DWG and reads it as the core does.
+    fn read_back(dir: &Path, drawing: &CadDocument) -> DrawingContents {
+        let path = dir.join("changed.dwg");
+        fs::write(&path, DwgWriter::write_to_vec(drawing).unwrap()).unwrap();
+        super::super::read(&path).unwrap()
+    }
+
+    fn handle_of(drawing: &CadDocument, kind: &str) -> acadrust::types::Handle {
+        drawing
+            .model_space_entities()
+            .find(|e| {
+                matches!(
+                    (kind, e),
+                    ("mleader", EntityType::MultiLeader(_))
+                        | ("leader", EntityType::Leader(_))
+                        | ("mtext", EntityType::MText(_))
+                )
+            })
+            .map(|e| e.common().handle)
+            .unwrap()
+    }
+
+    #[test]
+    fn the_sheet_reads_back_whole() {
+        let (dir, drawing) = built("whole", SHEET);
+        let read = read_back(&dir, &drawing);
+        assert_eq!(read.objects_not_read, 0, "{read:?}");
+        assert_eq!(read.objects.len(), 2);
+    }
+
+    #[test]
+    fn a_multileader_with_an_override_the_model_does_not_hold_is_not_read() {
+        let (dir, mut drawing) = built("override", SHEET);
+        let handle = handle_of(&drawing, "mleader");
+        if let Some(EntityType::MultiLeader(m)) = drawing.get_entity_mut(handle) {
+            m.property_override_flags |= Override::TEXT_COLOR;
+        }
+        let read = read_back(&dir, &drawing);
+        assert_eq!(read.objects_not_read, 1, "{read:?}");
+        assert!(!read.objects.iter().any(|o| matches!(o, Object::MLeader(_))));
+    }
+
+    #[test]
+    fn an_annotation_with_a_presentation_of_its_own_is_not_read_nor_its_leader() {
+        type Change = fn(&mut acadrust::entities::EntityCommon);
+        let changes: [(&str, Change); 5] = [
+            ("colour", |c| c.color = Color::Index(1)),
+            ("linetype", |c| "Continuous".clone_into(&mut c.linetype)),
+            ("lineweight", |c| {
+                c.line_weight = acadrust::types::LineWeight::Value(50)
+            }),
+            ("layer", |c| "0".clone_into(&mut c.layer)),
+            ("visibility", |c| c.invisible = true),
+        ];
+        for (what, change) in changes {
+            let (dir, mut drawing) = built(&format!("annotation-{what}"), SHEET);
+            let handle = handle_of(&drawing, "mtext");
+            if let Some(EntityType::MText(t)) = drawing.get_entity_mut(handle) {
+                change(&mut t.common);
+            }
+            let read = read_back(&dir, &drawing);
+            assert_eq!(read.objects.len(), 1, "{what}: {read:?}");
+            assert!(
+                matches!(read.objects[0], Object::MLeader(_)),
+                "{what}: {read:?}"
+            );
+            assert_eq!(read.objects_not_read, 2, "{what}: {read:?}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_insert_of_an_arrowhead_block_reads_with_its_block() {
+        let (dir, mut drawing) = built("insert-dot", SHEET);
+        drawing
+            .add_entity(EntityType::Insert(DwgInsert::new(
+                "_Dot",
+                Vector3::new(100.0, 50.0, 0.0),
+            )))
+            .unwrap();
+        let read = read_back(&dir, &drawing);
+        assert_eq!(read.objects_not_read, 0, "{read:?}");
+        assert_eq!(read.blocks_not_read, 0, "{read:?}");
+        assert!(read.objects.iter().any(|o| matches!(o, Object::MLeader(_))));
+        assert!(read
+            .objects
+            .iter()
+            .any(|o| matches!(o, Object::Insert(i) if i.block == "_Dot")));
+        let names: Vec<&str> = read.blocks.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["_Dot"]);
+    }
 }

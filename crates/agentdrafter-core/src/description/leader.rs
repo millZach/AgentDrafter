@@ -34,10 +34,11 @@ pub(crate) const MLEADER_STYLE_KEYS: [&str; 9] = [
 ];
 
 /// The keys a multileader takes.
-pub(crate) const MLEADER_KEYS: [&str; 11] = [
+pub(crate) const MLEADER_KEYS: [&str; 12] = [
     "leaders",
     "content",
     "landing",
+    "gap",
     "arrowhead",
     "arrow_size",
     "mleader_style",
@@ -205,6 +206,7 @@ pub(super) fn mleader(
         leaders,
         content,
         landing: not_negative(fields, "landing", units, "a landing's length")?,
+        gap: not_negative(fields, "gap", units, "a landing's gap")?,
         arrowhead,
         arrow_size,
         mleader_style,

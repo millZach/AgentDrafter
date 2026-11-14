@@ -397,11 +397,10 @@ fn leader_lines(
         if points.len() < 2 {
             continue;
         }
-        runs.extend(linetype::along(
-            &trimmed(points, arrowhead, size),
-            pattern,
-            false,
-        ));
+        let line = trimmed(points, arrowhead, size);
+        if line.len() >= 2 {
+            runs.extend(linetype::along(&line, pattern, false));
+        }
         let Some(arrow) = arrowhead_shapes(arrowhead, points[0], points[1], size) else {
             continue;
         };

@@ -178,6 +178,12 @@ pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
                     "description": "How long the arrowhead is: a length more than 0. Without \
                                     it, the multileader style's.",
                 },
+                "gap": {
+                    "$ref": "#/$defs/length_not_negative",
+                    "description": "The space between the landing's end and the text: a length \
+                                    of 0 or more. Without it, the multileader style's \
+                                    `landing_gap`.",
+                },
                 "mleader_style": optional_text(json!({
                     "description": format!(
                         "The multileader style it draws with: `{STANDARD_MLEADER_STYLE}`, which \
@@ -218,8 +224,9 @@ pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
                                     length of 0 or more. Without it, 0.625 mm on a metric sheet \
                                     and 0.09 in on an imperial one.",
                 },
-                "annotation": {
-                    "description": "The leader's annotation: multiline text.",
+                "annotation": optional_text(json!({
+                    "description": "The leader's annotation: multiline text. Left empty or \
+                                    `null`, the leader has none.",
                     "type": "object",
                     "required": ["text"],
                     "additionalProperties": false,
@@ -233,7 +240,7 @@ pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
                                             0.18 in on an imperial one.",
                         },
                     },
-                },
+                })),
             }),
         ),
     );

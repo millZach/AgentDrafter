@@ -167,7 +167,6 @@ pub(crate) fn write_new_sheet(
     // before the blocks and objects take theirs.
     drawing.assign_table_entry_handles();
     table::add_table_styles(&mut drawing, sheet)?;
-    leader::add_leader_styles(&mut drawing, sheet)?;
     let units = insertion_units(sheet.units);
     for definition in &sheet.blocks {
         let owner = block::add_block_record(&mut drawing, definition, units)?;
@@ -186,6 +185,9 @@ pub(crate) fn write_new_sheet(
             })?;
         }
     }
+    // After the sheet's blocks, so that a block of its library drawn as
+    // AutoCAD's arrowhead block is the one a leader draws with.
+    leader::add_leader_styles(&mut drawing, sheet)?;
     for (object, written) in sheet.objects.iter().zip(&record.objects) {
         if let Object::Table(t) = object {
             let style = sheet.table_style(&t.table_style).ok_or_else(|| {
@@ -591,8 +593,26 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
                 *handle == Some(r.handle) || (!name.is_empty() && *name == r.name)
             })
         })
-        .filter(|r| !arrow_blocks.contains(&r.handle))
         .collect();
+    // An arrowhead block that only leaders draw is read with them, and is
+    // neither a block of the drawing's nor counted; one an insert places
+    // is a block like any other.
+    let inserted: Vec<String> = drawing
+        .model_space_entities()
+        .chain(
+            drawing
+                .block_records
+                .iter()
+                .flat_map(|r| drawing.entities_in_block(&r.name)),
+        )
+        .filter_map(|e| match e {
+            EntityType::Insert(i) => Some(i.block_name.to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    let leaders_only = |r: &BlockRecord| {
+        arrow_blocks.contains(&r.handle) && !inserted.contains(&r.name.to_lowercase())
+    };
     let mut read: Vec<Option<Block>> = records.iter().map(|_| None).collect();
     loop {
         let known: Vec<Block> = read.iter().flatten().cloned().collect();
@@ -609,12 +629,22 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             break;
         }
     }
-    let blocks_not_read = read.iter().filter(|b| b.is_none()).count();
-    let blocks: Vec<Block> = read.into_iter().flatten().collect();
+    let blocks_not_read = read
+        .iter()
+        .zip(&records)
+        .filter(|(b, r)| b.is_none() && !leaders_only(r))
+        .count();
+    let blocks: Vec<Block> = read
+        .into_iter()
+        .zip(&records)
+        .filter(|(_, r)| !leaders_only(r))
+        .filter_map(|(b, _)| b)
+        .collect();
     let mut objects = Vec::new();
     let mut ids_and_names = Vec::new();
     let mut objects_not_read = 0;
-    // An older leader's annotation is read with the leader, not on its own.
+    // An older leader's annotation is read with the leader, not on its own:
+    // when the leader is not read, nor is its annotation.
     let mut leaders = Vec::new();
     let mut annotations = Vec::new();
     for dwg_object in drawing.model_space_entities() {
@@ -622,19 +652,22 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             let read = read_properties(&l.common)
                 .filter(|_| !l.common.invisible)
                 .and_then(|properties| {
-                    let (mut read, annotation) =
-                        leader::read_leader(&drawing, l, layer_of(&l.common))?;
+                    let (mut read, _) = leader::read_leader(&drawing, l, layer_of(&l.common))?;
                     read.properties = properties;
-                    Some((read, annotation))
+                    Some(read)
                 });
-            if let Some((_, Some(annotation))) = &read {
-                annotations.push(*annotation);
+            if let Some(annotation) = leader::annotation_of(&drawing, l) {
+                annotations.push((annotation, read.is_some()));
             }
-            leaders.push((l.common.handle, read.map(|(read, _)| read)));
+            leaders.push((l.common.handle, read));
         }
     }
     for dwg_object in drawing.model_space_entities() {
-        if annotations.contains(&dwg_object.common().handle) {
+        let handle = dwg_object.common().handle;
+        if let Some((_, read_with_its_leader)) = annotations.iter().find(|(a, _)| *a == handle) {
+            if !read_with_its_leader {
+                objects_not_read += 1;
+            }
             continue;
         }
         let read = match dwg_object {
@@ -734,7 +767,7 @@ fn read_linetype(dwg_linetype: &LineType) -> Option<Linetype> {
 }
 
 /// The layer an object sits on: layer `0` when it names none.
-fn layer_of(common: &EntityCommon) -> String {
+pub(super) fn layer_of(common: &EntityCommon) -> String {
     if common.layer.is_empty() {
         LAYER_ZERO.to_owned()
     } else {
@@ -768,7 +801,7 @@ fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
 /// One of our objects, if the DWG object and its own colour, linetype,
 /// lineweight and linetype scale have a model in the core. An insert is
 /// read only when its block is one of `blocks`.
-fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
+pub(super) fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
     let common = dwg_object.common();
     if common.invisible {
         return None;

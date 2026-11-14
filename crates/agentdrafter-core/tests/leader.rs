@@ -515,3 +515,141 @@ objects:
     };
     assert_eq!(note.annotation.as_ref().unwrap().text, "SEE NOTE 4");
 }
+
+#[test]
+fn a_multileaders_own_landing_gap_draws_and_reads_back() {
+    let dir = scratch("own-gap");
+    // Standard's metric gap is 2: this one's own is 10.
+    let text = "units: mm
+objects:
+  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {text: NOTE}, gap: 10}
+";
+    let sheet = parse_sheet_description(text).unwrap();
+    let Object::MLeader(own) = &sheet.objects[0] else {
+        panic!()
+    };
+    assert_eq!(own.gap, Some(10.0));
+    // The text starts its own gap past Standard's 8 long landing.
+    let report = display(&dir, text);
+    let drawn = drawn(&report, 0, true);
+    assert!(
+        drawn.min[0] >= 38.0 - 1e-9 && drawn.min[0] < 38.5,
+        "{drawn:?}"
+    );
+    let path = dir.join("sheet.yaml");
+    build(&BuildRequest {
+        description: path,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let read = read_dwg(&dir.join("sheet.dwg")).unwrap();
+    assert_eq!(read.objects_not_read, 0, "{read:?}");
+    assert_eq!(read.objects, sheet.objects);
+}
+
+/// AutoCAD 2026's own `_Open` arrowhead block, as it made it: the
+/// triangle's sides and its middle, `ByBlock` in colour, linetype and
+/// lineweight.
+const AUTOCAD_OPEN: &str = "units: mm
+blocks:
+  _Open:
+    objects:
+      - line: {from: [-1, 0.16666666666666666, 0], to: [0, 0, 0], color: ByBlock, linetype: ByBlock, lineweight: ByBlock}
+      - line: {from: [-1, -0.16666666666666666, 0], to: [0, 0, 0], color: ByBlock, linetype: ByBlock, lineweight: ByBlock}
+      - line: {from: [0, 0, 0], to: [-1, 0, 0], color: ByBlock, linetype: ByBlock, lineweight: ByBlock}
+";
+
+const OPEN_SHEET: &str = "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {block: _Open, position: [50, 50, 0], scale: 5}
+  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {text: P-101}, arrowhead: open}
+";
+
+#[test]
+fn a_library_block_that_is_autocads_arrowhead_is_written_once_and_shared() {
+    let dir = scratch("library-arrowhead");
+    fs::write(dir.join("blocks.yaml"), AUTOCAD_OPEN).unwrap();
+    let path = dir.join("sheet.yaml");
+    fs::write(&path, OPEN_SHEET).unwrap();
+    build(&BuildRequest {
+        description: path.clone(),
+        output: None,
+        overwrite: false,
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    let read = read_dwg(&dir.join("sheet.dwg")).unwrap();
+    assert_eq!(read.objects_not_read, 0, "{read:?}");
+    let names: Vec<&str> = read.blocks.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["_Open"]);
+    assert!(matches!(&read.objects[1], Object::MLeader(m) if m.arrowhead == Some(Arrowhead::Open)));
+}
+
+#[test]
+fn a_library_block_named_like_an_arrowhead_but_drawn_otherwise_is_refused() {
+    let dir = scratch("library-arrowhead-differs");
+    fs::write(
+        dir.join("blocks.yaml"),
+        AUTOCAD_OPEN.replacen("to: [-1, 0, 0]", "to: [-2, 0, 0]", 1),
+    )
+    .unwrap();
+    let path = dir.join("sheet.yaml");
+    fs::write(&path, OPEN_SHEET).unwrap();
+    let error = build(&BuildRequest {
+        description: path,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap_err();
+    assert!(
+        error.message.contains("`_Open`")
+            && error
+                .message
+                .contains("differs from AutoCAD's arrowhead block that a leader needs"),
+        "{}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("already exists"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_first_segment_as_long_as_the_arrow_draws_no_shaft() {
+    let dir = scratch("exact-arrow");
+    // Standard's metric arrow is 4: the first segment is exactly that.
+    let text = "units: mm
+objects:
+  - mleader: {leaders: [[[0, 0, 0], [4, 0, 0], [20, 10, 0]]], content: {text: NOTE}}
+  - leader: {points: [[50, 0, 0], [52.5, 0, 0], [60, 10, 0]]}
+";
+    let report = display(&dir, text);
+    for (object, tip, end) in [(0, [0.0, 0.0], [4.0, 0.0]), (1, [50.0, 0.0], [52.5, 0.0])] {
+        let runs: Vec<Vec<[f64; 2]>> = report
+            .display_list
+            .items
+            .iter()
+            .filter(|i| i.object == object && i.part.is_none())
+            .flat_map(|i| match &i.shape {
+                Shape::Stroke { runs, .. } => runs.clone(),
+                Shape::Fill { .. } => Vec::new(),
+            })
+            .collect();
+        // Nothing strokes the first segment: the line starts where the
+        // arrow ends.
+        for run in &runs {
+            for pair in run.windows(2) {
+                let on_first =
+                    |p: [f64; 2]| p[1] == tip[1] && p[0] >= tip[0] - 1e-9 && p[0] <= end[0] + 1e-9;
+                assert!(
+                    !(on_first(pair[0]) && on_first(pair[1])),
+                    "object {object} strokes {pair:?}"
+                );
+            }
+        }
+        assert!(runs.iter().any(|r| r[0] == end), "{runs:?}");
+    }
+}

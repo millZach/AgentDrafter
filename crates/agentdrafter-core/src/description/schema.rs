@@ -1117,7 +1117,7 @@ mod tests {
             sorted(&CONTENT_KEYS)
         );
         assert_eq!(
-            keys(&defs["leader"]["properties"]["annotation"]["properties"]),
+            keys(&defs["leader"]["properties"]["annotation"]["anyOf"][0]["properties"]),
             sorted(&ANNOTATION_KEYS)
         );
         let listed: Vec<String> = schema["properties"]["objects"]["items"]["oneOf"]

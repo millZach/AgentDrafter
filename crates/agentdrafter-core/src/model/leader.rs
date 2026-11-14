@@ -280,6 +280,10 @@ pub struct MLeader {
     /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<f64>,
+    /// The space between the landing's end and the text, instead of its
+    /// multileader style's landing gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<f64>,
     /// The arrowhead, instead of its multileader style's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrowhead: Option<Arrowhead>,
@@ -385,6 +389,7 @@ impl MLeader {
         let side = self.side();
         let connection = self.connection();
         let landing = self.landing.unwrap_or(style.landing);
+        let landing_gap = self.gap.unwrap_or(style.landing_gap);
         let height = self.content.height.unwrap_or(style.text_height);
         let attachment = self.content.attachment.unwrap_or(style.attachment);
         let mut text = MText {
@@ -409,7 +414,7 @@ impl MLeader {
         };
         let measured = measure(&text);
         text.position = Point3 {
-            x: connection.x + side * (landing + style.landing_gap),
+            x: connection.x + side * (landing + landing_gap),
             y: connection.y + attachment.below_top(height, measured),
             z: connection.z,
         };
@@ -418,7 +423,7 @@ impl MLeader {
             connection,
             side,
             landing,
-            landing_gap: style.landing_gap,
+            landing_gap,
             arrowhead: self.arrowhead.unwrap_or(style.arrowhead),
             arrow_size: self.arrow_size.unwrap_or(style.arrow_size),
             attachment,
@@ -603,13 +608,18 @@ pub struct ArrowShapes {
 }
 
 /// A leader line's points with its first segment trimmed back by the
-/// arrowhead's length, as AutoCAD draws the line behind an arrowhead.
+/// arrowhead's length, as AutoCAD draws the line behind an arrowhead. A
+/// first segment exactly as long as the arrow, which the reader takes,
+/// keeps no shaft: the line starts at its second point, where the arrow
+/// ends.
 pub fn trimmed(points: &[[f64; 2]], arrowhead: Arrowhead, size: f64) -> Vec<[f64; 2]> {
     let mut points = points.to_vec();
     if arrowhead.trims_line() && points.len() >= 2 {
         let (tip, next) = (points[0], points[1]);
         let length = (next[0] - tip[0]).hypot(next[1] - tip[1]);
-        if length > 0.0 && size < length {
+        if length > 0.0 && size == length {
+            points.remove(0);
+        } else if length > 0.0 && size < length {
             let t = size / length;
             points[0] = [
                 tip[0] + (next[0] - tip[0]) * t,
@@ -705,6 +715,7 @@ mod tests {
                 attachment: None,
             },
             landing: None,
+            gap: None,
             arrowhead: None,
             arrow_size: None,
             mleader_style: STANDARD_MLEADER_STYLE.to_owned(),
@@ -784,5 +795,18 @@ mod tests {
         leader.points[1] = point(230.0, 120.0);
         leader.annotation = None;
         assert!(!leader.hooked());
+    }
+
+    #[test]
+    fn a_first_segment_as_long_as_the_arrow_leaves_no_shaft_on_it() {
+        let line = trimmed(
+            &[[0.0, 0.0], [2.5, 0.0], [10.0, 5.0]],
+            Arrowhead::ClosedFilled,
+            2.5,
+        );
+        assert_eq!(line, vec![[2.5, 0.0], [10.0, 5.0]]);
+        // Two points, the first segment the arrow: no line left at all.
+        let line = trimmed(&[[0.0, 0.0], [2.5, 0.0]], Arrowhead::Dot, 2.5);
+        assert_eq!(line, vec![[2.5, 0.0]]);
     }
 }
