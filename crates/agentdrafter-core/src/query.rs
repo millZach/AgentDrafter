@@ -584,6 +584,9 @@ impl Selection {
                 Object::Text(t) if m.text(&t.contents, text) => {}
                 Object::MText(t) if m.text(&t.contents, text) => {}
                 Object::Table(t) if t.cells.iter().flatten().any(|c| m.text(&c.text, text)) => {}
+                Object::MLeader(l) if m.text(&l.content.text, text) => {}
+                Object::Leader(l)
+                    if l.annotation.as_ref().is_some_and(|a| m.text(&a.text, text)) => {}
                 Object::Insert(insert) => {
                     in_block = block_text(record, &insert.block, |c| m.text(c, text));
                     if in_block.is_empty() {
@@ -1110,7 +1113,7 @@ fn no_point(object: &Object, id: &str, field: &str) -> Error {
 
 /// "a line", "an insert".
 fn article(kind: &str) -> String {
-    if kind.starts_with(['a', 'e', 'i', 'o', 'u']) || kind == "mtext" {
+    if kind.starts_with(['a', 'e', 'i', 'o', 'u']) || kind == "mtext" || kind == "mleader" {
         format!("an {kind}")
     } else {
         format!("a {kind}")
@@ -1146,6 +1149,13 @@ fn points_of(object: &Object) -> Vec<(String, Point3)> {
         Object::AttributeDefinition(definition) => one("position", definition.position),
         Object::Insert(insert) => one("position", insert.position),
         Object::Table(table) => one("position", table.position),
+        Object::MLeader(mleader) => mleader
+            .leaders
+            .iter()
+            .enumerate()
+            .flat_map(|(i, points)| listed(&format!("leaders[{i}]"), points))
+            .collect(),
+        Object::Leader(leader) => listed("points", &leader.points),
     }
 }
 

@@ -1388,10 +1388,18 @@ impl RecordFile {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
                 ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,
-                ("polyline", "points")
+                ("polyline" | "leader", "points")
                 | ("spline", "fit_points" | "control_points")
                 | ("solid", "corners") => {
                     move_points(&mut entry.value, by, units, &field)?;
+                }
+                ("mleader", "leaders") => {
+                    let Kind::Sequence(lines) = &mut entry.value.kind else {
+                        return Err(not_a_point(&field));
+                    };
+                    for (i, line) in lines.iter_mut().enumerate() {
+                        move_points(line, by, units, &index_path(&field, i))?;
+                    }
                 }
                 ("hatch", "boundary") => move_boundary(&mut entry.value, by, units, &field)?,
                 _ => continue,

@@ -203,7 +203,8 @@ pub(crate) fn template_schema() -> Value {
         "A sheet's border, title block and fixed content, waiting for data. A template holds \
          what a sheet description holds, and where a sheet's value comes from its row in the \
          drawing set it writes {{{ROW_KEY}: NAME}} in place of the value: as an insert's \
-         attribute value, as a text's or an mtext's contents, or as a table cell or its text. Each sheet is the template with \
+         attribute value, as a text's or an mtext's contents, as a table cell or its text, or \
+         as a multileader's content's or a leader's annotation's text. Each sheet is the template with \
          every {{{ROW_KEY}: NAME}} replaced by its row's value NAME, and is built as a sheet \
          description is. Its declared unit is the set's. {SUBSET}"
     ));
@@ -261,6 +262,27 @@ pub(crate) fn template_schema() -> Value {
         defs["table_cell"]["anyOf"][2]["properties"]["text"]["anyOf"].as_array_mut()
     {
         choices.push(row_value);
+    }
+    for (kind, holder) in [("mleader", "content"), ("leader", "annotation")] {
+        let held = &mut defs[kind]["properties"][holder];
+        // An optional mapping is one choice of two, beside null.
+        let held = if held["anyOf"].is_array() {
+            &mut held["anyOf"][0]
+        } else {
+            held
+        };
+        let text = &mut held["properties"]["text"];
+        let written = text.take();
+        *text = json!({
+            "description": format!(
+                "In a template, the text, or a value from the row, {{{ROW_KEY}: NAME}}, which the \
+                 text's rules apply to once it is filled in."
+            ),
+            "anyOf": [
+                written,
+                { "$ref": "#/$defs/row_value" },
+            ],
+        });
     }
     for kind in ["text", "mtext"] {
         let contents = &mut defs[kind]["properties"]["contents"];

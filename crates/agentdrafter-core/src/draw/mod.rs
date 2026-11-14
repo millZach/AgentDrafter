@@ -39,6 +39,12 @@
 //! - A table draws its borders and each cell's text as AutoCAD lays a
 //!   table out ([`Drawer::table`]): each cell's text is multiline text in
 //!   the cell's margins, so it wraps and is justified as an mtext is.
+//! - A multileader draws its leader lines, each behind its arrowhead, its
+//!   landing and its text, and an older leader its line, hooked as AutoCAD
+//!   hooks it, and its annotation ([`Drawer::mleader`], [`Drawer::leader`]),
+//!   as AutoCAD 2026 laid out and exploded made-up leaders. Its text is
+//!   multiline text, and each shape and line of text it draws is its
+//!   `part` 0, so the checker tells its letters from its lines.
 //! - The sheet is seen from above: `z` is dropped.
 //!
 //! Everything here is plain computation. It opens no window and uses no
@@ -57,9 +63,11 @@ mod text;
 use serde::{Deserialize, Serialize};
 
 use crate::model::block::{definition_text, Placement};
+use crate::model::leader::{arrowhead_shapes, trimmed};
 use crate::model::{
-    attribute_text, Block, Insert, Layer, Object, ObjectColor, ObjectLinetype, ObjectLineweight,
-    Point3, Polyline, Properties, Sheet, Table, TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
+    attribute_text, Arrowhead, Block, Insert, Layer, Leader, MLeader, MLeaderStyle, Object,
+    ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline, Properties, Sheet, Table,
+    TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
 };
 use crate::text::placement::SheetFonts;
 
@@ -67,7 +75,7 @@ pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
 pub use pick::{object_bounds, pick};
 pub(crate) use polyline::bulge_of;
-pub(crate) use text::mtext_lines;
+pub(crate) use text::{mtext_box, mtext_lines};
 
 /// AutoCAD's default lineweight, which a layer with none of its own plots
 /// with: 0.25 mm, AutoCAD's `LWDEFAULT` as installed.
@@ -370,6 +378,60 @@ struct Drawn {
     cut_short: bool,
 }
 
+/// What leader lines draw with `pen`: each line from its arrow's point,
+/// started behind its arrowhead, and the arrowhead itself, as AutoCAD 2026
+/// exploded made-up leaders: a closed filled arrowhead filled, a dot
+/// filled with its stub behind it, an open arrowhead's lines stroked.
+fn leader_lines(
+    lines: &[Vec<Point2>],
+    arrowhead: Arrowhead,
+    size: f64,
+    pen: Pen<'_>,
+    tolerance: f64,
+) -> Drawn {
+    let dashes = pen.dashes();
+    let pattern = dashes.as_deref();
+    let mut runs = Vec::new();
+    let mut fills = Vec::new();
+    for points in lines {
+        if points.len() < 2 {
+            continue;
+        }
+        let line = trimmed(points, arrowhead, size);
+        if line.len() >= 2 {
+            runs.extend(linetype::along(&line, pattern, false));
+        }
+        let Some(arrow) = arrowhead_shapes(arrowhead, points[0], points[1], size) else {
+            continue;
+        };
+        for triangle in arrow.fills {
+            fills.push(polyline::anticlockwise(triangle));
+        }
+        if let Some((center, radius)) = arrow.dot {
+            fills.push(curves::circle(center, radius, tolerance));
+        }
+        for line in arrow.lines {
+            runs.extend(linetype::along(&line, pattern, false));
+        }
+    }
+    let mut drawn = Drawn::default();
+    add_stroke(&mut drawn, pen.lineweight, runs);
+    if !fills.is_empty() {
+        drawn.shapes.push(Shape::Fill {
+            rule: FillRule::NonZero,
+            contours: fills,
+        });
+    }
+    drawn
+}
+
+/// Adds `runs` to `drawn` as one stroke, when there are any.
+fn add_stroke(drawn: &mut Drawn, lineweight: f64, runs: Vec<Vec<Point2>>) {
+    if !runs.is_empty() {
+        drawn.shapes.push(Shape::Stroke { lineweight, runs });
+    }
+}
+
 /// Where an insert puts its block's points, by the one placement rule.
 /// An insert nested in another's block is placed by its own placement and
 /// then by every enclosing insert's, innermost first.
@@ -559,6 +621,14 @@ impl<'a> Drawer<'a> {
         }
         if let Object::Table(table) = object {
             self.table(index, table, tolerance, list);
+            return;
+        }
+        if let Object::MLeader(mleader) = object {
+            self.mleader(index, mleader, tolerance, list);
+            return;
+        }
+        if let Object::Leader(leader) = object {
+            self.leader(index, leader, tolerance, list);
             return;
         }
         let shown = self.shown(object.layer());
@@ -883,9 +953,86 @@ impl<'a> Drawer<'a> {
                 pen.lineweight,
                 tolerance,
             )),
-            // An insert and a table draw nothing here: [`Drawer::insert`]
-            // and [`Drawer::table`] draw them.
-            Object::Insert(_) | Object::Table(_) => Drawn::default(),
+            // An insert, a table and a leader draw nothing here: their own
+            // methods of [`Drawer`] draw them.
+            Object::Insert(_) | Object::Table(_) | Object::MLeader(_) | Object::Leader(_) => {
+                Drawn::default()
+            }
+        }
+    }
+
+    /// Adds what a multileader draws to `list`, laid out with its style:
+    /// its leader lines, each behind its arrowhead, and its landing, in the
+    /// style's leader pen, `ByBlock` taking the multileader's own; and its
+    /// text, in the multileader's own pen, as its `part` 0.
+    fn mleader(&self, index: usize, mleader: &MLeader, tolerance: f64, list: &mut DisplayList) {
+        let shown = self.shown(&mleader.layer);
+        if shown == Shown::Hidden {
+            return;
+        }
+        let pen = self.pen(&mleader.layer, &mleader.properties, None);
+        let style = self
+            .sheet
+            .mleader_style(&mleader.mleader_style)
+            .unwrap_or_else(|| MLeaderStyle::standard(self.sheet.units));
+        let laid = mleader.laid_out(&style, &|t| text::mtext_box(t, self.fonts));
+        let by_layer = self.layer_pen(&mleader.layer);
+        let line_pen = Pen {
+            color: match style.leader_color {
+                ObjectColor::ByBlock => pen.color,
+                ObjectColor::ByLayer => by_layer.color,
+                ObjectColor::Index(i) => Color(i),
+            },
+            lineweight: match style.leader_lineweight {
+                ObjectLineweight::ByBlock => pen.lineweight,
+                ObjectLineweight::ByLayer => by_layer.lineweight,
+                ObjectLineweight::Default => DEFAULT_LINEWEIGHT,
+                ObjectLineweight::Width(w) => w.millimetres(),
+            },
+            ..pen
+        };
+        let lines: Vec<Vec<Point2>> = laid
+            .lines
+            .iter()
+            .map(|points| points.iter().map(|&p| flat(p)).collect())
+            .collect();
+        let mut drawn = leader_lines(&lines, laid.arrowhead, laid.arrow_size, line_pen, tolerance);
+        if laid.landing > 0.0 {
+            let landing = [flat(laid.connection), flat(laid.landing_end())];
+            let dashes = line_pen.dashes();
+            let runs = linetype::along(&landing, dashes.as_deref(), false);
+            add_stroke(&mut drawn, line_pen.lineweight, runs);
+        }
+        list.add_shown(shown, index, &[], line_pen.color, drawn);
+        let lettering = text::draw_mtext(&laid.text, self.fonts, pen.lineweight, tolerance);
+        let drawn = Drawn {
+            shapes: lettering.shapes,
+            runs: lettering.runs,
+            ..Drawn::default()
+        };
+        list.add_shown(shown, index, &[0], pen.color, drawn);
+    }
+
+    /// Adds what an older leader draws to `list`: its line behind its
+    /// arrowhead, hooked as AutoCAD hooks it, in its own pen, and its
+    /// annotation, as its `part` 0.
+    fn leader(&self, index: usize, leader: &Leader, tolerance: f64, list: &mut DisplayList) {
+        let shown = self.shown(&leader.layer);
+        if shown == Shown::Hidden {
+            return;
+        }
+        let pen = self.pen(&leader.layer, &leader.properties, None);
+        let path: Vec<Point2> = leader.path().iter().map(|&p| flat(p)).collect();
+        let drawn = leader_lines(&[path], leader.arrowhead, leader.arrow_size, pen, tolerance);
+        list.add_shown(shown, index, &[], pen.color, drawn);
+        if let Some(annotation) = leader.annotation_text() {
+            let lettering = text::draw_mtext(&annotation, self.fonts, pen.lineweight, tolerance);
+            let drawn = Drawn {
+                shapes: lettering.shapes,
+                runs: lettering.runs,
+                ..Drawn::default()
+            };
+            list.add_shown(shown, index, &[0], pen.color, drawn);
         }
     }
 

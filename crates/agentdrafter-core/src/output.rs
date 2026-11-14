@@ -118,6 +118,7 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
             layers: drawing.layers,
             text_styles: drawing.text_styles,
             table_styles: drawing.table_styles,
+            mleader_styles: drawing.mleader_styles,
             blocks: drawing.blocks,
             objects: drawing.objects,
             paper,

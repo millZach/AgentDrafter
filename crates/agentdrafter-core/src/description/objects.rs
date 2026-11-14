@@ -11,6 +11,7 @@ use super::blocks::{
 use super::hatch::{self, HATCH_KEYS};
 use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
 use super::layers::{layer_name, properties};
+use super::leader::{leader, mleader, LEADER_KEYS, MLEADER_KEYS};
 use super::polyline;
 use super::strict_yaml::{index_path, key_path, Kind, Node};
 use super::table::{table, TABLE_KEYS};
@@ -21,8 +22,8 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arc, BlockLibrary, Circle, Ellipse, HatchPattern, Layer, Line, Linetype, Object, Spline,
-    TableStyle, FIT_DEGREE, LAYER_ZERO,
+    Arc, BlockLibrary, Circle, Ellipse, HatchPattern, Layer, Line, Linetype, MLeaderStyle, Object,
+    Spline, TableStyle, FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
@@ -57,15 +58,17 @@ const fn drawn_and(last: ObjectType) -> [ObjectType; 12] {
 }
 
 /// Every object type a sheet description can hold, and the keys each takes:
-/// the drawn objects, inserts and tables.
-pub(crate) const OBJECT_TYPES: [ObjectType; 13] = {
+/// the drawn objects, inserts, tables, multileaders and older leaders.
+pub(crate) const OBJECT_TYPES: [ObjectType; 15] = {
     let drawn = drawn_and(("insert", &INSERT_KEYS));
-    let mut types = [("table", &TABLE_KEYS as &[&str]); 13];
+    let mut types = [("table", &TABLE_KEYS as &[&str]); 15];
     let mut i = 0;
     while i < drawn.len() {
         types[i] = drawn[i];
         i += 1;
     }
+    types[13] = ("mleader", &MLEADER_KEYS);
+    types[14] = ("leader", &LEADER_KEYS);
     types
 };
 
@@ -116,6 +119,9 @@ pub(super) struct Tables<'a> {
     pub styles: &'a [TextStyle],
     /// The table styles a sheet's tables may name; none in a block.
     pub table_styles: &'a [TableStyle],
+    /// The multileader styles a sheet's multileaders may name; none in a
+    /// block.
+    pub mleader_styles: &'a [MLeaderStyle],
 }
 
 /// Where an object is: on a sheet, which may insert blocks from its block
@@ -154,6 +160,10 @@ impl Place<'_> {
                 Some("an attribute definition belongs in a block in the block library")
             }
             (Place::Block { .. }, "table") => Some("a table belongs on a sheet, not in a block"),
+            (Place::Block { .. }, "mleader") => {
+                Some("a multileader belongs on a sheet, not in a block")
+            }
+            (Place::Block { .. }, "leader") => Some("a leader belongs on a sheet, not in a block"),
             _ => None,
         }
     }
@@ -242,7 +252,7 @@ const SPLINE_KEYS: [&str; 8] = [
 /// The article an object type takes in a message: `an` for `arc`,
 /// `ellipse`, `insert` and `mtext`, `a` for the others.
 pub(crate) fn article(object: &str) -> &'static str {
-    if object.starts_with(['a', 'e', 'i', 'o', 'u']) || object == "mtext" {
+    if object.starts_with(['a', 'e', 'i', 'o', 'u']) || object == "mtext" || object == "mleader" {
         "an"
     } else {
         "a"
@@ -304,11 +314,7 @@ pub(super) fn object(
         Place::Block { .. } => own_keys.to_vec(),
     };
     let keys = keys.as_slice();
-    let article = if entry.key.starts_with(['a', 'e', 'i', 'o', 'u']) || entry.key == "mtext" {
-        "an"
-    } else {
-        "a"
-    };
+    let article = article(&entry.key);
     let fields = Fields::of(
         &entry.value,
         &path,
@@ -337,6 +343,13 @@ pub(super) fn object(
         ("mtext", _) => mtext(&fields, units, layer, tables.styles).map(Object::MText),
         ("table", Place::Sheet { .. }) => {
             table(&fields, units, layer, tables.styles, tables.table_styles).map(Object::Table)
+        }
+        ("mleader", Place::Sheet { .. }) => {
+            mleader(&fields, units, layer, tables.styles, tables.mleader_styles)
+                .map(Object::MLeader)
+        }
+        ("leader", Place::Sheet { .. }) => {
+            leader(&fields, units, layer, tables.styles).map(Object::Leader)
         }
         ("attdef", Place::Block { noticed, .. }) => {
             attribute_definition(&fields, tables, layer, noticed).map(Object::AttributeDefinition)

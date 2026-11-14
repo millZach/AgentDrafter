@@ -396,6 +396,27 @@ pub(super) fn places_in(
                 visit(&mut contents.value, key_path(&object_path, "contents"))?;
             }
         }
+        // A multileader's content's text, and an older leader's
+        // annotation's.
+        "mleader" | "leader" => {
+            let holder = if object.key == "mleader" {
+                "content"
+            } else {
+                "annotation"
+            };
+            let Some(held) = keys.iter_mut().find(|k| k.key == holder) else {
+                return Ok(());
+            };
+            let Kind::Mapping(held_keys) = &mut held.value.kind else {
+                return Ok(());
+            };
+            if let Some(text) = held_keys.iter_mut().find(|k| k.key == "text") {
+                visit(
+                    &mut text.value,
+                    key_path(&key_path(&object_path, holder), "text"),
+                )?;
+            }
+        }
         // Each cell's text: the cell itself when it is written as its text
         // or as a value from the row, or its `text`.
         "table" => {

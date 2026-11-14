@@ -373,6 +373,15 @@ const TABLE_TITLE: Place = Place {
     json: r#"{"units": "mm", "objects": [{"table": {"position": [0, 0, 0], "columns": [10], "rows": [5], "cells": [["A"]], "title": V}}]}"#,
 };
 
+const LEADER_ANNOTATION: Place = Place {
+    name: "a leader's annotation",
+    yaml: "units: mm
+objects:
+  - leader: {points: [[0, 0, 0], [10, 10, 0]], annotation: V}
+",
+    json: r#"{"units": "mm", "objects": [{"leader": {"points": [[0, 0, 0], [10, 10, 0]], "annotation": V}}]}"#,
+};
+
 const TABLE_TABLE_STYLE: Place = Place {
     name: "a table's table style",
     yaml: "units: mm\nobjects:\n  - table: {position: [0, 0, 0], columns: [10], rows: [5], cells: [[A]], table_style: V}\n",
@@ -429,6 +438,7 @@ fn bare_null_cases() -> Vec<Case> {
         bare_null(&INSERT_BLOCK, false, None),
         bare_null(&HATCH_PATTERN, false, None),
         bare_null(&TABLE_TABLE_STYLE, true, None),
+        bare_null(&LEADER_ANNOTATION, true, None),
     ]
     .concat()
 }

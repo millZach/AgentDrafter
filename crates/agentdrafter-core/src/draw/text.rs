@@ -23,6 +23,7 @@
 //! searchable where it draws. The run draws nothing itself.
 
 use super::{Point2, Shape, TextRun};
+use crate::model::MTextBox;
 use crate::text::fonts::{Font, Rect};
 use crate::text::placement::SheetFonts;
 use crate::text::{Attachment, MText, Text};
@@ -67,21 +68,32 @@ pub(crate) fn mtext_lines(text: &MText, fonts: &SheetFonts) -> usize {
     wrap(font, &text.contents, text.width / along).len()
 }
 
-/// What multiline text draws.
-pub(super) fn draw_mtext(
-    text: &MText,
-    fonts: &SheetFonts,
-    lineweight: f64,
-    tolerance: f64,
-) -> Lettering {
+/// Multiline text's box, as it is laid out: its width, its height and how
+/// far its last line draws below its baseline.
+pub(crate) fn mtext_box(text: &MText, fonts: &SheetFonts) -> MTextBox {
     let (font, style_width) = fonts.style(&text.style);
-    let width_factor = text.width_factor.unwrap_or(style_width);
-    let place = Placement {
-        origin: [text.position.x, text.position.y],
-        rotation: text.rotation,
-        height: text.height,
-        width_factor,
-    };
+    let laid = lay_out(text, font, text.width_factor.unwrap_or(style_width));
+    MTextBox {
+        width: laid.box_width,
+        height: laid.box_height,
+        last_descent: laid.descent,
+    }
+}
+
+/// Multiline text laid out in its own frame, from the top of its box.
+struct Laid {
+    lines: Vec<String>,
+    /// Each line's ink box, from the start of its baseline, in drawing units.
+    inks: Vec<Option<Rect>>,
+    /// Each line's baseline, down from the top of the box.
+    baselines: Vec<f64>,
+    box_width: f64,
+    box_height: f64,
+    /// How far the last line draws below its baseline.
+    descent: f64,
+}
+
+fn lay_out(text: &MText, font: &Font, width_factor: f64) -> Laid {
     let h = text.height;
     let along = h * width_factor;
     let lines = wrap(font, &text.contents, text.width / along);
@@ -121,6 +133,39 @@ pub(super) fn draw_mtext(
         .and_then(|ink| ink.map(|ink| (-ink.bottom).max(0.0)))
         .unwrap_or(0.0);
     let box_height = -baselines.last().copied().unwrap_or(-h) + descent;
+    Laid {
+        lines,
+        inks,
+        baselines,
+        box_width,
+        box_height,
+        descent,
+    }
+}
+
+/// What multiline text draws.
+pub(super) fn draw_mtext(
+    text: &MText,
+    fonts: &SheetFonts,
+    lineweight: f64,
+    tolerance: f64,
+) -> Lettering {
+    let (font, style_width) = fonts.style(&text.style);
+    let width_factor = text.width_factor.unwrap_or(style_width);
+    let place = Placement {
+        origin: [text.position.x, text.position.y],
+        rotation: text.rotation,
+        height: text.height,
+        width_factor,
+    };
+    let Laid {
+        lines,
+        inks,
+        baselines,
+        box_width,
+        box_height,
+        ..
+    } = lay_out(text, font, width_factor);
     let (across, up) = attachment(text.justify);
     // The box's left side and top, from the position.
     let left = -box_width * across;

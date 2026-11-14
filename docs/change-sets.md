@@ -52,6 +52,8 @@ A sheet's template is the file its row's path names, as the file system resolves
 | `add_solid` | `SOLID` | Adds a 2D solid. |
 | `insert_block` | `INSERT` | Adds an insert of a block from the block library. |
 | `add_table` | `TABLE` | Adds a table. |
+| `add_mleader` | `MLEADER` | Adds a multileader: leader lines from their arrows to a landing, and its text. |
+| `add_leader` | `LEADER` | Adds an older leader, with its annotation if it has one. |
 | `change` | `CHANGE` | Sets keys of an object. |
 | `move` | `MOVE` | Moves an object. |
 | `delete` | `ERASE` | Deletes an object. |
@@ -79,7 +81,7 @@ A sheet's template is the file its row's path names, as the file system resolves
 
 **`change`** takes `target` and `set`, a mapping from each key to set to its new value, written as a sheet description writes it; `null` takes an optional key away. It sets any key the object's type takes, and `name`. It does not set `id`, since an object's ID is fixed for its life, nor an insert's `attributes`, which `set_attribute` sets one at a time, nor the object's type. A text's or an mtext's `contents` whose template takes them from the row is set in the sheet's row (decision 5).
 
-**`move`** takes `target` and `by`, `[dx, dy, dz]`. Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, and the position of a text, an mtext or an insert. A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
+**`move`** takes `target` and `by`, `[dx, dy, dz]`. Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, the position of a text, an mtext, an insert or a table, every point of each of a multileader's leader lines, and an older leader's points; a leader's text moves with it, laid out again where its landing or end puts it. An arrow is placed at a point and does not follow an object it points at, since pointing it at an object by its ID or name waits for object snaps (#74). A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
 
 **`delete`** takes `target`.
 

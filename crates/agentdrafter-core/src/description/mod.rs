@@ -24,6 +24,8 @@ mod hatch_schema;
 pub(crate) mod ids;
 mod layers;
 pub(crate) use layers::{one_name, LAYER_KEYS, LINETYPE_KEYS};
+mod leader;
+mod leader_schema;
 mod mark;
 mod objects;
 pub(crate) mod paper;
@@ -69,7 +71,7 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 10] = [
+pub(crate) const SHEET_KEYS: [&str; 11] = [
     "units",
     "block_library",
     "ltscale",
@@ -78,6 +80,7 @@ pub(crate) const SHEET_KEYS: [&str; 10] = [
     "hatch_patterns",
     "text_styles",
     "table_styles",
+    "mleader_styles",
     "objects",
     paper::PAPER_KEY,
 ];
@@ -369,6 +372,10 @@ fn sheet_and_records(
         Some(node) => table::table_styles(node, units, &text_styles)?,
         None => Vec::new(),
     };
+    let mleader_styles = match fields.get("mleader_styles") {
+        Some(node) => leader::mleader_styles(node, units, &text_styles)?,
+        None => Vec::new(),
+    };
     let ltscale = match fields.get("ltscale") {
         Some(node) => layers::linetype_scale(node, "ltscale")?,
         None => 1.0,
@@ -385,6 +392,7 @@ fn sheet_and_records(
         hatch_patterns: &hatch_patterns,
         styles: &text_styles,
         table_styles: &table_styles,
+        mleader_styles: &mleader_styles,
     };
     let mut place = Place::Sheet {
         library: library.as_ref(),
@@ -437,6 +445,7 @@ fn sheet_and_records(
         layers,
         text_styles,
         table_styles,
+        mleader_styles,
         blocks: Vec::new(),
         objects,
         paper,

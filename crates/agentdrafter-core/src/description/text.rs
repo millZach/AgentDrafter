@@ -171,7 +171,7 @@ pub(super) fn mtext(
 
 /// What is wrong with text contents, if anything: they are empty, or hold
 /// a control character other than a line break.
-fn contents_problem(contents: &str) -> Option<String> {
+pub(super) fn contents_problem(contents: &str) -> Option<String> {
     if contents.trim().is_empty() {
         return Some("text needs contents: something that shows".to_owned());
     }

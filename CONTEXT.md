@@ -88,6 +88,18 @@ _Avoid_: grid, schedule (a schedule is one use of a table), spreadsheet
 What a table's cells draw with unless they give their own, as AutoCAD's TABLESTYLE: the text style, text height and justification of title, header and data rows, the cells' margins, and the borders' pen. Every drawing has the table style `Standard`.
 _Avoid_: table format, cell style (AutoCAD's name for one kind of row's part of a table style)
 
+**Leader**:
+An arrow from a point on the sheet, a line through any bends, and the text it points from: what calls out a device or a part, or points a note at a wire. A sheet holds two kinds, as AutoCAD does: the multileader, and the older leader, AutoCAD's LEADER object, one line with an optional multiline text annotation beyond its end, hooked when its last segment is steep. Its arrow is placed at a point; pointing it at an object by its ID or name waits for object snaps.
+_Avoid_: callout (a callout is one use of a leader), arrow (the arrow is a leader's arrowhead), pointer, QLEADER (AutoCAD's command that draws one)
+
+**Multileader**:
+A leader as AutoCAD's MULTILEADER object draws it: one or more leader lines, each from its arrowhead to where they all meet a landing, the short horizontal line beyond which its content, multiline text, sits, laid out where its multileader style says. AutoCAD's command for one is MLEADER.
+_Avoid_: mleader alone in prose (it is the sheet description's key), dogleg (AutoCAD's other name for the landing)
+
+**Multileader style**:
+What a multileader draws with unless it gives its own, as AutoCAD's MLEADERSTYLE: the text style and height, the arrowhead and its size, the landing's length and its gap to the text, where the landing meets the text, and the leader lines' pen. Every drawing has the multileader style `Standard`.
+_Avoid_: leader style (an older leader takes its arrowhead and sizes from a dimension style), callout style
+
 **Hatch**:
 An object that fills an area solid or with a hatch pattern, inside a boundary of closed loops, as in AutoCAD. It draws no outline of its own.
 _Avoid_: fill, shading, region (a region is AutoCAD's 2D solid object)

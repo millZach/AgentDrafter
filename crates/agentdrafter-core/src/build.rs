@@ -158,8 +158,13 @@ pub(crate) fn prepare_sheet(
 
     let sheet = &record.sheet;
     let fonts = SheetFonts::find(sheet, settings);
-    let bytes = dwg::write_new_sheet(record, &|text| fonts.start(text), mark)
-        .map_err(|e| e.in_file(output))?;
+    let bytes = dwg::write_new_sheet(
+        record,
+        &|text| fonts.start(text),
+        &|text| crate::draw::mtext_box(text, &fonts),
+        mark,
+    )
+    .map_err(|e| e.in_file(output))?;
 
     let mut objects = BTreeMap::new();
     for object in &sheet.objects {

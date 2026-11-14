@@ -6,7 +6,8 @@
 //! itself, changes these files and `Cargo.toml` only. Moving the pin means
 //! running the judge again. [`hatch`] carries hatches through the seam,
 //! [`text`] text styles and text, [`block`] blocks, attribute
-//! definitions and inserts, [`table`] table styles and tables, [`ids`]
+//! definitions and inserts, [`table`] table styles and tables, [`leader`]
+//! multileader styles, multileaders and older leaders, [`ids`]
 //! each object's ID, and [`import`] a DWG's or a DXF's blocks for an
 //! import into a block library.
 //!
@@ -29,19 +30,21 @@ use acadrust::{CadDocument, DwgReader, DwgWriter};
 
 use crate::description::{normalize_degrees, SheetRecord};
 use crate::error::{Error, ErrorCode};
+use crate::model::MTextBox;
 use crate::model::{
     is_one, Arc, Block, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype,
     Lineweight, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
     Properties, Solid, Spline, BUILT_IN_LINETYPES, BY_BLOCK, BY_LAYER, CONTINUOUS, FIT_DEGREE,
     LAYER_ZERO,
 };
-use crate::text::Text as TextObject;
+use crate::text::{MText as MTextObject, Text as TextObject};
 use crate::units::Unit;
 
 mod block;
 mod hatch;
 mod ids;
 mod import;
+mod leader;
 mod table;
 mod text;
 
@@ -94,10 +97,12 @@ pub(crate) fn new_sheet_version() -> String {
 /// build mark `mark`. `record` holds the sheet with the record of each of
 /// its objects, and each object is written with its ID and name from its
 /// record. `start_of` gives where each single line of text starts, which
-/// the DWG records beside the point it is justified at.
+/// the DWG records beside the point it is justified at, and `measure` the
+/// box multiline text lays out in, which places a multileader's text.
 pub(crate) fn write_new_sheet(
     record: &SheetRecord,
     start_of: &dyn Fn(&TextObject) -> Point3,
+    measure: &dyn Fn(&MTextObject) -> MTextBox,
     mark: &BuildMark,
 ) -> Result<Vec<u8>, Error> {
     let sheet = &record.sheet;
@@ -180,6 +185,9 @@ pub(crate) fn write_new_sheet(
             })?;
         }
     }
+    // After the sheet's blocks, so that a block of its library drawn as
+    // AutoCAD's arrowhead block is the one a leader draws with.
+    leader::add_leader_styles(&mut drawing, sheet)?;
     for (object, written) in sheet.objects.iter().zip(&record.objects) {
         if let Object::Table(t) = object {
             let style = sheet.table_style(&t.table_style).ok_or_else(|| {
@@ -203,6 +211,55 @@ pub(crate) fn write_new_sheet(
                 )
             })?;
             table::fill_block(&mut drawing, handle, t, &style)?;
+            continue;
+        }
+        if let Object::MLeader(m) = object {
+            let style = sheet.mleader_style(&m.mleader_style).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!(
+                        "a multileader draws with multileader style `{}`, which the sheet does not define",
+                        m.mleader_style
+                    ),
+                )
+            })?;
+            let mut dwg_mleader = EntityType::MultiLeader(Box::new(leader::dwg_mleader(
+                &drawing, m, &style, measure,
+            )?));
+            let common = dwg_mleader.common_mut();
+            m.layer.clone_into(&mut common.layer);
+            set_properties(common, &m.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            drawing.add_entity(dwg_mleader).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a multileader to the drawing: {e}"),
+                )
+            })?;
+            continue;
+        }
+        if let Object::Leader(l) = object {
+            let (dwg_leader, annotation) = leader::dwg_leader(&drawing, l);
+            let mut dwg_leader = EntityType::Leader(dwg_leader);
+            let common = dwg_leader.common_mut();
+            l.layer.clone_into(&mut common.layer);
+            set_properties(common, &l.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            let added = |e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a leader to the drawing: {e}"),
+                )
+            };
+            let handle = drawing.add_entity(dwg_leader).map_err(added)?;
+            if let Some(mut text) = annotation {
+                l.layer.clone_into(&mut text.common.layer);
+                set_properties(&mut text.common, &l.properties);
+                let text = drawing
+                    .add_entity(EntityType::MText(Box::new(text)))
+                    .map_err(added)?;
+                leader::link_annotation(&mut drawing, handle, text);
+            }
             continue;
         }
         let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
@@ -301,6 +358,12 @@ fn dwg_object(
             return Err(Error::new(
                 ErrorCode::DwgWrite,
                 "a table belongs on a sheet, not in a block",
+            ))
+        }
+        Object::MLeader(_) | Object::Leader(_) => {
+            return Err(Error::new(
+                ErrorCode::DwgWrite,
+                "a leader belongs on a sheet, not in a block",
             ))
         }
         Object::Insert(insert) => {
@@ -504,6 +567,9 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
     }
     let (text_styles, text_styles_not_read) = text::read_text_styles(&drawing);
     let (table_styles, table_styles_not_read) = table::read_table_styles(&drawing);
+    let (mleader_styles, mleader_styles_not_read) = leader::read_mleader_styles(&drawing);
+    // A leader's arrowhead block is read with the leader.
+    let arrow_blocks = leader::arrow_blocks(&drawing);
     // A table's own block holds what it draws, and is read with the table.
     let table_blocks: Vec<(Option<acadrust::types::Handle>, String)> = drawing
         .model_space_entities()
@@ -528,6 +594,25 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             })
         })
         .collect();
+    // An arrowhead block that only leaders draw is read with them, and is
+    // neither a block of the drawing's nor counted; one an insert places
+    // is a block like any other.
+    let inserted: Vec<String> = drawing
+        .model_space_entities()
+        .chain(
+            drawing
+                .block_records
+                .iter()
+                .flat_map(|r| drawing.entities_in_block(&r.name)),
+        )
+        .filter_map(|e| match e {
+            EntityType::Insert(i) => Some(i.block_name.to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    let leaders_only = |r: &BlockRecord| {
+        arrow_blocks.contains(&r.handle) && !inserted.contains(&r.name.to_lowercase())
+    };
     let mut read: Vec<Option<Block>> = records.iter().map(|_| None).collect();
     loop {
         let known: Vec<Block> = read.iter().flatten().cloned().collect();
@@ -544,13 +629,61 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             break;
         }
     }
-    let blocks_not_read = read.iter().filter(|b| b.is_none()).count();
-    let blocks: Vec<Block> = read.into_iter().flatten().collect();
+    let blocks_not_read = read
+        .iter()
+        .zip(&records)
+        .filter(|(b, r)| b.is_none() && !leaders_only(r))
+        .count();
+    let blocks: Vec<Block> = read
+        .into_iter()
+        .zip(&records)
+        .filter(|(_, r)| !leaders_only(r))
+        .filter_map(|(b, _)| b)
+        .collect();
     let mut objects = Vec::new();
     let mut ids_and_names = Vec::new();
     let mut objects_not_read = 0;
+    // An older leader's annotation is read with the leader, not on its own:
+    // when the leader is not read, nor is its annotation.
+    let mut leaders = Vec::new();
+    let mut annotations = Vec::new();
     for dwg_object in drawing.model_space_entities() {
+        if let EntityType::Leader(l) = dwg_object {
+            let read = read_properties(&l.common)
+                .filter(|_| !l.common.invisible)
+                .and_then(|properties| {
+                    let (mut read, _) = leader::read_leader(&drawing, l, layer_of(&l.common))?;
+                    read.properties = properties;
+                    Some(read)
+                });
+            if let Some(annotation) = leader::annotation_of(&drawing, l) {
+                annotations.push((annotation, read.is_some()));
+            }
+            leaders.push((l.common.handle, read));
+        }
+    }
+    for dwg_object in drawing.model_space_entities() {
+        let handle = dwg_object.common().handle;
+        if let Some((_, read_with_its_leader)) = annotations.iter().find(|(a, _)| *a == handle) {
+            if !read_with_its_leader {
+                objects_not_read += 1;
+            }
+            continue;
+        }
         let read = match dwg_object {
+            EntityType::Leader(l) => leaders
+                .iter()
+                .find(|(handle, _)| *handle == l.common.handle)
+                .and_then(|(_, read)| read.clone())
+                .map(Object::Leader),
+            EntityType::MultiLeader(m) => read_properties(&m.common)
+                .filter(|_| !m.common.invisible)
+                .and_then(|properties| {
+                    let mut read =
+                        leader::read_mleader(&drawing, m, &mleader_styles, layer_of(&m.common))?;
+                    read.properties = properties;
+                    Some(Object::MLeader(read))
+                }),
             EntityType::Table(t) => read_properties(&t.common)
                 .filter(|_| !t.common.invisible)
                 .and_then(|properties| {
@@ -583,6 +716,8 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         text_styles_not_read,
         table_styles,
         table_styles_not_read,
+        mleader_styles,
+        mleader_styles_not_read,
         blocks,
         blocks_not_read,
         objects,
@@ -632,7 +767,7 @@ fn read_linetype(dwg_linetype: &LineType) -> Option<Linetype> {
 }
 
 /// The layer an object sits on: layer `0` when it names none.
-fn layer_of(common: &EntityCommon) -> String {
+pub(super) fn layer_of(common: &EntityCommon) -> String {
     if common.layer.is_empty() {
         LAYER_ZERO.to_owned()
     } else {
@@ -666,7 +801,7 @@ fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
 /// One of our objects, if the DWG object and its own colour, linetype,
 /// lineweight and linetype scale have a model in the core. An insert is
 /// read only when its block is one of `blocks`.
-fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
+pub(super) fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
     let common = dwg_object.common();
     if common.invisible {
         return None;
@@ -1047,6 +1182,7 @@ mod tests {
             layers: Vec::new(),
             text_styles: Vec::new(),
             table_styles: Vec::new(),
+            mleader_styles: Vec::new(),
             blocks: Vec::new(),
             objects: Vec::new(),
             paper: None,
@@ -1089,7 +1225,13 @@ mod tests {
             let dwg = dir.join(name);
             fs::write(
                 &dwg,
-                write_new_sheet(&record(empty_sheet()), &|t| t.position, &mark).unwrap(),
+                write_new_sheet(
+                    &record(empty_sheet()),
+                    &|t| t.position,
+                    &|_| MTextBox::default(),
+                    &mark,
+                )
+                .unwrap(),
             )
             .unwrap();
             assert_eq!(carries_build_mark(&dwg), Ok(true), "{name}");
@@ -1159,7 +1301,13 @@ mod tests {
             layer: LAYER_ZERO.to_owned(),
             properties: Default::default(),
         }));
-        let error = write_new_sheet(&record(sheet), &|t| t.position, &ON_ITS_OWN).unwrap_err();
+        let error = write_new_sheet(
+            &record(sheet),
+            &|t| t.position,
+            &|_| MTextBox::default(),
+            &ON_ITS_OWN,
+        )
+        .unwrap_err();
         assert_eq!(error.code, ErrorCode::DwgWrite);
         assert!(error.message.contains("with its ID"), "{error:?}");
     }
