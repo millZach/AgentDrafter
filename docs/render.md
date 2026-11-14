@@ -27,14 +27,14 @@ A sheet description that names a block library is drawn with it, found from the 
 
 ## Size and scale
 
-Until drawing sets and their paper sizes arrive (ticket #7), a render covers the drawing's extents, with a margin round them.
+A render covers the paper the sheet declares, as a [plot](plot.md#the-sheet-size) does, with no margin, what lies off it cut at the image's edge; the reply's `page` is `paper`. A sheet that declares none is covered to its extents, with the margin round them, and `page` is `extents`. A DWG takes its paper from the set its build mark names.
 
 | Option | Default | What it is |
 |---|---|---|
 | `--dpi` | 150 | How many pixels an inch of paper spans. Lineweights draw at this. |
 | `--scale` | | The plot scale: how long a length on the drawing is on paper, as a share of itself, such as `1` for 1:1 or `0.02` for 1:50. The drawing's unit counts: 1 m drawn at `0.02` is 20 mm on paper. A DWG with no unit is taken to be in millimetres. |
 | `--width`, `--height` | | The image's size in pixels, the drawing fitted inside it and centred. With one, the other follows the drawing. Not given with `--scale`. |
-| `--margin` | 5 | The margin round the extents, in millimetres of paper. |
+| `--margin` | 5 | The margin round the extents, in millimetres of paper, for a sheet that declares no paper. |
 
 Without a scale or a size, the image's longer side is 2000 pixels. An image is at most 32767 pixels on a side and 100 million in all.
 
@@ -50,7 +50,7 @@ Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of 
 {"stamp":1,"produced_by":"agentdrafter 0.0.0","sources":[{"kind":"sheet_description","path":"sheet-1.yaml","sha256":"…"},{"kind":"block_library","path":"blocks.yaml","sha256":"…"}],"revision":{"issued":false}}
 ```
 
-- `sources` holds a sheet description and the block library it names, when it names one, or a DWG alone; a PDF of a drawing set's sheet holds its template, the rows file and the block library.
+- `sources` holds a sheet description and the block library it names, when it names one; or a DWG, followed by its set's template and rows file when its build mark leads to its set, which its paper is read from ([the sheet size](plot.md#the-sheet-size)); a PDF of a drawing set's sheet holds its template, the rows file and the block library.
 - Each entry's `kind` is `sheet_description`, `dwg`, `block_library`, `template` or `rows`.
 - `path` is where the file was, from the PNG's folder when the two share a folder above them, with `/` between folders, so a PNG and its files moved together still find each other and the stamp names no folder above them. Otherwise it is the path in full.
 - `sha256` is the SHA-256 of the file's bytes, as the render read them.

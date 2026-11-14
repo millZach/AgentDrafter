@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::description::sheet_description_at;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
+use crate::model::Paper;
 use crate::model::Sheet;
 use crate::stamp::{self, SourceKind};
 use crate::units::Unit;
@@ -96,6 +97,20 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
     })?;
     if kind == SourceKind::Dwg {
         let drawing = dwg::read(source)?;
+        let mut files = vec![(kind, source.to_path_buf(), bytes)];
+        // Zach decided on 2026-11-13 that a DWG plots on the paper its
+        // sheet declares, read from the set its build mark names; the DWG
+        // itself holds no paper.
+        let units = drawing.units.unwrap_or(Unit::Mm);
+        let paper = crate::set::paper_of_dwg(source).and_then(|found| {
+            files.extend(found.read);
+            // The paper in the DWG's own unit, should the set's have moved on.
+            found.paper.map(|paper| Paper {
+                width: found.units.convert(paper.width, units),
+                height: found.units.convert(paper.height, units),
+                ..paper
+            })
+        });
         let sheet = Sheet {
             units: drawing.units.unwrap_or(Unit::Mm),
             block_library: None,
@@ -104,14 +119,14 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
             text_styles: drawing.text_styles,
             blocks: drawing.blocks,
             objects: drawing.objects,
-            paper: None,
+            paper,
             ltscale: drawing.ltscale,
         };
         return Ok(Record {
             sheet,
             units: drawing.units,
             objects_not_drawn: drawing.objects_not_read,
-            files: vec![(kind, source.to_path_buf(), bytes)],
+            files,
         });
     }
     let text = String::from_utf8(bytes.clone()).map_err(|_| {

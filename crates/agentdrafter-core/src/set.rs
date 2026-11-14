@@ -26,11 +26,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::build::{build_sheet, is_same_file, BuildReport};
 use crate::change::relative_to;
-use crate::description::{read_rows, read_set_settings, read_template, template_path};
+use crate::description::{
+    read_rows, read_set_settings, read_template, rows_at, template_at, template_path,
+};
 use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
+use crate::model::Paper;
 use crate::reply::Reply;
 use crate::settings::Settings;
+use crate::stamp::SourceKind;
 use crate::units::Unit;
 
 /// The file at the top of a drawing set's folder that holds the set's
@@ -372,6 +376,65 @@ fn set_at(folder: PathBuf, dwg: &Path, written: &str) -> Result<DwgSet, String> 
         folder,
     })
 }
+
+/// What the sheet a DWG was built as declares about its paper, read from
+/// the drawing set its build mark names ([`set_of_dwg`]): its template
+/// filled in from its row, as a build reads it.
+pub(crate) struct DwgPaper {
+    /// The paper the sheet declares, in `units`; none when it declares
+    /// none.
+    pub paper: Option<Paper>,
+    /// The unit the paper is in: the set's.
+    pub units: Unit,
+    /// The template and the rows, with their bytes, so that an output
+    /// drawn from the DWG can be stamped with them: whether it declares a
+    /// paper or not, a change to them can change the output's page.
+    pub read: Vec<FileRead>,
+}
+
+/// What the sheet a DWG was built as declares about its paper ([`DwgPaper`]).
+/// None when the DWG names no set, or the set, its rows or the DWG's row
+/// or template cannot be read: the DWG then plots to its extents. The DWG's
+/// row is the one whose DWG in the set's output folder is this very file,
+/// as the file system tells it, so letter case is matched as the file
+/// system matches it.
+pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<DwgPaper> {
+    let set = set_of_dwg(dwg).ok()?;
+    let settings_file = set.folder.join(SET_SETTINGS_FILE);
+    let settings = read_set_settings(&settings_file).ok()?;
+    let rows_file = set.folder.join(&settings.rows);
+    let rows_bytes = fs::read(&rows_file).ok()?;
+    let rows = rows_at(std::str::from_utf8(&rows_bytes).ok()?, &rows_file).ok()?;
+    let output = set.folder.join(&settings.output);
+    let row = rows
+        .iter()
+        .find(|r| is_same_file(&output.join(format!("{}.dwg", r.sheet)), dwg))?;
+    let template = template_path(&set.folder, row);
+    let template_bytes = fs::read(&template).ok()?;
+    let text = std::str::from_utf8(&template_bytes).ok()?;
+    let mut notices = Vec::new();
+    let (record, _) = template_at(
+        text,
+        &template,
+        row,
+        &rows_file,
+        settings.units,
+        &mut notices,
+    )
+    .ok()?;
+    Some(DwgPaper {
+        paper: record.sheet.paper,
+        units: settings.units,
+        read: vec![
+            (SourceKind::Template, template, template_bytes),
+            (SourceKind::Rows, rows_file, rows_bytes),
+        ],
+    })
+}
+
+/// A file read to draw an output, with what it is and its bytes, for the
+/// output's stamp.
+pub(crate) type FileRead = (SourceKind, PathBuf, Vec<u8>);
 
 /// Why a DWG that carries no build mark names no drawing set.
 const NO_MARK: &str = "the DWG carries no build mark AgentDrafter can read, so it names no \

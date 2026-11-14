@@ -595,3 +595,56 @@ fn a_dwg_with_inserts_renders_as_its_sheet_description() {
         "{differ} pixels differ"
     );
 }
+
+/// A render covers the paper a sheet declares, as a plot does, with no
+/// margin, and what lies off it is cut at the image's edge.
+#[test]
+fn a_render_covers_the_declared_paper() {
+    let dir = scratch("paper");
+    let source = dir.join("sheet.yaml");
+    fs::write(
+        &source,
+        "units: mm
+paper: [100, 50]
+objects:
+  - line: {from: [10, 25, 0], to: [150, 25, 0]}
+",
+    )
+    .unwrap();
+    let mut request = RenderRequest::new(&source);
+    request.scale = Some(1.0);
+    request.dpi = 25.4;
+    let report = render_with(&request, &Settings::default()).unwrap_or_else(|e| panic!("{e}"));
+    // One pixel a millimetre: the paper, 100 by 50, and nothing more.
+    assert_eq!((report.width, report.height), (100, 50));
+    assert_eq!(report.top_left, [0.0, 50.0]);
+    assert_eq!(report.page, agentdrafter_core::PageFrom::Paper);
+    let image = decode(&PathBuf::from(&report.png), report);
+    assert!(image.inked(50, 25) && image.inked(99, 25) && !image.inked(5, 25));
+}
+
+/// An image larger than the paper it fits shows nothing that lies off the
+/// paper.
+#[test]
+fn a_render_fitted_to_a_larger_image_cuts_what_lies_off_the_paper() {
+    let dir = scratch("paper-fitted");
+    let source = dir.join("sheet.yaml");
+    fs::write(
+        &source,
+        "units: mm\npaper: [100, 50]\nobjects:\n  - line: {from: [10, 25, 0], to: [90, 25, 0]}\n  - line: {from: [10, 60, 0], to: [90, 60, 0]}\n",
+    )
+    .unwrap();
+    let mut request = RenderRequest::new(&source);
+    request.width = Some(100);
+    request.height = Some(100);
+    let report = render_with(&request, &Settings::default()).unwrap_or_else(|e| panic!("{e}"));
+    let image = decode(&PathBuf::from(&report.png), report);
+    // The paper fills the image's width and sits in its middle, 50 high;
+    // the line on it shows, the one 10 above it does not.
+    assert!(image.inked(50, 50));
+    for y in 0..25 {
+        for x in 0..100 {
+            assert!(!image.inked(x, y), "ink off the paper at ({x}, {y})");
+        }
+    }
+}

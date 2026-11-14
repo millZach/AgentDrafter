@@ -71,6 +71,27 @@ impl View {
 
 /// Draws a display list onto white paper. None when the image cannot be
 /// made, such as one with no pixels.
+/// Paints white everything in `pixmap`, drawn through `view`, that lies
+/// outside `keep`, in drawing units: what lies off a sheet's paper, where
+/// an image is larger than the paper it fits.
+pub(crate) fn blank_outside(pixmap: &mut Pixmap, view: &View, keep: Bounds) {
+    let (left, top) = view.pixel([keep.min[0], keep.max[1]]);
+    let (right, bottom) = view.pixel([keep.max[0], keep.min[1]]);
+    let (w, h) = (view.width as f32, view.height as f32);
+    let mut paint = Paint::default();
+    paint.set_color(tiny_skia::Color::WHITE);
+    for (x0, y0, x1, y1) in [
+        (0.0, 0.0, w, top),
+        (0.0, bottom, w, h),
+        (0.0, top, left, bottom),
+        (right, top, w, bottom),
+    ] {
+        if let Some(rect) = tiny_skia::Rect::from_ltrb(x0, y0.max(0.0), x1, y1.min(h)) {
+            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+        }
+    }
+}
+
 pub(crate) fn rasterize(list: &DisplayList, view: &View) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(view.width, view.height)?;
     pixmap.fill(tiny_skia::Color::WHITE);

@@ -30,8 +30,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::description::{read_set_settings, rows_at, template_at, template_path};
-use crate::draw::{self, Bounds, HatchCutShort};
+use crate::draw::{self, Bounds, HatchCutShort, PageFrom};
 use crate::error::{Error, ErrorCode};
+use crate::model::Sheet;
 use crate::output::{
     object_counts, read_record, refuse_to_replace, write_whole, OutputKind, Record,
 };
@@ -145,13 +146,18 @@ pub struct PlotReport {
     pub pdf: String,
     /// The sheet's size, which is the PDF's page.
     pub sheet_size: SheetSize,
+    /// What the page is: the paper the sheet declares, or, when it declares
+    /// none, its extents.
+    pub page: PageFrom,
     /// The plot scale: paper length over drawing length. Always 1.
     pub scale: f64,
     /// The drawing's unit; none when a DWG has none the core knows, and it
     /// is plotted as millimetres.
     pub units: Option<Unit>,
-    /// The box round everything drawn, in drawing units: the sheet.
-    pub extents: Bounds,
+    /// The box round everything drawn, in drawing units; none when a sheet
+    /// that declares its paper draws nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extents: Option<Bounds>,
     /// The plot style the PDF was drawn through.
     pub plot_style: PlotStyleUsed,
     /// How many objects of each type were drawn, such as `{"line": 1}`.
@@ -459,7 +465,7 @@ fn plot_record(
         CHORD_TOLERANCE_MM / millimetres_per_unit,
         draw::MOST_HATCH_DASHES,
     );
-    let page = page(&list, sheet.units)?;
+    let page = page(sheet, &list)?;
     let stamp = Stamp::new(&record.read(), output);
     let producer = format!("agentdrafter {}", env!("CARGO_PKG_VERSION"));
     let creator = format!("agentdrafter plot, plot style {}", used.name);
@@ -479,9 +485,10 @@ fn plot_record(
         source: source.display().to_string(),
         pdf: output.display().to_string(),
         sheet_size: page.1,
+        page: page.3,
         scale: 1.0,
         units: record.units,
-        extents: page.2,
+        extents: list.extents(),
         plot_style: used.clone(),
         objects: object_counts(sheet),
         objects_not_drawn: record.objects_not_drawn,
@@ -493,11 +500,16 @@ fn plot_record(
     })
 }
 
-/// The page a display list plots on: its extents at 1:1 in `units`, with
-/// the sheet's size and the extents. A sheet that draws nothing, or nothing
-/// with both a width and a height, has no page.
-fn page(list: &draw::DisplayList, units: Unit) -> Result<(Page, SheetSize, Bounds), Error> {
-    let Some(extents) = list.extents() else {
+/// The page `sheet`, drawn as `list`, plots on at 1:1: the paper it
+/// declares, or else its extents, with the sheet's size, the box the page
+/// covers in drawing units, and which it is. A sheet with no paper that
+/// draws nothing, or nothing with both a width and a height, has no page.
+fn page(
+    sheet: &Sheet,
+    list: &draw::DisplayList,
+) -> Result<(Page, SheetSize, Bounds, PageFrom), Error> {
+    let units = sheet.units;
+    let Some((extents, from)) = draw::page_of(sheet, list) else {
         return Err(Error::new(
             ErrorCode::BadValue,
             "the sheet draws nothing, so it has no size to plot: a sheet is as large as what it \
@@ -545,7 +557,7 @@ fn page(list: &draw::DisplayList, units: Unit) -> Result<(Page, SheetSize, Bound
         width,
         height,
     };
-    Ok((page, size, extents))
+    Ok((page, size, extents, from))
 }
 
 #[cfg(test)]

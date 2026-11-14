@@ -12,15 +12,23 @@ Both print one line of JSON, as `build` does.
 
 ## The sheet size
 
-A sheet is as large as what it draws ([the drawing set](drawing-set.md#templates)): its template draws its trim line at the paper's edge, and the usual case is one DWG per sheet, drawn in model space and plotted to extents at 1:1. So the PDF's page is the drawing's extents at 1:1 in the drawing's unit: the box round everything it draws, as the PNG's extents are (AutoCAD's take the same box but for text, whose box they take where AgentDrafter takes what it draws). There is no paper setting and no scale to give.
+Zach decided on 2026-11-13 that a sheet that declares its [paper](sheet-description.md#paper) plots on exactly that paper: the PDF's page is the paper at 1:1 in the drawing's unit, its lower left corner at the origin, whatever the sheet draws. What lies off the paper is cut at the page's edge, as AutoCAD cuts what lies outside the window it plots, and [the checker](check.md) still reports it as off the sheet. A sheet that declares none is as large as what it draws ([the drawing set](drawing-set.md#templates)): its page is the drawing's extents at 1:1, the box round everything it draws, as the PNG's extents are (AutoCAD's take the same box but for text, whose box they take where AgentDrafter takes what it draws). The reply's `page` says which: `paper` or `extents`. There is no scale to give.
+
+The paper matters when what a sheet draws falls short of it, as a sheet whose trim marks sit on a layer that does not plot does. On the extents its page would come out smaller than its paper and fail the exact paper size check; on its paper it is the paper's size.
+
+A DWG holds no paper (the DWG is unchanged by it). A DWG AgentDrafter built for a drawing set names the set in its build mark ([the build mark](drawing-set.md#the-build-mark-names-the-set)), so a plot of the DWG on its own reads the paper from that sheet's template filled in from its row, and the PDF is stamped with the template and the rows as well as the DWG. A DWG with no set, or whose set or row cannot be read, plots to its extents.
 
 - The demo set's template draws its trim line from (0, 0) to (17, 11) inches, so each of its sheets plots on a page of exactly 17 by 11 inches: 431.8 by 279.4 mm, 1224 by 792 points. Inches are exact in points, so the page box is exact; a sheet drawn in millimetres lands on the same page to within a millionth of a point.
-- The drawing's corner at its extents' lower left is the page's lower left corner.
+- The page's lower left corner is the paper's, the origin; or, for a sheet with no paper, the drawing's corner at its extents' lower left.
 - What lies along the page's edge, such as the template's trim line, draws the half of its pen that falls on the page. Zach decided this on 2026-11-11, knowing AutoCAD leaves it out. AutoCAD 2026, plotting a sheet to extents on paper its own size, leaves out every segment that lies along the paper's edge (the trim line, and on a made-up probe a line on the edge and the parts of a polyline on it) and draws what only touches it. A plot does not leave them out: the page's edge is the box round what the sheet draws, so on a sheet with no trim line it runs along the sheet's own outermost lines, and along the strokes of text where text is outermost, which AutoCAD's extents, taking text's box, never do. Leaving them out would cut those away; drawing them costs a hairline, half the trim line's pen, on the very edge of the paper.
 - A DWG with no unit is taken to be in millimetres, as `render` takes it.
-- A sheet that draws nothing, or nothing with both a width and a height, has no size and is refused (`bad_value`), and so is one larger than 200 inches (5080 mm) a side, the largest page PDF readers open: a sheet that size has objects drawn far outside its border.
+- A sheet with no paper that draws nothing, or nothing with both a width and a height, has no size and is refused (`bad_value`); one with paper plots a blank page, and so is one larger than 200 inches (5080 mm) a side, the largest page PDF readers open: a sheet that size has objects drawn far outside its border.
 
-The reply gives the page as `sheet_size` (`width_mm` and `height_mm` to the micrometre, `width_points` and `height_points` as the page box holds them), with the `extents` in drawing units and `scale`, always 1.
+The reply gives the page as `sheet_size` (`width_mm` and `height_mm` to the micrometre, `width_points` and `height_points` as the page box holds them) and `page`, with the `extents` in drawing units, the box round what the sheet draws, and `scale`, always 1.
+
+### On its paper, measured against AutoCAD
+
+AutoCAD 2026 plotted a made-up probe on 2026-11-13 through its headless console: DWG To PDF, model space, a window from (0, 0) to (17, 11) inches, 1:1, on ANSI full bleed B through `monochrome.ctb`. The probe declares `ANSI B landscape` and draws a border half an inch inside the paper, a line and a circle that run off it, and a note. AgentDrafter plotted the same sheet on its paper. Both pages are 1224 by 792 points; at 300 dots per inch every inked pixel of each lies within a pixel of the other's, and both cut the line and the circle at the paper's edge.
 
 ## The plot style
 
@@ -119,7 +127,7 @@ What still differs: the trim line on the page's edge (above); AutoCAD writes its
 
 ## What is not offered yet
 
-- Paper-space layouts and viewports, and a scale other than 1:1: a sheet is model space plotted to extents.
+- Paper-space layouts and viewports, and a scale other than 1:1: a sheet is model space plotted at 1:1 onto its declared paper, or to its extents when it declares none.
 - A plot style's screening, grayscale, linetypes, line ends and joins and fill styles (listed under `not_followed` when a CTB sets them), and named plot styles (STB).
 - PDF layers from the drawing's layers, and PDF/A.
 - More than one sheet in one PDF.

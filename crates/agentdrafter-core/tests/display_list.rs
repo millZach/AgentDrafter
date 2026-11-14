@@ -132,7 +132,12 @@ fn a_sets_sheet_draws_what_its_dwg_draws() {
             "a DWG's one sheet is named by its file"
         );
         assert_eq!(from_dwg.sheets, [sheet]);
-        assert_eq!(from_dwg.paper, None, "a DWG declares no paper");
+        // A DWG holds no paper; its set's sheet declares it (Zach, 2026-11-13).
+        assert_eq!(
+            from_dwg.paper, from_set.paper,
+            "a DWG takes its set's paper"
+        );
+        assert!(from_dwg.paper.is_some());
         assert_eq!(from_dwg.objects_not_drawn, 0);
         assert_eq!(points(&from_dwg), points(&from_set), "{sheet}");
     }

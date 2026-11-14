@@ -7,8 +7,10 @@
 //! a sheet description names ([`crate::stamp`]). Nothing here needs a
 //! window or a GPU.
 //!
-//! A render covers the drawing's extents with a margin, at a plot scale or
-//! an image size the caller gives. Lineweights are widths on paper, so they draw at
+//! A render covers the paper the sheet declares, as a plot does, what lies
+//! off it cut at its edge; a sheet that declares none is covered to its
+//! extents with a margin. Either is drawn at a plot scale or an image size
+//! the caller gives. Lineweights are widths on paper, so they draw at
 //! the render's dots per inch whatever its scale, as AutoCAD's plot fitted
 //! to paper keeps them.
 
@@ -18,7 +20,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use crate::draw::HatchCutShort;
-use crate::draw::{self, Bounds};
+use crate::draw::{self, Bounds, PageFrom};
 use crate::error::{Error, ErrorCode};
 use crate::output::{object_counts, read_record, refuse_to_replace, write_whole, OutputKind};
 use crate::raster::{self, View};
@@ -134,6 +136,9 @@ pub struct RenderReport {
     /// The box round everything drawn, in drawing units; none when nothing
     /// draws.
     pub extents: Option<Bounds>,
+    /// What the image covers: the paper the sheet declares, with no margin,
+    /// or, when it declares none, its extents with the margin round them.
+    pub page: PageFrom,
     /// How many objects of each type were drawn, such as `{"line": 1}`.
     pub objects: BTreeMap<String, usize>,
     /// How many objects of a DWG were not drawn because the core has no
@@ -183,13 +188,21 @@ fn render_within(
 
     let fonts = SheetFonts::find(sheet, settings);
     let pixels_per_millimetre = request.dpi / 25.4;
-    let margin = request.margin * pixels_per_millimetre;
+    // The paper is the page, as a plot's is: no margin round it.
+    let margin = if sheet.paper.is_some() {
+        0.0
+    } else {
+        request.margin * pixels_per_millimetre
+    };
     let millimetres_per_unit = sheet.units.convert(1.0, Unit::Mm);
     let area = |list: &draw::DisplayList| {
-        list.extents().unwrap_or(Bounds {
-            min: [0.0, 0.0],
-            max: [0.0, 0.0],
-        })
+        draw::page_of(sheet, list).map_or(
+            Bounds {
+                min: [0.0, 0.0],
+                max: [0.0, 0.0],
+            },
+            |(page, _)| page,
+        )
     };
     // A coarse list first, curves to within a drawing unit, for the scale;
     // then the list drawn to a quarter of a pixel, finer than the eye sees,
@@ -220,7 +233,7 @@ fn render_within(
     );
     check_size(view.width, view.height)?;
 
-    let pixmap = raster::rasterize(&list, &view).ok_or_else(|| {
+    let mut pixmap = raster::rasterize(&list, &view).ok_or_else(|| {
         Error::new(
             ErrorCode::WriteFailed,
             format!(
@@ -229,6 +242,13 @@ fn render_within(
             ),
         )
     })?;
+    // What lies off the paper is cut away, where the image is larger than
+    // the paper it fits.
+    if sheet.paper.is_some() {
+        if let Some((paper, _)) = draw::page_of(sheet, &list) {
+            raster::blank_outside(&mut pixmap, &view, paper);
+        }
+    }
     let stamp = Stamp::new(&record.read(), &output);
     let png = raster::png(&pixmap, &stamp.to_json(), pixels_per_millimetre).map_err(|e| {
         Error::new(
@@ -250,6 +270,11 @@ fn render_within(
         top_left: view.top_left,
         units: record.units,
         extents,
+        page: if sheet.paper.is_some() {
+            PageFrom::Paper
+        } else {
+            PageFrom::Extents
+        },
         objects: object_counts(sheet),
         objects_not_drawn: record.objects_not_drawn,
         bytes: png.len(),

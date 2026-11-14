@@ -69,6 +69,34 @@ pub(crate) use polyline::bulge_of;
 /// with: 0.25 mm, AutoCAD's `LWDEFAULT` as installed.
 pub const DEFAULT_LINEWEIGHT: f64 = 0.25;
 
+/// What an output's page covers: the paper its sheet declares, or, when it
+/// declares none, the box round everything it draws. Zach decided on
+/// 2026-11-13 that a plot and a render cover the declared paper, what lies
+/// off it cut at its edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageFrom {
+    Paper,
+    Extents,
+}
+
+/// The box an output of `sheet` covers, drawn as `list`, and what it is:
+/// the sheet's paper, its lower left corner at the origin, when it declares
+/// one, and otherwise `list`'s extents. None when the sheet declares no
+/// paper and draws nothing.
+pub fn page_of(sheet: &Sheet, list: &DisplayList) -> Option<(Bounds, PageFrom)> {
+    match &sheet.paper {
+        Some(paper) => Some((
+            Bounds {
+                min: [0.0, 0.0],
+                max: [paper.width, paper.height],
+            },
+            PageFrom::Paper,
+        )),
+        None => list.extents().map(|e| (e, PageFrom::Extents)),
+    }
+}
+
 /// A point in the drawing's own units, seen from above: `[x, y]`.
 pub type Point2 = [f64; 2];
 

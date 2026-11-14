@@ -495,7 +495,7 @@ impl StampRevision {
 /// settings.
 pub(crate) fn stamp_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevision {
     match files {
-        [(SourceKind::Dwg, dwg, bytes)] => dwg_revision(dwg, bytes),
+        [(SourceKind::Dwg, dwg, bytes), rest @ ..] => dwg_revision(dwg, bytes, rest),
         _ => files_revision(files),
     }
 }
@@ -503,8 +503,10 @@ pub(crate) fn stamp_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevis
 /// What a stamp says of the revision the DWG at `dwg` came from, its bytes
 /// as read: issued when the set its build mark names is still the set it
 /// was built from, and an accept of the set issued the DWG, at its place in
-/// the set's output folder, with these bytes.
-fn dwg_revision(dwg: &Path, bytes: &[u8]) -> StampRevision {
+/// the set's output folder, with these bytes, and issued each of `rest`,
+/// the set's files the output also read, such as the template its paper
+/// came from, with theirs.
+fn dwg_revision(dwg: &Path, bytes: &[u8], rest: &[(SourceKind, &Path, &[u8])]) -> StampRevision {
     let set = match set_of_dwg(dwg) {
         Ok(set) => set,
         Err(why) => return StampRevision::not_issued(Some(why)),
@@ -522,12 +524,20 @@ fn dwg_revision(dwg: &Path, bytes: &[u8]) -> StampRevision {
     // `demo-001.dwg` where letter case is ignored. Each accept is asked in
     // turn, newest first, so no older accept's name for it shadows a newer.
     let print = fingerprint(bytes);
+    let Some(others) = in_set(&set.folder, rest) else {
+        return StampRevision::not_issued(None);
+    };
     let accept = entries.iter().rev().find(|e| {
         e.kind == EntryKind::Accept
             && e.finished()
             && e.revision.iter().any(|f| {
                 f.sha256 == print
                     && (f.path == set.path || is_same_file(&set.folder.join(&f.path), dwg))
+            })
+            && others.iter().all(|(path, print)| {
+                e.revision
+                    .iter()
+                    .any(|f| &f.path == path && &f.sha256 == print)
             })
     });
     issued(accept)
@@ -547,17 +557,24 @@ fn files_revision(files: &[(SourceKind, &Path, &[u8])]) -> StampRevision {
     let Ok(entries) = read_entries(&folder) else {
         return not_issued;
     };
-    let mut read: Vec<(String, String)> = Vec::with_capacity(files.len());
-    for &(_, path, bytes) in files {
-        let Ok(path) = path.canonicalize() else {
-            return not_issued;
-        };
-        let Ok(inside) = path.strip_prefix(&folder) else {
-            return not_issued;
-        };
-        read.push((relative_to(Path::new(""), inside), fingerprint(bytes)));
-    }
+    let Some(read) = in_set(&folder, files) else {
+        return not_issued;
+    };
     issued_by(&entries, &read)
+}
+
+/// Each of `files` by its path in the set at `folder` and its fingerprint;
+/// none when one is not in the set.
+fn in_set(folder: &Path, files: &[(SourceKind, &Path, &[u8])]) -> Option<Vec<(String, String)>> {
+    let folder = folder.canonicalize().ok()?;
+    files
+        .iter()
+        .map(|&(_, path, bytes)| {
+            let path = path.canonicalize().ok()?;
+            let inside = path.strip_prefix(&folder).ok()?;
+            Some((relative_to(Path::new(""), inside), fingerprint(bytes)))
+        })
+        .collect()
 }
 
 /// Issued by the newest finished accept among `entries` whose revision
