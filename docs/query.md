@@ -104,6 +104,14 @@ A point is named as its key in the sheet description. Without one, the object's 
 {"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-001","DEMO-002","DEMO-003"],"message":"18.179658962697843 in from the position of `DEMO-001/heading` to the position of `DEMO-001/objects[2]`, on sheet `DEMO-001`","kind":"measure","distance":18.179658962697843,"delta":[15.5,-9.5,0.0],"from":{"sheet":"DEMO-001","id":"DEMO-001/heading","type":"text","point":"position","at":[1.0,10.0,0.0]},"to":{"sheet":"DEMO-001","id":"DEMO-001/objects[2]","name":"title-block","type":"insert","point":"position","at":[16.5,0.5,0.0]}}}
 ```
 
+## Layers
+
+`agentdrafter query layers <set | sheet-description> [--sheet <sheet>]` lists each sheet's layers: layer `0` first, as every drawing has it, then the sheet's own in order, those its block library brings among them. Each gives its `name`, `color`, `linetype` and `lineweight`, its states where they are not AutoCAD's defaults (`on`, `frozen`, `locked`, `plot`) and its `description` if it has one, as the sheet description writes them, and `objects`: how many of the sheet's objects sit on it, its inserts among them, not counting the objects of a block. The message names every layer that is off, frozen or does not plot.
+
+```json
+{"kind": "layers", "count": 2, "layers": [{"sheet": "frame-plate", "layers": [{"name": "0", "color": 7, "linetype": "Continuous", "objects": 1}, {"name": "trim", "color": 8, "linetype": "Continuous", "plot": false, "objects": 2}]}]}
+```
+
 ## Extents
 
 `agentdrafter query extents <source> [--sheet <sheet>] [--fonts <folder>]...` gives, for each sheet, the box round everything it draws, seen from above, as AutoCAD's extents are: `min` and `max` corners, `width` and `height`, in the declared unit, or `null` for a sheet that draws nothing. The extents follow the geometry, not the dashes a linetype lays along it: a circle of radius 10 drawn with a sparse dashed linetype spans 20 by 20. The sheet is drawn through the drawing pipeline that draws the PNG, with every layer continuous, so text counts as its font draws it, and the reply lists, under `font_substitutions`, each text style whose font was not in a font folder and the look-alike its text was measured with. Curves are drawn as chords within a millionth of the sheet's larger side, so how far a curve reaches is found to within that; straight lines are exact. The demo set's sheets draw within their trim line:

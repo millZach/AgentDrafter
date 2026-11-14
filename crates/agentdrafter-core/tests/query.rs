@@ -793,3 +793,47 @@ fn block_text_names_the_block_library_read_through_a_linked_folder() {
         assert!(Path::new(&text.file).is_file(), "{text:?}");
     }
 }
+
+#[test]
+fn a_layers_query_lists_each_sheets_layers_with_their_states() {
+    let dir = scratch("layers");
+    let sheet = dir.join("sheet.yaml");
+    fs::write(
+        &sheet,
+        "units: mm\nlayers:\n  trim: {color: 8, plot: false}\n  notes: {on: false}\nobjects:\n\
+         - line: {from: [0, 0, 0], to: [1, 0, 0], layer: trim}\n\
+         - line: {from: [0, 1, 0], to: [1, 1, 0], layer: trim}\n\
+         - line: {from: [0, 2, 0], to: [1, 2, 0]}\n",
+    )
+    .unwrap();
+    let report = ask(&sheet, Query::Layers);
+    let Answer::Layers { count, layers } = &report.answer else {
+        panic!("a layers answer: {report:#?}");
+    };
+    assert_eq!(*count, 3);
+    let listed: Vec<(&str, usize, bool, bool)> = layers[0]
+        .layers
+        .iter()
+        .map(|l| (l.layer.name.as_str(), l.objects, l.layer.on, l.layer.plot))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("0", 1, true, true),
+            ("trim", 2, true, false),
+            ("notes", 0, false, true)
+        ]
+    );
+    assert!(
+        report
+            .message
+            .contains("off, frozen or not plotting: trim, notes"),
+        "{}",
+        report.message
+    );
+    let json = serde_json::to_value(&report.answer).unwrap();
+    assert_eq!(
+        json["layers"][0]["layers"][1],
+        json!({"name": "trim", "color": 8, "linetype": "Continuous", "plot": false, "objects": 2})
+    );
+}

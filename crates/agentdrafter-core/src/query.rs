@@ -31,7 +31,7 @@ use crate::build::is_same_file;
 use crate::description::{read_sheet_record, SavedSet, SheetRecord};
 use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
-use crate::model::{Attribute, Object, Point3, Sheet};
+use crate::model::{Attribute, Layer, Object, Point3, Sheet, LAYER_ZERO};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -72,6 +72,9 @@ pub enum Query {
     Measure(Measure),
     /// The box round everything each sheet draws.
     Extents,
+    /// The layers of each sheet, with their states and how many of its
+    /// objects sit on each.
+    Layers,
 }
 
 /// A [`Query`] as it is read. A kind that takes nothing is an empty struct
@@ -86,6 +89,7 @@ enum QueryInput {
     Attributes(Selection),
     Measure(Measure),
     Extents {},
+    Layers {},
 }
 
 impl From<QueryInput> for Query {
@@ -96,6 +100,7 @@ impl From<QueryInput> for Query {
             QueryInput::Attributes(selection) => Self::Attributes(selection),
             QueryInput::Measure(measure) => Self::Measure(measure),
             QueryInput::Extents {} => Self::Extents,
+            QueryInput::Layers {} => Self::Layers,
         }
     }
 }
@@ -242,6 +247,32 @@ pub enum Answer {
         /// rests on it.
         font_substitutions: Vec<FontSubstitution>,
     },
+    Layers {
+        /// How many layers the sheets hold, layer `0` of each among them.
+        count: usize,
+        /// Each sheet looked at, with its layers.
+        layers: Vec<SheetLayers>,
+    },
+}
+
+/// One sheet's layers.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SheetLayers {
+    pub sheet: String,
+    /// Layer `0` first, as every drawing has it, then the sheet's own in
+    /// order, those its block library brings among them.
+    pub layers: Vec<LayerUse>,
+}
+
+/// A layer of a sheet: its colour, linetype, lineweight and states, and how
+/// many of the sheet's objects sit on it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LayerUse {
+    #[serde(flatten)]
+    pub layer: Layer,
+    /// How many of the sheet's objects sit on it, its inserts among them;
+    /// the objects of a block are not counted.
+    pub objects: usize,
 }
 
 /// Where an object is written: its file and its place in it.
@@ -397,6 +428,7 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
         Query::Attributes(selection) => attributes(&looked_at, selection, &looked),
         Query::Measure(measure) => self::measure(&looked_at, measure, units, &looked)?,
         Query::Extents => extents(&looked_at, settings, units, &looked),
+        Query::Layers => layers(&looked_at, &looked),
     };
     Ok(QueryReport {
         source: source.display().to_string(),
@@ -739,6 +771,72 @@ fn find(sheets: &[&SheetRecord], selection: &Selection, looked: &LookedAt) -> (S
     let count = objects.len();
     let message = found_message(count, "object", selection.words(), &looked.on());
     (message, Answer::Find { count, objects })
+}
+
+/// Each sheet's layers, layer `0` first.
+fn layers(sheets: &[&SheetRecord], looked: &LookedAt) -> (String, Answer) {
+    let listed: Vec<SheetLayers> = sheets
+        .iter()
+        .map(|record| {
+            let sheet = &record.sheet;
+            let zero = sheet
+                .layers
+                .iter()
+                .find(|l| l.name == LAYER_ZERO)
+                .cloned()
+                .unwrap_or_else(|| Layer::new(LAYER_ZERO));
+            let layers = std::iter::once(zero)
+                .chain(
+                    sheet
+                        .layers
+                        .iter()
+                        .filter(|l| l.name != LAYER_ZERO)
+                        .cloned(),
+                )
+                .map(|layer| LayerUse {
+                    objects: sheet
+                        .objects
+                        .iter()
+                        .filter(|o| o.layer() == layer.name)
+                        .count(),
+                    layer,
+                })
+                .collect();
+            SheetLayers {
+                sheet: record.name.clone(),
+                layers,
+            }
+        })
+        .collect();
+    let count: usize = listed.iter().map(|s| s.layers.len()).sum();
+    let not_drawn: Vec<String> = listed
+        .iter()
+        .flat_map(|s| &s.layers)
+        .filter(|l| !l.layer.on || l.layer.frozen || !l.layer.plot)
+        .map(|l| l.layer.name.clone())
+        .fold(Vec::new(), |mut names, name| {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+            names
+        });
+    let message = format!(
+        "{} {}{}",
+        counted(count, "layer"),
+        looked.on(),
+        if not_drawn.is_empty() {
+            String::new()
+        } else {
+            format!("; off, frozen or not plotting: {}", not_drawn.join(", "))
+        }
+    );
+    (
+        message,
+        Answer::Layers {
+            count,
+            layers: listed,
+        },
+    )
 }
 
 fn blocks(sheets: &[&SheetRecord], looked: &LookedAt) -> (String, Answer) {

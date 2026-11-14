@@ -663,3 +663,112 @@ fn donuts_solids_and_wide_polylines_fill_with_no_lineweight() {
     near(extents.min, [-2.0, -2.0]);
     near(extents.max, [30.0, 3.0]);
 }
+
+const LAYER_STATES: &str = r#"
+units: mm
+layers:
+  shown: {color: 1}
+  off: {color: 2, on: false}
+  frozen: {color: 3, frozen: true}
+  trim: {color: 4, plot: false}
+objects:
+  - line: {from: [0, 0, 0], to: [10, 0, 0], layer: shown}
+  - line: {from: [0, 20, 0], to: [10, 20, 0], layer: off}
+  - line: {from: [0, 40, 0], to: [10, 40, 0], layer: frozen}
+  - line: {from: [-5, -5, 0], to: [15, -5, 0], layer: trim}
+"#;
+
+/// Off and frozen layers draw nothing; a layer that does not plot draws on
+/// a screen and not on paper. Extents count off and no-plot layers, not
+/// frozen ones, as AutoCAD's do.
+#[test]
+fn a_layers_states_decide_what_draws_and_what_the_extents_take_in() {
+    let sheet = parse_sheet_description(LAYER_STATES).unwrap();
+    let fonts = SheetFonts::find(&sheet, &Settings::default());
+    let screen = draw_sheet_for(&sheet, &fonts, 0.001, MOST_HATCH_DASHES, Purpose::Screen);
+    let paper = draw_sheet_for(&sheet, &fonts, 0.001, MOST_HATCH_DASHES, Purpose::Plot);
+    let drawn = |list: &DisplayList| {
+        let mut objects: Vec<usize> = list.items.iter().map(|i| i.object).collect();
+        objects.dedup();
+        objects
+    };
+    assert_eq!(drawn(&screen), [0, 3]);
+    assert_eq!(drawn(&paper), [0]);
+    for list in [&screen, &paper] {
+        let extents = list.extents().unwrap();
+        // The trim line and the line that is off count; the frozen one does not.
+        assert!(
+            extents.min[0] <= -5.0 && extents.min[1] <= -5.0,
+            "{extents:?}"
+        );
+        assert!((extents.max[1] - 20.0).abs() < 0.5, "{extents:?}");
+    }
+}
+
+/// An insert on a frozen layer draws nothing; one on a layer that is off
+/// hides only what takes its layer, as AutoCAD does.
+#[test]
+fn an_inserts_layer_hides_what_takes_it() {
+    let library = r#"
+units: mm
+layers:
+  own: {color: blue}
+blocks:
+  B:
+    objects:
+      - line: {from: [0, 0, 0], to: [10, 0, 0]}
+      - line: {from: [0, 5, 0], to: [10, 5, 0], layer: own}
+"#;
+    let sheet = |state: &str| {
+        format!(
+            "units: mm\nblock_library: blocks.yaml\nlayers:\n  host: {{color: red, {state}}}\nobjects:\n  - insert: {{block: B, position: [0, 0, 0], layer: host}}\n"
+        )
+    };
+    let off = draw_with_library("insert-off", library, &sheet("on: false"));
+    let colors: Vec<Color> = off.items.iter().map(|i| i.color).collect();
+    assert_eq!(colors, [Color(5)], "only the block's own-layer line draws");
+    let frozen = draw_with_library("insert-frozen", library, &sheet("frozen: true"));
+    assert!(frozen.items.is_empty() && frozen.extents().is_none());
+}
+
+/// A block's object on a frozen layer neither draws nor counts towards the
+/// insert's box, and a hatch that does not draw is not reported cut short.
+#[test]
+fn what_a_layer_hides_takes_no_room_and_raises_no_warning() {
+    let library = r#"
+units: mm
+layers:
+  gone: {frozen: true}
+blocks:
+  B:
+    objects:
+      - line: {from: [0, 0, 0], to: [10, 0, 0]}
+      - line: {from: [0, 100, 0], to: [10, 100, 0], layer: gone}
+"#;
+    let sheet = "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {block: B, position: [0, 0, 0]}
+";
+    let list = draw_with_library("frozen-in-block", library, sheet);
+    let extents = list.extents().unwrap();
+    assert!(extents.max[1] < 1.0, "{extents:?}");
+
+    let fine = "units: mm
+hatch_patterns:
+  FINE:
+    lines:
+      - {angle: 0, delta: [0, 0.000001]}
+layers:
+  off: {on: false}
+objects:
+  - hatch: {pattern: FINE, boundary: [{polyline: {points: [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]]}}], layer: off}
+";
+    let list = draw(fine);
+    assert!(list.items.is_empty());
+    assert!(
+        list.hatches_cut_short.is_empty(),
+        "{:?}",
+        list.hatches_cut_short
+    );
+}

@@ -30,6 +30,10 @@ The reply gives the page as `sheet_size` (`width_mm` and `height_mm` to the micr
 
 AutoCAD 2026 plotted a made-up probe on 2026-11-13 through its headless console: DWG To PDF, model space, a window from (0, 0) to (17, 11) inches, 1:1, on ANSI full bleed B through `monochrome.ctb`. The probe declares `ANSI B landscape` and draws a border half an inch inside the paper, a line and a circle that run off it, and a note. AgentDrafter plotted the same sheet on its paper. Both pages are 1224 by 792 points; at 300 dots per inch every inked pixel of each lies within a pixel of the other's, and both cut the line and the circle at the paper's edge.
 
+## Layers
+
+A plot leaves out every object on a layer that is off, frozen or does not plot, as AutoCAD's plot does ([layers](sheet-description.md#layers)); objects on a layer that is off or does not plot still count towards the extents, so a sheet whose trim marks sit on a layer that does not plot, and that declares no paper, still plots on a page as large as its trim marks. AutoCAD 2026 plotted a made-up probe of such layers, and an insert on each, on 2026-11-13 through `acad.ctb`: its effective plotting area and extents, 160 by 75 mm from (-10, -10), were AgentDrafter's to the hundredth of a millimetre, and both drew the same two lines, every inked pixel of each within a pixel of the other's.
+
 ## The plot style
 
 A CTB file, AutoCAD's colour-dependent plot style table, sets each pen: for each AutoCAD colour index, the colour and the lineweight that index plots in. AutoCAD's own CTB files, such as `monochrome.ctb` and `acad.ctb`, are Autodesk's and never enter this repository, not even in a test (ADR-0008). They are read from the plot style folders, as fonts are read from the font folders: the folders `--plot-styles` names, then those the `AGENTDRAFTER_PLOT_STYLES` environment variable lists (separated as the system separates paths), such as AutoCAD's `Plot Styles` folder. There is no default folder. `--plot-style` names the CTB by its file name, found ignoring case; a path is refused, so a plot style is never read from outside its folders.

@@ -308,3 +308,25 @@ objects:
     assert_eq!(read.objects[3], sheet.objects[3]);
     assert_eq!(read.objects[4], sheet.objects[4]);
 }
+
+#[test]
+fn a_layers_states_and_description_read_back() {
+    let (sheet, read) = build_and_read(
+        "layer-states",
+        "units: mm
+layers:
+  trim: {color: 8, plot: false, description: 'Trim marks, not plotted'}
+  hidden: {on: false}
+  frozen: {frozen: true, locked: true}
+objects:
+  - line: {from: [0, 0, 0], to: [1, 0, 0], layer: trim}
+",
+    );
+    assert_eq!(read.layers, layers_in_the_dwg(&sheet));
+    let trim = read.layers.iter().find(|l| l.name == "trim").unwrap();
+    assert!(!trim.plot && trim.on && !trim.frozen);
+    assert_eq!(trim.description, "Trim marks, not plotted");
+    assert!(!read.layers.iter().find(|l| l.name == "hidden").unwrap().on);
+    let frozen = read.layers.iter().find(|l| l.name == "frozen").unwrap();
+    assert!(frozen.frozen && frozen.locked);
+}

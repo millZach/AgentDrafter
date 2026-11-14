@@ -129,6 +129,26 @@ const DONUT_OUTSIDE: Place = Place {
     json: r#"{"units": "mm", "objects": [{"donut": {"center": [0, 0, 0], "outside_diameter": V}}]}"#,
 };
 
+const LAYER_PLOT: Place = Place {
+    name: "a layer's plot",
+    yaml: "units: mm
+layers:
+  a: {plot: V}
+objects: []
+",
+    json: r#"{"units": "mm", "layers": {"a": {"plot": V}}, "objects": []}"#,
+};
+
+const LAYER_DESCRIPTION: Place = Place {
+    name: "a layer's description",
+    yaml: "units: mm
+layers:
+  a: {description: V}
+objects: []
+",
+    json: r#"{"units": "mm", "layers": {"a": {"description": V}}, "objects": []}"#,
+};
+
 const CLOSED: Place = Place {
     name: "a polyline's closed",
     yaml: "units: mm\nobjects:\n  - polyline: {points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]], closed: V}\n",
@@ -555,6 +575,18 @@ fn cases() -> Vec<Case> {
         (&SOLID_CORNERS, "[[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]]", json!([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]]), true),
         (&SOLID_CORNERS, "[[0, 0, 0], [1, 0, 0]]", json!([[0, 0, 0], [1, 0, 0]]), false),
         (&SOLID_CORNERS, "[[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 0]]", json!([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 0]]), false),
+        // A layer's states: true or false, quoted or not.
+        (&LAYER_PLOT, "false", json!(false), true),
+        (&LAYER_PLOT, "'true'", json!("true"), true),
+        (&LAYER_PLOT, "'no'", json!("no"), false),
+        (&LAYER_PLOT, "0", json!(0), false),
+        // A layer's description: text.
+        (&LAYER_DESCRIPTION, "Trim marks", json!("Trim marks"), true),
+        (&LAYER_DESCRIPTION, "null", json!(null), true),
+        (&LAYER_DESCRIPTION, "[a]", json!(["a"]), false),
+        (&LAYER_DESCRIPTION, Box::leak("a".repeat(255).into_boxed_str()), json!("a".repeat(255)), true),
+        (&LAYER_DESCRIPTION, Box::leak("a".repeat(256).into_boxed_str()), json!("a".repeat(256)), false),
+        (&LAYER_DESCRIPTION, "\"a\tb\"", json!("a	b"), false),
         // closed: true or false, quoted or not.
         (&CLOSED, "true", json!(true), true),
         (&CLOSED, "'true'", json!("true"), true),

@@ -23,8 +23,8 @@ use serde_json::{json, Map, Value};
 use super::blocks::LIBRARY_KEYS;
 use super::ids::{ID_KEY, ID_PUNCTUATION, ID_SEPARATOR, LONGEST_ID, SHEET_OBJECT_KEYS};
 use super::layers::{
-    colour_names, COLOUR_NAMES, FORBIDDEN_IN_NAMES, LONGEST_DESCRIPTION, LONGEST_NAME,
-    LONGEST_PATTERN, PROPERTY_KEYS,
+    colour_names, COLOUR_NAMES, FORBIDDEN_IN_NAMES, LONGEST_DESCRIPTION, LONGEST_LAYER_DESCRIPTION,
+    LONGEST_NAME, LONGEST_PATTERN, PROPERTY_KEYS,
 };
 use super::objects::{FEWEST_FIT_POINTS, HIGHEST_DEGREE, OBJECT_TYPES};
 use super::{block_schema, hatch_schema, SHEET_KEYS};
@@ -518,6 +518,38 @@ fn defs() -> Map<String, Value> {
                         { "type": "string", "pattern": format!("^({lineweight_pattern})( ?mm)?$") },
                     ],
                 },
+                "on": {
+                    "description": "Whether the layer is on: an object on a layer that is off \
+                                    draws nothing, and counts towards the extents. Without it, \
+                                    true.",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+                "frozen": {
+                    "description": "Whether the layer is frozen: an object on a frozen layer \
+                                    draws nothing and does not count towards the extents. \
+                                    Without it, false.",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+                "locked": {
+                    "description": "Whether the layer is locked against editing, as AutoCAD \
+                                    locks it. Without it, false.",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+                "plot": {
+                    "description": "Whether the layer plots: an object on a layer that does not \
+                                    plot is left out of a PDF and drawn in a PNG, and counts \
+                                    towards the extents. Without it, true.",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+                "description": optional_text(json!({
+                    "description": format!(
+                        "What AutoCAD's layer manager shows beside the name: one line of text, \
+                         at most {LONGEST_LAYER_DESCRIPTION} characters, with no control characters."
+                    ),
+                    "type": TEXT_TYPES,
+                    "maxLength": LONGEST_LAYER_DESCRIPTION,
+                    "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+                })),
             },
         }),
     );

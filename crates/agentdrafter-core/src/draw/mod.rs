@@ -280,6 +280,27 @@ impl DisplayList {
     }
 }
 
+/// What an output is for, which decides whether a layer that does not
+/// plot is drawn: on a screen, a PNG or the viewer, it is, as AutoCAD's
+/// screen shows it; on paper, a PDF, it is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    Screen,
+    Plot,
+}
+
+/// Whether an object draws, as its layer's states decide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shown {
+    /// It draws.
+    Drawn,
+    /// It draws nothing and counts towards the extents: a layer that is
+    /// off, or one that does not plot, on paper.
+    Counted,
+    /// It draws nothing and does not count: a frozen layer.
+    Hidden,
+}
+
 /// How an object draws, resolved from its own properties, its layer's and
 /// its insert's.
 #[derive(Clone, Copy)]
@@ -382,6 +403,7 @@ struct Drawer<'a> {
     fonts: &'a SheetFonts,
     most_dashes: usize,
     layer_zero: Layer,
+    purpose: Purpose,
 }
 
 impl<'a> Drawer<'a> {
@@ -428,11 +450,11 @@ impl<'a> Drawer<'a> {
             .map(|t| t.pattern.as_slice())
     }
 
-    /// How the layer named `name` draws, layer `0`'s defaults for a layer
-    /// the sheet does not define.
-    fn layer_pen(&self, name: &str) -> Pen<'a> {
+    /// The layer named `name`, layer `0`'s defaults for a layer the sheet
+    /// does not define.
+    fn layer(&self, name: &str) -> &Layer {
         let sheet = self.sheet;
-        let layer = sheet
+        sheet
             .layers
             .iter()
             .find(|l| l.name == name)
@@ -442,7 +464,27 @@ impl<'a> Drawer<'a> {
                     .iter()
                     .find(|l| l.name.eq_ignore_ascii_case(name))
             })
-            .unwrap_or(&self.layer_zero);
+            .unwrap_or(&self.layer_zero)
+    }
+
+    /// Whether an object on the layer named `name` draws, as AutoCAD
+    /// shows it: nothing of a frozen layer; a layer that is off, or one
+    /// that does not plot on paper, counts towards the extents only.
+    fn shown(&self, name: &str) -> Shown {
+        let layer = self.layer(name);
+        if layer.frozen {
+            Shown::Hidden
+        } else if !layer.on || (self.purpose == Purpose::Plot && !layer.plot) {
+            Shown::Counted
+        } else {
+            Shown::Drawn
+        }
+    }
+
+    /// How the layer named `name` draws, layer `0`'s defaults for a layer
+    /// the sheet does not define.
+    fn layer_pen(&self, name: &str) -> Pen<'a> {
+        let layer = self.layer(name);
         Pen {
             color: Color(layer.color),
             pattern: self.pattern(&layer.linetype),
@@ -468,14 +510,18 @@ impl<'a> Drawer<'a> {
             self.insert(index, insert, tolerance, list);
             return;
         }
+        let shown = self.shown(object.layer());
+        if shown == Shown::Hidden {
+            return;
+        }
         let pen = self.pen(object.layer(), object.properties(), None);
         let drawn = self.object(object, pen, tolerance, None);
-        if drawn.cut_short {
+        // Only a hatch that draws is reported as cut short.
+        if drawn.cut_short && shown == Shown::Drawn {
             list.hatches_cut_short
                 .push(self.cut_short(index, object, None));
         }
-        list.add(index, None, pen.color, drawn.shapes, drawn.reach);
-        list.add_text(index, None, drawn.runs);
+        list.add_shown(shown, index, None, pen.color, drawn);
     }
 
     /// Adds what an insert draws to `list`: its block's objects moved,
@@ -487,6 +533,11 @@ impl<'a> Drawer<'a> {
         let Some(block) = self.block(&insert.block) else {
             return;
         };
+        // An insert on a frozen layer draws nothing at all, as in AutoCAD;
+        // one on a layer that is off hides only what takes its layer.
+        if self.shown(&insert.layer) == Shown::Hidden {
+            return;
+        }
         let placed = Placed::of(insert, block);
         // What the block's `ByBlock` objects draw with.
         let insert_pen = self.pen(&insert.layer, &insert.properties, None);
@@ -504,9 +555,15 @@ impl<'a> Drawer<'a> {
                 LAYER_ZERO => insert.layer.as_str(),
                 layer => layer,
             };
+            // What lies on a frozen layer neither draws nor counts towards
+            // the block's box.
+            let shown = self.shown(layer);
+            if shown == Shown::Hidden {
+                continue;
+            }
             let pen = self.pen(layer, object.properties(), Some(insert_pen));
             let drawn = self.object(object, pen, within, Some(&placed));
-            if drawn.cut_short {
+            if drawn.cut_short && shown == Shown::Drawn {
                 let cut = self.cut_short(index, object, Some(&block.name));
                 list.hatches_cut_short.push(cut);
             }
@@ -514,8 +571,7 @@ impl<'a> Drawer<'a> {
             let points = drawn_points.chain(drawn.reach.iter().copied());
             let had = own.into_iter().flat_map(|b| [b.min, b.max]);
             own = Bounds::of(had.chain(points.map(|p| placed.back(p))));
-            list.add(index, Some(part), pen.color, drawn.shapes, drawn.reach);
-            list.add_text(index, Some(part), drawn.runs);
+            list.add_shown(shown, index, Some(part), pen.color, drawn);
         }
         // AutoCAD's extents take in an insert's block box: the box round the
         // block's objects in its own coordinates, placed whole. Turned, it
@@ -539,8 +595,12 @@ impl<'a> Drawer<'a> {
             let text = attribute_text(insert, block, definition, value);
             let pen = self.pen(&text.layer, &text.properties, Some(insert_pen));
             let lettering = text::draw_text(&text, self.fonts, pen.lineweight, tolerance);
-            list.add(index, Some(part), pen.color, lettering.shapes, Vec::new());
-            list.add_text(index, Some(part), lettering.runs);
+            let drawn = Drawn {
+                shapes: lettering.shapes,
+                runs: lettering.runs,
+                ..Drawn::default()
+            };
+            list.add_shown(self.shown(&text.layer), index, Some(part), pen.color, drawn);
         }
     }
 
@@ -729,6 +789,30 @@ impl<'a> Drawer<'a> {
 }
 
 impl DisplayList {
+    /// Adds what an object drew, as its layer's states decide: drawn, its
+    /// points taken into the extents only, or nothing.
+    fn add_shown(
+        &mut self,
+        shown: Shown,
+        index: usize,
+        part: Option<usize>,
+        color: Color,
+        drawn: Drawn,
+    ) {
+        match shown {
+            Shown::Drawn => {
+                self.add(index, part, color, drawn.shapes, drawn.reach);
+                self.add_text(index, part, drawn.runs);
+            }
+            Shown::Counted => {
+                let points: Vec<Point2> = drawn.shapes.iter().flat_map(Shape::points).collect();
+                self.take_in(points);
+                self.take_in(drawn.reach);
+            }
+            Shown::Hidden => {}
+        }
+    }
+
     /// Adds what the sheet's object at `index` draws in `color`: the
     /// object of its block at `part`, when it is an insert. `reach` is a
     /// patterned hatch's boundary, which draws nothing of its own.
@@ -782,12 +866,26 @@ pub fn draw_sheet(
     tolerance: f64,
     most_dashes: usize,
 ) -> DisplayList {
+    draw_sheet_for(sheet, fonts, tolerance, most_dashes, Purpose::Screen)
+}
+
+/// Draws a sheet as [`draw_sheet`] does, for `purpose`: on paper, a layer
+/// that does not plot is left out, its objects counted towards the
+/// extents.
+pub(crate) fn draw_sheet_for(
+    sheet: &Sheet,
+    fonts: &SheetFonts,
+    tolerance: f64,
+    most_dashes: usize,
+    purpose: Purpose,
+) -> DisplayList {
     let tolerance = if tolerance > 0.0 { tolerance } else { 1e-3 };
     let drawer = Drawer {
         sheet,
         fonts,
         most_dashes,
         layer_zero: Layer::new(LAYER_ZERO),
+        purpose,
     };
     let mut list = DisplayList::default();
     for (index, object) in sheet.objects.iter().enumerate() {

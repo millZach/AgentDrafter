@@ -52,7 +52,7 @@ const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-s
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...";
-const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find and attributes: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [extents: --fonts <folder>...]";
+const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find and attributes: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [extents: --fonts <folder>...]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
 /// name, as the binary does: it prints the reply on standard output, or
@@ -652,9 +652,9 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
         None => return Err(usage("query needs what to ask".to_owned())),
     };
     let selecting = matches!(kind.as_str(), "find" | "attributes");
-    if !selecting && !matches!(kind.as_str(), "blocks" | "measure" | "extents") {
+    if !selecting && !matches!(kind.as_str(), "blocks" | "measure" | "extents" | "layers") {
         return Err(usage(format!(
-            "query asks find, blocks, attributes, measure or extents, not `{kind}`"
+            "query asks find, blocks, attributes, measure, extents or layers, not `{kind}`"
         )));
     }
     let mut source: Option<PathBuf> = None;
@@ -723,6 +723,7 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
         "attributes" => Query::Attributes(selection),
         "blocks" => Query::Blocks,
         "extents" => Query::Extents,
+        "layers" => Query::Layers,
         _ => Query::Measure(Measure { from, to }),
     };
     let request = QueryRequest {

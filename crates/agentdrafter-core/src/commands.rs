@@ -647,7 +647,7 @@ fn query_schema() -> Value {
         })
     };
     json!({
-        "description": "What to ask, by its `kind`: find, blocks, attributes, measure or extents.",
+        "description": "What to ask, by its `kind`: find, blocks, attributes, measure, extents or layers.",
         "oneOf": [
             selection("find", "The objects that match every part given; with none given, every object."),
             bare("blocks", "The blocks each sheet inserts."),
@@ -664,6 +664,11 @@ fn query_schema() -> Value {
                 },
             },
             bare("extents", "The box round everything each sheet draws."),
+            bare(
+                "layers",
+                "The layers of each sheet, with their colour, linetype, lineweight and states, and \
+                 how many of its objects sit on each.",
+            ),
         ],
     })
 }

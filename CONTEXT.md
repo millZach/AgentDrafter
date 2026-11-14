@@ -45,7 +45,7 @@ What the judge counts when it compares AutoCAD's reading of an original with its
 _Avoid_: entity count, geometry
 
 **Layer**:
-A named group of objects in a drawing, as in AutoCAD. An object sits on one layer and draws with the layer's colour, linetype and lineweight, unless it gives its own.
+A named group of objects in a drawing, as in AutoCAD. An object sits on one layer and draws with the layer's colour, linetype and lineweight, unless it gives its own. A layer may be off or frozen, so that its objects draw nothing, locked, or set not to plot, so that they are left out of a PDF.
 _Avoid_: level, class
 
 **ByLayer**:
