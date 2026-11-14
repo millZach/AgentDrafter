@@ -120,6 +120,10 @@ _Avoid_: attribute name, field name
 One placement of a block on a sheet, at a position, scale and rotation, carrying a value for each of the block's attributes. AutoCAD calls it a block reference.
 _Avoid_: instance, block reference
 
+**Nested block**:
+A block that another block inserts, such as a terminal in a terminal strip. The insert that places it is one of the outer block's objects, and the outer block's definition fills in its attributes, once for every insert of the outer block.
+_Avoid_: sub-block, child block
+
 **Block library**:
 The blocks a drawing set shares, each defined once for the whole set. It is a file of its own that sheet descriptions name.
 _Avoid_: symbol library, catalog

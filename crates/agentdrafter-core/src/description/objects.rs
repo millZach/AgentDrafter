@@ -58,10 +58,17 @@ const fn drawn_and(last: ObjectType) -> [ObjectType; 12] {
 pub(crate) const OBJECT_TYPES: [ObjectType; 12] = drawn_and(("insert", &INSERT_KEYS));
 
 /// Every object type a block in a block library can hold, and the keys
-/// each takes: the drawn objects a sheet holds, and attribute definitions.
-/// A text in a block takes its cell as well.
-pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 12] = {
-    let mut types = drawn_and(("attdef", &ATTDEF_KEYS));
+/// each takes: the drawn objects a sheet holds, attribute definitions, and
+/// inserts of the library's other blocks. A text in a block takes its cell
+/// as well.
+pub(crate) const BLOCK_OBJECT_TYPES: [ObjectType; 13] = {
+    let drawn = drawn_and(("attdef", &ATTDEF_KEYS));
+    let mut types = [("insert", &INSERT_KEYS as &[&str]); 13];
+    let mut i = 0;
+    while i < drawn.len() {
+        types[i] = drawn[i];
+        i += 1;
+    }
     types[TEXT_TYPE] = ("text", &BLOCK_TEXT_KEYS);
     types
 };
@@ -108,6 +115,9 @@ pub(super) enum Place<'a> {
     Block {
         /// Each attribute tag defined so far, and where.
         tags: Vec<(String, Pos)>,
+        /// The library's blocks read so far, which an insert in this block
+        /// may place: every block it inserts is read before it.
+        library: Option<&'a BlockLibrary>,
     },
 }
 
@@ -124,9 +134,6 @@ impl Place<'_> {
         match (self, kind) {
             (Place::Sheet { .. }, "attdef") => {
                 Some("an attribute definition belongs in a block in the block library")
-            }
-            (Place::Block { .. }, "insert") => {
-                Some("a block cannot insert another block; nested blocks are not offered yet")
             }
             _ => None,
         }
@@ -309,10 +316,10 @@ pub(super) fn object(
         }
         ("text", _) => text(&fields, units, layer, tables.styles).map(Object::Text),
         ("mtext", _) => mtext(&fields, units, layer, tables.styles).map(Object::MText),
-        ("attdef", Place::Block { tags }) => {
+        ("attdef", Place::Block { tags, .. }) => {
             attribute_definition(&fields, tables, layer, tags).map(Object::AttributeDefinition)
         }
-        ("insert", Place::Sheet { library, .. }) => {
+        ("insert", Place::Sheet { library, .. } | Place::Block { library, .. }) => {
             insert(&fields, units, layer, *library).map(Object::Insert)
         }
         (other, _) => unreachable!("object type `{other}` is listed but not read"),

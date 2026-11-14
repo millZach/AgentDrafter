@@ -972,12 +972,8 @@ fn library_cases() -> Vec<Case> {
             true,
         ),
         (&BLOCK_OBJECTS, "[]", json!([]), false),
-        (
-            &BLOCK_OBJECTS,
-            "[{insert: {block: B, position: [0, 0, 0]}}]",
-            json!([{"insert": {"block": "B", "position": [0, 0, 0]}}]),
-            false,
-        ),
+        // A block that inserts itself is refused by the reader; the schema
+        // cannot see which block an insert names.
         // A block's objects take no ID or name: the insert is the object on a sheet.
         (
             &BLOCK_OBJECTS,

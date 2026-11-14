@@ -140,6 +140,7 @@ mod tests {
         Item {
             object,
             part: None,
+            nested: Vec::new(),
             color: Color(7),
             shape: Shape::Stroke {
                 lineweight,
@@ -153,6 +154,7 @@ mod tests {
         Item {
             object,
             part: None,
+            nested: Vec::new(),
             color: Color(1),
             shape: Shape::Fill {
                 rule: FillRule::EvenOdd,

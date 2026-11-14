@@ -772,3 +772,84 @@ objects:
         list.hatches_cut_short
     );
 }
+
+const NESTED_LIBRARY: &str = r#"
+units: mm
+blocks:
+  OUTER:
+    objects:
+      - line: {from: [0, 0, 0], to: [10, 0, 0]}
+      - insert: {block: INNER, position: [10, 0, 0], scale: 2, rotation: 90, color: ByBlock, attributes: {TAG: '7'}}
+  INNER:
+    objects:
+      - line: {from: [0, 0, 0], to: [1, 0, 0], color: ByBlock}
+      - attdef: {tag: TAG, position: [0, 1, 0], height: 1, color: ByBlock}
+"#;
+
+/// An insert in a block is placed by its own position, scale and turn and
+/// then by the enclosing insert's; on layer 0 it takes the enclosing
+/// insert's layer, and with `ByBlock` its pen, which its own `ByBlock`
+/// objects and attributes then draw with, as AutoCAD does. Everything it
+/// draws is part of the sheet's insert, the part its enclosing block's
+/// insert.
+#[test]
+fn a_nested_insert_is_placed_and_drawn_through_its_enclosing_insert() {
+    let sheet = r#"
+units: mm
+block_library: blocks.yaml
+layers:
+  red: {color: red}
+objects:
+  - insert: {block: OUTER, position: [100, 100, 0], scale: 3, layer: red, color: 6}
+"#;
+    let list = draw_with_library("nested", NESTED_LIBRARY, sheet);
+    assert!(list.items.iter().all(|i| i.object == 0), "{:?}", list.items);
+    let parts: Vec<Option<usize>> = list.items.iter().map(|i| i.part).collect();
+    assert_eq!(parts, [Some(0), Some(1), Some(1)], "{:?}", list.items);
+    // OUTER's own line, on layer 0 and ByLayer, takes the insert's layer.
+    let outer = &list.items[0];
+    assert_eq!(outer.color, Color(1));
+    near(runs(outer)[0][0], [100.0, 100.0]);
+    near(runs(outer)[0][1], [130.0, 100.0]);
+    // INNER's line: doubled and turned a quarter to (10, 0)-(10, 2) in
+    // OUTER, then trebled and moved to the sheet's insert.
+    let inner = &list.items[1];
+    assert_eq!(inner.color, Color(6));
+    near(runs(inner)[0][0], [130.0, 100.0]);
+    near(runs(inner)[0][1], [130.0, 106.0]);
+    // The nested attribute, filled in by OUTER's definition, at (8, 0) in
+    // OUTER, two high and turned a quarter: on the sheet at (124, 100),
+    // six high.
+    assert_eq!(list.items[2].color, Color(6));
+    let read: Vec<String> = list
+        .text
+        .iter()
+        .map(|r| r.characters.iter().map(|&(c, _)| c).collect())
+        .collect();
+    assert_eq!(read, ["7"]);
+    near(list.text[0].origin, [124.0, 100.0]);
+    near(list.text[0].up, [-6.0, 0.0]);
+    let extents = list.extents().unwrap();
+    assert!(extents.max[1] >= 106.0 - 1e-9, "{extents:?}");
+    assert!(extents.min[0] <= 124.0 - 6.0 + 1e-6, "{extents:?}");
+}
+
+/// A nested insert on a frozen layer draws nothing, and one on layer 0
+/// in a block inserted on a frozen layer draws nothing either.
+#[test]
+fn a_nested_insert_on_a_frozen_layer_draws_nothing() {
+    let library = NESTED_LIBRARY
+        .replace(
+            "units: mm\n",
+            "units: mm\nlayers:\n  cold: {frozen: true}\n",
+        )
+        .replace(
+            "rotation: 90, color: ByBlock",
+            "rotation: 90, layer: cold, color: ByBlock",
+        );
+    let sheet = "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {block: OUTER, position: [0, 0, 0]}\n";
+    let list = draw_with_library("nested-frozen", &library, sheet);
+    let parts: Vec<Option<usize>> = list.items.iter().map(|i| i.part).collect();
+    assert_eq!(parts, [Some(0)], "{:?}", list.items);
+    assert!(list.text.is_empty());
+}

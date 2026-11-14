@@ -248,7 +248,7 @@ impl Sheet<'_> {
                     num(paper.height)
                 ),
             );
-            finding.object = Some(self.checked(i, None));
+            finding.object = Some(self.checked(i, &[]));
             finding.drawn = Some(Extents::of(b));
             finding.paper = Some(paper.clone());
             finding.past = Some(past);
@@ -277,7 +277,9 @@ impl Sheet<'_> {
                     .list
                     .items
                     .iter()
-                    .filter(|item| item.object == i && item.part == Some(cell.object))
+                    .filter(|item| {
+                        item.object == i && item.part == Some(cell.object) && item.nested.is_empty()
+                    })
                     .flat_map(Item::points)
                     .map(|p| placement.back(p[0], p[1]));
                 let Some(b) = Bounds::of(points) else {
@@ -305,7 +307,7 @@ impl Sheet<'_> {
                     format!(
                         "{} draws {} its cell: in the block {}'s own coordinates it draws from {} \
                          to {}, and its cell runs from {} to {} {u}{scaled}",
-                        self.text_words(i, Some(cell.object), ""),
+                        self.text_words(i, &[cell.object], ""),
                         past.words(self.tolerance, insert.scale, u, "side"),
                         block.name,
                         point(b.min),
@@ -314,7 +316,7 @@ impl Sheet<'_> {
                         point(cell.max),
                     ),
                 );
-                finding.object = Some(self.checked(i, Some(cell.object)));
+                finding.object = Some(self.checked(i, &[cell.object]));
                 finding.drawn = Some(Extents::of(&b));
                 finding.cell = Some(Extents::of(&Bounds {
                     min: cell.min,
@@ -357,7 +359,7 @@ impl Sheet<'_> {
                     (b, a)
                 };
                 let deepest = pairs
-                    .entry((boxes[later].key, boxes[earlier].key))
+                    .entry((boxes[later].key.clone(), boxes[earlier].key.clone()))
                     .or_insert((later, earlier, depth));
                 if depth > deepest.2 {
                     *deepest = (later, earlier, depth);
@@ -373,8 +375,8 @@ impl Sheet<'_> {
                     format!(
                         "{} sits on {}: their drawn boxes overlap by {} {u}; it draws from {} to \
                          {}, and the other from {} to {}",
-                        self.text_words(later.key.0, later.key.1, &later.says),
-                        self.text_words(earlier.key.0, earlier.key.1, &earlier.says),
+                        self.text_words(later.key.0, &later.key.1, &later.says),
+                        self.text_words(earlier.key.0, &earlier.key.1, &earlier.says),
                         num(depth),
                         point(later.seen.min),
                         point(later.seen.max),
@@ -382,8 +384,8 @@ impl Sheet<'_> {
                         point(earlier.seen.max),
                     ),
                 );
-                finding.object = Some(self.checked(later.key.0, later.key.1));
-                finding.other = Some(self.checked(earlier.key.0, earlier.key.1));
+                finding.object = Some(self.checked(later.key.0, &later.key.1));
+                finding.other = Some(self.checked(earlier.key.0, &earlier.key.1));
                 finding.drawn = Some(Extents::of(&later.seen));
                 finding.other_drawn = Some(Extents::of(&earlier.seen));
                 finding.overlap = Some(depth);
@@ -401,8 +403,8 @@ impl Sheet<'_> {
         let mut letters: BTreeMap<Key, Ink> = BTreeMap::new();
         let mut lines: BTreeMap<Key, Ink> = BTreeMap::new();
         for item in &printed.items {
-            let key = (item.object, item.part);
-            match self.drawn_as(key) {
+            let key = (item.object, path(item.part, &item.nested));
+            match self.drawn_as(&key) {
                 Drawn::Letters => letters
                     .entry(key)
                     .or_default()
@@ -412,8 +414,8 @@ impl Sheet<'_> {
             }
         }
         let mut findings = Vec::new();
-        for (&text, letter_ink) in &letters {
-            for (&line, line_ink) in &lines {
+        for (text, letter_ink) in &letters {
+            for (line, line_ink) in &lines {
                 // An insert's own lines, such as its cell lines, never
                 // count against its own text.
                 if line.0 == text.0 {
@@ -425,7 +427,7 @@ impl Sheet<'_> {
                 let says = printed
                     .text
                     .iter()
-                    .filter(|run| (run.object, run.part) == text)
+                    .filter(|run| run.object == text.0 && path(run.part, &run.nested) == text.1)
                     .map(|run| run.characters.iter().map(|&(c, _)| c).collect::<String>())
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -433,13 +435,13 @@ impl Sheet<'_> {
                     Rule::TextOnLine,
                     format!(
                         "{} runs through {}: it touches the letters at {}, as they print",
-                        self.line_words(line.0, line.1),
-                        self.text_words(text.0, text.1, &says),
+                        self.line_words(line.0, &line.1),
+                        self.text_words(text.0, &text.1, &says),
                         point(at),
                     ),
                 );
-                finding.object = Some(self.checked(text.0, text.1));
-                finding.other = Some(self.checked(line.0, line.1));
+                finding.object = Some(self.checked(text.0, &text.1));
+                finding.other = Some(self.checked(line.0, &line.1));
                 finding.drawn = letter_ink.bounds.as_ref().map(Extents::of);
                 finding.other_drawn = line_ink.bounds.as_ref().map(Extents::of);
                 finding.at = Some(at);
@@ -450,9 +452,10 @@ impl Sheet<'_> {
     }
 
     /// What the sheet's object `i` draws, or the object of its block at
-    /// `part`: letters, a line, or a fill that no line rule counts.
-    fn drawn_as(&self, (i, part): Key) -> Drawn {
-        let object = match self.in_block(i, part) {
+    /// `path`: letters, a line, or a fill that no line rule counts.
+    fn drawn_as(&self, (i, path): &Key) -> Drawn {
+        let i = *i;
+        let object = match self.in_block(i, path) {
             Some(inner) => inner.object,
             None => &self.record.sheet.objects[i],
         };
@@ -471,15 +474,16 @@ impl Sheet<'_> {
     }
 
     /// A line, as a finding names it: the sheet's object `i`, or the
-    /// object of its block at `part` and the insert that draws it.
-    fn line_words(&self, i: usize, part: Option<usize>) -> String {
+    /// object of its block at `path` and the insert that draws it.
+    fn line_words(&self, i: usize, path: &[usize]) -> String {
         let words = self.object_words(i);
-        match self.in_block(i, part) {
+        match self.in_block(i, path) {
             Some(inner) => format!(
-                "the {} at `{}` of the block {} that {words} inserts",
+                "the {} at `{}` of the block {} {}",
                 inner.object.type_name(),
                 inner.field(),
-                inner.block.name
+                inner.block.name,
+                inner.inserted_by(&words)
             ),
             None => words,
         }
@@ -494,29 +498,41 @@ impl Sheet<'_> {
             .find(|b| b.name == insert.block)
     }
 
-    /// The object of an insert's block at `part` that the sheet's object
-    /// `i` draws, when `i` is an insert.
-    fn in_block(&self, i: usize, part: Option<usize>) -> Option<InBlock<'_>> {
-        let Object::Insert(insert) = &self.record.sheet.objects[i] else {
+    /// The object at `path` that the sheet's object `i` draws, when `i` is
+    /// an insert: the object of its block at the path's first place, or,
+    /// through each insert nested in that block in turn, of the innermost
+    /// block.
+    fn in_block(&self, i: usize, path: &[usize]) -> Option<InBlock<'_>> {
+        let Object::Insert(outermost) = &self.record.sheet.objects[i] else {
             return None;
         };
-        let block = self.block(insert)?;
-        let index = part?;
+        let (&index, through) = path.split_last()?;
+        let mut insert = outermost;
+        let mut block = self.block(insert)?;
+        let top = &block.name;
+        for &at in through {
+            let Some(Object::Insert(inner)) = block.objects.get(at) else {
+                return None;
+            };
+            insert = inner;
+            block = self.block(insert)?;
+        }
         Some(InBlock {
             insert,
             block,
             index,
             object: block.objects.get(index)?,
+            nested_in: (!through.is_empty()).then_some(top.as_str()),
         })
     }
 
     /// The sheet's object `i`, as a finding names it: by its ID, its name
     /// and where it is written, and for `part` of an insert, which object
     /// of its block.
-    fn checked(&self, i: usize, part: Option<usize>) -> CheckedObject {
+    fn checked(&self, i: usize, path: &[usize]) -> CheckedObject {
         let record = self.record;
         let object = &record.sheet.objects[i];
-        let (in_block, text) = match self.in_block(i, part) {
+        let (in_block, text) = match self.in_block(i, path) {
             Some(inner) => {
                 let tag = match inner.object {
                     Object::AttributeDefinition(d) => Some(d.tag.clone()),
@@ -577,13 +593,13 @@ impl Sheet<'_> {
         )
     }
 
-    /// The text the sheet's object `i` draws, at `part` of an insert's
+    /// The text the sheet's object `i` draws, at `path` of an insert's
     /// block, in words, such as "the attribute TITLE of the insert
     /// `DEMO-001/objects[2]`". `line` is the line of an mtext meant.
-    fn text_words(&self, i: usize, part: Option<usize>, line: &str) -> String {
+    fn text_words(&self, i: usize, path: &[usize], line: &str) -> String {
         let words = self.object_words(i);
         let on_line = format!(" on its line `{line}`");
-        let Some(inner) = self.in_block(i, part) else {
+        let Some(inner) = self.in_block(i, path) else {
             return match &self.record.sheet.objects[i] {
                 Object::Text(t) => format!("{words} saying `{}`", t.contents),
                 Object::MText(_) => format!("{words}{on_line}"),
@@ -591,18 +607,28 @@ impl Sheet<'_> {
             };
         };
         match inner.object {
-            Object::AttributeDefinition(d) => format!(
+            Object::AttributeDefinition(d) if inner.nested_in.is_none() => format!(
                 "the attribute {} of {words} saying `{}`",
                 d.tag,
                 inner.says().unwrap_or_default()
             ),
+            Object::AttributeDefinition(d) => format!(
+                "the attribute {} of the block {} saying `{}`, {}",
+                d.tag,
+                inner.block.name,
+                inner.says().unwrap_or_default(),
+                inner.inserted_by(&words)
+            ),
             Object::Text(t) => format!(
-                "the text `{}` of the block {} that {words} inserts",
-                t.contents, inner.block.name
+                "the text `{}` of the block {} {}",
+                t.contents,
+                inner.block.name,
+                inner.inserted_by(&words)
             ),
             Object::MText(_) => format!(
-                "the mtext at `{}`{on_line}, that {words} inserts",
-                inner.field()
+                "the mtext at `{}`{on_line}, {}",
+                inner.field(),
+                inner.inserted_by(&words)
             ),
             _ => words,
         }
@@ -611,14 +637,28 @@ impl Sheet<'_> {
 
 /// One object of an insert's block, as the insert draws it.
 struct InBlock<'a> {
+    /// The insert of `block`: the sheet's, or one nested in its block.
     insert: &'a Insert,
     block: &'a Block,
     /// Its place in the block's objects.
     index: usize,
     object: &'a Object,
+    /// When `insert` is nested, the block of the sheet's insert, which
+    /// holds it.
+    nested_in: Option<&'a str>,
 }
 
 impl InBlock<'_> {
+    /// Which insert puts it on the sheet, in words, given the sheet's
+    /// insert's: "that the insert ... inserts", or, nested, "nested in the
+    /// block STRIP that the insert ... inserts".
+    fn inserted_by(&self, words: &str) -> String {
+        match self.nested_in {
+            None => format!("that {words} inserts"),
+            Some(top) => format!("nested in the block {top} that {words} inserts"),
+        }
+    }
+
     /// Its place in the block library, such as
     /// `blocks.TITLE_BLOCK.objects[13]`.
     fn field(&self) -> String {
@@ -650,9 +690,17 @@ fn says(object: &Object) -> Option<String> {
     }
 }
 
-/// Which text draws a line: the sheet's object, and the object of its block
-/// when it is an insert's.
-type Key = (usize, Option<usize>);
+/// Which object draws a shape: the sheet's object, and when it is an
+/// insert, the path to the object of its block, through any nested inserts,
+/// as [`path`] gives it.
+type Key = (usize, Vec<usize>);
+
+/// The path to the object of an insert's block that draws an item or a
+/// line of text: its `part`, then its `nested` places. Empty for an object
+/// of the sheet's own.
+fn path(part: Option<usize>, nested: &[usize]) -> Vec<usize> {
+    part.into_iter().chain(nested.iter().copied()).collect()
+}
 
 /// What an object draws, for `text_on_line`.
 enum Drawn {
@@ -697,7 +745,7 @@ impl TextBox {
             (length > 0.0).then(|| [v[0] / length, v[1] / length])
         };
         Some(TextBox {
-            key: (run.object, run.part),
+            key: (run.object, path(run.part, &run.nested)),
             says: run.characters.iter().map(|&(c, _)| c).collect(),
             along: unit(run.across)?,
             up: unit(run.up)?,

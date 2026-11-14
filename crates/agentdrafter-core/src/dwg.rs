@@ -466,17 +466,32 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         }
     }
     let (text_styles, text_styles_not_read) = text::read_text_styles(&drawing);
-    let mut blocks = Vec::new();
-    let mut blocks_not_read = 0;
-    for record in drawing.block_records.iter() {
-        if record.is_model_space() || record.is_paper_space() || record.is_layout() {
-            continue;
+    // A block that inserts another is read once that one is: each round
+    // reads every block it can with the blocks read before it, until a
+    // round reads none.
+    let records: Vec<&BlockRecord> = drawing
+        .block_records
+        .iter()
+        .filter(|r| !(r.is_model_space() || r.is_paper_space() || r.is_layout()))
+        .collect();
+    let mut read: Vec<Option<Block>> = records.iter().map(|_| None).collect();
+    loop {
+        let known: Vec<Block> = read.iter().flatten().cloned().collect();
+        let mut more = false;
+        for (slot, record) in read.iter_mut().zip(&records) {
+            if slot.is_none() {
+                if let Some(definition) = read_block(&drawing, record, &known) {
+                    *slot = Some(definition);
+                    more = true;
+                }
+            }
         }
-        match read_block(&drawing, record) {
-            Some(definition) => blocks.push(definition),
-            None => blocks_not_read += 1,
+        if !more {
+            break;
         }
     }
+    let blocks_not_read = read.iter().filter(|b| b.is_none()).count();
+    let blocks: Vec<Block> = read.into_iter().flatten().collect();
     let mut objects = Vec::new();
     let mut ids_and_names = Vec::new();
     let mut objects_not_read = 0;
@@ -512,8 +527,8 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
 
 /// A block definition the core can read back whole: named, not an
 /// external reference, and holding only objects the core has a model for,
-/// none of them an insert.
-fn read_block(drawing: &CadDocument, record: &BlockRecord) -> Option<Block> {
+/// an insert among them only of one of `blocks`.
+fn read_block(drawing: &CadDocument, record: &BlockRecord, blocks: &[Block]) -> Option<Block> {
     if record.is_anonymous()
         || record.flags.is_xref
         || record.flags.is_xref_overlay
@@ -526,8 +541,7 @@ fn read_block(drawing: &CadDocument, record: &BlockRecord) -> Option<Block> {
         if matches!(dwg_object, EntityType::Block(_) | EntityType::BlockEnd(_)) {
             continue;
         }
-        // No blocks are given, so an insert inside a block is not read.
-        objects.push(read_object(dwg_object, &[])?);
+        objects.push(read_object(dwg_object, blocks)?);
     }
     Some(Block {
         name: record.name.clone(),

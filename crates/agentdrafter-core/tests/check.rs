@@ -906,3 +906,66 @@ objects:
     );
     assert_eq!(of(&stem, Rule::TextOnLine).len(), 1, "{:#?}", stem.findings);
 }
+
+/// A line through the letters of an attribute an insert nested in a block
+/// draws is found, and named through the block that holds the nested
+/// insert; the nested block's own lines round it are not.
+#[test]
+fn a_line_through_a_nested_inserts_attribute_is_found() {
+    let dir = scratch("text-on-line-nested");
+    fs::write(
+        dir.join("strip.yaml"),
+        "units: mm
+blocks:
+  STRIP:
+    objects:
+      - polyline: {points: [[0, 0, 0], [30, 0, 0], [30, 10, 0], [0, 10, 0]], closed: true}
+      - insert: {block: TERMINAL, position: [8, 5, 0], attributes: {NUMBER: '1'}}
+      - insert: {block: TERMINAL, position: [22, 5, 0], attributes: {NUMBER: '2'}}
+  TERMINAL:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 4}
+      - attdef: {tag: NUMBER, position: [0, 0, 0], height: 3, justify: middle_center}
+",
+    )
+    .unwrap();
+    let sheet = |extra: &str| {
+        format!(
+            "units: mm
+paper: [200, 100]
+block_library: strip.yaml
+layers:
+  trim: {{plot: false}}
+objects:
+{TRIM}  - insert: {{block: STRIP, position: [100, 50, 0], id: strip}}
+{extra}"
+        )
+    };
+    let path = dir.join("sheet.yaml");
+    fs::write(&path, sheet("")).unwrap();
+    passes(&check(&path, &[]));
+
+    // A wire down through the second terminal's number, at x = 122.
+    fs::write(
+        &path,
+        sheet("  - line: {from: [122, 20, 0], to: [122, 80, 0], id: wire}\n"),
+    )
+    .unwrap();
+    let report = check(&path, &[]);
+    let found = of(&report, Rule::TextOnLine);
+    assert_eq!(found.len(), 1, "{:#?}", report.findings);
+    let object = found[0].object.as_ref().unwrap();
+    assert_eq!(object.id, "sheet/strip");
+    let part = object.in_block.as_ref().unwrap();
+    assert_eq!(part.block, "TERMINAL");
+    assert_eq!(part.tag.as_deref(), Some("NUMBER"));
+    assert_eq!(part.field, "blocks.TERMINAL.objects[1]");
+    assert_eq!(object.text.as_deref(), Some("2"));
+    assert!(
+        found[0].message.contains(
+            "runs through the attribute NUMBER of the block TERMINAL saying `2`, nested in the block STRIP that the insert `sheet/strip`"
+        ),
+        "{}",
+        found[0].message
+    );
+}
