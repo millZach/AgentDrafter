@@ -64,5 +64,17 @@
       "args": ["import-blocks", "demo-set/dwg/DEMO-001.dwg", "--library", "imported-blocks.yaml", "--block", "title_block"],
       "input": {"drawing": "demo-set/dwg/DEMO-001.dwg", "library": "imported-blocks.yaml", "blocks": ["title_block"]}
     }
-  }
+  },
+  "also": [
+    {
+      "command": "query",
+      "args": ["query", "snap", "demo-set", "--id", "DEMO-001/objects[2]", "--snap", "perpendicular", "--from", "DEMO-001/border", "--from-snap", "endpoint", "--from-which", "points[2]"],
+      "input": {"source": "demo-set", "query": {"kind": "snap", "id": "DEMO-001/objects[2]", "snap": "perpendicular", "from": {"id": "DEMO-001/border", "snap": "endpoint", "which": "points[2]"}}}
+    },
+    {
+      "command": "query",
+      "args": ["query", "geometry", "demo-set", "--id", "DEMO-002/border"],
+      "input": {"source": "demo-set", "query": {"kind": "geometry", "id": "DEMO-002/border"}}
+    }
+  ]
 }

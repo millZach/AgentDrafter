@@ -385,6 +385,25 @@ fn calls() -> BTreeMap<String, (Vec<String>, Value)> {
         .collect()
 }
 
+/// Further calls of commands, made after each command's own, as the
+/// command name, the command line's arguments and the input the servers
+/// take: the kinds of a command one call cannot cover, such as each kind of
+/// query.
+fn also() -> Vec<(String, Vec<String>, Value)> {
+    shared()["also"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|call| {
+            (
+                call["command"].as_str().unwrap().to_owned(),
+                serde_json::from_value(call["args"].clone()).unwrap(),
+                call["input"].clone(),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn every_command_of_the_registry_is_reachable_through_every_interface_with_the_same_reply() {
     let (cli_dir, http_dir, mcp_dir) = (
@@ -416,13 +435,20 @@ fn every_command_of_the_registry_is_reachable_through_every_interface_with_the_s
         assert_eq!(tool["inputSchema"], command.input_schema());
     }
 
-    // Each command, run through each interface, gives the same reply.
+    // Each command, run through each interface, gives the same reply; then
+    // the further calls of a command whose kinds one call cannot cover.
     let calls = calls();
+    let mut runs: Vec<(String, Vec<String>, Value)> = Vec::new();
     for command in registry {
         let name = command.name();
         let Some((args, input)) = calls.get(name) else {
             panic!("`{name}` is in the registry: add a call of it to tests/calls.json");
         };
+        runs.push((name.to_owned(), args.clone(), input.clone()));
+    }
+    runs.extend(also());
+    for (name, args, input) in &runs {
+        let (name, input) = (name.as_str(), input);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let (code, by_cli) = cli(&args, &cli_dir);
         let (status, by_http) = http.run(name, input);

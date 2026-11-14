@@ -138,3 +138,76 @@ fn query_measuring_to_an_object_nobody_has_matches_nothing() {
     assert_eq!(code, 2, "{json}");
     assert_eq!(json["error"]["code"], "usage");
 }
+
+#[test]
+fn query_snaps_to_an_object_and_gives_its_geometry() {
+    let dir = demo_set("snaps");
+    let (code, json) = agentdrafter(
+        &[
+            "query",
+            "snap",
+            "demo-set",
+            "--id",
+            "DEMO-001/border",
+            "--snap",
+            "endpoint",
+            "--which",
+            "points[2]",
+        ],
+        &dir,
+    );
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(
+        json["result"]["points"],
+        json!([{"snap": "endpoint", "which": "points[2]", "at": [16.5, 10.5, 0.0]}])
+    );
+
+    // The nearest point of the border to the title block's insertion point,
+    // which sits on its corner.
+    let (code, json) = agentdrafter(
+        &[
+            "query",
+            "snap",
+            "demo-set",
+            "--id",
+            "DEMO-001/border",
+            "--snap",
+            "nearest",
+            "--from",
+            "DEMO-001/objects[2]",
+            "--from-snap",
+            "insertion",
+            "--from-which",
+            "position",
+        ],
+        &dir,
+    );
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["from"]["at"], json!([16.5, 0.5, 0.0]));
+    assert_eq!(json["result"]["points"][0]["at"], json!([16.5, 0.5, 0.0]));
+
+    let (code, json) = agentdrafter(
+        &["query", "geometry", "demo-set", "--id", "DEMO-002/border"],
+        &dir,
+    );
+    assert_eq!(code, 0, "{json}");
+    let border = &json["result"]["objects"][0];
+    assert_eq!(border["length"], 52.0);
+    assert_eq!(border["area"], 160.0);
+
+    // A snap AutoCAD has not is the command called wrongly.
+    let (code, json) = agentdrafter(
+        &[
+            "query",
+            "snap",
+            "demo-set",
+            "--id",
+            "DEMO-001/border",
+            "--snap",
+            "middle",
+        ],
+        &dir,
+    );
+    assert_eq!(code, 2, "{json}");
+    assert_eq!(json["error"]["code"], "usage");
+}

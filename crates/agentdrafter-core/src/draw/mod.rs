@@ -59,8 +59,8 @@ pub(crate) mod curves;
 mod hatch;
 mod linetype;
 mod pick;
-mod polyline;
-mod text;
+pub(crate) mod polyline;
+pub(crate) mod text;
 
 use serde::{Deserialize, Serialize};
 

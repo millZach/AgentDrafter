@@ -31,11 +31,17 @@ use crate::build::is_same_file;
 use crate::description::{read_sheet_record, SavedSet, SheetRecord};
 use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
+use crate::geometry::snap::SnapPoint;
+use crate::geometry::{ObjectRef, SnapRef};
 use crate::model::{Attribute, Layer, Object, Point3, Sheet, LAYER_ZERO};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
+
+mod snap;
+
+pub use snap::{ObjectGeometry, SnapObject, SnappedFrom};
 
 /// How finely a sheet's curves are drawn to find its extents: within this
 /// share of the sheet's larger side.
@@ -75,6 +81,12 @@ pub enum Query {
     /// The layers of each sheet, with their states and how many of its
     /// objects sit on each.
     Layers,
+    /// The points AutoCAD's object snaps find on an object, or between it
+    /// and another.
+    Snap(SnapRef),
+    /// The length, area, extents and angles of each object that matches
+    /// every part of the selection.
+    Geometry(Selection),
 }
 
 /// A [`Query`] as it is read. A kind that takes nothing is an empty struct
@@ -90,6 +102,8 @@ enum QueryInput {
     Measure(Measure),
     Extents {},
     Layers {},
+    Snap(SnapRef),
+    Geometry(Selection),
 }
 
 impl From<QueryInput> for Query {
@@ -101,6 +115,8 @@ impl From<QueryInput> for Query {
             QueryInput::Measure(measure) => Self::Measure(measure),
             QueryInput::Extents {} => Self::Extents,
             QueryInput::Layers {} => Self::Layers,
+            QueryInput::Snap(snap) => Self::Snap(snap),
+            QueryInput::Geometry(selection) => Self::Geometry(selection),
         }
     }
 }
@@ -252,6 +268,28 @@ pub enum Answer {
         count: usize,
         /// Each sheet looked at, with its layers.
         layers: Vec<SheetLayers>,
+    },
+    /// The points a snap found; when an object it names matches none, no
+    /// points and only the objects that matched.
+    Snap {
+        /// How many points were found; 0 when none were.
+        count: usize,
+        /// The object snapped to.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        object: Option<SnapObject>,
+        /// The other object of an intersection.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        with: Option<SnapObject>,
+        /// The point a perpendicular, a tangent or a nearest point is
+        /// taken from.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<Box<SnappedFrom>>,
+        points: Vec<SnapPoint>,
+    },
+    Geometry {
+        /// How many objects matched; 0 when none did.
+        count: usize,
+        objects: Vec<ObjectGeometry>,
     },
 }
 
@@ -441,6 +479,10 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
         Query::Measure(measure) => self::measure(&looked_at, measure, units, &looked)?,
         Query::Extents => extents(&looked_at, settings, units, &looked),
         Query::Layers => layers(&looked_at, &looked),
+        Query::Snap(request) => snap::snap(&looked_at, request, settings, &looked)?,
+        Query::Geometry(selection) => {
+            snap::geometry(&looked_at, selection, settings, units, &looked)
+        }
     };
     Ok(QueryReport {
         source: source.display().to_string(),
@@ -1009,57 +1051,14 @@ impl End {
 /// `sheets` has the ID or name it gives. `field` is the end's place in the
 /// request, for an error.
 fn end(sheets: &[&SheetRecord], end: &End, field: &str) -> Result<Option<MeasuredPoint>, Error> {
-    let found: Vec<(&SheetRecord, usize)> = match (&end.id, &end.name) {
-        (Some(id), None) => sheets
-            .iter()
-            .flat_map(|record| {
-                (0..record.objects.len())
-                    .filter(|&i| Matching::Exact.identifier(&record.id(i), id))
-                    .map(|i| (*record, i))
-            })
-            .take(1)
-            .collect(),
-        (None, Some(name)) => sheets
-            .iter()
-            .flat_map(|record| {
-                record
-                    .objects
-                    .iter()
-                    .position(|r| {
-                        r.name
-                            .as_deref()
-                            .is_some_and(|have| Matching::Exact.identifier(have, name))
-                    })
-                    .map(|i| (*record, i))
-            })
-            .collect(),
-        _ => {
-            return Err(Error::usage(
-                "each end of a distance names its object by `id` or by `name`, and not both",
-            )
-            .at_field(field.to_owned()))
-        }
+    let named = ObjectRef {
+        id: end.id.clone(),
+        name: end.name.clone(),
     };
-    let (record, index) = match found.as_slice() {
-        [] => return Ok(None),
-        [one] => *one,
-        several => {
-            return Err(Error::new(
-                ErrorCode::BadValue,
-                format!(
-                    "{} is given on {} sheets, {}, and a name is given once on a sheet; name \
-                     the sheet to measure on, or give the object's ID",
-                    end.words(),
-                    several.len(),
-                    several
-                        .iter()
-                        .map(|(r, _)| r.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            )
-            .at_field(format!("{field}.name")))
-        }
+    let Some((record, index)) =
+        object_named(sheets, &named, field, "each end of a distance", "measure")?
+    else {
+        return Ok(None);
     };
     let object = &record.sheet.objects[index];
     let id = record.id(index);
@@ -1112,11 +1111,73 @@ fn no_point(object: &Object, id: &str, field: &str) -> Error {
 }
 
 /// "a line", "an insert".
-fn article(kind: &str) -> String {
+pub(crate) fn article(kind: &str) -> String {
     if kind.starts_with(['a', 'e', 'i', 'o', 'u']) || kind == "mtext" || kind == "mleader" {
         format!("an {kind}")
     } else {
         format!("a {kind}")
+    }
+}
+
+/// The object `object` names on `sheets`, by its ID or by its name; none
+/// when no object there has it. `field` is its place in the request, for an
+/// error; `naming` says what names it, such as "each end of a distance",
+/// and `doing` what is done on the sheet it is on, such as "measure".
+pub(crate) fn object_named<'a>(
+    sheets: &[&'a SheetRecord],
+    object: &ObjectRef,
+    field: &str,
+    naming: &str,
+    doing: &str,
+) -> Result<Option<(&'a SheetRecord, usize)>, Error> {
+    let found: Vec<(&SheetRecord, usize)> = match (&object.id, &object.name) {
+        (Some(id), None) => sheets
+            .iter()
+            .flat_map(|record| {
+                (0..record.objects.len())
+                    .filter(|&i| Matching::Exact.identifier(&record.id(i), id))
+                    .map(|i| (*record, i))
+            })
+            .take(1)
+            .collect(),
+        (None, Some(name)) => sheets
+            .iter()
+            .flat_map(|record| {
+                record
+                    .objects
+                    .iter()
+                    .position(|r| {
+                        r.name
+                            .as_deref()
+                            .is_some_and(|have| Matching::Exact.identifier(have, name))
+                    })
+                    .map(|i| (*record, i))
+            })
+            .collect(),
+        _ => {
+            return Err(Error::usage(format!(
+                "{naming} names its object by `id` or by `name`, and not both"
+            ))
+            .at_field(field.to_owned()))
+        }
+    };
+    match found.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(*one)),
+        several => Err(Error::new(
+            ErrorCode::BadValue,
+            format!(
+                "{} is given on {} sheets, {}, and a name is given once on a sheet; name the                  sheet to {doing} on, or give the object's ID",
+                object.words(),
+                several.len(),
+                several
+                    .iter()
+                    .map(|(r, _)| r.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .at_field(format!("{field}.name"))),
     }
 }
 

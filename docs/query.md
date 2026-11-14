@@ -1,6 +1,6 @@
 # Queries
 
-A query is what an agent asks a drawing set about what is on its sheets, to check its own work: which objects carry a tag or say a piece of text, which blocks a sheet inserts, what an insert's attributes are, how far apart two objects are and how large a sheet is (see [`CONTEXT.md`](../CONTEXT.md)). Objects are selected by [ID](sheet-description.md#ids-and-names), name, block, attribute or text, never by coordinates. A query changes nothing.
+A query is what an agent asks a drawing set about what is on its sheets, to check its own work: which objects carry a tag or say a piece of text, which blocks a sheet inserts, what an insert's attributes are, how far apart two objects are, how large a sheet is, which points AutoCAD's object snaps find on an object and how long an object is and what it encloses (see [`CONTEXT.md`](../CONTEXT.md)). Objects are selected by [ID](sheet-description.md#ids-and-names), name, block, attribute or text, never by coordinates. A query changes nothing.
 
 `agentdrafter query <kind> <drawing-set-folder | sheet-description> [options]` asks a drawing set's folder, or one sheet description, and prints one line of JSON. It is a thin layer over the core's `query_with`, which takes a request and returns the answer as plain data (ADR-0007).
 
@@ -122,23 +122,97 @@ A point is named as its key in the sheet description. Without one, the object's 
 {"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-003"],"message":"sheet `DEMO-003` draws within 17 by 11 in, from [0, 0] to [17, 11]","kind":"extents","count":1,"extents":[{"sheet":"DEMO-003","extents":{"min":[0.0,0.0],"max":[17.0,11.0],"width":17.0,"height":11.0}}],"font_substitutions":[{"style":"notes","font":"romans.shx","used":"Hershey Roman Simplex","why":"no font folder is set"},"..."]}}
 ```
 
+## Snap
+
+`agentdrafter query snap <source> (--id <id> | --name <name>) [--snap <snap>] [--which <which>] [--with <id> | --with-name <name>] [--from <id> | --from-name <name> --from-snap <snap> [--from-which <which>]] [--sheet <sheet>] [--fonts <folder>]...` gives the points AutoCAD's [object snaps](../CONTEXT.md) find on an object, each in the declared unit: its `snap`, which of the object's points it is (`which`), and where it is (`at`). The object is named by its ID or its name, as an end of a [measure](#measure) is, with `--sheet` when its name is on more than one of the sheets looked at. Without `--snap`, every snap of the object by itself: endpoint, midpoint, center, quadrant, insertion and node. Everything is seen from above, as AutoCAD's snaps are in its top view, and every point keeps its height.
+
+**A snapped point is named so it can be asked for again.** Its `which` is its place in the object, such as `points[2]`, `segments[1]` or `objects[3].to`, and the same object, `snap` and `which` give the same point. A point the object has once, with no place of its own, such as a line's midpoint or a circle's centre, has no `which` and needs none. In JSON a snap is written `{"kind": "snap", "id": "lugs/strip", "snap": "endpoint", "which": "objects[0].objects[1].to"}`, with `with` and `from` as below; the same mapping, without `kind`, is the snapped point an operation will take.
+
+| Object | `endpoint` | `midpoint` | `center` | `quadrant` | `insertion` | `node` |
+|---|---|---|---|---|---|---|
+| `line` | `from`, `to` | its middle | | | | |
+| `polyline` | `points[0]`, ... | `segments[i]`, the segment from point `i`, along its arc when it is one; a closed polyline's last runs back to its first point | `segments[i]` of each arc segment | `segments[i].0`, `.90`, `.180`, `.270` of each arc segment, those on it | | |
+| `arc` | `start`, `end` | along its arc | its centre | `0`, `90`, `180`, `270`, those on it | | |
+| `circle` | | | its centre | `0`, `90`, `180`, `270` | | |
+| `ellipse` | an elliptical arc's `start`, `end` | halfway along an elliptical arc | its centre | the ends of its axes, `0` and `180` on the major axis, `90` and `270` on the minor, those on it | | |
+| `spline` | `fit_points[0]` and its last, or `control_points[0]` and its last | halfway along it | | | | |
+| `donut` | `points[0]`, `points[1]`, the ends of its two half circles | `segments[0]`, `segments[1]` | its centre | `0`, `90`, `180`, `270` on its middle circle | | |
+| `solid` | `corners[0]`, ... | `segments[i]`, round its outline, the last back to the first | | | | |
+| `text`, `attdef` | | | | | its position | where its baseline starts, when it is justified other than left |
+| `mtext` | | | | | its position | |
+| `table` | `borders[i].from`, `borders[i].to` | `borders[i]` | | | its position | |
+| `leader` | `points[0]`, ..., and `hook`, where AutoCAD's hook starts | `segments[i]` of what it draws, its hook among them | | | its annotation's | |
+| `mleader` | `leaders[i][j]`, each point of each leader line as it is laid out, and `landing`, the landing's far end | | | | its content's | |
+| `hatch` | none: AutoCAD snaps to no hatch while `OSNAPHATCH` is 0, as it is unless set | | | | | |
+
+A table's `borders` are its lines as AutoCAD draws them: each row's boundary from left to right, top to bottom, then each column's from top to bottom, left to right, each running whole until a merged cell breaks it. A multileader is snapped to only at the ends of its lines and its content, as AutoCAD 2026 found no midpoint and no nearest point along it.
+
+**An insert snaps to its block's own geometry.** Every object of the block, and of each block nested in it, is snapped to where the insert places it, moved, scaled and turned, its quadrants turned with it. Its `which` is its place in the block, `objects[3].to`, and in a block nested in it, `objects[0].objects[1].to`; `blocks` lists the blocks that place passes into, the insert's first. The insert's own point is its insertion point `position`; each visible attribute's, and each text's of its blocks, is the insertion point of the definition's place, `objects[2]`. An insert nested in a block has no insertion point of its own: AutoCAD's insertion snap on it finds the point of the insert that holds it. The made-up [example](../examples/snaps/lugs.yaml) inserts a strip of two lugs, turned 90° and twice as large, and draws a wire to the end of the first lug's stub:
+
+```json
+{"ok":true,"result":{"source":"examples/snaps/lugs.yaml","units":"mm","sheets":["lugs"],"message":"the endpoint of the insert `lugs/strip`, on sheet `lugs`: [50, 52, 0]","kind":"snap","count":1,"object":{"sheet":"lugs","id":"lugs/strip","type":"insert"},"points":[{"snap":"endpoint","which":"objects[0].objects[1].to","blocks":["STRIP","LUG"],"at":[50.0,52.0,0.0]}]}}
+```
+
+**Between two objects.** `intersection` and `apparent_intersection` take the other object as `--with` (`with` in JSON). They list every point where the two cross, inserts' block geometry among them, in the order they lie along the first object, named `0`, `1`, ... when there are several; `with_part` is the place in the other object of what it crosses there, and `part` the place in the first. An intersection is where the two meet in space; an apparent intersection where they cross seen from above, whatever their heights, at the first object's height. The wire meets the lug's stub at its end, and crosses the strip's frame:
+
+```json
+{"ok":true,"result":{"source":"examples/snaps/lugs.yaml","units":"mm","sheets":["lugs"],"message":"2 intersections of the line `lugs/wire` with the insert `lugs/strip`, on sheet `lugs`","kind":"snap","count":2,"object":{"sheet":"lugs","id":"lugs/wire","type":"line"},"with":{"sheet":"lugs","id":"lugs/strip","type":"insert"},"points":[{"snap":"intersection","which":"0","with_part":"objects[0].objects[1]","at":[50.0,52.0,0.0]},{"snap":"intersection","which":"1","with_part":"objects[2].segments[2]","at":[28.0,57.86666666666667,0.0]}]}}
+```
+
+`perpendicular`, `tangent` and `nearest` are taken from a point: `--from`, a snap of another object, given as a snap is (`from` in JSON), which must name one point. They list each point, nearest the point taken from first, named `0`, `1`, ... when there are several. A perpendicular to a line or a straight segment reaches past its ends, as AutoCAD's does, and one to an arc or a curve is on it. A tangent touches an arc, a circle, an ellipse or a spline, from a point outside it. The nearest point is the one point of the object nearest it. The reply gives the point taken from under `from`:
+
+```json
+{"ok":true,"result":{"source":"examples/snaps/lugs.yaml","units":"mm","sheets":["lugs"],"message":"the nearest point of the line `lugs/wire`, on sheet `lugs`: [38.04979253112033, 55.18672199170125, 0]","kind":"snap","count":1,"object":{"sheet":"lugs","id":"lugs/wire","type":"line"},"from":{"sheet":"lugs","id":"lugs/strip","type":"insert","snap":"center","which":"objects[1].objects[0]","at":[34.0,40.0,0.0]},"points":[{"snap":"nearest","at":[38.04979253112033,55.18672199170125,0.0]}]}}
+```
+
+**A snap that finds nothing is not an error.** An object, a `with` or a `from` that no object on the sheets looked at has the ID or name of, and a snap the object has none of, such as a line's centre, answer `ok`, with `count` 0 and a `message` saying so. The two objects of a snap are on one sheet.
+
+## Geometry
+
+`agentdrafter query geometry <source>` with the options of [`find`](#find) gives each matching object's length, area, extents and angles, as AutoCAD's LIST and AREA give them, in the declared unit and degrees, and under `without` what it has none of:
+
+| Object | `length` | `area` | `extents` | Angles |
+|---|---|---|---|---|
+| `line` | in space | | its ends | `angle`, in the XY plane, anticlockwise from the X axis |
+| `polyline` | along its segments and arcs | when it is closed | round its points and arcs, and round the band it fills when it has a width | |
+| `arc` | along it | | | `start_angle`, `end_angle` and `total_angle`, the angle it sweeps |
+| `circle` | its circumference | yes | yes | |
+| `ellipse` | its perimeter, or an elliptical arc's length | a whole ellipse's | yes | |
+| `spline` | along it | when its ends meet | yes | |
+| `donut` | its middle circle's | its middle circle's | its outside circle's | |
+| `solid` | | yes | its corners | |
+| `hatch` | | what it fills: a loop inside an odd number of others is a hole | its boundary's | |
+| anything else | | | | |
+
+Lengths and areas are measured along a polyline's middle, whatever its width, as AutoCAD's AREA measures a wide polyline, and a donut is the polyline AutoCAD draws it as. Extents are the box round the object's own geometry, `min` and `max` `[x, y, z]`, worked out exactly from its curves; text, inserts, tables and leaders have none here, as their extents are their fonts', which [`extents`](#extents) gives for the sheet. An ellipse's and a spline's lengths and areas are integrated to within a ten-billionth.
+
+```json
+{"ok":true,"result":{"source":"examples/snaps/lugs.yaml","units":"mm","sheets":["lugs"],"message":"a polyline `lugs/plate`, on sheet `lugs`, is 135.70796326794897 mm long and encloses 1178.539816339745 square mm","kind":"geometry","count":1,"objects":[{"sheet":"lugs","id":"lugs/plate","type":"polyline","length":135.70796326794897,"area":1178.539816339745,"extents":{"min":[0.0,0.0,0.0],"max":[40.0,30.0,0.0]},"without":["angle"]}]}}
+```
+
+**What AutoCAD 2026 gave.** On a made-up sheet of every kind of object, with an insert scaled, turned and nested, AutoCAD 2026's own snaps (`osnap`) and measures (`vlax-curve`, AREA) gave every point and value above to within a millionth. Where AutoCAD approximates, the query does not: AutoCAD's own length of a spline by control points, and the midpoint it snaps to on a spline, which it places by that length, were up to 1.6e-5 of the length away from the curve's exact length, which the same curve summed along 50,000 of AutoCAD's own points matched; and its extents, which it takes from the curves as it draws them, fell short of an arc's reach by up to 2.4e-4 mm.
+
 ## Errors
 
 Errors take the shape and codes a sheet description's do ([Errors](sheet-description.md#errors)); `field` is the place in the request, such as `query.from.id`.
 
 | Code | In a query it means |
 |---|---|
-| `bad_value` | A measure's ends are on two sheets, a name to measure from is given on more than one of the sheets looked at, or the object has no point of its own, such as a hatch. |
-| `unknown_name` | A sheet the set does not hold, or a point the object does not have; the message lists the choices. |
-| `usage` | A measure's end names its object by both ID and name, or by neither, or the command was called wrongly. |
+| `bad_value` | A measure's ends or a snap's objects are on two sheets, a name to measure from or to snap to is given on more than one of the sheets looked at, or the object has no point of its own, such as a hatch. A snap gives `which` without `snap`, `with` to a snap that is not an intersection or `from` to one that is not perpendicular, tangent or nearest, or leaves them out of one that is; a `from` has no `snap`, names no point of its object, or names several without `which`, the message listing them. |
+| `unknown_name` | A sheet the set does not hold, a point the object does not have, or a snap's `which` the object has no point of; the message lists the choices. |
+| `usage` | A measure's end or a snap's object names it by both ID and name, or by neither, a snap is not one of AutoCAD's, or the command was called wrongly. |
 | any other | A sheet that cannot be read, with its own error in its file, such as `duplicate_id`. |
 
 ## How it works
 
-`crates/agentdrafter-core/src/query.rs` reads the set's settings and rows and each sheet's record (`description/records.rs`, and `description/template.rs` for a sheet of a set), selects and measures, and draws a sheet's extents with `draw::draw_sheet`.
+`crates/agentdrafter-core/src/query.rs` reads the set's settings and rows and each sheet's record (`description/records.rs`, and `description/template.rs` for a sheet of a set), selects and measures, and draws a sheet's extents with `draw::draw_sheet`. `query/snap.rs` works out a snap and an object's geometry on the records, from `geometry.rs`, which reads each object as the curves it is made of, an insert's block's placed by the one placement rule, and the points its own snaps find; `geometry/curve.rs` holds the curves' arithmetic, `geometry/snap.rs` the snaps between two objects and `geometry/measure.rs` the lengths, areas and extents. A polyline's arcs come from their bulges as the drawing pipeline's do (`draw/polyline.rs`), and a spline is the B-spline it draws (`draw/curves.rs`).
 
 ## What is not offered yet
 
 - Querying DWGs, built or someone else's. Every DWG a build writes carries each object's ID, ready for it.
 - Patterns other than a whole value or a part of it, such as wildcards.
 - A distance from a point given by coordinates. Nothing is selected by coordinates.
+- A snapped point as an operation's point, and selecting the objects within or crossing a box or touching another object: the next part of [#74](https://github.com/millZach/AgentDrafter/issues/74).
+- AutoCAD's extended intersections and apparent intersections, where two objects would cross if drawn on, and a snap picked by a cursor's place: every point of the kind is listed, named.
+- A node on multiline text, which AutoCAD 2026 finds at a point of its box that moves with its attachment, and snaps into a multileader's block content or a table's text.
+- The geometric extents of text, inserts, tables and leaders: [`extents`](#extents) gives what a sheet draws, text as its font draws it.

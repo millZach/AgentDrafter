@@ -129,6 +129,34 @@ pub(crate) fn spline(s: &Spline, tolerance: f64) -> Vec<Point2> {
     points
 }
 
+/// A spline as the B-spline it draws, in space: its degree, its control
+/// points and its knots, fitted through its fit points as [`spline`] fits
+/// them. None when it has too few points to be a curve.
+pub(crate) fn spline_definition(s: &Spline) -> Option<(usize, Vec<Point3d>, Vec<f64>)> {
+    if s.fit_points.is_empty() {
+        let control: Vec<Point3d> = s.control_points.iter().map(|p| [p.x, p.y, p.z]).collect();
+        if control.len() < 2 {
+            return None;
+        }
+        let degree = usize::from(s.degree).clamp(1, control.len() - 1);
+        let knots = clamped_uniform_knots(degree, control.len());
+        Some((degree, control, knots))
+    } else {
+        let fit: Vec<Point3d> = s.fit_points.iter().map(|p| [p.x, p.y, p.z]).collect();
+        if fit.len() < 2 {
+            return None;
+        }
+        let (control, knots) = fit_cubic(&fit);
+        Some((usize::from(FIT_DEGREE), control, knots))
+    }
+}
+
+/// The parameter of an ellipse's point `degrees` from its major axis, as
+/// the DWG keeps it: see [`parameter`].
+pub(crate) fn ellipse_parameter(degrees: f64, ratio: f64) -> f64 {
+    parameter(degrees, ratio)
+}
+
 /// A clamped B-spline's knots, evenly spaced from 0 to 1 between `degree +
 /// 1` at each end, as acadrust writes them and the core reads them.
 fn clamped_uniform_knots(degree: usize, count: usize) -> Vec<f64> {

@@ -18,15 +18,15 @@ use super::{curves, linetype, Point2};
 /// A segment's arc: its centre, radius, the angle it starts at and the
 /// angle it sweeps, in radians, positive anticlockwise.
 #[derive(Clone, Copy, Debug)]
-struct SegmentArc {
-    center: Point2,
-    radius: f64,
-    start: f64,
-    sweep: f64,
+pub(crate) struct SegmentArc {
+    pub(crate) center: Point2,
+    pub(crate) radius: f64,
+    pub(crate) start: f64,
+    pub(crate) sweep: f64,
 }
 
 /// The arc from `a` to `b` of `bulge`; none for a straight segment.
-fn arc_of(a: Point2, b: Point2, bulge: f64) -> Option<SegmentArc> {
+pub(crate) fn arc_of(a: Point2, b: Point2, bulge: f64) -> Option<SegmentArc> {
     let chord = [b[0] - a[0], b[1] - a[1]];
     let length = chord[0].hypot(chord[1]);
     if bulge == 0.0 || !bulge.is_finite() || length == 0.0 {
@@ -184,16 +184,16 @@ fn mitre(before: &mut Band, after: &mut Band) {
 /// The areas a flat polyline's wide segments fill, each a closed contour
 /// running anticlockwise, to be filled by the non-zero rule, and the paths of its thin segments,
 /// each from its start to its end.
-pub(super) struct Drawn {
-    pub fills: Vec<Vec<Point2>>,
-    pub thin: Vec<Vec<Point2>>,
+pub(crate) struct Drawn {
+    pub(crate) fills: Vec<Vec<Point2>>,
+    pub(crate) thin: Vec<Vec<Point2>>,
 }
 
 /// Draws a flat polyline through `points`, closed or not, the segment
 /// starting at each point taking its `bulge` and `widths`, its arcs within
 /// `tolerance`. A wide segment is cut into the dashes of `pattern`, when it
 /// has one, laid out along it as along a thin one.
-pub(super) fn draw(
+pub(crate) fn draw(
     points: &[Point2],
     closed: bool,
     bulge: impl Fn(usize) -> f64,

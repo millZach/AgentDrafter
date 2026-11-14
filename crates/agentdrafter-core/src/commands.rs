@@ -590,7 +590,12 @@ fn query_does() -> String {
      gives each matching insert's attributes as JSON from tag to value; blocks lists the \
      blocks each sheet inserts; measure gives the distance between a point of two objects on \
      one sheet, each named by ID or name, by default an insert's or a text's position, a \
-     line's from, a circle's centre; extents gives the box round what each sheet draws. \
+     line's from, a circle's centre; extents gives the box round what each sheet draws; \
+     snap gives the points AutoCAD's object snaps find on an object named by ID or name, \
+     inserts' blocks among them: endpoint, midpoint, center, quadrant, insertion and node, \
+     intersection and apparent_intersection `with` another object, and perpendicular, \
+     tangent and nearest `from` a snap of another object, each named by `which` to ask for \
+     it again; geometry gives each matching object's length, area, extents and angles. \
      Lengths are in the declared unit. `id`, `name`, `block` and `tag` match whole, in any \
      case, and `value` and `text` whole, case and all; with `match` `contains`, each matches \
      what holds it, in any case. A query that matches nothing is ok and says so; `sheet` \
@@ -655,7 +660,7 @@ fn query_schema() -> Value {
         })
     };
     json!({
-        "description": "What to ask, by its `kind`: find, blocks, attributes, measure, extents or layers.",
+        "description": "What to ask, by its `kind`: find, blocks, attributes, measure, extents, layers, snap or geometry.",
         "oneOf": [
             selection("find", "The objects that match every part given; with none given, every object."),
             bare("blocks", "The blocks each sheet inserts."),
@@ -677,8 +682,66 @@ fn query_schema() -> Value {
                 "The layers of each sheet, with their colour, linetype, lineweight and states, and \
                  how many of its objects sit on each.",
             ),
+            snap_schema(),
+            selection(
+                "geometry",
+                "The length, area, extents and angles of each object that matches every part \
+                 given, as AutoCAD's LIST and AREA give them; with none given, every object's.",
+            ),
         ],
     })
+}
+
+/// The schema of a snap: an object by ID or name, the snap, and which
+/// point, with the other object or the point it is taken from.
+fn snap_schema() -> Value {
+    let kinds: Vec<&str> = crate::geometry::SnapKind::ALL
+        .iter()
+        .map(|k| k.name())
+        .collect();
+    let point = |kind: Option<&str>, what: &str, from: Value| {
+        let mut properties = json!({
+            "id": text("The object's ID."),
+            "name": text("The object's name, which only one sheet of those looked at may give."),
+            "snap": {
+                "description": "The snap: endpoint, midpoint, center, quadrant, insertion and node of the object by itself; intersection and apparent_intersection with `with`; perpendicular, tangent and nearest from `from`. Without it, every snap of the object by itself.",
+                "enum": kinds,
+            },
+            "which": text("Which of the object's points of the snap, as a reply names it: `points[2]`, `segments[1]`, `90`, `objects[3].to` of an insert's block. Without it, every point of the snap."),
+            "with": {
+                "description": "The other object of an intersection or an apparent intersection, by `id` or `name`.",
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "id": text("The object's ID."),
+                    "name": text("The object's name."),
+                },
+            },
+            "from": from,
+        });
+        let mut required = Vec::new();
+        if let Some(kind) = kind {
+            properties["kind"] = json!({ "const": kind });
+            required.push("kind");
+        }
+        json!({
+            "description": what,
+            "type": "object",
+            "additionalProperties": false,
+            "required": required,
+            "properties": properties,
+        })
+    };
+    let from = point(
+        None,
+        "The point a perpendicular, a tangent or a nearest point is taken from: a snap of another object that names one point, written as a snap is.",
+        json!({ "type": "object" }),
+    );
+    point(
+        Some("snap"),
+        "The points AutoCAD's object snaps find on an object, by `id` or `name`, an insert's in its block's own geometry too, each in the declared unit and named by `which`.",
+        from,
+    )
 }
 
 fn run_query(
