@@ -82,6 +82,9 @@ pub(crate) struct TableEdited {
     /// Where within the table the edit set something, such as
     /// `cells[2][1].merge` or `rows[3]`, so an error there is laid on it.
     pub touched: Vec<String>,
+    /// Each cell the operation gave, where it is now, such as
+    /// `cells[3][1]`, with its key in the operation, such as `cells[1]`.
+    pub given: Vec<(String, String)>,
     /// What it did, in words, such as `adds a row at 3`.
     pub words: String,
     /// What else it did to keep the table in line, in words, such as `the
@@ -543,6 +546,7 @@ fn set_cell(
         edited: !touched.is_empty(),
         from_row,
         touched,
+        given: Vec::new(),
         words: format!("sets {} of cell [{r}, {c}]", set_keys.join(", ")),
         notes: Vec::new(),
         shift: None,
@@ -658,6 +662,17 @@ fn add(
         }
     }
     list_mut(keys, sizes_key)?.insert(i, size_node);
+    // Each cell given, where it goes, with its key in the operation.
+    let place = |n: usize| match axis {
+        Axis::Row => index_path(&index_path("cells", i), n),
+        Axis::Column => index_path(&index_path("cells", n), i),
+    };
+    let given: Vec<(String, String)> = match cells {
+        Some(sent) => (0..sent.len())
+            .map(|n| (place(n), index_path("cells", n)))
+            .collect(),
+        None => Vec::new(),
+    };
     match axis {
         Axis::Row => {
             list_mut(keys, "cells")?.insert(i, Node::new(Kind::Sequence(new_cells)));
@@ -677,6 +692,7 @@ fn add(
         touched,
         words: format!("adds a {word} at {i}"),
         notes,
+        given,
         shift: Some(Shift {
             axis,
             at: i,
@@ -792,6 +808,7 @@ fn delete(keys: &mut Vec<Entry>, axis: Axis, i: usize) -> Result<TableEdited, Er
         touched,
         words: format!("deletes {word} {i}"),
         notes,
+        given: Vec::new(),
         shift: Some(Shift {
             axis,
             at: i,

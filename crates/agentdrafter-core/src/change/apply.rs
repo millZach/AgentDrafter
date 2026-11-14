@@ -36,8 +36,8 @@ use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::blocks::tag_in_capitals;
 use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
-    template_at, template_in, template_path, AttributeSet, Axis, Disk, GivenValue, Listed,
-    MarkFailure, ObjectList, ReadFiles, RecordFile, Row, TableEdit, ID_SEPARATOR,
+    template_at, template_in, template_path, AttributeSet, Disk, GivenValue, Listed, MarkFailure,
+    Matched, ObjectList, ReadFiles, RecordFile, Row, TableEdit, ID_SEPARATOR,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -2599,7 +2599,7 @@ fn attribute(
     let field = error.field.clone().unwrap_or_default();
     // The operation, the place within its object, and the place the
     // operation set that covers it, when one does.
-    let mut cause: Option<(usize, String, Option<String>)> = None;
+    let mut cause: Option<(usize, String, Option<Matched>)> = None;
     let in_library = files.library_of[t].filter(|&l| {
         error
             .file
@@ -2660,7 +2660,7 @@ fn attribute(
     }
     if let Some((i, rest, matched)) = cause {
         let op = &ops[i];
-        let suffix = op_field(op, &rest, error.code, matched.as_deref());
+        let suffix = op_field(op, &rest, error.code, matched.as_ref());
         return Error {
             message: format!(
                 "operation {i} (`{}`) on sheet `{}`: {}",
@@ -2798,7 +2798,7 @@ fn split_place(field: &str) -> Option<(ObjectList, usize, &str)> {
 /// The field within operation `op` that `rest`, a place within the object
 /// it edits, such as `line.to[1]`, is about. `matched` is the place within
 /// the object the operation set that covers it, when one does.
-fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&str>) -> String {
+fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matched>) -> String {
     let within = rest.split_once('.').map_or("", |(_, within)| within);
     match &op.body {
         Body::Add { .. } => within.to_owned(),
@@ -2857,7 +2857,7 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&str>) 
 /// the place the operation set that covers it, which follows its cell when
 /// a later operation moved the cell; an empty `within` is a value of the
 /// row the operation set.
-fn grid_field(edit: &TableEdit, within: &str, matched: Option<&str>) -> String {
+fn grid_field(edit: &TableEdit, within: &str, matched: Option<&Matched>) -> String {
     /// `cells[R][C]` and what follows, or `None`.
     fn cell_of(within: &str) -> Option<(usize, usize, &str)> {
         let rest = within.strip_prefix("cells[")?;
@@ -2869,7 +2869,9 @@ fn grid_field(edit: &TableEdit, within: &str, matched: Option<&str>) -> String {
     match edit {
         TableEdit::SetCell { cell, set } => {
             // Where the cell is now.
-            let now = matched.and_then(cell_of).map_or(*cell, |(r, c, _)| [r, c]);
+            let now = matched
+                .and_then(|m| cell_of(&m.path))
+                .map_or(*cell, |(r, c, _)| [r, c]);
             match cell_of(within) {
                 Some((r, c, rest)) if [r, c] == now => {
                     let key = rest
@@ -2891,9 +2893,7 @@ fn grid_field(edit: &TableEdit, within: &str, matched: Option<&str>) -> String {
                 _ => "set".to_owned(),
             }
         }
-        TableEdit::Add {
-            axis, size, cells, ..
-        } => {
+        TableEdit::Add { axis, size, .. } => {
             if within.starts_with(axis.sizes_key()) {
                 return if size.is_some() {
                     axis.size_key().to_owned()
@@ -2901,11 +2901,10 @@ fn grid_field(edit: &TableEdit, within: &str, matched: Option<&str>) -> String {
                     String::new()
                 };
             }
-            match (cell_of(within), cells) {
-                (Some((r, c, rest)), Some(_)) => match axis {
-                    Axis::Row => format!("cells[{c}]{rest}"),
-                    Axis::Column => format!("cells[{r}]{rest}"),
-                },
+            // A cell the operation gave, by its key in the operation, which
+            // stays put however later edits move the cell.
+            match (cell_of(within), matched.and_then(|m| m.given.as_deref())) {
+                (Some((_, _, rest)), Some(given)) => format!("{given}{rest}"),
                 _ => String::new(),
             }
         }

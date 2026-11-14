@@ -707,3 +707,36 @@ fn the_journal_marks_a_table_whose_rows_or_columns_change_as_changed() {
         ]
     );
 }
+
+#[test]
+fn an_error_in_a_given_cell_keeps_its_key_in_the_operation_when_a_later_operation_moves_it() {
+    let set = table_set("given-moves");
+    let bad = json!(["", {"style": "MISSING"}]);
+    let mut wrong = Vec::new();
+    for (add, then) in [
+        (
+            json!({"op": "add_row", "target": {"id": "S-1/own"}, "at": 2, "cells": bad}),
+            json!({"op": "add_column", "target": {"id": "S-1/own"}, "at": 0}),
+        ),
+        (
+            json!({"op": "add_row", "target": {"id": "S-1/own"}, "at": 2, "cells": bad}),
+            json!({"op": "delete_column", "target": {"id": "S-1/own"}, "column": 0}),
+        ),
+        (
+            json!({"op": "add_column", "target": {"id": "S-1/own"}, "at": 2, "cells": bad}),
+            json!({"op": "add_row", "target": {"id": "S-1/own"}, "at": 0}),
+        ),
+        (
+            json!({"op": "add_column", "target": {"id": "S-1/own"}, "at": 2, "cells": bad}),
+            json!({"op": "delete_row", "target": {"id": "S-1/own"}, "row": 0}),
+        ),
+    ] {
+        let e = fails(&set, json!([add, then]));
+        assert_eq!(e.code, ErrorCode::UnknownName);
+        let field = e.field.unwrap_or_default();
+        if field != "operations[0].cells[1].style" {
+            wrong.push(format!("{add} then {then}: {field}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}

@@ -209,22 +209,40 @@ enum Touch {
     Whole,
     /// These keys, such as `layer` or `attributes.REV`.
     Keys(Vec<String>),
+    /// These places, each with the key of the operation that gave its
+    /// value, such as a table's cell `cells[2][1]` that an add_row's
+    /// `cells[1]` gave. A place moves when a later edit moves it; the
+    /// operation's key does not.
+    Given(Vec<(String, String)>),
+}
+
+/// Whether setting the value at `set` set the value at `key`, each a path
+/// within an object such as `layer`, `points[2]` or `attributes.REV`.
+fn path_covers(set: &str, key: &str) -> bool {
+    key == set
+        || key.starts_with(&format!("{set}."))
+        || key.starts_with(&format!("{set}["))
+        || set.starts_with(&format!("{key}."))
 }
 
 impl Touch {
-    /// Whether it set the value at `key`, a path within the object such as
-    /// `layer`, `points[2]` or `attributes.REV`.
+    /// Whether it set the value at `key`, a path within the object.
     fn covers(&self, key: &str) -> bool {
         match self {
             Touch::Whole => true,
-            Touch::Keys(keys) => keys.iter().any(|set| {
-                key == set
-                    || key.starts_with(&format!("{set}."))
-                    || key.starts_with(&format!("{set}["))
-                    || set.starts_with(&format!("{key}."))
-            }),
+            Touch::Keys(keys) => keys.iter().any(|set| path_covers(set, key)),
+            Touch::Given(given) => given.iter().any(|(set, _)| path_covers(set, key)),
         }
     }
+}
+
+/// The place within an object an operation set that covers a place
+/// blamed on it, and the key of the operation that gave its value, when
+/// the touch keeps one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Matched {
+    pub path: String,
+    pub given: Option<String>,
 }
 
 /// A row's value an edit set: where its old text was written.
@@ -1089,7 +1107,7 @@ impl RecordFile {
         list: ObjectList,
         index: usize,
         within: &str,
-    ) -> Option<(usize, Option<String>)> {
+    ) -> Option<(usize, Option<Matched>)> {
         let item = self
             .lists
             .iter()
@@ -1105,10 +1123,24 @@ impl RecordFile {
             .find(|(_, touch)| !key.is_empty() && touch.covers(key));
         match set_it {
             Some((op, Touch::Keys(keys))) => {
-                let matched = keys
-                    .iter()
-                    .find(|set| Touch::Keys(vec![(*set).clone()]).covers(key));
-                Some((*op, matched.cloned()))
+                let matched = keys.iter().find(|set| path_covers(set, key));
+                Some((
+                    *op,
+                    matched.map(|path| Matched {
+                        path: path.clone(),
+                        given: None,
+                    }),
+                ))
+            }
+            Some((op, Touch::Given(given))) => {
+                let matched = given.iter().find(|(set, _)| path_covers(set, key));
+                Some((
+                    *op,
+                    matched.map(|(path, given)| Matched {
+                        path: path.clone(),
+                        given: Some(given.clone()),
+                    }),
+                ))
             }
             Some((op, Touch::Whole)) => Some((*op, None)),
             None => item.touches.last().map(|(op, _)| (*op, None)),
@@ -1499,13 +1531,27 @@ impl RecordFile {
         if let Some(shift) = edited.shift {
             let item = &mut self.list_state(list).items[index];
             for (_, touch) in &mut item.touches {
-                if let Touch::Keys(keys) = touch {
-                    *keys = keys.iter().filter_map(|k| shift.path(k)).collect();
+                match touch {
+                    Touch::Keys(keys) => {
+                        *keys = keys.iter().filter_map(|k| shift.path(k)).collect();
+                    }
+                    // The place moves, or goes with its cell; the
+                    // operation's own key stays as it sent it.
+                    Touch::Given(given) => {
+                        *given = given
+                            .iter()
+                            .filter_map(|(k, by)| shift.path(k).map(|k| (k, by.clone())))
+                            .collect();
+                    }
+                    Touch::Whole => {}
                 }
             }
         }
         if edited.edited {
             self.touch(list, index, operation, Touch::Keys(edited.touched.clone()));
+            if !edited.given.is_empty() {
+                self.touch(list, index, operation, Touch::Given(edited.given.clone()));
+            }
         }
         Ok(edited)
     }

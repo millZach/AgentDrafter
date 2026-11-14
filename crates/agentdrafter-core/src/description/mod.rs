@@ -51,7 +51,9 @@ use crate::model::{BlockLibrary, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 pub use blocks::parse_block_library;
-pub(crate) use edit::{AttributeSet, Axis, GivenValue, Listed, ObjectList, RecordFile, TableEdit};
+pub(crate) use edit::{
+    AttributeSet, Axis, GivenValue, Listed, Matched, ObjectList, RecordFile, TableEdit,
+};
 pub(crate) use emit::number_text;
 pub(crate) use ids::ID_SEPARATOR;
 pub(crate) use mark::{mark_text, parse_mark, MarkFailure};
