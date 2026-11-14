@@ -216,7 +216,6 @@ impl Touch {
                     || key.starts_with(&format!("{set}."))
                     || key.starts_with(&format!("{set}["))
                     || set.starts_with(&format!("{key}."))
-                    || set.starts_with(&format!("{key}["))
             }),
         }
     }

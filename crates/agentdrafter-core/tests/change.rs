@@ -2690,3 +2690,37 @@ fn an_occurrences_error_is_laid_on_its_own_operation_and_a_whole_float_is_taken(
     );
     assert_eq!(values_of(&set, "DEMO-001/n", "NOTE"), ["a", "two", "-"]);
 }
+
+/// A tag written with brackets, such as `A[0]`, is a tag of its own: an
+/// error in the tag `A` is not laid on an edit of `A[0]`.
+#[test]
+fn an_error_in_a_tag_is_not_laid_on_an_edit_of_a_bracketed_tag() {
+    let set = demo_set("bracketed-tag");
+    append(
+        &set.join("blocks.yaml"),
+        "  BRACKETS:
+    objects:
+      - attdef: {tag: 'A[0]', position: [0, 0, 0], height: 0.1}
+",
+    );
+    rebuild(&set);
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "INSERT", "sheet": "DEMO-001", "block": "BRACKETS", "position": [2, 2, 0], "id": "b"}
+        ]}),
+    );
+    let e = failed_operation(
+        &set,
+        json!({"operations": [
+            {"op": "set_attribute", "target": {"id": "DEMO-001/b"}, "tag": "A", "value": "bad"},
+            {"op": "set_attribute", "target": {"id": "DEMO-001/b"}, "tag": "A[0]", "value": "good"}
+        ]}),
+    );
+    assert!(
+        e.field
+            .as_deref()
+            .is_some_and(|f| f.starts_with("operations[0].")),
+        "{e:#?}"
+    );
+}
