@@ -132,6 +132,10 @@ _Avoid_: sub-block, child block
 The blocks a drawing set shares, each defined once for the whole set. It is a file of its own that sheet descriptions name.
 _Avoid_: symbol library, catalog
 
+**Redefinition**:
+A block's whole definition replaced, its base point and every object, as AutoCAD's BEDIT replaces it. Every insert of the block draws as the new definition does, and is brought into line with it as it lands: a value an insert gives for a tag the block no longer carries is removed from its record, as AutoCAD's ATTSYNC removes it.
+_Avoid_: block edit, block update
+
 **Template**:
 A sheet's border, title block and fixed content, waiting for data.
 _Avoid_: prototype, master

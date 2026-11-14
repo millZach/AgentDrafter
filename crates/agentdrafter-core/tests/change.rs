@@ -10,14 +10,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, change_set_schema, change_with, operations, query_with, read_dwg, Answer,
-    ChangeReport, ChangeRequest, ErrorCode, Object, ObjectColor, ObjectLineweight, Query,
-    QueryRequest, Reply, Selection, SetBuildRequest, Settings, JOURNAL_FILE, LOCK_FILE, MARK_FILE,
+    build_set_with, change_set_schema, change_with, operations, query_with, read_dwg, undo, Answer,
+    ChangeReport, ChangeRequest, ErrorCode, HowChanged, JournalRequest, Object, ObjectColor,
+    ObjectLineweight, Query, QueryRequest, Reply, Selection, SetBuildRequest, Settings,
+    UndoRequest, JOURNAL_FILE, LOCK_FILE, MARK_FILE,
 };
 use serde_json::{json, Value};
 
 #[path = "support/demo_set.rs"]
 mod demo_set;
+#[path = "support/snapshot.rs"]
+mod snapshot;
 
 const SHEETS: [&str; 3] = ["DEMO-001", "DEMO-002", "DEMO-003"];
 
@@ -353,6 +356,9 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("change_text_style", ""),
             ("rename_text_style", ""),
             ("delete_text_style", ""),
+            ("add_block", "BLOCK"),
+            ("redefine_block", "BEDIT"),
+            ("attsync", "ATTSYNC"),
         ]
     );
     let samples = [
@@ -384,6 +390,9 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "change_text_style", "sheet": "S", "name": "tags", "set": {"width_factor": 0.8}}),
         json!({"op": "rename_text_style", "template": "t.yaml", "name": "tags", "to": "labels"}),
         json!({"op": "delete_text_style", "sheet": "S", "name": "labels"}),
+        json!({"op": "BLOCK", "name": "BADGE", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1}}, {"attdef": {"tag": "CODE", "position": [0, 0, 0], "height": 1, "cell": [[0, 0, 0], [1, 1, 0]]}}]}),
+        json!({"op": "BEDIT", "library": "blocks.yaml", "name": "BADGE", "base_point": [1, 0, 0], "objects": [{"text": {"contents": "A", "position": [0, 0, 0], "height": 1, "cell": [[0, 0, 0], [1, 1, 0]]}}]}),
+        json!({"op": "ATTSYNC", "name": "BADGE"}),
     ];
     for (info, sample) in listed.operations.iter().zip(&samples) {
         assert!(info.does.contains(&info.alias), "{}", info.does);
@@ -1722,4 +1731,473 @@ fn a_constant_attribute_is_refused_to_set_attribute_and_found_by_its_text() {
     assert_eq!(objects.len(), 1, "{objects:#?}");
     assert_eq!(objects[0].id, "DEMO-001/badge");
     assert_eq!(objects[0].block_text[0].field, "blocks.BADGE.objects[0]");
+}
+
+/// Builds the set again from its files, after a test edited them by hand.
+fn rebuild(set: &Path) {
+    let built = build_set_with(
+        &SetBuildRequest {
+            set: set.to_owned(),
+            overwrite: true,
+        },
+        &Settings::default(),
+    );
+    assert!(built.ok, "{:#?}", built.error);
+}
+
+/// Appends `text` to the file at `path`.
+fn append(path: &Path, text: &str) {
+    let mut all = fs::read_to_string(path).unwrap();
+    all.push_str(text);
+    fs::write(path, all).unwrap();
+}
+
+/// The error of the first operation of a change set that did not land.
+fn failed_operation(set: &Path, change_set: Value) -> agentdrafter_core::Error {
+    let reply = apply(set, change_set);
+    assert!(!reply.ok);
+    let report = reply.result.expect("a report");
+    report
+        .operations
+        .into_iter()
+        .find(|o| !o.ok)
+        .expect("an operation that did not land")
+        .error
+        .expect("its error")
+}
+
+/// Zach decided on 2026-11-13 that a change set adds a block to a block
+/// library with `add_block`, AutoCAD's BLOCK, which reaches every sheet
+/// whose template names the library.
+#[test]
+fn add_block_adds_a_block_that_a_later_insert_inserts() {
+    let set = demo_set("add-block");
+    let library = set.join("blocks.yaml");
+    let before = fs::read_to_string(&library).unwrap();
+    let dwg_001 = fs::read(dwg(&set, "DEMO-001")).unwrap();
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "BLOCK", "library": "blocks.yaml", "name": "BADGE", "base_point": [0, 0, 0], "objects": [
+                {"circle": {"radius": 0.5, "center": [0, 0, 0], "layer": "title"}},
+                {"attdef": {"height": 0.1, "position": [0, -0.8, 0], "tag": "CODE", "default": "X-1"}}
+            ]},
+            {"op": "insert_block", "sheet": "DEMO-002", "block": "BADGE", "position": [4, 4, 0], "id": "badge", "attributes": {"CODE": "Z-9"}}
+        ]}),
+    );
+    assert_eq!(report.landed, 3, "it reaches every sheet of the library");
+    assert_eq!(report.operations[0].sheets, SHEETS);
+    assert!(report.operations[0]
+        .message
+        .starts_with("adds the block `BADGE` to the block library `blocks.yaml`"));
+    let after = fs::read_to_string(&library).unwrap();
+    assert!(after.starts_with(&before), "every other byte is kept");
+    assert_eq!(
+        &after[before.len()..],
+        "  BADGE:
+    base_point: [0, 0, 0]
+    objects:
+      - circle: {center: [0, 0, 0], radius: 0.5, layer: title}
+      - attdef: {tag: CODE, default: X-1, position: [0, -0.8, 0], height: 0.1}
+"
+    );
+    assert!(report
+        .records
+        .iter()
+        .any(|r| Path::new(r).ends_with("blocks.yaml")));
+    // A sheet that does not insert it builds the same DWG, which is not
+    // written again.
+    assert_eq!(fs::read(dwg(&set, "DEMO-001")).unwrap(), dwg_001);
+    assert!(!report.sheets[0].dwg_written);
+    let Object::Insert(badge) = &built(&set, "DEMO-002")["DEMO-002/badge"] else {
+        panic!("an insert")
+    };
+    assert_eq!(badge.block, "BADGE");
+    assert_eq!(badge.attributes[0].tag, "CODE");
+    assert_eq!(badge.attributes[0].value, "Z-9");
+}
+
+#[test]
+fn a_block_operation_on_a_name_it_cannot_take_is_refused_listing_the_blocks() {
+    let set = demo_set("block-names");
+    let start = snapshot(&set);
+    let e = failed_operation(
+        &set,
+        json!({"operations": [{"op": "add_block", "name": "title_block", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1}}]}]}),
+    );
+    assert_eq!(e.code, ErrorCode::DuplicateName);
+    assert_eq!(e.field.as_deref(), Some("operations[0].name"));
+    assert!(e.message.contains("`TITLE_BLOCK` already"), "{}", e.message);
+    for op in [
+        json!({"op": "redefine_block", "name": "NOPE", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1}}]}),
+        json!({"op": "attsync", "name": "NOPE"}),
+    ] {
+        let e = failed_operation(&set, json!({"operations": [op]}));
+        assert_eq!(e.code, ErrorCode::UnknownName);
+        assert!(
+            e.message
+                .contains("has no block `NOPE`; its blocks: TITLE_BLOCK"),
+            "{}",
+            e.message
+        );
+    }
+    assert_eq!(snapshot(&set), start, "nothing was written");
+}
+
+/// A made-up block the redefinition tests redefine, with three attributes.
+const BADGE: &str = "  BADGE:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 0.5}
+      - attdef: {tag: CODE, position: [0, -0.8, 0], height: 0.1}
+      - attdef: {tag: NOTE, position: [0, -1, 0], height: 0.1}
+      - attdef: {tag: KEEP, position: [0, -1.2, 0], height: 0.1}
+";
+
+/// The demo set with `BADGE` in its library, inserted by its template,
+/// which takes `CODE` from the row, and by DEMO-002's row.
+fn set_with_badge(test: &str) -> PathBuf {
+    let set = demo_set(test);
+    append(&set.join("blocks.yaml"), BADGE);
+    append(
+        &set.join("templates").join("ansi-b.yaml"),
+        "  - insert: {block: BADGE, position: [3, 3, 0], id: badge, attributes: {CODE: {row: REV}, NOTE: fixed, KEEP: k}}\n",
+    );
+    rebuild(&set);
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "INSERT", "sheet": "DEMO-002", "block": "BADGE", "position": [6, 3, 0], "id": "row-badge", "attributes": {"NOTE": "row note", "KEEP": "x"}}
+        ]}),
+    );
+    set
+}
+
+/// Zach decided on 2026-11-13 that `redefine_block`, AutoCAD's BEDIT,
+/// replaces a block's whole definition and brings every insert into line
+/// as it lands: a value for a tag the block no longer carries is removed
+/// from its record, the reply lists each, and `undo` brings them back.
+#[test]
+fn redefine_block_replaces_the_definition_and_removes_values_no_longer_defined() {
+    let set = set_with_badge("redefine-block");
+    let start = snapshot::snapshot(&set);
+    let rows_before = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "BEDIT", "name": "BADGE", "objects": [
+                {"circle": {"center": [0, 0, 0], "radius": 0.6}},
+                {"attdef": {"tag": "CODE", "position": [0, -0.8, 0], "height": 0.1, "default": "C-1", "constant": true}},
+                {"attdef": {"tag": "KEEP", "position": [0, -1.2, 0], "height": 0.1}},
+                {"attdef": {"tag": "ADDED", "position": [0, -1.4, 0], "height": 0.1, "default": "new"}}
+            ]}
+        ]}),
+    );
+    let outcome = &report.operations[0];
+    assert_eq!(
+        outcome.inserts,
+        [
+            "DEMO-001/badge",
+            "DEMO-002/badge",
+            "DEMO-002/row-badge",
+            "DEMO-003/badge"
+        ]
+    );
+    let removed: Vec<(String, String, Vec<String>, String, String)> = outcome
+        .attributes_removed
+        .iter()
+        .map(|r| {
+            let file = Path::new(&r.record)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            (
+                file,
+                r.field.clone(),
+                r.ids.clone(),
+                r.tag.clone(),
+                r.value.clone(),
+            )
+        })
+        .collect();
+    let on_every_sheet: Vec<String> = SHEETS.iter().map(|s| format!("{s}/badge")).collect();
+    assert_eq!(
+        removed,
+        [
+            (
+                "ansi-b.yaml".to_owned(),
+                "objects[5]".to_owned(),
+                on_every_sheet.clone(),
+                "CODE".to_owned(),
+                "{row: REV}".to_owned()
+            ),
+            (
+                "ansi-b.yaml".to_owned(),
+                "objects[5]".to_owned(),
+                on_every_sheet,
+                "NOTE".to_owned(),
+                "fixed".to_owned()
+            ),
+            (
+                "rows.yaml".to_owned(),
+                "rows[1].objects[0]".to_owned(),
+                vec!["DEMO-002/row-badge".to_owned()],
+                "NOTE".to_owned(),
+                "row note".to_owned()
+            ),
+        ]
+    );
+    assert!(
+        outcome.message.starts_with(
+            "redefines the block `BADGE` in the block library `blocks.yaml`, reaching 4 \
+             inserts; removes 3 attribute values"
+        ),
+        "{}",
+        outcome.message
+    );
+    let template = fs::read_to_string(set.join("templates").join("ansi-b.yaml")).unwrap();
+    assert!(
+        template.ends_with(
+            "  - insert: {block: BADGE, position: [3, 3, 0], id: badge, attributes: {KEEP: k}}\n"
+        ),
+        "{template}"
+    );
+    let rows = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    assert!(rows.contains("attributes: {KEEP: x}"), "{rows}");
+    assert_eq!(
+        rows.replace(
+            "attributes: {KEEP: x}",
+            "attributes: {KEEP: x, NOTE: row note}"
+        ),
+        rows_before,
+        "only the value removed changes in the rows"
+    );
+    let library = fs::read_to_string(set.join("blocks.yaml")).unwrap();
+    assert!(
+        library.contains(
+            "      - attdef: {tag: ADDED, default: new, position: [0, -1.4, 0], height: 0.1}\n"
+        ),
+        "{library}"
+    );
+    let Object::Insert(badge) = &built(&set, "DEMO-002")["DEMO-002/row-badge"] else {
+        panic!("an insert")
+    };
+    let values: Vec<(&str, &str)> = badge
+        .attributes
+        .iter()
+        .map(|a| (a.tag.as_str(), a.value.as_str()))
+        .collect();
+    assert_eq!(values, [("KEEP", "x"), ("ADDED", "new")]);
+
+    // The journal marks every insert the redefinition reached as changed.
+    let entry = report.journal_entry.unwrap();
+    let journal = agentdrafter_core::journal(&JournalRequest { set: set.clone() })
+        .result
+        .unwrap();
+    let recorded = &journal
+        .entries
+        .iter()
+        .find(|e| e.recorded.entry == entry)
+        .unwrap()
+        .recorded;
+    let changed: Vec<&str> = recorded.objects.iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(changed, outcome.inserts);
+    assert!(recorded
+        .objects
+        .iter()
+        .all(|o| o.how == HowChanged::Changed));
+
+    // Undo puts the library, the template and the rows back, byte for byte.
+    let undone = undo(&UndoRequest {
+        set: set.clone(),
+        change_set: entry,
+        dry_run: false,
+    });
+    assert!(undone.ok, "{:#?}", undone.error);
+    assert_eq!(snapshot::snapshot(&set), start);
+}
+
+/// A redefinition the library cannot read fails every sheet whose template
+/// names the library, with the error placed in the operation, and writes
+/// nothing.
+#[test]
+fn a_redefinition_that_breaks_the_library_fails_every_sheet_and_names_its_field() {
+    let set = set_with_badge("redefine-breaks");
+    let start = snapshot(&set);
+    let reply = apply(
+        &set,
+        json!({"operations": [
+            {"op": "redefine_block", "name": "BADGE", "objects": [
+                {"line": {"from": [0, 0, 0], "to": [1, 0, 0], "layer": "nope"}}
+            ]}
+        ]}),
+    );
+    assert!(!reply.ok);
+    let report = reply.result.unwrap();
+    assert_eq!(report.failed, 3);
+    assert_eq!(report.landed, 0);
+    let e = report.operations[0].error.clone().unwrap();
+    assert_eq!(e.code, ErrorCode::UnknownName);
+    assert_eq!(
+        e.field.as_deref(),
+        Some("operations[0].objects[0].line.layer"),
+        "{e:#?}"
+    );
+    assert!(
+        e.message.starts_with("operation 0 (`redefine_block`)"),
+        "{}",
+        e.message
+    );
+    assert!(report.sheets.iter().all(|s| !s.ok));
+    assert_eq!(snapshot(&set), start, "nothing was written");
+}
+
+/// Zach decided on 2026-11-13 that `attsync`, AutoCAD's ATTSYNC, brings
+/// inserts into line alone, for a library edited by hand: a value for a tag
+/// the block no longer defines is removed, a nested insert's in another
+/// block of the library among them.
+#[test]
+fn attsync_brings_inserts_into_line_with_a_library_edited_by_hand() {
+    let set = demo_set("attsync");
+    let library = set.join("blocks.yaml");
+    append(
+        &library,
+        "  MARK:
+    objects:
+      - attdef: {tag: LETTER, position: [0, 0, 0], height: 0.2}
+      - attdef: {tag: OLD, position: [0, 0.3, 0], height: 0.2}
+  STAMP:
+    objects:
+      - insert: {block: MARK, position: [0, 0, 0], attributes: {LETTER: A, OLD: gone}}
+",
+    );
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "INSERT", "sheet": "DEMO-001", "block": "MARK", "position": [2, 2, 0], "id": "mark", "attributes": {"LETTER": "B", "OLD": "x"}},
+            {"op": "INSERT", "sheet": "DEMO-003", "block": "STAMP", "position": [3, 2, 0], "id": "stamp"}
+        ]}),
+    );
+    // The library is edited by hand: MARK no longer defines OLD, so no
+    // sheet builds until its inserts are brought into line.
+    let text = fs::read_to_string(&library).unwrap();
+    fs::write(
+        &library,
+        text.replace(
+            "      - attdef: {tag: OLD, position: [0, 0.3, 0], height: 0.2}\n",
+            "",
+        ),
+    )
+    .unwrap();
+    let report = lands(
+        &set,
+        json!({"operations": [{"op": "ATTSYNC", "name": "MARK"}]}),
+    );
+    assert_eq!(report.landed, 3);
+    let outcome = &report.operations[0];
+    assert_eq!(outcome.inserts, ["DEMO-001/mark"]);
+    let removed: Vec<(&str, &[String], &str, &str)> = outcome
+        .attributes_removed
+        .iter()
+        .map(|r| {
+            (
+                r.field.as_str(),
+                r.ids.as_slice(),
+                r.tag.as_str(),
+                r.value.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        removed,
+        [
+            ("blocks.STAMP.objects[0]", &[][..], "OLD", "gone"),
+            (
+                "rows[0].objects[0]",
+                &["DEMO-001/mark".to_owned()][..],
+                "OLD",
+                "x"
+            ),
+        ]
+    );
+    let text = fs::read_to_string(&library).unwrap();
+    assert!(
+        text.ends_with(
+            "  STAMP:
+    objects:
+      - insert: {block: MARK, position: [0, 0, 0], attributes: {LETTER: A}}
+"
+        ),
+        "{text}"
+    );
+    assert!(row_text(&set, "DEMO-001").contains("attributes: {LETTER: B}"));
+    // Every block, with nothing left to bring into line, removes nothing.
+    let report = lands(&set, json!({"operations": [{"op": "attsync"}]}));
+    assert!(report.operations[0].attributes_removed.is_empty());
+    assert!(report.records.is_empty(), "{:?}", report.records);
+}
+
+/// A block operation names its library by its path in the set, which may
+/// be left out when every template names the same library.
+#[test]
+fn a_block_operation_names_its_library_when_the_set_has_more_than_one() {
+    let set = demo_set("two-libraries");
+    let templates = set.join("templates");
+    fs::copy(set.join("blocks.yaml"), set.join("blocks-2.yaml")).unwrap();
+    let template = fs::read_to_string(templates.join("ansi-b.yaml")).unwrap();
+    fs::write(
+        templates.join("ansi-b-2.yaml"),
+        template.replace(
+            "block_library: ../blocks.yaml",
+            "block_library: ../blocks-2.yaml",
+        ),
+    )
+    .unwrap();
+    let rows = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    let third = rows.find("  - sheet: DEMO-003").unwrap();
+    fs::write(
+        set.join("rows.yaml"),
+        format!(
+            "{}{}",
+            &rows[..third],
+            rows[third..].replace("templates/ansi-b.yaml", "templates/ansi-b-2.yaml")
+        ),
+    )
+    .unwrap();
+    rebuild(&set);
+
+    let refused = |change_set: Value| {
+        let reply = apply(&set, change_set);
+        assert!(!reply.ok);
+        assert!(reply.result.is_none(), "refused whole");
+        reply.error.unwrap()
+    };
+    let e = refused(json!({"operations": [{"op": "attsync"}]}));
+    assert_eq!(e.code, ErrorCode::MissingKey);
+    assert_eq!(e.field.as_deref(), Some("operations[0].library"));
+    assert!(
+        e.message.contains("`blocks.yaml`, `blocks-2.yaml`"),
+        "{}",
+        e.message
+    );
+    let e = refused(json!({"operations": [{"op": "attsync", "library": "other.yaml"}]}));
+    assert_eq!(e.code, ErrorCode::UnknownName);
+    assert_eq!(e.field.as_deref(), Some("operations[0].library"));
+    assert!(
+        e.message.contains("`blocks.yaml`, `blocks-2.yaml`"),
+        "{}",
+        e.message
+    );
+
+    let report = lands(
+        &set,
+        json!({"operations": [{"op": "add_block", "library": "blocks-2.yaml", "name": "BADGE", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1}}]}]}),
+    );
+    assert_eq!(report.operations[0].sheets, ["DEMO-003"]);
+    assert!(fs::read_to_string(set.join("blocks-2.yaml"))
+        .unwrap()
+        .contains("  BADGE:\n"));
+    assert!(!fs::read_to_string(set.join("blocks.yaml"))
+        .unwrap()
+        .contains("BADGE"));
 }

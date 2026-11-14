@@ -126,8 +126,13 @@ An insert's ID and name are kept in the DWG as extended data under the registere
 
 Reading a DWG back gives its block definitions, the inserts nested in them among their objects, and its inserts with their attribute values, scale, rotation and name, and each object's ID. An insert is read only when each attribute is where its block puts it, with its definition's tag, mode, style and justification.
 
+## Changing it through a change set
+
+A change set adds a block to a drawing set's library with `add_block` (AutoCAD's BLOCK), replaces a block's whole definition with `redefine_block` (BEDIT), and brings inserts into line with their blocks' definitions with `attsync` (ATTSYNC), for a library edited by hand. An edit to the library reaches every sheet whose template names it, all or nothing, and a value an insert gives for a tag its block no longer carries is removed from its record as AutoCAD's ATTSYNC removes it. [Change sets](change-sets.md#blocks) sets out how each is written and what the reply lists.
+
 ## What is not offered yet
 
+- Renaming or deleting a block, and editing the library's own layers, linetypes and text styles, through a change set.
 - Dynamic blocks, which come in a later ticket.
 - Cells in a nested block: the checker holds only the cells of the block a sheet inserts.
 - Annotative blocks and attributes.

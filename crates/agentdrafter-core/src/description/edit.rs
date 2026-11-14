@@ -11,6 +11,11 @@
 //! The new text is read back before anything is saved and must read as the
 //! tree the edits made; a text that does not is refused.
 //!
+//! A block library's blocks are edited one block at a time: a block an
+//! edit sets is written again whole, a key to a line, in the place of its
+//! entry, and a block added goes after the library's last; every other
+//! block, and every other byte, stays as it was.
+//!
 //! IDs stay put. An object an edit adds is given an `id` by the caller, and
 //! deleting an object writes the place of each later object that has no
 //! `id` as its `id`, such as `objects[3]`, so that no object's ID moves.
@@ -21,7 +26,7 @@ use serde_json::{Map, Value};
 
 use super::emit::{number_text, scalar_text, Context, Emitter};
 use super::ids::{ID_KEY, NAME_KEY};
-use super::objects::{article, OBJECT_TYPES};
+use super::objects::{article, BLOCK_OBJECT_TYPES, OBJECT_TYPES};
 use super::polyline::VERTEX_KEYS;
 use super::set::ROW_OBJECTS_KEY;
 use super::strict_yaml::{self, index_path, key_path, Entry, Kind, Node, Source, Style};
@@ -76,6 +81,16 @@ pub(crate) struct Changed {
     pub from_row: Option<(String, String)>,
 }
 
+/// An insert in a list of objects, or among a block's: its place in the
+/// list, the block it inserts, and each attribute value it gives, by tag,
+/// as the record writes the value, such as `B` or `{row: REV}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InsertValues {
+    pub index: usize,
+    pub block: String,
+    pub values: Vec<(String, String)>,
+}
+
 /// What setting an attribute did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AttributeSet {
@@ -99,6 +114,18 @@ pub(crate) struct RecordFile {
     /// The tables at the top of the file an edit changed, such as
     /// `layers`, each written again whole, one entry to a line.
     tables: Vec<String>,
+    /// The blocks of a block library an edit set or changed, each written
+    /// again whole on its own lines.
+    blocks: Vec<BlockEdit>,
+}
+
+/// A block of a block library an edit set or changed.
+struct BlockEdit {
+    name: String,
+    /// The lines its entry was written on, from the start of its key's
+    /// line to just after its value's last line, and the column of its
+    /// key; none for a block the file did not have.
+    lines: Option<(usize, usize, usize)>,
 }
 
 /// What became of one list's objects: where the file wrote each at first,
@@ -179,6 +206,7 @@ impl RecordFile {
             lists: Vec::new(),
             values: Vec::new(),
             tables: Vec::new(),
+            blocks: Vec::new(),
         })
     }
 
@@ -186,6 +214,7 @@ impl RecordFile {
     pub(crate) fn changed(&self) -> bool {
         !self.values.is_empty()
             || !self.tables.is_empty()
+            || !self.blocks.is_empty()
             || self.lists.iter().any(|(_, state)| state.dirty())
     }
 
@@ -432,6 +461,308 @@ impl RecordFile {
             self.touch(list, index, operation, Touch::Keys(vec![key.to_owned()]));
         }
         users.len()
+    }
+
+    /// Each insert of `list`, with the attribute values it gives as the
+    /// record writes them.
+    pub(crate) fn inserts(&self, list: ObjectList) -> Vec<InsertValues> {
+        self.items(list)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| self.insert_values(index, item))
+            .collect()
+    }
+
+    /// Takes the value the insert of `list` at `index` gives for the
+    /// attribute `tag` away, as operation `operation`, and its
+    /// `attributes` with it when no value is left.
+    pub(crate) fn remove_attribute(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        tag: &str,
+        operation: usize,
+    ) -> Result<(), Error> {
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let keys = object_keys_mut(&mut items[index]).ok_or_else(|| record_shape("insert"))?;
+        remove_attribute_value(keys, tag);
+        let key = key_path("attributes", tag);
+        self.touch(list, index, operation, Touch::Keys(vec![key]));
+        Ok(())
+    }
+
+    /// The names of a block library's blocks, in the file's order.
+    pub(crate) fn block_names(&self) -> Vec<String> {
+        self.table_names(BLOCKS_KEY)
+    }
+
+    /// The block `name` of a block library as one line of its YAML; none
+    /// when the library does not define it.
+    pub(crate) fn block_text(&self, name: &str) -> Option<String> {
+        self.table_entry_text(BLOCKS_KEY, name)
+    }
+
+    /// The tags each insert of the block `name` carries, as the library
+    /// writes the block now: its attribute definitions' tags, but a
+    /// constant one's, whose value is the definition's on every insert.
+    /// None when the library does not define the block.
+    pub(crate) fn block_carried_tags(&self, name: &str) -> Option<Vec<String>> {
+        let block = self.block_node(name)?;
+        let mut tags = Vec::new();
+        for item in block_items_of(block) {
+            if let (Some("attdef"), Some(keys)) = object_parts(item) {
+                if scalar_of(keys, "constant") == Some("true") {
+                    continue;
+                }
+                if let Some(tag) = scalar_of(keys, "tag") {
+                    tags.push(tag.to_owned());
+                }
+            }
+        }
+        Some(tags)
+    }
+
+    /// Each insert among the objects of each block of a block library, with
+    /// the block whose definition holds it.
+    pub(crate) fn block_inserts(&self) -> Vec<(String, InsertValues)> {
+        let Some(Kind::Mapping(blocks)) = mapping_entry(&self.root, BLOCKS_KEY).map(|b| &b.kind)
+        else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for block in blocks {
+            for (index, item) in block_items_of(&block.value).iter().enumerate() {
+                if let Some(insert) = self.insert_values(index, item) {
+                    found.push((block.key.clone(), insert));
+                }
+            }
+        }
+        found
+    }
+
+    /// Sets the block `name` of a block library to `objects`, at
+    /// `base_point` when one is given: a block it has is replaced whole,
+    /// and one it has not is added after its last. Each object is written
+    /// with its keys in the order its type lists them.
+    pub(crate) fn block_set(
+        &mut self,
+        name: &str,
+        base_point: Option<&Value>,
+        objects: &[Value],
+    ) -> Result<(), Error> {
+        let mut keys = Vec::new();
+        if let Some(point) = base_point {
+            keys.push(new_entry("base_point", node_of(point)));
+        }
+        keys.push(new_entry(
+            "objects",
+            Node::new(Kind::Sequence(objects.iter().map(block_object).collect())),
+        ));
+        let value = Node::new(Kind::Mapping(keys));
+        self.note_block(name)?;
+        let blocks = self.table_mut(BLOCKS_KEY)?;
+        match blocks.iter_mut().find(|e| e.key == name) {
+            Some(entry) => entry.value = value,
+            None => blocks.push(new_entry(name, value)),
+        }
+        Ok(())
+    }
+
+    /// Takes the value the insert at `index` among the objects of the block
+    /// `block` gives for the attribute `tag` away, and its `attributes`
+    /// with it when no value is left.
+    pub(crate) fn remove_block_attribute(
+        &mut self,
+        block: &str,
+        index: usize,
+        tag: &str,
+    ) -> Result<(), Error> {
+        self.note_block(block)?;
+        let shape = || record_shape_in("a block's list of objects", &self.path);
+        let node = mapping_entry_mut(&mut self.root, BLOCKS_KEY)
+            .and_then(|blocks| mapping_entry_mut(blocks, block))
+            .and_then(|block| mapping_entry_mut(block, "objects"));
+        let Some(Node {
+            kind: Kind::Sequence(items),
+            ..
+        }) = node
+        else {
+            return Err(shape());
+        };
+        let keys = items
+            .get_mut(index)
+            .and_then(object_keys_mut)
+            .ok_or_else(|| record_shape("insert"))?;
+        remove_attribute_value(keys, tag);
+        Ok(())
+    }
+
+    /// The block `name` of a block library, as the record holds it now.
+    fn block_node(&self, name: &str) -> Option<&Node> {
+        mapping_entry(mapping_entry(&self.root, BLOCKS_KEY)?, name)
+    }
+
+    /// Notes that an edit sets the block `name`, before it does, keeping
+    /// where the file wrote its entry.
+    fn note_block(&mut self, name: &str) -> Result<(), Error> {
+        if self.blocks.iter().any(|b| b.name == name) {
+            return Ok(());
+        }
+        let blocks = mapping_entry(&self.root, BLOCKS_KEY);
+        if blocks
+            .and_then(|b| b.source)
+            .is_some_and(|s| s.style == Style::Flow)
+        {
+            return Err(self.cannot_write("its blocks are written in braces"));
+        }
+        let lines = match blocks.map(|b| &b.kind) {
+            Some(Kind::Mapping(entries)) => entries
+                .iter()
+                .find(|e| e.key == name && e.key_end > 0)
+                .map(|e| {
+                    let start = line_start(&self.text, e.key_end);
+                    let end = e.value.source.map_or_else(
+                        || line_end(&self.text, e.key_end),
+                        |s| line_end(&self.text, s.end),
+                    );
+                    (start, end, e.key_at.column.saturating_sub(1))
+                }),
+            _ => None,
+        };
+        self.blocks.push(BlockEdit {
+            name: name.to_owned(),
+            lines,
+        });
+        Ok(())
+    }
+
+    /// The block `name` written whole, a key to a line, its key at
+    /// `column`: its base point in brackets and its objects an item to a
+    /// line, ending with a line break.
+    fn block_lines(&self, name: &str, value: &Node, column: usize) -> String {
+        let nl = self.newline;
+        let emitter = self.emitter();
+        let indent = " ".repeat(column);
+        let key = scalar_text(name, Context::Flow, column, nl);
+        let Kind::Mapping(keys) = &value.kind else {
+            return format!("{indent}{key}: {}{nl}", emitter.flow(value));
+        };
+        let mut out = format!("{indent}{key}:{nl}");
+        for entry in keys {
+            out.push_str(&" ".repeat(column + 2));
+            out.push_str(&scalar_text(&entry.key, Context::Flow, column + 2, nl));
+            match &entry.value.kind {
+                Kind::Sequence(items) if entry.key == "objects" && !items.is_empty() => {
+                    out.push(':');
+                    out.push_str(nl);
+                    for item in items {
+                        out.push_str(&" ".repeat(column + 4));
+                        out.push_str("- ");
+                        out.push_str(&emitter.item(item, column + 6));
+                        out.push_str(nl);
+                    }
+                }
+                _ => {
+                    out.push_str(": ");
+                    out.push_str(&emitter.flow(&entry.value));
+                    out.push_str(nl);
+                }
+            }
+        }
+        out
+    }
+
+    /// The splices that write each block an edit set again, where the file
+    /// wrote it, and each block added after the last the file wrote.
+    fn block_splices(&self, splices: &mut Vec<(usize, usize, String)>) -> Result<(), Error> {
+        if self.blocks.is_empty() {
+            return Ok(());
+        }
+        let Some(Kind::Mapping(entries)) = mapping_entry(&self.root, BLOCKS_KEY).map(|b| &b.kind)
+        else {
+            return Err(record_shape_in("a mapping under `blocks`", &self.path));
+        };
+        let nl = self.newline;
+        // The end of the last block the file wrote, and the column of its
+        // blocks' names.
+        let written: Vec<(usize, usize)> = entries
+            .iter()
+            .filter(|e| e.key_end > 0)
+            .map(|e| {
+                let end = match self.blocks.iter().find(|b| b.name == e.key) {
+                    Some(BlockEdit {
+                        lines: Some((_, end, _)),
+                        ..
+                    }) => *end,
+                    _ => e.value.source.map_or_else(
+                        || line_end(&self.text, e.key_end),
+                        |s| line_end(&self.text, s.end),
+                    ),
+                };
+                (end, e.key_at.column.saturating_sub(1))
+            })
+            .collect();
+        let Some(&(last_end, column)) = written.iter().max_by_key(|(end, _)| *end) else {
+            return Err(self.cannot_write("its blocks are not written a block to a line"));
+        };
+        let mut added = String::new();
+        for edit in &self.blocks {
+            let Some(entry) = entries.iter().find(|e| e.key == edit.name) else {
+                continue;
+            };
+            match edit.lines {
+                Some((start, end, column)) => {
+                    let mut with = self.block_lines(&edit.name, &entry.value, column);
+                    if end == self.text.len() && !self.text.ends_with('\n') {
+                        with.truncate(with.len() - nl.len());
+                    }
+                    splices.push((start, end, with));
+                }
+                None => added.push_str(&self.block_lines(&edit.name, &entry.value, column)),
+            }
+        }
+        if !added.is_empty() {
+            let mut with = String::new();
+            if last_end == self.text.len() && !self.text.ends_with('\n') {
+                with.push_str(nl);
+            }
+            with.push_str(&added);
+            splices.push((last_end, last_end, with));
+        }
+        Ok(())
+    }
+
+    /// The insert `item`, at `index` in its list, with its block and the
+    /// attribute values it gives; none when it is not an insert.
+    fn insert_values(&self, index: usize, item: &Node) -> Option<InsertValues> {
+        let (Some("insert"), Some(keys)) = object_parts(item) else {
+            return None;
+        };
+        let block = scalar_of(keys, "block")?.to_owned();
+        let values = match keys
+            .iter()
+            .find(|k| k.key == "attributes")
+            .map(|k| &k.value.kind)
+        {
+            Some(Kind::Mapping(values)) => values
+                .iter()
+                .map(|v| {
+                    let text = match &v.value.kind {
+                        Kind::Scalar(text) => text.clone(),
+                        _ => self.emitter().flow(&v.value),
+                    };
+                    (v.key.clone(), text)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        Some(InsertValues {
+            index,
+            block,
+            values,
+        })
     }
 
     /// The entries of `table` at the top of the file, to edit, made when
@@ -1124,6 +1455,7 @@ impl RecordFile {
                 self.list_splices(*list, state, &mut splices)?;
             }
         }
+        self.block_splices(&mut splices)?;
         for edit in &self.values {
             let start = if edit.source.style == Style::BlockScalar {
                 value_start(&self.text, edit.key_end).unwrap_or(edit.source.start)
@@ -1291,6 +1623,65 @@ impl ListState {
                 .enumerate()
                 .any(|(i, item)| item.edited || item.origin != Some(i))
     }
+}
+
+/// The key a block library writes its blocks under.
+const BLOCKS_KEY: &str = "blocks";
+
+/// The objects of the block `block`, as a block library writes them; none
+/// when it writes no list.
+fn block_items_of(block: &Node) -> &[Node] {
+    match mapping_entry(block, "objects").map(|o| &o.kind) {
+        Some(Kind::Sequence(items)) => items,
+        _ => &[],
+    }
+}
+
+/// Takes the value an insert's `keys` give for the attribute `tag` away,
+/// and the `attributes` with it when no value is left.
+fn remove_attribute_value(keys: &mut Vec<Entry>, tag: &str) {
+    let Some(p) = keys.iter().position(|e| e.key == "attributes") else {
+        return;
+    };
+    if let Kind::Mapping(values) = &mut keys[p].value.kind {
+        values.retain(|v| v.key != tag);
+        if values.is_empty() {
+            keys.remove(p);
+        }
+    }
+}
+
+/// The node a block's object sent as JSON writes: a mapping of one key, its
+/// type, whose keys are written in the order the type lists them, then its
+/// ID and its name.
+fn block_object(value: &Value) -> Node {
+    let Value::Object(object) = value else {
+        return node_of(value);
+    };
+    let [(kind, Value::Object(keys))] = object.iter().collect::<Vec<_>>()[..] else {
+        return node_of(value);
+    };
+    let order: Vec<&str> = BLOCK_OBJECT_TYPES
+        .iter()
+        .find(|(name, _)| name == kind)
+        .map(|(_, keys)| keys.iter().copied().chain([ID_KEY, NAME_KEY]).collect())
+        .unwrap_or_default();
+    let mut ordered: Vec<(&String, &Value)> = keys.iter().collect();
+    ordered.sort_by_key(|(key, _)| order.iter().position(|k| k == key).unwrap_or(order.len()));
+    let entries = ordered
+        .into_iter()
+        .map(|(key, value)| {
+            let mut node = node_of(value);
+            if kind == "polyline" && key == "points" {
+                order_vertices(&mut node);
+            }
+            new_entry(key, node)
+        })
+        .collect();
+    Node::new(Kind::Mapping(vec![new_entry(
+        kind,
+        Node::new(Kind::Mapping(entries)),
+    )]))
 }
 
 /// `items` written an item to a line, each `- ` at `column`, with line

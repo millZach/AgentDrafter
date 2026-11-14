@@ -95,9 +95,9 @@ pub use change::{
     StampRevision,
 };
 pub use change::{
-    change, change_set_schema, change_with, operations, ChangeReport, ChangeRequest, Failure, Fill,
-    Inconsistent, OperationInfo, OperationList, OperationOutcome, RowValueSet, SheetChange,
-    MARK_FILE,
+    change, change_set_schema, change_with, operations, AttributeRemoved, ChangeReport,
+    ChangeRequest, Failure, Fill, Inconsistent, OperationInfo, OperationList, OperationOutcome,
+    RowValueSet, SheetChange, MARK_FILE,
 };
 pub use change::{
     journal, undo, CommitState, Entry, EntryKind, FileState, FileUndone, JournalEntry,

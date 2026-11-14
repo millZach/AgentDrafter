@@ -181,9 +181,38 @@ pub struct OperationOutcome {
     /// an object before them did not move their IDs.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ids_written: Vec<String>,
+    /// The inserts of the block a `redefine_block` or an `attsync` brought
+    /// into line, by ID, on every sheet it reaches: an insert of a
+    /// template on every sheet built from it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inserts: Vec<String>,
+    /// Each attribute value it removed from an insert, because the insert's
+    /// block no longer carries the tag.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes_removed: Vec<AttributeRemoved>,
     /// Why it did not land.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
+}
+
+/// An attribute value a block operation removed from an insert, because
+/// the insert's block no longer carries its tag, as AutoCAD's ATTSYNC
+/// removes it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AttributeRemoved {
+    /// The record that wrote it.
+    pub record: String,
+    /// The insert's place in the record, such as `objects[2]`,
+    /// `rows[1].objects[0]` or, for an insert in another block of the
+    /// library, `blocks.OUTER.objects[1]`.
+    pub field: String,
+    /// The insert's ID on each sheet it is on; none for an insert in a
+    /// block, which is on every sheet that inserts that block.
+    pub ids: Vec<String>,
+    pub tag: String,
+    /// The value as the record wrote it, such as `B` or `{row: REV}`; a
+    /// row's value itself stays in its row.
+    pub value: String,
 }
 
 /// A row's value an operation sets, because the template takes the value

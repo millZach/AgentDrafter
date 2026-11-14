@@ -59,7 +59,9 @@ pub(crate) use set::{
     read_rows, read_rows_in, read_set_settings, read_set_settings_in, rows_at, template_path, Row,
 };
 pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
-pub(crate) use template::{read_template, read_template_in, template_at};
+pub(crate) use template::{
+    library_named, read_template, read_template_in, template_at, template_in,
+};
 
 /// The keys at the top of a sheet description.
 pub(crate) const SHEET_KEYS: [&str; 9] = [
