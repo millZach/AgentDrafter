@@ -806,12 +806,18 @@ impl<'a> Shape<'a> {
         let Shape::Curve { d, near } = self else {
             return 0.0;
         };
-        let start = near
-            .iter()
-            .min_by(|a, b| plan_distance(a.1, p).total_cmp(&plan_distance(b.1, p)))
-            .map_or(0.0, |n| n.0);
+        // A spline can come near a point more than once, and the nearest of
+        // the points along it need not lie by the nearest foot: start from
+        // each place the points come nearest, and keep the nearest foot.
         let (a, b) = d.domain();
-        foot_on(d, p, start).clamp(a, b)
+        let far: Vec<f64> = near.iter().map(|n| plan_distance(n.1, p)).collect();
+        (0..near.len())
+            .filter(|&i| {
+                (i == 0 || far[i] <= far[i - 1]) && (i + 1 == far.len() || far[i] <= far[i + 1])
+            })
+            .map(|i| foot_on(d, p, near[i].0).clamp(a, b))
+            .min_by(|&u, &v| plan_distance(d.point(u), p).total_cmp(&plan_distance(d.point(v), p)))
+            .unwrap_or(a)
     }
 
     /// The parameter along `d`, the curve this is the shape of, of `p`, a
