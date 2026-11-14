@@ -1016,6 +1016,22 @@ impl RecordFile {
                 || line_end(&self.text, entry.key_end),
                 |s| line_end(&self.text, s.end),
             );
+            // A table in braces is written again an entry to a line, which
+            // would lose a comment among its entries: it is refused instead,
+            // as blocks in braces are.
+            let braces = entry.value.source.is_some_and(|s| s.style == Style::Flow);
+            if braces && self.holds_comment(&entry.value, start, end) {
+                return Err(Error::new(
+                    ErrorCode::WriteFailed,
+                    format!(
+                        "could not rewrite the record in place: its {} are written in braces \
+                         with a comment; nothing was written, so write the table one entry to a \
+                         line and try again",
+                        table.replace('_', " ")
+                    ),
+                )
+                .in_file(&self.path));
+            }
             let mut with = render(column);
             if end == self.text.len() && !self.text.ends_with('\n') {
                 with.truncate(with.len() - nl.len());
@@ -1037,6 +1053,20 @@ impl RecordFile {
                 Ok((at, at, format!("{lead}{}", render(column))))
             }
         }
+    }
+
+    /// Whether the text from `start` to `end`, which holds `node`, holds a
+    /// comment: a `#` at the start of a line or after a space, outside the
+    /// quoted scalars of `node`, its keys among them.
+    fn holds_comment(&self, node: &Node, start: usize, end: usize) -> bool {
+        let mut quoted = Vec::new();
+        quoted_spans(node, &self.text, &mut quoted);
+        let bytes = self.text.as_bytes();
+        (start..end).any(|at| {
+            bytes[at] == b'#'
+                && (at == 0 || matches!(bytes[at - 1], b' ' | b'\t' | b'\n' | b'\r'))
+                && !quoted.iter().any(|&(from, to)| (from..to).contains(&at))
+        })
     }
 
     /// The operation to blame for what is wrong at `within` in the object
@@ -2076,6 +2106,65 @@ fn node_of(value: &Value) -> Node {
                 .collect(),
         )),
     }
+}
+
+/// Adds to `spans` where each quoted scalar of `node`, and each quoted key
+/// of its mappings, is written in `text`.
+fn quoted_spans(node: &Node, text: &str, spans: &mut Vec<(usize, usize)>) {
+    match &node.kind {
+        Kind::Mapping(entries) => {
+            for entry in entries {
+                if let Some(span) = quoted_key(text, entry.key_end) {
+                    spans.push(span);
+                }
+                quoted_spans(&entry.value, text, spans);
+            }
+        }
+        Kind::Sequence(items) => {
+            for item in items {
+                quoted_spans(item, text, spans);
+            }
+        }
+        Kind::Scalar(_) => {
+            if let Some(source) = node.source.filter(|s| s.style == Style::Quoted) {
+                spans.push((source.start, source.end));
+            }
+        }
+    }
+}
+
+/// Where a key that ends just before `key_end` is written, when it is
+/// quoted: from its opening quote to just after its closing one.
+fn quoted_key(text: &str, key_end: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let quote = *bytes.get(key_end.checked_sub(1)?)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let mut at = key_end - 1;
+    while at > 0 {
+        at -= 1;
+        if bytes[at] != quote {
+            continue;
+        }
+        if quote == b'\'' {
+            // `''` inside single quotes is one quote.
+            if at > 0 && bytes[at - 1] == b'\'' {
+                at -= 1;
+                continue;
+            }
+            return Some((at, key_end));
+        }
+        let escapes = bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|&&b| b == b'\\')
+            .count();
+        if escapes % 2 == 0 {
+            return Some((at, key_end));
+        }
+    }
+    None
 }
 
 /// Writes the keys of each of a polyline's points that is a mapping in the

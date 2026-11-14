@@ -18,7 +18,7 @@ use acadrust::{CadDocument, DxfReader};
 
 use super::{panic_message, point, read_drawing, read_layer, read_linetype, read_object, unit};
 use crate::error::{Error, ErrorCode};
-use crate::import::{carries, DrawingBlocks, ReadBlock};
+use crate::import::{as_donut, carries, DrawingBlocks, ReadBlock};
 use crate::model::{Block, Layer, Linetype, BUILT_IN_LINETYPES, CONTINUOUS};
 use crate::text::{TextStyle, STANDARD};
 
@@ -121,7 +121,9 @@ pub(crate) fn read_blocks(path: &Path, dxf: bool) -> Result<DrawingBlocks, Error
             if matches!(dwg_object, EntityType::Block(_) | EntityType::BlockEnd(_)) {
                 continue;
             }
+            // A donut comes back as the polyline it is written as.
             let object = read_object(dwg_object, known)
+                .map(as_donut)
                 .filter(|o| carries(o, &linetypes, &layers, &text_styles));
             match object {
                 Some(object) => objects.push(object),

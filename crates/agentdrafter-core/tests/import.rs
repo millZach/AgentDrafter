@@ -543,3 +543,42 @@ fn import_blocks_with_replace_brings_the_inserts_of_a_block_it_replaces_into_lin
         .iter()
         .any(|n| n.code == ImportNoticeCode::CellsDropped));
 }
+
+#[test]
+fn a_donut_and_a_disc_come_back_as_donuts_and_a_look_alike_as_a_polyline() {
+    let dir = scratch("donuts");
+    let library = "# Made up for AgentDrafter's tests.
+units: mm
+blocks:
+  RING:
+    objects:
+      - donut: {center: [10, 10, 0], inside_diameter: 2, outside_diameter: 4, color: red}
+      - donut: {center: [0, 0, 0], outside_diameter: 3}
+      - polyline: {points: [{point: [21, 0, 0], bulge: 1}, [19, 0, 0]], width: 1}
+";
+    let sheet = "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {block: RING, position: [50, 50, 0]}
+";
+    let dwg = built(&dir, library, sheet);
+    let imported = dir.join("imported.yaml");
+    let report = import_blocks(&request(&dwg, &imported)).unwrap();
+    assert!(
+        report.imported.not_carried.is_empty(),
+        "{:?}",
+        report.imported.not_carried
+    );
+    let text = fs::read_to_string(&imported).unwrap();
+    assert_eq!(text.matches("- donut:").count(), 2, "{text}");
+    let back = library_at(&imported);
+    let original = parse_block_library(library).unwrap();
+    assert!(
+        same(&block(&back, "RING"), &block(&original, "RING")),
+        "{text}"
+    );
+    assert!(matches!(
+        block(&back, "RING").objects[2],
+        Object::Polyline(_)
+    ));
+}

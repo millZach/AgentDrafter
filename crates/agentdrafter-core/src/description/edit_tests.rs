@@ -381,6 +381,64 @@ blocks: {}
     );
 }
 
+/// A table written in braces is written again an entry to a line, so one
+/// whose text holds a comment is not rewritten, and nothing is lost; a `#`
+/// inside a quoted key or value is no comment.
+#[test]
+fn a_table_in_braces_with_a_comment_is_not_rewritten() {
+    let keys = |json: serde_json::Value| json.as_object().unwrap().clone();
+    for text in [
+        "units: in
+layers: {title: {color: red}}  # the client's
+objects: []
+",
+        "units: in
+layers: {
+  # ours
+  title: {color: red}
+}
+objects: []
+",
+        "units: in
+layers: # ours
+  {title: {color: red}}
+objects: []
+",
+    ] {
+        let mut record = RecordFile::from_text(Path::new("t.yaml"), text.to_owned()).unwrap();
+        record
+            .table_add("layers", &["color"], "notes", &keys(json!({})))
+            .unwrap();
+        let error = record.new_text().unwrap_err();
+        assert_eq!(error.code, crate::error::ErrorCode::WriteFailed, "{text}");
+        assert!(
+            error
+                .message
+                .contains("its layers are written in braces with a comment"),
+            "{error:?}"
+        );
+        assert!(
+            error
+                .message
+                .contains("write the table one entry to a line"),
+            "{error:?}"
+        );
+    }
+    let quoted = "units: in
+layers: {'A #1': {color: red, description: 'see #2'}, \"B #3\": {}}
+objects: []
+";
+    let mut record = RecordFile::from_text(Path::new("t.yaml"), quoted.to_owned()).unwrap();
+    record
+        .table_add("layers", &["color"], "notes", &keys(json!({})))
+        .unwrap();
+    let written = record.new_text().unwrap().unwrap();
+    assert!(
+        written.contains("'see #2'") && written.contains("  notes: {}"),
+        "{written}"
+    );
+}
+
 const LIBRARY: &str = include_str!("../../../../examples/demo-set/blocks.yaml");
 
 /// A made-up block library with comments between its blocks, and a block

@@ -2726,3 +2726,41 @@ fn an_error_in_a_tag_is_not_laid_on_an_edit_of_a_bracketed_tag() {
         "{e:#?}"
     );
 }
+
+/// A template's table written in braces with a comment is not written
+/// again an entry to a line, which would lose the comment: the operation
+/// that adds to it fails `write_failed`, and nothing is written.
+#[test]
+fn a_table_in_braces_with_a_comment_takes_no_entry_and_keeps_its_comment() {
+    let set = demo_set("braces-comment");
+    let template = set.join("templates").join("ansi-b.yaml");
+    let text = fs::read_to_string(&template).unwrap().replace(
+        "layers:\n  trim: {color: 8, lineweight: 0.13}\n  border: {color: white, lineweight: 0.7}\n  notes: {color: cyan}\n",
+        "layers: {trim: {color: 8, lineweight: 0.13}, border: {color: white, lineweight: 0.7}, notes: {color: cyan}}  # the client's layers\n",
+    );
+    assert!(text.contains("# the client's layers"));
+    fs::write(&template, &text).unwrap();
+    let before = snapshot(&set);
+
+    let reply = apply(
+        &set,
+        json!({"operations": [{"op": "add_layer", "template": "templates/ansi-b.yaml", "name": "markup", "color": "red"}]}),
+    );
+
+    assert!(!reply.ok);
+    let error = reply
+        .result
+        .as_ref()
+        .and_then(|r| r.operations[0].error.clone())
+        .or(reply.error.clone())
+        .unwrap();
+    assert_eq!(error.code, ErrorCode::WriteFailed, "{error:?}");
+    assert!(
+        error
+            .message
+            .contains("layers are written in braces with a comment"),
+        "{error:?}"
+    );
+    assert_eq!(fs::read_to_string(&template).unwrap(), text);
+    assert_eq!(snapshot(&set), before, "nothing was written");
+}

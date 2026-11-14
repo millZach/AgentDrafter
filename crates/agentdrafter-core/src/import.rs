@@ -26,15 +26,16 @@ use serde_json::{json, Map, Value};
 
 use crate::build::{is_same_file, write_beside};
 use crate::change::{fit_library_inserts, AttributeRemoved};
-use crate::description::blocks::{library_hatch_patterns, read_block_library};
+use crate::description::blocks::{library_hatch_patterns, read_block_library, tag_in_capitals};
 use crate::description::{
     library_named, one_name, read_file, read_rows, read_set_settings, template_path, RecordFile,
     LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Block, BlockLibrary, HatchEdge, HatchLoop, HatchPattern, Layer, Linetype, Object, ObjectColor,
-    ObjectLinetype, ObjectLineweight, Point3, Properties, CONTINUOUS, LAYER_ZERO, WHITE,
+    Block, BlockLibrary, Donut, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, Layer,
+    Linetype, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Properties,
+    CONTINUOUS, LAYER_ZERO, WHITE,
 };
 use crate::set::SET_SETTINGS_FILE;
 use crate::text::{Attachment, Justify, TextStyle, STANDARD};
@@ -183,6 +184,14 @@ pub enum ImportNoticeCode {
     /// A block replaced had cells, which a DWG does not hold, so the
     /// replacement has none: they are added by hand.
     CellsDropped,
+    /// A hatch pattern of the drawing has the name of another, in the
+    /// drawing or the library, defined otherwise: it is carried under a new
+    /// name, its own with `_2`, `_3` and so on, and its hatches name that.
+    PatternRenamed,
+    /// The command replaced a block of a library that no drawing set it
+    /// found names; a set elsewhere that names it would not see the change
+    /// in its journal.
+    NotJournaled,
 }
 
 /// A drawing's blocks as the seam reads them, with the tables they draw on.
@@ -205,6 +214,7 @@ pub(crate) struct DrawingBlocks {
 }
 
 /// One named block of a drawing, as the seam reads it.
+#[derive(Clone)]
 pub(crate) struct ReadBlock {
     pub block: Block,
     /// Each type of object the core could not carry, as a DXF names it,
@@ -253,6 +263,65 @@ pub(crate) fn carries(
             Object::Polyline(p) => p.points.len() >= if p.closed { 3 } else { 2 },
             _ => true,
         }
+}
+
+/// `object` as a donut when it is a polyline of the exact shape a donut is
+/// written as ([`Donut::polyline`]): closed, through two points on one
+/// level line, the first right of the second, each starting a half circle
+/// anticlockwise (a bulge of 1), with a constant width that fills a ring,
+/// or a disc when the ring has no hole. Anything else is left as it is.
+pub(crate) fn as_donut(object: Object) -> Object {
+    let Object::Polyline(polyline) = &object else {
+        return object;
+    };
+    let shaped = polyline.closed
+        && polyline.points.len() == 2
+        && polyline.bulges == [1.0, 1.0]
+        && polyline.widths.is_empty()
+        && polyline.width > 0.0;
+    if !shaped {
+        return object;
+    }
+    let (right, left) = (polyline.points[0], polyline.points[1]);
+    if right.y != left.y || right.z != left.z || right.x <= left.x {
+        return object;
+    }
+    let middle = right.x - left.x;
+    let outside_diameter = middle + polyline.width;
+    let mut inside_diameter = middle - polyline.width;
+    if inside_diameter.abs() <= SAME * outside_diameter {
+        inside_diameter = 0.0;
+    }
+    if inside_diameter < 0.0 {
+        return object;
+    }
+    Object::Donut(Donut {
+        center: Point3::new((right.x + left.x) / 2.0, right.y, right.z),
+        inside_diameter,
+        outside_diameter,
+        layer: polyline.layer.clone(),
+        properties: polyline.properties.clone(),
+    })
+}
+
+/// `block` with each attribute tag its attribute definitions and nested
+/// inserts write taken in capitals, as AutoCAD keeps a tag and a library
+/// reads one.
+fn tags_in_capitals(mut block: Block) -> Block {
+    for object in &mut block.objects {
+        match object {
+            Object::AttributeDefinition(definition) => {
+                definition.tag = tag_in_capitals(&definition.tag);
+            }
+            Object::Insert(insert) => {
+                for attribute in &mut insert.attributes {
+                    attribute.tag = tag_in_capitals(&attribute.tag);
+                }
+            }
+            _ => {}
+        }
+    }
+    block
 }
 
 /// The library an import writes into, as it is before.
@@ -346,11 +415,29 @@ pub(crate) fn plan(
 ) -> Result<Plan, Error> {
     let library = &existing.library;
     let mut imported = BlocksImported::default();
-    let named: Vec<&ReadBlock> = drawing.blocks.iter().collect();
+    let owned: Vec<ReadBlock> = drawing
+        .blocks
+        .iter()
+        .map(|read| ReadBlock {
+            block: tags_in_capitals(read.block.clone()),
+            not_carried: read.not_carried.clone(),
+        })
+        .collect();
+    let named: Vec<&ReadBlock> = owned.iter().collect();
     let carried = |b: &ReadBlock| !b.block.objects.is_empty();
-    let nothing_carried = |b: &ReadBlock| SkippedBlock {
-        block: b.block.name.clone(),
-        why: "none of its objects can be carried".to_owned(),
+    // A block skipped whole still says what it could not carry.
+    let nothing_carried = |b: &ReadBlock, imported: &mut BlocksImported| {
+        imported.skipped.push(SkippedBlock {
+            block: b.block.name.clone(),
+            why: "none of its objects can be carried".to_owned(),
+        });
+        imported
+            .not_carried
+            .extend(b.not_carried.iter().map(|(kind, count)| NotCarried {
+                block: b.block.name.clone(),
+                object_type: (*kind).to_owned(),
+                count: *count,
+            }));
     };
 
     // The blocks asked for.
@@ -360,7 +447,7 @@ pub(crate) fn plan(
             if carried(b) {
                 top.push(i);
             } else {
-                imported.skipped.push(nothing_carried(b));
+                nothing_carried(b, &mut imported);
             }
         }
     } else {
@@ -371,8 +458,12 @@ pub(crate) fn plan(
                     if !top.contains(&i) {
                         top.push(i);
                     }
-                } else {
-                    imported.skipped.push(nothing_carried(named[i]));
+                } else if !imported
+                    .skipped
+                    .iter()
+                    .any(|s| s.block == named[i].block.name)
+                {
+                    nothing_carried(named[i], &mut imported);
                 }
             } else if let Some((found, why)) =
                 drawing.skipped.iter().find(|(n, _)| one_name(n, name))
@@ -563,26 +654,63 @@ pub(crate) fn plan(
             }),
         }
     }
-    for pattern in &used.hatch_patterns {
-        match existing
-            .hatch_patterns
-            .iter()
-            .find(|p| one_name(&p.name, &pattern.name))
-        {
-            Some(held) => {
-                names
-                    .hatch_patterns
-                    .insert(pattern.name.clone(), held.name.clone());
-                if !same(&pattern.lines, &held.lines) {
-                    kept("hatch pattern", &pattern.name, &held.name);
-                }
+    // A hatch pattern is shared by name only where its definition is the
+    // same: one of the drawing's that has the name of another, in the
+    // drawing or the library, defined otherwise is carried under a name of
+    // its own.
+    let mut known: Vec<(String, Vec<HatchPatternLine>)> = existing
+        .hatch_patterns
+        .iter()
+        .map(|p| (p.name.clone(), p.lines.clone()))
+        .collect();
+    let mut renamed: Vec<(String, String, String)> = Vec::new();
+    for &i in &written {
+        for object in &named[i].block.objects {
+            let Object::Hatch(hatch) = object else {
+                continue;
+            };
+            if hatch.is_solid() {
+                continue;
             }
-            None => entries.push(PlannedEntry {
-                table: "hatch_patterns",
-                order: &HATCH_PATTERN_KEYS,
-                name: pattern.name.clone(),
-                keys: whole_keys(hatch_pattern_keys(pattern)),
-            }),
+            let pattern = &hatch.pattern;
+            let resolved = names
+                .hatch_patterns
+                .iter()
+                .find(|(p, _)| p.name == pattern.name && same(&p.lines, &pattern.lines))
+                .map(|(_, name)| name.clone());
+            let name = match resolved {
+                Some(name) => name,
+                None => {
+                    let mut candidate = pattern.name.clone();
+                    let mut n = 1;
+                    let name = loop {
+                        match known.iter().find(|(k, _)| one_name(k, &candidate)) {
+                            None => {
+                                known.push((candidate.clone(), pattern.lines.clone()));
+                                entries.push(PlannedEntry {
+                                    table: "hatch_patterns",
+                                    order: &HATCH_PATTERN_KEYS,
+                                    name: candidate.clone(),
+                                    keys: whole_keys(hatch_pattern_keys(pattern)),
+                                });
+                                break candidate;
+                            }
+                            Some((k, lines)) if same(lines, &pattern.lines) => break k.clone(),
+                            Some(_) => {
+                                n += 1;
+                                candidate = format!("{}_{n}", pattern.name);
+                            }
+                        }
+                    };
+                    names.hatch_patterns.push((pattern.clone(), name.clone()));
+                    name
+                }
+            };
+            let block = &named[i].block.name;
+            let note = (block.clone(), pattern.name.clone(), name.clone());
+            if !one_name(&name, &pattern.name) && !renamed.contains(&note) {
+                renamed.push(note);
+            }
         }
     }
     let drawing_style = |name: &str| drawing.text_styles.iter().find(|s| s.name == name);
@@ -628,6 +756,16 @@ pub(crate) fn plan(
     names
         .width_factors
         .insert(STANDARD.to_owned(), standard.width_factor);
+    for (block, old, new) in renamed {
+        notices.push(ImportNotice {
+            code: ImportNoticeCode::PatternRenamed,
+            message: format!(
+                "the block `{block}` hatches with the pattern `{old}`, whose name another \
+                 pattern defined otherwise has in the drawing or the library; it is carried as \
+                 `{new}`, and the block's hatches name that"
+            ),
+        });
+    }
     if used.standard {
         if let Some(theirs) = drawing_style(STANDARD) {
             let differs = !theirs.font.eq_ignore_ascii_case(&standard.font)
@@ -805,8 +943,19 @@ pub(crate) fn drawing_unit(
 /// templates name is refused: it is changed only by a change set's
 /// `import_blocks` operation, so the set's journal and undo hold it.
 pub fn import_blocks(request: &ImportBlocksRequest) -> Result<ImportBlocksReport, Error> {
+    let here = std::env::current_dir().unwrap_or_default();
+    import_blocks_in(request, &here)
+}
+
+/// Imports as [`import_blocks`] does, looking for the drawing sets that may
+/// name the library above it and above `here`, the folder the command runs
+/// in.
+fn import_blocks_in(
+    request: &ImportBlocksRequest,
+    here: &Path,
+) -> Result<ImportBlocksReport, Error> {
     let dxf = is_dxf(&request.drawing)?;
-    if let Some(set) = set_naming(&request.library) {
+    if let Some(set) = set_naming(&request.library, here) {
         return Err(Error::usage(format!(
             "the block library is the drawing set's in `{}`, whose templates name it; a set's \
              library is changed only by a change set, so that its journal and undo hold the \
@@ -844,13 +993,26 @@ pub fn import_blocks(request: &ImportBlocksRequest) -> Result<ImportBlocksReport
         }
         None => Existing::none(units),
     };
-    let plan = plan(
+    let mut plan = plan(
         &drawing,
         &existing,
         &request.blocks,
         request.replace,
         "--replace",
     )?;
+    // No set the command can see names the library, but one elsewhere on
+    // the disk may, and would not see a block replaced in its journal.
+    if old_text.is_some() && !plan.replaced().is_empty() {
+        plan.imported.notices.push(ImportNotice {
+            code: ImportNoticeCode::NotJournaled,
+            message: "no drawing set above the block library or above the folder the command \
+                      runs in names it, so its blocks were replaced here; a drawing set \
+                      elsewhere that names this library would not see the change in its \
+                      journal, so a set's library is changed with a change set's import_blocks \
+                      operation"
+                .to_owned(),
+        });
+    }
     let created = old_text.is_none() && !plan.blocks.is_empty();
     let mut report = ImportBlocksReport {
         drawing: request.drawing.display().to_string(),
@@ -915,15 +1077,23 @@ fn new_library_text(units: Unit, plan: &Plan) -> String {
     text
 }
 
-/// The folder of the drawing set whose templates name the block library
-/// at `library`, if one does: the set in its folder, or the nearest folder
-/// above it that holds a set's settings, or any folder above that. A set
-/// whose files cannot be read is not taken to name it.
-fn set_naming(library: &Path) -> Option<PathBuf> {
-    let library = plain_path(library);
-    let folder = library.parent()?.to_owned();
-    folder
-        .ancestors()
+/// The folder of a drawing set whose templates name the block library at
+/// `library`, if one does, among the sets the command can find: those in
+/// the library's folder or any folder above it, and those in `here`, the
+/// folder the command runs in, or any folder above it. A set elsewhere on
+/// the disk is not seen. A set whose files cannot be read is not taken to
+/// name it. A relative `library` is taken from `here`.
+fn set_naming(library: &Path, here: &Path) -> Option<PathBuf> {
+    let library = plain_path(&here.join(library));
+    let here = plain_path(here);
+    let mut folders: Vec<&Path> = library.parent()?.ancestors().collect();
+    for folder in here.ancestors() {
+        if !folders.contains(&folder) {
+            folders.push(folder);
+        }
+    }
+    folders
+        .into_iter()
         .filter(|f| f.join(SET_SETTINGS_FILE).is_file())
         .find(|set| names_library(set, &library))
         .map(Path::to_owned)
@@ -975,7 +1145,9 @@ fn plain_path(path: &Path) -> PathBuf {
 struct Names {
     layers: BTreeMap<String, String>,
     linetypes: BTreeMap<String, String>,
-    hatch_patterns: BTreeMap<String, String>,
+    /// Each hatch pattern of the drawing, by its name and definition, with
+    /// the name the library writes it by.
+    hatch_patterns: Vec<(HatchPattern, String)>,
     text_styles: BTreeMap<String, String>,
     blocks: BTreeMap<String, String>,
     width_factors: BTreeMap<String, f64>,
@@ -998,6 +1170,14 @@ impl Names {
         Self::of(&self.text_styles, name)
     }
 
+    /// The name the library writes the hatch pattern `pattern` by.
+    fn hatch_pattern(&self, pattern: &HatchPattern) -> String {
+        self.hatch_patterns
+            .iter()
+            .find(|(p, _)| p == pattern)
+            .map_or_else(|| pattern.name.clone(), |(_, name)| name.clone())
+    }
+
     /// The width factor text in the style `name`, as the library spells
     /// it, takes when it gives none.
     fn width_factor(&self, style: &str) -> f64 {
@@ -1005,14 +1185,12 @@ impl Names {
     }
 }
 
-/// The layers, linetypes, hatch patterns and text styles the blocks'
-/// objects name, each once, in the order first met; and whether any text
-/// draws in `Standard`.
+/// The layers, linetypes and text styles the blocks' objects name, each
+/// once, in the order first met; and whether any text draws in `Standard`.
 #[derive(Default)]
 struct Used {
     layers: Vec<String>,
     linetypes: Vec<String>,
-    hatch_patterns: Vec<HatchPattern>,
     text_styles: Vec<String>,
     standard: bool,
 }
@@ -1032,12 +1210,6 @@ impl Used {
             Object::Text(t) => Some(&t.style),
             Object::MText(t) => Some(&t.style),
             Object::AttributeDefinition(d) => Some(&d.style),
-            Object::Hatch(h) => {
-                if !h.is_solid() && !self.hatch_patterns.iter().any(|p| p.name == h.pattern.name) {
-                    self.hatch_patterns.push(h.pattern.clone());
-                }
-                None
-            }
             _ => None,
         };
         if let Some(style) = style {
@@ -1106,6 +1278,25 @@ fn quoted(names: &[&str]) -> String {
         .join(", ")
 }
 
+/// An angle in degrees as an import writes it: snapped to the nearest
+/// billionth of a degree, so that one a DWG kept in radians, such as
+/// 29.999999999999996, is written as it was drawn, 30; a whole turn is
+/// written 0.
+fn degrees(angle: f64) -> f64 {
+    const STEP: f64 = 1e9;
+    let snapped = (angle * STEP).round() / STEP;
+    let snapped = if (angle - snapped).abs() <= 1.0 / STEP {
+        snapped
+    } else {
+        angle
+    };
+    if snapped == 360.0 {
+        0.0
+    } else {
+        snapped
+    }
+}
+
 fn point_value(p: Point3) -> Value {
     json!([p.x, p.y, p.z])
 }
@@ -1167,8 +1358,8 @@ fn object_value(object: &Object, names: &Names) -> Value {
         Object::Arc(arc) => {
             put("center", point_value(arc.center));
             put("radius", json!(arc.radius));
-            put("start_angle", json!(arc.start_angle));
-            put("end_angle", json!(arc.end_angle));
+            put("start_angle", json!(degrees(arc.start_angle)));
+            put("end_angle", json!(degrees(arc.end_angle)));
         }
         Object::Circle(circle) => {
             put("center", point_value(circle.center));
@@ -1178,9 +1369,11 @@ fn object_value(object: &Object, names: &Names) -> Value {
             put("center", point_value(ellipse.center));
             put("major_axis", point_value(ellipse.major_axis));
             put("ratio", json!(ellipse.ratio));
-            if !ellipse.is_whole() {
-                put("start_angle", json!(ellipse.start_angle));
-                put("end_angle", json!(ellipse.end_angle));
+            let (start, end) = (degrees(ellipse.start_angle), degrees(ellipse.end_angle));
+            // An elliptical arc whose ends snap together is the whole ellipse.
+            if !ellipse.is_whole() && start != end {
+                put("start_angle", json!(start));
+                put("end_angle", json!(end));
             }
         }
         Object::Spline(spline) => {
@@ -1202,15 +1395,12 @@ fn object_value(object: &Object, names: &Names) -> Value {
             if hatch.is_solid() {
                 put("pattern", json!(hatch.pattern.name));
             } else {
-                put(
-                    "pattern",
-                    json!(Names::of(&names.hatch_patterns, &hatch.pattern.name)),
-                );
+                put("pattern", json!(names.hatch_pattern(&hatch.pattern)));
                 if hatch.scale != 1.0 {
                     put("scale", json!(hatch.scale));
                 }
-                if hatch.angle != 0.0 {
-                    put("angle", json!(hatch.angle));
+                if degrees(hatch.angle) != 0.0 {
+                    put("angle", json!(degrees(hatch.angle)));
                 }
             }
             let loops: Vec<Value> = hatch.boundary.iter().map(loop_value).collect();
@@ -1238,8 +1428,8 @@ fn object_value(object: &Object, names: &Names) -> Value {
             if style != STANDARD {
                 put("style", json!(style));
             }
-            if text.rotation != 0.0 {
-                put("rotation", json!(text.rotation));
+            if degrees(text.rotation) != 0.0 {
+                put("rotation", json!(degrees(text.rotation)));
             }
             if text.justify != Justify::Left {
                 put("justify", json!(text.justify.name()));
@@ -1259,8 +1449,8 @@ fn object_value(object: &Object, names: &Names) -> Value {
             if let Some(factor) = text.width_factor {
                 put("width_factor", json!(factor));
             }
-            if text.rotation != 0.0 {
-                put("rotation", json!(text.rotation));
+            if degrees(text.rotation) != 0.0 {
+                put("rotation", json!(degrees(text.rotation)));
             }
             if text.justify != Attachment::TopLeft {
                 put("justify", json!(text.justify.name()));
@@ -1283,8 +1473,8 @@ fn object_value(object: &Object, names: &Names) -> Value {
             if definition.width_factor != names.width_factor(&style) {
                 put("width_factor", json!(definition.width_factor));
             }
-            if definition.rotation != 0.0 {
-                put("rotation", json!(definition.rotation));
+            if degrees(definition.rotation) != 0.0 {
+                put("rotation", json!(degrees(definition.rotation)));
             }
             if definition.justify != Justify::Left {
                 put("justify", json!(definition.justify.name()));
@@ -1310,8 +1500,8 @@ fn object_value(object: &Object, names: &Names) -> Value {
             if insert.scale != 1.0 {
                 put("scale", json!(insert.scale));
             }
-            if insert.rotation != 0.0 {
-                put("rotation", json!(insert.rotation));
+            if degrees(insert.rotation) != 0.0 {
+                put("rotation", json!(degrees(insert.rotation)));
             }
             // A tag the block defines more than once takes its values as a
             // list, in the block's order.
@@ -1434,8 +1624,8 @@ fn loop_value(hatch_loop: &HatchLoop) -> Value {
                     } => json!({ "arc": {
                         "center": point_value(center),
                         "radius": radius,
-                        "start_angle": start_angle,
-                        "end_angle": end_angle,
+                        "start_angle": degrees(start_angle),
+                        "end_angle": degrees(end_angle),
                     } }),
                 })
                 .collect();
@@ -1495,8 +1685,8 @@ fn hatch_pattern_keys(pattern: &HatchPattern) -> Map<String, Value> {
         .iter()
         .map(|line| {
             let mut keys = Map::new();
-            if line.angle != 0.0 {
-                keys.insert("angle".into(), json!(line.angle));
+            if degrees(line.angle) != 0.0 {
+                keys.insert("angle".into(), json!(degrees(line.angle)));
             }
             if line.origin != [0.0, 0.0] {
                 keys.insert("origin".into(), json!(line.origin));
@@ -1511,4 +1701,310 @@ fn hatch_pattern_keys(pattern: &HatchPattern) -> Map<String, Value> {
     let mut keys = Map::new();
     keys.insert("lines".into(), Value::Array(lines));
     keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::{build, BuildRequest};
+    use crate::description::parse_block_library;
+    use crate::model::{Arc, Insert};
+
+    /// A drawing whose blocks, layers, linetypes and text styles are those
+    /// of the made-up block library `text`, each block holding all it holds.
+    fn drawing(text: &str) -> DrawingBlocks {
+        let library = parse_block_library(text).unwrap();
+        DrawingBlocks {
+            units_code: 4,
+            units: Some(Unit::Mm),
+            linetypes: library.linetypes,
+            layers: library.layers,
+            text_styles: library.text_styles,
+            blocks: library
+                .blocks
+                .into_iter()
+                .map(|block| ReadBlock {
+                    block,
+                    not_carried: Vec::new(),
+                })
+                .collect(),
+            skipped: Vec::new(),
+        }
+    }
+
+    /// What `plan` makes of `drawing` against the library `held`, and the
+    /// library's text it writes.
+    fn planned(drawing: &DrawingBlocks, held: &str, wanted: &[&str]) -> (Plan, String) {
+        let existing = Existing::read(held).unwrap();
+        let wanted: Vec<String> = wanted.iter().map(|w| (*w).to_owned()).collect();
+        let plan = plan(drawing, &existing, &wanted, false, "--replace").unwrap();
+        let mut record = RecordFile::from_text(Path::new("blocks.yaml"), held.to_owned()).unwrap();
+        write_plan(&mut record, &plan).unwrap();
+        let text = record.current_text().unwrap();
+        (plan, text)
+    }
+
+    const EMPTY: &str = "units: mm\nblocks: {}\n";
+
+    /// A made-up block hatched with GRID, defined by `delta`.
+    fn hatched(block: &str, delta: &str) -> String {
+        format!(
+            "units: mm\nhatch_patterns:\n  GRID: {{lines: [{{delta: {delta}}}]}}\nblocks:\n  \
+             {block}:\n    objects:\n      - hatch: {{pattern: GRID, boundary: [{{polyline: \
+             {{points: [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}}}]}}\n"
+        )
+    }
+
+    fn pattern_of<'a>(library: &'a BlockLibrary, block: &str) -> &'a HatchPattern {
+        let block = library.blocks.iter().find(|b| b.name == block).unwrap();
+        match &block.objects[0] {
+            Object::Hatch(hatch) => &hatch.pattern,
+            other => panic!("a hatch, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hatch_pattern_named_as_another_defined_otherwise_is_carried_under_a_new_name() {
+        // Two blocks of one drawing, each with its own GRID.
+        let mut both = drawing(&hatched("A", "[0, 5]"));
+        both.blocks.extend(drawing(&hatched("B", "[0, 7]")).blocks);
+        let (plan, text) = planned(&both, EMPTY, &[]);
+        let back = parse_block_library(&text).unwrap();
+        assert_eq!(pattern_of(&back, "A").name, "GRID");
+        assert_eq!(pattern_of(&back, "A").lines[0].delta, [0.0, 5.0]);
+        assert_eq!(pattern_of(&back, "B").name, "GRID_2");
+        assert_eq!(pattern_of(&back, "B").lines[0].delta, [0.0, 7.0]);
+        let renamed: Vec<&ImportNotice> = plan
+            .imported
+            .notices
+            .iter()
+            .filter(|n| n.code == ImportNoticeCode::PatternRenamed)
+            .collect();
+        assert_eq!(renamed.len(), 1, "{:?}", plan.imported.notices);
+        let message = &renamed[0].message;
+        assert!(
+            message.contains("`B`") && message.contains("`GRID`") && message.contains("`GRID_2`"),
+            "{message}"
+        );
+        assert_eq!(
+            plan.imported.tables_added.hatch_patterns,
+            ["GRID", "GRID_2"]
+        );
+
+        // Against the library's own GRID: the same is shared, another renamed,
+        // past a GRID_2 the library defines otherwise too.
+        let held = "units: mm\nhatch_patterns:\n  GRID: {lines: [{delta: [0, 7]}]}\n  GRID_2: {lines: [{delta: [0, 9]}]}\nblocks:\n  HELD:\n    objects:\n      - circle: {center: [0, 0, 0], radius: 1}\n";
+        let (plan, text) = planned(&both, held, &[]);
+        let back = parse_block_library(&text).unwrap();
+        assert_eq!(pattern_of(&back, "A").name, "GRID_3");
+        assert_eq!(pattern_of(&back, "A").lines[0].delta, [0.0, 5.0]);
+        assert_eq!(pattern_of(&back, "B").name, "GRID");
+        assert_eq!(plan.imported.tables_added.hatch_patterns, ["GRID_3"]);
+        assert!(!plan
+            .imported
+            .notices
+            .iter()
+            .any(|n| n.code == ImportNoticeCode::DefinitionKept));
+    }
+
+    /// A made-up block that defines NOTE twice, the second in lowercase,
+    /// and one that nests it, giving both values.
+    const NESTED: &str = "units: mm
+blocks:
+  CHILD:
+    objects:
+      - attdef: {tag: NOTE, position: [0, 0, 0], height: 1}
+      - attdef: {tag: NOTE, position: [0, 2, 0], height: 1}
+  PARENT:
+    objects:
+      - insert: {block: CHILD, position: [0, 0, 0], attributes: {NOTE: [A, B]}}
+";
+
+    /// The drawing of [`NESTED`] as a DWG may hold it, the child's second
+    /// tag, and the parent's value for it, written in lowercase.
+    fn lowercase_tags() -> DrawingBlocks {
+        let mut read = drawing(NESTED);
+        for block in &mut read.blocks {
+            match block.block.objects.last_mut() {
+                Some(Object::AttributeDefinition(d)) => d.tag = "note".into(),
+                Some(Object::Insert(Insert { attributes, .. })) => {
+                    attributes[1].tag = "note".into()
+                }
+                _ => {}
+            }
+        }
+        read
+    }
+
+    #[test]
+    fn a_tag_in_lowercase_is_taken_in_capitals_before_values_are_grouped_and_blocks_compared() {
+        let (_, text) = planned(&lowercase_tags(), EMPTY, &[]);
+        assert!(text.contains("attributes: {NOTE: [A, B]}"), "{text}");
+        let back = parse_block_library(&text).unwrap();
+        let original = parse_block_library(NESTED).unwrap();
+        assert_eq!(back.blocks, original.blocks);
+
+        // The child the library holds, the same but for the tag's case, is
+        // used as it is when the parent is imported after it.
+        let held = "units: mm\nblocks:\n  CHILD:\n    objects:\n      - attdef: {tag: NOTE, position: [0, 0, 0], height: 1}\n      - attdef: {tag: NOTE, position: [0, 2, 0], height: 1}\n";
+        let (plan, text) = planned(&lowercase_tags(), held, &["PARENT"]);
+        assert_eq!(plan.imported.blocks_added.len(), 1);
+        assert_eq!(plan.imported.blocks_added[0].name, "PARENT");
+        assert!(text.starts_with(held), "{text}");
+    }
+
+    #[test]
+    fn a_block_skipped_whole_still_says_what_it_could_not_carry() {
+        let mut read = drawing(&hatched("A", "[0, 5]"));
+        read.blocks.push(ReadBlock {
+            block: Block {
+                name: "DIMS".into(),
+                base_point: Point3::new(0.0, 0.0, 0.0),
+                objects: Vec::new(),
+                cells: Vec::new(),
+            },
+            not_carried: vec![("DIMENSION", 2), ("LEADER", 1)],
+        });
+        for wanted in [&[][..], &["dims", "A"]] {
+            let existing = Existing::read(EMPTY).unwrap();
+            let wanted: Vec<String> = wanted.iter().map(|w| (*w).to_owned()).collect();
+            let plan = plan(&read, &existing, &wanted, false, "--replace").unwrap();
+            assert_eq!(plan.imported.skipped.len(), 1, "{wanted:?}");
+            assert_eq!(plan.imported.skipped[0].block, "DIMS");
+            let lost: Vec<(&str, &str, usize)> = plan
+                .imported
+                .not_carried
+                .iter()
+                .map(|n| (n.block.as_str(), n.object_type.as_str(), n.count))
+                .collect();
+            assert_eq!(
+                lost,
+                [("DIMS", "DIMENSION", 2), ("DIMS", "LEADER", 1)],
+                "{wanted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_angle_read_from_radians_is_written_as_it_was_drawn() {
+        let off = 29.999_999_999_999_996;
+        let names = Names::default();
+        let written = |object: Object| {
+            let value = object_value(&object, &names);
+            value[object.type_name()].clone()
+        };
+        let mut insert = match &drawing(NESTED).blocks[1].block.objects[0] {
+            Object::Insert(insert) => insert.clone(),
+            _ => unreachable!(),
+        };
+        insert.rotation = off;
+        assert_eq!(written(Object::Insert(insert))["rotation"], json!(30));
+        let arc = Arc {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+            start_angle: off,
+            end_angle: 359.999_999_999_999_94,
+            layer: LAYER_ZERO.into(),
+            properties: Properties::default(),
+        };
+        let arc = written(Object::Arc(arc));
+        assert_eq!(
+            (&arc["start_angle"], &arc["end_angle"]),
+            (&json!(30), &json!(0)),
+            "{arc}"
+        );
+        let mut pattern = parse_block_library(&hatched("A", "[0, 5]")).unwrap().blocks[0].clone();
+        if let Object::Hatch(hatch) = &mut pattern.objects[0] {
+            hatch.pattern.lines[0].angle = 44.999_999_999_999_99;
+            let keys = hatch_pattern_keys(&hatch.pattern);
+            assert_eq!(keys["lines"][0]["angle"], json!(45.0));
+            hatch.angle = off;
+            hatch.scale = 2.0;
+            assert_eq!(written(Object::Hatch(hatch.clone()))["angle"], json!(30));
+        }
+        // An angle drawn with more digits keeps them, to a billionth.
+        assert_eq!(degrees(12.345_678_9), 12.345_678_9);
+        assert_eq!(degrees(0.1), 0.1);
+    }
+
+    /// A made-up drawing set in `job/` whose template names the library
+    /// `shared/blocks.yaml`, outside the set's folder, and a made-up drawing
+    /// whose block that library holds.
+    fn shared_library(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("agentdrafter-import-unit-{}", std::process::id()))
+            .join(test);
+        let _ = fs::remove_dir_all(&dir);
+        for folder in ["job/templates", "shared", "parts", "elsewhere"] {
+            fs::create_dir_all(dir.join(folder)).unwrap();
+        }
+        fs::write(
+            dir.join("job/set.yaml"),
+            "units: mm\noutput: dwg\nrows: rows.yaml\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("job/rows.yaml"),
+            "rows:\n  - {sheet: S-1, template: templates/sheet.yaml}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("job/templates/sheet.yaml"),
+            "units: mm\nblock_library: ../../shared/blocks.yaml\nobjects: []\n",
+        )
+        .unwrap();
+        let library = "units: mm\nblocks:\n  MARK:\n    objects:\n      - circle: {center: [0, 0, 0], radius: 2}\n";
+        fs::write(dir.join("shared/blocks.yaml"), library).unwrap();
+        fs::write(
+            dir.join("parts/blocks.yaml"),
+            library.replace("radius: 2", "radius: 3"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("parts/sheet.yaml"),
+            "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {block: MARK, position: [0, 0, 0]}\n",
+        )
+        .unwrap();
+        build(&BuildRequest {
+            description: dir.join("parts/sheet.yaml"),
+            output: None,
+            overwrite: false,
+        })
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_set_s_library_outside_its_folder_is_found_from_the_folder_the_command_runs_in() {
+        let dir = shared_library("found");
+        let library = dir.join("shared/blocks.yaml");
+        let before = fs::read(&library).unwrap();
+        let request = ImportBlocksRequest {
+            drawing: dir.join("parts/sheet.dwg"),
+            library: library.clone(),
+            blocks: Vec::new(),
+            replace: true,
+            units: None,
+            dry_run: false,
+        };
+        // Run in the set's folder, or below it, the set is found.
+        for here in ["job", "job/templates"] {
+            let error = import_blocks_in(&request, &dir.join(here)).unwrap_err();
+            assert_eq!(error.code, ErrorCode::Usage, "{here}: {error:?}");
+            assert!(error.message.contains("import_blocks"), "{error:?}");
+            assert_eq!(fs::read(&library).unwrap(), before);
+        }
+        // Run elsewhere, it is not, and replacing says what that misses.
+        let report = import_blocks_in(&request, &dir.join("elsewhere")).unwrap();
+        assert_eq!(report.imported.blocks_replaced.len(), 1);
+        let notices = &report.imported.notices;
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.code == ImportNoticeCode::NotJournaled
+                    && n.message.contains("import_blocks")),
+            "{notices:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
