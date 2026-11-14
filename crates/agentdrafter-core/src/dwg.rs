@@ -224,7 +224,11 @@ pub(crate) fn write_new_sheet(
                 )
             })?;
             let mut dwg_mleader = EntityType::MultiLeader(Box::new(leader::dwg_mleader(
-                &drawing, m, &style, measure,
+                &drawing,
+                m,
+                &style,
+                measure,
+                &sheet.blocks,
             )?));
             let common = dwg_mleader.common_mut();
             m.layer.clone_into(&mut common.layer);
@@ -595,8 +599,9 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         })
         .collect();
     // An arrowhead block that only leaders draw is read with them, and is
-    // neither a block of the drawing's nor counted; one an insert places
-    // is a block like any other.
+    // neither a block of the drawing's nor counted; one an insert or a
+    // multileader's block content places is a block like any other.
+    let content_blocks = leader::content_blocks(&drawing);
     let inserted: Vec<String> = drawing
         .model_space_entities()
         .chain(
@@ -611,7 +616,9 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         })
         .collect();
     let leaders_only = |r: &BlockRecord| {
-        arrow_blocks.contains(&r.handle) && !inserted.contains(&r.name.to_lowercase())
+        arrow_blocks.contains(&r.handle)
+            && !inserted.contains(&r.name.to_lowercase())
+            && !content_blocks.contains(&r.handle)
     };
     let mut read: Vec<Option<Block>> = records.iter().map(|_| None).collect();
     loop {
@@ -679,8 +686,13 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             EntityType::MultiLeader(m) => read_properties(&m.common)
                 .filter(|_| !m.common.invisible)
                 .and_then(|properties| {
-                    let mut read =
-                        leader::read_mleader(&drawing, m, &mleader_styles, layer_of(&m.common))?;
+                    let mut read = leader::read_mleader(
+                        &drawing,
+                        m,
+                        &mleader_styles,
+                        &blocks,
+                        layer_of(&m.common),
+                    )?;
                     read.properties = properties;
                     Some(Object::MLeader(read))
                 }),

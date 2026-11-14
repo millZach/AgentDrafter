@@ -93,8 +93,12 @@ An arrow from a point on the sheet, a line through any bends, and the text it po
 _Avoid_: callout (a callout is one use of a leader), arrow (the arrow is a leader's arrowhead), pointer, QLEADER (AutoCAD's command that draws one)
 
 **Multileader**:
-A leader as AutoCAD's MULTILEADER object draws it: one or more leader lines, each from its arrowhead to where they all meet a landing, the short horizontal line beyond which its content, multiline text, sits, laid out where its multileader style says. AutoCAD's command for one is MLEADER.
+A leader as AutoCAD's MULTILEADER object draws it: one or more leader lines, each from its arrowhead to where they all meet a landing, the short horizontal line beyond which its content, multiline text or block content, sits, laid out where its multileader style says. AutoCAD's command for one is MLEADER, and MLEADEREDIT adds and removes its leader lines.
 _Avoid_: mleader alone in prose (it is the sheet description's key), dogleg (AutoCAD's other name for the landing)
+
+**Block content**:
+A block of the block library as a multileader's content, in place of its text, as AutoCAD's MULTILEADER holds one: placed at the landing's end where AutoCAD places it, by the centre of the block's extents or by its base point, and drawn as an insert of the block draws, with its attributes' values. A tag balloon or a tag hexagon at a leader's end is block content.
+_Avoid_: block leader, balloon (a balloon is one use of block content), insert (block content is not an insert of its own; it draws as one)
 
 **Multileader style**:
 What a multileader draws with unless it gives its own, as AutoCAD's MLEADERSTYLE: the text style and height, the arrowhead and its size, the landing's length and its gap to the text, where the landing meets the text, and the leader lines' pen. Every drawing has the multileader style `Standard`.

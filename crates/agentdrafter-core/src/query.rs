@@ -584,7 +584,7 @@ impl Selection {
                 Object::Text(t) if m.text(&t.contents, text) => {}
                 Object::MText(t) if m.text(&t.contents, text) => {}
                 Object::Table(t) if t.cells.iter().flatten().any(|c| m.text(&c.text, text)) => {}
-                Object::MLeader(l) if m.text(&l.content.text, text) => {}
+                Object::MLeader(l) if l.content.text().is_some_and(|t| m.text(&t.text, text)) => {}
                 Object::Leader(l)
                     if l.annotation.as_ref().is_some_and(|a| m.text(&a.text, text)) => {}
                 Object::Insert(insert) => {

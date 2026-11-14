@@ -350,6 +350,32 @@ fn each_place(
     Ok(())
 }
 
+/// Calls `visit` with each value of an insert's `attributes`, or of a
+/// multileader's block content's, at `path`.
+fn attribute_places(
+    attributes: &mut Node,
+    path: &str,
+    visit: &mut dyn FnMut(&mut Node, String) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let Kind::Mapping(values) = &mut attributes.kind else {
+        return Ok(());
+    };
+    for value in values {
+        let path = key_path(path, &value.key);
+        // A tag the block defines more than once takes a list, and each of
+        // its items may be a value from the row.
+        match &mut value.value.kind {
+            Kind::Sequence(items) => {
+                for (i, item) in items.iter_mut().enumerate() {
+                    visit(item, index_path(&path, i))?;
+                }
+            }
+            _ => visit(&mut value.value, path)?,
+        }
+    }
+    Ok(())
+}
+
 /// Calls `visit` with each place in the object `item`, at `path`, where a
 /// template may put a value from a row, as [`each_place`] does for a
 /// sheet's objects.
@@ -373,23 +399,11 @@ pub(super) fn places_in(
             let Some(attributes) = keys.iter_mut().find(|k| k.key == "attributes") else {
                 return Ok(());
             };
-            let Kind::Mapping(values) = &mut attributes.value.kind else {
-                return Ok(());
-            };
-            let attributes_path = key_path(&object_path, "attributes");
-            for value in values {
-                let path = key_path(&attributes_path, &value.key);
-                // A tag the block defines more than once takes a list, and
-                // each of its items may be a value from the row.
-                match &mut value.value.kind {
-                    Kind::Sequence(items) => {
-                        for (i, item) in items.iter_mut().enumerate() {
-                            visit(item, index_path(&path, i))?;
-                        }
-                    }
-                    _ => visit(&mut value.value, path)?,
-                }
-            }
+            attribute_places(
+                &mut attributes.value,
+                &key_path(&object_path, "attributes"),
+                visit,
+            )?;
         }
         "text" | "mtext" => {
             if let Some(contents) = keys.iter_mut().find(|k| k.key == "contents") {
@@ -410,11 +424,21 @@ pub(super) fn places_in(
             let Kind::Mapping(held_keys) = &mut held.value.kind else {
                 return Ok(());
             };
-            if let Some(text) = held_keys.iter_mut().find(|k| k.key == "text") {
-                visit(
-                    &mut text.value,
-                    key_path(&key_path(&object_path, holder), "text"),
-                )?;
+            let held_path = key_path(&object_path, holder);
+            for key in held_keys.iter_mut() {
+                match key.key.as_str() {
+                    "text" => visit(&mut key.value, key_path(&held_path, "text"))?,
+                    // A multileader's block content's attribute values, as
+                    // an insert's.
+                    "attributes" if holder == "content" => {
+                        attribute_places(
+                            &mut key.value,
+                            &key_path(&held_path, "attributes"),
+                            visit,
+                        )?;
+                    }
+                    _ => {}
+                }
             }
         }
         // Each cell's text: the cell itself when it is written as its text

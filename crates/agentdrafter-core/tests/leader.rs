@@ -91,13 +91,13 @@ fn multileaders_their_styles_and_leaders_read_with_what_they_give() {
     let terminals = mleader(&sheet, 1);
     assert_eq!(terminals.leaders.len(), 2);
     assert_eq!(terminals.mleader_style, "callout");
-    assert_eq!(terminals.content.text, "TB-1 TERMINALS");
+    assert_eq!(terminals.content.text().unwrap().text, "TB-1 TERMINALS");
     assert_eq!(terminals.arrowhead, None);
     let supply = mleader(&sheet, 2);
     assert_eq!(supply.arrowhead, Some(Arrowhead::Dot));
-    assert_eq!(supply.content.text, "PS-1\n24 VDC");
+    assert_eq!(supply.content.text().unwrap().text, "PS-1\n24 VDC");
     assert_eq!(
-        supply.content.attachment,
+        supply.content.text().unwrap().attachment,
         Some(LeaderAttachment::MiddleOfText)
     );
     assert_eq!(supply.side(), -1.0);
@@ -509,7 +509,7 @@ objects:
     let Object::MLeader(strip) = &read.objects[0] else {
         panic!("{read:?}");
     };
-    assert_eq!(strip.content.text, "TB-7");
+    assert_eq!(strip.content.text().unwrap().text, "TB-7");
     let Object::Leader(note) = &read.objects[1] else {
         panic!("{read:?}");
     };
@@ -584,6 +584,40 @@ fn a_library_block_that_is_autocads_arrowhead_is_written_once_and_shared() {
     let names: Vec<&str> = read.blocks.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["_Open"]);
     assert!(matches!(&read.objects[1], Object::MLeader(m) if m.arrowhead == Some(Arrowhead::Open)));
+}
+
+/// A library block that is AutoCAD's arrowhead and also a multileader's
+/// block content is a block of the drawing's, as one an insert places is.
+#[test]
+fn a_library_arrowhead_that_is_also_block_content_reads_back() {
+    let dir = scratch("library-arrowhead-content");
+    fs::write(dir.join("blocks.yaml"), AUTOCAD_OPEN).unwrap();
+    let path = dir.join("sheet.yaml");
+    fs::write(
+        &path,
+        "units: mm
+block_library: blocks.yaml
+objects:
+  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {block: _Open, scale: 5}, arrowhead: open}
+",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: path,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    let read = read_dwg(&dir.join("sheet.dwg")).unwrap();
+    assert_eq!(read.objects_not_read, 0, "{read:?}");
+    assert_eq!(read.objects.len(), 1, "{read:?}");
+    let names: Vec<&str> = read.blocks.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["_Open"]);
+    let Object::MLeader(m) = &read.objects[0] else {
+        panic!("{read:?}")
+    };
+    assert_eq!(m.arrowhead, Some(Arrowhead::Open));
+    assert_eq!(m.content.block().map(|b| b.block.as_str()), Some("_Open"));
 }
 
 #[test]

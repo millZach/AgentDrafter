@@ -4,7 +4,7 @@
 //! A multileader points at something with one or more leader lines, each
 //! from its arrow's point through any bends to where it meets the landing,
 //! a short horizontal line, the dogleg, beyond which its content, multiline
-//! text, sits. Every leader line of one multileader meets the landing at
+//! text or a block, sits. Every leader line of one multileader meets the landing at
 //! the same point. The landing runs right when the first leader line's
 //! last segment runs right or straight up or down, and left when it runs
 //! left, and the text sits beyond it, a gap away, as AutoCAD 2026 laid out
@@ -18,6 +18,9 @@
 //!   reaches from the text's height above its baseline down to the lowest
 //!   point the last line draws, which AutoCAD measures for the top line
 //!   and the bottom line alike; the box is the multiline text's own.
+//!
+//! Block content sits at the landing's end as AutoCAD 2026 placed it
+//! ([`super::leader_block`]), drawn as an insert of the block draws.
 //!
 //! A multileader style is what a multileader draws with unless it gives its
 //! own: the text style and height, the arrowhead and its size, the
@@ -33,12 +36,17 @@
 //! the middle of its left side, or of its right side when the leader runs
 //! left.
 //!
-//! An arrow is placed at a point: pointing one at an object by its ID or
-//! name waits for object snaps (#74).
+//! An arrow, a multileader's own or one a change set adds, is placed at a
+//! point: pointing one at an object by its ID or name waits for object
+//! snaps (#74).
 
 use serde::{Deserialize, Serialize};
 
-use super::{layer_zero, ObjectColor, ObjectLineweight, Point3, Properties};
+use super::leader_block::{place, BlockConnection, Outline};
+use super::{
+    layer_zero, Attribute, Block, Insert, ObjectColor, ObjectLineweight, Point3, Properties,
+};
+use crate::description::normalize_degrees;
 use crate::text::{Attachment, MText, STANDARD};
 use crate::units::Unit;
 
@@ -250,9 +258,36 @@ impl MLeaderStyle {
     }
 }
 
-/// A multileader's content: multiline text.
+/// A multileader's content: multiline text, or a block. The two are
+/// exclusive, as AutoCAD's content types are.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MLeaderContent {
+#[serde(untagged)]
+pub enum MLeaderContent {
+    Text(MLeaderText),
+    Block(MLeaderBlock),
+}
+
+impl MLeaderContent {
+    /// The content's text, when it is text.
+    pub fn text(&self) -> Option<&MLeaderText> {
+        match self {
+            MLeaderContent::Text(text) => Some(text),
+            MLeaderContent::Block(_) => None,
+        }
+    }
+
+    /// The content's block, when it is a block.
+    pub fn block(&self) -> Option<&MLeaderBlock> {
+        match self {
+            MLeaderContent::Block(block) => Some(block),
+            MLeaderContent::Text(_) => None,
+        }
+    }
+}
+
+/// A multileader's text content.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MLeaderText {
     /// What the text says, exactly as it shows; lines are separated by a
     /// line break (`\n`).
     pub text: String,
@@ -268,8 +303,35 @@ pub struct MLeaderContent {
     pub attachment: Option<LeaderAttachment>,
 }
 
-/// One or more leader lines, a landing and multiline text: AutoCAD's
-/// MULTILEADER.
+/// A block of the sheet's block library as a multileader's content,
+/// AutoCAD's block content: placed at the landing's end, and drawn as an
+/// insert of it draws, with its attributes' values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MLeaderBlock {
+    /// The name of the block.
+    pub block: String,
+    /// A value for each of the block's attributes, in the order the block
+    /// defines them, as an insert carries them.
+    #[serde(default)]
+    pub attributes: Vec<Attribute>,
+    /// How much the block is enlarged, the same along every axis: more
+    /// than 0.
+    #[serde(default = "one")]
+    pub scale: f64,
+    /// Degrees anticlockwise from the X axis, in `[0, 360)`.
+    #[serde(default)]
+    pub rotation: f64,
+    /// How the block meets the landing.
+    #[serde(default)]
+    pub connection: BlockConnection,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// One or more leader lines, a landing and its content, multiline text or
+/// a block: AutoCAD's MULTILEADER.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MLeader {
     /// Each leader line's points, from its arrow's point to where it meets
@@ -318,11 +380,25 @@ pub struct LaidMLeader {
     pub landing_gap: f64,
     pub arrowhead: Arrowhead,
     pub arrow_size: f64,
-    pub attachment: LeaderAttachment,
-    /// The text, attached at its top left or top right corner.
-    pub text: MText,
-    /// The text's box, as the pipeline lays it out.
-    pub measured: MTextBox,
+    pub content: LaidContent,
+}
+
+/// A multileader's content, laid out.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LaidContent {
+    Text {
+        /// The text, attached at its top left or top right corner.
+        text: MText,
+        /// The text's box, as the pipeline lays it out.
+        measured: MTextBox,
+        attachment: LeaderAttachment,
+    },
+    Block {
+        /// The block placed as an insert of it, which draws it.
+        insert: Insert,
+        /// The point AutoCAD records as the content's base.
+        base: Point3,
+    },
 }
 
 impl LaidMLeader {
@@ -334,18 +410,32 @@ impl LaidMLeader {
         }
     }
 
-    /// The point AutoCAD records as the content's base: the landing's end
-    /// when the text is on the right, and a gap short of the text box's
-    /// left side, level with the landing, when it is on the left, as
-    /// AutoCAD 2026 wrote made-up multileaders laying them out.
+    /// The point AutoCAD records as the content's base. For text, the
+    /// landing's end when the text is on the right, and a gap short of the
+    /// text box's left side, level with the landing, when it is on the
+    /// left, as AutoCAD 2026 wrote made-up multileaders laying them out;
+    /// for a block, where [`super::leader_block::place`] puts it.
     pub fn content_base(&self) -> Point3 {
-        if self.side > 0.0 {
-            self.landing_end()
-        } else {
-            Point3 {
-                x: self.text.position.x - self.measured.width - self.landing_gap,
-                ..self.connection
+        match &self.content {
+            LaidContent::Text { text, measured, .. } => {
+                if self.side > 0.0 {
+                    self.landing_end()
+                } else {
+                    Point3 {
+                        x: text.position.x - measured.width - self.landing_gap,
+                        ..self.connection
+                    }
+                }
             }
+            LaidContent::Block { base, .. } => *base,
+        }
+    }
+
+    /// The text, when the content is text.
+    pub fn text(&self) -> Option<&MText> {
+        match &self.content {
+            LaidContent::Text { text, .. } => Some(text),
+            LaidContent::Block { .. } => None,
         }
     }
 }
@@ -380,25 +470,100 @@ impl MLeader {
     }
 
     /// Lays the multileader out with `style`, measuring its text's box
-    /// with `measure`.
+    /// with `measure`, its block content's block one of `blocks`.
     pub fn laid_out(
         &self,
         style: &MLeaderStyle,
         measure: &dyn Fn(&MText) -> MTextBox,
+        blocks: &[Block],
     ) -> LaidMLeader {
         let side = self.side();
         let connection = self.connection();
         let landing = self.landing.unwrap_or(style.landing);
         let landing_gap = self.gap.unwrap_or(style.landing_gap);
-        let height = self.content.height.unwrap_or(style.text_height);
-        let attachment = self.content.attachment.unwrap_or(style.attachment);
+        let mut laid = LaidMLeader {
+            lines: self.leaders.clone(),
+            connection,
+            side,
+            landing,
+            landing_gap,
+            arrowhead: self.arrowhead.unwrap_or(style.arrowhead),
+            arrow_size: self.arrow_size.unwrap_or(style.arrow_size),
+            content: LaidContent::Block {
+                insert: Insert {
+                    block: String::new(),
+                    position: connection,
+                    scale: 1.0,
+                    rotation: 0.0,
+                    attributes: Vec::new(),
+                    name: None,
+                    layer: self.layer.clone(),
+                    properties: self.properties.clone(),
+                },
+                base: connection,
+            },
+        };
+        match &self.content {
+            MLeaderContent::Text(content) => {
+                laid.content = self.laid_text(content, style, measure, side, landing, landing_gap);
+            }
+            MLeaderContent::Block(content) => {
+                let end = laid.landing_end();
+                let insert = |position: Point3| Insert {
+                    block: content.block.clone(),
+                    position,
+                    scale: content.scale,
+                    rotation: normalize_degrees(content.rotation),
+                    attributes: content.attributes.clone(),
+                    name: None,
+                    layer: self.layer.clone(),
+                    properties: self.properties.clone(),
+                };
+                laid.content = match blocks.iter().find(|b| b.name == content.block) {
+                    Some(block) => {
+                        let outline = Outline::of(block, blocks).unwrap_or_default();
+                        let placed = place(
+                            block,
+                            &outline,
+                            content.connection,
+                            content.scale,
+                            content.rotation,
+                            end,
+                            side,
+                        );
+                        LaidContent::Block {
+                            insert: insert(placed.position),
+                            base: placed.base,
+                        }
+                    }
+                    None => LaidContent::Block {
+                        insert: insert(end),
+                        base: end,
+                    },
+                };
+            }
+        }
+        laid
+    }
+
+    fn laid_text(
+        &self,
+        content: &MLeaderText,
+        style: &MLeaderStyle,
+        measure: &dyn Fn(&MText) -> MTextBox,
+        side: f64,
+        landing: f64,
+        landing_gap: f64,
+    ) -> LaidContent {
+        let connection = self.connection();
+        let height = content.height.unwrap_or(style.text_height);
+        let attachment = content.attachment.unwrap_or(style.attachment);
         let mut text = MText {
-            contents: self.content.text.clone(),
+            contents: content.text.clone(),
             position: connection,
             height,
             width: 0.0,
-            style: self
-                .content
+            style: content
                 .style
                 .clone()
                 .unwrap_or_else(|| style.text_style.clone()),
@@ -418,17 +583,10 @@ impl MLeader {
             y: connection.y + attachment.below_top(height, measured),
             z: connection.z,
         };
-        LaidMLeader {
-            lines: self.leaders.clone(),
-            connection,
-            side,
-            landing,
-            landing_gap,
-            arrowhead: self.arrowhead.unwrap_or(style.arrowhead),
-            arrow_size: self.arrow_size.unwrap_or(style.arrow_size),
-            attachment,
+        LaidContent::Text {
             text,
             measured,
+            attachment,
         }
     }
 }
@@ -708,12 +866,12 @@ mod tests {
         };
         let mut mleader = MLeader {
             leaders: vec![vec![point(0.0, 0.0), point(20.0, 10.0)]],
-            content: MLeaderContent {
+            content: MLeaderContent::Text(MLeaderText {
                 text: "NOTE".to_owned(),
                 style: None,
                 height: None,
                 attachment: None,
-            },
+            }),
             landing: None,
             gap: None,
             arrowhead: None,
@@ -728,16 +886,18 @@ mod tests {
             last_descent: 0.0,
         };
         // As AutoCAD 2026 placed NOTE in romans: at (26, 10), top left.
-        let laid = mleader.laid_out(&style, &measure);
-        assert_eq!(laid.text.position, point(26.0, 10.0));
-        assert_eq!(laid.text.justify, Attachment::TopLeft);
+        let laid = mleader.laid_out(&style, &measure, &[]);
+        let text = laid.text().unwrap();
+        assert_eq!(text.position, point(26.0, 10.0));
+        assert_eq!(text.justify, Attachment::TopLeft);
         assert_eq!(laid.content_base(), point(25.0, 10.0));
         // And to the left: at (-26, 10), top right, its base a gap short
         // of the text's left side.
         mleader.leaders = vec![vec![point(0.0, 0.0), point(-20.0, 10.0)]];
-        let laid = mleader.laid_out(&style, &measure);
-        assert_eq!(laid.text.position, point(-26.0, 10.0));
-        assert_eq!(laid.text.justify, Attachment::TopRight);
+        let laid = mleader.laid_out(&style, &measure, &[]);
+        let text = laid.text().unwrap();
+        assert_eq!(text.position, point(-26.0, 10.0));
+        assert_eq!(text.justify, Attachment::TopRight);
         assert!((laid.content_base().x + 36.6905).abs() < 1e-9);
     }
 

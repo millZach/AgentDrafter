@@ -67,12 +67,22 @@ pub(super) fn check_sheet(
     tolerance: f64,
 ) -> Vec<Finding> {
     let list = measuring_drawing(&record.sheet, fonts);
+    let contents: Vec<Option<Insert>> = record
+        .sheet
+        .objects
+        .iter()
+        .map(|o| match o {
+            Object::MLeader(m) => record.sheet.block_content(m),
+            _ => None,
+        })
+        .collect();
     let on = Sheet {
         record,
         list: &list,
         fonts,
         units,
         tolerance,
+        contents: &contents,
     };
     let mut findings = Vec::new();
     match &record.sheet.paper {
@@ -96,6 +106,9 @@ struct Sheet<'a> {
     fonts: &'a SheetFonts,
     units: Unit,
     tolerance: f64,
+    /// The insert that draws each multileader's block content, by the
+    /// sheet's object it is.
+    contents: &'a [Option<Insert>],
 }
 
 impl Sheet<'_> {
@@ -613,8 +626,11 @@ impl Sheet<'_> {
     /// through each insert nested in that block in turn, of the innermost
     /// block.
     fn in_block(&self, i: usize, path: &[usize]) -> Option<InBlock<'_>> {
-        let Object::Insert(outermost) = &self.record.sheet.objects[i] else {
-            return None;
+        // A multileader's block content draws as an insert of its block.
+        let outermost = match &self.record.sheet.objects[i] {
+            Object::Insert(insert) => insert,
+            Object::MLeader(_) => self.contents.get(i)?.as_ref()?,
+            _ => return None,
         };
         let (&index, through) = path.split_last()?;
         let mut insert = outermost;
@@ -830,7 +846,7 @@ fn says(object: &Object) -> Option<String> {
     match object {
         Object::Text(t) => Some(t.contents.clone()),
         Object::MText(t) => Some(t.contents.clone()),
-        Object::MLeader(l) => Some(l.content.text.clone()),
+        Object::MLeader(l) => l.content.text().map(|t| t.text.clone()),
         Object::Leader(l) => l.annotation.as_ref().map(|a| a.text.clone()),
         _ => None,
     }
