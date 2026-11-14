@@ -17,7 +17,7 @@ objects:
       to: [100, 50, 0]
 ```
 
-`agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on. `examples/blocks/` holds a block library and two sheets that insert its blocks, `examples/table.yaml` two tables, and `examples/leaders.yaml` callouts on a panel layout, multileaders and older leaders.
+`agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on. `examples/blocks/` holds a block library and two sheets that insert its blocks, `examples/table.yaml` two tables, and `examples/leaders.yaml` callouts on a panel layout, multileaders, some ending in a block of `examples/leader-blocks.yaml`, and older leaders.
 
 Every DWG a build writes carries AgentDrafter's build mark: a custom drawing property, `AgentDrafter` with the value `build`, which AutoCAD shows under DWGPROPS. `--overwrite` replaces only a DWG that carries it. A sheet built from a drawing set records its set in the same property, as `build; set=` and the set's folder relative to the DWG ([the drawing set](drawing-set.md#the-build-mark-names-the-set)); a sheet description built on its own records none.
 
@@ -177,7 +177,7 @@ mleader_styles:
 | `leader_color` | The colour the leader lines, landing and arrowheads draw in, as an [object's own colour](#an-objects-own-colour-linetype-and-lineweight) is written. Without it, `ByBlock`: the multileader's own colour, or its layer's where that is `ByLayer`. |
 | `leader_lineweight` | The lineweight they draw with, as an object's own lineweight is written. Without it, `ByBlock`. |
 
-A multileader style's text is multiline text and its leader lines are straight; its landing is horizontal and its text upright. AutoCAD's MLEADERSTYLE offers more, such as a block as the content, spline leader lines, a frame round the text, text above or below a vertical landing, and annotative scaling; a DWG multileader style that uses them is counted as not read, and so is a multileader in it.
+A multileader style's content is multiline text and its leader lines are straight; its landing is horizontal and its text upright. A multileader may still take a block as its content ([Block content](#block-content)). AutoCAD's MLEADERSTYLE offers more, such as a block as the style's own content, spline leader lines, a frame round the text, text above or below a vertical landing, and annotative scaling; a DWG multileader style that uses them is counted as not read, and so is a multileader in it.
 
 ### Objects
 
@@ -198,7 +198,7 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 | `mtext` | `contents`, `position`, `height`; `width`, `style`, `width_factor`, `rotation`, `justify` | Text of one or more lines in a box, as AutoCAD's MTEXT draws it. See [Text](#text). |
 | `insert` | `block`, `position`; `scale`, `rotation`, `attributes` | A block from the sheet's block library, placed as AutoCAD's INSERT places it. See [Inserts](#inserts). |
 | `table` | `position`, `columns`, `rows`, `cells`; `title`, `header`, `table_style` | A grid of cells with text, as AutoCAD's TABLE draws it. See [Tables](#tables). |
-| `mleader` | `leaders`, `content`; `landing`, `arrowhead`, `arrow_size`, `mleader_style` | One or more leader lines from their arrows to a landing, and multiline text beyond it, as AutoCAD's MLEADER draws it. See [Leaders](#leaders). |
+| `mleader` | `leaders`, `content`; `landing`, `arrowhead`, `arrow_size`, `mleader_style` | One or more leader lines from their arrows to a landing, and multiline text or a block beyond it, as AutoCAD's MLEADER draws it. See [Leaders](#leaders). |
 | `leader` | `points`; `arrowhead`, `arrow_size`, `gap`, `annotation` | One leader line, arrow first, with an optional multiline text annotation beyond its end, as AutoCAD's older LEADER draws it. See [Leaders](#leaders). |
 
 Keys before the semicolon are required; keys after it are not. A `radius` is a length more than 0.
@@ -444,7 +444,7 @@ A change set adds a table with `add_table`, sets a cell with `set_cell` and adds
 
 A leader points at something on the sheet with an arrow and says what it is: a device on a panel layout, a part number, a note on a loop sheet. A sheet holds two kinds, as AutoCAD does: the multileader, `mleader`, AutoCAD's MLEADER, and the older leader, `leader`, AutoCAD's LEADER and QLEADER, which plant drawings hold. Both belong on a sheet, not in a block.
 
-An arrow is placed at a point. Pointing it at an object by its ID or name, so that it follows the object, waits for object snaps ([#74](https://github.com/millZach/AgentDrafter/issues/74)).
+An arrow is placed at a point: a multileader's, an older leader's, and one `add_leader_line` adds. Pointing it at an object by its ID or name, so that it follows the object, waits for object snaps ([#74](https://github.com/millZach/AgentDrafter/issues/74)).
 
 ```yaml
 - mleader:
@@ -465,9 +465,9 @@ A multileader takes these keys:
 | Key | Required | What it is |
 |---|---|---|
 | `leaders` | yes | Its leader lines: at least one, each a list of at least two points from its arrow's point, through any bends, to where it meets the landing, each point apart from the one before. Every leader line ends at the same point, where the landing starts: a multileader with landings in two places waits. A leader line's first segment is at least as long as its arrow, unless its arrowhead is `none`, since AutoCAD draws the line from behind the arrowhead. |
-| `content` | yes | Its text: a mapping of `text`, what it says, exactly as it shows, a line break starting a new line, as an `mtext`'s contents are written; and, instead of its style's, `style`, a text style, `height`, a length more than 0, and `attachment`, where the landing meets it, as a [multileader style](#multileader-styles) names one. |
+| `content` | yes | Its text: a mapping of `text`, what it says, exactly as it shows, a line break starting a new line, as an `mtext`'s contents are written; and, instead of its style's, `style`, a text style, `height`, a length more than 0, and `attachment`, where the landing meets it, as a [multileader style](#multileader-styles) names one. Or a block: a mapping of `block` and its keys ([Block content](#block-content)). Not both. |
 | `landing` | no | How long its landing is, instead of its style's: a length of 0 or more, 0 for none. |
-| `gap` | no | The space between its landing's end and its text, instead of its style's `landing_gap`: a length of 0 or more. |
+| `gap` | no | The space between its landing's end and its text, instead of its style's `landing_gap`: a length of 0 or more. Block content takes none. |
 | `arrowhead` | no | Its arrowhead, instead of its style's: `closed_filled`, `dot`, `open` or `none`. |
 | `arrow_size` | no | How long its arrowhead is, instead of its style's: a length more than 0. |
 | `mleader_style` | no | The [multileader style](#multileader-styles) it draws with: `Standard` or a name under `mleader_styles`, written exactly as it is there. Without it, `Standard`. |
@@ -480,6 +480,38 @@ A multileader is laid out as AutoCAD 2026 laid out made-up ones in SHX and TrueT
 - Up, the landing meets the text where its attachment says: at the top of its box, at the middle of its top line, at the middle of the text, at the middle of its bottom line, or at the bottom of its box. The box is the multiline text's own. A line here reaches from the text's height above its baseline down to the lowest point the text's last line draws: AutoCAD measures the top line and the bottom line alike by the last line's descent, so `GLAND PLATE` over `gy` sits lower than over `GY`.
 - Each leader line starts an arrow's length behind its arrow's point, where the arrowhead ends, as AutoCAD draws it: a closed filled arrowhead is a filled triangle, a sixth of its length wide each side of the line; a dot is a filled dot as wide as the arrow is long, with the line's last half arrow behind it; an open arrowhead is the triangle's sides and its middle. With `none`, the line runs to the arrow's point.
 - The leader lines, the landing and the arrowheads draw in the style's leader pen, which `ByBlock` makes the multileader's own colour and lineweight; the text draws in the multileader's own colour and lineweight. All take its linetype.
+
+#### Block content
+
+```yaml
+- mleader:
+    id: ft-101-tag
+    leaders:
+      - [[150, 120, 0], [175, 140, 0]]
+    content: {block: TAG_BALLOON, attributes: {TAG: FT-101}, connection: extents}
+```
+
+A multileader's content may be a block of the sheet's block library instead of text, as AutoCAD's block content is: a tag balloon or a hexagon at the end of a leader. Its keys:
+
+| Key | Required | What it is |
+|---|---|---|
+| `block` | yes | The name of a block in the block library, written exactly as it is there. |
+| `attributes` | no | The values of the block's attributes, written as an [insert's](#inserts) are: a tag the block defines more than once takes a list, a tag in lowercase is taken in capitals, and an attribute left out takes its definition's default. In a template, a value may come from the row, `{row: NAME}`. |
+| `scale` | no | How much the block is enlarged, the same along every axis: a number more than 0. Without it, 1. |
+| `rotation` | no | An angle: degrees anticlockwise from the X axis. Without it, 0. |
+| `connection` | no | How the block meets the landing, AutoCAD's block connection type: `extents`, by the centre of the block's extents, AutoCAD's default; or `insertion`, by its base point. Without it, `extents`. |
+
+AutoCAD 2026 made its own block content on both sides of a landing, with both connections, scaled and turned, and placed every block by one rule, which the pipeline follows:
+
+- The block's attachment point is the centre of the box round what it draws, for `extents`, or its base point, for `insertion`, placed with the content's scale and rotation.
+- The block sits with that point level with the landing, slid along the landing's line until the first place where the line crosses the block's outline, coming from the landing, is at the landing's end. When the line crosses nothing, the attachment point itself is at the landing's end. A circle's edge, not its centre, meets the landing; so does a box's near side. The landing's gap is not used.
+- The outline is what the block draws, and what the blocks it inserts draw: lines, polylines along their middle, whatever their width, arcs, circles, ellipses, 2D solids and donuts. A line that runs along the landing's line does not cross it. A hatch counts towards the extents but is not crossed, and an attribute counts towards neither.
+
+The block draws as an insert of it draws ([Inserts](#inserts)): its objects on layer `0` take the multileader's layer, its `ByBlock` objects the multileader's own colour, linetype and lineweight, and each visible attribute draws its value. The checker counts its lines and its attributes as it counts an insert's, so its own lines never count against its own attributes.
+
+A block of text, multiline text or a constant attribute is refused as content, and so is one that inserts a block with attributes: where AutoCAD's landing meets letters depends on the font's outline. So is a block with a spline, whose extents AutoCAD takes past its curve. Block content needs a landing: a multileader with block content and a landing of 0, its own or its style's, is refused, since AutoCAD connected one to the block's own point instead, and it takes no `gap`.
+
+The DWG holds the multileader's block content as AutoCAD 2026 wrote its own: the block, where its base point sits, its scale, rotation and connection, and a value for each of the block's attribute definitions, by the definition and its place among them. AutoCAD opened made-up multileaders with block content without recovery, its audit found no errors, and laying each out again moved no block.
 
 An older leader takes these keys:
 
@@ -496,9 +528,9 @@ Its annotation sits its gap beyond the leader's end, attached at the middle of i
 
 The DWG holds an AutoCAD MULTILEADER and its MLEADERSTYLE, and an AutoCAD LEADER with its annotation an MTEXT of its own that the leader points at, as AutoCAD writes them. A LEADER draws with a dimension style: it names `Standard`, which every drawing has, and carries its arrow's size, its gap, a scale of 1, its annotation level with its end and, but for a closed filled arrowhead, its arrowhead as AutoCAD's own overrides, so it draws the same whatever `Standard` holds. An arrowhead other than closed filled is a block AutoCAD names, such as `_Dot`, which the DWG holds once with what AutoCAD 2026 put in it. A block of the sheet's block library with that name, in any case, is that block when it is drawn as AutoCAD's, and is written once for both; drawn otherwise, it stops the build with an error naming it, since a drawing holds one block of a name. AutoCAD 2026 opened the example sheet without recovery, its audit found no errors, and laying every leader out again changed none.
 
-Reading a DWG back gives the multileaders, their styles and the older leaders, each with its annotation and not as an `mtext` of its own, when they have a model in the core. A multileader whose content is a block, whose leader lines are splines or have breaks, with more than one landing, its own leader pen, any override of its style the model does not hold, such as its text's colour, or a landing on the other side from the one its leader line runs to, is counted as not read; so is an older leader with a spline path, an annotation that is not multiline text where the model puts it or that draws with a layer, colour, linetype, lineweight or visibility other than the leader's, its own pen from its dimension style, or text above its end, and its annotation is counted with it. An arrowhead block that only leaders draw with is read with them and not counted; one an insert places is read as a block like any other. In a [template](drawing-set.md#templates), a multileader's content's `text` and an older leader's annotation's `text` may be a value from the row, `{row: NAME}`.
+Reading a DWG back gives the multileaders, their styles and the older leaders, each with its annotation and not as an `mtext` of its own, when they have a model in the core. A multileader whose block content the model does not place, or that does not sit where the model places it, or that is not upright, scaled the same along every axis and in the multileader's own colour, whose leader lines are splines or have breaks, with more than one landing, its own leader pen, any override of its style the model does not hold, such as its text's colour, or a landing on the other side from the one its leader line runs to, is counted as not read; so is an older leader with a spline path, an annotation that is not multiline text where the model puts it or that draws with a layer, colour, linetype, lineweight or visibility other than the leader's, its own pen from its dimension style, or text above its end, and its annotation is counted with it. An arrowhead block that only leaders draw with is read with them and not counted; one an insert places is read as a block like any other. In a [template](drawing-set.md#templates), a multileader's content's `text`, an attribute value of its block content, and an older leader's annotation's `text` may be a value from the row, `{row: NAME}`.
 
-A change set adds a multileader with `add_mleader` (AutoCAD's `MLEADER`) and an older leader with `add_leader` (`LEADER`), and `move` moves every point of either ([The operations](change-sets.md#the-operations)). A query for text finds a leader by its text ([Queries](query.md)). The checker counts a leader's text as text and its lines, landing and arrowheads as lines, never against each other ([Checks](check.md)).
+A change set adds a multileader with `add_mleader` (AutoCAD's `MLEADER`) and an older leader with `add_leader` (`LEADER`), adds and deletes a multileader's leader lines with `add_leader_line` and `delete_leader_line` (`MLEADEREDIT`), and `move` moves every point of either; `change` sets a template leader's text from the row in that sheet's row ([Leaders in change sets](change-sets.md#leaders)). A query for text finds a leader by its text ([Queries](query.md)). The checker counts a leader's text as text and its lines, landing and arrowheads as lines, never against each other ([Checks](check.md)).
 
 ### IDs and names
 

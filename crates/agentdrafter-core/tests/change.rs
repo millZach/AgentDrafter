@@ -352,6 +352,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("delete_row", ""),
             ("add_column", ""),
             ("delete_column", ""),
+            ("add_leader_line", "MLEADEREDIT"),
+            ("delete_leader_line", ""),
             ("add_layer", "LAYER"),
             ("change_layer", ""),
             ("rename_layer", "RENAME"),
@@ -395,6 +397,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "delete_row", "target": {"name": "cables", "sheet": "S"}, "row": 3}),
         json!({"op": "add_column", "target": {"id": "S/cables"}, "width": 20}),
         json!({"op": "delete_column", "target": {"id": "S/cables"}, "column": 0}),
+        json!({"op": "MLEADEREDIT", "target": {"id": "S/callout"}, "points": [[0, 8, 0], [2, 7, 0]]}),
+        json!({"op": "delete_leader_line", "target": {"name": "callout"}, "leader": 1}),
         json!({"op": "layer", "sheet": "S", "name": "markup", "color": "red", "plot": false}),
         json!({"op": "change_layer", "sheet": "S", "name": "markup", "set": {"locked": true}}),
         json!({"op": "rename", "sheet": "S", "name": "markup", "to": "redline"}),
@@ -466,6 +470,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"operations": [{"op": "set_cell", "target": {"id": "S/a"}, "cell": [0, 0], "set": {"colour": "red"}}]}),
         json!({"operations": [{"op": "delete_row", "target": {"id": "S/a"}, "row": -1}]}),
         json!({"operations": [{"op": "add_column", "target": {"id": "S/a"}, "height": 2}]}),
+        json!({"operations": [{"op": "add_leader_line", "target": {"id": "S/a"}, "points": []}]}),
+        json!({"operations": [{"op": "delete_leader_line", "target": {"id": "S/a"}, "leader": -1}]}),
     ] {
         assert!(!whole.is_valid(&wrong), "the schema refuses {wrong}");
     }
@@ -771,7 +777,7 @@ fn a_multileader_and_a_leader_are_added_and_moved() {
     };
     close(callout.leaders[0][0].x, 1.5);
     close(callout.leaders[1][1].y, 1.5);
-    assert_eq!(callout.content.text, "TB-1");
+    assert_eq!(callout.content.text().unwrap().text, "TB-1");
     let Object::Leader(note) = &objects["DEMO-003/leader-1"] else {
         panic!()
     };
@@ -2900,5 +2906,251 @@ fn a_table_in_braces_whose_quoted_value_holds_a_hash_is_changed() {
 "
         ),
         "{written}"
+    );
+}
+
+/// The multileader `id` of sheet `sheet`'s DWG.
+fn mleader_of(set: &Path, sheet: &str, id: &str) -> agentdrafter_core::MLeader {
+    match &built(set, sheet)[&format!("{sheet}/{id}")] {
+        Object::MLeader(m) => m.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn leader_points(m: &agentdrafter_core::MLeader) -> Vec<Vec<[f64; 3]>> {
+    m.leaders
+        .iter()
+        .map(|line| line.iter().map(|p| [p.x, p.y, p.z]).collect())
+        .collect()
+}
+
+/// `add_leader_line` adds a leader line that ends where the others meet
+/// the landing, `delete_leader_line` deletes one, both refuse what the
+/// multileader cannot take, and undo puts the row back byte for byte.
+#[test]
+fn leader_lines_are_added_to_and_deleted_from_a_sheets_multileader() {
+    let set = demo_set("leader-lines");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "add_mleader", "sheet": "DEMO-003", "id": "callout", "leaders": [[[1, 1, 0], [3, 2, 0]]], "content": {"text": "TB-1"}},
+        ]}),
+    );
+    let before = snapshot(&set);
+    let added = lands(
+        &set,
+        json!({"operations": [
+            {"op": "MLEADEREDIT", "target": {"id": "DEMO-003/callout"}, "points": [[1, 3.5, 0], [1.5, 3, 0]]},
+        ]}),
+    );
+    assert_eq!(added.operations[0].sheets, ["DEMO-003"]);
+    assert!(added.operations[0].message.contains("adds leader line 1"));
+    let callout = mleader_of(&set, "DEMO-003", "callout");
+    assert_eq!(
+        leader_points(&callout),
+        [
+            vec![[1.0, 1.0, 0.0], [3.0, 2.0, 0.0]],
+            vec![[1.0, 3.5, 0.0], [1.5, 3.0, 0.0], [3.0, 2.0, 0.0]]
+        ]
+    );
+    assert!(row_text(&set, "DEMO-003").contains("[[1, 3.5, 0], [1.5, 3, 0], [3, 2, 0]]"));
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "delete_leader_line", "target": {"id": "DEMO-003/callout"}, "leader": 0},
+        ]}),
+    );
+    let callout = mleader_of(&set, "DEMO-003", "callout");
+    assert_eq!(
+        leader_points(&callout),
+        [vec![[1.0, 3.5, 0.0], [1.5, 3.0, 0.0], [3.0, 2.0, 0.0]]]
+    );
+    // The last leader line stays; a place past the last is no leader line.
+    for (leader, says) in [(0, "last leader line"), (3, "no leader line 3")] {
+        let error = failed_operation(
+            &set,
+            json!({"operations": [
+                {"op": "delete_leader_line", "target": {"id": "DEMO-003/callout"}, "leader": leader},
+            ]}),
+        );
+        assert_eq!(error.code, ErrorCode::BadValue, "{}", error.message);
+        assert_eq!(error.field.as_deref(), Some("operations[0].leader"));
+        assert!(error.message.contains(says), "{}", error.message);
+    }
+    // A first segment shorter than Standard's 0.18 in arrow, and a point
+    // at the landing, are refused at the points the operation sent.
+    for points in [json!([[2.9, 1.95, 0]]), json!([[3, 2, 0]])] {
+        let error = failed_operation(
+            &set,
+            json!({"operations": [
+                {"op": "add_leader_line", "target": {"id": "DEMO-003/callout"}, "points": points},
+            ]}),
+        );
+        assert_eq!(error.code, ErrorCode::BadValue, "{}", error.message);
+        assert_eq!(
+            error.field.as_deref(),
+            Some("operations[0].points"),
+            "{}",
+            error.message
+        );
+    }
+    // Only a multileader has leader lines to add.
+    let error = failed_operation(
+        &set,
+        json!({"operations": [
+            {"op": "add_leader_line", "target": {"id": "DEMO-003/border"}, "points": [[0, 0, 0]]},
+        ]}),
+    );
+    assert!(
+        error.message.contains("only a multileader"),
+        "{}",
+        error.message
+    );
+    // Too few points is wrong in itself: the whole change set is refused.
+    let reply = apply(
+        &set,
+        json!({"operations": [
+            {"op": "add_leader_line", "target": {"id": "DEMO-003/callout"}, "points": []},
+        ]}),
+    );
+    assert!(!reply.ok);
+    // Undoing the add undoes the delete after it, byte for byte.
+    let undone = undo(&UndoRequest {
+        set: set.clone(),
+        change_set: added.journal_entry.unwrap(),
+        dry_run: false,
+    });
+    assert!(undone.ok, "{:#?}", undone.error);
+    assert_eq!(snapshot(&set), before);
+}
+
+/// A template's multileader takes a leader line on every sheet built from
+/// the template, all or nothing, and undo puts the template back.
+#[test]
+fn a_leader_line_added_to_a_templates_multileader_reaches_every_sheet() {
+    let set = demo_set("template-leader-lines");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "add_mleader", "template": "templates/ansi-b.yaml", "id": "everywhere", "leaders": [[[1, 1, 0], [3, 2, 0]]], "content": {"text": "TB-1"}},
+        ]}),
+    );
+    let before = snapshot(&set);
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "add_leader_line", "target": {"id": "DEMO-002/everywhere"}, "points": [[1, 3, 0]]},
+        ]}),
+    );
+    assert_eq!(report.operations[0].sheets, SHEETS);
+    for sheet in SHEETS {
+        assert_eq!(
+            mleader_of(&set, sheet, "everywhere").leaders.len(),
+            2,
+            "{sheet}"
+        );
+    }
+    let template = fs::read_to_string(set.join("templates/ansi-b.yaml")).unwrap();
+    assert!(template.contains("[[1, 3, 0], [3, 2, 0]]"), "{template}");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "delete_leader_line", "target": {"id": "DEMO-001/everywhere"}, "leader": 1},
+        ]}),
+    );
+    for sheet in SHEETS {
+        assert_eq!(
+            mleader_of(&set, sheet, "everywhere").leaders.len(),
+            1,
+            "{sheet}"
+        );
+    }
+    let undone = undo(&UndoRequest {
+        set: set.clone(),
+        change_set: report.journal_entry.unwrap(),
+        dry_run: false,
+    });
+    assert!(undone.ok, "{:#?}", undone.error);
+    assert_eq!(snapshot(&set), before);
+}
+
+/// A change that alters only the text of a template multileader's content,
+/// or of a template leader's annotation, that the template takes from the
+/// row sets that sheet's row value, on that sheet alone; any other change
+/// of them edits the template, on every sheet.
+#[test]
+fn a_leaders_text_the_template_takes_from_the_row_is_set_in_that_sheets_row() {
+    let set = demo_set("row-leader-text");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "add_mleader", "template": "templates/ansi-b.yaml", "id": "titled", "leaders": [[[1, 1, 0], [3, 2, 0]]], "content": {"text": {"row": "TITLE"}, "height": 0.2}},
+            {"op": "add_leader", "template": "templates/ansi-b.yaml", "id": "numbered", "points": [[5, 1, 0], [6, 3, 0]], "annotation": {"text": {"row": "SHEET"}, "height": 0.2}},
+        ]}),
+    );
+    let template_before = fs::read_to_string(set.join("templates/ansi-b.yaml")).unwrap();
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "change", "target": {"id": "DEMO-002/titled"}, "set": {"content": {"text": "AREA 200 RENAMED", "height": 0.2}}},
+            {"op": "change", "target": {"id": "DEMO-002/numbered"}, "set": {"annotation": {"height": 0.2, "text": "2 OF 9"}}},
+        ]}),
+    );
+    let title = report.operations[0].row_value.as_ref().unwrap();
+    assert_eq!(
+        (title.sheet.as_str(), title.value.as_str()),
+        ("DEMO-002", "TITLE")
+    );
+    assert_eq!(title.now, "AREA 200 RENAMED");
+    assert!(title
+        .fills
+        .iter()
+        .any(|f| f.id == "DEMO-002/titled" && f.at == "content.text"));
+    assert!(report.operations[0]
+        .message
+        .contains("the text of the content of"));
+    assert_eq!(report.operations[0].sheets, ["DEMO-002"]);
+    let sheet = report.operations[1].row_value.as_ref().unwrap();
+    assert_eq!(
+        (sheet.value.as_str(), sheet.now.as_str()),
+        ("SHEET", "2 OF 9")
+    );
+    // The template is as it was; the row holds the new values.
+    let template = fs::read_to_string(set.join("templates/ansi-b.yaml")).unwrap();
+    assert_eq!(template, template_before);
+    assert!(row_text(&set, "DEMO-002").contains("TITLE: AREA 200 RENAMED"));
+    let titled = mleader_of(&set, "DEMO-002", "titled");
+    assert_eq!(titled.content.text().unwrap().text, "AREA 200 RENAMED");
+    let other = mleader_of(&set, "DEMO-001", "titled");
+    assert_eq!(
+        other.content.text().unwrap().text,
+        "AREA 100 GENERAL ARRANGEMENT"
+    );
+    let Object::Leader(numbered) = &built(&set, "DEMO-002")["DEMO-002/numbered"] else {
+        panic!()
+    };
+    assert_eq!(numbered.annotation.as_ref().unwrap().text, "2 OF 9");
+    // A change of anything but the text edits the template, on every sheet.
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "change", "target": {"id": "DEMO-001/titled"}, "set": {"content": {"text": {"row": "TITLE"}, "height": 0.3}}},
+        ]}),
+    );
+    assert!(report.operations[0].row_value.is_none());
+    assert_eq!(report.operations[0].sheets, SHEETS);
+    let template = fs::read_to_string(set.join("templates/ansi-b.yaml")).unwrap();
+    assert!(template.contains("height: 0.3"), "{template}");
+    for sheet in SHEETS {
+        let titled = mleader_of(&set, sheet, "titled");
+        assert_eq!(titled.content.text().unwrap().height, Some(0.3), "{sheet}");
+    }
+    assert_eq!(
+        mleader_of(&set, "DEMO-002", "titled")
+            .content
+            .text()
+            .unwrap()
+            .text,
+        "AREA 200 RENAMED"
     );
 }

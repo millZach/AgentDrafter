@@ -1058,7 +1058,9 @@ mod tests {
     use super::*;
     use crate::description::blocks::BLOCK_KEYS;
     use crate::description::layers::{LAYER_KEYS, LINETYPE_KEYS};
-    use crate::description::leader::{ANNOTATION_KEYS, CONTENT_KEYS, MLEADER_STYLE_KEYS};
+    use crate::description::leader::{
+        ANNOTATION_KEYS, BLOCK_CONTENT_KEYS, MLEADER_STYLE_KEYS, TEXT_CONTENT_KEYS,
+    };
     use crate::description::objects::BLOCK_OBJECT_TYPES;
     use crate::description::table::{CELL_KEYS, ROW_STYLE_KEYS, TABLE_STYLE_KEYS};
     use crate::description::text::TEXT_STYLE_KEYS;
@@ -1113,8 +1115,12 @@ mod tests {
             sorted(&MLEADER_STYLE_KEYS)
         );
         assert_eq!(
-            keys(&defs["mleader"]["properties"]["content"]["properties"]),
-            sorted(&CONTENT_KEYS)
+            keys(&defs["mleader"]["properties"]["content"]["anyOf"][0]["properties"]),
+            sorted(&TEXT_CONTENT_KEYS)
+        );
+        assert_eq!(
+            keys(&defs["mleader"]["properties"]["content"]["anyOf"][1]["properties"]),
+            sorted(&BLOCK_CONTENT_KEYS)
         );
         assert_eq!(
             keys(&defs["leader"]["properties"]["annotation"]["anyOf"][0]["properties"]),

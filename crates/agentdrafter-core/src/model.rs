@@ -18,15 +18,17 @@ use crate::units::Unit;
 pub(crate) mod block;
 pub(crate) mod hatch;
 pub(crate) mod leader;
+pub(crate) mod leader_block;
 pub(crate) mod table;
 pub use block::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
 };
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use leader::{
-    Arrowhead, LaidMLeader, Leader, LeaderAnnotation, LeaderAttachment, MLeader, MLeaderContent,
-    MLeaderStyle, MTextBox, STANDARD_MLEADER_STYLE,
+    Arrowhead, LaidContent, LaidMLeader, Leader, LeaderAnnotation, LeaderAttachment, MLeader,
+    MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, MTextBox, STANDARD_MLEADER_STYLE,
 };
+pub use leader_block::{BlockConnection, Outline};
 pub use table::{
     LaidCell, RowKind, RowStyle, Table, TableCell, TableStyle, LINE_BOX, LINE_STEP,
     STANDARD_TABLE_STYLE,
@@ -837,6 +839,21 @@ impl Sheet {
             .find(|s| s.name == name)
             .cloned()
             .or_else(|| (name == STANDARD_TABLE_STYLE).then(|| TableStyle::standard(self.units)))
+    }
+
+    /// The insert that draws the block content of the multileader
+    /// `mleader` on this sheet, placed where AutoCAD places it; none for
+    /// text content.
+    pub fn block_content(&self, mleader: &MLeader) -> Option<Insert> {
+        mleader.content.block()?;
+        let style = self
+            .mleader_style(&mleader.mleader_style)
+            .unwrap_or_else(|| MLeaderStyle::standard(self.units));
+        let laid = mleader.laid_out(&style, &|_| MTextBox::default(), &self.blocks);
+        match laid.content {
+            LaidContent::Block { insert, .. } => Some(insert),
+            LaidContent::Text { .. } => None,
+        }
     }
 
     /// The multileader style named `name` a multileader draws with: one the

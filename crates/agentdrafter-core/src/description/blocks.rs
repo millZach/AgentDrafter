@@ -571,6 +571,27 @@ pub(super) fn insert(
     noticed: &mut Vec<Noticed>,
 ) -> Result<Insert, Error> {
     let block = block_named(fields, library)?;
+    let (scale, rotation) = scale_and_rotation(fields)?;
+    let attributes = attributes(fields, block, library, noticed)?;
+    Ok(Insert {
+        block: block.name.clone(),
+        position: point(
+            fields.require("position")?,
+            &fields.path_of("position"),
+            units,
+        )?,
+        scale,
+        rotation,
+        attributes,
+        name: None,
+        layer,
+        properties: Default::default(),
+    })
+}
+
+/// The `scale` and `rotation` an insert, or a multileader's block content,
+/// places its block with: without them, 1 and 0.
+pub(super) fn scale_and_rotation(fields: &Fields) -> Result<(f64, f64), Error> {
     let scale = match fields.get("scale") {
         Some(node) => {
             let path = fields.path_of("scale");
@@ -590,25 +611,14 @@ pub(super) fn insert(
         Some(node) => angle(node, &fields.path_of("rotation"))?,
         None => 0.0,
     };
-    let attributes = attributes(fields, block, library, noticed)?;
-    Ok(Insert {
-        block: block.name.clone(),
-        position: point(
-            fields.require("position")?,
-            &fields.path_of("position"),
-            units,
-        )?,
-        scale,
-        rotation,
-        attributes,
-        name: None,
-        layer,
-        properties: Default::default(),
-    })
+    Ok((scale, rotation))
 }
 
 /// The block an insert names, from the sheet's block library.
-fn block_named<'a>(fields: &Fields, library: Option<&'a BlockLibrary>) -> Result<&'a Block, Error> {
+pub(super) fn block_named<'a>(
+    fields: &Fields,
+    library: Option<&'a BlockLibrary>,
+) -> Result<&'a Block, Error> {
     let node = fields.require_text("block")?;
     let path = fields.path_of("block");
     let listed = match library {
@@ -653,7 +663,7 @@ fn block_named<'a>(fields: &Fields, library: Option<&'a BlockLibrary>) -> Result
 /// null, for the tag or for an item of its list, leaves the value out, so
 /// the definition's default holds. A tag written in lowercase is taken in
 /// capitals, and `noticed` says so.
-fn attributes(
+pub(super) fn attributes(
     fields: &Fields,
     block: &Block,
     library: Option<&BlockLibrary>,
@@ -1021,6 +1031,8 @@ pub(super) fn take_from_library(
         .iter()
         .filter_map(|o| match o {
             Object::Insert(insert) => Some(insert.block.as_str()),
+            // A multileader's block content draws its block as an insert does.
+            Object::MLeader(m) => m.content.block().map(|b| b.block.as_str()),
             _ => None,
         })
         .collect();

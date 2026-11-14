@@ -136,8 +136,9 @@ pub use model::{
     Solid, Spline, BY_BLOCK, BY_LAYER, CONTINUOUS, DEFAULT_LINEWEIGHT, LAYER_ZERO,
 };
 pub use model::{
-    Arrowhead, LaidMLeader, Leader, LeaderAnnotation, LeaderAttachment, MLeader, MLeaderContent,
-    MLeaderStyle, MTextBox, STANDARD_MLEADER_STYLE,
+    Arrowhead, BlockConnection, LaidContent, LaidMLeader, Leader, LeaderAnnotation,
+    LeaderAttachment, MLeader, MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, MTextBox,
+    STANDARD_MLEADER_STYLE,
 };
 pub use model::{Cell, Paper};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};

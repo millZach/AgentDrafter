@@ -91,11 +91,16 @@ impl SheetFonts {
                         .any(|cell| cell.style.as_deref() == Some(STANDARD));
                     rows || cells
                 }
-                Object::MLeader(mleader) => match &mleader.content.style {
-                    Some(style) => style == STANDARD,
-                    None => sheet
-                        .mleader_style(&mleader.mleader_style)
-                        .is_some_and(|style| style.text_style == STANDARD),
+                Object::MLeader(mleader) => match mleader.content.text() {
+                    Some(text) => match &text.style {
+                        Some(style) => style == STANDARD,
+                        None => sheet
+                            .mleader_style(&mleader.mleader_style)
+                            .is_some_and(|style| style.text_style == STANDARD),
+                    },
+                    // Block content draws its block's text, which the
+                    // blocks' text styles account for.
+                    None => false,
                 },
                 Object::Leader(leader) => leader
                     .annotation

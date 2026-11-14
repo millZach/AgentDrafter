@@ -4,16 +4,17 @@
 //! Every object a sheet description holds has an operation that adds it,
 //! named after the object and aliased to the AutoCAD command that draws it.
 //! `change`, `move`, `delete` and `set_attribute` edit an object an agent
-//! names by its ID or by its name, and `set_cell`, `add_row`, `delete_row`,
-//! `add_column` and `delete_column` a table's grid.
+//! names by its ID or by its name, `set_cell`, `add_row`, `delete_row`,
+//! `add_column` and `delete_column` a table's grid, and `add_leader_line`
+//! and `delete_leader_line` a multileader's leader lines.
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::description::schema::{block_library_schema, sheet_description_schema};
 use crate::description::{
-    article, objects_table, rows_schema, template_schema, Axis, TableEdit, CELL_KEYS, LAYER_KEYS,
-    LINETYPE_KEYS, TEXT_STYLE_KEYS,
+    article, objects_table, rows_schema, template_schema, Axis, LeaderLineEdit, TableEdit,
+    CELL_KEYS, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
 };
 use crate::error::{Error, ErrorCode};
 use crate::units::{parse_length, LengthError, Unit};
@@ -35,6 +36,16 @@ pub(crate) enum Kind {
     Block(BlockOp),
     /// Sets a cell of a table, or adds or deletes a row or a column.
     Grid(GridOp),
+    /// Adds a leader line to a multileader, or deletes one: AutoCAD's
+    /// MLEADEREDIT.
+    LeaderLine(LeaderLineOp),
+}
+
+/// What an operation on a multileader's leader lines does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeaderLineOp {
+    Add,
+    Delete,
 }
 
 /// What an operation on a table's grid does.
@@ -151,7 +162,7 @@ pub(crate) struct Spec {
 }
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 40] = [
+pub(crate) const SPECS: [Spec; 42] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -192,6 +203,16 @@ pub(crate) const SPECS: [Spec; 40] = [
     grid("delete_row", "", GridOp::Delete(Axis::Row)),
     grid("add_column", "", GridOp::Add(Axis::Column)),
     grid("delete_column", "", GridOp::Delete(Axis::Column)),
+    Spec {
+        name: "add_leader_line",
+        alias: "MLEADEREDIT",
+        kind: Kind::LeaderLine(LeaderLineOp::Add),
+    },
+    Spec {
+        name: "delete_leader_line",
+        alias: "",
+        kind: Kind::LeaderLine(LeaderLineOp::Delete),
+    },
     table("add_layer", "LAYER", TableOp::Add, Table::Layer),
     table("change_layer", "", TableOp::Change, Table::Layer),
     table("rename_layer", "RENAME", TableOp::Rename, Table::Layer),
@@ -324,7 +345,10 @@ fn does(spec: &Spec) -> String {
                          sheet description writes it, and null takes a key away. It changes \
                          neither the object's type nor its id, which is fixed for its life; an \
                          insert's attributes are set with set_attribute. A text's contents its \
-                         template takes from the row are set in that sheet's row. AutoCAD's \
+                         template takes from the row are set in that sheet's row, and so is the \
+                         text of a multileader's content or a leader's annotation its template \
+                         takes from the row, when the new content or annotation differs in its \
+                         text alone; any other change of them edits the template. AutoCAD's \
                          CHANGE."
             .to_owned(),
         Kind::Move => "Moves an object by by, [dx, dy, dz]: every point it is drawn through \
@@ -423,6 +447,25 @@ fn does(spec: &Spec) -> String {
             )
         }
         Kind::Grid(op) => grid_does(op),
+        Kind::LeaderLine(LeaderLineOp::Add) => "Adds a leader line to a multileader, target, by \
+             its ID or its name: points, from its arrow's point through any bends, up to but not \
+             including the point where the multileader's leader lines meet its landing, which \
+             the operation appends, so that every leader line meets the landing at the same \
+             point. At least one point; each apart from the one before and from that point; \
+             the first segment at least as long as the arrow, unless the arrowhead is none. A \
+             multileader of a template is edited in the template, so every sheet built from it \
+             follows, all or nothing. AutoCAD's MLEADEREDIT, adding leaders."
+            .to_owned(),
+        Kind::LeaderLine(LeaderLineOp::Delete) => {
+            "Deletes a leader line of a multileader, target, \
+             by its ID or its name: leader, its place among the multileader's leader lines, \
+             counted from 0 in the order they are written. A multileader's last leader line is \
+             not deleted: delete the multileader instead. Deleting the first leader line makes \
+             the next the first, whose last segment then sets the side the landing runs to. A \
+             multileader of a template is edited in the template, so every sheet built from it \
+             follows, all or nothing. AutoCAD's MLEADEREDIT, removing leaders."
+                .to_owned()
+        }
         Kind::SetAttribute => "Sets the value of the attribute tag of an insert. When the \
                                insert's block defines the tag more than once, occurrence names \
                                which, counted from 1 in the order the block defines them, and \
@@ -722,6 +765,44 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
         Kind::Table(op, table) => table_schema(op, table, defs),
         Kind::Block(op) => block_schema(op, defs),
         Kind::Grid(op) => grid_schema(op, defs),
+        Kind::LeaderLine(LeaderLineOp::Add) => json!({
+            "type": "object",
+            "required": ["target", "points"],
+            "additionalProperties": false,
+            "properties": {
+                "target": {
+                    "description": "The multileader, by its ID or its name.",
+                    "$ref": "#/$defs/target",
+                },
+                "points": {
+                    "description": "The new leader line's points, from its arrow's point up to, \
+                                    not including, the point where the multileader's leader \
+                                    lines meet its landing, which the operation appends: at least \
+                                    one, as lengths in the set's declared unit or carrying their \
+                                    own.",
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/point" },
+                    "minItems": 1,
+                },
+            },
+        }),
+        Kind::LeaderLine(LeaderLineOp::Delete) => json!({
+            "type": "object",
+            "required": ["target", "leader"],
+            "additionalProperties": false,
+            "properties": {
+                "target": {
+                    "description": "The multileader, by its ID or its name.",
+                    "$ref": "#/$defs/target",
+                },
+                "leader": {
+                    "description": "The leader line to delete: its place among the \
+                                    multileader's leader lines, counted from 0.",
+                    "type": "integer",
+                    "minimum": 0,
+                },
+            },
+        }),
         Kind::SetAttribute => json!({
             "type": "object",
             "required": ["target", "tag", "value"],
@@ -1155,6 +1236,11 @@ pub(crate) enum Body {
     TableEdit {
         target: Target,
         edit: TableEdit,
+    },
+    /// A leader line added to a multileader, or deleted.
+    LeaderLine {
+        target: Target,
+        edit: LeaderLineEdit,
     },
     /// A block operation: on the block `name`, or every block for an
     /// attsync without one, of the block library `library` names, with the
@@ -1772,6 +1858,90 @@ fn operation(
             let edit = read_grid_edit(grid_op, map)
                 .map_err(|(code, message, field)| fail(code, message, &field))?;
             Body::TableEdit { target, edit }
+        }
+        Kind::LeaderLine(line_op) => {
+            match line_op {
+                LeaderLineOp::Add => keys(&["target", "points"])?,
+                LeaderLineOp::Delete => keys(&["target", "leader"])?,
+            }
+            let target = target()?;
+            let edit = match line_op {
+                LeaderLineOp::Add => {
+                    let shape = "the new leader line's points, from its arrow's point up to the \
+                                 point where the leader lines meet the landing, each [x, y, z]";
+                    let Some(Value::Array(items)) = map.get("points") else {
+                        let code = if map.contains_key("points") {
+                            ErrorCode::WrongType
+                        } else {
+                            ErrorCode::MissingKey
+                        };
+                        return Err(fail(code, format!("expected {shape}"), "points"));
+                    };
+                    if items.is_empty() {
+                        return Err(fail(
+                            ErrorCode::BadValue,
+                            "a leader line takes at least one point of its own, its arrow's, \
+                             before the point where it meets the landing, which the operation \
+                             appends"
+                                .to_owned(),
+                            "points",
+                        ));
+                    }
+                    let mut points = Vec::with_capacity(items.len());
+                    for (i, item) in items.iter().enumerate() {
+                        let Value::Array(xyz) = item else {
+                            return Err(fail(
+                                ErrorCode::WrongType,
+                                "expected a point, [x, y, z]".to_owned(),
+                                &format!("points[{i}]"),
+                            ));
+                        };
+                        if xyz.len() != 3 {
+                            return Err(fail(
+                                ErrorCode::WrongType,
+                                "expected a point, three lengths [x, y, z]".to_owned(),
+                                &format!("points[{i}]"),
+                            ));
+                        }
+                        let mut point = [0.0; 3];
+                        for (axis, v) in xyz.iter().enumerate() {
+                            point[axis] = length(v, units).map_err(|message| {
+                                fail(
+                                    ErrorCode::BadNumber,
+                                    message,
+                                    &format!("points[{i}][{axis}]"),
+                                )
+                            })?;
+                        }
+                        points.push(point);
+                    }
+                    LeaderLineEdit::Add { points }
+                }
+                LeaderLineOp::Delete => {
+                    let leader = match map.get("leader") {
+                        Some(Value::Number(n)) => whole(n).and_then(|n| usize::try_from(n).ok()),
+                        None => {
+                            return Err(fail(
+                                ErrorCode::MissingKey,
+                                "missing key `leader`, the place of the leader line to delete, \
+                                 counted from 0"
+                                    .to_owned(),
+                                "leader",
+                            ))
+                        }
+                        Some(_) => None,
+                    };
+                    let Some(leader) = leader else {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected the leader line to delete, a whole number from 0".to_owned(),
+                            "leader",
+                        ));
+                    };
+                    LeaderLineEdit::Delete { leader }
+                }
+            };
+            Body::LeaderLine { target, edit }
         }
         Kind::Block(op) => {
             let allowed: &[&str] = match op {

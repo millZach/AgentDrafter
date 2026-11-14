@@ -1,0 +1,16 @@
+# Made-up symbols a multileader may end in, for examples/leaders.yaml: a tag
+# balloon, and a hexagon whose tag is written twice, once over a line.
+units: mm
+blocks:
+  TAG_BALLOON:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 5}
+      - attdef: {tag: TAG, prompt: Tag, default: '?', position: [0, 0, 0], height: 2.5, justify: middle_center}
+  TAG_HEX:
+    # Below the middle, so that its insertion point is not its centre.
+    base_point: [0, -2, 0]
+    objects:
+      - polyline: {points: [[-7, 0, 0], [-3.5, 6, 0], [3.5, 6, 0], [7, 0, 0], [3.5, -6, 0], [-3.5, -6, 0]], closed: true}
+      - line: {from: [-5, 0, 0], to: [5, 0, 0]}
+      - attdef: {tag: TAG, prompt: Device, default: '?', position: [0, 2.5, 0], height: 2.2, justify: middle_center}
+      - attdef: {tag: TAG, prompt: Terminal, default: '-', position: [0, -2.5, 0], height: 2.2, justify: middle_center}

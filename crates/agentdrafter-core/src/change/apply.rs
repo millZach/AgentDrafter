@@ -36,8 +36,8 @@ use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::blocks::tag_in_capitals;
 use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
-    template_at, template_in, template_path, AttributeSet, Disk, GivenValue, Listed, MarkFailure,
-    Matched, ObjectList, ReadFiles, RecordFile, Row, TableEdit, ID_SEPARATOR,
+    template_at, template_in, template_path, AttributeSet, Disk, GivenValue, LeaderLineEdit,
+    Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile, Row, TableEdit, ID_SEPARATOR,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -841,7 +841,8 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::Move { target, .. }
             | Body::Delete { target }
             | Body::SetAttribute { target, .. }
-            | Body::TableEdit { target, .. } => match target {
+            | Body::TableEdit { target, .. }
+            | Body::LeaderLine { target, .. } => match target {
                 Target::Id { sheet, .. } => (sheet, "target.id"),
                 Target::Name {
                     sheet: Some(sheet), ..
@@ -1060,7 +1061,8 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         | Body::Move { target, .. }
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
-        | Body::TableEdit { target, .. } => target,
+        | Body::TableEdit { target, .. }
+        | Body::LeaderLine { target, .. } => target,
         Body::Add { .. } | Body::Table { .. } | Body::Block { .. } => {
             unreachable!("handled above")
         }
@@ -1270,6 +1272,20 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 return fail(reach, op_err(e.code, e.message, &field));
             }
         },
+        Body::LeaderLine { edit, .. } => {
+            match record.leader_line_edit(list, index, edit, op.index) {
+                Ok(words) => {
+                    if let Some(refusal) = many_paths(files, file, op, "target") {
+                        return refusal;
+                    }
+                    done.message = format!("{words} of `{id}`{template_note}");
+                }
+                Err(e) => {
+                    let field = e.field.clone().unwrap_or_default();
+                    return fail(reach, op_err(e.code, e.message, &field));
+                }
+            }
+        }
         Body::Add { .. } | Body::Table { .. } | Body::Block { .. } => {
             unreachable!("handled above")
         }
@@ -1337,6 +1353,12 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 edit: TableEdit::SetCell { cell: [r, c], .. },
                 ..
             } => format!("the text of cell [{r}, {c}] of `{id}`"),
+            Body::Change { set, .. } if set.contains_key("content") => {
+                format!("the text of the content of `{id}`")
+            }
+            Body::Change { set, .. } if set.contains_key("annotation") => {
+                format!("the text of the annotation of `{id}`")
+            }
             _ => format!("the contents of `{id}`"),
         };
         let row_message = format!(
@@ -2739,7 +2761,8 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::Move { target, .. }
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
-        | Body::TableEdit { target, .. } => match target {
+        | Body::TableEdit { target, .. }
+        | Body::LeaderLine { target, .. } => match target {
             Target::Id { sheet, .. }
             | Target::Name {
                 sheet: Some(sheet), ..
@@ -2839,6 +2862,10 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         Body::Move { .. } => "by".to_owned(),
         Body::Delete { .. } => String::new(),
         Body::TableEdit { edit, .. } => grid_field(edit, within, matched),
+        Body::LeaderLine { edit, .. } => match edit {
+            LeaderLineEdit::Add { .. } => "points".to_owned(),
+            LeaderLineEdit::Delete { .. } => "leader".to_owned(),
+        },
         // A place within the block it wrote, such as `objects[0].line.layer`,
         // is that place in the operation.
         Body::Block { .. } => rest.to_owned(),
@@ -3018,7 +3045,8 @@ fn target_words(op: &Operation) -> String {
         | Body::Move { target, .. }
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
-        | Body::TableEdit { target, .. } => target.words(),
+        | Body::TableEdit { target, .. }
+        | Body::LeaderLine { target, .. } => target.words(),
         Body::Add {
             to: AddTo::Sheet(s),
             ..

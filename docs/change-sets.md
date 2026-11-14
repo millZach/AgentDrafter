@@ -12,7 +12,7 @@ Zach decided on 2026-11-11:
 2. **An edit to an object that comes from a template changes the template.** Every sheet built from it follows, and the reply lists the sheets it reaches.
 3. **An object added to one sheet goes in that sheet's row**, under the row's [`objects`](drawing-set.md#a-rows-own-objects). The template stays shared.
 4. **A template edit is all or nothing across its sheets.** It lands only if every sheet built from that template takes its whole part. Otherwise the template, those sheets' rows and their DWGs stay as they were, byte for byte. Sheets built from other templates still land. ADR-0005 stands.
-5. **A value the template takes from the row is set in that sheet's row.** Setting an attribute, or a text's contents, whose template value is `{row: NAME}` writes that sheet's row value `NAME`, on that sheet alone, and the reply names every place on the sheet the value fills.
+5. **A value the template takes from the row is set in that sheet's row.** Setting an attribute, a text's contents, or the text of a leader's content or annotation, whose template value is `{row: NAME}` writes that sheet's row value `NAME`, on that sheet alone, and the reply names every place on the sheet the value fills.
 
 A sheet's template is the file its row's path names, as the file system resolves it, so rows that reach one file by different paths, such as `templates/t.yaml` and `templates/T.yaml` where the file system ignores case, or a link and the file it links to, share one template, and rows whose paths name two files, such as `../t.yaml` and `../../../t.yaml`, do not. A change set writes a template through one path, so it does not edit a template the rows reach by more than one: such an edit refuses the change set, naming the paths, until every row writes one path to it. An edit to one sheet's row is no edit to its template, and lands.
 
@@ -52,7 +52,7 @@ A sheet's template is the file its row's path names, as the file system resolves
 | `add_solid` | `SOLID` | Adds a 2D solid. |
 | `insert_block` | `INSERT` | Adds an insert of a block from the block library. |
 | `add_table` | `TABLE` | Adds a table. |
-| `add_mleader` | `MLEADER` | Adds a multileader: leader lines from their arrows to a landing, and its text. |
+| `add_mleader` | `MLEADER` | Adds a multileader: leader lines from their arrows to a landing, and its text or block. |
 | `add_leader` | `LEADER` | Adds an older leader, with its annotation if it has one. |
 | `change` | `CHANGE` | Sets keys of an object. |
 | `move` | `MOVE` | Moves an object. |
@@ -63,6 +63,8 @@ A sheet's template is the file its row's path names, as the file system resolves
 | `delete_row` | none | Deletes a row of a table. |
 | `add_column` | none | Adds a column to a table. |
 | `delete_column` | none | Deletes a column of a table. |
+| `add_leader_line` | `MLEADEREDIT` | Adds a leader line to a multileader. |
+| `delete_leader_line` | none | Deletes a leader line of a multileader. |
 | `add_layer`, `change_layer`, `rename_layer`, `delete_layer` | `LAYER`, none, `RENAME`, `LAYDEL` | Adds, changes, renames or deletes a layer of a template. |
 | `add_linetype`, `change_linetype`, `rename_linetype`, `delete_linetype` | `LINETYPE`, none, none, none | The same for a linetype. |
 | `add_text_style`, `change_text_style`, `rename_text_style`, `delete_text_style` | `STYLE`, none, none, none | The same for a text style. |
@@ -79,9 +81,9 @@ A sheet's template is the file its row's path names, as the file system resolves
 
 **Adding.** Every object a sheet description holds has an operation that adds it. It takes the keys that object takes in a [sheet description](sheet-description.md#objects), `id`, `name` and `layer` among them, and where it goes: `sheet`, to add it to that sheet's row, or `template`, the template's path as the rows write it, to add it to the template and so to every sheet built from it. The object is drawn after the objects already in its list. An object added without an `id` is given one, its type and the first number free on the sheets it is added to, such as `line-1` or `insert-2`, so that its ID is fixed for its life; the reply gives its ID. A key sent as `null` is a [bare null](sheet-description.md#the-yaml-subset) (rule 8), JSON's form of `layer: null`: the record writes it so, and the sheet reads it as a sheet description does. On an optional text or path field it leaves the field out, so `"layer": null` puts the object on layer `0`, an attribute's value sent as `null` takes its definition's default, and an `id` sent as `null` is given one as above. On a required one, such as a text's `contents`, it is the `missing_key` error, and on any other key, such as `closed` or `radius`, it is an error as `closed: null` is in a sheet description; either fails the sheet, as a bad value does.
 
-**`change`** takes `target` and `set`, a mapping from each key to set to its new value, written as a sheet description writes it; `null` takes an optional key away. It sets any key the object's type takes, and `name`. It does not set `id`, since an object's ID is fixed for its life, nor an insert's `attributes`, which `set_attribute` sets one at a time, nor the object's type. A text's or an mtext's `contents` whose template takes them from the row is set in the sheet's row (decision 5).
+**`change`** takes `target` and `set`, a mapping from each key to set to its new value, written as a sheet description writes it; `null` takes an optional key away. It sets any key the object's type takes, and `name`. It does not set `id`, since an object's ID is fixed for its life, nor an insert's `attributes`, which `set_attribute` sets one at a time, nor the object's type. A text's or an mtext's `contents` whose template takes them from the row is set in the sheet's row (decision 5), and so is the text of a multileader's `content` or an older leader's `annotation` ([Leaders](#leaders)).
 
-**`move`** takes `target` and `by`, `[dx, dy, dz]`. Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, the position of a text, an mtext, an insert or a table, every point of each of a multileader's leader lines, and an older leader's points; a leader's text moves with it, laid out again where its landing or end puts it. An arrow is placed at a point and does not follow an object it points at, since pointing it at an object by its ID or name waits for object snaps (#74). A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
+**`move`** takes `target` and `by`, `[dx, dy, dz]`. Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, the position of a text, an mtext, an insert or a table, every point of each of a multileader's leader lines, and an older leader's points; a leader's text moves with it, laid out again where its landing or end puts it. An arrow is placed at a point and does not follow an object it points at, since pointing it at an object by its ID or name waits for object snaps (#74); so is the arrow of a leader line `add_leader_line` adds. A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
 
 **`delete`** takes `target`.
 
@@ -124,6 +126,24 @@ Five operations edit a [table](sheet-description.md#tables)'s grid, as AutoCAD's
 - **`add_column`** and **`delete_column`** do the same across, with `at`, `width`, `cells`, one for each row, and `column`. A merge across the column grows or shrinks, a column holding a merged cell that spans more columns is refused, and a table keeps at least one column.
 
 The reply's operation says what else it did to keep the table in line, such as `the merge of cell [0, 0] grows to [1, 5]`. The table is written again as an object an edit touched is ([How the records are written](#how-the-records-are-written)): each value it did not touch as it was, and a comment inside the table is lost.
+
+### Leaders
+
+Two operations edit a [multileader](sheet-description.md#leaders)'s leader lines, as AutoCAD's MLEADEREDIT adds and removes leaders. Each names its multileader under `target`, by its ID or its name, and lands as any edit of an object does: a multileader of a template is edited in the template, so every sheet built from it follows, all or nothing, and one of a row's own objects on that sheet alone. Once applied, each sheet they reach is read back and built, so a leader line the multileader cannot take fails the sheet, with the error at the operation's key.
+
+- **`add_leader_line`** (`MLEADEREDIT`) takes `target` and `points`: the new leader line from its arrow's point through any bends, up to but not including the point where the multileader's leader lines meet its landing, which the operation appends, written as the multileader's first leader line writes it. At least one point, each apart from the one before and from that point, and the first segment at least as long as the arrow, unless the arrowhead is `none`; the error of one that is not is at `points`. It may come from either side of the landing: AutoCAD 2026 kept a second leader line from the landing's far side where it was when it laid the multileader out again.
+
+  ```json
+  {"op": "add_leader_line", "target": {"id": "DEMO-001/terminals"}, "points": [[4, 2, 0], [5, 2.5, 0]]}
+  ```
+
+- **`delete_leader_line`** takes `target` and `leader`, the leader line's place among the multileader's, counted from 0 in the order they are written. The last leader line is not deleted: delete the multileader instead. Deleting the first makes the next the first, whose last segment then sets the side the landing runs to.
+
+**A leader's text from the row.** A `change` whose `set` gives a multileader's `content`, or an older leader's `annotation`, that differs from what the template writes in its `text` alone, where the template writes that text `{row: NAME}`, sets the sheet's row value `NAME` to the new text, on that sheet alone, as a text's contents from the row are set (decision 5), and the reply's `row_value` names it and every place it fills. Any other change of the content or the annotation, such as a new height, a value from the row, or a block, edits the template, so every sheet built from it follows.
+
+```json
+{"op": "change", "target": {"id": "DEMO-002/callout"}, "set": {"content": {"text": "AREA 200 RENAMED", "height": 0.2}}}
+```
 
 ### Blocks
 

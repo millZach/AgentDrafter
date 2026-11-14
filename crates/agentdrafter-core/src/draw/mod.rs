@@ -44,7 +44,9 @@
 //!   hooks it, and its annotation ([`Drawer::mleader`], [`Drawer::leader`]),
 //!   as AutoCAD 2026 laid out and exploded made-up leaders. Its text is
 //!   multiline text, and each shape and line of text it draws is its
-//!   `part` 0, so the checker tells its letters from its lines.
+//!   `part` 0, so the checker tells its letters from its lines. A
+//!   multileader's block content draws as an insert of its block, placed
+//!   where AutoCAD places it, each of the block's objects its part.
 //! - The sheet is seen from above: `z` is dropped.
 //!
 //! Everything here is plain computation. It opens no window and uses no
@@ -65,9 +67,9 @@ use serde::{Deserialize, Serialize};
 use crate::model::block::{definition_text, Placement};
 use crate::model::leader::{arrowhead_shapes, trimmed};
 use crate::model::{
-    attribute_text, Arrowhead, Block, Insert, Layer, Leader, MLeader, MLeaderStyle, Object,
-    ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline, Properties, Sheet, Table,
-    TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
+    attribute_text, Arrowhead, Block, Insert, LaidContent, Layer, Leader, MLeader, MLeaderStyle,
+    Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline, Properties, Sheet,
+    Table, TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
 };
 use crate::text::placement::SheetFonts;
 
@@ -964,7 +966,9 @@ impl<'a> Drawer<'a> {
     /// Adds what a multileader draws to `list`, laid out with its style:
     /// its leader lines, each behind its arrowhead, and its landing, in the
     /// style's leader pen, `ByBlock` taking the multileader's own; and its
-    /// text, in the multileader's own pen, as its `part` 0.
+    /// text, in the multileader's own pen, as its `part` 0, or its block,
+    /// as an insert of the block on the multileader's layer and in its pen
+    /// draws it, each of the block's objects its part.
     fn mleader(&self, index: usize, mleader: &MLeader, tolerance: f64, list: &mut DisplayList) {
         let shown = self.shown(&mleader.layer);
         if shown == Shown::Hidden {
@@ -975,7 +979,11 @@ impl<'a> Drawer<'a> {
             .sheet
             .mleader_style(&mleader.mleader_style)
             .unwrap_or_else(|| MLeaderStyle::standard(self.sheet.units));
-        let laid = mleader.laid_out(&style, &|t| text::mtext_box(t, self.fonts));
+        let laid = mleader.laid_out(
+            &style,
+            &|t| text::mtext_box(t, self.fonts),
+            &self.sheet.blocks,
+        );
         let by_layer = self.layer_pen(&mleader.layer);
         let line_pen = Pen {
             color: match style.leader_color {
@@ -1004,13 +1012,22 @@ impl<'a> Drawer<'a> {
             add_stroke(&mut drawn, line_pen.lineweight, runs);
         }
         list.add_shown(shown, index, &[], line_pen.color, drawn);
-        let lettering = text::draw_mtext(&laid.text, self.fonts, pen.lineweight, tolerance);
-        let drawn = Drawn {
-            shapes: lettering.shapes,
-            runs: lettering.runs,
-            ..Drawn::default()
-        };
-        list.add_shown(shown, index, &[0], pen.color, drawn);
+        match &laid.content {
+            LaidContent::Text { text, .. } => {
+                let lettering = text::draw_mtext(text, self.fonts, pen.lineweight, tolerance);
+                let drawn = Drawn {
+                    shapes: lettering.shapes,
+                    runs: lettering.runs,
+                    ..Drawn::default()
+                };
+                list.add_shown(shown, index, &[0], pen.color, drawn);
+            }
+            // Block content draws as an insert of its block draws, each
+            // of the block's objects as its part, as an insert's are.
+            LaidContent::Block { insert, .. } => {
+                self.nested(index, &[], insert, None, None, tolerance, list);
+            }
+        }
     }
 
     /// Adds what an older leader draws to `list`: its line behind its

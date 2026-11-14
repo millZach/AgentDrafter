@@ -22,17 +22,25 @@
 //! An arrowhead other than closed filled is a block AutoCAD names, such as
 //! `_Dot`; the drawing holds it once, with what AutoCAD 2026 put in it.
 //!
+//! Block content is written as AutoCAD 2026 wrote its own: the block's
+//! record, where the block's base point sits, its scale, rotation and
+//! connection, the matrix that places it, and a value for each of the
+//! block's attribute definitions, by the definition's handle and its place
+//! among them, from 1.
+//!
 //! A multileader, an older leader and a multileader style are read back
-//! when the core has a model for them: text content, straight leader lines
+//! when the core has a model for them: text content, or a block the model
+//! places, sitting where the model places it, straight leader lines
 //! and a horizontal landing, one of the arrowheads and attachments the
 //! pipeline draws, and the pens AutoCAD's own Standard style gives, or
 //! they are counted not read. An older leader's annotation is read with it,
 //! and not as an mtext of its own.
 
 use acadrust::entities::multileader::{
-    FlowDirectionType, LeaderLine, LeaderRoot, LineSpacingStyle, MultiLeaderPathType,
-    MultiLeaderPropertyOverrideFlags as Override, TextAlignmentType, TextAngleType,
-    TextAttachmentDirectionType, TextAttachmentPointType, TextAttachmentType,
+    BlockAttribute, BlockContentConnectionType, FlowDirectionType, LeaderLine, LeaderRoot,
+    LineSpacingStyle, MultiLeaderPathType, MultiLeaderPropertyOverrideFlags as Override,
+    TextAlignmentType, TextAngleType, TextAttachmentDirectionType, TextAttachmentPointType,
+    TextAttachmentType,
 };
 use acadrust::entities::{
     EntityType, HooklineDirection, Leader as DwgLeader, LeaderCreationType, LeaderPathType,
@@ -52,8 +60,9 @@ use super::text::{dwg_mtext, mtext_code, mtext_contents, style_name};
 use super::{point, vector};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arrowhead, Leader, LeaderAnnotation, LeaderAttachment, Lineweight, MLeader, MLeaderContent,
-    MLeaderStyle, MTextBox, Object, ObjectColor, ObjectLineweight, Point3, Sheet,
+    Arrowhead, Attribute, Block, BlockConnection, Insert, LaidContent, Leader, LeaderAnnotation,
+    LeaderAttachment, Lineweight, MLeader, MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText,
+    MTextBox, Object, ObjectColor, ObjectLineweight, Outline, Point3, Sheet,
     STANDARD_MLEADER_STYLE,
 };
 use crate::text::MText;
@@ -448,13 +457,25 @@ fn attachment_type(attachment: LeaderAttachment) -> TextAttachmentType {
     TextAttachmentType::from(attachment.code())
 }
 
+/// What AutoCAD 2026 flagged on every multileader it made with block
+/// content: its content type, its block, and the block's scale and
+/// rotation.
+fn block_overrides() -> Override {
+    Override::CONTENT_TYPE
+        | Override::BLOCK_CONTENT
+        | Override::BLOCK_CONTENT_SCALE
+        | Override::BLOCK_CONTENT_ROTATION
+}
+
 /// The DWG multileader for one of ours, laid out with `style`, which the
-/// drawing holds.
+/// drawing holds, its block content's block one of `blocks`, which the
+/// drawing holds too.
 pub(super) fn dwg_mleader(
     drawing: &CadDocument,
     mleader: &MLeader,
     style: &MLeaderStyle,
     measure: &dyn Fn(&MText) -> MTextBox,
+    blocks: &[Block],
 ) -> Result<MultiLeader, Error> {
     let style_handle = style_handle(drawing, &style.name).ok_or_else(|| {
         Error::new(
@@ -465,11 +486,9 @@ pub(super) fn dwg_mleader(
             ),
         )
     })?;
-    let laid = mleader.laid_out(style, measure);
-    let text_style = &laid.text.style;
-    let text_style_handle = drawing.text_styles.get(text_style).map(|s| s.handle);
+    let laid = mleader.laid_out(style, measure, blocks);
     let right = laid.side > 0.0;
-    let mut overrides = base_overrides();
+    let mut overrides = Override::empty();
     if laid.arrowhead != style.arrowhead {
         overrides |= Override::ARROWHEAD;
     }
@@ -485,24 +504,8 @@ pub(super) fn dwg_mleader(
     if laid.landing_gap != style.landing_gap {
         overrides |= Override::LANDING_GAP;
     }
-    if *text_style != style.text_style {
-        overrides |= Override::TEXT_STYLE;
-    }
-    if laid.text.height != style.text_height {
-        overrides |= Override::TEXT_HEIGHT;
-    }
-    if laid.attachment != style.attachment {
-        overrides |= Override::TEXT_LEFT_ATTACHMENT | Override::TEXT_RIGHT_ATTACHMENT;
-    }
-    let attachment = attachment_type(laid.attachment);
-    let (alignment, attached) = if right {
-        (TextAlignmentType::Left, TextAttachmentPointType::Left)
-    } else {
-        (TextAlignmentType::Right, TextAttachmentPointType::Right)
-    };
     let mut written = MultiLeader::new();
     written.style_handle = Some(style_handle);
-    written.property_override_flags = overrides;
     written.path_type = MultiLeaderPathType::StraightLineSegments;
     written.line_color = dwg_color(style.leader_color);
     written.line_type_handle = drawing.line_types.get("ByBlock").map(|l| l.handle);
@@ -512,47 +515,165 @@ pub(super) fn dwg_mleader(
     written.dogleg_length = laid.landing;
     written.arrowhead_handle = arrow_block(drawing, laid.arrowhead);
     written.arrowhead_size = laid.arrow_size;
-    written.text_style_handle = text_style_handle;
     written.text_color = Color::ByBlock;
     written.text_frame = false;
-    written.text_height = laid.text.height;
-    written.text_left_attachment = attachment;
-    written.text_right_attachment = attachment;
     written.text_top_attachment = TextAttachmentType::CenterOfText;
     written.text_bottom_attachment = TextAttachmentType::CenterOfText;
     written.text_attachment_direction = TextAttachmentDirectionType::Horizontal;
-    written.text_attachment_point = attached;
-    written.text_alignment = alignment;
     written.text_angle_type = TextAngleType::Horizontal;
     let context = &mut written.context;
     context.scale_factor = 1.0;
     context.content_base_point = vector(laid.content_base());
-    context.text_height = laid.text.height;
     context.arrowhead_size = laid.arrow_size;
     context.landing_gap = laid.landing_gap;
-    context.text_left_attachment = attachment;
-    context.text_right_attachment = attachment;
     context.text_top_attachment = TextAttachmentType::CenterOfText;
     context.text_bottom_attachment = TextAttachmentType::CenterOfText;
-    context.text_alignment = alignment;
-    context.has_text_contents = true;
-    context.text_string = mtext_code(&laid.text.contents, None);
-    context.text_style_handle = text_style_handle;
-    context.text_location = vector(laid.text.position);
-    context.text_direction = Vector3::UNIT_X;
-    context.text_attachment_point = attached;
-    context.text_flow_direction = FlowDirectionType::ByStyle;
-    context.line_spacing_factor = 1.0;
-    context.line_spacing_style = LineSpacingStyle::AtLeast;
-    context.text_color = Color::ByBlock;
-    context.background_fill_color = Color::ByLayer;
-    context.background_scale_factor = 0.0;
-    context.word_break = false;
     context.base_point = laid
         .lines
         .first()
         .and_then(|l| l.first())
         .map_or(Vector3::ZERO, |p| vector(*p));
+    match &laid.content {
+        LaidContent::Text {
+            text,
+            attachment: laid_attachment,
+            ..
+        } => {
+            overrides |= base_overrides();
+            let text_style_handle = drawing.text_styles.get(&text.style).map(|s| s.handle);
+            if text.style != style.text_style {
+                overrides |= Override::TEXT_STYLE;
+            }
+            if text.height != style.text_height {
+                overrides |= Override::TEXT_HEIGHT;
+            }
+            if *laid_attachment != style.attachment {
+                overrides |= Override::TEXT_LEFT_ATTACHMENT | Override::TEXT_RIGHT_ATTACHMENT;
+            }
+            let attachment = attachment_type(*laid_attachment);
+            let (alignment, attached) = if right {
+                (TextAlignmentType::Left, TextAttachmentPointType::Left)
+            } else {
+                (TextAlignmentType::Right, TextAttachmentPointType::Right)
+            };
+            written.text_style_handle = text_style_handle;
+            written.text_height = text.height;
+            written.text_left_attachment = attachment;
+            written.text_right_attachment = attachment;
+            written.text_attachment_point = attached;
+            written.text_alignment = alignment;
+            let context = &mut written.context;
+            context.text_height = text.height;
+            context.text_left_attachment = attachment;
+            context.text_right_attachment = attachment;
+            context.text_alignment = alignment;
+            context.has_text_contents = true;
+            context.text_string = mtext_code(&text.contents, None);
+            context.text_style_handle = text_style_handle;
+            context.text_location = vector(text.position);
+            context.text_direction = Vector3::UNIT_X;
+            context.text_attachment_point = attached;
+            context.text_flow_direction = FlowDirectionType::ByStyle;
+            context.line_spacing_factor = 1.0;
+            context.line_spacing_style = LineSpacingStyle::AtLeast;
+            context.text_color = Color::ByBlock;
+            context.background_fill_color = Color::ByLayer;
+            context.background_scale_factor = 0.0;
+            context.word_break = false;
+        }
+        LaidContent::Block { insert, .. } => {
+            let connection = mleader
+                .content
+                .block()
+                .map_or(BlockConnection::Extents, |b| b.connection);
+            overrides |= block_overrides();
+            if connection != BlockConnection::Extents {
+                overrides |= Override::BLOCK_CONTENT_CONNECTION;
+            }
+            let record = drawing
+                .block_records
+                .iter()
+                .find(|r| r.name == insert.block)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::DwgWrite,
+                        format!(
+                            "a multileader's content is block `{}`, which the drawing does not hold",
+                            insert.block
+                        ),
+                    )
+                })?;
+            let block = blocks.iter().find(|b| b.name == insert.block);
+            // Each of the block's attribute definitions, in order, with the
+            // value the content gives it, as AutoCAD 2026 wrote them: by its
+            // place among the block's attribute definitions, from 1.
+            let definitions: Vec<Handle> = drawing
+                .entities_in_block(&record.name)
+                .filter(|e| matches!(e, EntityType::AttributeDefinition(_)))
+                .map(|e| e.common().handle)
+                .collect();
+            let places: Vec<usize> = block.map_or(Vec::new(), |b| {
+                b.objects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| matches!(o, Object::AttributeDefinition(_)))
+                    .map(|(p, _)| p)
+                    .collect()
+            });
+            written.block_attributes = definitions
+                .iter()
+                .zip(&places)
+                .enumerate()
+                .map(|(k, (handle, &p))| {
+                    let value = block
+                        .and_then(|b| b.attribute_value(insert, p))
+                        .unwrap_or_default();
+                    let mut attribute = BlockAttribute::new(value);
+                    attribute.attribute_definition_handle = Some(*handle);
+                    attribute.index = i16::try_from(k + 1).unwrap_or(i16::MAX);
+                    attribute
+                })
+                .collect();
+            let attachment = attachment_type(style.attachment);
+            written.content_type = acadrust::entities::LeaderContentType::Block;
+            written.text_style_handle =
+                drawing.text_styles.get(&style.text_style).map(|s| s.handle);
+            written.text_left_attachment = attachment;
+            written.text_right_attachment = attachment;
+            written.text_attachment_point = TextAttachmentPointType::Left;
+            written.text_alignment = TextAlignmentType::Left;
+            written.block_content_handle = Some(record.handle);
+            written.block_content_color = Color::ByBlock;
+            written.block_connection_type = block_connection_type(connection);
+            written.block_rotation = insert.rotation.to_radians();
+            written.block_scale = Vector3::new(insert.scale, insert.scale, insert.scale);
+            let context = &mut written.context;
+            context.text_height = style.text_height;
+            context.text_left_attachment = attachment;
+            context.text_right_attachment = attachment;
+            context.text_alignment = TextAlignmentType::Left;
+            context.text_normal = Vector3::ZERO;
+            context.text_flow_direction = FlowDirectionType::Horizontal;
+            context.text_color = Color::ByLayer;
+            context.word_break = false;
+            context.background_fill_color = Color::ByLayer;
+            context.background_scale_factor = 1.5;
+            context.has_text_contents = false;
+            context.has_block_contents = true;
+            context.block_content_handle = Some(record.handle);
+            context.block_content_normal = Vector3::UNIT_Z;
+            context.block_content_location = vector(insert.position);
+            context.block_content_scale = Vector3::new(insert.scale, insert.scale, insert.scale);
+            context.block_rotation = insert.rotation.to_radians();
+            context.block_content_color = Color::ByLayer;
+            context.block_connection_type = block_connection_type(connection);
+            context.transform_matrix = block_transform(
+                insert,
+                block.map_or(Point3::new(0.0, 0.0, 0.0), |b| b.base_point),
+            );
+        }
+    }
+    written.property_override_flags = overrides;
     let mut root = LeaderRoot::new(0);
     root.content_valid = true;
     root.unknown = true;
@@ -574,6 +695,33 @@ pub(super) fn dwg_mleader(
     }
     written.context.leader_roots.push(root);
     Ok(written)
+}
+
+fn block_connection_type(connection: BlockConnection) -> BlockContentConnectionType {
+    match connection {
+        BlockConnection::Extents => BlockContentConnectionType::BlockExtents,
+        BlockConnection::Insertion => BlockContentConnectionType::BasePoint,
+    }
+}
+
+/// The matrix that places block content, row by row, as AutoCAD 2026 wrote
+/// it: what takes a point in the block's own coordinates to the sheet,
+/// scaled, turned and moved so that the block's base point, `base`, sits
+/// where the insert puts it.
+#[rustfmt::skip]
+fn block_transform(insert: &Insert, base: Point3) -> [f64; 16] {
+    let (sin, cos) = insert.rotation.to_radians().sin_cos();
+    let s = insert.scale;
+    let p = insert.position;
+    let tx = p.x - s * (base.x * cos - base.y * sin);
+    let ty = p.y - s * (base.x * sin + base.y * cos);
+    let tz = p.z - s * base.z;
+    [
+        s * cos, -s * sin, 0.0, tx,
+        s * sin, s * cos, 0.0, ty,
+        0.0, 0.0, s, tz,
+        0.0, 0.0, 0.0, 1.0,
+    ]
 }
 
 /// The DWG leader for one of ours, and its annotation's MTEXT, if it has
@@ -711,38 +859,41 @@ fn read_style(drawing: &CadDocument, written: &DwgStyle) -> Option<MLeaderStyle>
     })
 }
 
+/// What a multileader with block content may override of its style and
+/// still be read: what AutoCAD flags on every one, its connection, what the
+/// model holds of its own, and its text's alignment, which AutoCAD 2026
+/// flagged once it had mirrored one, and which block content does not use.
+fn block_overrides_read() -> Override {
+    block_overrides()
+        | Override::BLOCK_CONTENT_CONNECTION
+        | Override::TEXT_ALIGNMENT
+        | Override::ARROWHEAD
+        | Override::ARROWHEAD_SIZE
+        | Override::LANDING_DISTANCE
+        | Override::ENABLE_DOGLEG
+}
+
 /// A multileader the core can read back whole, drawing with one of
-/// `styles`: text content, one leader root with straight leader lines and
-/// a horizontal landing on the side its first leader line runs to, and no
+/// `styles`: text content, or a block among `blocks` placed where the
+/// model places it; one leader root with straight leader lines and a
+/// horizontal landing on the side its first leader line runs to; and no
 /// pen of its own for its leader lines.
 pub(super) fn read_mleader(
     drawing: &CadDocument,
     written: &MultiLeader,
     styles: &[MLeaderStyle],
+    blocks: &[Block],
     layer: String,
 ) -> Option<MLeader> {
     let context = &written.context;
     let [root] = context.leader_roots.as_slice() else {
         return None;
     };
-    let plain = written.content_type == acadrust::entities::LeaderContentType::MText
-        && context.has_text_contents
-        && !context.has_block_contents
-        && written.path_type == MultiLeaderPathType::StraightLineSegments
+    let plain = written.path_type == MultiLeaderPathType::StraightLineSegments
         && written.enable_landing
-        && !written.text_frame
-        && written.text_color == Color::ByBlock
-        && written.text_angle_type == TextAngleType::Horizontal
-        && written.text_attachment_direction == TextAttachmentDirectionType::Horizontal
-        && written.text_left_attachment as i16 == written.text_right_attachment as i16
         && written.scale_factor == 1.0
         && context.scale_factor == 1.0
         && !written.enable_annotation_scale
-        && context.text_rotation == 0.0
-        && context.text_width == 0.0
-        && context.line_spacing_factor == 1.0
-        && context.column_type == 0
-        && !context.background_fill_enabled
         && root.break_points.is_empty()
         && root.direction.y == 0.0
         && root.direction.x.abs() == 1.0
@@ -780,35 +931,36 @@ pub(super) fn read_mleader(
         }
         leaders.push(points);
     }
-    let (text, width_factor) = mtext_contents(&context.text_string)?;
-    if width_factor.is_some() {
-        return None;
-    }
     let landing = if written.enable_dogleg {
         root.landing_distance
     } else {
         0.0
     };
     let arrowhead = arrowhead_of(drawing, written.arrowhead_handle)?;
-    let attachment = LeaderAttachment::of_code(written.text_left_attachment as i16)?;
-    let text_style = text_style_name(drawing, context.text_style_handle)?;
+    let differs = |same: bool| !same;
+    let content = match written.content_type {
+        acadrust::entities::LeaderContentType::MText => read_text_content(drawing, written, style)?,
+        acadrust::entities::LeaderContentType::Block => {
+            MLeaderContent::Block(read_block_content(drawing, written, blocks)?)
+        }
+        _ => return None,
+    };
     // An override the model does not hold, such as the text's colour,
     // would be lost.
-    if !overrides_read().contains(written.property_override_flags) {
+    let held = match content {
+        MLeaderContent::Text(_) => overrides_read(),
+        MLeaderContent::Block(_) => block_overrides_read(),
+    };
+    if !held.contains(written.property_override_flags) {
         return None;
     }
-    let differs = |same: bool| !same;
+    let block_content = matches!(content, MLeaderContent::Block(_));
     let read = MLeader {
         leaders,
-        content: MLeaderContent {
-            text,
-            style: differs(text_style == style.text_style).then_some(text_style),
-            height: differs(context.text_height == style.text_height)
-                .then_some(context.text_height),
-            attachment: differs(attachment == style.attachment).then_some(attachment),
-        },
+        content,
         landing: differs(landing == style.landing).then_some(landing),
-        gap: differs(context.landing_gap == style.landing_gap).then_some(context.landing_gap),
+        gap: differs(block_content || context.landing_gap == style.landing_gap)
+            .then_some(context.landing_gap),
         arrowhead: differs(arrowhead == style.arrowhead).then_some(arrowhead),
         arrow_size: differs(written.arrowhead_size == style.arrow_size)
             .then_some(written.arrowhead_size),
@@ -817,7 +969,145 @@ pub(super) fn read_mleader(
         properties: Default::default(),
     };
     // The landing runs to the side the model gives it, or it is not read.
-    (read.side() == root.direction.x).then_some(read)
+    if read.side() != root.direction.x {
+        return None;
+    }
+    // Block content sits where the model places it, or it is not read.
+    if let MLeaderContent::Block(_) = &read.content {
+        let laid = read.laid_out(style, &|_| MTextBox::default(), blocks);
+        let LaidContent::Block { insert, base } = &laid.content else {
+            return None;
+        };
+        let reach = read
+            .leaders
+            .iter()
+            .flatten()
+            .chain([&insert.position])
+            .map(|p| p.x.abs().max(p.y.abs()))
+            .fold(1.0, f64::max);
+        let near = |a: Point3, b: Vector3| {
+            (a.x - b.x).abs() <= reach * 1e-9 && (a.y - b.y).abs() <= reach * 1e-9
+        };
+        if !near(insert.position, context.block_content_location)
+            || !near(*base, context.content_base_point)
+        {
+            return None;
+        }
+    }
+    Some(read)
+}
+
+/// A multileader's text content, as the model holds it, or none.
+fn read_text_content(
+    drawing: &CadDocument,
+    written: &MultiLeader,
+    style: &MLeaderStyle,
+) -> Option<MLeaderContent> {
+    let context = &written.context;
+    let plain = context.has_text_contents
+        && !context.has_block_contents
+        && !written.text_frame
+        && written.text_color == Color::ByBlock
+        && written.text_angle_type == TextAngleType::Horizontal
+        && written.text_attachment_direction == TextAttachmentDirectionType::Horizontal
+        && written.text_left_attachment as i16 == written.text_right_attachment as i16
+        && context.text_rotation == 0.0
+        && context.text_width == 0.0
+        && context.line_spacing_factor == 1.0
+        && context.column_type == 0
+        && !context.background_fill_enabled;
+    if !plain {
+        return None;
+    }
+    let (text, width_factor) = mtext_contents(&context.text_string)?;
+    if width_factor.is_some() {
+        return None;
+    }
+    let attachment = LeaderAttachment::of_code(written.text_left_attachment as i16)?;
+    let text_style = text_style_name(drawing, context.text_style_handle)?;
+    let differs = |same: bool| !same;
+    Some(MLeaderContent::Text(MLeaderText {
+        text,
+        style: differs(text_style == style.text_style).then_some(text_style),
+        height: differs(context.text_height == style.text_height).then_some(context.text_height),
+        attachment: differs(attachment == style.attachment).then_some(attachment),
+    }))
+}
+
+/// A multileader's block content, as the model holds it, or none: a block
+/// among `blocks` that the model places, upright on the sheet, scaled the
+/// same along every axis, in the multileader's own colour, with a value
+/// for each of its attribute definitions, by their handles.
+fn read_block_content(
+    drawing: &CadDocument,
+    written: &MultiLeader,
+    blocks: &[Block],
+) -> Option<MLeaderBlock> {
+    let context = &written.context;
+    let handle = context.block_content_handle?;
+    // The entity's scale and rotation, which the context repeats, within a
+    // rounding: AutoCAD 2026 wrote them a last digit apart once it had
+    // mirrored a multileader.
+    let scale = written.block_scale;
+    let within = |a: f64, b: f64| (a - b).abs() <= 1e-9 * a.abs().max(1.0);
+    let plain = context.has_block_contents
+        && !context.has_text_contents
+        && written.block_content_handle == Some(handle)
+        && written.block_content_color == Color::ByBlock
+        && context.block_content_normal == Vector3::UNIT_Z
+        && scale.x > 0.0
+        && scale.x == scale.y
+        && scale.y == scale.z
+        && within(context.block_content_scale.x, scale.x)
+        && within(context.block_content_scale.y, scale.y)
+        && within(context.block_content_scale.z, scale.z)
+        && within(written.block_rotation, context.block_rotation);
+    if !plain {
+        return None;
+    }
+    let record = drawing.block_records.iter().find(|r| r.handle == handle)?;
+    let block = blocks.iter().find(|b| b.name == record.name)?;
+    Outline::of(block, blocks).ok()?;
+    let connection = match written.block_connection_type {
+        BlockContentConnectionType::BlockExtents => BlockConnection::Extents,
+        BlockContentConnectionType::BasePoint => BlockConnection::Insertion,
+    };
+    // Each attribute definition of the block, in order, and its value.
+    let definitions: Vec<Handle> = drawing
+        .entities_in_block(&record.name)
+        .filter(|e| matches!(e, EntityType::AttributeDefinition(_)))
+        .map(|e| e.common().handle)
+        .collect();
+    let carried: Vec<&crate::model::AttributeDefinition> = block.attribute_definitions().collect();
+    if definitions.len() != carried.len() || written.block_attributes.len() > definitions.len() {
+        return None;
+    }
+    let mut values: Vec<Option<String>> = vec![None; carried.len()];
+    for attribute in &written.block_attributes {
+        let k = definitions
+            .iter()
+            .position(|h| Some(*h) == attribute.attribute_definition_handle)?;
+        if values[k].is_some() || attribute.width != 0.0 {
+            return None;
+        }
+        values[k] = Some(attribute.text.clone());
+    }
+    let attributes = carried
+        .iter()
+        .zip(values)
+        .map(|(definition, value)| Attribute {
+            tag: definition.tag.clone(),
+            value: value.unwrap_or_else(|| definition.default.clone()),
+        })
+        .collect();
+    let degrees = crate::description::normalize_degrees(written.block_rotation.to_degrees());
+    Some(MLeaderBlock {
+        block: block.name.clone(),
+        attributes,
+        scale: scale.x,
+        rotation: degrees,
+        connection,
+    })
 }
 
 /// The dimension style overrides AutoCAD keeps on an object, by their
@@ -1180,5 +1470,24 @@ objects:
             .any(|o| matches!(o, Object::Insert(i) if i.block == "_Dot")));
         let names: Vec<&str> = read.blocks.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(names, ["_Dot"]);
+    }
+
+    /// AutoCAD 2026 laid a hexagon out again, its base point 2 below its
+    /// own origin, at (x, 105), and wrote its matrix moving the origin to
+    /// 107: the matrix takes the block's own points to the sheet.
+    #[test]
+    fn block_contents_matrix_places_the_blocks_own_origin() {
+        let insert = crate::model::Insert {
+            block: "HEX".into(),
+            position: crate::model::Point3::new(62.0, 105.0, 0.0),
+            scale: 1.0,
+            rotation: 0.0,
+            attributes: Vec::new(),
+            name: None,
+            layer: "0".into(),
+            properties: Default::default(),
+        };
+        let m = super::block_transform(&insert, crate::model::Point3::new(0.0, -2.0, 0.0));
+        assert_eq!((m[3], m[7]), (62.0, 107.0));
     }
 }

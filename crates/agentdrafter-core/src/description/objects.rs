@@ -344,10 +344,21 @@ pub(super) fn object(
         ("table", Place::Sheet { .. }) => {
             table(&fields, units, layer, tables.styles, tables.table_styles).map(Object::Table)
         }
-        ("mleader", Place::Sheet { .. }) => {
-            mleader(&fields, units, layer, tables.styles, tables.mleader_styles)
-                .map(Object::MLeader)
-        }
+        (
+            "mleader",
+            Place::Sheet {
+                library, noticed, ..
+            },
+        ) => mleader(
+            &fields,
+            units,
+            layer,
+            tables.styles,
+            tables.mleader_styles,
+            *library,
+            noticed,
+        )
+        .map(Object::MLeader),
         ("leader", Place::Sheet { .. }) => {
             leader(&fields, units, layer, tables.styles).map(Object::Leader)
         }

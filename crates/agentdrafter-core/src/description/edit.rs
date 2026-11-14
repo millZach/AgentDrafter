@@ -74,6 +74,17 @@ pub(crate) struct Listed {
     pub kind: String,
 }
 
+/// An edit of a multileader's leader lines.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum LeaderLineEdit {
+    /// Adds a leader line through `points`, in the declared unit, from its
+    /// arrow's point; the point where the leader lines meet the landing is
+    /// appended.
+    Add { points: Vec<[f64; 3]> },
+    /// Deletes the leader line at `leader`, counted from 0.
+    Delete { leader: usize },
+}
+
 /// What a change did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Changed {
@@ -1250,7 +1261,10 @@ impl RecordFile {
     /// `operation`: each value in `set` replaces the key's, and `null`
     /// takes the key away. A text's contents the template takes from the
     /// row are not set here: the row's value and its new text are returned,
-    /// for the caller to set in the sheet's row.
+    /// for the caller to set in the sheet's row. So is the text of a
+    /// multileader's content or an older leader's annotation that the
+    /// template takes from the row, when the new content or annotation
+    /// differs from it in its text alone.
     pub(crate) fn change(
         &mut self,
         list: ObjectList,
@@ -1275,6 +1289,8 @@ impl RecordFile {
         allowed.push(NAME_KEY);
         let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
         let mut from_row = None;
+        // The key whose text the row's value is, when it is not `contents`.
+        let mut from_row_key = "contents";
         let mut edited = false;
         for (key, value) in set {
             let field = key_path("set", key);
@@ -1330,6 +1346,18 @@ impl RecordFile {
                     continue;
                 }
             }
+            if (kind == "mleader" && key == "content") || (kind == "leader" && key == "annotation")
+            {
+                if let Some(found) = position.and_then(|p| text_from_row(&keys[p].value, value)) {
+                    from_row = Some(found);
+                    from_row_key = if kind == "mleader" {
+                        "content"
+                    } else {
+                        "annotation"
+                    };
+                    continue;
+                }
+            }
             match (value, position) {
                 (Value::Null, Some(p)) => {
                     keys.remove(p);
@@ -1351,7 +1379,7 @@ impl RecordFile {
         if edited {
             let keys: Vec<String> = set
                 .keys()
-                .filter(|k| from_row.is_none() || k.as_str() != "contents")
+                .filter(|k| from_row.is_none() || k.as_str() != from_row_key)
                 .cloned()
                 .collect();
             self.touch(list, index, operation, Touch::Keys(keys));
@@ -1562,6 +1590,104 @@ impl RecordFile {
             }
         }
         Ok(edited)
+    }
+
+    /// Adds a leader line to the multileader of `list` at `index`, or
+    /// deletes one, as operation `operation`, and says what it did, such as
+    /// "adds leader line 2". A new leader line ends where the multileader's
+    /// first one does, written as it is written there.
+    pub(crate) fn leader_line_edit(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        edit: &LeaderLineEdit,
+        operation: usize,
+    ) -> Result<String, Error> {
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let item = &mut items[index];
+        let kind = object_parts(item).0.unwrap_or_default().to_owned();
+        if kind != "mleader" {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "the object is {} {kind}, and only a multileader has leader lines to add \
+                     and delete; an older leader is one leader line, whose points `change` sets",
+                    article(&kind)
+                ),
+            )
+            .at_field("target"));
+        }
+        let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
+        let leaders = keys
+            .iter_mut()
+            .find(|k| k.key == "leaders")
+            .and_then(|k| match &mut k.value.kind {
+                Kind::Sequence(lines) => Some(lines),
+                _ => None,
+            })
+            .ok_or_else(|| record_shape(&kind))?;
+        let words = match edit {
+            LeaderLineEdit::Add { points } => {
+                // Where every leader line meets the landing, as the first
+                // one writes it.
+                let landing = leaders
+                    .first()
+                    .and_then(|line| match &line.kind {
+                        Kind::Sequence(points) => points.last().cloned(),
+                        _ => None,
+                    })
+                    .ok_or_else(|| record_shape(&kind))?;
+                let mut line: Vec<Node> = points
+                    .iter()
+                    .map(|p| {
+                        let mut point = node_of(&serde_json::json!([]));
+                        point.kind = Kind::Sequence(
+                            p.iter()
+                                .map(|x| Node::scalar(super::number_text(*x)))
+                                .collect(),
+                        );
+                        point
+                    })
+                    .collect();
+                line.push(landing);
+                let mut written = node_of(&serde_json::json!([]));
+                written.kind = Kind::Sequence(line);
+                leaders.push(written);
+                format!("adds leader line {}", leaders.len() - 1)
+            }
+            LeaderLineEdit::Delete { leader } => {
+                let count = leaders.len();
+                if *leader >= count {
+                    return Err(Error::new(
+                        ErrorCode::BadValue,
+                        format!(
+                            "the multileader has {count} leader line{}, counted from 0, so there is \
+                             no leader line {leader}",
+                            if count == 1 { "" } else { "s" }
+                        ),
+                    )
+                    .at_field("leader"));
+                }
+                if count == 1 {
+                    return Err(Error::new(
+                        ErrorCode::BadValue,
+                        "this is the multileader's last leader line, and a multileader has at \
+                         least one; delete the multileader instead",
+                    )
+                    .at_field("leader"));
+                }
+                leaders.remove(*leader);
+                format!("deletes leader line {leader}")
+            }
+        };
+        self.touch(
+            list,
+            index,
+            operation,
+            Touch::Keys(vec!["leaders".to_owned()]),
+        );
+        Ok(words)
     }
 
     /// The text of row `row`'s value `name`, if the row gives it.
@@ -2201,6 +2327,37 @@ fn row_value_name(node: &Node) -> Option<String> {
         },
         _ => None,
     }
+}
+
+/// When `now`, a multileader's content or an older leader's annotation as
+/// the template writes it, takes its `text` from the row, and `new` gives
+/// every other key as `now` does and a text of its own: the row value's
+/// name and the new text, which the sheet's row is to take.
+fn text_from_row(now: &Node, new: &Value) -> Option<(String, String)> {
+    let Kind::Mapping(entries) = &now.kind else {
+        return None;
+    };
+    let Value::Object(set) = new else {
+        return None;
+    };
+    let name = row_value_name(&entries.iter().find(|e| e.key == "text")?.value)?;
+    let text = match set.get("text")? {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => return None,
+    };
+    let others: Vec<&Entry> = entries.iter().filter(|e| e.key != "text").collect();
+    if others.len() + 1 != set.len() {
+        return None;
+    }
+    others
+        .iter()
+        .all(|e| {
+            set.get(&e.key)
+                .is_some_and(|v| node_of(v).same_as(&e.value))
+        })
+        .then_some((name, text))
 }
 
 fn new_entry(key: &str, value: Node) -> Entry {

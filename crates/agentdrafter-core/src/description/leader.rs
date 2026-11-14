@@ -5,14 +5,16 @@
 //! objects of a sheet: `objects.rs` lists them and hands their keys to
 //! [`mleader`] and [`leader`] here. Both belong on a sheet, not in a block.
 
+use super::blocks::{attributes, block_named, scale_and_rotation, Noticed};
 use super::layers::{name_error, named_entries, object_color, object_lineweight};
 use super::strict_yaml::{index_path, key_path, Node};
 use super::text::{contents_problem, text_style_at};
 use super::{at, bad_value, choice, length, points, scalar, Fields};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arrowhead, Leader, LeaderAnnotation, LeaderAttachment, MLeader, MLeaderContent, MLeaderStyle,
-    Point3, STANDARD_MLEADER_STYLE,
+    Arrowhead, BlockConnection, BlockLibrary, Leader, LeaderAnnotation, LeaderAttachment, MLeader,
+    MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, Outline, Point3,
+    STANDARD_MLEADER_STYLE,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
@@ -49,8 +51,25 @@ pub(crate) const MLEADER_KEYS: [&str; 12] = [
     "linetype_scale",
 ];
 
-/// The keys a multileader's content takes.
-pub(crate) const CONTENT_KEYS: [&str; 4] = ["text", "style", "height", "attachment"];
+/// The keys a multileader's text content takes.
+pub(crate) const TEXT_CONTENT_KEYS: [&str; 4] = ["text", "style", "height", "attachment"];
+
+/// The keys a multileader's block content takes.
+pub(crate) const BLOCK_CONTENT_KEYS: [&str; 5] =
+    ["block", "attributes", "scale", "rotation", "connection"];
+
+/// The keys a multileader's content takes: text's or a block's.
+pub(crate) const CONTENT_KEYS: [&str; 9] = [
+    "text",
+    "style",
+    "height",
+    "attachment",
+    "block",
+    "attributes",
+    "scale",
+    "rotation",
+    "connection",
+];
 
 /// The keys an older leader takes.
 pub(crate) const LEADER_KEYS: [&str; 10] = [
@@ -136,6 +155,8 @@ pub(super) fn mleader(
     layer: String,
     text_styles: &[TextStyle],
     mleader_styles: &[MLeaderStyle],
+    library: Option<&BlockLibrary>,
+    noticed: &mut Vec<Noticed>,
 ) -> Result<MLeader, Error> {
     let mleader_style = mleader_style_name(fields, mleader_styles)?;
     let style = mleader_styles
@@ -193,19 +214,91 @@ pub(super) fn mleader(
         &CONTENT_KEYS,
         "a multileader's content",
     )?;
-    let content = MLeaderContent {
-        text: text_of(&content_fields)?,
-        style: match content_fields.text("style") {
-            Some(_) => Some(text_style_at(&content_fields, "style", text_styles)?),
-            None => None,
-        },
-        height: positive(&content_fields, "height", units, "a text height")?,
-        attachment: attachment(&content_fields)?,
+    let content = if content_fields.get("block").is_some() {
+        if let Some(key) = TEXT_CONTENT_KEYS
+            .iter()
+            .find(|k| content_fields.get(k).is_some())
+        {
+            let node = content_fields.get(key).unwrap_or(content_node);
+            return Err(at(
+                Error::new(
+                    ErrorCode::UnknownKey,
+                    format!(
+                        "a multileader's content is text or a block, not both; `{key}` is \
+                         text's, and block content takes {}",
+                        BLOCK_CONTENT_KEYS.join(", ")
+                    ),
+                ),
+                &content_fields.path_of(key),
+                content_fields.key_at(key).unwrap_or(node.at),
+            ));
+        }
+        if let Some(node) = fields.get("gap") {
+            return Err(bad_value(
+                node,
+                &fields.path_of("gap"),
+                "a block sits at the landing's end, with no gap, as AutoCAD places block \
+                 content; `gap` is the space before text content",
+            ));
+        }
+        MLeaderContent::Block(block_content(&content_fields, library, noticed)?)
+    } else {
+        if let Some(key) = BLOCK_CONTENT_KEYS
+            .iter()
+            .find(|k| content_fields.get(k).is_some())
+        {
+            let node = content_fields.get(key).unwrap_or(content_node);
+            return Err(at(
+                Error::new(
+                    ErrorCode::UnknownKey,
+                    format!(
+                        "`{key}` is block content's, which names its block under `block`; text \
+                         content takes {}",
+                        TEXT_CONTENT_KEYS.join(", ")
+                    ),
+                ),
+                &content_fields.path_of(key),
+                content_fields.key_at(key).unwrap_or(node.at),
+            ));
+        }
+        MLeaderContent::Text(MLeaderText {
+            text: text_of(&content_fields)?,
+            style: match content_fields.text("style") {
+                Some(_) => Some(text_style_at(&content_fields, "style", text_styles)?),
+                None => None,
+            },
+            height: positive(&content_fields, "height", units, "a text height")?,
+            attachment: attachment(&content_fields)?,
+        })
     };
+    let landing = not_negative(fields, "landing", units, "a landing's length")?;
+    // AutoCAD 2026 connected block content with no landing otherwise than
+    // where it places block content at a landing's end.
+    if matches!(content, MLeaderContent::Block(_)) && landing.unwrap_or(style.landing) == 0.0 {
+        let (node, path, whose) = match fields.get("landing") {
+            Some(node) => (
+                node,
+                fields.path_of("landing"),
+                "its own landing".to_owned(),
+            ),
+            None => (
+                content_node,
+                content_path.clone(),
+                format!("multileader style `{}`'s landing", style.name),
+            ),
+        };
+        return Err(bad_value(
+            node,
+            &path,
+            format!(
+                "a multileader with block content has a landing, more than 0 long, and {whose}                  is 0; AutoCAD connects block content with no landing to its block's own point,                  not where the model places it"
+            ),
+        ));
+    }
     Ok(MLeader {
         leaders,
         content,
-        landing: not_negative(fields, "landing", units, "a landing's length")?,
+        landing,
         gap: not_negative(fields, "gap", units, "a landing's gap")?,
         arrowhead,
         arrow_size,
@@ -251,6 +344,61 @@ pub(super) fn leader(
         layer,
         properties: Default::default(),
     })
+}
+
+/// A multileader's block content: a block of the sheet's block library,
+/// with its attributes' values as an insert gives them, its scale, its
+/// rotation and its connection.
+fn block_content(
+    fields: &Fields,
+    library: Option<&BlockLibrary>,
+    noticed: &mut Vec<Noticed>,
+) -> Result<MLeaderBlock, Error> {
+    let block = block_named(fields, library)?;
+    let blocks = library.map_or(&[][..], |l| l.blocks.as_slice());
+    if let Err(why) = Outline::of(block, blocks) {
+        let node = fields.require("block")?;
+        return Err(bad_value(
+            node,
+            &fields.path_of("block"),
+            format!(
+                "block `{}` cannot be a multileader's content: {why}. AutoCAD places block \
+                 content by the block's outline, and the pipeline places it exactly when the \
+                 block draws lines, polylines, arcs, circles, ellipses, 2D solids, donuts and \
+                 hatches, inserts of such blocks, and attributes: where a landing meets letters \
+                 depends on the font, and AutoCAD takes a spline's extents past its curve",
+                block.name
+            ),
+        ));
+    }
+    let attributes = attributes(fields, block, library, noticed)?;
+    let (scale, rotation) = scale_and_rotation(fields)?;
+    Ok(MLeaderBlock {
+        block: block.name.clone(),
+        attributes,
+        scale,
+        rotation,
+        connection: connection(fields)?.unwrap_or_default(),
+    })
+}
+
+/// The block connection under `connection`, if it is given.
+fn connection(fields: &Fields) -> Result<Option<BlockConnection>, Error> {
+    let Some(node) = fields.get("connection") else {
+        return Ok(None);
+    };
+    let path = fields.path_of("connection");
+    let listed = "a block content's connection is extents, the centre of the block's extents, \
+                  or insertion, its base point";
+    let text = choice(node, &path, "a connection", listed)?;
+    match BlockConnection::ALL.into_iter().find(|c| c.name() == text) {
+        Some(c) => Ok(Some(c)),
+        None => Err(bad_value(
+            node,
+            &path,
+            format!("`{text}` is not a connection; {listed}"),
+        )),
+    }
 }
 
 /// A leader line's points: at least two, each apart from the one before.

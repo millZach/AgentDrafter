@@ -3,8 +3,8 @@
 
 use serde_json::{json, Map, Value};
 
-use super::schema::{object_def, optional_text, shows_pattern, TEXT_TYPES};
-use crate::model::{Arrowhead, LeaderAttachment, STANDARD_MLEADER_STYLE};
+use super::schema::{object_def, optional_text, shows_pattern, NUMBER, TEXT_TYPES};
+use crate::model::{Arrowhead, BlockConnection, LeaderAttachment, STANDARD_MLEADER_STYLE};
 use crate::text::STANDARD;
 
 /// The `mleader_styles` key of a sheet.
@@ -79,6 +79,67 @@ fn leader_text() -> Value {
     })
 }
 
+/// A multileader's block content.
+fn block_content() -> Value {
+    json!({
+        "description": "Block content: a block of the sheet's block library, AutoCAD's block \
+                        content, placed at the landing's end as AutoCAD places it and drawn as \
+                        an insert of it draws. The block holds lines, polylines, arcs, circles, \
+                        ellipses, 2D solids, donuts, hatches, inserts of such blocks and \
+                        attributes, but no text, multiline text, constant attribute or spline. A \
+                        multileader with block content takes no `gap`.",
+        "type": "object",
+        "required": ["block"],
+        "additionalProperties": false,
+        "properties": {
+            "block": {
+                "description": "The name of a block in the block library, written exactly as it \
+                                is there.",
+                "type": TEXT_TYPES,
+            },
+            "attributes": {
+                "description": "The values of the block's attributes, from tag to value, as an \
+                                insert's are written. A tag the block defines more than once \
+                                takes a list of values; a tag it defines once takes one value. \
+                                An attribute not given, or given as null, takes its \
+                                definition's default.",
+                "type": "object",
+                "propertyNames": { "$ref": "#/$defs/attribute_tag" },
+                "additionalProperties": {
+                    "anyOf": [
+                        { "$ref": "#/$defs/attribute_value" },
+                        {
+                            "type": "array",
+                            "items": { "$ref": "#/$defs/attribute_value" },
+                        },
+                    ],
+                },
+            },
+            "scale": {
+                "description": "How much the block is enlarged, the same along every axis: a \
+                                number more than 0, with no unit. Without it, 1.",
+                "anyOf": [
+                    { "type": "number", "exclusiveMinimum": 0 },
+                    { "type": "string", "pattern": format!("^{NUMBER}$") },
+                ],
+            },
+            "rotation": {
+                "$ref": "#/$defs/angle",
+                "description": "Degrees anticlockwise from the X axis. Without it, 0.",
+            },
+            "connection": {
+                "description": "How the block meets the landing, as AutoCAD's block connection \
+                                type says: extents, by the centre of the block's extents, \
+                                AutoCAD's default; or insertion, by its base point. Either way \
+                                the block sits level with the landing, slid along it until the \
+                                first place its outline crosses the landing's line is at the \
+                                landing's end. Without it, extents.",
+                "enum": BlockConnection::ALL.map(BlockConnection::name),
+            },
+        },
+    })
+}
+
 /// Adds the definitions of a multileader style, a multileader and an older
 /// leader to `defs`.
 pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
@@ -131,10 +192,11 @@ pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
         "mleader".into(),
         object_def(
             "A multileader, AutoCAD's MULTILEADER: one or more leader lines from their arrows to \
-             a landing, and multiline text beyond it. The landing runs right when the first \
-             leader line's last segment runs right or straight up or down, and left when it \
-             runs left; the text sits a gap beyond it, attached at its top left or top right \
-             corner, where the attachment says. An arrow is placed at a point: pointing it at \
+             a landing, and multiline text or a block beyond it. The landing runs right when \
+             the first leader line's last segment runs right or straight up or down, and left \
+             when it runs left; text sits a gap beyond it, attached at its top left or top \
+             right corner, where the attachment says, and a block at its end, where AutoCAD \
+             places block content. An arrow is placed at a point: pointing it at \
              an object by its ID or name waits for object snaps. A multileader belongs on a \
              sheet, not in a block.",
             &["leaders", "content"],
@@ -151,21 +213,29 @@ pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
                     "minItems": 1,
                 },
                 "content": {
-                    "description": "The multileader's content: multiline text.",
-                    "type": "object",
-                    "required": ["text"],
-                    "additionalProperties": false,
-                    "properties": {
-                        "text": leader_text(),
-                        "style": text_style_name("the multileader style's `text_style`"),
-                        "height": {
-                            "$ref": "#/$defs/length_more_than_0",
-                            "description": "The height of the text's capitals: a length more \
-                                            than 0. Without it, the multileader style's \
-                                            `text_height`.",
+                    "description": "The multileader's content: multiline text, under `text`, or \
+                                    a block of the sheet's block library, under `block`, not \
+                                    both.",
+                    "anyOf": [
+                        {
+                            "description": "Text content: multiline text.",
+                            "type": "object",
+                            "required": ["text"],
+                            "additionalProperties": false,
+                            "properties": {
+                                "text": leader_text(),
+                                "style": text_style_name("the multileader style's `text_style`"),
+                                "height": {
+                                    "$ref": "#/$defs/length_more_than_0",
+                                    "description": "The height of the text's capitals: a length \
+                                                    more than 0. Without it, the multileader \
+                                                    style's `text_height`.",
+                                },
+                                "attachment": attachment("the multileader style's"),
+                            },
                         },
-                        "attachment": attachment("the multileader style's"),
-                    },
+                        block_content(),
+                    ],
                 },
                 "landing": {
                     "$ref": "#/$defs/length_not_negative",

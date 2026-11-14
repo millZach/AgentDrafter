@@ -1,9 +1,11 @@
 # Callouts on a panel layout, on an A3 sheet: multileaders in a style of
 # their own and in Standard, with one, two and bent leader lines, landings
-# on both sides, each arrowhead and each attachment, and older leaders, one
-# hooked to its annotation. Everything here is made up.
+# on both sides, each arrowhead and each attachment, block content from the
+# library beside it by both connections, and older leaders, one hooked to
+# its annotation. Everything here is made up.
 units: mm
 paper: ISO A3 landscape
+block_library: leader-blocks.yaml
 layers:
   border: {color: white, lineweight: 0.5}
   panel: {color: white, lineweight: 0.35}
@@ -93,3 +95,26 @@ objects:
       id: vent
       layer: notes
       points: [[300, 150, 0], [350, 150, 0]]
+  # Block content: a tag balloon at the landing's end on the right, by its
+  # extents; one larger and turned; and a hexagon on the left, by its
+  # insertion point, with a tag written twice and two leader lines.
+  - mleader:
+      id: tb-tag
+      layer: callouts
+      leaders:
+        - [[270, 80, 0], [330, 100, 0]]
+      content: {block: TAG_BALLOON, attributes: {TAG: TB-1}}
+  - mleader:
+      id: plc-tag
+      layer: callouts
+      leaders:
+        - [[195, 175, 0], [330, 195, 0]]
+      content: {block: TAG_BALLOON, scale: 1.5, rotation: 15, attributes: {TAG: P1}}
+  - mleader:
+      id: jb-tag
+      layer: callouts
+      arrowhead: dot
+      leaders:
+        - [[150, 85, 0], [80, 105, 0]]
+        - [[145, 75, 0], [80, 105, 0]]
+      content: {block: TAG_HEX, connection: insertion, attributes: {TAG: [JB-3, '12']}}

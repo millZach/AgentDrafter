@@ -224,7 +224,11 @@ pub(crate) fn write_new_sheet(
                 )
             })?;
             let mut dwg_mleader = EntityType::MultiLeader(Box::new(leader::dwg_mleader(
-                &drawing, m, &style, measure,
+                &drawing,
+                m,
+                &style,
+                measure,
+                &sheet.blocks,
             )?));
             let common = dwg_mleader.common_mut();
             m.layer.clone_into(&mut common.layer);
@@ -679,8 +683,13 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             EntityType::MultiLeader(m) => read_properties(&m.common)
                 .filter(|_| !m.common.invisible)
                 .and_then(|properties| {
-                    let mut read =
-                        leader::read_mleader(&drawing, m, &mleader_styles, layer_of(&m.common))?;
+                    let mut read = leader::read_mleader(
+                        &drawing,
+                        m,
+                        &mleader_styles,
+                        &blocks,
+                        layer_of(&m.common),
+                    )?;
                     read.properties = properties;
                     Some(Object::MLeader(read))
                 }),

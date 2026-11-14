@@ -204,7 +204,8 @@ pub(crate) fn template_schema() -> Value {
          what a sheet description holds, and where a sheet's value comes from its row in the \
          drawing set it writes {{{ROW_KEY}: NAME}} in place of the value: as an insert's \
          attribute value, as a text's or an mtext's contents, as a table cell or its text, or \
-         as a multileader's content's or a leader's annotation's text. Each sheet is the template with \
+         as a multileader's content's or a leader's annotation's text, or as an attribute value \
+         of a multileader's block content. Each sheet is the template with \
          every {{{ROW_KEY}: NAME}} replaced by its row's value NAME, and is built as a sheet \
          description is. Its declared unit is the set's. {SUBSET}"
     ));
@@ -253,6 +254,9 @@ pub(crate) fn template_schema() -> Value {
             { "type": "array", "items": one },
         ],
     });
+    // So may a multileader's block content's.
+    defs["mleader"]["properties"]["content"]["anyOf"][1]["properties"]["attributes"] =
+        defs["insert"]["properties"]["attributes"].clone();
     // A table's cell, or its text, may be a value from the row.
     let row_value = json!({ "$ref": "#/$defs/row_value" });
     if let Some(choices) = defs["table_cell"]["anyOf"].as_array_mut() {
