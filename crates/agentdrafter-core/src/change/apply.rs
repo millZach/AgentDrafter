@@ -866,21 +866,23 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         Err(applied) => return *applied,
     };
     // An object on a locked layer is not edited, as AutoCAD will not edit
-    // it (Zach, 2026-11-13); adding one onto it is allowed.
-    if let Some(layer) = locked_layer(at, &found) {
-        let reach = at.reach(found.file, found.row);
-        return fail(
-            reach,
-            op_err(
-                ErrorCode::Locked,
-                format!(
-                    "`{}` sits on layer `{layer}`, which is locked; unlock it first with \
-                     change_layer, set: {{\"locked\": false}}, in this change set or an earlier one",
-                    found.id
-                ),
-                "target",
+    // it (Zach, 2026-11-13); adding one onto it is allowed. A move or a
+    // delete always edits it; a change or an attribute is judged once it is
+    // known whether it edits the object or only a row's value.
+    let locked = |id: &str, layer: &str| {
+        op_err(
+            ErrorCode::Locked,
+            format!(
+                "`{id}` sits on layer `{layer}`, which is locked; unlock it first with \
+                 change_layer, set: {{\"locked\": false}}, in this change set or an earlier one"
             ),
-        );
+            "target",
+        )
+    };
+    let target_locked = locked_layer(at, &found);
+    if let (Some(layer), Body::Move { .. } | Body::Delete { .. }) = (&target_locked, &op.body) {
+        let reach = at.reach(found.file, found.row);
+        return fail(reach, locked(&found.id, layer));
     }
     let Found {
         row: k,
@@ -917,6 +919,8 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
     };
     let mut sheets = reach.clone();
     let mut from_row: Option<(String, String)> = None;
+    // Whether the operation edits the object itself, not only a row value.
+    let mut edits_object = true;
     // A move or a delete always edits the object's file; a change and an
     // attribute are checked once it is known whether they did.
     if matches!(op.body, Body::Move { .. } | Body::Delete { .. }) {
@@ -929,6 +933,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
             Ok(changed) => {
                 let keys: Vec<&str> = set.keys().map(String::as_str).collect();
                 done.message = format!("sets {} of `{id}`{template_note}", keys.join(", "));
+                edits_object = changed.edited;
                 if !changed.edited {
                     sheets = vec![k];
                 } else if let Some(refusal) = many_paths(files, file, op, "target") {
@@ -978,6 +983,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                         format!("sets the attribute {tag} of `{id}` to `{value}`{template_note}");
                 }
                 Ok(AttributeSet::FromRow(name)) => {
+                    edits_object = false;
                     sheets = vec![k];
                     from_row = Some((name, value.clone()));
                 }
@@ -993,11 +999,33 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         }
         Body::Add { .. } | Body::Table { .. } => unreachable!("handled above"),
     }
+    if let (Some(layer), true) = (&target_locked, edits_object) {
+        return fail(reach, locked(&id, layer));
+    }
     done.after = Some(record.object_text(list, index));
     if done.after == done.before {
         done.after = None;
     }
     if let Some((name, text)) = from_row {
+        // A row's value fills every place on the sheet its template takes
+        // it, and each is edited: none may be on a locked layer.
+        let t = files.template_of[k];
+        if let Ok(template) = at.template(t) {
+            let listed = template.objects(ObjectList::Template);
+            for (i, _) in template.row_value_places(&name) {
+                let layer = template
+                    .object_value(ObjectList::Template, i, "layer")
+                    .unwrap_or_else(|| "0".to_owned());
+                if template
+                    .table_value(Table::Layer.key(), &layer, "locked")
+                    .as_deref()
+                    == Some("true")
+                {
+                    let filled = format!("{}/{}", files.name(k), listed[i].id);
+                    return fail(vec![k], locked(&filled, &layer));
+                }
+            }
+        }
         let was = at.rows.row_value(k, &name).unwrap_or_default();
         if let Err(e) = at.rows.set_row_value(k, &name, &text) {
             return fail(vec![k], from_record(e));
@@ -1153,6 +1181,18 @@ fn apply_table(
             format!("adds the {word} `{name}` to the template `{written}`")
         }
         TableOp::Change => {
+            if table == Table::Linetype {
+                if let Some(own) = built_in {
+                    return fail(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{own}` is AutoCAD's own linetype, which every drawing has and no \
+                             template defines, so it is not changed"
+                        ),
+                        "name",
+                    );
+                }
+            }
             if !exists && built_in.is_none() {
                 return fail(
                     ErrorCode::UnknownName,
@@ -1163,6 +1203,17 @@ fn apply_table(
                     "name",
                 );
             }
+            // `Standard`, written for the first time, takes its font from
+            // the drawing's own, so that setting its width factor alone
+            // still makes a whole style.
+            let mut keys = keys.clone();
+            if !exists && table == Table::TextStyle && !keys.contains_key("font") {
+                keys.insert(
+                    "font".into(),
+                    serde_json::Value::String(crate::text::STANDARD_FONT.to_owned()),
+                );
+            }
+            let keys = &keys;
             if let Err(e) = record.table_change(key, table.entry_keys(), name, keys) {
                 return fail(e.code, e.message, "");
             }

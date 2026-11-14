@@ -1576,6 +1576,20 @@ fn a_templates_layers_linetypes_and_styles_are_added_changed_renamed_and_deleted
     assert_eq!(e.code, ErrorCode::Locked);
     assert_eq!(e.field.as_deref(), Some("operations[0].target"));
     assert!(e.message.contains("layer `notes`"), "{}", e.message);
+    // A row's value that fills a text on the locked layer is not set
+    // either, and its refusal reaches only that sheet.
+    let reply = apply(
+        &set,
+        json!({"operations": [
+            {"op": "set_attribute", "target": {"id": "DEMO-001/objects[2]"}, "tag": "TITLE", "value": "NEW"},
+            {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.1},
+        ]}),
+    );
+    let report = reply.result.unwrap();
+    let e = report.operations[0].error.clone().unwrap();
+    assert_eq!(e.code, ErrorCode::Locked);
+    assert!(e.message.contains("DEMO-001/heading"), "{}", e.message);
+    assert_eq!(report.landed, 1, "DEMO-002 takes its own circle");
     lands(
         &set,
         json!({"operations": [
@@ -1583,5 +1597,19 @@ fn a_templates_layers_linetypes_and_styles_are_added_changed_renamed_and_deleted
             {"op": "change_layer", "sheet": "DEMO-001", "name": "notes", "set": {"locked": null}},
             {"op": "move", "target": {"id": "DEMO-001/heading"}, "by": [0.1, 0, 0]},
         ]}),
+    );
+
+    // `Standard`, which the template does not write, is changed whole.
+    lands(
+        &set,
+        json!({"operations": [{"op": "change_text_style", "sheet": "DEMO-001", "name": "Standard", "set": {"width_factor": 0.8}}]}),
+    );
+    let text = fs::read_to_string(&template).unwrap();
+    assert!(
+        text.contains(
+            "  Standard: {font: txt.shx, width_factor: 0.8}
+"
+        ),
+        "{text}"
     );
 }

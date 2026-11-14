@@ -1102,9 +1102,22 @@ impl RecordFile {
 
     /// Where the text changes: each a range of bytes and what replaces it.
     fn splices(&self) -> Result<Vec<(usize, usize, String)>, Error> {
-        let mut splices = Vec::new();
-        for table in &self.tables {
-            splices.push(self.table_splice(table)?);
+        let mut splices: Vec<(usize, usize, String)> = Vec::new();
+        // Tables are taken in the order the file holds them, so that two
+        // new ones inserted at one place go in that order.
+        let mut tables: Vec<&String> = self.tables.iter().collect();
+        if let Kind::Mapping(root) = &self.root.kind {
+            tables.sort_by_key(|t| root.iter().position(|e| &e.key == *t));
+        }
+        for table in tables {
+            let (start, end, with) = self.table_splice(table)?;
+            match splices
+                .iter_mut()
+                .find(|s| s.0 == start && s.1 == end && start == end)
+            {
+                Some(same) => same.2.push_str(&with),
+                None => splices.push((start, end, with)),
+            }
         }
         for (list, state) in &self.lists {
             if state.dirty() {
