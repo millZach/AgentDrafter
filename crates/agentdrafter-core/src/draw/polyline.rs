@@ -187,6 +187,8 @@ fn mitre(before: &mut Band, after: &mut Band) {
 pub(crate) struct Drawn {
     pub(crate) fills: Vec<Vec<Point2>>,
     pub(crate) thin: Vec<Vec<Point2>>,
+    /// The band each wide arc segment fills, a closed contour.
+    pub(crate) arcs: Vec<Vec<Point2>>,
 }
 
 /// Draws a flat polyline through `points`, closed or not, the segment
@@ -244,17 +246,22 @@ pub(crate) fn draw(
             mitre(before, after);
         }
     }
-    let mut fills: Vec<Vec<Point2>> = bands
-        .into_iter()
-        .flatten()
-        .map(|band| {
-            let mut contour = band.left;
-            contour.extend(band.right.into_iter().rev());
-            anticlockwise(contour)
-        })
-        .collect();
+    let mut fills = Vec::new();
+    let mut arcs = Vec::new();
+    for (i, band) in bands.into_iter().enumerate() {
+        let Some(band) = band else {
+            continue;
+        };
+        let mut contour = band.left;
+        contour.extend(band.right.into_iter().rev());
+        let contour = anticlockwise(contour);
+        if arc_of(points[i], points[(i + 1) % count], bulge(i)).is_some() {
+            arcs.push(contour.clone());
+        }
+        fills.push(contour);
+    }
     fills.extend(dashes.into_iter().map(anticlockwise));
-    Drawn { fills, thin }
+    Drawn { fills, thin, arcs }
 }
 
 /// The pieces of a wide segment's band under each dash `pattern` lays

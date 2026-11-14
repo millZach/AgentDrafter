@@ -75,6 +75,7 @@ use crate::text::placement::SheetFonts;
 
 pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
+pub(crate) use pick::inside;
 pub use pick::{object_bounds, pick};
 pub(crate) use polyline::bulge_of;
 pub(crate) use text::{mtext_box, mtext_lines};
@@ -144,6 +145,12 @@ pub struct DisplayList {
     /// of the list an output reads, so not written with it.
     #[serde(skip)]
     pub hatch_loops: Vec<(usize, Vec<Vec<Point2>>)>,
+    /// The band each wide arc segment of a polyline or a donut fills, a
+    /// closed contour, with the sheet's object that draws it, wherever it
+    /// is drawn: AutoCAD 2026's crossing took a wide arc by a box anywhere
+    /// inside its band. Not written.
+    #[serde(skip)]
+    pub wide_arcs: Vec<(usize, Vec<Point2>)>,
 }
 
 /// A hatch whose pattern needed more lines or dashes than one hatch draws:
@@ -384,6 +391,8 @@ struct Drawn {
     reach: Vec<Point2>,
     /// A hatch's boundary loops, placed on the sheet.
     loops: Vec<Vec<Point2>>,
+    /// The bands of its wide arc segments, placed on the sheet.
+    arcs: Vec<Vec<Point2>>,
     /// Whether it is a hatch whose pattern was cut short.
     cut_short: bool,
 }
@@ -877,6 +886,7 @@ impl<'a> Drawer<'a> {
                 runs.extend(linetype::along(&path(segment), pattern, false));
             }
             let mut out = stroke(runs);
+            out.arcs = drawn.arcs.into_iter().map(path).collect();
             if !drawn.fills.is_empty() {
                 out.shapes.extend(
                     shapes(vec![Shape::Fill {
@@ -1179,6 +1189,8 @@ impl DisplayList {
                 if !drawn.loops.is_empty() {
                     self.hatch_loops.push((index, drawn.loops));
                 }
+                self.wide_arcs
+                    .extend(drawn.arcs.into_iter().map(|c| (index, c)));
                 self.add(index, path, color, drawn.shapes, drawn.reach);
                 self.add_text(index, path, drawn.runs);
             }

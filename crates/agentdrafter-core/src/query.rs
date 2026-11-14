@@ -928,39 +928,11 @@ struct Drawn {
     /// Its hatches' boundary loops, each closed: a hatch is selected by its
     /// boundary as well as its pattern's lines, which may stop short of it.
     hatches: Vec<Vec<Vec<draw::Point2>>>,
-    /// What it draws with every width taken away, a wide polyline's or a
-    /// donut's centreline, which a crossing takes it by too.
-    centrelines: Vec<Vec<draw::Point2>>,
-}
-
-/// `sheet` with every wide polyline and donut drawn as its centreline, in
-/// its blocks too, or none when it has none: a crossing takes a wide
-/// polyline or a donut across its centreline as well as across its band's
-/// edge, as AutoCAD 2026's did.
-fn centrelines(sheet: &Sheet) -> Option<Sheet> {
-    let mut sheet = sheet.clone();
-    let mut any = false;
-    let mut thin = |object: &mut Object| match object {
-        Object::Polyline(polyline)
-            if polyline.width != 0.0 || polyline.widths.iter().any(|w| *w != [0.0, 0.0]) =>
-        {
-            any = true;
-            polyline.width = 0.0;
-            polyline.widths.fill([0.0, 0.0]);
-        }
-        Object::Donut(donut) => {
-            any = true;
-            let middle = (donut.inside_diameter + donut.outside_diameter) / 2.0;
-            donut.inside_diameter = middle;
-            donut.outside_diameter = middle;
-        }
-        _ => {}
-    };
-    sheet.objects.iter_mut().for_each(&mut thin);
-    for block in &mut sheet.blocks {
-        block.objects.iter_mut().for_each(&mut thin);
-    }
-    any.then_some(sheet)
+    /// The band each wide arc segment of a polyline or a donut fills, top
+    /// level, in a block or in a multileader's content, which a crossing
+    /// takes it by anywhere inside, as AutoCAD 2026's did: it fills a wide
+    /// arc in pieces too fine for a box inside it to miss their edges.
+    arcs: Vec<Vec<draw::Point2>>,
 }
 
 impl Space {
@@ -993,19 +965,9 @@ impl Space {
                     d.hatches.push(loops);
                 }
             }
-            if let Some(thin) = centrelines(&record.sheet) {
-                for item in measuring_drawing(&thin, &fonts).items {
-                    // Only what a width was taken from: a polyline, a
-                    // donut, or an insert, whose block may hold them.
-                    let thinned = matches!(
-                        record.sheet.objects.get(item.object),
-                        Some(Object::Polyline(_) | Object::Donut(_) | Object::Insert(_))
-                    );
-                    if let (Some(d), draw::Shape::Stroke { runs, .. }, true) =
-                        (drawn.get_mut(item.object), item.shape, thinned)
-                    {
-                        d.centrelines.extend(runs);
-                    }
+            for (object, band) in list.wide_arcs {
+                if let Some(d) = drawn.get_mut(object) {
+                    d.arcs.push(band);
                 }
             }
         }
@@ -1084,10 +1046,12 @@ impl Drawn {
 
     /// Whether something it draws is within the box from `min` to `max` or
     /// crosses its edge: a line, a hatch's pattern line or boundary, or the
-    /// outline of a filled area, or a wide polyline's or a donut's
-    /// centreline. A box wholly inside a filled area crosses nothing, as
-    /// AutoCAD 2026's crossing selection found: inside a solid, a wide
-    /// polyline's band or a hatch, solid or patterned, it took none.
+    /// outline of a filled area, each wide segment's band its own, so the
+    /// seam where two meet is an edge, as AutoCAD 2026's crossing took
+    /// them; or whether the box is inside a wide arc's band. Otherwise a box
+    /// wholly inside a filled area crosses nothing: inside a solid, a
+    /// straight band or a hatch, solid or patterned, AutoCAD took none but
+    /// across the inner edges of the triangles it fills them with, its own.
     fn reaches(&self, (min, max): ([f64; 2], [f64; 2])) -> bool {
         if self.points().any(|p| inside_box(p, min, max)) {
             return true;
@@ -1097,18 +1061,20 @@ impl Drawn {
             let edges = if closed { n } else { n.saturating_sub(1) };
             (0..edges).any(|i| segment_meets_box(run[i], run[(i + 1) % n], min, max))
         };
-        if self
-            .runs
-            .iter()
-            .chain(&self.centrelines)
-            .any(|run| crosses(run, false))
-        {
+        if self.runs.iter().any(|run| crosses(run, false)) {
             return true;
         }
         if self
             .fills
             .iter()
             .any(|(_, contours)| contours.iter().any(|c| crosses(c, true)))
+        {
+            return true;
+        }
+        if self
+            .arcs
+            .iter()
+            .any(|band| draw::inside(min, draw::FillRule::NonZero, std::slice::from_ref(band)))
         {
             return true;
         }
