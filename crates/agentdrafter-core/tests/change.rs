@@ -2764,3 +2764,37 @@ fn a_table_in_braces_with_a_comment_takes_no_entry_and_keeps_its_comment() {
     assert_eq!(fs::read_to_string(&template).unwrap(), text);
     assert_eq!(snapshot(&set), before, "nothing was written");
 }
+
+/// A `#` inside a quoted value of a table in braces is no comment, even
+/// once the change set replaces that value.
+#[test]
+fn a_table_in_braces_whose_quoted_value_holds_a_hash_is_changed() {
+    let set = demo_set("braces-quoted-hash");
+    let template = set.join("templates").join("ansi-b.yaml");
+    let text = fs::read_to_string(&template).unwrap().replace(
+        "layers:
+  trim: {color: 8, lineweight: 0.13}
+  border: {color: white, lineweight: 0.7}
+  notes: {color: cyan}
+",
+        "layers: {trim: {color: 8, lineweight: 0.13}, border: {color: white, lineweight: 0.7}, notes: {color: cyan, description: 'see #2'}}
+",
+    );
+    assert!(text.contains("'see #2'"));
+    fs::write(&template, &text).unwrap();
+
+    let report = lands(
+        &set,
+        json!({"operations": [{"op": "change_layer", "template": "templates/ansi-b.yaml", "name": "notes", "set": {"description": "new"}}]}),
+    );
+
+    assert_eq!(report.landed, 3);
+    let written = fs::read_to_string(&template).unwrap();
+    assert!(
+        written.contains(
+            "  notes: {color: cyan, description: new}
+"
+        ),
+        "{written}"
+    );
+}

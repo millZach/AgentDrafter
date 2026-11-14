@@ -439,6 +439,34 @@ objects: []
     );
 }
 
+/// What counts as a comment is read from the file as it was: a `#` in a
+/// quoted value an edit replaces is still no comment.
+#[test]
+fn a_hash_in_a_quoted_value_an_edit_replaces_is_no_comment() {
+    let keys = |json: serde_json::Value| json.as_object().unwrap().clone();
+    let text = "units: in
+layers: {old: {description: 'see #2'}}
+objects: []
+";
+    let mut record = RecordFile::from_text(Path::new("t.yaml"), text.to_owned()).unwrap();
+    record
+        .table_change(
+            "layers",
+            &["description"],
+            "old",
+            &keys(json!({"description": "new"})),
+        )
+        .unwrap();
+    assert_eq!(
+        record.new_text().unwrap().unwrap(),
+        "units: in
+layers:
+  old: {description: new}
+objects: []
+"
+    );
+}
+
 const LIBRARY: &str = include_str!("../../../../examples/demo-set/blocks.yaml");
 
 /// A made-up block library with comments between its blocks, and a block

@@ -676,7 +676,7 @@ pub(crate) fn plan(
             let resolved = names
                 .hatch_patterns
                 .iter()
-                .find(|(p, _)| p.name == pattern.name && same(&p.lines, &pattern.lines))
+                .find(|(p, _)| same_pattern(p, pattern))
                 .map(|(_, name)| name.clone());
             let name = match resolved {
                 Some(name) => name,
@@ -695,7 +695,9 @@ pub(crate) fn plan(
                                 });
                                 break candidate;
                             }
-                            Some((k, lines)) if same(lines, &pattern.lines) => break k.clone(),
+                            Some((k, lines)) if same_pattern_lines(lines, &pattern.lines) => {
+                                break k.clone()
+                            }
                             Some(_) => {
                                 n += 1;
                                 candidate = format!("{}_{n}", pattern.name);
@@ -1174,7 +1176,7 @@ impl Names {
     fn hatch_pattern(&self, pattern: &HatchPattern) -> String {
         self.hatch_patterns
             .iter()
-            .find(|(p, _)| p == pattern)
+            .find(|(p, _)| same_pattern(p, pattern))
             .map_or_else(|| pattern.name.clone(), |(_, name)| name.clone())
     }
 
@@ -1239,6 +1241,21 @@ fn same_block(a: &Block, b: &Block) -> bool {
     same(&strip(a), &strip(b))
 }
 
+/// Whether two hatch patterns of a drawing are one: the same name, and
+/// lines the same as [`same_pattern_lines`] has them. Planning and writing
+/// both match a hatch's pattern by it, so a hatch is written with the name
+/// its own definition was given.
+fn same_pattern(a: &HatchPattern, b: &HatchPattern) -> bool {
+    a.name == b.name && same_pattern_lines(&a.lines, &b.lines)
+}
+
+/// Whether two hatch patterns' lines are one definition, numbers within
+/// [`SAME`]: the one test of a pattern's definition, against the drawing's
+/// others and the library's.
+fn same_pattern_lines(a: &[HatchPatternLine], b: &[HatchPatternLine]) -> bool {
+    same(&a, &b)
+}
+
 /// Whether `a` and `b` are the same as plain data, numbers within [`SAME`].
 fn same<T: Serialize>(a: &T, b: &T) -> bool {
     match (serde_json::to_value(a), serde_json::to_value(b)) {
@@ -1294,6 +1311,19 @@ fn degrees(angle: f64) -> f64 {
         0.0
     } else {
         snapped
+    }
+}
+
+/// The two end angles of an arc or an elliptical arc as an import writes
+/// them: each snapped as [`degrees`] snaps it when the two stay apart, as
+/// written, a whole turn taken off; otherwise both as read, so that a short
+/// sweep is never closed up into nothing or into a whole curve.
+fn sweep(start: f64, end: f64) -> (f64, f64) {
+    let (snapped_start, snapped_end) = (degrees(start), degrees(end));
+    if (snapped_end - snapped_start).rem_euclid(360.0) == 0.0 {
+        (start, end)
+    } else {
+        (snapped_start, snapped_end)
     }
 }
 
@@ -1358,8 +1388,9 @@ fn object_value(object: &Object, names: &Names) -> Value {
         Object::Arc(arc) => {
             put("center", point_value(arc.center));
             put("radius", json!(arc.radius));
-            put("start_angle", json!(degrees(arc.start_angle)));
-            put("end_angle", json!(degrees(arc.end_angle)));
+            let (start, end) = sweep(arc.start_angle, arc.end_angle);
+            put("start_angle", json!(start));
+            put("end_angle", json!(end));
         }
         Object::Circle(circle) => {
             put("center", point_value(circle.center));
@@ -1369,9 +1400,8 @@ fn object_value(object: &Object, names: &Names) -> Value {
             put("center", point_value(ellipse.center));
             put("major_axis", point_value(ellipse.major_axis));
             put("ratio", json!(ellipse.ratio));
-            let (start, end) = (degrees(ellipse.start_angle), degrees(ellipse.end_angle));
-            // An elliptical arc whose ends snap together is the whole ellipse.
-            if !ellipse.is_whole() && start != end {
+            if !ellipse.is_whole() {
+                let (start, end) = sweep(ellipse.start_angle, ellipse.end_angle);
                 put("start_angle", json!(start));
                 put("end_angle", json!(end));
             }
@@ -1621,12 +1651,15 @@ fn loop_value(hatch_loop: &HatchLoop) -> Value {
                         radius,
                         start_angle,
                         end_angle,
-                    } => json!({ "arc": {
-                        "center": point_value(center),
-                        "radius": radius,
-                        "start_angle": degrees(start_angle),
-                        "end_angle": degrees(end_angle),
-                    } }),
+                    } => {
+                        let (start_angle, end_angle) = sweep(start_angle, end_angle);
+                        json!({ "arc": {
+                            "center": point_value(center),
+                            "radius": radius,
+                            "start_angle": start_angle,
+                            "end_angle": end_angle,
+                        } })
+                    }
                 })
                 .collect();
             json!({ "edges": edges })
@@ -1805,6 +1838,67 @@ mod tests {
             .notices
             .iter()
             .any(|n| n.code == ImportNoticeCode::DefinitionKept));
+    }
+
+    #[test]
+    fn a_hatch_is_written_with_the_name_its_own_definition_was_given() {
+        // Two definitions the same to a billionth are one, and both differ
+        // from the library's GRID.
+        let mut both = drawing(&hatched("A", "[0, 5]"));
+        both.blocks
+            .extend(drawing(&hatched("B", "[0, 5.0000000001]")).blocks);
+        let held = "units: mm
+hatch_patterns:
+  GRID: {lines: [{delta: [0, 7]}]}
+blocks:
+  HELD:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 1}
+";
+        let (plan, text) = planned(&both, held, &[]);
+        assert_eq!(plan.imported.tables_added.hatch_patterns, ["GRID_2"]);
+        let back = parse_block_library(&text).unwrap();
+        for block in ["A", "B"] {
+            assert_eq!(pattern_of(&back, block).name, "GRID_2", "{block}: {text}");
+            assert_eq!(
+                pattern_of(&back, block).lines[0].delta,
+                [0.0, 5.0],
+                "{block}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_sweep_keeps_its_ends_as_read_rather_than_close_up() {
+        let library = "units: mm
+blocks:
+  SWEEPS:
+    objects:
+      - arc: {center: [0, 0, 0], radius: 1, start_angle: 0, end_angle: 0.0000000004}
+      - ellipse: {center: [0, 0, 0], major_axis: [2, 0, 0], ratio: 0.5, start_angle: 30, end_angle: 30.0000000004}
+      - arc: {center: [0, 0, 0], radius: 1, start_angle: 29.999999999999996, end_angle: 90}
+";
+        let (_, text) = planned(&drawing(library), EMPTY, &[]);
+        let back = parse_block_library(&text).unwrap();
+        let objects = &back.blocks[0].objects;
+        let Object::Arc(short) = &objects[0] else {
+            panic!("an arc: {text}")
+        };
+        assert_eq!(
+            (short.start_angle, short.end_angle),
+            (0.0, 0.000_000_000_4),
+            "{text}"
+        );
+        let Object::Ellipse(elliptical) = &objects[1] else {
+            panic!("an ellipse: {text}")
+        };
+        assert!(!elliptical.is_whole(), "{text}");
+        assert_eq!(
+            (elliptical.start_angle, elliptical.end_angle),
+            (30.0, 30.000_000_000_4)
+        );
+        // Ends that stay apart are still snapped.
+        assert!(text.contains("start_angle: 30, end_angle: 90"), "{text}");
     }
 
     /// A made-up block that defines NOTE twice, the second in lowercase,

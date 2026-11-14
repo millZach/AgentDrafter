@@ -1020,7 +1020,7 @@ impl RecordFile {
             // would lose a comment among its entries: it is refused instead,
             // as blocks in braces are.
             let braces = entry.value.source.is_some_and(|s| s.style == Style::Flow);
-            if braces && self.holds_comment(&entry.value, start, end) {
+            if braces && self.holds_comment(table, start, end) {
                 return Err(Error::new(
                     ErrorCode::WriteFailed,
                     format!(
@@ -1055,12 +1055,18 @@ impl RecordFile {
         }
     }
 
-    /// Whether the text from `start` to `end`, which holds `node`, holds a
+    /// Whether the text from `start` to `end`, which holds the table, holds a
     /// comment: a `#` at the start of a line or after a space, outside the
-    /// quoted scalars of `node`, its keys among them.
-    fn holds_comment(&self, node: &Node, start: usize, end: usize) -> bool {
+    /// quoted scalars, keys among them, of the table `table` as the file
+    /// wrote it. The file is read again for them, so that an edit to the
+    /// table never changes what counts as a comment.
+    fn holds_comment(&self, table: &str, start: usize, end: usize) -> bool {
         let mut quoted = Vec::new();
-        quoted_spans(node, &self.text, &mut quoted);
+        if let Ok(Some(read)) = strict_yaml::read(&self.text) {
+            if let Some(node) = mapping_entry(&read, table) {
+                quoted_spans(node, &self.text, &mut quoted);
+            }
+        }
         let bytes = self.text.as_bytes();
         (start..end).any(|at| {
             bytes[at] == b'#'
