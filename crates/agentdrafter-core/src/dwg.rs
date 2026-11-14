@@ -220,6 +220,11 @@ fn dwg_linetype(linetype: &Linetype) -> LineType {
 }
 
 fn set_layer_properties(dwg_layer: &mut DwgLayer, layer: &Layer) {
+    dwg_layer.flags.off = !layer.on;
+    dwg_layer.flags.frozen = layer.frozen;
+    dwg_layer.flags.locked = layer.locked;
+    dwg_layer.is_plottable = layer.plot;
+    layer.description.clone_into(&mut dwg_layer.description);
     dwg_layer.color = Color::Index(layer.color);
     dwg_layer.line_type = layer.linetype.clone();
     dwg_layer.line_weight = match layer.lineweight {
@@ -560,6 +565,11 @@ fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
         color,
         linetype: dwg_layer.line_type.clone(),
         lineweight,
+        on: !dwg_layer.flags.off,
+        frozen: dwg_layer.flags.frozen,
+        locked: dwg_layer.flags.locked,
+        plot: dwg_layer.is_plottable,
+        description: dwg_layer.description.clone(),
     })
 }
 

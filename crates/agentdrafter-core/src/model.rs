@@ -434,6 +434,20 @@ pub(crate) fn is_zero(n: &f64) -> bool {
     *n == 0.0
 }
 
+pub(crate) fn yes() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn is_true(b: &bool) -> bool {
+    *b
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// An object property's value that takes its layer's: AutoCAD's ByLayer.
 pub const BY_LAYER: &str = "ByLayer";
 
@@ -618,6 +632,26 @@ pub struct Layer {
     /// The pen width objects on the layer plot with; none for AutoCAD's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineweight: Option<Lineweight>,
+    /// Whether the layer is on. An object on a layer that is off draws
+    /// nothing, and still counts towards the extents, as in AutoCAD.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub on: bool,
+    /// Whether the layer is frozen. An object on a frozen layer draws
+    /// nothing and does not count towards the extents, as in AutoCAD.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub frozen: bool,
+    /// Whether the layer is locked, as AutoCAD locks it against editing.
+    /// It changes nothing a sheet draws.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
+    /// Whether the layer plots. An object on a layer that does not plot is
+    /// left out of a PDF, and drawn in a PNG and the viewer, as AutoCAD's
+    /// screen shows it; it counts towards the extents.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub plot: bool,
+    /// What AutoCAD's layer manager shows beside the name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
 }
 
 impl Layer {
@@ -628,6 +662,11 @@ impl Layer {
             color: WHITE,
             linetype: CONTINUOUS.to_owned(),
             lineweight: None,
+            on: true,
+            frozen: false,
+            locked: false,
+            plot: true,
+            description: String::new(),
         }
     }
 }

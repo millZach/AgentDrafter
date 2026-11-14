@@ -664,6 +664,11 @@ fn query_schema() -> Value {
                 },
             },
             bare("extents", "The box round everything each sheet draws."),
+            bare(
+                "layers",
+                "The layers of each sheet, with their colour, linetype, lineweight and states, and \
+                 how many of its objects sit on each.",
+            ),
         ],
     })
 }

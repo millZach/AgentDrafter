@@ -459,11 +459,13 @@ fn plot_record(
     let sheet = &record.sheet;
     let fonts = SheetFonts::find(sheet, settings);
     let millimetres_per_unit = sheet.units.convert(1.0, Unit::Mm);
-    let list = draw::draw_sheet(
+    // On paper: a layer that does not plot is left out (Zach, 2026-11-13).
+    let list = draw::draw_sheet_for(
         sheet,
         &fonts,
         CHORD_TOLERANCE_MM / millimetres_per_unit,
         draw::MOST_HATCH_DASHES,
+        draw::Purpose::Plot,
     );
     let page = page(sheet, &list)?;
     let stamp = Stamp::new(&record.read(), output);

@@ -136,8 +136,8 @@ pub use plot::{
 pub use plot_style::NotFollowed;
 pub use query::{
     query, query_with, Answer, AttributeValues, BlockInserts, BlockText, End, Extents, FoundObject,
-    InsertAttributes, Matching, Measure, MeasuredPoint, Query, QueryReport, QueryRequest,
-    Selection, SheetBlocks, SheetExtents, WrittenAt, EXTENTS_TOLERANCE,
+    InsertAttributes, LayerUse, Matching, Measure, MeasuredPoint, Query, QueryReport, QueryRequest,
+    Selection, SheetBlocks, SheetExtents, SheetLayers, WrittenAt, EXTENTS_TOLERANCE,
 };
 pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;

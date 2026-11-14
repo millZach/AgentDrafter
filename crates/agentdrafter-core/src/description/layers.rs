@@ -5,7 +5,9 @@
 //! in case are refused as well.
 
 use super::strict_yaml::{index_path, key_path, Entry, Kind, Node};
-use super::{at, bad_value, choice, length, plain_number, scalar, sequence, wrong_type, Fields};
+use super::{
+    at, bad_value, boolean, choice, length, plain_number, scalar, sequence, wrong_type, Fields,
+};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
     Layer, Linetype, Lineweight, ObjectColor, ObjectLinetype, ObjectLineweight, Properties,
@@ -17,7 +19,19 @@ use crate::units::{parse_length, LengthError, Unit};
 pub(crate) const LINETYPE_KEYS: [&str; 2] = ["description", "pattern"];
 
 /// The keys a layer takes.
-pub(crate) const LAYER_KEYS: [&str; 3] = ["color", "linetype", "lineweight"];
+pub(crate) const LAYER_KEYS: [&str; 8] = [
+    "color",
+    "linetype",
+    "lineweight",
+    "on",
+    "frozen",
+    "locked",
+    "plot",
+    "description",
+];
+
+/// The longest layer description AgentDrafter writes, in characters.
+pub(crate) const LONGEST_LAYER_DESCRIPTION: usize = 255;
 
 /// The colours that have a name: AutoCAD colour indexes 1 to 7.
 pub(crate) const COLOUR_NAMES: [(&str, u8); 7] = [
@@ -92,6 +106,19 @@ pub(super) fn layers(node: &Node, linetypes: &[Linetype]) -> Result<Vec<Layer>, 
         if let Some(node) = fields.get("lineweight") {
             layer.lineweight = Some(lineweight(node, &fields.path_of("lineweight"))?);
         }
+        for (key, state) in [
+            ("on", &mut layer.on),
+            ("frozen", &mut layer.frozen),
+            ("locked", &mut layer.locked),
+            ("plot", &mut layer.plot),
+        ] {
+            if let Some(node) = fields.get(key) {
+                *state = boolean(node, &fields.path_of(key))?;
+            }
+        }
+        if let Some(node) = fields.text("description") {
+            layer.description = layer_description(node, &fields.path_of("description"))?;
+        }
         layers.push(layer);
     }
     Ok(layers)
@@ -154,6 +181,30 @@ pub(super) fn linetype_scale(node: &Node, path: &str) -> Result<f64, Error> {
             "a linetype scale is more than 0: how much a linetype's dashes and gaps are enlarged",
         ))
     }
+}
+
+/// A layer's description: one line of text, at most
+/// [`LONGEST_LAYER_DESCRIPTION`] characters, with no control characters.
+fn layer_description(node: &Node, path: &str) -> Result<String, Error> {
+    let text = scalar(node, path, "a description, one line of text")?;
+    if text.chars().any(char::is_control) {
+        return Err(bad_value(
+            node,
+            path,
+            "a layer's description is one line of text, with no control characters",
+        ));
+    }
+    if text.chars().count() > LONGEST_LAYER_DESCRIPTION {
+        return Err(bad_value(
+            node,
+            path,
+            format!(
+                "a layer's description is at most {LONGEST_LAYER_DESCRIPTION} characters; this one has {}",
+                text.chars().count()
+            ),
+        ));
+    }
+    Ok(text.to_owned())
 }
 
 /// The name of a layer an object sits on: `0` or one of the sheet's layers.
