@@ -259,11 +259,18 @@ fn tolerance(size: f64) -> f64 {
 }
 
 /// Where `parts` and `others` cross, seen from above; only where they meet
-/// in space too unless `apparent`. Each point lies on the first object, in
-/// the order of its parts and along each.
+/// in space too unless `apparent`. Each point lies on the first object, and
+/// they are in the order they lie along it: by its parts, then along each.
 pub(crate) fn intersections(parts: &[Part], others: &[Part], apparent: bool) -> Vec<SnapPoint> {
-    let mut points: Vec<SnapPoint> = Vec::new();
-    for part in parts {
+    let kind = if apparent {
+        SnapKind::ApparentIntersection
+    } else {
+        SnapKind::Intersection
+    };
+    // Each crossing, with its part's place among the first object's parts
+    // and its parameter along it, to put them in order.
+    let mut crossed: Vec<(usize, f64, f64, SnapPoint)> = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
         for other in others {
             let size = scale_of(&part.curve).max(scale_of(&other.curve));
             for (t, u) in crossings(&part.curve, &other.curve) {
@@ -271,23 +278,21 @@ pub(crate) fn intersections(parts: &[Part], others: &[Part], apparent: bool) -> 
                 if !apparent && (p[2] - q[2]).abs() > tolerance(size) {
                     continue;
                 }
-                if points.iter().any(|seen| {
-                    plan_distance([seen.at.x, seen.at.y, seen.at.z], p) <= tolerance(size)
-                        && (apparent || (seen.at.z - p[2]).abs() <= tolerance(size))
-                }) {
-                    continue;
-                }
-                points.push(found(
-                    if apparent {
-                        SnapKind::ApparentIntersection
-                    } else {
-                        SnapKind::Intersection
-                    },
-                    part,
-                    Some(other),
-                    p,
-                ));
+                crossed.push((i, t, size, found(kind, part, Some(other), p)));
             }
+        }
+    }
+    crossed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    // A point where two parts meet, such as a polyline's corner, is one.
+    let mut points: Vec<SnapPoint> = Vec::new();
+    for (_, _, size, point) in crossed {
+        let p = [point.at.x, point.at.y, point.at.z];
+        let seen = points.iter().any(|seen| {
+            plan_distance([seen.at.x, seen.at.y, seen.at.z], p) <= tolerance(size)
+                && (apparent || (seen.at.z - p[2]).abs() <= tolerance(size))
+        });
+        if !seen {
+            points.push(point);
         }
     }
     numbered(points)
@@ -373,10 +378,16 @@ fn perpendiculars(c: &Curve, from: P3, extend: bool) -> Vec<P3> {
                 .filter_map(|a| arc_share(a, *start, *sweep).map(|s| c.point(s)))
                 .collect()
         }
-        _ => where_on(c, &|p, d| (p[0] - from[0]) * d[0] + (p[1] - from[1]) * d[1])
-            .into_iter()
-            .map(|t| c.point(t))
-            .collect(),
+        _ => where_on(c, &|p, d| {
+            let w = [p[0] - from[0], p[1] - from[1]];
+            (
+                w[0] * d[0] + w[1] * d[1],
+                w[0].hypot(w[1]) * d[0].hypot(d[1]),
+            )
+        })
+        .into_iter()
+        .map(|t| c.point(t))
+        .collect(),
     }
 }
 
@@ -402,10 +413,16 @@ fn tangents(c: &Curve, from: P3) -> Vec<P3> {
                 .filter_map(|a| arc_share(a, *start, *sweep).map(|s| c.point(s)))
                 .collect()
         }
-        _ => where_on(c, &|p, d| (p[0] - from[0]) * d[1] - (p[1] - from[1]) * d[0])
-            .into_iter()
-            .map(|t| c.point(t))
-            .collect(),
+        _ => where_on(c, &|p, d| {
+            let w = [p[0] - from[0], p[1] - from[1]];
+            (
+                w[0] * d[1] - w[1] * d[0],
+                w[0].hypot(w[1]) * d[0].hypot(d[1]),
+            )
+        })
+        .into_iter()
+        .map(|t| c.point(t))
+        .collect(),
     }
 }
 

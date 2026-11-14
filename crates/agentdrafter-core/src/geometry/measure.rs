@@ -10,6 +10,8 @@
 
 use serde::Serialize;
 
+use std::f64::consts::TAU;
+
 use super::curve::{length_of, sub, Curve, P3};
 use super::{p3, Reader};
 use crate::model::hatch::walk;
@@ -204,40 +206,57 @@ fn hatch_loop(l: &HatchLoop) -> Vec<Curve> {
     }
 }
 
-/// A loop seen from above as a fine polygon, to tell what lies inside it.
-fn polygon(curves: &[Curve]) -> Vec<[f64; 2]> {
-    let mut points = Vec::new();
-    for c in curves {
-        let steps = if c.is_straight() { 1 } else { 256 };
-        let (a, b) = c.domain();
-        for i in 0..steps {
-            let p = c.point(a + (b - a) * i as f64 / steps as f64);
-            points.push([p[0], p[1]]);
-        }
-    }
-    points
+/// The angle from `u` to `v`, both from one point, in `(-π, π]`.
+fn turn(u: [f64; 2], v: [f64; 2]) -> f64 {
+    (u[0] * v[1] - u[1] * v[0]).atan2(u[0] * v[0] + u[1] * v[1])
 }
 
-fn inside(p: [f64; 2], polygon: &[[f64; 2]]) -> bool {
-    let mut odd = false;
-    let n = polygon.len();
-    for i in 0..n {
-        let (a, b) = (polygon[i], polygon[(i + 1) % n]);
-        if (a[1] > p[1]) != (b[1] > p[1]) {
-            let x = a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
-            if p[0] < x {
-                odd = !odd;
-            }
+/// How far the curve turns about `p`, seen from above, in radians. A
+/// segment's is exact. An arc is followed in pieces each so short that `p`
+/// lies nowhere between a piece and its chord, so each piece turns as its
+/// chord does: the region between them reaches no further from the circle
+/// than the piece's sagitta, which is kept below `p`'s distance from it.
+fn turn_about(c: &Curve, p: [f64; 2]) -> f64 {
+    let from = |q: P3| [q[0] - p[0], q[1] - p[1]];
+    let pieces = match c {
+        Curve::Segment { .. } => 1,
+        Curve::Arc {
+            center,
+            radius,
+            sweep,
+            ..
+        } => {
+            let off = ((p[0] - center[0]).hypot(p[1] - center[1]) - radius).abs();
+            let sagitta = (off / 2.0).max(radius * 1e-15);
+            let step = 2.0 * (1.0 - (sagitta / radius).min(1.0)).acos();
+            (sweep.abs() / step).ceil().clamp(1.0, 1_048_576.0) as usize
         }
+        _ => 4096,
+    };
+    let (a, b) = c.domain();
+    let mut total = 0.0;
+    let mut last = from(c.point(a));
+    for i in 1..=pieces {
+        let next = from(c.point(a + (b - a) * i as f64 / pieces as f64));
+        total += turn(last, next);
+        last = next;
     }
-    odd
+    total
+}
+
+/// Whether a closed loop of curves winds round `p`, seen from above, its
+/// arcs followed exactly.
+fn encloses(curves: &[Curve], p: [f64; 2]) -> bool {
+    let total: f64 = curves.iter().map(|c| turn_about(c, p)).sum();
+    (total / TAU).round() != 0.0
 }
 
 /// The area a hatch fills: each loop's area, less where it is a hole, a
 /// loop inside an odd number of others, as AutoCAD's normal island
-/// detection fills it.
+/// detection fills it. A loop is inside another when a point of it is: the
+/// middle of its first curve, tested against the other's own lines and
+/// arcs, so a hole all but as large as its loop is still inside it.
 fn hatch_area(loops: &[Vec<Curve>]) -> f64 {
-    let polygons: Vec<Vec<[f64; 2]>> = loops.iter().map(|l| polygon(l)).collect();
     loops
         .iter()
         .enumerate()
@@ -246,10 +265,10 @@ fn hatch_area(loops: &[Vec<Curve>]) -> f64 {
                 return 0.0;
             };
             let p = first.point(first.middle());
-            let depth = polygons
+            let depth = loops
                 .iter()
                 .enumerate()
-                .filter(|&(j, polygon)| j != i && inside([p[0], p[1]], polygon))
+                .filter(|&(j, other)| j != i && encloses(other, [p[0], p[1]]))
                 .count();
             let area = enclosed(l);
             if depth % 2 == 0 {

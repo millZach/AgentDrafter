@@ -55,7 +55,7 @@ const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...";
 const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
-const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which>] [extents, snap and geometry: --fonts <folder>...]";
+const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [extents, snap and geometry: --fonts <folder>...]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
 /// name, as the binary does: it prints the reply on standard output, or
@@ -673,6 +673,8 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
     let (mut from, mut to) = (End::default(), End::default());
     let (mut snap, mut with, mut snap_from) =
         (SnapRef::default(), ObjectRef::default(), SnapRef::default());
+    // The other object of a `from` that is itself an intersection.
+    let mut from_with = ObjectRef::default();
     let (mut snap_kind, mut from_kind): (Option<String>, Option<String>) = (None, None);
     let mut fonts = Vec::new();
     let value = |flag: &str, value: Option<OsString>| -> Result<String, Error> {
@@ -718,7 +720,8 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
             }
             Some(
                 flag @ ("--id" | "--name" | "--snap" | "--which" | "--with" | "--with-name"
-                | "--from" | "--from-name" | "--from-snap" | "--from-which"),
+                | "--from" | "--from-name" | "--from-snap" | "--from-which" | "--from-with"
+                | "--from-with-name"),
             ) if kind == "snap" => {
                 let slot = match flag {
                     "--id" => &mut snap.id,
@@ -730,6 +733,8 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
                     "--from" => &mut snap_from.id,
                     "--from-name" => &mut snap_from.name,
                     "--from-snap" => &mut from_kind,
+                    "--from-with" => &mut from_with.id,
+                    "--from-with-name" => &mut from_with.name,
                     _ => &mut snap_from.which,
                 };
                 once(slot, flag, value(flag, args.next())?)?;
@@ -768,6 +773,9 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
     snap_from.snap = snap_of(from_kind, "--from-snap")?;
     if with != ObjectRef::default() {
         snap.with = Some(with);
+    }
+    if from_with != ObjectRef::default() {
+        snap_from.with = Some(from_with);
     }
     if snap_from != SnapRef::default() {
         snap.from = Some(Box::new(snap_from));

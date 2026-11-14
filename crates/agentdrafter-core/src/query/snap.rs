@@ -314,6 +314,8 @@ fn resolve<'a>(
             .map(|(name, _)| name.clone())
             .filter(|name| !name.is_empty())
             .collect();
+        // Counted before `which` picks among them.
+        let found = named.len();
         named.retain(|(name, _)| name == which);
         if named.is_empty() {
             let kind = kind.unwrap_or(SnapKind::Endpoint);
@@ -322,9 +324,10 @@ fn resolve<'a>(
                     "{} has no {} `{which}`; it has {}",
                     object.words(),
                     kind.word(),
-                    match own_count(&reader, &object, kind, &resolved) {
+                    match found {
                         0 => format!("no {}", kind.word()),
-                        _ => format!("one {}, which needs no `which`", kind.word()),
+                        1 => format!("one {}, which takes no `which`", kind.word()),
+                        n => format!("{n} {}s, none of which has a `which`", kind.word()),
                     }
                 )
             } else {
@@ -346,14 +349,6 @@ fn resolve<'a>(
         resolved.none = Some(none_words(&object, kind, &resolved));
     }
     Ok(resolved)
-}
-
-/// How many points of `kind` the object has by itself, for an error.
-fn own_count(reader: &Reader, object: &Located, kind: SnapKind, resolved: &Resolved) -> usize {
-    if kind.takes_with() || kind.takes_from() {
-        return resolved.points.len();
-    }
-    own_points(reader, object.object(), Some(kind)).len()
 }
 
 /// The name a snap between two objects is asked for again by: its place in

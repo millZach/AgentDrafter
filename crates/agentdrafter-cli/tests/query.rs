@@ -211,3 +211,38 @@ fn query_snaps_to_an_object_and_gives_its_geometry() {
     assert_eq!(code, 2, "{json}");
     assert_eq!(json["error"]["code"], "usage");
 }
+
+#[test]
+fn query_snaps_from_where_two_other_objects_cross() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("cli-query")
+        .join("from-with");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("cross.yaml"),
+        "units: mm\nobjects:\n  - line: {id: a, from: [0, 0, 0], to: [10, 10, 0]}\n  - line: {id: b, from: [0, 10, 0], to: [10, 0, 0]}\n  - line: {id: c, from: [0, -5, 0], to: [10, -5, 0]}\n",
+    )
+    .unwrap();
+    let (code, json) = agentdrafter(
+        &[
+            "query",
+            "snap",
+            "cross.yaml",
+            "--id",
+            "cross/c",
+            "--snap",
+            "nearest",
+            "--from",
+            "cross/a",
+            "--from-snap",
+            "intersection",
+            "--from-with",
+            "cross/b",
+        ],
+        &dir,
+    );
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["from"]["at"], json!([5.0, 5.0, 0.0]));
+    assert_eq!(json["result"]["points"][0]["at"], json!([5.0, -5.0, 0.0]));
+}

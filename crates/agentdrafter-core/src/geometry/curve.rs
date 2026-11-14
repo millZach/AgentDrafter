@@ -260,11 +260,6 @@ impl Curve {
         self.point(self.domain().1)
     }
 
-    /// Whether the curve is straight.
-    pub(crate) fn is_straight(&self) -> bool {
-        matches!(self, Curve::Segment { .. })
-    }
-
     /// The curve placed by `place`, which moves, scales evenly and turns
     /// about the Z axis by `turn` radians, enlarging by `scale`.
     pub(crate) fn placed(&self, place: &dyn Fn(P3) -> P3, scale: f64, turn: f64) -> Curve {
@@ -412,7 +407,10 @@ impl Curve {
                 }
             }
             Curve::Spline(_) => {
-                let f = |t: f64| self.tangent(t)[axis];
+                let f = |t: f64| {
+                    let d = self.tangent(t);
+                    (d[axis], length_of(d))
+                };
                 at.extend(roots(&f, &self.breaks(), 64));
             }
             _ => {}
@@ -456,7 +454,7 @@ impl Curve {
     /// The parameter of the point `p` seen from above, for a point known to
     /// lie on the line or the circle the curve runs along; none for an
     /// ellipse or a spline.
-    fn parameter_of(&self, p: P3) -> Option<f64> {
+    pub(crate) fn parameter_of(&self, p: P3) -> Option<f64> {
         match self {
             Curve::Segment { a, b } => {
                 let d = sub(*b, *a);
@@ -527,32 +525,85 @@ pub(crate) fn integrate(f: &dyn Fn(f64) -> f64, a: f64, b: f64) -> f64 {
     adapt(f, a, b, gauss(f, a, b), 0)
 }
 
-/// The parameters within `breaks` where `f` crosses 0, each piece between
-/// breaks looked at in `steps` steps and each crossing then halved down to
-/// the last digit.
-pub(crate) fn roots(f: &dyn Fn(f64) -> f64, breaks: &[f64], steps: usize) -> Vec<f64> {
+/// The parameters within `breaks` where `f` is 0. `f` gives its value and
+/// how large its terms are: a value within a billionth of that is 0. Each
+/// piece between breaks is looked at in `steps` steps, each halved; where
+/// the value changes sign, the crossing is halved down to the last digit,
+/// and where its size dips between two neighbours of the same sign, the dip
+/// is followed to its bottom, which holds two roots when the sign changes
+/// there and one, where the curve touches, when the value is 0 there. So
+/// roots closer together than a step are not lost.
+pub(crate) fn roots(f: &dyn Fn(f64) -> (f64, f64), breaks: &[f64], steps: usize) -> Vec<f64> {
+    let value = |t: f64| f(t).0;
     let mut found: Vec<f64> = Vec::new();
     for w in breaks.windows(2) {
         let (a, b) = (w[0], w[1]);
-        let mut t0 = a;
-        let mut f0 = f(a);
-        for i in 1..=steps {
-            let t1 = a + (b - a) * i as f64 / steps as f64;
-            let f1 = f(t1);
-            if f0 == 0.0 {
-                found.push(t0);
-            } else if f0.signum() != f1.signum() && f1 != 0.0 {
-                found.push(bisect(f, t0, t1, f0));
+        let n = 2 * steps;
+        let ts: Vec<f64> = (0..=n).map(|i| a + (b - a) * i as f64 / n as f64).collect();
+        let fs: Vec<f64> = ts.iter().map(|&t| value(t)).collect();
+        for i in 0..=n {
+            if fs[i] == 0.0 {
+                found.push(ts[i]);
             }
-            t0 = t1;
-            f0 = f1;
-        }
-        if f0 == 0.0 {
-            found.push(t0);
+            if i < n && fs[i] != 0.0 && fs[i + 1] != 0.0 && fs[i].signum() != fs[i + 1].signum() {
+                found.push(bisect(&value, ts[i], ts[i + 1], fs[i]));
+            }
+            // A dip of the value's size that keeps its sign between its
+            // neighbours, or one that reaches 0 at a sample.
+            if i == 0 || i == n {
+                continue;
+            }
+            let (l, m, r) = (fs[i - 1], fs[i], fs[i + 1]);
+            let same = l != 0.0
+                && m != 0.0
+                && r != 0.0
+                && l.signum() == m.signum()
+                && m.signum() == r.signum();
+            if !same || m.abs() > l.abs() || m.abs() > r.abs() {
+                continue;
+            }
+            let bottom = least(&|t| value(t).abs(), ts[i - 1], ts[i + 1]);
+            let (v, size) = f(bottom);
+            if v != 0.0 && v.signum() != m.signum() {
+                found.push(bisect(&value, ts[i - 1], bottom, l));
+                found.push(bisect(&value, bottom, ts[i + 1], v));
+            } else if v.abs() <= 1e-9 * size {
+                found.push(bottom);
+            }
         }
     }
-    found.dedup_by(|a, b| (*a - *b).abs() <= 1e-12 * (1.0 + b.abs()));
+    found.sort_by(f64::total_cmp);
+    let span = breaks.last().unwrap_or(&1.0) - breaks.first().unwrap_or(&0.0);
+    found.dedup_by(|a, b| (*a - *b).abs() <= 1e-9 * span.abs().max(f64::MIN_POSITIVE));
     found
+}
+
+/// Where `g` is least between `a` and `b`, for a `g` with one dip there
+/// (golden-section search).
+fn least(g: &dyn Fn(f64) -> f64, mut a: f64, mut b: f64) -> f64 {
+    let ratio = (5f64.sqrt() - 1.0) / 2.0;
+    let mut c = b - ratio * (b - a);
+    let mut d = a + ratio * (b - a);
+    let (mut gc, mut gd) = (g(c), g(d));
+    for _ in 0..200 {
+        if (b - a).abs() <= 1e-15 * (1.0 + a.abs()) {
+            break;
+        }
+        if gc < gd {
+            b = d;
+            d = c;
+            gd = gc;
+            c = b - ratio * (b - a);
+            gc = g(c);
+        } else {
+            a = c;
+            c = d;
+            gc = gd;
+            d = a + ratio * (b - a);
+            gd = g(d);
+        }
+    }
+    (a + b) / 2.0
 }
 
 /// The root of `f` between `a` and `b`, where it changes sign, `fa` being
@@ -585,10 +636,21 @@ pub(crate) type Crossing = (f64, f64);
 /// along `c`. Lines and arcs are crossed exactly; anything with an ellipse
 /// or a spline is found from fine chords and then refined.
 pub(crate) fn crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
+    let size = scale_of(c).max(scale_of(d));
     let mut found = match (c, d) {
+        _ if end_on(c).is_some() => seen_end_on(c, d, size),
+        _ if end_on(d).is_some() => seen_end_on(d, c, size)
+            .into_iter()
+            .map(|(u, t)| (t, u))
+            .collect(),
         (Curve::Segment { .. } | Curve::Arc { .. }, Curve::Segment { .. } | Curve::Arc { .. }) => {
             exact_crossings(c, d)
         }
+        (Curve::Segment { .. }, Curve::Ellipse { .. }) => line_ellipse(c, d),
+        (Curve::Ellipse { .. }, Curve::Segment { .. }) => line_ellipse(d, c)
+            .into_iter()
+            .map(|(u, t)| (t, u))
+            .collect(),
         _ => numeric_crossings(c, d),
     };
     found.retain(|&(t, u)| c.holds(t) && d.holds(u));
@@ -599,9 +661,124 @@ pub(crate) fn crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
         *u = u.clamp(d0, d1);
     }
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let size = scale_of(c).max(scale_of(d));
-    found.dedup_by(|a, b| plan_distance(c.point(a.0), c.point(b.0)) <= 1e-9 * size);
+    // One point is found once. Where the curves touch, rather than cross,
+    // it is found only to the square root of the arithmetic's precision,
+    // so points there that close are one.
+    found.dedup_by(|a, b| {
+        let gap = plan_distance(c.point(a.0), c.point(b.0));
+        gap <= 1e-9 * size || (gap <= 1e-6 * size && touching(c, d, *b))
+    });
     found
+}
+
+/// Whether the curves run the same way, seen from above, where they cross
+/// at `at`: they touch there rather than cross.
+fn touching(c: &Curve, d: &Curve, at: Crossing) -> bool {
+    let (u, v) = (c.tangent(at.0), d.tangent(at.1));
+    let cross = u[0] * v[1] - u[1] * v[0];
+    let lengths = u[0].hypot(u[1]) * v[0].hypot(v[1]);
+    lengths > 0.0 && cross.abs() <= 1e-3 * lengths
+}
+
+/// A straight segment seen end on from above, a line along Z: the point
+/// it is seen as.
+fn end_on(c: &Curve) -> Option<P3> {
+    match c {
+        Curve::Segment { a, b } if a[0] == b[0] && a[1] == b[1] => Some(*a),
+        _ => None,
+    }
+}
+
+/// Where `d` passes through the point a segment seen end on, `c`, is seen
+/// as from above: the parameter along each, the segment's at the height
+/// `d` has there, or its nearer end. Two segments seen end on at one point
+/// run along one line, and collinear lines do not intersect, as AutoCAD's
+/// intersection snap finds none between them.
+fn seen_end_on(c: &Curve, d: &Curve, size: f64) -> Vec<Crossing> {
+    let (Curve::Segment { a, b }, Some(q)) = (c, end_on(c)) else {
+        return Vec::new();
+    };
+    let on_d: Vec<f64> = match d {
+        _ if end_on(d).is_some() => Vec::new(),
+        Curve::Segment { .. } | Curve::Arc { .. } => d.parameter_of(q).into_iter().collect(),
+        _ => where_on(d, &|p, v| {
+            let w = [p[0] - q[0], p[1] - q[1]];
+            (
+                w[0] * v[0] + w[1] * v[1],
+                w[0].hypot(w[1]) * v[0].hypot(v[1]),
+            )
+        }),
+    };
+    on_d.into_iter()
+        .filter(|&u| plan_distance(d.point(u), q) <= 1e-9 * size)
+        .map(|u| {
+            let z = d.point(u)[2];
+            let t = if b[2] == a[2] {
+                0.0
+            } else {
+                ((z - a[2]) / (b[2] - a[2])).clamp(0.0, 1.0)
+            };
+            (t, u)
+        })
+        .collect()
+}
+
+/// Where a straight segment `c` crosses an ellipse `e`, exactly: in the
+/// ellipse's own frame, along its axes as units, the ellipse is the unit
+/// circle and the segment still a line. A line that touches it meets it
+/// once.
+fn line_ellipse(c: &Curve, e: &Curve) -> Vec<Crossing> {
+    let (
+        Curve::Segment { a, b },
+        Curve::Ellipse {
+            center,
+            major,
+            minor,
+            start,
+            sweep,
+        },
+    ) = (c, e)
+    else {
+        return Vec::new();
+    };
+    let frame = |v: [f64; 2]| {
+        [
+            (v[0] * major[0] + v[1] * major[1]) / (major[0] * major[0] + major[1] * major[1]),
+            (v[0] * minor[0] + v[1] * minor[1]) / (minor[0] * minor[0] + minor[1] * minor[1]),
+        ]
+    };
+    let w = frame([a[0] - center[0], a[1] - center[1]]);
+    let v = frame([b[0] - a[0], b[1] - a[1]]);
+    let qa = v[0] * v[0] + v[1] * v[1];
+    if qa == 0.0 {
+        return Vec::new();
+    }
+    let qb = w[0] * v[0] + w[1] * v[1];
+    let qc = w[0] * w[0] + w[1] * w[1] - 1.0;
+    let disc = qb * qb - qa * qc;
+    let tolerance = 1e-12 * (qb * qb).max((qa * qc).abs()).max(qa);
+    let ts: Vec<f64> = if disc < -tolerance {
+        Vec::new()
+    } else if disc <= tolerance {
+        vec![-qb / qa]
+    } else {
+        let root = disc.sqrt();
+        vec![(-qb - root) / qa, (-qb + root) / qa]
+    };
+    ts.into_iter()
+        .map(|t| {
+            let (x, y) = (w[0] + v[0] * t, w[1] + v[1] * t);
+            let share = (y.atan2(x) - start).rem_euclid(TAU) / sweep;
+            // A point a hair before the start is at the start.
+            let turn = TAU / sweep;
+            let share = if share > 1.0 && turn - share < 1e-9 * turn {
+                share - turn
+            } else {
+                share
+            };
+            (t, share)
+        })
+        .collect()
 }
 
 /// How large a curve's coordinates are, for tolerances: at least 1.
@@ -804,10 +981,11 @@ fn refine(c: &Curve, d: &Curve, mut t: f64, mut u: f64) -> Option<(f64, f64)> {
 }
 
 /// The parameters at which the curve meets `wanted`, a condition on the
-/// point and the derivative there that crosses 0, such as being
-/// perpendicular to the line from a point. A segment or an arc is solved
+/// point and the derivative there that is 0, such as being perpendicular
+/// to the line from a point: it gives its value and how large its terms
+/// are, as [`roots`] takes them. A segment or an arc is solved
 /// exactly by its caller; this is for ellipses and splines.
-pub(crate) fn where_on(c: &Curve, wanted: &dyn Fn(P3, P3) -> f64) -> Vec<f64> {
+pub(crate) fn where_on(c: &Curve, wanted: &dyn Fn(P3, P3) -> (f64, f64)) -> Vec<f64> {
     let f = |t: f64| wanted(c.point(t), c.tangent(t));
     let steps = match c {
         Curve::Spline(_) => 64,

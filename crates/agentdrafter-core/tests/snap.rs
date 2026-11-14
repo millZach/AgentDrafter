@@ -182,11 +182,11 @@ fn a_wire_meets_the_lug_it_ends_on() {
         "2 intersections of the line `lugs/wire` with the insert `lugs/strip`, on sheet `lugs`"
     );
     // In the order they lie along the wire, named by it.
-    let end = named(&points, SnapKind::Intersection, Some("0"));
+    let frame = named(&points, SnapKind::Intersection, Some("0"));
+    assert_eq!(frame.with_part.as_deref(), Some("objects[2].segments[2]"));
+    let end = named(&points, SnapKind::Intersection, Some("1"));
     close(end.at, [50.0, 52.0, 0.0]);
     assert_eq!(end.with_part.as_deref(), Some("objects[0].objects[1]"));
-    let frame = named(&points, SnapKind::Intersection, Some("1"));
-    assert_eq!(frame.with_part.as_deref(), Some("objects[2].segments[2]"));
 }
 
 #[test]
@@ -515,5 +515,174 @@ fn an_objects_length_area_extents_and_angles_are_autocads() {
     assert_eq!(
         get("justified").without,
         ["length", "area", "extents", "angle"]
+    );
+}
+
+/// A made-up sheet of the cases a review found: a parabola and a point
+/// above it, a hatch whose hole all but fills it, lines that meet end to
+/// end or are seen end on, a line tangent to an ellipse, and a line through
+/// a polyline that doubles back.
+fn review(test: &str) -> PathBuf {
+    let dir = scratch(test);
+    let sheet = dir.join("review.yaml");
+    fs::write(
+        &sheet,
+        r#"units: mm
+objects:
+  - spline: {id: parabola, degree: 2, control_points: [[-1000, 1000, 0], [0, -1000, 0], [1000, 1000, 0]]}
+  - circle: {id: above, center: [0, 500.9, 0], radius: 1}
+  - hatch:
+      id: ring
+      pattern: SOLID
+      boundary:
+        - edges:
+            - arc: {center: [0, 5000, 0], radius: 1000, start_angle: 0, end_angle: 180}
+            - arc: {center: [0, 5000, 0], radius: 1000, start_angle: 180, end_angle: 0}
+        - edges:
+            - arc: {center: [0, 5000, 0], radius: 999.99, start_angle: 10, end_angle: 190}
+            - arc: {center: [0, 5000, 0], radius: 999.99, start_angle: 190, end_angle: 10}
+  - line: {id: first, from: [3000, 0, 0], to: [3010, 0, 0]}
+  - line: {id: next, from: [3010, 0, 0], to: [3020, 0, 0]}
+  - line: {id: upright, from: [4000, 0, -1], to: [4000, 0, 1]}
+  - line: {id: across, from: [3999, 0, 0], to: [4001, 0, 0]}
+  - ellipse: {id: oval, center: [0, 0, 0], major_axis: [2, 0, 0], ratio: 0.5}
+  - line: {id: touching, from: [2, -1, 0], to: [2, 1, 0]}
+  - circle: {id: kissing, center: [3, 0, 0], radius: 1}
+  - line: {id: through, from: [6000, 0, 0], to: [6010, 0, 0]}
+  - polyline: {id: hairpin, points: [[6009, -1, 0], [6009, 1, 0], [6001, 1, 0], [6001, -1, 0]]}
+"#,
+    )
+    .unwrap();
+    sheet
+}
+
+fn with(request: SnapRef, id: &str) -> SnapRef {
+    SnapRef {
+        with: Some(ObjectRef {
+            id: Some(id.to_owned()),
+            name: None,
+        }),
+        ..request
+    }
+}
+
+#[test]
+fn every_foot_and_the_nearest_point_on_a_spline_are_found() {
+    let sheet = review("parabola");
+    let from = || Some(Box::new(kind("review/above", SnapKind::Center)));
+    // y = x² / 1000 from [0, 500.9]: the feet at x = 0 and x = ±30.
+    let (_, points) = snap(
+        &sheet,
+        SnapRef {
+            from: from(),
+            ..kind("review/parabola", SnapKind::Perpendicular)
+        },
+    );
+    let mut xs: Vec<f64> = points.iter().map(|p| p.at.x).collect();
+    xs.sort_by(f64::total_cmp);
+    assert_eq!(xs.len(), 3, "{points:#?}");
+    for (x, want) in xs.iter().zip([-30.0, 0.0, 30.0]) {
+        assert!((x - want).abs() < 1e-6, "{xs:?}");
+    }
+    let (_, points) = snap(
+        &sheet,
+        SnapRef {
+            from: from(),
+            ..kind("review/parabola", SnapKind::Nearest)
+        },
+    );
+    assert_eq!(points.len(), 1);
+    assert!((points[0].at.x.abs() - 30.0).abs() < 1e-6, "{points:#?}");
+    assert!((points[0].at.y - 0.9).abs() < 1e-6, "{points:#?}");
+}
+
+#[test]
+fn a_hole_that_all_but_fills_its_hatch_is_a_hole() {
+    let ring = geometry(&review("ring"), "review/ring");
+    near(
+        ring.measures.area,
+        PI * (1000.0f64.powi(2) - 999.99f64.powi(2)),
+    );
+}
+
+#[test]
+fn a_line_seen_end_on_meets_one_through_it_and_collinear_lines_do_not_intersect() {
+    let sheet = review("parallel");
+    // AutoCAD 2026's intersection snap found none between collinear lines,
+    // whether they overlap or only meet end to end: their endpoints are
+    // snapped to as endpoints.
+    for kind_of in [SnapKind::Intersection, SnapKind::ApparentIntersection] {
+        let (_, points) = snap(&sheet, with(kind("review/first", kind_of), "review/next"));
+        assert!(points.is_empty(), "{points:#?}");
+    }
+    let (_, points) = snap(
+        &sheet,
+        with(
+            kind("review/upright", SnapKind::Intersection),
+            "review/across",
+        ),
+    );
+    assert_eq!(points.len(), 1, "{points:#?}");
+    close(points[0].at, [4000.0, 0.0, 0.0]);
+}
+
+#[test]
+fn a_line_or_a_circle_tangent_to_an_ellipse_meets_it_once() {
+    let sheet = review("tangent");
+    let (_, points) = snap(
+        &sheet,
+        with(
+            kind("review/touching", SnapKind::Intersection),
+            "review/oval",
+        ),
+    );
+    assert_eq!(points.len(), 1, "{points:#?}");
+    close(points[0].at, [2.0, 0.0, 0.0]);
+    let (_, points) = snap(
+        &sheet,
+        with(
+            kind("review/kissing", SnapKind::Intersection),
+            "review/oval",
+        ),
+    );
+    assert_eq!(points.len(), 1, "{points:#?}");
+    // Where two curves touch, the point is found to the square root of
+    // the arithmetic's precision.
+    assert!((points[0].at.x - 2.0).abs() < 1e-6 && points[0].at.y.abs() < 1e-6);
+}
+
+#[test]
+fn intersections_are_numbered_along_the_first_object() {
+    let sheet = review("order");
+    for kind_of in [SnapKind::Intersection, SnapKind::ApparentIntersection] {
+        let (_, points) = snap(
+            &sheet,
+            with(kind("review/through", kind_of), "review/hairpin"),
+        );
+        let first = named(&points, kind_of, Some("0"));
+        close(first.at, [6001.0, 0.0, 0.0]);
+        close(named(&points, kind_of, Some("1")).at, [6009.0, 0.0, 0.0]);
+    }
+}
+
+#[test]
+fn a_which_on_a_snap_of_one_point_says_it_takes_none() {
+    let sheet = review("which");
+    let e = try_ask(
+        &sheet,
+        Query::Snap(SnapRef {
+            which: Some("x".to_owned()),
+            from: Some(Box::new(kind("review/above", SnapKind::Center))),
+            ..kind("review/parabola", SnapKind::Nearest)
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::UnknownName);
+    assert_eq!(e.field.as_deref(), Some("query.which"));
+    assert!(
+        e.message
+            .contains("one nearest point, which takes no `which`"),
+        "{}",
+        e.message
     );
 }
