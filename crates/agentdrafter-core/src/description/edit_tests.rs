@@ -206,7 +206,9 @@ fn deleting_the_last_object_leaves_an_empty_list() {
 fn a_change_sets_keys_and_takes_them_away() {
     let mut record = file(TEMPLATE);
     let set = keys(json!({"height": 0.3, "layer": null, "name": "heading-text"}));
-    let changed = record.change(ObjectList::Template, 3, &set, 0).unwrap();
+    let changed = record
+        .change(ObjectList::Template, 3, &set, Unit::Mm, 0)
+        .unwrap();
     assert!(changed.edited);
     assert_eq!(changed.from_row, None);
     let after = record.new_text().unwrap().unwrap();
@@ -217,7 +219,7 @@ fn a_change_sets_keys_and_takes_them_away() {
     );
     let contents = keys(json!({"contents": "NEW HEADING"}));
     let changed = record
-        .change(ObjectList::Template, 3, &contents, 1)
+        .change(ObjectList::Template, 3, &contents, Unit::Mm, 1)
         .unwrap();
     assert!(!changed.edited);
     assert_eq!(
@@ -225,11 +227,23 @@ fn a_change_sets_keys_and_takes_them_away() {
         Some(("TITLE".to_owned(), "NEW HEADING".to_owned()))
     );
     let id = record
-        .change(ObjectList::Template, 3, &keys(json!({"id": "x"})), 2)
+        .change(
+            ObjectList::Template,
+            3,
+            &keys(json!({"id": "x"})),
+            Unit::Mm,
+            2,
+        )
         .unwrap_err();
     assert!(id.message.contains("fixed for its life"), "{}", id.message);
     let unknown = record
-        .change(ObjectList::Template, 3, &keys(json!({"colour": 1})), 2)
+        .change(
+            ObjectList::Template,
+            3,
+            &keys(json!({"colour": 1})),
+            Unit::Mm,
+            2,
+        )
         .unwrap_err();
     assert!(
         unknown.message.contains(
@@ -244,7 +258,9 @@ fn a_change_sets_keys_and_takes_them_away() {
 fn multiline_contents_are_written_as_a_literal_block() {
     let mut record = file(TEMPLATE);
     let set = keys(json!({"contents": "NOTES:\n1. CHANGED.\n"}));
-    record.change(ObjectList::Template, 4, &set, 0).unwrap();
+    record
+        .change(ObjectList::Template, 4, &set, Unit::Mm, 0)
+        .unwrap();
     let after = record.new_text().unwrap().unwrap();
     assert!(after.contains(
         "      contents: |\n        NOTES:\n        1. CHANGED.\n      position: [10, 4.5, 0]\n"

@@ -6,8 +6,11 @@
 //! block here is made up.
 
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use acadrust::entities::{EntityType, MultiLeader};
+use acadrust::{CadDocument, DwgReader, DwgWriter};
 use agentdrafter_core::{
     build, build_set_with, check_with, display_list_with, read_dwg, read_sheet_description,
     Attribute, BlockConnection, Bounds, BuildRequest, CheckRequest, DisplayListRequest, ErrorCode,
@@ -48,6 +51,9 @@ blocks:
   CURVE:
     objects:
       - spline: {fit_points: [[0, 0, 0], [5, 5, 0], [10, 0, 0]]}
+  SPOT:
+    objects:
+      - polyline: {points: [{point: [0, 0, 0], bulge: 1}, [0, 0, 0]]}
 ";
 
 /// Block content on both sides, by both connections, scaled and turned,
@@ -372,4 +378,128 @@ objects:
     };
     assert_eq!(values(0), ["FT-101"]);
     assert_eq!(values(1), ["A-1", "B-2"]);
+}
+
+/// Builds `sheet` with the library in a folder of its own, and gives the
+/// folder and the drawing its DWG holds.
+fn built_drawing(test: &str, sheet: &str) -> (PathBuf, CadDocument) {
+    let dir = scratch(test);
+    let path = write(&dir, sheet);
+    build(&BuildRequest {
+        description: path,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    let bytes = fs::read(dir.join("sheet.dwg")).unwrap();
+    let drawing = DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
+    (dir, drawing)
+}
+
+/// The drawing's one multileader.
+fn the_mleader(drawing: &mut CadDocument) -> &mut MultiLeader {
+    let handle = drawing
+        .model_space_entities()
+        .find(|e| matches!(e, EntityType::MultiLeader(_)))
+        .map(|e| e.common().handle)
+        .unwrap();
+    match drawing.get_entity_mut(handle) {
+        Some(EntityType::MultiLeader(m)) => m,
+        _ => unreachable!(),
+    }
+}
+
+/// Writes `drawing` beside the built DWG and reads it as the core does.
+fn read_back(dir: &Path, drawing: &CadDocument) -> agentdrafter_core::DrawingContents {
+    let path = dir.join("changed.dwg");
+    fs::write(&path, DwgWriter::write_to_vec(drawing).unwrap()).unwrap();
+    read_dwg(&path).unwrap()
+}
+
+const ONE: &str = "units: mm
+block_library: blocks.yaml
+objects:
+  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {block: BOXA, attributes: {TAG: TB-1}}}
+";
+
+#[test]
+fn an_attribute_value_is_coded_in_the_dwg_as_an_inserts_is() {
+    let sheet = ONE.replace("TAG: TB-1", "TAG: '%%d 50%'");
+    let (dir, mut drawing) = built_drawing("coded", &sheet);
+    // As an insert's attribute stores it: each `%` of a run of two `%%%`.
+    let m = the_mleader(&mut drawing);
+    assert_eq!(m.block_attributes[0].text, "%%%%%%d 50%");
+    let read = read_dwg(&dir.join("sheet.dwg")).unwrap();
+    assert_eq!(read.objects_not_read, 0, "{read:?}");
+    let Object::MLeader(m) = &read.objects[0] else {
+        panic!("{read:?}")
+    };
+    assert_eq!(m.content.block().unwrap().attributes[0].value, "%%d 50%");
+    // A code the model does not hold, such as AutoCAD's degree sign, is
+    // not read.
+    the_mleader(&mut drawing).block_attributes[0].text = "%%d".into();
+    let read = read_back(&dir, &drawing);
+    assert_eq!(read.objects_not_read, 1, "{read:?}");
+}
+
+#[test]
+fn block_content_out_of_the_leaders_plane_is_not_read() {
+    let (dir, mut drawing) = built_drawing("raised", ONE);
+    let read = read_back(&dir, &drawing);
+    assert_eq!(read.objects_not_read, 0, "{read:?}");
+    let m = the_mleader(&mut drawing);
+    m.context.block_content_location.z = 7.0;
+    m.context.content_base_point.z = 7.0;
+    m.context.transform_matrix[11] = 7.0;
+    let read = read_back(&dir, &drawing);
+    assert_eq!(read.objects_not_read, 1, "{read:?}");
+}
+
+#[test]
+fn block_content_whose_matrix_places_it_elsewhere_is_not_read() {
+    let (dir, mut drawing) = built_drawing("matrix", ONE);
+    the_mleader(&mut drawing).context.transform_matrix[3] += 1.0;
+    let read = read_back(&dir, &drawing);
+    assert_eq!(read.objects_not_read, 1, "{read:?}");
+}
+
+#[test]
+fn block_content_with_no_landing_is_not_read() {
+    let (dir, mut drawing) = built_drawing("no-landing", ONE);
+    // The block where the model would place it with no landing: the
+    // placing moves with the landing's end, 8 to the left.
+    let m = the_mleader(&mut drawing);
+    m.enable_dogleg = false;
+    m.dogleg_length = 0.0;
+    m.context.leader_roots[0].landing_distance = 0.0;
+    m.context.block_content_location.x -= 8.0;
+    m.context.content_base_point.x -= 8.0;
+    m.context.transform_matrix[3] -= 8.0;
+    let read = read_back(&dir, &drawing);
+    assert_eq!(read.objects_not_read, 1, "{read:?}");
+    assert!(read.objects.is_empty(), "{read:?}");
+}
+
+#[test]
+fn a_bulged_segment_that_ends_where_it_starts_places_as_the_pipeline_draws_it() {
+    let sheet = ONE.replace("{block: BOXA, attributes: {TAG: TB-1}}", "{block: SPOT}");
+    let (dir, mut drawing) = built_drawing("spot", &sheet);
+    let m = the_mleader(&mut drawing);
+    let location = m.context.block_content_location;
+    assert!(
+        [location.x, location.y, location.z]
+            .iter()
+            .chain(&m.context.transform_matrix)
+            .all(|v| v.is_finite()),
+        "{location:?} {:?}",
+        m.context.transform_matrix
+    );
+    // It draws a point, which crosses nothing: the point sits at the
+    // landing's end.
+    assert!(
+        (location.x - 28.0).abs() < 1e-9 && (location.y - 10.0).abs() < 1e-9,
+        "{location:?}"
+    );
+    let read = read_dwg(&dir.join("sheet.dwg")).unwrap();
+    assert_eq!(read.objects_not_read, 0, "{read:?}");
 }

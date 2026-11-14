@@ -599,8 +599,9 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         })
         .collect();
     // An arrowhead block that only leaders draw is read with them, and is
-    // neither a block of the drawing's nor counted; one an insert places
-    // is a block like any other.
+    // neither a block of the drawing's nor counted; one an insert or a
+    // multileader's block content places is a block like any other.
+    let content_blocks = leader::content_blocks(&drawing);
     let inserted: Vec<String> = drawing
         .model_space_entities()
         .chain(
@@ -615,7 +616,9 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         })
         .collect();
     let leaders_only = |r: &BlockRecord| {
-        arrow_blocks.contains(&r.handle) && !inserted.contains(&r.name.to_lowercase())
+        arrow_blocks.contains(&r.handle)
+            && !inserted.contains(&r.name.to_lowercase())
+            && !content_blocks.contains(&r.handle)
     };
     let mut read: Vec<Option<Block>> = records.iter().map(|_| None).collect();
     loop {

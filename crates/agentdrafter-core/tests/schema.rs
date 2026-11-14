@@ -268,7 +268,7 @@ const MTEXT_WIDTH: Place = Place {
 
 /// The block library the places on a sheet that names one draw on: a block
 /// `B` with the attribute `TAG`, defined once, and `NOTE`, defined twice.
-const LIBRARY: &str = "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: TAG, position: [0, 0, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 2, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 4, 0], height: 1}}]}\n";
+const LIBRARY: &str = "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: TAG, position: [0, 0, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 2, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 4, 0], height: 1}}]}\n  L: {objects: [{line: {from: [0, -2, 0], to: [0, 2, 0]}}]}\n";
 
 const INSERT_SCALE: Place = Place {
     name: "an insert's scale",
@@ -373,6 +373,24 @@ const TABLE_TITLE: Place = Place {
     json: r#"{"units": "mm", "objects": [{"table": {"position": [0, 0, 0], "columns": [10], "rows": [5], "cells": [["A"]], "title": V}}]}"#,
 };
 
+const BLOCK_CONTENT_LANDING: Place = Place {
+    name: "the landing of a multileader with block content",
+    yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {block: L}, landing: V}\n",
+    json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"mleader": {"leaders": [[[0, 0, 0], [20, 10, 0]]], "content": {"block": "L"}, "landing": V}}]}"#,
+};
+
+const BLOCK_CONTENT_GAP: Place = Place {
+    name: "the gap of a multileader with block content",
+    yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {block: L}, gap: V}\n",
+    json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"mleader": {"leaders": [[[0, 0, 0], [20, 10, 0]]], "content": {"block": "L"}, "gap": V}}]}"#,
+};
+
+const TEXT_CONTENT_GAP: Place = Place {
+    name: "the gap of a multileader with text content",
+    yaml: "units: mm\nobjects:\n  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {text: A}, gap: V}\n",
+    json: r#"{"units": "mm", "objects": [{"mleader": {"leaders": [[[0, 0, 0], [20, 10, 0]]], "content": {"text": "A"}, "gap": V}}]}"#,
+};
+
 const LEADER_ANNOTATION: Place = Place {
     name: "a leader's annotation",
     yaml: "units: mm
@@ -448,6 +466,17 @@ fn cases() -> Vec<Case> {
     cases.extend(vec![
         // A paper: two lengths more than 0, or a standard size and the way
         // it lies, written exactly.
+        // Block content has a landing, more than 0, and no gap; text
+        // content may have both.
+        (&BLOCK_CONTENT_LANDING, "5", json!(5), true),
+        (&BLOCK_CONTENT_LANDING, "'0.2 in'", json!("0.2 in"), true),
+        (&BLOCK_CONTENT_LANDING, "0", json!(0), false),
+        (&BLOCK_CONTENT_LANDING, "0.0", json!(0.0), false),
+        (&BLOCK_CONTENT_LANDING, "'0 mm'", json!("0 mm"), false),
+        (&BLOCK_CONTENT_GAP, "1", json!(1), false),
+        (&BLOCK_CONTENT_GAP, "0", json!(0), false),
+        (&TEXT_CONTENT_GAP, "1", json!(1), true),
+        (&TEXT_CONTENT_GAP, "0", json!(0), true),
         (&PAPER, "[297, 210]", json!([297, 210]), true),
         (&PAPER, "['17 in', '11 in']", json!(["17 in", "11 in"]), true),
         (&PAPER, "['17', 11.5]", json!(["17", 11.5]), true),

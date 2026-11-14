@@ -188,10 +188,8 @@ pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
             },
         }),
     );
-    defs.insert(
-        "mleader".into(),
-        object_def(
-            "A multileader, AutoCAD's MULTILEADER: one or more leader lines from their arrows to \
+    let mut mleader = object_def(
+        "A multileader, AutoCAD's MULTILEADER: one or more leader lines from their arrows to \
              a landing, and multiline text or a block beyond it. The landing runs right when \
              the first leader line's last segment runs right or straight up or down, and left \
              when it runs left; text sits a gap beyond it, attached at its top left or top \
@@ -199,72 +197,81 @@ pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
              places block content. An arrow is placed at a point: pointing it at \
              an object by its ID or name waits for object snaps. A multileader belongs on a \
              sheet, not in a block.",
-            &["leaders", "content"],
-            json!({
-                "leaders": {
-                    "description": "The leader lines: at least one, each a list of at least two \
-                                    points from its arrow's point to where it meets the landing, \
-                                    each point apart from the one before. Every leader line ends \
-                                    at the same point, where the landing starts, and its first \
-                                    segment is at least as long as its arrow, unless the \
-                                    arrowhead is none.",
-                    "type": "array",
-                    "items": leader_points("A leader line's points, its arrow's point first."),
-                    "minItems": 1,
-                },
-                "content": {
-                    "description": "The multileader's content: multiline text, under `text`, or \
-                                    a block of the sheet's block library, under `block`, not \
-                                    both.",
-                    "anyOf": [
-                        {
-                            "description": "Text content: multiline text.",
-                            "type": "object",
-                            "required": ["text"],
-                            "additionalProperties": false,
-                            "properties": {
-                                "text": leader_text(),
-                                "style": text_style_name("the multileader style's `text_style`"),
-                                "height": {
-                                    "$ref": "#/$defs/length_more_than_0",
-                                    "description": "The height of the text's capitals: a length \
-                                                    more than 0. Without it, the multileader \
-                                                    style's `text_height`.",
-                                },
-                                "attachment": attachment("the multileader style's"),
+        &["leaders", "content"],
+        json!({
+            "leaders": {
+                "description": "The leader lines: at least one, each a list of at least two \
+                                points from its arrow's point to where it meets the landing, \
+                                each point apart from the one before. Every leader line ends \
+                                at the same point, where the landing starts, and its first \
+                                segment is at least as long as its arrow, unless the \
+                                arrowhead is none.",
+                "type": "array",
+                "items": leader_points("A leader line's points, its arrow's point first."),
+                "minItems": 1,
+            },
+            "content": {
+                "description": "The multileader's content: multiline text, under `text`, or \
+                                a block of the sheet's block library, under `block`, not \
+                                both.",
+                "anyOf": [
+                    {
+                        "description": "Text content: multiline text.",
+                        "type": "object",
+                        "required": ["text"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "text": leader_text(),
+                            "style": text_style_name("the multileader style's `text_style`"),
+                            "height": {
+                                "$ref": "#/$defs/length_more_than_0",
+                                "description": "The height of the text's capitals: a length \
+                                                more than 0. Without it, the multileader \
+                                                style's `text_height`.",
                             },
+                            "attachment": attachment("the multileader style's"),
                         },
-                        block_content(),
-                    ],
-                },
-                "landing": {
-                    "$ref": "#/$defs/length_not_negative",
-                    "description": "How long the landing is: a length of 0 or more, 0 for none. \
-                                    Without it, the multileader style's.",
-                },
-                "arrowhead": arrowhead("the multileader style's"),
-                "arrow_size": {
-                    "$ref": "#/$defs/length_more_than_0",
-                    "description": "How long the arrowhead is: a length more than 0. Without \
-                                    it, the multileader style's.",
-                },
-                "gap": {
-                    "$ref": "#/$defs/length_not_negative",
-                    "description": "The space between the landing's end and the text: a length \
-                                    of 0 or more. Without it, the multileader style's \
-                                    `landing_gap`.",
-                },
-                "mleader_style": optional_text(json!({
-                    "description": format!(
-                        "The multileader style it draws with: `{STANDARD_MLEADER_STYLE}`, which \
-                         every drawing has, or a name under `mleader_styles`, written exactly as \
-                         it is there. Without it, `{STANDARD_MLEADER_STYLE}`."
-                    ),
-                    "type": TEXT_TYPES,
-                })),
-            }),
-        ),
+                    },
+                    block_content(),
+                ],
+            },
+            "landing": {
+                "$ref": "#/$defs/length_not_negative",
+                "description": "How long the landing is: a length of 0 or more, 0 for none. \
+                                Without it, the multileader style's.",
+            },
+            "arrowhead": arrowhead("the multileader style's"),
+            "arrow_size": {
+                "$ref": "#/$defs/length_more_than_0",
+                "description": "How long the arrowhead is: a length more than 0. Without \
+                                it, the multileader style's.",
+            },
+            "gap": {
+                "$ref": "#/$defs/length_not_negative",
+                "description": "The space between the landing's end and the text: a length \
+                                of 0 or more. Without it, the multileader style's \
+                                `landing_gap`.",
+            },
+            "mleader_style": optional_text(json!({
+                "description": format!(
+                    "The multileader style it draws with: `{STANDARD_MLEADER_STYLE}`, which \
+                     every drawing has, or a name under `mleader_styles`, written exactly as \
+                     it is there. Without it, `{STANDARD_MLEADER_STYLE}`."
+                ),
+                "type": TEXT_TYPES,
+            })),
+        }),
     );
+    // Block content takes no gap, and a landing it gives is more than 0.
+    mleader["if"] = json!({
+        "required": ["content"],
+        "properties": { "content": { "required": ["block"] } },
+    });
+    mleader["then"] = json!({
+        "not": { "required": ["gap"] },
+        "properties": { "landing": { "$ref": "#/$defs/length_more_than_0" } },
+    });
+    defs.insert("mleader".into(), mleader);
     defs.insert(
         "leader".into(),
         object_def(

@@ -1257,8 +1257,8 @@ impl RecordFile {
         kept.into_iter().map(|(_, place)| place).collect()
     }
 
-    /// Sets the keys of the object of `list` at `index`, as operation
-    /// `operation`: each value in `set` replaces the key's, and `null`
+    /// Sets the keys of the object of `list` at `index`, in the declared
+    /// unit `units`, as operation `operation`: each value in `set` replaces the key's, and `null`
     /// takes the key away. A text's contents the template takes from the
     /// row are not set here: the row's value and its new text are returned,
     /// for the caller to set in the sheet's row. So is the text of a
@@ -1270,6 +1270,7 @@ impl RecordFile {
         list: ObjectList,
         index: usize,
         set: &Map<String, Value>,
+        units: Unit,
         operation: usize,
     ) -> Result<Changed, Error> {
         self.state(list);
@@ -1348,7 +1349,9 @@ impl RecordFile {
             }
             if (kind == "mleader" && key == "content") || (kind == "leader" && key == "annotation")
             {
-                if let Some(found) = position.and_then(|p| text_from_row(&keys[p].value, value)) {
+                if let Some(found) =
+                    position.and_then(|p| text_from_row(&keys[p].value, value, units))
+                {
                     from_row = Some(found);
                     from_row_key = if kind == "mleader" {
                         "content"
@@ -1601,6 +1604,7 @@ impl RecordFile {
         list: ObjectList,
         index: usize,
         edit: &LeaderLineEdit,
+        units: Unit,
         operation: usize,
     ) -> Result<String, Error> {
         self.state(list);
@@ -1638,6 +1642,22 @@ impl RecordFile {
                         _ => None,
                     })
                     .ok_or_else(|| record_shape(&kind))?;
+                // Each point is apart from that one, which the operation
+                // appends, as from the one before it.
+                if let Some(at) = point_in(&landing, units) {
+                    if let Some(i) = points.iter().position(|p| *p == at) {
+                        return Err(Error::new(
+                            ErrorCode::BadValue,
+                            format!(
+                                "point {i} of the new leader line is [{}], the point where the \
+                                 multileader's leader lines meet its landing, which the operation \
+                                 appends; each point is apart from it",
+                                at.map(super::number_text).join(", ")
+                            ),
+                        )
+                        .at_field("points"));
+                    }
+                }
                 let mut line: Vec<Node> = points
                     .iter()
                     .map(|p| {
@@ -2331,9 +2351,12 @@ fn row_value_name(node: &Node) -> Option<String> {
 
 /// When `now`, a multileader's content or an older leader's annotation as
 /// the template writes it, takes its `text` from the row, and `new` gives
-/// every other key as `now` does and a text of its own: the row value's
-/// name and the new text, which the sheet's row is to take.
-fn text_from_row(now: &Node, new: &Value) -> Option<(String, String)> {
+/// every other key as `now` does, by value, and a text of its own: the row
+/// value's name and the new text, which the sheet's row is to take. A key
+/// left out or given as null is the same as one written so; a length is
+/// compared in the declared unit `units`, so `0.2` and `0.20`, and `5.08`
+/// and `0.2 in` on a sheet in millimetres, are the same.
+fn text_from_row(now: &Node, new: &Value, units: Unit) -> Option<(String, String)> {
     let Kind::Mapping(entries) = &now.kind else {
         return None;
     };
@@ -2347,17 +2370,71 @@ fn text_from_row(now: &Node, new: &Value) -> Option<(String, String)> {
         Value::Bool(b) => b.to_string(),
         _ => return None,
     };
-    let others: Vec<&Entry> = entries.iter().filter(|e| e.key != "text").collect();
-    if others.len() + 1 != set.len() {
+    let others: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| e.key != "text" && !e.value.is_bare_null())
+        .collect();
+    let given = set
+        .iter()
+        .filter(|(key, value)| key.as_str() != "text" && !value.is_null())
+        .count();
+    if others.len() != given {
         return None;
     }
     others
         .iter()
         .all(|e| {
             set.get(&e.key)
-                .is_some_and(|v| node_of(v).same_as(&e.value))
+                .is_some_and(|v| same_value(&e.value, v, units))
         })
         .then_some((name, text))
+}
+
+/// Whether `value` gives what `node` writes: the same node, or two
+/// numbers, or two lengths in the declared unit `units`, that are equal.
+fn same_value(node: &Node, value: &Value, units: Unit) -> bool {
+    if node.same_as(&node_of(value)) {
+        return true;
+    }
+    let Kind::Scalar(written) = &node.kind else {
+        return false;
+    };
+    let given = match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return false,
+    };
+    let in_units = |text: &str| match parse_length(text) {
+        Ok((value, None)) => Some(value),
+        Ok((value, Some(own))) => Some(own.convert(value, units)),
+        Err(_) => None,
+    };
+    match (in_units(written), in_units(&given)) {
+        (Some(a), Some(b)) => (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0),
+        _ => false,
+    }
+}
+
+/// The point `node` writes, in the declared unit `units`, if it is a list
+/// of three lengths.
+fn point_in(node: &Node, units: Unit) -> Option<[f64; 3]> {
+    let Kind::Sequence(items) = &node.kind else {
+        return None;
+    };
+    let mut point = [0.0; 3];
+    if items.len() != 3 {
+        return None;
+    }
+    for (coordinate, item) in point.iter_mut().zip(items) {
+        let Kind::Scalar(text) = &item.kind else {
+            return None;
+        };
+        *coordinate = match parse_length(text).ok()? {
+            (value, None) => value,
+            (value, Some(own)) => own.convert(value, units),
+        };
+    }
+    Some(point)
 }
 
 fn new_entry(key: &str, value: Node) -> Entry {

@@ -56,7 +56,7 @@ use acadrust::types::{Color, Handle, LineWeight, Vector2, Vector3};
 use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 use acadrust::CadDocument;
 
-use super::text::{dwg_mtext, mtext_code, mtext_contents, style_name};
+use super::text::{dwg_mtext, mtext_code, mtext_contents, style_name, text_code, text_contents};
 use super::{point, vector};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
@@ -628,7 +628,8 @@ pub(super) fn dwg_mleader(
                     let value = block
                         .and_then(|b| b.attribute_value(insert, p))
                         .unwrap_or_default();
-                    let mut attribute = BlockAttribute::new(value);
+                    // Coded as an insert's attribute is.
+                    let mut attribute = BlockAttribute::new(&text_code(value));
                     attribute.attribute_definition_handle = Some(*handle);
                     attribute.index = i16::try_from(k + 1).unwrap_or(i16::MAX);
                     attribute
@@ -955,6 +956,12 @@ pub(super) fn read_mleader(
         return None;
     }
     let block_content = matches!(content, MLeaderContent::Block(_));
+    // Block content with no landing: AutoCAD moves the leaders' end to the
+    // block's base point when it lays it out again, which the model does
+    // not draw, as the description's reader refuses it.
+    if block_content && landing == 0.0 {
+        return None;
+    }
     let read = MLeader {
         leaders,
         content,
@@ -983,14 +990,39 @@ pub(super) fn read_mleader(
             .iter()
             .flatten()
             .chain([&insert.position])
-            .map(|p| p.x.abs().max(p.y.abs()))
+            .map(|p| p.x.abs().max(p.y.abs()).max(p.z.abs()))
             .fold(1.0, f64::max);
         let near = |a: Point3, b: Vector3| {
-            (a.x - b.x).abs() <= reach * 1e-9 && (a.y - b.y).abs() <= reach * 1e-9
+            (a.x - b.x).abs() <= reach * 1e-9
+                && (a.y - b.y).abs() <= reach * 1e-9
+                && (a.z - b.z).abs() <= reach * 1e-9
         };
         if !near(insert.position, context.block_content_location)
             || !near(*base, context.content_base_point)
         {
+            return None;
+        }
+        // The matrix that takes the block's own points to the sheet places
+        // it there too: its turn and scale within a rounding, its move
+        // within the sheet's reach.
+        let own_base = blocks
+            .iter()
+            .find(|b| b.name == insert.block)
+            .map_or(Point3::new(0.0, 0.0, 0.0), |b| b.base_point);
+        let want = block_transform(insert, own_base);
+        let matrix_near =
+            want.iter()
+                .zip(&context.transform_matrix)
+                .enumerate()
+                .all(|(k, (a, b))| {
+                    let within = if k % 4 == 3 {
+                        reach
+                    } else {
+                        insert.scale.max(1.0)
+                    };
+                    (a - b).abs() <= within * 1e-9
+                });
+        if !matrix_near {
             return None;
         }
     }
@@ -1090,7 +1122,7 @@ fn read_block_content(
         if values[k].is_some() || attribute.width != 0.0 {
             return None;
         }
-        values[k] = Some(attribute.text.clone());
+        values[k] = Some(text_contents(&attribute.text)?);
     }
     let attributes = carried
         .iter()
@@ -1324,6 +1356,21 @@ pub(super) fn arrow_blocks(drawing: &CadDocument) -> Vec<Handle> {
                 }
             }
             _ => {}
+        }
+    }
+    handles.retain(|h| !h.is_null());
+    handles
+}
+
+/// The blocks the drawing's multileaders place as their block content,
+/// which are blocks of the drawing's as an insert's are, even when one is
+/// an arrowhead too.
+pub(super) fn content_blocks(drawing: &CadDocument) -> Vec<Handle> {
+    let mut handles = Vec::new();
+    for entity in drawing.model_space_entities() {
+        if let EntityType::MultiLeader(m) = entity {
+            handles.extend(m.block_content_handle);
+            handles.extend(m.context.block_content_handle);
         }
     }
     handles.retain(|h| !h.is_null());

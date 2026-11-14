@@ -183,13 +183,15 @@ fn parameter(degrees: f64, ratio: f64) -> f64 {
 }
 
 /// The arc a polyline's segment from `a` to `b` with `bulge` draws, or the
-/// straight segment.
+/// straight segment. A segment between two points that are the same is
+/// straight, whatever its bulge, as the pipeline draws it: a point, which
+/// crosses nothing.
 fn bulged(a: [f64; 2], b: [f64; 2], bulge: f64) -> Piece {
-    if bulge == 0.0 {
-        return Piece::Segment(a, b);
-    }
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let chord = dx.hypot(dy);
+    if bulge == 0.0 || !bulge.is_finite() || chord == 0.0 {
+        return Piece::Segment(a, b);
+    }
     let theta = 4.0 * bulge.atan();
     // The centre lies along the chord's left normal from its middle.
     let h = chord / 2.0 * (1.0 - bulge * bulge) / (2.0 * bulge);

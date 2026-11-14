@@ -1160,7 +1160,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         }
     }
     match &op.body {
-        Body::Change { set, .. } => match record.change(list, index, set, op.index) {
+        Body::Change { set, .. } => match record.change(list, index, set, units, op.index) {
             Ok(changed) => {
                 let keys: Vec<&str> = set.keys().map(String::as_str).collect();
                 done.message = format!("sets {} of `{id}`{template_note}", keys.join(", "));
@@ -1273,7 +1273,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
             }
         },
         Body::LeaderLine { edit, .. } => {
-            match record.leader_line_edit(list, index, edit, op.index) {
+            match record.leader_line_edit(list, index, edit, units, op.index) {
                 Ok(words) => {
                     if let Some(refusal) = many_paths(files, file, op, "target") {
                         return refusal;
@@ -2854,7 +2854,12 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
             if set.contains_key(key) {
                 format!("set.{within}")
             } else if rest.is_empty() && set.contains_key("contents") {
+                // An error in a row's value is in the text the change gave it.
                 "set.contents".to_owned()
+            } else if rest.is_empty() && set.contains_key("content") {
+                "set.content.text".to_owned()
+            } else if rest.is_empty() && set.contains_key("annotation") {
+                "set.annotation.text".to_owned()
             } else {
                 "set".to_owned()
             }

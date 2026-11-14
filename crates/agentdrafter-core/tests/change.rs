@@ -2978,8 +2978,13 @@ fn leader_lines_are_added_to_and_deleted_from_a_sheets_multileader() {
         assert!(error.message.contains(says), "{}", error.message);
     }
     // A first segment shorter than Standard's 0.18 in arrow, and a point
-    // at the landing, are refused at the points the operation sent.
-    for points in [json!([[2.9, 1.95, 0]]), json!([[3, 2, 0]])] {
+    // at the landing, last or between others, are refused at the points
+    // the operation sent.
+    for points in [
+        json!([[2.9, 1.95, 0]]),
+        json!([[3, 2, 0]]),
+        json!([[1, 1, 0], [3, 2, 0], [2, 3, 0]]),
+    ] {
         let error = failed_operation(
             &set,
             json!({"operations": [
@@ -3153,4 +3158,87 @@ fn a_leaders_text_the_template_takes_from_the_row_is_set_in_that_sheets_row() {
             .text,
         "AREA 200 RENAMED"
     );
+}
+
+#[test]
+fn a_leaders_text_from_the_row_is_set_in_the_row_when_its_other_keys_are_the_same_spelled_otherwise(
+) {
+    let set = demo_set("row-leader-text-spelled");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "add_mleader", "template": "templates/ansi-b.yaml", "id": "titled", "leaders": [[[1, 1, 0], [3, 2, 0]]], "content": {"text": {"row": "TITLE"}, "height": "0.20"}},
+            {"op": "add_leader", "template": "templates/ansi-b.yaml", "id": "numbered", "points": [[5, 1, 0], [6, 3, 0]], "annotation": {"text": {"row": "SHEET"}, "height": "5.08 mm"}},
+        ]}),
+    );
+    let template_before = fs::read_to_string(set.join("templates/ansi-b.yaml")).unwrap();
+    assert!(template_before.contains("0.20"), "{template_before}");
+    let report = lands(
+        &set,
+        json!({"operations": [
+            {"op": "change", "target": {"id": "DEMO-002/titled"}, "set": {"content": {"text": "RENAMED", "height": 0.2}}},
+            {"op": "change", "target": {"id": "DEMO-002/numbered"}, "set": {"annotation": {"text": "2 OF 9", "height": "0.2 in", "style": null}}},
+        ]}),
+    );
+    for operation in &report.operations {
+        assert!(operation.row_value.is_some(), "{}", operation.message);
+        assert_eq!(operation.sheets, ["DEMO-002"]);
+    }
+    let template = fs::read_to_string(set.join("templates/ansi-b.yaml")).unwrap();
+    assert_eq!(template, template_before);
+    assert_eq!(
+        mleader_of(&set, "DEMO-002", "titled")
+            .content
+            .text()
+            .unwrap()
+            .text,
+        "RENAMED"
+    );
+    assert_eq!(
+        mleader_of(&set, "DEMO-001", "titled")
+            .content
+            .text()
+            .unwrap()
+            .text,
+        "AREA 100 GENERAL ARRANGEMENT"
+    );
+    let Object::Leader(numbered) = &built(&set, "DEMO-002")["DEMO-002/numbered"] else {
+        panic!()
+    };
+    assert_eq!(numbered.annotation.as_ref().unwrap().text, "2 OF 9");
+}
+
+#[test]
+fn a_leaders_text_from_the_row_that_shows_nothing_fails_at_the_text() {
+    let set = demo_set("row-leader-text-blank");
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "add_mleader", "template": "templates/ansi-b.yaml", "id": "titled", "leaders": [[[1, 1, 0], [3, 2, 0]]], "content": {"text": {"row": "TITLE"}, "height": 0.2}},
+            {"op": "add_leader", "template": "templates/ansi-b.yaml", "id": "numbered", "points": [[5, 1, 0], [6, 3, 0]], "annotation": {"text": {"row": "SHEET"}, "height": 0.2}},
+        ]}),
+    );
+    for (target, set_key, field) in [
+        (
+            "DEMO-002/titled",
+            "content",
+            "operations[0].set.content.text",
+        ),
+        (
+            "DEMO-002/numbered",
+            "annotation",
+            "operations[0].set.annotation.text",
+        ),
+    ] {
+        let reply = apply(
+            &set,
+            json!({"operations": [
+                {"op": "change", "target": {"id": target}, "set": {set_key: {"text": "   ", "height": 0.2}}},
+            ]}),
+        );
+        let report = reply.result.expect("a report");
+        assert_eq!(report.failed, 1, "{report:#?}");
+        let error = report.sheets.iter().find_map(|s| s.error.as_ref()).unwrap();
+        assert_eq!(error.field.as_deref(), Some(field), "{error:?}");
+    }
 }
