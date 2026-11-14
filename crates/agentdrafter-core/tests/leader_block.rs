@@ -51,6 +51,10 @@ blocks:
   CURVE:
     objects:
       - spline: {fit_points: [[0, 0, 0], [5, 5, 0], [10, 0, 0]]}
+  DEGREES:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 5}
+      - attdef: {tag: T, prompt: T, default: '%%d', position: [0, 0, 0], height: 2.5, justify: middle_center}
   SPOT:
     objects:
       - polyline: {points: [{point: [0, 0, 0], bulge: 1}, [0, 0, 0]]}
@@ -423,23 +427,128 @@ objects:
 ";
 
 #[test]
-fn an_attribute_value_is_coded_in_the_dwg_as_an_inserts_is() {
-    let sheet = ONE.replace("TAG: TB-1", "TAG: '%%d 50%'");
-    let (dir, mut drawing) = built_drawing("coded", &sheet);
-    // As an insert's attribute stores it: each `%` of a run of two `%%%`.
-    let m = the_mleader(&mut drawing);
-    assert_eq!(m.block_attributes[0].text, "%%%%%%d 50%");
+fn a_block_content_value_with_two_percent_signs_is_refused_at_its_field() {
+    let dir = scratch("percent-refused");
+    let one = |content: &str| {
+        format!(
+            "units: mm\nblock_library: blocks.yaml\nobjects:\n  - mleader: {{leaders: [[[0, 0, 0], [20, 10, 0]]], content: {content}}}\n"
+        )
+    };
+    // AutoCAD 2026 draws `%%d` in block content as a degree sign however
+    // it is escaped, and `%%%` as more percent signs.
+    for (content, field) in [
+        (
+            "{block: BOXA, attributes: {TAG: '90%%d'}}",
+            "objects[0].mleader.content.attributes.TAG",
+        ),
+        (
+            "{block: BOXA, attributes: {tag: 'A%%%B'}}",
+            "objects[0].mleader.content.attributes.tag",
+        ),
+        (
+            "{block: NOTES, attributes: {N: ['50%', '%%c6']}}",
+            "objects[0].mleader.content.attributes.N[1]",
+        ),
+        // A definition's default that holds `%%` is refused at its tag.
+        (
+            "{block: DEGREES}",
+            "objects[0].mleader.content.attributes.T",
+        ),
+    ] {
+        let error = read_sheet_description(&write(&dir, &one(content))).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BadValue, "{}", error.message);
+        assert_eq!(error.field.as_deref(), Some(field), "{}", error.message);
+        assert!(
+            error
+                .message
+                .contains("AutoCAD draws in a multileader's block content as a control code"),
+            "{}",
+            error.message
+        );
+    }
+    // The same block's default is given a value of its own.
+    read_sheet_description(&write(
+        &dir,
+        &one("{block: DEGREES, attributes: {T: '90'}}"),
+    ))
+    .unwrap();
+}
+
+#[test]
+fn a_block_content_value_with_one_percent_sign_reads_back_as_it_was_written() {
+    let sheet = ONE.replace("TAG: TB-1", "TAG: '50% A%B'");
+    let (dir, mut drawing) = built_drawing("percent", &sheet);
+    // Written as it is: AutoCAD draws a lone `%` as itself.
+    assert_eq!(
+        the_mleader(&mut drawing).block_attributes[0].text,
+        "50% A%B"
+    );
     let read = read_dwg(&dir.join("sheet.dwg")).unwrap();
     assert_eq!(read.objects_not_read, 0, "{read:?}");
     let Object::MLeader(m) = &read.objects[0] else {
         panic!("{read:?}")
     };
-    assert_eq!(m.content.block().unwrap().attributes[0].value, "%%d 50%");
-    // A code the model does not hold, such as AutoCAD's degree sign, is
-    // not read.
-    the_mleader(&mut drawing).block_attributes[0].text = "%%d".into();
-    let read = read_back(&dir, &drawing);
-    assert_eq!(read.objects_not_read, 1, "{read:?}");
+    assert_eq!(m.content.block().unwrap().attributes[0].value, "50% A%B");
+}
+
+#[test]
+fn a_multileader_whose_block_content_value_holds_two_percent_signs_is_not_read() {
+    let (dir, mut drawing) = built_drawing("percent-not-read", ONE);
+    for raw in ["90%%d", "A%%B", "%%%"] {
+        the_mleader(&mut drawing).block_attributes[0].text = raw.into();
+        let read = read_back(&dir, &drawing);
+        assert_eq!(read.objects_not_read, 1, "{raw}: {read:?}");
+        assert!(read.objects.is_empty(), "{raw}: {read:?}");
+    }
+}
+
+#[test]
+fn a_row_value_that_puts_two_percent_signs_in_block_content_fails_at_the_rows_value() {
+    let dir = scratch("percent-row");
+    let set = dir.join("set");
+    fs::create_dir_all(set.join("templates")).unwrap();
+    fs::write(set.join("blocks.yaml"), LIBRARY).unwrap();
+    fs::write(
+        set.join("set.yaml"),
+        "units: mm\noutput: dwg\nrows: rows.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        set.join("rows.yaml"),
+        "rows:\n  - sheet: S-1\n    template: templates/t.yaml\n    values: {TAG: FT-101}\n  - sheet: S-2\n    template: templates/t.yaml\n    values: {TAG: '90%%d'}\n",
+    )
+    .unwrap();
+    fs::write(
+        set.join("templates/t.yaml"),
+        "units: mm
+block_library: ../blocks.yaml
+objects:
+  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {block: BOXA, attributes: {TAG: {row: TAG}}}}
+",
+    )
+    .unwrap();
+    let reply = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: false,
+        },
+        &Settings::default(),
+    );
+    let report = reply.result.unwrap();
+    assert_eq!(
+        (report.built, report.failed),
+        (1, 1),
+        "{:#?}",
+        report.sheets
+    );
+    let error = report.sheets[1].error.as_ref().unwrap();
+    assert_eq!(error.code, ErrorCode::BadValue, "{error:?}");
+    assert_eq!(
+        error.field.as_deref(),
+        Some("rows[1].values.TAG"),
+        "{error:?}"
+    );
+    assert!(error.message.contains("control code"), "{error:?}");
 }
 
 #[test]

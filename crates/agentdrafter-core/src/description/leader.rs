@@ -5,16 +5,16 @@
 //! objects of a sheet: `objects.rs` lists them and hands their keys to
 //! [`mleader`] and [`leader`] here. Both belong on a sheet, not in a block.
 
-use super::blocks::{attributes, block_named, scale_and_rotation, Noticed};
+use super::blocks::{attributes, block_named, scale_and_rotation, tag_in_capitals, Noticed};
 use super::layers::{name_error, named_entries, object_color, object_lineweight};
-use super::strict_yaml::{index_path, key_path, Node};
+use super::strict_yaml::{index_path, key_path, Kind, Node};
 use super::text::{contents_problem, text_style_at};
 use super::{at, bad_value, choice, length, points, scalar, Fields};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arrowhead, BlockConnection, BlockLibrary, Leader, LeaderAnnotation, LeaderAttachment, MLeader,
-    MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, Outline, Point3,
-    STANDARD_MLEADER_STYLE,
+    Arrowhead, Attribute, BlockConnection, BlockLibrary, Leader, LeaderAnnotation,
+    LeaderAttachment, MLeader, MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, Outline,
+    Point3, STANDARD_MLEADER_STYLE,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
@@ -372,6 +372,7 @@ fn block_content(
         ));
     }
     let attributes = attributes(fields, block, library, noticed)?;
+    refuse_control_codes(fields, &block.name, &attributes)?;
     let (scale, rotation) = scale_and_rotation(fields)?;
     Ok(MLeaderBlock {
         block: block.name.clone(),
@@ -380,6 +381,60 @@ fn block_content(
         rotation,
         connection: connection(fields)?.unwrap_or_default(),
     })
+}
+
+/// Refuses an attribute value of block content that holds `%%`. In a
+/// multileader's block content AutoCAD 2026 draws `%%d`, `%%c` and `%%p`
+/// as symbols whatever is written round them: `%%%`, which escapes a
+/// percent sign in an insert's attribute, does not here, nor does
+/// `\U+0025`. So such a value cannot be written for AutoCAD to draw as the
+/// model does, and is refused at the attribute's field, or at its tag when
+/// it is the definition's default.
+fn refuse_control_codes(fields: &Fields, block: &str, values: &[Attribute]) -> Result<(), Error> {
+    let entries = match fields.get("attributes").map(|n| &n.kind) {
+        Some(Kind::Mapping(entries)) => entries.as_slice(),
+        _ => &[],
+    };
+    for (k, attribute) in values.iter().enumerate() {
+        if !attribute.value.contains("%%") {
+            continue;
+        }
+        let tag = &attribute.tag;
+        let j = values[..k].iter().filter(|a| a.tag == *tag).count();
+        let many = values.iter().filter(|a| a.tag == *tag).count() > 1;
+        let entry = entries.iter().find(|e| tag_in_capitals(&e.key) == *tag);
+        let key = entry.map_or(tag.as_str(), |e| e.key.as_str());
+        let mut path = key_path(&fields.path_of("attributes"), key);
+        if many {
+            path = index_path(&path, j);
+        }
+        let node = entry
+            .map(|e| &e.value)
+            .and_then(|value| match (&value.kind, many) {
+                (Kind::Sequence(items), true) => items.get(j),
+                (_, false) => Some(value),
+                _ => None,
+            })
+            .filter(|node| !node.is_bare_null());
+        let why = format!(
+            "`{}` holds `%%`, which AutoCAD draws in a multileader's block content as a control \
+             code, `%%d` as a degree sign, `%%c` as a diameter sign and `%%p` as a plus or minus \
+             sign, however it is escaped; a value of block content holds no `%%`",
+            attribute.value
+        );
+        return Err(match node {
+            Some(node) => bad_value(node, &path, format!("the attribute `{tag}`'s value {why}")),
+            None => Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "the attribute `{tag}` of block `{block}` takes its definition's default, \
+                     which {why}; give it a value"
+                ),
+            )
+            .at_field(path),
+        });
+    }
+    Ok(())
 }
 
 /// The block connection under `connection`, if it is given.

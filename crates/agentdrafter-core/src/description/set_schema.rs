@@ -254,9 +254,12 @@ pub(crate) fn template_schema() -> Value {
             { "type": "array", "items": one },
         ],
     });
-    // So may a multileader's block content's.
+    // So may a multileader's block content's, each with no `%%`.
+    let content = serde_json::to_string(&defs["insert"]["properties"]["attributes"])
+        .expect("a schema is JSON")
+        .replace("#/$defs/attribute_value", "#/$defs/content_attribute_value");
     defs["mleader"]["properties"]["content"]["anyOf"][1]["properties"]["attributes"] =
-        defs["insert"]["properties"]["attributes"].clone();
+        serde_json::from_str(&content).expect("a schema is JSON");
     // A table's cell, or its text, may be a value from the row.
     let row_value = json!({ "$ref": "#/$defs/row_value" });
     if let Some(choices) = defs["table_cell"]["anyOf"].as_array_mut() {

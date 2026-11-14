@@ -107,10 +107,10 @@ fn block_content() -> Value {
                 "propertyNames": { "$ref": "#/$defs/attribute_tag" },
                 "additionalProperties": {
                     "anyOf": [
-                        { "$ref": "#/$defs/attribute_value" },
+                        { "$ref": "#/$defs/content_attribute_value" },
                         {
                             "type": "array",
-                            "items": { "$ref": "#/$defs/attribute_value" },
+                            "items": { "$ref": "#/$defs/content_attribute_value" },
                         },
                     ],
                 },
@@ -143,6 +143,16 @@ fn block_content() -> Value {
 /// Adds the definitions of a multileader style, a multileader and an older
 /// leader to `defs`.
 pub(super) fn leader_defs(defs: &mut Map<String, Value>) {
+    defs.insert(
+        "content_attribute_value".into(),
+        json!({
+            "description": "A block content's attribute value: an attribute's value with no \
+                            `%%`, which AutoCAD draws in a multileader's block content as a \
+                            control code, `%%d` as a degree sign, however it is escaped.",
+            "allOf": [{ "$ref": "#/$defs/attribute_value" }],
+            "not": { "type": "string", "pattern": "%%" },
+        }),
+    );
     defs.insert(
         "mleader_style".into(),
         json!({

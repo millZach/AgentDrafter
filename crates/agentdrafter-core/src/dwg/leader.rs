@@ -56,7 +56,7 @@ use acadrust::types::{Color, Handle, LineWeight, Vector2, Vector3};
 use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 use acadrust::CadDocument;
 
-use super::text::{dwg_mtext, mtext_code, mtext_contents, style_name, text_code, text_contents};
+use super::text::{dwg_mtext, mtext_code, mtext_contents, style_name, text_contents};
 use super::{point, vector};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
@@ -628,8 +628,9 @@ pub(super) fn dwg_mleader(
                     let value = block
                         .and_then(|b| b.attribute_value(insert, p))
                         .unwrap_or_default();
-                    // Coded as an insert's attribute is.
-                    let mut attribute = BlockAttribute::new(&text_code(value));
+                    // As it is: AutoCAD escapes no `%%` here, and the
+                    // description's reader refuses a value that holds one.
+                    let mut attribute = BlockAttribute::new(value);
                     attribute.attribute_definition_handle = Some(*handle);
                     attribute.index = i16::try_from(k + 1).unwrap_or(i16::MAX);
                     attribute
@@ -1120,6 +1121,10 @@ fn read_block_content(
             .iter()
             .position(|h| Some(*h) == attribute.attribute_definition_handle)?;
         if values[k].is_some() || attribute.width != 0.0 {
+            return None;
+        }
+        // `%%` AutoCAD draws as a control code, however it is escaped.
+        if attribute.text.contains("%%") {
             return None;
         }
         values[k] = Some(text_contents(&attribute.text)?);

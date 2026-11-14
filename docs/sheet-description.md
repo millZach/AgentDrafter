@@ -496,7 +496,7 @@ A multileader's content may be a block of the sheet's block library instead of t
 | Key | Required | What it is |
 |---|---|---|
 | `block` | yes | The name of a block in the block library, written exactly as it is there. |
-| `attributes` | no | The values of the block's attributes, written as an [insert's](#inserts) are: a tag the block defines more than once takes a list, a tag in lowercase is taken in capitals, and an attribute left out takes its definition's default. In a template, a value may come from the row, `{row: NAME}`. |
+| `attributes` | no | The values of the block's attributes, written as an [insert's](#inserts) are: a tag the block defines more than once takes a list, a tag in lowercase is taken in capitals, and an attribute left out takes its definition's default. A value holds no `%%`: in block content AutoCAD 2026 draws `%%d`, `%%c` and `%%p` as symbols however they are escaped, so such a value, or a default that holds one, is refused. In a template, a value may come from the row, `{row: NAME}`, and a row's value that puts `%%` there is refused at the row's value. |
 | `scale` | no | How much the block is enlarged, the same along every axis: a number more than 0. Without it, 1. |
 | `rotation` | no | An angle: degrees anticlockwise from the X axis. Without it, 0. |
 | `connection` | no | How the block meets the landing, AutoCAD's block connection type: `extents`, by the centre of the block's extents, AutoCAD's default; or `insertion`, by its base point. Without it, `extents`. |
@@ -511,7 +511,7 @@ The block draws as an insert of it draws ([Inserts](#inserts)): its objects on l
 
 A block of text, multiline text or a constant attribute is refused as content, and so is one that inserts a block with attributes: where AutoCAD's landing meets letters depends on the font's outline. So is a block with a spline, whose extents AutoCAD takes past its curve. Block content needs a landing: a multileader with block content and a landing of 0, its own or its style's, is refused, since AutoCAD connected one to the block's own point instead, and it takes no `gap`.
 
-The DWG holds the multileader's block content as AutoCAD 2026 wrote its own: the block, where its base point sits, its scale, rotation and connection, and a value for each of the block's attribute definitions, by the definition and its place among them. AutoCAD opened made-up multileaders with block content without recovery, its audit found no errors, and laying each out again moved no block.
+The DWG holds the multileader's block content as AutoCAD 2026 wrote its own: the block, where its base point sits, its scale, rotation and connection, and a value for each of the block's attribute definitions, by the definition and its place among them, as it is written: AutoCAD escapes no `%%` there, not with `%%%` as in an insert's attribute nor with `\U+0025`, which is why a value with `%%` is refused. A multileader whose block content's value holds `%%` is not read. AutoCAD opened made-up multileaders with block content without recovery, its audit found no errors, and laying each out again moved no block.
 
 An older leader takes these keys:
 

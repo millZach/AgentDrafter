@@ -268,7 +268,7 @@ const MTEXT_WIDTH: Place = Place {
 
 /// The block library the places on a sheet that names one draw on: a block
 /// `B` with the attribute `TAG`, defined once, and `NOTE`, defined twice.
-const LIBRARY: &str = "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: TAG, position: [0, 0, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 2, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 4, 0], height: 1}}]}\n  L: {objects: [{line: {from: [0, -2, 0], to: [0, 2, 0]}}]}\n";
+const LIBRARY: &str = "units: mm\nblocks:\n  B: {objects: [{attdef: {tag: TAG, position: [0, 0, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 2, 0], height: 1}}, {attdef: {tag: NOTE, position: [0, 4, 0], height: 1}}]}\n  L: {objects: [{line: {from: [0, -2, 0], to: [0, 2, 0]}}]}\n  P: {objects: [{line: {from: [0, -2, 0], to: [0, 2, 0]}}, {attdef: {tag: TAG, position: [0, 0, 0], height: 1}}]}\n";
 
 const INSERT_SCALE: Place = Place {
     name: "an insert's scale",
@@ -385,6 +385,12 @@ const BLOCK_CONTENT_GAP: Place = Place {
     json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"mleader": {"leaders": [[[0, 0, 0], [20, 10, 0]]], "content": {"block": "L"}, "gap": V}}]}"#,
 };
 
+const BLOCK_CONTENT_VALUE: Place = Place {
+    name: "an attribute value of a multileader's block content",
+    yaml: "units: mm\nblock_library: lib.yaml\nobjects:\n  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {block: P, attributes: {TAG: V}}}\n",
+    json: r#"{"units": "mm", "block_library": "lib.yaml", "objects": [{"mleader": {"leaders": [[[0, 0, 0], [20, 10, 0]]], "content": {"block": "P", "attributes": {"TAG": V}}}}]}"#,
+};
+
 const TEXT_CONTENT_GAP: Place = Place {
     name: "the gap of a multileader with text content",
     yaml: "units: mm\nobjects:\n  - mleader: {leaders: [[[0, 0, 0], [20, 10, 0]]], content: {text: A}, gap: V}\n",
@@ -475,6 +481,14 @@ fn cases() -> Vec<Case> {
         (&BLOCK_CONTENT_LANDING, "'0 mm'", json!("0 mm"), false),
         (&BLOCK_CONTENT_GAP, "1", json!(1), false),
         (&BLOCK_CONTENT_GAP, "0", json!(0), false),
+        // Block content's attribute values hold no `%%`, which AutoCAD
+        // draws there as a control code.
+        (&BLOCK_CONTENT_VALUE, "'50%'", json!("50%"), true),
+        (&BLOCK_CONTENT_VALUE, "'A%B'", json!("A%B"), true),
+        (&BLOCK_CONTENT_VALUE, "12", json!(12), true),
+        (&BLOCK_CONTENT_VALUE, "'90%%d'", json!("90%%d"), false),
+        (&BLOCK_CONTENT_VALUE, "'A%%%B'", json!("A%%%B"), false),
+        (&ATTRIBUTE_VALUE, "'90%%d'", json!("90%%d"), true),
         (&TEXT_CONTENT_GAP, "1", json!(1), true),
         (&TEXT_CONTENT_GAP, "0", json!(0), true),
         (&PAPER, "[297, 210]", json!([297, 210]), true),
