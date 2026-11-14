@@ -24,7 +24,8 @@ use serde_json::Value;
 use super::commit::Replacement;
 use super::journal::{commit_change_set, HowChanged, Landing, ObjectChanged, SheetFailed};
 use super::operations::{
-    op_error, read_change_set, AddTo, BlockOp, Body, Kind, Operation, Table, TableOp, Target,
+    op_error, read_change_set, AddTo, BlockOp, Body, Import, Kind, Operation, Table, TableOp,
+    Target,
 };
 use super::MARK_FILE;
 use super::{
@@ -40,6 +41,7 @@ use crate::description::{
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
+use crate::import::{drawing_unit, is_dxf, plan, write_plan, BlocksImported, Existing};
 use crate::set::{set_in_mark, Notice, SET_SETTINGS_FILE};
 use crate::settings::Settings;
 use crate::units::Unit;
@@ -404,6 +406,8 @@ struct Done {
     /// The inserts a block operation brought into line.
     inserts: Vec<String>,
     attributes_removed: Vec<AttributeRemoved>,
+    /// What an import_blocks imported.
+    imported: Option<BlocksImported>,
     message: String,
 }
 
@@ -731,6 +735,7 @@ pub(super) fn apply(
                     .map(|d| d.ids_written.clone())
                     .unwrap_or_default(),
                 inserts: d.as_ref().map(|d| d.inserts.clone()).unwrap_or_default(),
+                imported: d.as_ref().and_then(|d| d.imported.clone()),
                 attributes_removed: d.map(|d| d.attributes_removed).unwrap_or_default(),
                 error: if included[i] {
                     None
@@ -991,6 +996,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 ids_written: Vec::new(),
                 inserts: Vec::new(),
                 attributes_removed: Vec::new(),
+                imported: None,
                 message: format!("adds {} {object}, `{id}`, {place}", article(object)),
             }),
             sheets,
@@ -1020,11 +1026,21 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
     }
 
     if let Body::Block {
+        library,
+        import: Some(import),
+        ..
+    } = &op.body
+    {
+        return apply_import(at, op, library.as_deref(), import);
+    }
+
+    if let Body::Block {
         op: block_op,
         library,
         name,
         base_point,
         objects,
+        ..
     } = &op.body
     {
         return apply_block(
@@ -1123,6 +1139,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         ids_written: Vec::new(),
         inserts: Vec::new(),
         attributes_removed: Vec::new(),
+        imported: None,
         message: String::new(),
     };
     let mut sheets = reach.clone();
@@ -1570,6 +1587,7 @@ fn apply_table(
             ids_written: Vec::new(),
             inserts: Vec::new(),
             attributes_removed: Vec::new(),
+            imported: None,
             message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
         }),
         sheets,
@@ -1660,6 +1678,7 @@ fn apply_block(
         }
         (BlockOp::Sync, None) => names.clone(),
         (BlockOp::Add | BlockOp::Redefine, None) => unreachable!("read with a name"),
+        (BlockOp::Import, _) => unreachable!("an import is applied by apply_import"),
     };
     let synced = if block_op == BlockOp::Add {
         Synced::default()
@@ -1743,7 +1762,169 @@ fn apply_block(
             ids_written: Vec::new(),
             inserts: synced.inserts,
             attributes_removed: synced.removed,
+            imported: None,
             message: format!("{what}{removed}{on}"),
+        }),
+        sheets,
+        refuse: false,
+    }
+}
+
+/// Applies an import_blocks operation: the blocks of the drawing `import`
+/// names, planned and written into the block library `library` names as
+/// `agentdrafter import-blocks` writes them, then, for each block it
+/// replaced, every insert brought into line as redefine_block brings them.
+fn apply_import(
+    at: &mut Attempt,
+    op: &Operation,
+    library: Option<&str>,
+    import: &Import,
+) -> Applied {
+    let files = at.files;
+    let l = files.library(library).expect("checked before");
+    let sheets = files.libraries[l].sheets.clone();
+    let written = files.libraries[l].written.clone();
+    let fail = |e: Error, field: &str| Applied {
+        sheets: sheets.clone(),
+        outcome: Err(op_error(op.index, op.spec.name, e.code, e.message, field)),
+        refuse: false,
+    };
+    if let Some(refusal) = library_many_paths(files, l, op) {
+        return refusal;
+    }
+    let from = files.folder.join(&import.from);
+    let in_from = |e: Error| Error::new(e.code, format!("`{}`: {}", import.from, e.message));
+    let dxf = match is_dxf(&from) {
+        Ok(dxf) => dxf,
+        Err(e) => return fail(e, "from"),
+    };
+    let drawing = match crate::dwg::read_blocks(&from, dxf) {
+        Ok(drawing) => drawing,
+        Err(e) => return fail(in_from(e), "from"),
+    };
+    let units = match drawing_unit(&drawing, import.units, "units") {
+        Ok(units) => units,
+        Err(e) => return fail(in_from(e), "units"),
+    };
+    if units != files.units {
+        return fail(
+            Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "`{}` is in {units}, and the drawing set in {}; blocks are imported into a \
+                     set's library in the set's unit, since converting them from one unit to \
+                     another is not offered yet",
+                    import.from, files.units
+                ),
+            ),
+            "from",
+        );
+    }
+    let record = match at.library(l) {
+        Ok(record) => record,
+        Err(e) => return fail(e, ""),
+    };
+    let path = record.path.clone();
+    let existing = match record.current_text().and_then(|text| Existing::read(&text)) {
+        Ok(existing) => existing,
+        Err(e) => return fail(e, ""),
+    };
+    let planned = match plan(
+        &drawing,
+        &existing,
+        &import.blocks,
+        import.replace,
+        "replace",
+    ) {
+        Ok(planned) => planned,
+        Err(e) => {
+            let field = if e.code == ErrorCode::UnknownName {
+                "blocks"
+            } else {
+                ""
+            };
+            return fail(e, field);
+        }
+    };
+    if let Err(e) = write_plan(record, &planned) {
+        return fail(e, "");
+    }
+    for block in &planned.blocks {
+        at.blocks.push((l, block.name.clone(), op.index));
+    }
+    let replaced = planned.replaced();
+    let synced = if replaced.is_empty() {
+        Synced::default()
+    } else {
+        match sync(at, l, &replaced, op) {
+            Ok(synced) => synced,
+            Err(applied) => return *applied,
+        }
+    };
+    let imported = planned.imported;
+    let names = |blocks: &[crate::import::ImportedBlock]| {
+        blocks
+            .iter()
+            .map(|b| format!("`{}`", b.name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut what = vec![];
+    if !imported.blocks_added.is_empty() {
+        what.push(format!("adds {}", names(&imported.blocks_added)));
+    }
+    if !imported.blocks_replaced.is_empty() {
+        let reached = match synced.inserts.len() {
+            1 => "1 insert".to_owned(),
+            n => format!("{n} inserts"),
+        };
+        what.push(format!(
+            "replaces {}, reaching {reached}",
+            names(&imported.blocks_replaced)
+        ));
+    }
+    if what.is_empty() {
+        what.push("imports no block".to_owned());
+    }
+    let left_out: Vec<String> = imported
+        .not_carried
+        .iter()
+        .map(|n| format!("{} {} in `{}`", n.count, n.object_type, n.block))
+        .collect();
+    let left_out = if left_out.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; leaves out what the core cannot carry: {}",
+            left_out.join(", ")
+        )
+    };
+    let names_of = files.names(&sheets);
+    let on = if names_of.is_empty() {
+        String::new()
+    } else {
+        let refs: Vec<&str> = names_of.iter().map(String::as_str).collect();
+        format!(
+            ", so on every sheet whose template names it: {}",
+            quoted_list(&refs)
+        )
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: None,
+            before: None,
+            after: None,
+            row_value: None,
+            ids_written: Vec::new(),
+            inserts: synced.inserts,
+            attributes_removed: synced.removed,
+            imported: Some(imported),
+            message: format!(
+                "imports from `{}` into the block library `{written}`: {}{left_out}{on}",
+                import.from,
+                what.join("; ")
+            ),
         }),
         sheets,
         refuse: false,
@@ -1898,7 +2079,6 @@ fn sync(
         let n = count(block, &given.tag)?;
         given.unfitted(n).map(|gone| (n, gone))
     };
-    let synced = |block: &str| carried.iter().any(|(b, _)| b == block);
     // The blocks an insert on a sheet reaches through: these, and every
     // block of the library that nests one of them, however deep, as the
     // library holds them now. An insert of any of them draws as the
@@ -1922,31 +2102,7 @@ fn sync(
     let mut removed = Vec::new();
 
     // The library's own blocks, whose definitions insert these.
-    let library_path = record.path.display().to_string();
-    let nested: Vec<(String, usize, GivenValue, usize, Removed)> = record
-        .block_inserts()
-        .into_iter()
-        .filter(|(_, insert)| synced(&insert.block))
-        .flat_map(|(outer, insert)| {
-            let block = insert.block.clone();
-            let index = insert.index;
-            insert
-                .values
-                .into_iter()
-                .filter_map(|given| {
-                    let (n, gone) = unfit(&block, &given)?;
-                    Some((outer.clone(), index, given, n, gone))
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    for (outer, index, given, n, gone) in nested {
-        record
-            .fit_block_attribute(&outer, index, &given.key, n)
-            .map_err(fail)?;
-        let field = format!("blocks.{outer}.objects[{index}]");
-        removed.extend(removals(&library_path, &field, &[], &given.tag, gone));
-    }
+    removed.extend(fit_library_inserts(record, blocks).map_err(fail)?);
 
     // Each template that names the library: its inserts are on every
     // sheet built from it.
@@ -2023,6 +2179,48 @@ fn sync(
         inserts: reached.into_iter().map(|(_, id)| id).collect(),
         removed,
     })
+}
+
+/// Brings each insert among the objects of the blocks of the block
+/// library `record` that places one of `blocks` into line with that
+/// block's definition as `record` writes it now, as an attsync does: a
+/// value it gives for a tag the block no longer carries, or more values
+/// than the block carries the tag, is removed. Gives each value removed.
+pub(crate) fn fit_library_inserts(
+    record: &mut RecordFile,
+    blocks: &[String],
+) -> Result<Vec<AttributeRemoved>, Error> {
+    let carried: Vec<(String, Vec<String>)> = blocks
+        .iter()
+        .map(|b| (b.clone(), record.block_carried_tags(b).unwrap_or_default()))
+        .collect();
+    let library_path = record.path.display().to_string();
+    let nested: Vec<(String, usize, GivenValue, usize, Removed)> = record
+        .block_inserts()
+        .into_iter()
+        .filter_map(|(outer, insert)| {
+            let (_, tags) = carried.iter().find(|(b, _)| *b == insert.block)?;
+            let index = insert.index;
+            let fitted: Vec<_> = insert
+                .values
+                .into_iter()
+                .filter_map(|given| {
+                    let n = tags.iter().filter(|t| **t == given.tag).count();
+                    let gone = given.unfitted(n)?;
+                    Some((outer.clone(), index, given, n, gone))
+                })
+                .collect();
+            Some(fitted)
+        })
+        .flatten()
+        .collect();
+    let mut removed = Vec::new();
+    for (outer, index, given, n, gone) in nested {
+        record.fit_block_attribute(&outer, index, &given.key, n)?;
+        let field = format!("blocks.{outer}.objects[{index}]");
+        removed.extend(removals(&library_path, &field, &[], &given.tag, gone));
+    }
+    Ok(removed)
 }
 
 /// What fitting an insert's value to its block takes away: the whole
@@ -2738,6 +2936,10 @@ fn target_words(op: &Operation) -> String {
             to: AddTo::Sheet(s),
             ..
         } => format!("the {} `{name}` of sheet `{s}`'s template", table.word()),
+        Body::Block {
+            import: Some(import),
+            ..
+        } => format!("the blocks of `{}`", import.from),
         Body::Block {
             name: Some(name), ..
         } => format!("the block `{name}`"),

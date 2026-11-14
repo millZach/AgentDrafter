@@ -59,6 +59,10 @@
     "check": {
       "args": ["check", "demo-set", "--sheet", "DEMO-002"],
       "input": {"source": "demo-set", "sheets": ["DEMO-002"]}
+    },
+    "import-blocks": {
+      "args": ["import-blocks", "demo-set/dwg/DEMO-001.dwg", "--library", "imported-blocks.yaml", "--block", "title_block"],
+      "input": {"drawing": "demo-set/dwg/DEMO-001.dwg", "library": "imported-blocks.yaml", "blocks": ["title_block"]}
     }
   }
 }

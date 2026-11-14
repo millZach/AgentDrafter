@@ -35,6 +35,7 @@ use crate::change::{change_set_schema, change_with, journal, operations, undo, C
 use crate::check::{check_with, CheckRequest};
 use crate::display_list::{display_list_with, DisplayListRequest};
 use crate::error::Error;
+use crate::import::{import_blocks, ImportBlocksRequest};
 use crate::interface::Interface;
 use crate::plot::{plot_set_with, plot_with, PlotRequest, PlotSetRequest, BUILT_IN_PLOT_STYLE};
 use crate::query::{query_with, QueryRequest};
@@ -44,6 +45,7 @@ use crate::set::{build_set_with, set_of_dwg, SetBuildRequest, SET_SETTINGS_FILE}
 use crate::settings::{Settings, FONTS_VARIABLE, PLOT_STYLES_VARIABLE};
 use crate::stamp::{check_stale, SourceKind, StaleRequest};
 use crate::text::measure::{measure_text_with, MeasureTextRequest};
+use crate::units::Unit;
 use crate::{block_library_schema, rows_schema, set_schema, sheet_description_schema};
 use crate::{template_schema, JOURNAL_FILE, KEPT_UNDO_STATES};
 
@@ -224,6 +226,12 @@ const COMMANDS: &[Command] = &[
         does: check_does,
         input: check_input,
         run: run_check,
+    },
+    Command {
+        name: "import-blocks",
+        does: import_blocks_does,
+        input: import_blocks_input,
+        run: run_import_blocks,
     },
 ];
 
@@ -901,6 +909,58 @@ fn run_check(
 }
 
 // What every command shares.
+
+// import-blocks
+
+fn import_blocks_does() -> String {
+    format!(
+        "Imports the blocks of a DWG or a DXF, `drawing`, into the block library `library`, as \
+         AutoCAD's DesignCenter (ADCENTER) does: every named block, or with `blocks` those \
+         named, each with every block it nests, with their objects, attribute definitions, \
+         layers, linetypes, hatch patterns and text styles. The drawing is only read. The \
+         library is made in the drawing's unit when it is not there; one that is keeps every \
+         byte it had, takes each new block after its last, keeps its own definition of a layer, \
+         linetype, hatch pattern or text style it holds already, and must be in the drawing's \
+         unit. A block it holds already is refused unless `replace`, which replaces its whole \
+         definition. A drawing that states no unit takes `units`. What the core cannot carry, \
+         such as a dimension or an object in a true colour, is left out and counted block by \
+         block under not_carried. A drawing set's library, which its templates name, is \
+         refused: it takes blocks through a change set's import_blocks operation, so its \
+         journal and undo hold them; the set is found by its settings ({SET_SETTINGS_FILE}) in \
+         the library's folder or one above. With `dry_run` it reports what it would write and \
+         writes nothing."
+    )
+}
+
+fn import_blocks_input() -> Value {
+    input(
+        json!({
+            "drawing": text("The DWG or DXF to read the blocks of, told apart by its extension."),
+            "library": text("The block library to write the blocks into: made when it is not there."),
+            "blocks": {
+                "description": "Only the blocks of these names, in any case, each with every block it nests. Without them, every named block of the drawing.",
+                "type": "array",
+                "items": { "type": "string" },
+            },
+            "replace": flag("Replace the whole definition of a block the library holds already, rather than refuse."),
+            "units": {
+                "description": "The unit the drawing's blocks are drawn in, for a drawing that states none a block library takes.",
+                "enum": Unit::ALL.map(Unit::symbol),
+            },
+            "dry_run": flag("Report what the import would write, and write nothing."),
+        }),
+        &["drawing", "library"],
+    )
+}
+
+fn run_import_blocks(
+    input: Map<String, Value>,
+    _: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
+    let request: ImportBlocksRequest = parse("import-blocks", input)?;
+    Ok(done(import_blocks(&request)))
+}
 
 /// The drawing set a command's input reads, if it names one: the folder its
 /// `set` names; or the set its `source`, or with none its `output`, is, or

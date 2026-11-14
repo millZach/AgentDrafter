@@ -78,6 +78,10 @@ fn samples() -> Vec<(&'static str, Value)> {
             "check",
             json!({"source": "missing", "sheets": ["DEMO-001"], "fonts": ["f"]}),
         ),
+        (
+            "import-blocks",
+            json!({"drawing": "missing.dwg", "library": "missing-blocks.yaml", "blocks": ["MARKER"], "replace": true, "units": "mm", "dry_run": true}),
+        ),
     ]
 }
 

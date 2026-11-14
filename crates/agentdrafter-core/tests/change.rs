@@ -359,6 +359,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("add_block", "BLOCK"),
             ("redefine_block", "BEDIT"),
             ("attsync", "ATTSYNC"),
+            ("import_blocks", "ADCENTER"),
         ]
     );
     let samples = [
@@ -393,6 +394,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "BLOCK", "name": "BADGE", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1}}, {"attdef": {"tag": "CODE", "position": [0, 0, 0], "height": 1, "cell": [[0, 0, 0], [1, 1, 0]]}}]}),
         json!({"op": "BEDIT", "library": "blocks.yaml", "name": "BADGE", "base_point": [1, 0, 0], "objects": [{"text": {"contents": "A", "position": [0, 0, 0], "height": 1, "cell": [[0, 0, 0], [1, 1, 0]]}}]}),
         json!({"op": "ATTSYNC", "name": "BADGE"}),
+        json!({"op": "adcenter", "library": "blocks.yaml", "from": "../parts/badges.dxf", "blocks": ["BADGE"], "replace": true, "units": "in"}),
     ];
     for (info, sample) in listed.operations.iter().zip(&samples) {
         assert!(info.does.contains(&info.alias), "{}", info.does);
@@ -2722,5 +2724,77 @@ fn an_error_in_a_tag_is_not_laid_on_an_edit_of_a_bracketed_tag() {
             .as_deref()
             .is_some_and(|f| f.starts_with("operations[0].")),
         "{e:#?}"
+    );
+}
+
+/// A template's table written in braces with a comment is not written
+/// again an entry to a line, which would lose the comment: the operation
+/// that adds to it fails `write_failed`, and nothing is written.
+#[test]
+fn a_table_in_braces_with_a_comment_takes_no_entry_and_keeps_its_comment() {
+    let set = demo_set("braces-comment");
+    let template = set.join("templates").join("ansi-b.yaml");
+    let text = fs::read_to_string(&template).unwrap().replace(
+        "layers:\n  trim: {color: 8, lineweight: 0.13}\n  border: {color: white, lineweight: 0.7}\n  notes: {color: cyan}\n",
+        "layers: {trim: {color: 8, lineweight: 0.13}, border: {color: white, lineweight: 0.7}, notes: {color: cyan}}  # the client's layers\n",
+    );
+    assert!(text.contains("# the client's layers"));
+    fs::write(&template, &text).unwrap();
+    let before = snapshot(&set);
+
+    let reply = apply(
+        &set,
+        json!({"operations": [{"op": "add_layer", "template": "templates/ansi-b.yaml", "name": "markup", "color": "red"}]}),
+    );
+
+    assert!(!reply.ok);
+    let error = reply
+        .result
+        .as_ref()
+        .and_then(|r| r.operations[0].error.clone())
+        .or(reply.error.clone())
+        .unwrap();
+    assert_eq!(error.code, ErrorCode::WriteFailed, "{error:?}");
+    assert!(
+        error
+            .message
+            .contains("layers are written in braces with a comment"),
+        "{error:?}"
+    );
+    assert_eq!(fs::read_to_string(&template).unwrap(), text);
+    assert_eq!(snapshot(&set), before, "nothing was written");
+}
+
+/// A `#` inside a quoted value of a table in braces is no comment, even
+/// once the change set replaces that value.
+#[test]
+fn a_table_in_braces_whose_quoted_value_holds_a_hash_is_changed() {
+    let set = demo_set("braces-quoted-hash");
+    let template = set.join("templates").join("ansi-b.yaml");
+    let text = fs::read_to_string(&template).unwrap().replace(
+        "layers:
+  trim: {color: 8, lineweight: 0.13}
+  border: {color: white, lineweight: 0.7}
+  notes: {color: cyan}
+",
+        "layers: {trim: {color: 8, lineweight: 0.13}, border: {color: white, lineweight: 0.7}, notes: {color: cyan, description: 'see #2'}}
+",
+    );
+    assert!(text.contains("'see #2'"));
+    fs::write(&template, &text).unwrap();
+
+    let report = lands(
+        &set,
+        json!({"operations": [{"op": "change_layer", "template": "templates/ansi-b.yaml", "name": "notes", "set": {"description": "new"}}]}),
+    );
+
+    assert_eq!(report.landed, 3);
+    let written = fs::read_to_string(&template).unwrap();
+    assert!(
+        written.contains(
+            "  notes: {color: cyan, description: new}
+"
+        ),
+        "{written}"
     );
 }

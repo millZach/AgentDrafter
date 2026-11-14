@@ -150,6 +150,10 @@ Reading a DWG back gives its block definitions, the inserts nested in them among
 
 A change set adds a block to a drawing set's library with `add_block` (AutoCAD's BLOCK), replaces a block's whole definition with `redefine_block` (BEDIT), and brings inserts into line with their blocks' definitions with `attsync` (ATTSYNC), for a library edited by hand. An edit to the library reaches every sheet whose template names it, all or nothing, and a value an insert gives for a tag its block no longer carries is removed from its record as AutoCAD's ATTSYNC removes it. A repeated tag keeps its values by occurrence: a tag the block now defines fewer times loses the list's items past the last it keeps, each listed with its `occurrence`; one it now defines once takes the list's first item alone; and one it now defines more than once takes a single value as its list's first item. [Change sets](change-sets.md#blocks) sets out how each is written and what the reply lists.
 
+## Importing blocks from a drawing
+
+`agentdrafter import-blocks` reads a DWG's or a DXF's blocks into a library of its own, with their objects, attribute definitions and the layers, linetypes, hatch patterns and text styles they use, as AutoCAD's DesignCenter does, and a change set's `import_blocks` operation (ADCENTER) does the same for a drawing set's library. A DWG holds no cells, so they are added by hand after. [Importing blocks](import-blocks.md) sets out what comes through, what cannot, and how units and a block the library holds already are taken.
+
 ## What is not offered yet
 
 - Renaming or deleting a block, and editing the library's own layers, linetypes and text styles, through a change set.

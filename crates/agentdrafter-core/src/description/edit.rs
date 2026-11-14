@@ -159,8 +159,11 @@ pub(crate) struct RecordFile {
     lists: Vec<(ObjectList, ListState)>,
     values: Vec<ValueEdit>,
     /// The tables at the top of the file an edit changed, such as
-    /// `layers`, each written again whole, one entry to a line.
+    /// `layers`, each written again whole, one entry to a line, unless
+    /// edits only added to it ([`RecordFile::table_append`]).
     tables: Vec<String>,
+    /// The tables an edit changed otherwise than by adding an entry.
+    rewritten: Vec<String>,
     /// The blocks of a block library an edit set or changed, each written
     /// again whole on its own lines.
     blocks: Vec<BlockEdit>,
@@ -253,6 +256,7 @@ impl RecordFile {
             lists: Vec::new(),
             values: Vec::new(),
             tables: Vec::new(),
+            rewritten: Vec::new(),
             blocks: Vec::new(),
         })
     }
@@ -400,7 +404,7 @@ impl RecordFile {
                 .position(|o| *o == k.key)
                 .unwrap_or(order.len())
         });
-        self.note_table(table);
+        self.note_rewrite(table);
         Ok(())
     }
 
@@ -410,7 +414,7 @@ impl RecordFile {
         if let Some(entry) = entries.iter_mut().find(|e| e.key == name) {
             to.clone_into(&mut entry.key);
         }
-        self.note_table(table);
+        self.note_rewrite(table);
         Ok(())
     }
 
@@ -434,13 +438,13 @@ impl RecordFile {
                 }
             }
         }
-        self.note_table(table);
+        self.note_rewrite(table);
     }
 
     /// Takes the entry `name` away from `table`.
     pub(crate) fn table_delete(&mut self, table: &str, name: &str) -> Result<(), Error> {
         self.table_mut(table)?.retain(|e| e.key != name);
-        self.note_table(table);
+        self.note_rewrite(table);
         Ok(())
     }
 
@@ -912,6 +916,60 @@ impl RecordFile {
         }
     }
 
+    /// Notes that an edit changed `table` otherwise than by adding to it,
+    /// so it is written again whole.
+    fn note_rewrite(&mut self, table: &str) {
+        self.note_table(table);
+        if !self.rewritten.iter().any(|t| t == table) {
+            self.rewritten.push(table.to_owned());
+        }
+    }
+
+    /// The splice that adds a table's new entries, an entry to a line, after
+    /// the last line of the entries the file wrote, when the file writes the
+    /// table an entry to a line and the edits only added to it: so nothing
+    /// the file wrote in the table, a comment among it, changes. None when
+    /// the table is to be written again whole.
+    fn table_append(&self, table: &Entry) -> Option<(usize, usize, String)> {
+        if self.rewritten.contains(&table.key)
+            || table.key_end == 0
+            || table.value.source.map(|s| s.style) != Some(Style::Block)
+        {
+            return None;
+        }
+        let Kind::Mapping(entries) = &table.value.kind else {
+            return None;
+        };
+        let added = entries.iter().position(|e| e.key_end == 0)?;
+        if added == 0 || entries[added..].iter().any(|e| e.key_end > 0) {
+            return None;
+        }
+        let end = entries[..added]
+            .iter()
+            .map(|e| {
+                e.value.source.map_or_else(
+                    || line_end(&self.text, e.key_end),
+                    |s| line_end(&self.text, s.end),
+                )
+            })
+            .max()?;
+        let column = entries[0].key_at.column.saturating_sub(1);
+        let nl = self.newline;
+        let emitter = self.emitter();
+        let mut with = String::new();
+        if end == self.text.len() && !self.text.ends_with('\n') {
+            with.push_str(nl);
+        }
+        for e in &entries[added..] {
+            with.push_str(&" ".repeat(column));
+            with.push_str(&scalar_text(&e.key, Context::Flow, column, nl));
+            with.push_str(": ");
+            with.push_str(&emitter.flow(&e.value));
+            with.push_str(nl);
+        }
+        Some((end, end, with))
+    }
+
     /// The splice that writes `table` again whole, one entry to a line, in
     /// the place the file wrote it, or else before the file's `objects`.
     fn table_splice(&self, table: &str) -> Result<(usize, usize, String), Error> {
@@ -925,6 +983,9 @@ impl RecordFile {
             .iter()
             .find(|e| e.key == table)
             .expect("an edited table is in the file");
+        if let Some(appended) = self.table_append(entry) {
+            return Ok(appended);
+        }
         let nl = self.newline;
         let emitter = self.emitter();
         let Kind::Mapping(entries) = &entry.value.kind else {
@@ -955,6 +1016,22 @@ impl RecordFile {
                 || line_end(&self.text, entry.key_end),
                 |s| line_end(&self.text, s.end),
             );
+            // A table in braces is written again an entry to a line, which
+            // would lose a comment among its entries: it is refused instead,
+            // as blocks in braces are.
+            let braces = entry.value.source.is_some_and(|s| s.style == Style::Flow);
+            if braces && self.holds_comment(table, start, end) {
+                return Err(Error::new(
+                    ErrorCode::WriteFailed,
+                    format!(
+                        "could not rewrite the record in place: its {} are written in braces \
+                         with a comment; nothing was written, so write the table one entry to a \
+                         line and try again",
+                        table.replace('_', " ")
+                    ),
+                )
+                .in_file(&self.path));
+            }
             let mut with = render(column);
             if end == self.text.len() && !self.text.ends_with('\n') {
                 with.truncate(with.len() - nl.len());
@@ -976,6 +1053,26 @@ impl RecordFile {
                 Ok((at, at, format!("{lead}{}", render(column))))
             }
         }
+    }
+
+    /// Whether the text from `start` to `end`, which holds the table, holds a
+    /// comment: a `#` at the start of a line or after a space, outside the
+    /// quoted scalars, keys among them, of the table `table` as the file
+    /// wrote it. The file is read again for them, so that an edit to the
+    /// table never changes what counts as a comment.
+    fn holds_comment(&self, table: &str, start: usize, end: usize) -> bool {
+        let mut quoted = Vec::new();
+        if let Ok(Some(read)) = strict_yaml::read(&self.text) {
+            if let Some(node) = mapping_entry(&read, table) {
+                quoted_spans(node, &self.text, &mut quoted);
+            }
+        }
+        let bytes = self.text.as_bytes();
+        (start..end).any(|at| {
+            bytes[at] == b'#'
+                && (at == 0 || matches!(bytes[at - 1], b' ' | b'\t' | b'\n' | b'\r'))
+                && !quoted.iter().any(|&(from, to)| (from..to).contains(&at))
+        })
     }
 
     /// The operation to blame for what is wrong at `within` in the object
@@ -1467,6 +1564,18 @@ impl RecordFile {
             text.insert(0, '\u{FEFF}');
         }
         Ok(Some(text))
+    }
+
+    /// The record's text as its edits leave it, without a byte-order mark:
+    /// the text as read when no edit has been made.
+    pub(crate) fn current_text(&self) -> Result<String, Error> {
+        Ok(match self.new_text()? {
+            Some(text) => match text.strip_prefix('\u{FEFF}') {
+                Some(bare) => bare.to_owned(),
+                None => text,
+            },
+            None => self.text.clone(),
+        })
     }
 
     fn cannot_write(&self, why: &str) -> Error {
@@ -2003,6 +2112,65 @@ fn node_of(value: &Value) -> Node {
                 .collect(),
         )),
     }
+}
+
+/// Adds to `spans` where each quoted scalar of `node`, and each quoted key
+/// of its mappings, is written in `text`.
+fn quoted_spans(node: &Node, text: &str, spans: &mut Vec<(usize, usize)>) {
+    match &node.kind {
+        Kind::Mapping(entries) => {
+            for entry in entries {
+                if let Some(span) = quoted_key(text, entry.key_end) {
+                    spans.push(span);
+                }
+                quoted_spans(&entry.value, text, spans);
+            }
+        }
+        Kind::Sequence(items) => {
+            for item in items {
+                quoted_spans(item, text, spans);
+            }
+        }
+        Kind::Scalar(_) => {
+            if let Some(source) = node.source.filter(|s| s.style == Style::Quoted) {
+                spans.push((source.start, source.end));
+            }
+        }
+    }
+}
+
+/// Where a key that ends just before `key_end` is written, when it is
+/// quoted: from its opening quote to just after its closing one.
+fn quoted_key(text: &str, key_end: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let quote = *bytes.get(key_end.checked_sub(1)?)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let mut at = key_end - 1;
+    while at > 0 {
+        at -= 1;
+        if bytes[at] != quote {
+            continue;
+        }
+        if quote == b'\'' {
+            // `''` inside single quotes is one quote.
+            if at > 0 && bytes[at - 1] == b'\'' {
+                at -= 1;
+                continue;
+            }
+            return Some((at, key_end));
+        }
+        let escapes = bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|&&b| b == b'\\')
+            .count();
+        if escapes % 2 == 0 {
+            return Some((at, key_end));
+        }
+    }
+    None
 }
 
 /// Writes the keys of each of a polyline's points that is a mapping in the

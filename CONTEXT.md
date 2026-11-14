@@ -136,6 +136,10 @@ _Avoid_: symbol library, catalog
 A block's whole definition replaced, its base point and every object, as AutoCAD's BEDIT replaces it. Every insert of the block draws as the new definition does, and is brought into line with it as it lands: a value an insert gives for a tag the block no longer carries is removed from its record, as AutoCAD's ATTSYNC removes it.
 _Avoid_: block edit, block update
 
+**Import**:
+A drawing's blocks read into a block library, as AutoCAD's DesignCenter drags them from one drawing into another: each with the blocks it nests, and the layers, linetypes, hatch patterns and text styles they use. The drawing is only read. What the core has no model for is not carried, and the import counts it.
+_Avoid_: conversion, WBLOCK
+
 **Template**:
 A sheet's border, title block and fixed content, waiting for data.
 _Avoid_: prototype, master

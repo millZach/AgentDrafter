@@ -44,6 +44,9 @@ pub(crate) enum BlockOp {
     /// Brings inserts into line with their block's definition alone:
     /// AutoCAD's ATTSYNC.
     Sync,
+    /// Imports a drawing's blocks, each with every block it nests: AutoCAD's
+    /// DesignCenter, ADCENTER.
+    Import,
 }
 
 /// A table of a template's definitions that an operation edits.
@@ -133,7 +136,7 @@ pub(crate) struct Spec {
 }
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 31] = [
+pub(crate) const SPECS: [Spec; 32] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -181,6 +184,7 @@ pub(crate) const SPECS: [Spec; 31] = [
     block("add_block", "BLOCK", BlockOp::Add),
     block("redefine_block", "BEDIT", BlockOp::Redefine),
     block("attsync", "ATTSYNC", BlockOp::Sync),
+    block("import_blocks", "ADCENTER", BlockOp::Import),
 ];
 
 const fn block(name: &'static str, alias: &'static str, op: BlockOp) -> Spec {
@@ -365,6 +369,19 @@ fn does(spec: &Spec) -> String {
                      template, a row or another block of the library; a new tag takes its \
                      default. The reply lists the inserts it reached under inserts and each \
                      value removed under attributes_removed. AutoCAD's ATTSYNC."
+                }
+                BlockOp::Import => {
+                    "Imports the blocks of a DWG or a DXF, from, its path relative to the set's \
+                     folder or absolute, into a block library, as AutoCAD's DesignCenter does: \
+                     every named block, or those blocks names, each with every block it nests, \
+                     with their objects, attribute definitions, and the layers, linetypes, hatch \
+                     patterns and text styles they use that the library lacks; one it defines \
+                     already it keeps as it defines it. The drawing is only read, and is in the \
+                     set's unit, or states none and units names it. A block the library holds \
+                     already is refused, unless replace, which replaces its whole definition and \
+                     brings its inserts into line as redefine_block does. What the core cannot \
+                     carry, such as a dimension, is left out and counted block by block under \
+                     imported.not_carried. AutoCAD's ADCENTER."
                 }
             };
             format!(
@@ -728,6 +745,48 @@ fn block_schema(op: BlockOp, defs: &Map<String, Value>) -> Value {
             "minLength": 1,
         }),
     );
+    if op == BlockOp::Import {
+        properties.insert(
+            "from".into(),
+            json!({
+                "description": "The DWG or DXF to import the blocks of, told apart by its \
+                                extension: its path relative to the set's folder, or absolute.",
+                "type": "string",
+                "minLength": 1,
+            }),
+        );
+        properties.insert(
+            "blocks".into(),
+            json!({
+                "description": "Only the blocks of these names, in any case, each with every \
+                                block it nests. Without them, every named block of the drawing.",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 },
+            }),
+        );
+        properties.insert(
+            "replace".into(),
+            json!({
+                "description": "Replace the whole definition of a block the library holds \
+                                already, rather than refuse.",
+                "type": "boolean",
+            }),
+        );
+        properties.insert(
+            "units".into(),
+            json!({
+                "description": "The unit the drawing's blocks are drawn in, for a drawing that \
+                                states none a block library takes: the set's.",
+                "enum": Unit::ALL.map(Unit::symbol),
+            }),
+        );
+        return json!({
+            "type": "object",
+            "required": ["from"],
+            "additionalProperties": false,
+            "properties": properties,
+        });
+    }
     let name_description = match op {
         BlockOp::Add => "The new block's name, which the library does not have in any case.",
         BlockOp::Redefine => "The block to redefine, written exactly as the library writes it.",
@@ -735,6 +794,7 @@ fn block_schema(op: BlockOp, defs: &Map<String, Value>) -> Value {
             "The block whose inserts to bring into line, written exactly as the library writes \
              it. Without it, every block of the library."
         }
+        BlockOp::Import => unreachable!("handled above"),
     };
     properties.insert(
         "name".into(),
@@ -864,7 +924,20 @@ pub(crate) enum Body {
         name: Option<String>,
         base_point: Option<Value>,
         objects: Option<Vec<Value>>,
+        /// What an import_blocks imports.
+        import: Option<Import>,
     },
+}
+
+/// What an import_blocks operation imports: the blocks of the drawing at
+/// `from`, as sent, those `blocks` names or every one, replacing those the
+/// library holds when `replace`, in `units` when the drawing states none.
+#[derive(Clone, Debug)]
+pub(crate) struct Import {
+    pub from: String,
+    pub blocks: Vec<String>,
+    pub replace: bool,
+    pub units: Option<Unit>,
 }
 
 /// Where an object is added.
@@ -964,6 +1037,81 @@ pub(crate) fn read_change_set(value: &Value, units: Unit) -> Result<ChangeSet, E
         }
     };
     Ok(ChangeSet { operations, fixes })
+}
+
+/// What an import_blocks operation sent as `map` imports, or the code,
+/// message and key of what is wrong with it.
+fn read_import(map: &Map<String, Value>) -> Result<Import, (ErrorCode, String, &'static str)> {
+    let from = match map.get("from") {
+        Some(Value::String(from)) if !from.is_empty() => from.clone(),
+        Some(_) => {
+            return Err((
+                ErrorCode::WrongType,
+                "expected the drawing's path, a DWG or a DXF, relative to the set's folder or \
+                 absolute"
+                    .to_owned(),
+                "from",
+            ))
+        }
+        None => {
+            return Err((
+                ErrorCode::MissingKey,
+                "missing key `from`, the DWG or DXF to import the blocks of".to_owned(),
+                "from",
+            ))
+        }
+    };
+    let blocks = match map.get("blocks") {
+        None => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(name) if !name.is_empty() => Ok(name.clone()),
+                _ => Err((
+                    ErrorCode::WrongType,
+                    "expected a list of the blocks' names".to_owned(),
+                    "blocks",
+                )),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => {
+            return Err((
+                ErrorCode::WrongType,
+                "expected a list of the blocks' names".to_owned(),
+                "blocks",
+            ))
+        }
+    };
+    let replace = match map.get("replace") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err((
+                ErrorCode::WrongType,
+                "expected true or false".to_owned(),
+                "replace",
+            ))
+        }
+    };
+    let units = match map.get("units") {
+        None => None,
+        Some(Value::String(symbol)) if Unit::from_symbol(symbol).is_some() => {
+            Unit::from_symbol(symbol)
+        }
+        Some(_) => {
+            return Err((
+                ErrorCode::UnknownUnit,
+                format!("expected a unit, one of {}", Unit::symbols()),
+                "units",
+            ))
+        }
+    };
+    Ok(Import {
+        from,
+        blocks,
+        replace,
+        units,
+    })
 }
 
 /// The error for operation `index`, named `name`, at `field` within it.
@@ -1257,6 +1405,7 @@ fn operation(
             let allowed: &[&str] = match op {
                 BlockOp::Sync => &["library", "name"],
                 BlockOp::Add | BlockOp::Redefine => &["library", "name", "base_point", "objects"],
+                BlockOp::Import => &["library", "from", "blocks", "replace", "units"],
             };
             keys(allowed)?;
             let library = match map.get("library") {
@@ -1273,7 +1422,7 @@ fn operation(
             };
             let name = match map.get("name") {
                 Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
-                None if op == BlockOp::Sync => None,
+                None if matches!(op, BlockOp::Sync | BlockOp::Import) => None,
                 Some(_) => {
                     return Err(fail(
                         ErrorCode::WrongType,
@@ -1291,7 +1440,7 @@ fn operation(
             };
             let objects =
                 match (op, map.get("objects")) {
-                    (BlockOp::Sync, _) => None,
+                    (BlockOp::Sync | BlockOp::Import, _) => None,
                     (_, Some(Value::Array(items))) if !items.is_empty() => Some(items.clone()),
                     (_, Some(Value::Array(_))) => {
                         return Err(fail(
@@ -1314,12 +1463,21 @@ fn operation(
                         "objects",
                     )),
                 };
+            let import = if op == BlockOp::Import {
+                Some(
+                    read_import(map)
+                        .map_err(|(code, message, field)| fail(code, message, field))?,
+                )
+            } else {
+                None
+            };
             Body::Block {
                 op,
                 library,
                 name,
                 base_point: map.get("base_point").cloned(),
                 objects,
+                import,
             }
         }
         Kind::Table(op, table) => {

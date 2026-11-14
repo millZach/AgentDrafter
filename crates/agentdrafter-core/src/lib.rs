@@ -51,6 +51,9 @@
 //!   paper size, nothing off the sheet, no text overflowing its cell and no
 //!   text sitting on other text. A change set's reply carries its report on
 //!   the sheets it landed on.
+//! - [`import_blocks`] reads a DWG's or a DXF's blocks into a block library
+//!   of its own, as AutoCAD's DesignCenter does; a drawing set's library
+//!   takes them through a change set's `import_blocks` operation.
 //!
 //! [`Settings`] say where the machine keeps its fonts and plot styles;
 //! [`build`], [`measure_text`], [`render`] and [`plot`] read them from the
@@ -71,6 +74,7 @@ mod display_list;
 mod draw;
 mod dwg;
 mod error;
+mod import;
 mod interface;
 mod model;
 mod output;
@@ -120,6 +124,10 @@ pub use draw::{
     TextRun,
 };
 pub use error::{Error, ErrorCode};
+pub use import::{
+    import_blocks, BlocksImported, ImportBlocksReport, ImportBlocksRequest, ImportNotice,
+    ImportNoticeCode, ImportedBlock, NotCarried, SkippedBlock, TablesAdded,
+};
 pub use interface::Interface;
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use model::{

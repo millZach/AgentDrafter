@@ -28,9 +28,9 @@ use std::process::ExitCode;
 
 use agentdrafter_core::{commands, find_command, Error, ErrorCode, Interface, Reply, Settings};
 use agentdrafter_core::{
-    AcceptRequest, ChangeRequest, CheckRequest, DisplayListRequest, JournalRequest,
-    MeasureTextRequest, RenderRequest, StaleRequest, UndoRequest, FONTS_VARIABLE,
-    PLOT_STYLES_VARIABLE,
+    AcceptRequest, ChangeRequest, CheckRequest, DisplayListRequest, ImportBlocksRequest,
+    JournalRequest, MeasureTextRequest, RenderRequest, StaleRequest, UndoRequest, Unit,
+    FONTS_VARIABLE, PLOT_STYLES_VARIABLE,
 };
 use agentdrafter_core::{End, Matching, Measure, Query, QueryRequest, Selection};
 use serde::Serialize;
@@ -52,6 +52,7 @@ const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-s
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...";
+const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
 const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find and attributes: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [extents: --fonts <folder>...]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
@@ -97,6 +98,7 @@ fn cli_form(command: &str) -> Option<(&'static str, Parse)> {
         "undo" => (UNDO_USAGE, parse_undo),
         "accept" => (ACCEPT_USAGE, parse_accept),
         "check" => (CHECK_USAGE, parse_check),
+        "import-blocks" => (IMPORT_BLOCKS_USAGE, parse_import_blocks),
         _ => return None,
     })
 }
@@ -767,6 +769,70 @@ fn parse_check(mut args: Args) -> Result<Value, Error> {
         usage("check needs a drawing set's folder or a sheet description".to_owned())
     })?;
     input_of(CheckRequest { source, sheets }, fonts)
+}
+
+fn parse_import_blocks(mut args: Args) -> Result<Value, Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {IMPORT_BLOCKS_USAGE}"));
+    let mut drawing: Option<PathBuf> = None;
+    let mut library: Option<PathBuf> = None;
+    let mut blocks = Vec::new();
+    let mut replace = false;
+    let mut units: Option<Unit> = None;
+    let mut dry_run = false;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some(flag @ ("--library" | "--block" | "--units")) => {
+                let Some(value) = args.next() else {
+                    return Err(usage(format!("{flag} needs a value")));
+                };
+                match flag {
+                    "--library" => {
+                        if library.replace(PathBuf::from(value)).is_some() {
+                            return Err(usage("--library is given twice".to_owned()));
+                        }
+                    }
+                    "--block" => blocks.push(value.to_string_lossy().into_owned()),
+                    _ => {
+                        let text = value.to_string_lossy();
+                        let Some(unit) = Unit::from_symbol(&text) else {
+                            return Err(usage(format!(
+                                "--units takes one of {}, not `{text}`",
+                                Unit::ALL.map(Unit::symbol).join(", ")
+                            )));
+                        };
+                        if units.replace(unit).is_some() {
+                            return Err(usage("--units is given twice".to_owned()));
+                        }
+                    }
+                }
+            }
+            Some("--replace") => replace = true,
+            Some("--dry-run") => dry_run = true,
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("import-blocks takes no option `{flag}`")))
+            }
+            _ => {
+                if drawing.replace(arg.into()).is_some() {
+                    return Err(usage("import-blocks takes one DWG or DXF".to_owned()));
+                }
+            }
+        }
+    }
+    let drawing = drawing.ok_or_else(|| usage("import-blocks needs a DWG or a DXF".to_owned()))?;
+    let library = library.ok_or_else(|| {
+        usage("import-blocks needs the block library to write, under --library".to_owned())
+    })?;
+    input_of(
+        ImportBlocksRequest {
+            drawing,
+            library,
+            blocks,
+            replace,
+            units,
+            dry_run,
+        },
+        Vec::new(),
+    )
 }
 
 fn parse_build(mut args: Args) -> Result<Value, Error> {

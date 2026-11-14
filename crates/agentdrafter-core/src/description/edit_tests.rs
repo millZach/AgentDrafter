@@ -335,6 +335,138 @@ objects: []
     );
 }
 
+/// An entry added to a table the file writes an entry to a line goes after
+/// its last, and every line the file wrote stays as it was, its comments
+/// and its block-style entries among them; a table written in braces, or
+/// one an edit changes otherwise, is written again whole.
+#[test]
+fn an_entry_added_to_a_table_goes_after_its_last_and_keeps_its_comments() {
+    let keys = |json: serde_json::Value| json.as_object().unwrap().clone();
+    let text = "units: in
+layers:
+  # ours
+  title: {color: red}   # red, as the client asks
+  frame:
+    color: 3
+blocks: {}
+";
+    let mut record = RecordFile::from_text(Path::new("t.yaml"), text.to_owned()).unwrap();
+    record
+        .table_add("layers", &["color"], "notes", &keys(json!({"color": 2})))
+        .unwrap();
+    let written = record.new_text().unwrap().unwrap();
+    assert_eq!(
+        written,
+        text.replace("blocks: {}", "  notes: {color: 2}\nblocks: {}")
+    );
+
+    let mut record = RecordFile::from_text(Path::new("t.yaml"), text.to_owned()).unwrap();
+    record
+        .table_add("layers", &["color"], "notes", &keys(json!({"color": 2})))
+        .unwrap();
+    record
+        .table_change("layers", &["color"], "frame", &keys(json!({"color": 4})))
+        .unwrap();
+    let written = record.new_text().unwrap().unwrap();
+    assert!(!written.contains("# red"), "written again whole: {written}");
+
+    let flow = "units: in\nlayers: {title: {color: red}}\nblocks: {}\n";
+    let mut record = RecordFile::from_text(Path::new("t.yaml"), flow.to_owned()).unwrap();
+    record
+        .table_add("layers", &["color"], "notes", &keys(json!({})))
+        .unwrap();
+    assert_eq!(
+        record.new_text().unwrap().unwrap(),
+        "units: in\nlayers:\n  title: {color: red}\n  notes: {}\nblocks: {}\n"
+    );
+}
+
+/// A table written in braces is written again an entry to a line, so one
+/// whose text holds a comment is not rewritten, and nothing is lost; a `#`
+/// inside a quoted key or value is no comment.
+#[test]
+fn a_table_in_braces_with_a_comment_is_not_rewritten() {
+    let keys = |json: serde_json::Value| json.as_object().unwrap().clone();
+    for text in [
+        "units: in
+layers: {title: {color: red}}  # the client's
+objects: []
+",
+        "units: in
+layers: {
+  # ours
+  title: {color: red}
+}
+objects: []
+",
+        "units: in
+layers: # ours
+  {title: {color: red}}
+objects: []
+",
+    ] {
+        let mut record = RecordFile::from_text(Path::new("t.yaml"), text.to_owned()).unwrap();
+        record
+            .table_add("layers", &["color"], "notes", &keys(json!({})))
+            .unwrap();
+        let error = record.new_text().unwrap_err();
+        assert_eq!(error.code, crate::error::ErrorCode::WriteFailed, "{text}");
+        assert!(
+            error
+                .message
+                .contains("its layers are written in braces with a comment"),
+            "{error:?}"
+        );
+        assert!(
+            error
+                .message
+                .contains("write the table one entry to a line"),
+            "{error:?}"
+        );
+    }
+    let quoted = "units: in
+layers: {'A #1': {color: red, description: 'see #2'}, \"B #3\": {}}
+objects: []
+";
+    let mut record = RecordFile::from_text(Path::new("t.yaml"), quoted.to_owned()).unwrap();
+    record
+        .table_add("layers", &["color"], "notes", &keys(json!({})))
+        .unwrap();
+    let written = record.new_text().unwrap().unwrap();
+    assert!(
+        written.contains("'see #2'") && written.contains("  notes: {}"),
+        "{written}"
+    );
+}
+
+/// What counts as a comment is read from the file as it was: a `#` in a
+/// quoted value an edit replaces is still no comment.
+#[test]
+fn a_hash_in_a_quoted_value_an_edit_replaces_is_no_comment() {
+    let keys = |json: serde_json::Value| json.as_object().unwrap().clone();
+    let text = "units: in
+layers: {old: {description: 'see #2'}}
+objects: []
+";
+    let mut record = RecordFile::from_text(Path::new("t.yaml"), text.to_owned()).unwrap();
+    record
+        .table_change(
+            "layers",
+            &["description"],
+            "old",
+            &keys(json!({"description": "new"})),
+        )
+        .unwrap();
+    assert_eq!(
+        record.new_text().unwrap().unwrap(),
+        "units: in
+layers:
+  old: {description: new}
+objects: []
+"
+    );
+}
+
 const LIBRARY: &str = include_str!("../../../../examples/demo-set/blocks.yaml");
 
 /// A made-up block library with comments between its blocks, and a block
