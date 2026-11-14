@@ -1017,7 +1017,7 @@ fn refined(c: &Curve, d: &Curve, start: Crossing, tolerance: f64) -> Option<Cros
 }
 
 /// Newton's method on `c(t) − d(u) = 0` seen from above, from `start`;
-/// none where it runs off or meets a Jacobian that cannot be solved.
+/// none where it runs off; where no step can be taken it stops there.
 fn newton(c: &Curve, d: &Curve, start: Crossing) -> Option<Crossing> {
     let (c0, c1) = c.domain();
     let (d0, d1) = d.domain();
@@ -1028,8 +1028,11 @@ fn newton(c: &Curve, d: &Curve, start: Crossing) -> Option<Crossing> {
         let r = [p[0] - q[0], p[1] - q[1]];
         // v·dt − w·du = −r, by Cramer's rule.
         let det = w[0] * v[1] - v[0] * w[1];
+        // Where a tangent is zero, at a cusp, or the curves run parallel,
+        // no step can be taken: the point stands as it is, for `refined`
+        // to keep only when it lies on both.
         if det == 0.0 || !det.is_finite() {
-            return None;
+            break;
         }
         let dt = (r[0] * w[1] - r[1] * w[0]) / det;
         let du = (r[0] * v[1] - r[1] * v[0]) / det;

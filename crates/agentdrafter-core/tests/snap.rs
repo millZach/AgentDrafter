@@ -808,6 +808,8 @@ objects:
   - polyline: {id: steps, points: [[300, 0, 0], [301, 0, 0], [300, 0, 10], [301, 0, 10]]}
   - line: {id: upright, from: [300, 0, -1], to: [300, 0, 11]}
   - spline: {id: from-b, degree: 3, control_points: [[399.856, 0, 0], [390, -10, 0], [380, -20, 0], [350, -50, 0]]}
+  - spline: {id: cusp, degree: 3, control_points: [[470, 3, 0], [530, -1, 0], [470, -1, 0], [530, 3, 0]]}
+  - spline: {id: under, degree: 2, control_points: [[460, 0, 0], [500, 0, 0], [540, 0, 0]]}
   - spline: {id: through, degree: 3, control_points: [[400, 0, 0], [500, 0, 0], [300, 100, 0], [466, -200, 0]]}
 ",
     )
@@ -848,6 +850,14 @@ fn a_point_is_found_once_and_only_where_both_objects_are() {
                 (points[0].at.x - 399.856).abs() < 1e-6 && points[0].at.y.abs() < 1e-6,
                 "{points:#?}"
             );
+        }
+    }
+    // A spline with a cusp, where it has no direction, meets another there.
+    for kind_of in [SnapKind::Intersection, SnapKind::ApparentIntersection] {
+        for (first, second) in [("once/cusp", "once/under"), ("once/under", "once/cusp")] {
+            let (_, points) = snap(&sheet, with(kind(first, kind_of), second));
+            assert_eq!(points.len(), 1, "{kind_of:?} {first}: {points:#?}");
+            close(points[0].at, [500.0, 0.0, 0.0]);
         }
     }
     // The steps meet the upright at two heights, which seen from above
