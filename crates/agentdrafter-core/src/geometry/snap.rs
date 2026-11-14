@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::curve::{crossings, plan_distance, scale_of, sub, where_on, Curve, P3};
+use super::curve::{crossings, length_of, plan_distance, scale_of, sub, where_on, Curve, P3};
 use super::{point3, OwnSnap, Part, Reader};
 use crate::model::Point3;
 
@@ -283,6 +283,9 @@ pub(crate) fn intersections(parts: &[Part], others: &[Part], apparent: bool) -> 
                     part: i,
                     other: j,
                     t,
+                    u,
+                    t_slack: slack(&part.curve),
+                    u_slack: slack(&other.curve),
                     at_end: end_at(&part.curve, t),
                     other_end: end_at(&other.curve, u),
                     size,
@@ -292,19 +295,31 @@ pub(crate) fn intersections(parts: &[Part], others: &[Part], apparent: bool) -> 
         }
     }
     crossed.sort_by(|a, b| a.part.cmp(&b.part).then(a.t.total_cmp(&b.t)));
-    // A point where two parts of one object meet, such as a polyline's
-    // corner, is found on each of them: it is one point where both lie at
-    // an end of their parts and those ends are one place. No two points
+    // One point can be found more than once: on two parts of one object
+    // that meet there, such as a polyline's corner, at both ends of a
+    // closed curve, or where one part crosses two of the other's that
+    // cross each other, as a block's lines may. It is one point where both
+    // finds lie at an end of their parts and those ends are one place, or
+    // where both are at the same parameter of the same part. No two points
     // are one for being close alone.
     let mut kept: Vec<Crossed> = Vec::new();
     for c in crossed {
+        let apart = |a: P3, b: P3| {
+            if apparent {
+                plan_distance(a, b)
+            } else {
+                length_of(sub(a, b))
+            }
+        };
         let same_end = |a: Option<P3>, b: Option<P3>, size: f64| match (a, b) {
-            (Some(a), Some(b)) => plan_distance(a, b) <= tolerance(size),
+            (Some(a), Some(b)) => apart(a, b) <= tolerance(size),
             _ => false,
         };
         let seen = kept.iter().any(|k| {
-            (k.part != c.part && same_end(k.at_end, c.at_end, c.size))
-                || (k.other != c.other && same_end(k.other_end, c.other_end, c.size))
+            (k.part == c.part && (k.t - c.t).abs() <= c.t_slack)
+                || (k.other == c.other && (k.u - c.u).abs() <= c.u_slack)
+                || same_end(k.at_end, c.at_end, c.size)
+                || same_end(k.other_end, c.other_end, c.size)
         });
         if !seen {
             kept.push(c);
@@ -319,6 +334,11 @@ struct Crossed {
     part: usize,
     other: usize,
     t: f64,
+    /// Its parameter along the other object's part.
+    u: f64,
+    /// How far apart two parameters along either part are one.
+    t_slack: f64,
+    u_slack: f64,
     /// The end of the first object's part it lies at, if it does.
     at_end: Option<P3>,
     /// The end of the other object's part it lies at, if it does.
@@ -327,10 +347,16 @@ struct Crossed {
     point: SnapPoint,
 }
 
+/// How far apart two parameters along `c` are one.
+fn slack(c: &Curve) -> f64 {
+    let (a, b) = c.domain();
+    (b - a) * 1e-9
+}
+
 /// The end of `c` that the parameter `t` is at, within a little.
 fn end_at(c: &Curve, t: f64) -> Option<P3> {
     let (a, b) = c.domain();
-    let slack = (b - a) * 1e-9;
+    let slack = slack(c);
     if t - a <= slack {
         Some(c.start())
     } else if b - t <= slack {

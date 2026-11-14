@@ -939,7 +939,13 @@ fn meetings(c: &Curve, shape: &Shape, size: f64) -> Vec<f64> {
     let changes =
         |i: usize| fs[i] != 0.0 && fs[i + 1] != 0.0 && fs[i].signum() != fs[i + 1].signum();
     let mut crossing: Vec<bool> = (0..n - 1).map(changes).collect();
-    let mut found: Vec<f64> = (0..n).filter(|&i| fs[i] == 0.0).map(|i| ts[i]).collect();
+    // A zero of the function is a meeting only where the point lies on the
+    // other curve: a spline's signed distance is zero along its end's
+    // tangent, past the spline itself.
+    let mut found: Vec<f64> = (0..n)
+        .filter(|&i| fs[i] == 0.0 && distance(ts[i]) <= tolerance)
+        .map(|i| ts[i])
+        .collect();
     for k in 1..n - 1 {
         if !splits[k].1 || fs[k] == 0.0 {
             continue;

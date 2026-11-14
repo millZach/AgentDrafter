@@ -776,3 +776,79 @@ fn a_point_at_a_polylines_corner_is_found_once() {
     );
     assert_eq!(points.len(), 1, "{points:#?}");
 }
+
+/// A made-up sheet of points found more than once, or once where they are
+/// not: two curved splines apart, a block of two crossing lines, a closed
+/// spline, and a polyline that runs back over one point at two heights.
+fn found_once(test: &str) -> PathBuf {
+    let dir = scratch(test);
+    fs::write(
+        dir.join("blocks.yaml"),
+        "units: mm
+blocks:
+  CROSS:
+    objects:
+      - line: {from: [-10, 0, 0], to: [10, 0, 0]}
+      - line: {from: [0, -10, 0], to: [0, 10, 0]}
+",
+    )
+    .unwrap();
+    let sheet = dir.join("once.yaml");
+    fs::write(
+        &sheet,
+        "units: mm
+block_library: blocks.yaml
+objects:
+  - spline: {id: left, degree: 3, control_points: [[0, 10, 0], [2, 10, 0], [3, 0, 0], [5, 0, 0]]}
+  - spline: {id: right, degree: 3, control_points: [[10, 0, 0], [12, 0, 0], [13, 10, 0], [15, 10, 0]]}
+  - insert: {id: cross, block: CROSS, position: [100, 0, 0], rotation: 30, scale: 2}
+  - line: {id: slant, from: [95, -5, 0], to: [105, 5, 0]}
+  - spline: {id: loop, degree: 2, control_points: [[200, 0, 0], [201, 1, 0], [199, 1, 0], [200, 0, 0]]}
+  - line: {id: floor, from: [198, 0, 0], to: [202, 0, 0]}
+  - polyline: {id: steps, points: [[300, 0, 0], [301, 0, 0], [300, 0, 10], [301, 0, 10]]}
+  - line: {id: upright, from: [300, 0, -1], to: [300, 0, 11]}
+",
+    )
+    .unwrap();
+    sheet
+}
+
+#[test]
+fn a_point_is_found_once_and_only_where_both_objects_are() {
+    let sheet = found_once("once");
+    for kind_of in [SnapKind::Intersection, SnapKind::ApparentIntersection] {
+        // A spline's end runs on along its tangent to where the other
+        // spline ends; the splines themselves are 5 apart.
+        let (_, points) = snap(&sheet, with(kind("once/left", kind_of), "once/right"));
+        assert!(points.is_empty(), "{kind_of:?}: {points:#?}");
+        // The line crosses both of the block's lines where they cross.
+        for (first, second) in [("once/slant", "once/cross"), ("once/cross", "once/slant")] {
+            let (_, points) = snap(&sheet, with(kind(first, kind_of), second));
+            assert_eq!(points.len(), 1, "{kind_of:?} {first}: {points:#?}");
+            close(points[0].at, [100.0, 0.0, 0.0]);
+        }
+        // A closed spline starts and ends where the line touches it.
+        for (first, second) in [("once/loop", "once/floor"), ("once/floor", "once/loop")] {
+            let (_, points) = snap(&sheet, with(kind(first, kind_of), second));
+            assert_eq!(points.len(), 1, "{kind_of:?} {first}: {points:#?}");
+            close(points[0].at, [200.0, 0.0, 0.0]);
+        }
+    }
+    // The steps meet the upright at two heights, which seen from above
+    // are one point.
+    let (_, points) = snap(
+        &sheet,
+        with(kind("once/steps", SnapKind::Intersection), "once/upright"),
+    );
+    assert_eq!(points.len(), 2, "{points:#?}");
+    close(points[0].at, [300.0, 0.0, 0.0]);
+    close(points[1].at, [300.0, 0.0, 10.0]);
+    let (_, points) = snap(
+        &sheet,
+        with(
+            kind("once/steps", SnapKind::ApparentIntersection),
+            "once/upright",
+        ),
+    );
+    assert_eq!(points.len(), 1, "{points:#?}");
+}
