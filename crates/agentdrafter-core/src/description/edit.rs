@@ -1082,7 +1082,14 @@ impl RecordFile {
     /// of `list` at `index`, such as `circle.layer`: the last that set that
     /// value, or else the last that touched the object at all. `None` when
     /// no operation touched it.
-    pub(crate) fn blame(&self, list: ObjectList, index: usize, within: &str) -> Option<usize> {
+    /// With it, the place within the object that operation set that covers
+    /// `within`, such as `cells[2][0].style`, when one does.
+    pub(crate) fn blame_at(
+        &self,
+        list: ObjectList,
+        index: usize,
+        within: &str,
+    ) -> Option<(usize, Option<String>)> {
         let item = self
             .lists
             .iter()
@@ -1096,7 +1103,16 @@ impl RecordFile {
             .iter()
             .rev()
             .find(|(_, touch)| !key.is_empty() && touch.covers(key));
-        set_it.or(item.touches.last()).map(|(op, _)| *op)
+        match set_it {
+            Some((op, Touch::Keys(keys))) => {
+                let matched = keys
+                    .iter()
+                    .find(|set| Touch::Keys(vec![(*set).clone()]).covers(key));
+                Some((*op, matched.cloned()))
+            }
+            Some((op, Touch::Whole)) => Some((*op, None)),
+            None => item.touches.last().map(|(op, _)| (*op, None)),
+        }
     }
 
     /// The object of `list` at `index` as one line of the record's YAML,
@@ -1478,6 +1494,16 @@ impl RecordFile {
         }
         let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
         let edited = cells::edit_table(keys, edit)?;
+        // A row or column inserted or deleted moves the cells after it, so
+        // the places earlier edits touched follow their cells.
+        if let Some(shift) = edited.shift {
+            let item = &mut self.list_state(list).items[index];
+            for (_, touch) in &mut item.touches {
+                if let Touch::Keys(keys) = touch {
+                    *keys = keys.iter().filter_map(|k| shift.path(k)).collect();
+                }
+            }
+        }
         if edited.edited {
             self.touch(list, index, operation, Touch::Keys(edited.touched.clone()));
         }

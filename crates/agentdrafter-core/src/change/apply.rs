@@ -437,9 +437,9 @@ fn objects_changed(
         let Some(d) = done[i].as_ref().filter(|_| included[i]) else {
             continue;
         };
-        let how = match op.spec.name {
-            "delete" => HowChanged::Deleted,
-            name if name.starts_with("add_") || name == "insert_block" => HowChanged::Added,
+        let how = match (op.spec.kind, &op.body) {
+            (Kind::Delete, _) => HowChanged::Deleted,
+            (Kind::Add(_), _) => HowChanged::Added,
             _ => HowChanged::Changed,
         };
         if let Some(id) = &d.id {
@@ -1282,6 +1282,11 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         done.after = None;
     }
     if let Some((name, text)) = from_row {
+        // An operation that edits its object as well as a row's value
+        // reaches every sheet the object is on, so a refusal of it holds
+        // them all back; one that sets the row's value alone reaches its
+        // sheet.
+        let refused_on = if edits_object { reach.clone() } else { vec![k] };
         // A row's value fills every place on the sheet its template takes
         // it, and each is edited: none may be on a locked layer.
         let t = files.template_of[k];
@@ -1297,13 +1302,13 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                     == Some("true")
                 {
                     let filled = format!("{}/{}", files.name(k), listed[i].id);
-                    return fail(vec![k], locked(&filled, &layer));
+                    return fail(refused_on, locked(&filled, &layer));
                 }
             }
         }
         let was = at.rows.row_value(k, &name).unwrap_or_default();
         if let Err(e) = at.rows.set_row_value(k, &name, &text) {
-            return fail(vec![k], from_record(e));
+            return fail(refused_on, from_record(e));
         }
         at.values.retain(|(r, n, _)| !(*r == k && *n == name));
         at.values.push((k, name.clone(), op.index));
@@ -2592,7 +2597,9 @@ fn attribute(
     let in_template =
         error.file.as_deref().map(Path::new) == Some(files.templates[t].path.as_path());
     let field = error.field.clone().unwrap_or_default();
-    let mut cause: Option<(usize, String)> = None;
+    // The operation, the place within its object, and the place the
+    // operation set that covers it, when one does.
+    let mut cause: Option<(usize, String, Option<String>)> = None;
     let in_library = files.library_of[t].filter(|&l| {
         error
             .file
@@ -2630,30 +2637,30 @@ fn attribute(
                 .iter()
                 .rev()
                 .find(|(lib, name, _)| *lib == l && name == block)
-                .and_then(|(_, name, i)| within(name).map(|within| (*i, within)));
+                .and_then(|(_, name, i)| within(name).map(|within| (*i, within, None)));
         }
     } else if in_rows {
         if let Some((list @ ObjectList::Row(_), index, rest)) = split_place(&field) {
-            if let Some(i) = at.rows.blame(list, index, rest) {
-                cause = Some((i, rest.to_owned()));
+            if let Some((i, matched)) = at.rows.blame_at(list, index, rest) {
+                cause = Some((i, rest.to_owned(), matched));
             }
         } else if let Some(value) = field.strip_prefix(&format!("rows[{}].values.", k)) {
             if let Some((_, _, i)) = at.values.iter().find(|(r, n, _)| *r == k && n == value) {
-                cause = Some((*i, String::new()));
+                cause = Some((*i, String::new(), None));
             }
         }
     } else if in_template {
         if let Some((ObjectList::Template, index, rest)) = split_place(&field) {
             if let Some(Some(Ok(template))) = at.templates.get(t) {
-                if let Some(i) = template.blame(ObjectList::Template, index, rest) {
-                    cause = Some((i, rest.to_owned()));
+                if let Some((i, matched)) = template.blame_at(ObjectList::Template, index, rest) {
+                    cause = Some((i, rest.to_owned(), matched));
                 }
             }
         }
     }
-    if let Some((i, rest)) = cause {
+    if let Some((i, rest, matched)) = cause {
         let op = &ops[i];
-        let suffix = op_field(op, &rest, error.code);
+        let suffix = op_field(op, &rest, error.code, matched.as_deref());
         return Error {
             message: format!(
                 "operation {i} (`{}`) on sheet `{}`: {}",
@@ -2789,8 +2796,9 @@ fn split_place(field: &str) -> Option<(ObjectList, usize, &str)> {
 }
 
 /// The field within operation `op` that `rest`, a place within the object
-/// it edits, such as `line.to[1]`, is about.
-fn op_field(op: &Operation, rest: &str, code: ErrorCode) -> String {
+/// it edits, such as `line.to[1]`, is about. `matched` is the place within
+/// the object the operation set that covers it, when one does.
+fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&str>) -> String {
     let within = rest.split_once('.').map_or("", |(_, within)| within);
     match &op.body {
         Body::Add { .. } => within.to_owned(),
@@ -2830,7 +2838,7 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode) -> String {
         }
         Body::Move { .. } => "by".to_owned(),
         Body::Delete { .. } => String::new(),
-        Body::TableEdit { edit, .. } => grid_field(edit, within),
+        Body::TableEdit { edit, .. } => grid_field(edit, within, matched),
         // A place within the block it wrote, such as `objects[0].line.layer`,
         // is that place in the operation.
         Body::Block { .. } => rest.to_owned(),
@@ -2845,8 +2853,11 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode) -> String {
 }
 
 /// The field within a table operation that `within`, a place within its
-/// table such as `cells[2][1].merge[0]` or `rows[3]`, is about.
-fn grid_field(edit: &TableEdit, within: &str) -> String {
+/// table such as `cells[2][1].merge[0]` or `rows[3]`, is about. `matched` is
+/// the place the operation set that covers it, which follows its cell when
+/// a later operation moved the cell; an empty `within` is a value of the
+/// row the operation set.
+fn grid_field(edit: &TableEdit, within: &str, matched: Option<&str>) -> String {
     /// `cells[R][C]` and what follows, or `None`.
     fn cell_of(within: &str) -> Option<(usize, usize, &str)> {
         let rest = within.strip_prefix("cells[")?;
@@ -2856,21 +2867,30 @@ fn grid_field(edit: &TableEdit, within: &str) -> String {
         Some((row.parse().ok()?, column.parse().ok()?, rest))
     }
     match edit {
-        TableEdit::SetCell { cell, set } => match cell_of(within) {
-            Some((r, c, rest)) if [r, c] == *cell => {
-                let key = rest
-                    .strip_prefix('.')
-                    .and_then(|k| k.split(['.', '[']).next())
-                    .unwrap_or("");
-                if set.contains_key(key) {
-                    format!("set{rest}")
-                } else {
-                    "set".to_owned()
+        TableEdit::SetCell { cell, set } => {
+            // Where the cell is now.
+            let now = matched.and_then(cell_of).map_or(*cell, |(r, c, _)| [r, c]);
+            match cell_of(within) {
+                Some((r, c, rest)) if [r, c] == now => {
+                    let key = rest
+                        .strip_prefix('.')
+                        .and_then(|k| k.split(['.', '[']).next())
+                        .unwrap_or("");
+                    if set.contains_key(key) {
+                        format!("set{rest}")
+                    } else if key.is_empty() && set.contains_key("text") {
+                        // A cell written as its text alone, or as a value
+                        // from the row, is its text.
+                        "set.text".to_owned()
+                    } else {
+                        "set".to_owned()
+                    }
                 }
+                None if within.is_empty() && set.contains_key("text") => "set.text".to_owned(),
+                _ if set.contains_key("merge") => "set.merge".to_owned(),
+                _ => "set".to_owned(),
             }
-            _ if set.contains_key("merge") => "set.merge".to_owned(),
-            _ => "set".to_owned(),
-        },
+        }
         TableEdit::Add {
             axis, size, cells, ..
         } => {

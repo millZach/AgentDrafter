@@ -12,8 +12,8 @@ use serde_json::{json, Map, Value};
 
 use crate::description::schema::{block_library_schema, sheet_description_schema};
 use crate::description::{
-    article, objects_table, rows_schema, Axis, TableEdit, CELL_KEYS, LAYER_KEYS, LINETYPE_KEYS,
-    TEXT_STYLE_KEYS,
+    article, objects_table, rows_schema, template_schema, Axis, TableEdit, CELL_KEYS, LAYER_KEYS,
+    LINETYPE_KEYS, TEXT_STYLE_KEYS,
 };
 use crate::error::{Error, ErrorCode};
 use crate::units::{parse_length, LengthError, Unit};
@@ -540,6 +540,20 @@ fn definitions() -> Map<String, Value> {
         }),
     );
     add_block_definitions(&mut defs);
+    // A table's cell as a template writes it: the cell, or its text, may be
+    // a value from the row, which the reader takes only in a template.
+    let mut template_defs = template_schema()["$defs"].take();
+    for name in ["row_value", "value_name"] {
+        defs.insert(name.into(), template_defs[name].take());
+    }
+    let mut cell = template_defs["table_cell"].take();
+    cell["description"] = json!(
+        "A cell, as a sheet description writes one: its text alone, '' or null for an empty \
+         cell, or a mapping that gives its text and what it draws with. In a template's table, \
+         the cell or its text may be a value from the row, {row: NAME}; a row's own table takes \
+         none."
+    );
+    defs.insert("template_cell".into(), cell);
     defs.insert(
         "target".into(),
         json!({
@@ -819,6 +833,17 @@ fn grid_schema(op: GridOp, defs: &Map<String, Value>) -> Value {
             "minimum": 0,
         })
     };
+    // An optional key sent as null is left out.
+    let or_null = |mut schema: Value| {
+        let description = schema
+            .as_object_mut()
+            .and_then(|own| own.remove("description"));
+        let mut optional = json!({ "anyOf": [schema, { "type": "null" }] });
+        if let Some(description) = description {
+            optional["description"] = description;
+        }
+        optional
+    };
     let mut properties = Map::new();
     properties.insert(
         "target".into(),
@@ -833,7 +858,7 @@ fn grid_schema(op: GridOp, defs: &Map<String, Value>) -> Value {
             // A cell's keys, as a cell written as a mapping takes them, each
             // of which null takes away.
             let mut keys = Map::new();
-            let cell = &defs["table_cell"]["anyOf"];
+            let cell = &defs["template_cell"]["anyOf"];
             if let Some(own) = cell
                 .as_array()
                 .and_then(|choices| choices.iter().find_map(|c| c["properties"].as_object()))
@@ -844,6 +869,14 @@ fn grid_schema(op: GridOp, defs: &Map<String, Value>) -> Value {
                     let mut optional = json!({ "anyOf": [value, { "type": "null" }] });
                     if let Some(description) = description {
                         optional["description"] = description;
+                    }
+                    if key == "text" {
+                        optional["description"] = json!(
+                            "What the cell says, exactly as it shows; null takes it away. In a \
+                             template's table it may be a value from the row, {row: NAME}, \
+                             which only a template takes. Text sent for a cell whose template \
+                             takes its text from the row sets that sheet's row value instead."
+                        );
                     }
                     keys.insert(key.clone(), optional);
                 }
@@ -880,33 +913,35 @@ fn grid_schema(op: GridOp, defs: &Map<String, Value>) -> Value {
             };
             properties.insert(
                 "at".into(),
-                place(&format!(
+                or_null(place(&format!(
                     "The new {word}'s place, counted from 0: the {word} now there and those \
-                     after it move along. Without it, after the last."
-                )),
+                     after it move along. Without it, or null, after the last."
+                ))),
             );
             properties.insert(
                 axis.size_key().into(),
-                json!({
+                or_null(json!({
                     "description": format!(
-                        "The new {word}'s {}: a length more than 0. Without it, the {} of the \
-                         {word} before it, or of the first {word} when it is added at 0.",
+                        "The new {word}'s {}: a length more than 0. Without it, or null, the {} \
+                         of the {word} before it, or of the first {word} when it is added at 0.",
                         axis.size_key(),
                         axis.size_key()
                     ),
                     "$ref": "#/$defs/length_more_than_0",
-                }),
+                })),
             );
             properties.insert(
                 "cells".into(),
-                json!({
+                or_null(json!({
                     "description": format!(
                         "The new {word}'s cells, one for each {across}, each as a sheet \
-                         description writes a cell. Without them, empty."
+                         description writes a cell, or in a template's table a value from the \
+                         row, {{row: NAME}}, as the cell or its text. Without them, or null, \
+                         empty."
                     ),
                     "type": "array",
-                    "items": { "$ref": "#/$defs/table_cell" },
-                }),
+                    "items": { "$ref": "#/$defs/template_cell" },
+                })),
             );
         }
         GridOp::Delete(axis) => {

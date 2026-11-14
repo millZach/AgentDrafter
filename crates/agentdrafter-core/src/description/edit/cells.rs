@@ -87,6 +87,51 @@ pub(crate) struct TableEdited {
     /// What else it did to keep the table in line, in words, such as `the
     /// merge of cell [0, 0] grows to [1, 5]`.
     pub notes: Vec<String>,
+    /// The row or column it inserted or deleted, so places within the table
+    /// an earlier edit touched follow their cells.
+    pub shift: Option<Shift>,
+}
+
+/// A row or column inserted or deleted at `at`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Shift {
+    pub axis: Axis,
+    pub at: usize,
+    pub inserted: bool,
+}
+
+impl Shift {
+    /// Where `path`, a place within the table such as `cells[2][1].style`
+    /// or `rows[3]`, is once the row or column is inserted or deleted, or
+    /// `None` when it was in the row or column deleted.
+    pub(crate) fn path(&self, path: &str) -> Option<String> {
+        /// The number in `[N]` at the start of `text`, and what follows.
+        fn index(text: &str) -> Option<(usize, &str)> {
+            let rest = text.strip_prefix('[')?;
+            let (n, rest) = rest.split_once(']')?;
+            Some((n.parse().ok()?, rest))
+        }
+        let moved = |n: usize| -> Option<usize> {
+            match (self.inserted, n.cmp(&self.at)) {
+                (true, std::cmp::Ordering::Less) | (false, std::cmp::Ordering::Less) => Some(n),
+                (true, _) => Some(n + 1),
+                (false, std::cmp::Ordering::Equal) => None,
+                (false, std::cmp::Ordering::Greater) => Some(n - 1),
+            }
+        };
+        let sizes = self.axis.sizes_key();
+        if let Some((n, rest)) = path.strip_prefix(sizes).and_then(index) {
+            return Some(format!("{sizes}[{}]{rest}", moved(n)?));
+        }
+        let Some((r, rest)) = path.strip_prefix("cells").and_then(index) else {
+            return Some(path.to_owned());
+        };
+        match (self.axis, index(rest)) {
+            (Axis::Row, _) => Some(format!("cells[{}]{rest}", moved(r)?)),
+            (Axis::Column, Some((c, rest))) => Some(format!("cells[{r}][{}]{rest}", moved(c)?)),
+            (Axis::Column, None) => Some(path.to_owned()),
+        }
+    }
 }
 
 /// A merged cell: its place and its span, `[rows, columns]`.
@@ -234,11 +279,13 @@ fn merges(keys: &[Entry]) -> Result<Vec<Merge>, Error> {
 /// cell a merge covers must: `''`, a bare null, or a mapping whose `text`
 /// is empty and that gives nothing else.
 fn is_empty(cell: &Node) -> bool {
+    // The reader drops the line breaks at the end of a cell's text.
+    let shows_nothing = |text: &str| text.trim_end_matches(['\n', '\r']).is_empty();
     match &cell.kind {
-        Kind::Scalar(text) => text.is_empty() || cell.is_bare_null(),
+        Kind::Scalar(text) => shows_nothing(text) || cell.is_bare_null(),
         Kind::Mapping(entries) => entries.iter().all(|e| {
             e.value.is_bare_null()
-                || (e.key == "text" && matches!(&e.value.kind, Kind::Scalar(t) if t.is_empty()))
+                || (e.key == "text" && matches!(&e.value.kind, Kind::Scalar(t) if shows_nothing(t)))
         }),
         Kind::Sequence(_) => false,
     }
@@ -414,22 +461,15 @@ fn set_cell(
     let mut edits: Vec<(&String, &Value)> = Vec::new();
     for (key, value) in set {
         if key == "text" {
-            if let Some(name) = &row_name {
-                let text = match value {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    _ => {
-                        return Err(wrong(
-                            ErrorCode::WrongType,
-                            format!(
-                                "the template takes this cell's text from the row's value \
-                                 `{name}`, which is text; give the new text as text"
-                            ),
-                            "set.text",
-                        ))
-                    }
-                };
+            // Text sets the row's value; another value from the row, or
+            // null, edits the template's cell itself.
+            let text = match value {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(n.to_string()),
+                Value::Bool(b) => Some(b.to_string()),
+                _ => None,
+            };
+            if let (Some(name), Some(text)) = (&row_name, text) {
                 from_row = Some((name.clone(), text));
                 continue;
             }
@@ -505,6 +545,7 @@ fn set_cell(
         touched,
         words: format!("sets {} of cell [{r}, {c}]", set_keys.join(", ")),
         notes: Vec::new(),
+        shift: None,
     })
 }
 
@@ -578,7 +619,14 @@ fn add(
             // The size of the one it follows, or the first's at 0, written
             // as the record writes it.
             let sizes = list(keys, sizes_key)?;
-            let like = &sizes[i.saturating_sub(1)];
+            let Some(like) = sizes.get(i.saturating_sub(1)) else {
+                let size = axis.size_key();
+                return Err(wrong(
+                    ErrorCode::BadValue,
+                    format!("the table has no {word} to take a {size} from; give {size}"),
+                    size,
+                ));
+            };
             match &like.kind {
                 Kind::Scalar(text) => Node::scalar(text.clone()),
                 _ => like.clone(),
@@ -629,6 +677,11 @@ fn add(
         touched,
         words: format!("adds a {word} at {i}"),
         notes,
+        shift: Some(Shift {
+            axis,
+            at: i,
+            inserted: true,
+        }),
     })
 }
 
@@ -739,5 +792,10 @@ fn delete(keys: &mut Vec<Entry>, axis: Axis, i: usize) -> Result<TableEdited, Er
         touched,
         words: format!("deletes {word} {i}"),
         notes,
+        shift: Some(Shift {
+            axis,
+            at: i,
+            inserted: false,
+        }),
     })
 }

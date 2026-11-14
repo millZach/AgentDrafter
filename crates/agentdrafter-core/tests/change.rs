@@ -418,6 +418,34 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             }
         }
     }
+    // What the reader takes beyond the samples: a value from the row in a
+    // template's cell, and null for an optional key, which leaves it out.
+    for (name, more) in [
+        (
+            "set_cell",
+            json!({"op": "set_cell", "target": {"id": "S/t"}, "cell": [0, 0], "set": {"text": {"row": "PUMP"}}}),
+        ),
+        (
+            "add_row",
+            json!({"op": "add_row", "target": {"id": "S/t"}, "at": null, "height": null, "cells": [{"row": "PUMP"}, {"text": {"row": "TAG"}, "height": 2}, null, ""]}),
+        ),
+        (
+            "add_row",
+            json!({"op": "add_row", "target": {"id": "S/t"}, "cells": null}),
+        ),
+        (
+            "add_column",
+            json!({"op": "add_column", "target": {"id": "S/t"}, "at": null, "width": null, "cells": null}),
+        ),
+        (
+            "add_column",
+            json!({"op": "add_column", "target": {"id": "S/t"}, "at": 1, "cells": [{"row": "PUMP"}, "A"]}),
+        ),
+    ] {
+        let info = listed.operations.iter().find(|o| o.name == name).unwrap();
+        let validator = jsonschema::validator_for(&info.schema).unwrap();
+        assert!(validator.is_valid(&more), "{name}: {more}");
+    }
     let whole = jsonschema::validator_for(&change_set_schema()).unwrap();
     assert!(whole.is_valid(&json!({"operations": samples.to_vec(), "fixes": ["DEMO-002"]})));
     for wrong in [

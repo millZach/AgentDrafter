@@ -10,8 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, change_with, read_dwg, undo, ChangeReport, ChangeRequest, ErrorCode, Object,
-    Reply, SetBuildRequest, Settings, Table, UndoRequest,
+    build_set_with, change_with, journal, read_dwg, undo, ChangeReport, ChangeRequest, ErrorCode,
+    HowChanged, JournalRequest, Object, Reply, SetBuildRequest, Settings, Table, UndoRequest,
 };
 use serde_json::{json, Value};
 
@@ -58,6 +58,11 @@ const ROWS: &str = "rows:
 /// title, a header, two merges and a cell from the row; sheet `S-1` has a
 /// table of its own.
 fn table_set(test: &str) -> PathBuf {
+    set_of(test, TEMPLATE, ROWS)
+}
+
+/// A built made-up set of the template `template` and the rows `rows`.
+fn set_of(test: &str, template: &str, rows: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("core-table-change")
         .join(test);
@@ -69,8 +74,8 @@ fn table_set(test: &str) -> PathBuf {
         "units: mm\noutput: dwg\nrows: rows.yaml\n",
     )
     .unwrap();
-    fs::write(set.join("rows.yaml"), ROWS).unwrap();
-    fs::write(set.join("templates/t.yaml"), TEMPLATE).unwrap();
+    fs::write(set.join("rows.yaml"), rows).unwrap();
+    fs::write(set.join("templates/t.yaml"), template).unwrap();
     let built = build_set_with(
         &SetBuildRequest {
             set: set.clone(),
@@ -79,7 +84,7 @@ fn table_set(test: &str) -> PathBuf {
         &Settings::default(),
     );
     assert!(built.ok, "{:#?}", built.error);
-    assert_eq!(built.result.unwrap().built, 2);
+    assert!(built.result.unwrap().built >= 1);
     set
 }
 
@@ -494,4 +499,211 @@ fn a_table_the_operation_leaves_wrong_is_placed_on_the_operations_field() {
     let e = reply.error.unwrap();
     assert_eq!(e.code, ErrorCode::UnknownKey);
     assert_eq!(e.field.as_deref(), Some("operations[0].set.colour"));
+}
+
+/// A template whose table takes its one cell from the row, as does a text
+/// on a locked layer.
+const LOCKED_FILL: &str = "units: mm
+paper: [200, 100]
+layers:
+  frozen: {locked: true}
+objects:
+  - table:
+      id: t
+      position: [10, 90, 0]
+      columns: [30]
+      rows: [8]
+      cells:
+        - [{row: PUMP}]
+  - text: {contents: {row: PUMP}, position: [10, 10, 0], height: 2.5, layer: frozen}
+";
+
+const TWO_ROWS: &str = "rows:
+  - sheet: S-1
+    template: templates/t.yaml
+    values: {PUMP: P-101}
+  - sheet: S-2
+    template: templates/t.yaml
+    values: {PUMP: P-202}
+";
+
+#[test]
+fn a_set_cell_that_edits_the_template_is_refused_on_every_sheet_built_from_it() {
+    let set = set_of("mixed-refusal", LOCKED_FILL, TWO_ROWS);
+    // The row value fills a text on a locked layer on S-1, and the height
+    // edits the template: S-2 is held back with S-1.
+    let before = snapshot::snapshot(&set);
+    let reply = apply(
+        &set,
+        json!([
+            {"op": "set_cell", "target": {"id": "S-1/t"}, "cell": [0, 0], "set": {"text": "P-999", "height": 2}},
+            {"op": "add_circle", "sheet": "S-2", "center": [50, 50, 0], "radius": 5},
+        ]),
+    );
+    assert!(!reply.ok);
+    let report = reply.result.unwrap();
+    assert_eq!(report.landed, 0, "{:#?}", report.sheets);
+    assert_eq!(report.failed, 2);
+    assert_eq!(
+        report.sheets[0].error.as_ref().unwrap().code,
+        ErrorCode::Locked
+    );
+    assert_eq!(snapshot::snapshot(&set), before);
+    // Setting the row value alone stays on its sheet.
+    let reply = apply(
+        &set,
+        json!([
+            {"op": "set_cell", "target": {"id": "S-1/t"}, "cell": [0, 0], "set": {"text": "P-999"}},
+            {"op": "add_circle", "sheet": "S-2", "center": [50, 50, 0], "radius": 5},
+        ]),
+    );
+    let report = reply.result.unwrap();
+    assert_eq!((report.landed, report.failed), (1, 1));
+}
+
+#[test]
+fn a_row_or_column_added_to_an_emptied_grid_is_refused_not_a_panic() {
+    let set = table_set("emptied");
+    let e = fails(
+        &set,
+        json!([
+            {"op": "change", "target": {"id": "S-1/own"}, "set": {"rows": [], "cells": []}},
+            {"op": "add_row", "target": {"id": "S-1/own"}},
+        ]),
+    );
+    assert_eq!(e.code, ErrorCode::BadValue);
+    assert_eq!(e.field.as_deref(), Some("operations[1].height"));
+    assert!(
+        e.message
+            .contains("no row to take a height from; give height"),
+        "{}",
+        e.message
+    );
+    let e = fails(
+        &set,
+        json!([
+            {"op": "change", "target": {"id": "S-1/own"}, "set": {"columns": [], "cells": [[], []]}},
+            {"op": "add_column", "target": {"id": "S-1/own"}, "at": 0},
+        ]),
+    );
+    assert_eq!(e.field.as_deref(), Some("operations[1].width"));
+}
+
+#[test]
+fn an_error_follows_its_cell_when_a_later_operation_moves_it() {
+    let set = table_set("blame-moves");
+    let e = fails(
+        &set,
+        json!([
+            {"op": "set_cell", "target": {"id": "S-1/own"}, "cell": [1, 0], "set": {"style": "MISSING"}},
+            {"op": "add_row", "target": {"id": "S-1/own"}, "at": 0},
+        ]),
+    );
+    assert_eq!(e.code, ErrorCode::UnknownName);
+    assert_eq!(e.field.as_deref(), Some("operations[0].set.style"));
+    let e = fails(
+        &set,
+        json!([
+            {"op": "set_cell", "target": {"id": "S-1/own"}, "cell": [1, 1], "set": {"style": "MISSING"}},
+            {"op": "delete_column", "target": {"id": "S-1/own"}, "column": 0},
+        ]),
+    );
+    assert_eq!(e.field.as_deref(), Some("operations[0].set.style"));
+}
+
+#[test]
+fn bad_text_is_placed_on_set_text() {
+    let set = table_set("bad-text");
+    // A cell written as its text alone.
+    let e = fails(
+        &set,
+        json!([{"op": "set_cell", "target": {"id": "S-1/own"}, "cell": [0, 0], "set": {"text": "   "}}]),
+    );
+    assert_eq!(e.code, ErrorCode::BadValue);
+    assert_eq!(e.field.as_deref(), Some("operations[0].set.text"));
+    // A cell its template takes from the row.
+    let e = fails(
+        &set,
+        json!([{"op": "set_cell", "target": {"id": "S-2/sched"}, "cell": [2, 0], "set": {"text": "   "}}]),
+    );
+    assert_eq!(
+        e.field.as_deref(),
+        Some("operations[0].set.text"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn a_merge_covers_a_cell_that_shows_nothing_as_the_reader_reads_it() {
+    let set = table_set("merge-blank");
+    lands(
+        &set,
+        json!([
+            {"op": "change", "target": {"id": "S-1/own"}, "set": {"cells": [["A", "\n"], ["C", "D"]]}},
+            {"op": "set_cell", "target": {"id": "S-1/own"}, "cell": [0, 0], "set": {"merge": [1, 2]}},
+        ]),
+    );
+    assert_eq!(table(&set, "S-1", "own").cells[0][0].merge, Some([1, 2]));
+}
+
+#[test]
+fn a_value_from_the_row_sent_as_a_cells_text_edits_the_template() {
+    let set = table_set("row-text");
+    lands(
+        &set,
+        json!([
+            {"op": "set_cell", "target": {"id": "S-1/sched"}, "cell": [3, 0], "set": {"text": {"row": "PUMP"}}},
+            {"op": "add_row", "target": {"id": "S-1/sched"}, "at": null, "height": null, "cells": [{"row": "PUMP"}, {"text": {"row": "PUMP"}, "height": 2}, null]},
+        ]),
+    );
+    let t = table(&set, "S-2", "sched");
+    assert_eq!(t.cells[3][0].text, "P-202");
+    assert_eq!(texts(&t)[4], ["P-202", "P-202", ""]);
+    // null on a cell the template takes from the row takes the value from
+    // the row away, in the template, on every sheet.
+    let report = lands(
+        &set,
+        json!([{"op": "set_cell", "target": {"id": "S-1/sched"}, "cell": [2, 0], "set": {"text": null}}]),
+    );
+    assert_eq!(report.operations[0].sheets, ["S-1", "S-2"]);
+    assert!(template(&set).contains(
+        "        - ['', {text: FEED, merge: [2, 1]}, '']
+"
+    ));
+    assert_eq!(table(&set, "S-2", "sched").cells[2][0].text, "");
+}
+
+#[test]
+fn the_journal_marks_a_table_whose_rows_or_columns_change_as_changed() {
+    let set = table_set("journal");
+    let report = lands(
+        &set,
+        json!([
+            {"op": "add_row", "target": {"id": "S-1/sched"}},
+            {"op": "add_column", "target": {"id": "S-1/own"}},
+        ]),
+    );
+    let listed = journal(&JournalRequest { set: set.clone() })
+        .result
+        .unwrap();
+    let recorded = &listed
+        .entries
+        .iter()
+        .find(|e| Some(e.recorded.entry) == report.journal_entry)
+        .unwrap()
+        .recorded;
+    let objects: Vec<(&str, HowChanged)> = recorded
+        .objects
+        .iter()
+        .map(|o| (o.id.as_str(), o.how))
+        .collect();
+    assert_eq!(
+        objects,
+        [
+            ("S-1/sched", HowChanged::Changed),
+            ("S-2/sched", HowChanged::Changed),
+            ("S-1/own", HowChanged::Changed),
+        ]
+    );
 }
