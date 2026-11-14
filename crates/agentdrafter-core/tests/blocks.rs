@@ -308,3 +308,55 @@ objects:
         read.linetypes
     );
 }
+
+/// A block that inserts another, defined before it in the library, comes
+/// to the sheet with the block it inserts and not with a block nothing
+/// inserts; the DWG defines both, the outer block's insert with its
+/// attribute, and reads back as it was written.
+#[test]
+fn a_block_that_inserts_another_reads_back_with_both_defined() {
+    let dir = scratch("nested");
+    fs::write(
+        dir.join("blocks.yaml"),
+        "units: mm
+blocks:
+  STRIP:
+    objects:
+      - polyline: {points: [[0, 0, 0], [20, 0, 0], [20, 10, 0], [0, 10, 0]], closed: true}
+      - insert: {block: TERMINAL, position: [5, 5, 0], attributes: {NUMBER: '1'}}
+      - insert: {block: TERMINAL, position: [15, 5, 0], rotation: 90, scale: 0.5, attributes: {NUMBER: '2'}, color: ByBlock}
+  TERMINAL:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 2}
+      - attdef: {tag: NUMBER, position: [0, -1, 0], height: 2, justify: middle_center}
+  UNUSED:
+    objects:
+      - line: {from: [0, 0, 0], to: [1, 0, 0]}
+",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("sheet.yaml"),
+        "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {block: STRIP, position: [50, 50, 0]}
+  - insert: {block: STRIP, position: [50, 80, 0], scale: 2}
+",
+    )
+    .unwrap();
+    let (sheet, _, read) = build_and_read(&dir.join("sheet.yaml"));
+    let names: Vec<&str> = sheet.blocks.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["STRIP", "TERMINAL"]);
+    assert_same_objects(&sheet, &read);
+    for block in &sheet.blocks {
+        assert_same_block(block, &read);
+    }
+    assert!(read.blocks.iter().all(|b| b.name != "UNUSED"));
+    let strip = block(&read, "STRIP");
+    let numbers: Vec<&str> = inserts(&strip.objects)
+        .iter()
+        .map(|i| i.attributes[0].value.as_str())
+        .collect();
+    assert_eq!(numbers, ["1", "2"]);
+}

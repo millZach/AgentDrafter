@@ -41,9 +41,30 @@ A block's name follows the rules for a layer's name: 1 to 255 characters, not st
 | Key | Required | What it is |
 |---|---|---|
 | `base_point` | no | The point of the block that sits at an insert's position, in the block's own coordinates: a point. Without it, `[0, 0, 0]`. |
-| `objects` | yes | The block's objects, in drawing order: at least one. Each is a mapping with one key, its type: any [object a sheet holds](sheet-description.md#objects) but `insert`, or `attdef`. An object names a layer, text style or hatch pattern of the library's. It takes no `id` and no `name`: an insert of the block is the object on a sheet, with an [ID and a name](sheet-description.md#ids-and-names) of its own. A `text` takes a [`cell`](#cells) as well. |
+| `objects` | yes | The block's objects, in drawing order: at least one. Each is a mapping with one key, its type: any [object a sheet holds](sheet-description.md#objects), an `insert` of another of the library's blocks among them (see [Nested blocks](#nested-blocks)), or `attdef`. An object names a layer, text style or hatch pattern of the library's. It takes no `id` and no `name`: an insert of the block is the object on a sheet, with an [ID and a name](sheet-description.md#ids-and-names) of its own. A `text` takes a [`cell`](#cells) as well. |
 
 An object on layer `0` in a block draws with the layer of the insert it is drawn by, as in AutoCAD; an object on any other layer draws with that layer. An object, or an attribute definition, whose `color`, `linetype` or `lineweight` is `ByBlock` draws with the insert's own, as AutoCAD draws it; see [An object's own colour, linetype and lineweight](sheet-description.md#an-objects-own-colour-linetype-and-lineweight).
+
+### Nested blocks
+
+A block may insert another block of the same library, as AutoCAD's blocks nest: a terminal strip that holds terminals, a title block that holds a revision row. The `insert` takes the keys an insert on a sheet takes, but no `id` and no `name`, and its position, scale and rotation are in the enclosing block's own coordinates. The library lists its blocks in any order. A block that inserts itself, directly or through other blocks, is an error that names the round, such as `A to B to A`, and an insert of a block the library does not define lists the blocks it does.
+
+Zach decided on 2026-11-13 that a block that inserts another fills in the inner block's attributes in its own definition, once, as AutoCAD does: the nested insert's `attributes` give their values, and every insert of the outer block shows them. An insert of the outer block on a sheet gives values only for the outer block's own attribute definitions. Giving one for a nested block's tag is an error that says where its value is set, and a change set's `set_attribute` on it is refused the same way.
+
+```yaml
+blocks:
+  STRIP:
+    objects:
+      - polyline: {points: [[0, 0, 0], [30, 0, 0], [30, 10, 0], [0, 10, 0]], closed: true}
+      - insert: {block: TERMINAL, position: [8, 5, 0], attributes: {NUMBER: '1'}}
+      - insert: {block: TERMINAL, position: [22, 5, 0], attributes: {NUMBER: '2'}}
+  TERMINAL:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 4}
+      - attdef: {tag: NUMBER, position: [0, 0, 0], height: 3, justify: middle_center}
+```
+
+A nested insert draws as an insert on a sheet does, placed by its own position, scale and turn and then by the enclosing insert's. On layer `0` it takes the enclosing insert's layer, and with `ByBlock` the enclosing insert's colour, linetype or lineweight, which its own layer `0` and `ByBlock` objects then take in turn, as AutoCAD draws them. On a frozen layer it draws nothing. A sheet that inserts the outer block holds every block it nests, however deep, and its DWG defines each, the outer block's definition holding the nested insert with its attributes. [The checker](check.md) holds a nested insert's text and lines as it holds the outer block's own.
 
 ### Attribute definitions
 
@@ -85,12 +106,12 @@ Each block is written as AutoCAD writes one: a block definition with the library
 
 An insert's ID and name are kept in the DWG as extended data under the registered application `AGENTDRAFTER`, as every object's [ID and name](sheet-description.md#ids-and-names) are: the text `sheet` followed by the sheet's name, `id` followed by the insert's `id` or its place, then, when it has a name, `name` followed by the name. AutoCAD carries them through a save.
 
-Reading a DWG back gives its block definitions and its inserts with their attribute values, scale, rotation and name, and each object's ID. An insert is read only when each attribute is where its block puts it, with its definition's tag, mode, style and justification.
+Reading a DWG back gives its block definitions, the inserts nested in them among their objects, and its inserts with their attribute values, scale, rotation and name, and each object's ID. An insert is read only when each attribute is where its block puts it, with its definition's tag, mode, style and justification.
 
 ## What is not offered yet
 
 - Dynamic blocks, which come in a later ticket.
-- A block inside a block: a block holds no inserts.
+- Cells in a nested block: the checker holds only the cells of the block a sheet inserts.
 - Annotative blocks and attributes.
 - Constant, Verify and Preset attributes, multiline attributes, and attributes whose place an insert changes.
 - Mirrored and stretched inserts: an insert's scale is the same along every axis and more than 0.

@@ -1613,3 +1613,50 @@ fn a_templates_layers_linetypes_and_styles_are_added_changed_renamed_and_deleted
         "{text}"
     );
 }
+
+/// An attribute of a block nested in another is filled in once, in the
+/// outer block's definition, as AutoCAD fills it: `set_attribute` on an
+/// insert of the outer block is refused, saying where its value is set.
+#[test]
+fn set_attribute_on_a_nested_blocks_attribute_is_refused_saying_why() {
+    let set = demo_set("set-nested-attribute");
+    let library = set.join("blocks.yaml");
+    let mut text = fs::read_to_string(&library).unwrap();
+    text.push_str(
+        "  STAMP:
+    objects:
+      - insert: {block: MARK, position: [0, 0, 0], attributes: {LETTER: A}}
+  MARK:
+    objects:
+      - attdef: {tag: LETTER, position: [0, 0, 0], height: 0.2}
+",
+    );
+    fs::write(&library, text).unwrap();
+    lands(
+        &set,
+        json!({"operations": [
+            {"op": "INSERT", "sheet": "DEMO-001", "block": "STAMP", "position": [2, 2, 0], "id": "stamp"}
+        ]}),
+    );
+    let before = fs::read(set.join("rows.yaml")).unwrap();
+    let reply = apply(
+        &set,
+        json!({"operations": [
+            {"op": "set_attribute", "target": {"id": "DEMO-001/stamp"}, "tag": "LETTER", "value": "B"}
+        ]}),
+    );
+    let report = reply.result.expect("a report");
+    assert_eq!(report.failed, 1, "{report:#?}");
+    let text = format!("{report:?}");
+    assert!(
+        text.contains(
+            "the attribute `LETTER` belongs to block `MARK`, which block `STAMP` inserts"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("set once, in block `STAMP`'s definition"),
+        "{text}"
+    );
+    assert_eq!(fs::read(set.join("rows.yaml")).unwrap(), before);
+}

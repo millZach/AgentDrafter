@@ -159,6 +159,12 @@ pub struct TextRun {
     /// an [`Item`]. None for an object of the sheet's own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub part: Option<usize>,
+    /// When the object at `part` is itself an insert, a block nested in the
+    /// insert's: the object that draws it of each block nested in turn, from the
+    /// outermost in, counted from 0 in that block's objects. Empty for an
+    /// object of the sheet's own, or of the insert's block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested: Vec<usize>,
     /// The box round what its characters draw, in the line's frame: its
     /// lower left and upper right corners `(u, v)`. None when they draw
     /// nothing, as spaces do.
@@ -188,6 +194,12 @@ pub struct Item {
     /// its attribute definition's. None for an object of the sheet's own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub part: Option<usize>,
+    /// When the object at `part` is itself an insert, a block nested in the
+    /// insert's: the object that draws it of each block nested in turn, from the
+    /// outermost in, counted from 0 in that block's objects. Empty for an
+    /// object of the sheet's own, or of the insert's block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested: Vec<usize>,
     /// The AutoCAD colour index it draws in.
     pub color: Color,
     pub shape: Shape,
@@ -346,20 +358,42 @@ struct Drawn {
 }
 
 /// Where an insert puts its block's points, by the one placement rule.
-struct Placed(Placement);
+/// An insert nested in another's block is placed by its own placement and
+/// then by every enclosing insert's, innermost first.
+struct Placed(Vec<Placement>);
 
 impl Placed {
     fn of(insert: &Insert, block: &Block) -> Placed {
-        Placed(Placement::of(insert, block.base_point))
+        Placed(vec![Placement::of(insert, block.base_point)])
+    }
+
+    /// An insert of `block` inside the block this places.
+    fn within(&self, insert: &Insert, block: &Block) -> Placed {
+        let mut chain = vec![Placement::of(insert, block.base_point)];
+        chain.extend(self.0.iter().cloned());
+        Placed(chain)
+    }
+
+    /// How much the chain enlarges what it places.
+    fn scale(&self) -> f64 {
+        self.0.iter().map(Placement::scale).product()
     }
 
     fn point(&self, p: Point2) -> Point2 {
-        flat(self.0.point(Point3::new(p[0], p[1], 0.0)))
+        let mut at = Point3::new(p[0], p[1], 0.0);
+        for placement in &self.0 {
+            at = placement.point(at);
+        }
+        flat(at)
     }
 
     /// Where a placed point is in the block's own coordinates.
     fn back(&self, p: Point2) -> Point2 {
-        self.0.back(p[0], p[1])
+        let mut at = p;
+        for placement in self.0.iter().rev() {
+            at = placement.back(at[0], at[1]);
+        }
+        at
     }
 
     fn shape(&self, shape: Shape) -> Shape {
@@ -521,7 +555,7 @@ impl<'a> Drawer<'a> {
             list.hatches_cut_short
                 .push(self.cut_short(index, object, None));
         }
-        list.add_shown(shown, index, None, pen.color, drawn);
+        list.add_shown(shown, index, &[], pen.color, drawn);
     }
 
     /// Adds what an insert draws to `list`: its block's objects moved,
@@ -530,29 +564,82 @@ impl<'a> Drawer<'a> {
     /// plots an insert. The block's attribute definitions themselves draw
     /// nothing on an insert.
     fn insert(&self, index: usize, insert: &Insert, tolerance: f64, list: &mut DisplayList) {
-        let Some(block) = self.block(&insert.block) else {
-            return;
+        if let Some(corners) = self.nested(index, &[], insert, None, None, tolerance, list) {
+            // AutoCAD's extents take in an insert's block box: the box round
+            // the block's objects in its own coordinates, placed whole.
+            // Turned, it reaches past what the insert draws.
+            list.take_in(corners);
+        }
+    }
+
+    /// Draws an insert of the sheet's object `index`, and gives the corners
+    /// of its block's box, placed on the sheet. `path` is the object that
+    /// holds it of the sheet's insert's block and of each block nested in
+    /// turn, when it is nested in another insert's block; `outer` is how
+    /// that enclosing block is placed, and
+    /// `enclosing` that insert's layer and pen, which an object on layer
+    /// `0` or `ByBlock` in this block takes in turn, as AutoCAD does.
+    #[allow(clippy::too_many_arguments)]
+    fn nested(
+        &self,
+        index: usize,
+        path: &[usize],
+        insert: &Insert,
+        outer: Option<&Placed>,
+        enclosing: Option<(&str, Pen<'a>)>,
+        tolerance: f64,
+        list: &mut DisplayList,
+    ) -> Option<[Point2; 4]> {
+        let block = self.block(&insert.block)?;
+        // An insert on layer `0` in a block takes the enclosing insert's.
+        let insert_layer = match (insert.layer.as_str(), enclosing) {
+            (LAYER_ZERO, Some((layer, _))) => layer,
+            (layer, _) => layer,
         };
         // An insert on a frozen layer draws nothing at all, as in AutoCAD;
         // one on a layer that is off hides only what takes its layer.
-        if self.shown(&insert.layer) == Shown::Hidden {
-            return;
+        if self.shown(insert_layer) == Shown::Hidden {
+            return None;
         }
-        let placed = Placed::of(insert, block);
+        let placed = match outer {
+            Some(outer) => outer.within(insert, block),
+            None => Placed::of(insert, block),
+        };
         // What the block's `ByBlock` objects draw with.
-        let insert_pen = self.pen(&insert.layer, &insert.properties, None);
+        let insert_pen = self.pen(
+            insert_layer,
+            &insert.properties,
+            enclosing.map(|(_, pen)| pen),
+        );
         // Curves are made chords in the block's own coordinates, then
         // enlarged: to keep within the tolerance once enlarged, they are
         // made finer.
-        let within = tolerance / insert.scale.abs().max(f64::MIN_POSITIVE);
+        let within = tolerance / placed.scale().abs().max(f64::MIN_POSITIVE);
         // The box round the block's objects in its own coordinates.
         let mut own: Option<Bounds> = None;
-        for (part, object) in block.objects.iter().enumerate() {
-            if matches!(object, Object::AttributeDefinition(_) | Object::Insert(_)) {
+        for (p, object) in block.objects.iter().enumerate() {
+            let here = [path, &[p]].concat();
+            if let Object::Insert(inner) = object {
+                let corners = self.nested(
+                    index,
+                    &here,
+                    inner,
+                    Some(&placed),
+                    Some((insert_layer, insert_pen)),
+                    tolerance,
+                    list,
+                );
+                if let Some(corners) = corners {
+                    let had = own.into_iter().flat_map(|b| [b.min, b.max]);
+                    own = Bounds::of(had.chain(corners.map(|c| placed.back(c))));
+                }
+                continue;
+            }
+            if matches!(object, Object::AttributeDefinition(_)) {
                 continue;
             }
             let layer = match object.layer() {
-                LAYER_ZERO => insert.layer.as_str(),
+                LAYER_ZERO => insert_layer,
                 layer => layer,
             };
             // What lies on a frozen layer neither draws nor counts towards
@@ -571,16 +658,9 @@ impl<'a> Drawer<'a> {
             let points = drawn_points.chain(drawn.reach.iter().copied());
             let had = own.into_iter().flat_map(|b| [b.min, b.max]);
             own = Bounds::of(had.chain(points.map(|p| placed.back(p))));
-            list.add_shown(shown, index, Some(part), pen.color, drawn);
+            list.add_shown(shown, index, &here, pen.color, drawn);
         }
-        // AutoCAD's extents take in an insert's block box: the box round the
-        // block's objects in its own coordinates, placed whole. Turned, it
-        // reaches past what the insert draws.
-        if let Some(b) = own {
-            let corners = [b.min, [b.max[0], b.min[1]], b.max, [b.min[0], b.max[1]]];
-            list.take_in(corners.map(|c| placed.point(c)));
-        }
-        for (part, object) in block.objects.iter().enumerate() {
+        for (p, object) in block.objects.iter().enumerate() {
             let Object::AttributeDefinition(definition) = object else {
                 continue;
             };
@@ -592,16 +672,40 @@ impl<'a> Drawer<'a> {
                 .iter()
                 .find(|a| a.tag == definition.tag)
                 .map_or(definition.default.as_str(), |a| a.value.as_str());
-            let text = attribute_text(insert, block, definition, value);
+            // The attribute where the insert puts it: on the sheet, or in
+            // the enclosing block, which `outer` then places.
+            let mut text = attribute_text(insert, block, definition, value);
+            if definition.layer == LAYER_ZERO {
+                insert_layer.clone_into(&mut text.layer);
+            }
             let pen = self.pen(&text.layer, &text.properties, Some(insert_pen));
-            let lettering = text::draw_text(&text, self.fonts, pen.lineweight, tolerance);
-            let drawn = Drawn {
-                shapes: lettering.shapes,
-                runs: lettering.runs,
-                ..Drawn::default()
+            let scale = outer
+                .map_or(1.0, Placed::scale)
+                .abs()
+                .max(f64::MIN_POSITIVE);
+            let lettering = text::draw_text(&text, self.fonts, pen.lineweight, tolerance / scale);
+            let drawn = match outer {
+                Some(outer) => Drawn {
+                    shapes: lettering
+                        .shapes
+                        .into_iter()
+                        .map(|s| outer.shape(s))
+                        .collect(),
+                    runs: lettering.runs.into_iter().map(|r| outer.run(r)).collect(),
+                    ..Drawn::default()
+                },
+                None => Drawn {
+                    shapes: lettering.shapes,
+                    runs: lettering.runs,
+                    ..Drawn::default()
+                },
             };
-            list.add_shown(self.shown(&text.layer), index, Some(part), pen.color, drawn);
+            let shown = self.shown(&text.layer);
+            list.add_shown(shown, index, &[path, &[p]].concat(), pen.color, drawn);
         }
+        let b = own?;
+        let corners = [b.min, [b.max[0], b.min[1]], b.max, [b.min[0], b.max[1]]];
+        Some(corners.map(|c| placed.point(c)))
     }
 
     /// What one object draws with `pen`, put where `placed` puts it when an
@@ -661,7 +765,7 @@ impl<'a> Drawer<'a> {
             // Wide dashes are cut in the block's own coordinates and then
             // enlarged with it, so their pattern is shrunk by the insert's
             // scale first, to keep its own lengths, as a thin one does.
-            let own = placed.map_or(1.0, |p| p.0.scale());
+            let own = placed.map_or(1.0, Placed::scale);
             let wide_pattern: Option<Vec<f64>> =
                 pattern.map(|lengths| lengths.iter().map(|l| l / own).collect());
             let drawn = polyline::draw(
@@ -788,6 +892,15 @@ impl<'a> Drawer<'a> {
     }
 }
 
+/// An item's `part` and `nested` from the path to the object that draws
+/// it: the object of the insert's block, then of each block nested in turn.
+fn split_path(path: &[usize]) -> (Option<usize>, Vec<usize>) {
+    match path.split_first() {
+        Some((&part, nested)) => (Some(part), nested.to_vec()),
+        None => (None, Vec::new()),
+    }
+}
+
 impl DisplayList {
     /// Adds what an object drew, as its layer's states decide: drawn, its
     /// points taken into the extents only, or nothing.
@@ -795,14 +908,14 @@ impl DisplayList {
         &mut self,
         shown: Shown,
         index: usize,
-        part: Option<usize>,
+        path: &[usize],
         color: Color,
         drawn: Drawn,
     ) {
         match shown {
             Shown::Drawn => {
-                self.add(index, part, color, drawn.shapes, drawn.reach);
-                self.add_text(index, part, drawn.runs);
+                self.add(index, path, color, drawn.shapes, drawn.reach);
+                self.add_text(index, path, drawn.runs);
             }
             Shown::Counted => {
                 let points: Vec<Point2> = drawn.shapes.iter().flat_map(Shape::points).collect();
@@ -814,12 +927,13 @@ impl DisplayList {
     }
 
     /// Adds what the sheet's object at `index` draws in `color`: the
-    /// object of its block at `part`, when it is an insert. `reach` is a
+    /// object of its block at `path`, when it is an insert, as
+    /// [`DisplayList::add_shown`] takes it. `reach` is a
     /// patterned hatch's boundary, which draws nothing of its own.
     fn add(
         &mut self,
         index: usize,
-        part: Option<usize>,
+        path: &[usize],
         color: Color,
         shapes: Vec<Shape>,
         reach: Vec<Point2>,
@@ -828,20 +942,24 @@ impl DisplayList {
             self.boundaries.push((index, boundary));
         }
         self.take_in(reach);
+        let (part, nested) = split_path(path);
         self.items.extend(shapes.into_iter().map(|shape| Item {
             object: index,
             part,
+            nested: nested.clone(),
             color,
             shape,
         }));
     }
 
     /// Adds the lines of text the sheet's object at `index` draws, as they
-    /// read: the object of its block at `part`, when it is an insert.
-    fn add_text(&mut self, index: usize, part: Option<usize>, runs: Vec<TextRun>) {
+    /// read: the object of its block at `path`, when it is an insert.
+    fn add_text(&mut self, index: usize, path: &[usize], runs: Vec<TextRun>) {
+        let (part, nested) = split_path(path);
         self.text.extend(runs.into_iter().map(|run| TextRun {
             object: index,
             part,
+            nested: nested.clone(),
             ..run
         }));
     }

@@ -156,20 +156,161 @@ pub fn parse_block_library(text: &str) -> Result<BlockLibrary, Error> {
         styles: &text_styles,
     };
     let entries = named_entries(fields.require("blocks")?, "blocks", "block")?;
-    let blocks = entries
-        .iter()
-        .map(|entry| block(&entry.key, &entry.value, &tables))
-        .collect::<Result<_, _>>()?;
-    Ok(BlockLibrary {
+    // A block that inserts another is read after it, so that its insert can
+    // take the other's attributes; then the blocks go back in the file's
+    // order.
+    let order = nesting_order(entries)?;
+    let mut library = BlockLibrary {
         units,
-        linetypes,
-        layers,
-        text_styles,
-        blocks,
-    })
+        linetypes: linetypes.clone(),
+        layers: layers.clone(),
+        text_styles: text_styles.clone(),
+        blocks: Vec::with_capacity(entries.len()),
+    };
+    for i in order {
+        let read = block(&entries[i].key, &entries[i].value, &tables, Some(&library))?;
+        library.blocks.push(read);
+    }
+    library
+        .blocks
+        .sort_by_key(|b| entries.iter().position(|e| e.key == b.name));
+    Ok(library)
 }
 
-fn block(name: &str, node: &Node, tables: &Tables) -> Result<Block, Error> {
+/// The order to read the blocks of `entries` in: each block after every
+/// block it inserts. A block that inserts itself, directly or through
+/// others, is an error naming the round.
+fn nesting_order(entries: &[strict_yaml::Entry]) -> Result<Vec<usize>, Error> {
+    // The blocks each block's objects insert, where it inserts them.
+    let mut inserts: Vec<Vec<(usize, Pos)>> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut found = Vec::new();
+        for (name, at, place) in nested_names(&entry.value) {
+            let Some(i) = entries.iter().position(|e| e.key == name) else {
+                let names: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+                return Err(Error::new(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "unknown block `{name}`; the block library's blocks: {}",
+                        names.join(", ")
+                    ),
+                )
+                .at_field(key_path(
+                    &index_path(&key_path(&key_path("blocks", &entry.key), "objects"), place),
+                    "insert.block",
+                ))
+                .at_position(at.line, at.column));
+            };
+            found.push((i, at));
+        }
+        inserts.push(found);
+    }
+    let mut order = Vec::with_capacity(entries.len());
+    // 0: not yet seen, 1: being read, 2: read.
+    let mut state = vec![0_u8; entries.len()];
+    fn visit(
+        i: usize,
+        entries: &[strict_yaml::Entry],
+        inserts: &[Vec<(usize, Pos)>],
+        state: &mut [u8],
+        order: &mut Vec<usize>,
+        round: &mut Vec<usize>,
+    ) -> Result<(), Error> {
+        match state[i] {
+            2 => return Ok(()),
+            1 => {
+                let start = round.iter().position(|&r| r == i).unwrap_or(0);
+                let mut names: Vec<&str> = round[start..]
+                    .iter()
+                    .map(|&r| entries[r].key.as_str())
+                    .collect();
+                names.push(&entries[i].key);
+                let at = inserts[round[round.len() - 1]]
+                    .iter()
+                    .find(|(to, _)| *to == i)
+                    .map(|(_, at)| *at)
+                    .unwrap_or(entries[i].key_at);
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    format!(
+                        "block `{}` inserts itself, through {}; a block cannot insert itself, \
+                         directly or through others",
+                        entries[i].key,
+                        names.join(" to ")
+                    ),
+                )
+                .at_field(key_path("blocks", &entries[round[round.len() - 1]].key))
+                .at_position(at.line, at.column));
+            }
+            _ => {}
+        }
+        state[i] = 1;
+        round.push(i);
+        for &(to, _) in &inserts[i] {
+            visit(to, entries, inserts, state, order, round)?;
+        }
+        round.pop();
+        state[i] = 2;
+        order.push(i);
+        Ok(())
+    }
+    for i in 0..entries.len() {
+        visit(
+            i,
+            entries,
+            &inserts,
+            &mut state,
+            &mut order,
+            &mut Vec::new(),
+        )?;
+    }
+    Ok(order)
+}
+
+/// The block each `insert` among a block's objects names, where, and its
+/// place among the objects, as the file writes it, read before the block
+/// is.
+fn nested_names(block: &Node) -> Vec<(String, Pos, usize)> {
+    let Kind::Mapping(keys) = &block.kind else {
+        return Vec::new();
+    };
+    let Some(objects) = keys.iter().find(|k| k.key == "objects") else {
+        return Vec::new();
+    };
+    let Kind::Sequence(items) = &objects.value.kind else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(place, item)| {
+            let Kind::Mapping(types) = &item.kind else {
+                return None;
+            };
+            let [object] = types.as_slice() else {
+                return None;
+            };
+            let Kind::Mapping(keys) = &object.value.kind else {
+                return None;
+            };
+            if object.key != "insert" {
+                return None;
+            }
+            let block = keys.iter().find(|k| k.key == "block")?;
+            match &block.value.kind {
+                Kind::Scalar(name) => Some((name.clone(), block.value.at, place)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn block(
+    name: &str,
+    node: &Node,
+    tables: &Tables,
+    library: Option<&BlockLibrary>,
+) -> Result<Block, Error> {
     let path = key_path("blocks", name);
     let fields = Fields::of(node, &path, &BLOCK_KEYS, "a block")?;
     let base_point = match fields.get("base_point") {
@@ -186,7 +327,10 @@ fn block(name: &str, node: &Node, tables: &Tables) -> Result<Block, Error> {
             objects_node.at,
         ));
     }
-    let mut place = Place::Block { tags: Vec::new() };
+    let mut place = Place::Block {
+        tags: Vec::new(),
+        library,
+    };
     let mut objects = Vec::with_capacity(items.len());
     let mut cells = Vec::new();
     for (i, item) in items.iter().enumerate() {
@@ -437,12 +581,27 @@ fn attributes(fields: &Fields, block: &Block) -> Result<Vec<Attribute>, Error> {
         };
         for entry in entries {
             let Some(i) = definitions.iter().position(|d| d.tag == entry.key) else {
-                return Err(Error::new(
-                    ErrorCode::UnknownName,
-                    format!("unknown attribute `{}`; {listed}", entry.key),
-                )
-                .at_field(key_path(&path, &entry.key))
-                .at_position(entry.key_at.line, entry.key_at.column));
+                // An attribute of a block this block inserts is filled in by
+                // this block's definition, once, as AutoCAD fills it (Zach,
+                // 2026-11-13); an insert of this block cannot set it.
+                let nested = block.objects.iter().find_map(|o| match o {
+                    Object::Insert(inner)
+                        if inner.attributes.iter().any(|a| a.tag == entry.key) =>
+                    {
+                        Some(inner.block.as_str())
+                    }
+                    _ => None,
+                });
+                let why = match nested {
+                    Some(inner) => format!(
+                        "the attribute `{}` belongs to block `{inner}`, which block `{}` inserts; its value is set once, in block `{}`'s definition in the block library, as AutoCAD sets it, not by each insert. {listed}",
+                        entry.key, block.name, block.name
+                    ),
+                    None => format!("unknown attribute `{}`; {listed}", entry.key),
+                };
+                return Err(Error::new(ErrorCode::UnknownName, why)
+                    .at_field(key_path(&path, &entry.key))
+                    .at_position(entry.key_at.line, entry.key_at.column));
             };
             // A bare null leaves the value out, so the definition's default holds.
             if !entry.value.is_bare_null() {
@@ -594,7 +753,7 @@ pub(super) fn take_from_library(
     library: &BlockLibrary,
     fields: &Fields,
 ) -> Result<(), Error> {
-    let inserted: Vec<&str> = sheet
+    let mut inserted: Vec<&str> = sheet
         .objects
         .iter()
         .filter_map(|o| match o {
@@ -602,6 +761,20 @@ pub(super) fn take_from_library(
             _ => None,
         })
         .collect();
+    // And every block those blocks insert, however deep.
+    let mut i = 0;
+    while i < inserted.len() {
+        if let Some(block) = library.blocks.iter().find(|b| b.name == inserted[i]) {
+            for object in &block.objects {
+                if let Object::Insert(nested) = object {
+                    if !inserted.contains(&nested.block.as_str()) {
+                        inserted.push(&nested.block);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
     let blocks: Vec<Block> = library
         .blocks
         .iter()

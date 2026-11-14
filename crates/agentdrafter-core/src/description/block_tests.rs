@@ -490,9 +490,9 @@ fn a_block_library_is_checked_as_a_sheet_is() {
         ),
         (
             "units: mm\nblocks:\n  A: {objects: [{insert: {block: B, position: [0, 0, 0]}}]}\n",
-            ErrorCode::UnknownKey,
-            "blocks.A.objects[0].insert",
-            &["cannot insert another block", "attdef"],
+            ErrorCode::UnknownName,
+            "blocks.A.objects[0].insert.block",
+            &["unknown block `B`", "the block library's blocks: A"],
         ),
         (
             "units: mm\nblocks:\n  A: {objects: [{circle: {center: [0, 0, 0], radius: 1, layer: symbols}}]}\n",
@@ -721,4 +721,74 @@ fn a_sheet_description_finds_its_block_library_beside_it() {
         Some(dir.join("library/blocks.yaml").display().to_string())
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// A made-up terminal strip: a block that inserts a terminal block twice,
+/// filling in each terminal's tag in its own definition.
+const NESTED: &str = "units: mm
+layers:
+  terminals: {color: green}
+blocks:
+  STRIP:
+    objects:
+      - line: {from: [0, 0, 0], to: [20, 0, 0]}
+      - insert: {block: TERMINAL, position: [5, 0, 0], attributes: {TAG: '1'}}
+      - insert: {block: TERMINAL, position: [15, 0, 0], attributes: {TAG: '2'}, layer: terminals}
+  TERMINAL:
+    objects:
+      - circle: {center: [0, 0, 0], radius: 2}
+      - attdef: {tag: TAG, position: [0, 3, 0], height: 2, justify: middle_center}
+";
+
+#[test]
+fn a_block_inserts_another_block_and_fills_in_its_attributes() {
+    let library = parse_block_library(NESTED).unwrap_or_else(|e| panic!("{e}"));
+    // The blocks stay in the file's order, though TERMINAL is read first.
+    let names: Vec<&str> = library.blocks.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["STRIP", "TERMINAL"]);
+    let Object::Insert(first) = &library.blocks[0].objects[1] else {
+        panic!("a nested insert")
+    };
+    assert_eq!(first.block, "TERMINAL");
+    assert_eq!(first.attributes[0].value, "1");
+
+    // A sheet that inserts the strip takes the terminal too.
+    let sheet = read_with(
+        "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {block: STRIP, position: [0, 0, 0]}\n",
+        NESTED,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let taken: Vec<&str> = sheet.blocks.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(taken, ["STRIP", "TERMINAL"]);
+    assert!(sheet.layers.iter().any(|l| l.name == "terminals"));
+
+    // The strip's insert cannot set a terminal's tag: the strip's definition
+    // sets it, once.
+    let e = read_with(
+        "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {block: STRIP, position: [0, 0, 0], attributes: {TAG: X}}\n",
+        NESTED,
+    )
+    .unwrap_err();
+    assert_names(
+        &e,
+        ErrorCode::UnknownName,
+        "objects[0].insert.attributes.TAG",
+        &[
+            "belongs to block `TERMINAL`, which block `STRIP` inserts",
+            "set once",
+        ],
+    );
+}
+
+#[test]
+fn a_block_that_inserts_itself_is_refused() {
+    let e = library_error(
+        "units: mm\nblocks:\n  A:\n    objects:\n      - insert: {block: B, position: [0, 0, 0]}\n  B:\n    objects:\n      - insert: {block: A, position: [0, 0, 0]}\n",
+    );
+    assert_eq!(e.code, ErrorCode::BadValue);
+    assert!(
+        e.message.contains("inserts itself, through A to B to A"),
+        "{}",
+        e.message
+    );
 }
