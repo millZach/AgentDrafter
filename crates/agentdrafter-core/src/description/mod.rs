@@ -23,6 +23,7 @@ mod hatch;
 mod hatch_schema;
 pub(crate) mod ids;
 mod layers;
+pub(crate) use layers::{LAYER_KEYS, LINETYPE_KEYS};
 mod mark;
 mod objects;
 pub(crate) mod paper;
@@ -34,6 +35,7 @@ mod set_schema;
 mod strict_yaml;
 mod template;
 mod text;
+pub(crate) use text::TEXT_STYLE_KEYS;
 
 use std::fs;
 use std::path::{Path, PathBuf};

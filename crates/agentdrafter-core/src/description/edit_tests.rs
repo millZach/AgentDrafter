@@ -297,3 +297,40 @@ fn a_moved_coordinate_with_its_own_unit_is_written_in_the_declared_unit() {
         .unwrap()
         .contains("{center: [26.4, 2, 0], radius: 1}"));
 }
+
+/// Two tables the file did not have, added together, go in before its
+/// objects in the order they were made.
+#[test]
+fn two_new_tables_go_in_before_the_objects_in_order() {
+    let mut record = RecordFile::from_text(
+        std::path::Path::new("t.yaml"),
+        "units: in
+objects: []
+"
+        .to_owned(),
+    )
+    .unwrap();
+    let keys = |json: serde_json::Value| json.as_object().unwrap().clone();
+    record
+        .table_add("layers", &["color"], "notes", &keys(serde_json::json!({})))
+        .unwrap();
+    record
+        .table_add(
+            "linetypes",
+            &["pattern"],
+            "DASHED",
+            &keys(serde_json::json!({"pattern": [1, -1]})),
+        )
+        .unwrap();
+    let text = record.new_text().unwrap().unwrap();
+    assert_eq!(
+        text,
+        "units: in
+layers:
+  notes: {}
+linetypes:
+  DASHED: {pattern: [1, -1]}
+objects: []
+"
+    );
+}

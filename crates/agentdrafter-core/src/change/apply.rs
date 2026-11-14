@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 
 use super::commit::Replacement;
 use super::journal::{commit_change_set, HowChanged, Landing, ObjectChanged, SheetFailed};
-use super::operations::{op_error, read_change_set, AddTo, Body, Kind, Operation, Target};
+use super::operations::{
+    op_error, read_change_set, AddTo, Body, Kind, Operation, Table, TableOp, Target,
+};
 use super::MARK_FILE;
 use super::{
     mark_report, quoted_list, read_mark, ChangeReport, ChangeRequest, Fill, OperationOutcome,
@@ -641,7 +643,32 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             Body::Add {
                 to: AddTo::Sheet(sheet),
                 ..
+            }
+            | Body::Table {
+                to: AddTo::Sheet(sheet),
+                ..
             } => (sheet, "sheet"),
+            Body::Table {
+                to: AddTo::Template(written),
+                ..
+            } => {
+                if files.template(written).is_none() {
+                    let templates: Vec<&str> =
+                        files.templates.iter().map(|t| t.written.as_str()).collect();
+                    return Err(op_error(
+                        op.index,
+                        op.spec.name,
+                        ErrorCode::UnknownName,
+                        format!(
+                            "no sheet of the set is built from the template `{written}`; its \
+                             templates: {}",
+                            templates.join(", ")
+                        ),
+                        "template",
+                    ));
+                }
+                continue;
+            }
             Body::Change { target, .. }
             | Body::Move { target, .. }
             | Body::Delete { target }
@@ -806,17 +833,57 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         };
     }
 
+    if let Body::Table {
+        op: table_op,
+        table,
+        to,
+        name,
+        keys,
+        new_name,
+    } = &op.body
+    {
+        return apply_table(
+            at,
+            op,
+            *table_op,
+            *table,
+            to,
+            name,
+            keys,
+            new_name.as_deref(),
+        );
+    }
+
     let target = match &op.body {
         Body::Change { target, .. }
         | Body::Move { target, .. }
         | Body::Delete { target }
         | Body::SetAttribute { target, .. } => target,
-        Body::Add { .. } => unreachable!("handled above"),
+        Body::Add { .. } | Body::Table { .. } => unreachable!("handled above"),
     };
     let found = match resolve(at, target, op) {
         Ok(found) => found,
         Err(applied) => return *applied,
     };
+    // An object on a locked layer is not edited, as AutoCAD will not edit
+    // it (Zach, 2026-11-13); adding one onto it is allowed. A move or a
+    // delete always edits it; a change or an attribute is judged once it is
+    // known whether it edits the object or only a row's value.
+    let locked = |id: &str, layer: &str| {
+        op_err(
+            ErrorCode::Locked,
+            format!(
+                "`{id}` sits on layer `{layer}`, which is locked; unlock it first with \
+                 change_layer, set: {{\"locked\": false}}, in this change set or an earlier one"
+            ),
+            "target",
+        )
+    };
+    let target_locked = locked_layer(at, &found);
+    if let (Some(layer), Body::Move { .. } | Body::Delete { .. }) = (&target_locked, &op.body) {
+        let reach = at.reach(found.file, found.row);
+        return fail(reach, locked(&found.id, layer));
+    }
     let Found {
         row: k,
         file,
@@ -852,6 +919,8 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
     };
     let mut sheets = reach.clone();
     let mut from_row: Option<(String, String)> = None;
+    // Whether the operation edits the object itself, not only a row value.
+    let mut edits_object = true;
     // A move or a delete always edits the object's file; a change and an
     // attribute are checked once it is known whether they did.
     if matches!(op.body, Body::Move { .. } | Body::Delete { .. }) {
@@ -864,6 +933,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
             Ok(changed) => {
                 let keys: Vec<&str> = set.keys().map(String::as_str).collect();
                 done.message = format!("sets {} of `{id}`{template_note}", keys.join(", "));
+                edits_object = changed.edited;
                 if !changed.edited {
                     sheets = vec![k];
                 } else if let Some(refusal) = many_paths(files, file, op, "target") {
@@ -913,6 +983,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                         format!("sets the attribute {tag} of `{id}` to `{value}`{template_note}");
                 }
                 Ok(AttributeSet::FromRow(name)) => {
+                    edits_object = false;
                     sheets = vec![k];
                     from_row = Some((name, value.clone()));
                 }
@@ -926,13 +997,35 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 }
             }
         }
-        Body::Add { .. } => unreachable!("handled above"),
+        Body::Add { .. } | Body::Table { .. } => unreachable!("handled above"),
+    }
+    if let (Some(layer), true) = (&target_locked, edits_object) {
+        return fail(reach, locked(&id, layer));
     }
     done.after = Some(record.object_text(list, index));
     if done.after == done.before {
         done.after = None;
     }
     if let Some((name, text)) = from_row {
+        // A row's value fills every place on the sheet its template takes
+        // it, and each is edited: none may be on a locked layer.
+        let t = files.template_of[k];
+        if let Ok(template) = at.template(t) {
+            let listed = template.objects(ObjectList::Template);
+            for (i, _) in template.row_value_places(&name) {
+                let layer = template
+                    .object_value(ObjectList::Template, i, "layer")
+                    .unwrap_or_else(|| "0".to_owned());
+                if template
+                    .table_value(Table::Layer.key(), &layer, "locked")
+                    .as_deref()
+                    == Some("true")
+                {
+                    let filled = format!("{}/{}", files.name(k), listed[i].id);
+                    return fail(vec![k], locked(&filled, &layer));
+                }
+            }
+        }
         let was = at.rows.row_value(k, &name).unwrap_or_default();
         if let Err(e) = at.rows.set_row_value(k, &name, &text) {
             return fail(vec![k], from_record(e));
@@ -990,6 +1083,264 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
     Applied {
         sheets,
         outcome: Ok(done),
+        refuse: false,
+    }
+}
+
+/// The layer the object `found` sits on, when that layer is locked in its
+/// sheet's template; an object with no layer sits on layer `0`.
+fn locked_layer(at: &mut Attempt, found: &Found) -> Option<String> {
+    let layer = at
+        .file(found.file)
+        .ok()?
+        .object_value(found.list, found.index, "layer")
+        .unwrap_or_else(|| "0".to_owned());
+    let t = at.files.template_of[found.row];
+    let locked = at
+        .template(t)
+        .ok()?
+        .table_value(Table::Layer.key(), &layer, "locked");
+    (locked.as_deref() == Some("true")).then_some(layer)
+}
+
+/// Applies a table operation: adds, changes, renames or deletes the entry
+/// `name` of `table` in the template `to` names, reaching every sheet built
+/// from it. A rename rewrites what names the entry, in the template and in
+/// those sheets' rows; a delete is refused while anything uses it.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn apply_table(
+    at: &mut Attempt,
+    op: &Operation,
+    table_op: TableOp,
+    table: Table,
+    to: &AddTo,
+    name: &str,
+    keys: &serde_json::Map<String, serde_json::Value>,
+    new_name: Option<&str>,
+) -> Applied {
+    let files = at.files;
+    let t = match to {
+        AddTo::Template(written) => files.template(written).expect("checked before"),
+        AddTo::Sheet(sheet) => files.template_of[files.sheet(sheet).expect("checked before")],
+    };
+    let sheets = files.templates[t].sheets.clone();
+    let fail = |code: ErrorCode, message: String, field: &str| Applied {
+        sheets: sheets.clone(),
+        outcome: Err(op_error(op.index, op.spec.name, code, message, field)),
+        refuse: false,
+    };
+    if let Some(refusal) = many_paths(files, FileRef::Template(t), op, "template") {
+        return refusal;
+    }
+    let word = table.word();
+    let written = files.templates[t].written.clone();
+    let key = table.key();
+    let built_in = table
+        .built_in()
+        .iter()
+        .find(|b| b.eq_ignore_ascii_case(name));
+    let record = match at.template(t) {
+        Ok(record) => record,
+        Err(e) => return fail(e.code, e.message, ""),
+    };
+    let path = record.path.clone();
+    let names = record.table_names(key);
+    let exists = names.iter().any(|n| n == name);
+    let choices = || {
+        let mut all: Vec<String> = table.built_in().iter().map(|b| (*b).to_owned()).collect();
+        all.extend(
+            names
+                .iter()
+                .filter(|n| !table.built_in().contains(&n.as_str()))
+                .cloned(),
+        );
+        all.join(", ")
+    };
+    let before = record.table_entry_text(key, name);
+    let message = match table_op {
+        TableOp::Add => {
+            if let Some(same) = names
+                .iter()
+                .map(String::as_str)
+                .chain(table.built_in().iter().copied())
+                .find(|n| n.eq_ignore_ascii_case(name))
+            {
+                return fail(
+                    ErrorCode::DuplicateName,
+                    format!(
+                        "the template `{written}` has a {word} `{same}` already, and AutoCAD \
+                         ignores case in names; change it with change_{} or give another name",
+                        op.spec.name.trim_start_matches("add_")
+                    ),
+                    "name",
+                );
+            }
+            if let Err(e) = record.table_add(key, table.entry_keys(), name, keys) {
+                return fail(e.code, e.message, "");
+            }
+            format!("adds the {word} `{name}` to the template `{written}`")
+        }
+        TableOp::Change => {
+            if table == Table::Linetype {
+                if let Some(own) = built_in {
+                    return fail(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{own}` is AutoCAD's own linetype, which every drawing has and no \
+                             template defines, so it is not changed"
+                        ),
+                        "name",
+                    );
+                }
+            }
+            if !exists && built_in.is_none() {
+                return fail(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "the template `{written}` has no {word} `{name}`; its {word}s: {}",
+                        choices()
+                    ),
+                    "name",
+                );
+            }
+            // `Standard`, written for the first time, takes its font from
+            // the drawing's own, so that setting its width factor alone
+            // still makes a whole style.
+            let mut keys = keys.clone();
+            if !exists && table == Table::TextStyle && !keys.contains_key("font") {
+                keys.insert(
+                    "font".into(),
+                    serde_json::Value::String(crate::text::STANDARD_FONT.to_owned()),
+                );
+            }
+            let keys = &keys;
+            if let Err(e) = record.table_change(key, table.entry_keys(), name, keys) {
+                return fail(e.code, e.message, "");
+            }
+            let set: Vec<&str> = keys.keys().map(String::as_str).collect();
+            format!(
+                "sets {} of the {word} `{name}` in the template `{written}`",
+                set.join(", ")
+            )
+        }
+        TableOp::Rename | TableOp::Delete => {
+            if let Some(own) = built_in {
+                return fail(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`{own}` is every drawing's own {word}, and is never renamed or deleted"
+                    ),
+                    "name",
+                );
+            }
+            if !exists {
+                return fail(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "the template `{written}` has no {word} `{name}`; its {word}s: {}",
+                        choices()
+                    ),
+                    "name",
+                );
+            }
+            let by = table.named_by();
+            if table_op == TableOp::Rename {
+                let to = new_name.expect("a rename has a new name");
+                if let Some(same) = names
+                    .iter()
+                    .map(String::as_str)
+                    .chain(table.built_in().iter().copied())
+                    .find(|n| n.eq_ignore_ascii_case(to) && *n != name)
+                {
+                    return fail(
+                        ErrorCode::DuplicateName,
+                        format!(
+                            "the template `{written}` has a {word} `{same}` already, and \
+                             AutoCAD ignores case in names"
+                        ),
+                        "to",
+                    );
+                }
+                if let Err(e) = record.table_rename(key, name, to) {
+                    return fail(e.code, e.message, "");
+                }
+                if table == Table::Linetype {
+                    record.table_rename_values(Table::Layer.key(), "linetype", name, to);
+                }
+                let mut count = record.rename_values(ObjectList::Template, by, name, to, op.index);
+                for &k in &sheets {
+                    count += at
+                        .rows
+                        .rename_values(ObjectList::Row(k), by, name, to, op.index);
+                }
+                format!(
+                    "renames the {word} `{name}` to `{to}` in the template `{written}`, and \
+                     {count} object{} that named it",
+                    if count == 1 { "" } else { "s" }
+                )
+            } else {
+                let mut users: Vec<String> = record
+                    .object_users(ObjectList::Template, by, name)
+                    .into_iter()
+                    .map(|id| format!("{}/{id}", files.name(sheets[0])))
+                    .collect();
+                for &k in &sheets {
+                    users.extend(
+                        at.rows
+                            .object_users(ObjectList::Row(k), by, name)
+                            .into_iter()
+                            .map(|id| format!("{}/{id}", files.name(k))),
+                    );
+                }
+                let template = at.template(t).expect("read above");
+                let layers = if table == Table::Linetype {
+                    template.table_users(Table::Layer.key(), "linetype", name)
+                } else {
+                    Vec::new()
+                };
+                if !users.is_empty() || !layers.is_empty() {
+                    let mut what = Vec::new();
+                    if !layers.is_empty() {
+                        let s = if layers.len() == 1 { "" } else { "s" };
+                        what.push(format!("the layer{s} {}", layers.join(", ")));
+                    }
+                    if !users.is_empty() {
+                        let s = if users.len() == 1 { "" } else { "s" };
+                        what.push(format!("the object{s} {}", listed(&users)));
+                    }
+                    return fail(
+                        ErrorCode::InUse,
+                        format!(
+                            "the {word} `{name}` is in use, so it is not deleted: {}. Move them \
+                             to another {word}, or delete them, first",
+                            what.join(" and ")
+                        ),
+                        "name",
+                    );
+                }
+                if let Err(e) = template.table_delete(key, name) {
+                    return fail(e.code, e.message, "");
+                }
+                format!("deletes the {word} `{name}` from the template `{written}`")
+            }
+        }
+    };
+    let after_name = new_name.unwrap_or(name);
+    let after = at
+        .template(t)
+        .ok()
+        .and_then(|record| record.table_entry_text(key, after_name));
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: None,
+            before,
+            after,
+            row_value: None,
+            ids_written: Vec::new(),
+            message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
+        }),
+        sheets,
         refuse: false,
     }
 }
@@ -1322,7 +1673,17 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         Body::Add {
             to: AddTo::Template(written),
             ..
+        }
+        | Body::Table {
+            to: AddTo::Template(written),
+            ..
         } => files.template(written) == Some(files.template_of[k]),
+        Body::Table {
+            to: AddTo::Sheet(sheet),
+            ..
+        } => files
+            .sheet(sheet)
+            .is_some_and(|s| files.template_of[s] == files.template_of[k]),
         Body::Change { target, .. }
         | Body::Move { target, .. }
         | Body::Delete { target }
@@ -1385,6 +1746,30 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode) -> String {
     let within = rest.split_once('.').map_or("", |(_, within)| within);
     match &op.body {
         Body::Add { .. } => within.to_owned(),
+        Body::Table {
+            op: TableOp::Change,
+            keys,
+            ..
+        } => {
+            let key = rest.rsplit('.').next().unwrap_or("");
+            if keys.contains_key(key) {
+                format!("set.{key}")
+            } else {
+                "set".to_owned()
+            }
+        }
+        Body::Table {
+            op: TableOp::Rename,
+            ..
+        } => "to".to_owned(),
+        Body::Table { .. } => {
+            let key = rest.rsplit('.').next().unwrap_or("");
+            if key.is_empty() {
+                "name".to_owned()
+            } else {
+                key.to_owned()
+            }
+        }
         Body::Change { set, .. } => {
             let key = within.split(['.', '[']).next().unwrap_or("");
             if set.contains_key(key) {
@@ -1512,6 +1897,18 @@ fn target_words(op: &Operation) -> String {
             to: AddTo::Template(t),
             ..
         } => format!("to the template `{t}`"),
+        Body::Table {
+            table,
+            name,
+            to: AddTo::Template(t),
+            ..
+        } => format!("the {} `{name}` of the template `{t}`", table.word()),
+        Body::Table {
+            table,
+            name,
+            to: AddTo::Sheet(s),
+            ..
+        } => format!("the {} `{name}` of sheet `{s}`'s template", table.word()),
     }
 }
 
