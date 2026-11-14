@@ -93,7 +93,7 @@ A point is named as its key in the sheet description. Without one, the object's 
 
 | Object | Points |
 |---|---|
-| `insert`, `text`, `mtext` | `position` |
+| `insert`, `text`, `mtext`, `table` | `position` |
 | `line` | `from`, `to` |
 | `polyline` | `points[0]`, `points[1]`, ... |
 | `circle`, `arc`, `ellipse` | `center` |

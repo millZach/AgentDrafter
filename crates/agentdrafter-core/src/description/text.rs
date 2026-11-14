@@ -260,10 +260,20 @@ pub(super) fn rotation(fields: &Fields) -> Result<f64, Error> {
 
 /// The style the text draws with: `Standard` or one of the sheet's.
 pub(super) fn style_name(fields: &Fields, styles: &[TextStyle]) -> Result<String, Error> {
-    let Some(node) = fields.text("style") else {
+    text_style_at(fields, "style", styles)
+}
+
+/// The text style named under `key`: `Standard` or one of the sheet's.
+/// Without it, `Standard`.
+pub(super) fn text_style_at(
+    fields: &Fields,
+    key: &str,
+    styles: &[TextStyle],
+) -> Result<String, Error> {
+    let Some(node) = fields.text(key) else {
         return Ok(STANDARD.to_owned());
     };
-    let path = fields.path_of("style");
+    let path = fields.path_of(key);
     let mut choices = vec![STANDARD];
     choices.extend(
         styles

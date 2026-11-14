@@ -80,6 +80,14 @@ _Avoid_: dot, ring, filled circle
 A filled triangle or quadrilateral, AutoCAD's SOLID object. A sheet description lists its corners round the outline.
 _Avoid_: solid (alone it is a hatch's `SOLID` fill, or AutoCAD's 3D solid), filled polygon
 
+**Table**:
+A grid of cells with text, AutoCAD's TABLE object, hung from its top left corner: rows of given heights running down, columns of given widths across, each cell's text laid out in its margins, and cells merged across rows and columns. Its first row may be a title row and the next a header row; the rest are data rows.
+_Avoid_: grid, schedule (a schedule is one use of a table), spreadsheet
+
+**Table style**:
+What a table's cells draw with unless they give their own, as AutoCAD's TABLESTYLE: the text style, text height and justification of title, header and data rows, the cells' margins, and the borders' pen. Every drawing has the table style `Standard`.
+_Avoid_: table format, cell style (AutoCAD's name for one kind of row's part of a table style)
+
 **Hatch**:
 An object that fills an area solid or with a hatch pattern, inside a boundary of closed loops, as in AutoCAD. It draws no outline of its own.
 _Avoid_: fill, shading, region (a region is AutoCAD's 2D solid object)

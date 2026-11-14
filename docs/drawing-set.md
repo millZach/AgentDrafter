@@ -115,7 +115,8 @@ rows:
 A template is a sheet's border, title block and fixed content, waiting for data. It is written with what a sheet description holds, and where a sheet's value comes from its row, it writes `{row: NAME}` in place of the value:
 
 - as the value of an insert's attribute, such as a title block's `TITLE: {row: TITLE}`;
-- as a `text`'s or an `mtext`'s `contents`.
+- as a `text`'s or an `mtext`'s `contents`;
+- as a table cell's text: the cell itself, `{row: NAME}`, or its `text`, `{text: {row: NAME}, height: 3}`.
 
 A value from the row stands for the whole value; it is not spliced into other text. The same value can be used in more than one place. Each sheet is the template with every `{row: NAME}` replaced by its row's value `NAME`, and is built as a sheet description is.
 

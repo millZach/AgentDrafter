@@ -1333,7 +1333,7 @@ impl RecordFile {
             match (kind.as_str(), entry.key.as_str()) {
                 ("line", "from" | "to")
                 | ("arc" | "circle" | "ellipse", "center")
-                | ("text" | "mtext" | "insert", "position") => {
+                | ("text" | "mtext" | "insert" | "table", "position") => {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
                 ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,

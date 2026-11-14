@@ -60,6 +60,14 @@ const ATTACHMENTS: [(Attachment, AttachmentPoint); 9] = [
     (Attachment::BottomRight, AttachmentPoint::BottomRight),
 ];
 
+/// The attachment of multiline text that AutoCAD's `point` is.
+pub(super) fn attachment_of(point: AttachmentPoint) -> Option<Attachment> {
+    ATTACHMENTS
+        .into_iter()
+        .find(|(_, p)| *p == point)
+        .map(|(attachment, _)| attachment)
+}
+
 /// The code multiline text writes a `%` of a run with.
 const PERCENT_CODE: &str = "\\U+0025";
 
@@ -304,7 +312,7 @@ pub(super) fn text_contents(value: &str) -> Option<String> {
 }
 
 /// Codes multiline text, with its width factor at the start when it has one.
-fn mtext_code(contents: &str, width_factor: Option<f64>) -> String {
+pub(super) fn mtext_code(contents: &str, width_factor: Option<f64>) -> String {
     let mut coded = String::with_capacity(contents.len() + 8);
     if let Some(factor) = width_factor {
         coded.push_str(&format!("\\W{factor};"));
@@ -325,7 +333,7 @@ fn mtext_code(contents: &str, width_factor: Option<f64>) -> String {
 
 /// What multiline text says, decoded, and its width factor, or none when
 /// it holds a code the core does not model.
-fn mtext_contents(value: &str) -> Option<(String, Option<f64>)> {
+pub(super) fn mtext_contents(value: &str) -> Option<(String, Option<f64>)> {
     let (width_factor, mut rest) = match value.strip_prefix("\\W") {
         Some(after) => {
             let (number, text) = after.split_once(';')?;

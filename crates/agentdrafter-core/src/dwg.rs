@@ -6,8 +6,9 @@
 //! itself, changes these files and `Cargo.toml` only. Moving the pin means
 //! running the judge again. [`hatch`] carries hatches through the seam,
 //! [`text`] text styles and text, [`block`] blocks, attribute
-//! definitions and inserts, [`ids`] each object's ID, and [`import`] a
-//! DWG's or a DXF's blocks for an import into a block library.
+//! definitions and inserts, [`table`] table styles and tables, [`ids`]
+//! each object's ID, and [`import`] a DWG's or a DXF's blocks for an
+//! import into a block library.
 //!
 //! Our own names here follow `CONTEXT.md`: a DWG file's contents are a
 //! drawing and the things in it are objects. acadrust's names, such as
@@ -41,6 +42,7 @@ mod block;
 mod hatch;
 mod ids;
 mod import;
+mod table;
 mod text;
 
 pub(crate) use import::read_blocks;
@@ -159,6 +161,7 @@ pub(crate) fn write_new_sheet(
     // Layers, linetypes, text styles and applications take their handles
     // before the blocks and objects take theirs.
     drawing.assign_table_entry_handles();
+    table::add_table_styles(&mut drawing, sheet)?;
     let units = insertion_units(sheet.units);
     for definition in &sheet.blocks {
         let owner = block::add_block_record(&mut drawing, definition, units)?;
@@ -178,6 +181,30 @@ pub(crate) fn write_new_sheet(
         }
     }
     for (object, written) in sheet.objects.iter().zip(&record.objects) {
+        if let Object::Table(t) = object {
+            let style = sheet.table_style(&t.table_style).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!(
+                        "a table draws with table style `{}`, which the sheet does not define",
+                        t.table_style
+                    ),
+                )
+            })?;
+            let mut dwg_table = EntityType::Table(Box::new(table::dwg_table(&drawing, t, &style)?));
+            let common = dwg_table.common_mut();
+            t.layer.clone_into(&mut common.layer);
+            set_properties(common, &t.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            let handle = drawing.add_entity(dwg_table).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a table to the drawing: {e}"),
+                )
+            })?;
+            table::fill_block(&mut drawing, handle, t, &style)?;
+            continue;
+        }
         let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
         ids::write_id_and_name(
             dwg_object.common_mut(),
@@ -269,6 +296,12 @@ fn dwg_object(
         Object::MText(t) => EntityType::MText(Box::new(text::dwg_mtext(t))),
         Object::AttributeDefinition(definition) => {
             EntityType::AttributeDefinition(block::dwg_attribute_definition(definition, start_of))
+        }
+        Object::Table(_) => {
+            return Err(Error::new(
+                ErrorCode::DwgWrite,
+                "a table belongs on a sheet, not in a block",
+            ))
         }
         Object::Insert(insert) => {
             let Some(definition) = blocks.iter().find(|b| b.name == insert.block) else {
@@ -470,6 +503,18 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         }
     }
     let (text_styles, text_styles_not_read) = text::read_text_styles(&drawing);
+    let (table_styles, table_styles_not_read) = table::read_table_styles(&drawing);
+    // A table's own block holds what it draws, and is read with the table.
+    let table_blocks: Vec<(Option<acadrust::types::Handle>, String)> = drawing
+        .model_space_entities()
+        .filter_map(|e| match e {
+            EntityType::Table(t) => {
+                let (handle, name) = table::block_of(t);
+                Some((handle, name.to_owned()))
+            }
+            _ => None,
+        })
+        .collect();
     // A block that inserts another is read once that one is: each round
     // reads every block it can with the blocks read before it, until a
     // round reads none.
@@ -477,6 +522,11 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         .block_records
         .iter()
         .filter(|r| !(r.is_model_space() || r.is_paper_space() || r.is_layout()))
+        .filter(|r| {
+            !table_blocks.iter().any(|(handle, name)| {
+                *handle == Some(r.handle) || (!name.is_empty() && *name == r.name)
+            })
+        })
         .collect();
     let mut read: Vec<Option<Block>> = records.iter().map(|_| None).collect();
     loop {
@@ -500,7 +550,18 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
     let mut ids_and_names = Vec::new();
     let mut objects_not_read = 0;
     for dwg_object in drawing.model_space_entities() {
-        match read_object(dwg_object, &blocks) {
+        let read = match dwg_object {
+            EntityType::Table(t) => read_properties(&t.common)
+                .filter(|_| !t.common.invisible)
+                .and_then(|properties| {
+                    let mut read =
+                        table::read_table(&drawing, t, &table_styles, layer_of(&t.common))?;
+                    read.properties = properties;
+                    Some(Object::Table(read))
+                }),
+            _ => read_object(dwg_object, &blocks),
+        };
+        match read {
             Some(object) => {
                 objects.push(object);
                 ids_and_names.push(IdAndName {
@@ -520,6 +581,8 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         layers_not_read,
         text_styles,
         text_styles_not_read,
+        table_styles,
+        table_styles_not_read,
         blocks,
         blocks_not_read,
         objects,
@@ -568,6 +631,15 @@ fn read_linetype(dwg_linetype: &LineType) -> Option<Linetype> {
     })
 }
 
+/// The layer an object sits on: layer `0` when it names none.
+fn layer_of(common: &EntityCommon) -> String {
+    if common.layer.is_empty() {
+        LAYER_ZERO.to_owned()
+    } else {
+        common.layer.clone()
+    }
+}
+
 /// A layer with an index colour and a standard or default lineweight.
 fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
     let Color::Index(color) = dwg_layer.color else {
@@ -600,11 +672,7 @@ fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
         return None;
     }
     let properties = read_properties(common)?;
-    let layer = if common.layer.is_empty() {
-        LAYER_ZERO.to_owned()
-    } else {
-        common.layer.clone()
-    };
+    let layer = layer_of(common);
     let object = match dwg_object {
         EntityType::Line(line) => Object::Line(Line {
             from: point(line.start),
@@ -978,6 +1046,7 @@ mod tests {
             linetypes: Vec::new(),
             layers: Vec::new(),
             text_styles: Vec::new(),
+            table_styles: Vec::new(),
             blocks: Vec::new(),
             objects: Vec::new(),
             paper: None,

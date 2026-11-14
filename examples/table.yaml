@@ -1,0 +1,47 @@
+# Two tables on an A3 sheet: a cable schedule with a title, a header and a
+# merged cell, in a table style of its own, and a plain list in Standard.
+# Everything here is made up.
+units: mm
+paper: ISO A3 landscape
+layers:
+  border: {color: white, lineweight: 0.5}
+  schedule: {color: cyan}
+  list: {color: green}
+text_styles:
+  notes: {font: romans.shx}
+table_styles:
+  schedule:
+    text_style: notes
+    text_height: 2.5
+    horizontal_margin: 1
+    vertical_margin: 1
+    border_lineweight: 0.35
+    title: {text_height: 3.5}
+    data: {justify: middle_left}
+objects:
+  - polyline: {points: [[0, 0, 0], [420, 0, 0], [420, 297, 0], [0, 297, 0]], closed: true, layer: border}
+  - table:
+      id: cables
+      position: [20, 277, 0]
+      columns: [30, 40, 40, 25]
+      rows: [8, 6, 6, 6, 6]
+      title: true
+      header: true
+      table_style: schedule
+      layer: schedule
+      cells:
+        - [{text: CABLE SCHEDULE, merge: [1, 4]}, '', '', '']
+        - [CABLE, FROM, TO, CORES]
+        - [C-101, JB-101, MCC-1, {text: '4', justify: middle_center}]
+        - [C-102, JB-102 STRIP B, MCC-1, {text: '2', justify: middle_center}]
+        - [{text: C-103, style: Standard}, {text: JB-103, height: 2}, {text: SPARE, merge: [1, 2]}, '']
+  - table:
+      id: list
+      position: [200, 277, 0]
+      columns: [20, 60]
+      rows: [10, 10, 10]
+      layer: list
+      cells:
+        - [ITEM, DESCRIPTION]
+        - ['1', PUMP]
+        - ['2', VALVE]

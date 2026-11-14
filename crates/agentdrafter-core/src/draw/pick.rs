@@ -141,6 +141,7 @@ mod tests {
             object,
             part: None,
             nested: Vec::new(),
+            cell: None,
             color: Color(7),
             shape: Shape::Stroke {
                 lineweight,
@@ -155,6 +156,7 @@ mod tests {
             object,
             part: None,
             nested: Vec::new(),
+            cell: None,
             color: Color(1),
             shape: Shape::Fill {
                 rule: FillRule::EvenOdd,

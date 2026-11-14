@@ -203,7 +203,7 @@ pub(crate) fn template_schema() -> Value {
         "A sheet's border, title block and fixed content, waiting for data. A template holds \
          what a sheet description holds, and where a sheet's value comes from its row in the \
          drawing set it writes {{{ROW_KEY}: NAME}} in place of the value: as an insert's \
-         attribute value, or as a text's or an mtext's contents. Each sheet is the template with \
+         attribute value, as a text's or an mtext's contents, or as a table cell or its text. Each sheet is the template with \
          every {{{ROW_KEY}: NAME}} replaced by its row's value NAME, and is built as a sheet \
          description is. Its declared unit is the set's. {SUBSET}"
     ));
@@ -252,6 +252,16 @@ pub(crate) fn template_schema() -> Value {
             { "type": "array", "items": one },
         ],
     });
+    // A table's cell, or its text, may be a value from the row.
+    let row_value = json!({ "$ref": "#/$defs/row_value" });
+    if let Some(choices) = defs["table_cell"]["anyOf"].as_array_mut() {
+        choices.push(row_value.clone());
+    }
+    if let Some(choices) =
+        defs["table_cell"]["anyOf"][2]["properties"]["text"]["anyOf"].as_array_mut()
+    {
+        choices.push(row_value);
+    }
     for kind in ["text", "mtext"] {
         let contents = &mut defs[kind]["properties"]["contents"];
         let mut written = contents.take();

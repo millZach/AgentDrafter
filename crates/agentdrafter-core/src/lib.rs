@@ -137,6 +137,7 @@ pub use model::{
 };
 pub use model::{Cell, Paper};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
+pub use model::{RowKind, RowStyle, Table, TableCell, TableStyle, STANDARD_TABLE_STYLE};
 pub use plot::{
     plot, plot_set, plot_set_with, plot_with, PlotReport, PlotRequest, PlotSetReport,
     PlotSetRequest, PlotStyleUsed, PlottedSheet, SheetSize, BUILT_IN_PLOT_STYLE,

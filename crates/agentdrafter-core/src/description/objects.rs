@@ -13,6 +13,7 @@ use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
 use super::layers::{layer_name, properties};
 use super::polyline;
 use super::strict_yaml::{index_path, key_path, Kind, Node};
+use super::table::{table, TABLE_KEYS};
 use super::text::{mtext, text, MTEXT_KEYS, TEXT_KEYS};
 use super::{
     angle, at, bad_value, length, plain_number, point, points, scalar, unknown_key, wrong_type,
@@ -21,7 +22,7 @@ use super::{
 use crate::error::{Error, ErrorCode};
 use crate::model::{
     Arc, BlockLibrary, Circle, Ellipse, HatchPattern, Layer, Line, Linetype, Object, Spline,
-    FIT_DEGREE, LAYER_ZERO,
+    TableStyle, FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
@@ -56,8 +57,17 @@ const fn drawn_and(last: ObjectType) -> [ObjectType; 12] {
 }
 
 /// Every object type a sheet description can hold, and the keys each takes:
-/// the drawn objects, and inserts.
-pub(crate) const OBJECT_TYPES: [ObjectType; 12] = drawn_and(("insert", &INSERT_KEYS));
+/// the drawn objects, inserts and tables.
+pub(crate) const OBJECT_TYPES: [ObjectType; 13] = {
+    let drawn = drawn_and(("insert", &INSERT_KEYS));
+    let mut types = [("table", &TABLE_KEYS as &[&str]); 13];
+    let mut i = 0;
+    while i < drawn.len() {
+        types[i] = drawn[i];
+        i += 1;
+    }
+    types
+};
 
 /// Every object type a block in a block library can hold, and the keys
 /// each takes: the drawn objects a sheet holds, attribute definitions, and
@@ -96,13 +106,16 @@ const fn same_name(a: &str, b: &str) -> bool {
 }
 
 /// What the objects of one sheet or one block may name: the declared unit
-/// and the layers, hatch patterns and text styles defined beside them.
+/// and the layers, hatch patterns, text styles and table styles defined
+/// beside them.
 pub(super) struct Tables<'a> {
     pub units: Unit,
     pub linetypes: &'a [Linetype],
     pub layers: &'a [Layer],
     pub hatch_patterns: &'a [HatchPattern],
     pub styles: &'a [TextStyle],
+    /// The table styles a sheet's tables may name; none in a block.
+    pub table_styles: &'a [TableStyle],
 }
 
 /// Where an object is: on a sheet, which may insert blocks from its block
@@ -140,6 +153,7 @@ impl Place<'_> {
             (Place::Sheet { .. }, "attdef") => {
                 Some("an attribute definition belongs in a block in the block library")
             }
+            (Place::Block { .. }, "table") => Some("a table belongs on a sheet, not in a block"),
             _ => None,
         }
     }
@@ -321,6 +335,9 @@ pub(super) fn object(
         }
         ("text", _) => text(&fields, units, layer, tables.styles).map(Object::Text),
         ("mtext", _) => mtext(&fields, units, layer, tables.styles).map(Object::MText),
+        ("table", Place::Sheet { .. }) => {
+            table(&fields, units, layer, tables.styles, tables.table_styles).map(Object::Table)
+        }
         ("attdef", Place::Block { noticed, .. }) => {
             attribute_definition(&fields, tables, layer, noticed).map(Object::AttributeDefinition)
         }

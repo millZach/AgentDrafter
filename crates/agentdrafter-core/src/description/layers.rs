@@ -134,12 +134,7 @@ pub(crate) const PROPERTY_KEYS: [&str; 4] = ["color", "linetype", "lineweight", 
 pub(super) fn properties(fields: &Fields, linetypes: &[Linetype]) -> Result<Properties, Error> {
     let mut properties = Properties::default();
     if let Some(node) = fields.get("color") {
-        let path = fields.path_of("color");
-        properties.color = match &node.kind {
-            Kind::Scalar(text) if text == BY_LAYER => ObjectColor::ByLayer,
-            Kind::Scalar(text) if text == BY_BLOCK => ObjectColor::ByBlock,
-            _ => ObjectColor::Index(colour(node, &path, "`ByLayer`, `ByBlock`, ")?),
-        };
+        properties.color = object_color(node, &fields.path_of("color"))?;
     }
     if let Some(node) = fields.text("linetype") {
         let path = fields.path_of("linetype");
@@ -148,24 +143,38 @@ pub(super) fn properties(fields: &Fields, linetypes: &[Linetype]) -> Result<Prop
         properties.linetype = ObjectLinetype::from(named(node, &path, "linetype", &choices)?);
     }
     if let Some(node) = fields.get("lineweight") {
-        let path = fields.path_of("lineweight");
-        properties.lineweight = match &node.kind {
-            Kind::Scalar(text) if text == BY_LAYER => ObjectLineweight::ByLayer,
-            Kind::Scalar(text) if text == BY_BLOCK => ObjectLineweight::ByBlock,
-            Kind::Scalar(text) if text == DEFAULT_LINEWEIGHT => ObjectLineweight::Default,
-            _ => ObjectLineweight::Width(lineweight(node, &path).map_err(|e| Error {
-                message: format!(
-                    "{}; or `{BY_LAYER}`, `{BY_BLOCK}` or `{DEFAULT_LINEWEIGHT}`",
-                    e.message
-                ),
-                ..e
-            })?),
-        };
+        properties.lineweight = object_lineweight(node, &fields.path_of("lineweight"))?;
     }
     if let Some(node) = fields.get("linetype_scale") {
         properties.linetype_scale = linetype_scale(node, &fields.path_of("linetype_scale"))?;
     }
     Ok(properties)
+}
+
+/// An object's own colour: `ByLayer`, `ByBlock` or a colour index.
+pub(super) fn object_color(node: &Node, path: &str) -> Result<ObjectColor, Error> {
+    Ok(match &node.kind {
+        Kind::Scalar(text) if text == BY_LAYER => ObjectColor::ByLayer,
+        Kind::Scalar(text) if text == BY_BLOCK => ObjectColor::ByBlock,
+        _ => ObjectColor::Index(colour(node, path, "`ByLayer`, `ByBlock`, ")?),
+    })
+}
+
+/// An object's own lineweight: `ByLayer`, `ByBlock`, `Default` or a
+/// standard lineweight.
+pub(super) fn object_lineweight(node: &Node, path: &str) -> Result<ObjectLineweight, Error> {
+    Ok(match &node.kind {
+        Kind::Scalar(text) if text == BY_LAYER => ObjectLineweight::ByLayer,
+        Kind::Scalar(text) if text == BY_BLOCK => ObjectLineweight::ByBlock,
+        Kind::Scalar(text) if text == DEFAULT_LINEWEIGHT => ObjectLineweight::Default,
+        _ => ObjectLineweight::Width(lineweight(node, path).map_err(|e| Error {
+            message: format!(
+                "{}; or `{BY_LAYER}`, `{BY_BLOCK}` or `{DEFAULT_LINEWEIGHT}`",
+                e.message
+            ),
+            ..e
+        })?),
+    })
 }
 
 /// A linetype scale: a number more than 0, with no unit, that a linetype's

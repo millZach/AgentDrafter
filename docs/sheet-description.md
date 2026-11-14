@@ -2,7 +2,7 @@
 
 A sheet description is the text file that states what is on a new sheet. It is the sheet's record: the DWG is built from it (ADR-0003). It is written in a strict subset of YAML, set out below, so that an agent can write it, a person can read it, and a mistake is an error that names its field rather than a guess.
 
-So far a sheet description holds lines, polylines, arcs, circles, ellipses, splines and hatches, on layers that carry a colour, a linetype and a lineweight, text and multiline text in text styles that name a TrueType or an SHX font, and inserts of blocks with attributes from a [block library](block-library.md). A template is written with the same keys, and leaves some values to a row of a [drawing set](drawing-set.md), which builds one sheet per row.
+So far a sheet description holds lines, polylines, arcs, circles, ellipses, splines and hatches, on layers that carry a colour, a linetype and a lineweight, text and multiline text in text styles that name a TrueType or an SHX font, inserts of blocks with attributes from a [block library](block-library.md), and tables in table styles. A template is written with the same keys, and leaves some values to a row of a [drawing set](drawing-set.md), which builds one sheet per row.
 
 `agentdrafter schema` prints the same keys as a JSON Schema (draft 2020-12), with what each means, for an agent to read before it writes a sheet description. `agentdrafter schema block-library` prints the block library's.
 
@@ -17,7 +17,7 @@ objects:
       to: [100, 50, 0]
 ```
 
-`agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on. `examples/blocks/` holds a block library and two sheets that insert its blocks.
+`agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on. `examples/blocks/` holds a block library and two sheets that insert its blocks, and `examples/table.yaml` two tables.
 
 Every DWG a build writes carries AgentDrafter's build mark: a custom drawing property, `AgentDrafter` with the value `build`, which AutoCAD shows under DWGPROPS. `--overwrite` replaces only a DWG that carries it. A sheet built from a drawing set records its set in the same property, as `build; set=` and the set's folder relative to the DWG ([the drawing set](drawing-set.md#the-build-mark-names-the-set)); a sheet description built on its own records none.
 
@@ -50,6 +50,7 @@ Keys are spelled as AutoCAD spells them: `color`, `center`.
 | `layers` | no | The sheet's layers: a mapping from each layer's name to its colour, linetype and lineweight. |
 | `hatch_patterns` | no | The sheet's hatch patterns: a mapping from each pattern's name to its lines. |
 | `text_styles` | no | The sheet's text styles: a mapping from each style's name to its font and width factor. |
+| `table_styles` | no | The sheet's table styles: a mapping from each style's name to what its tables' cells draw with. See [Table styles](#table-styles). |
 | `objects` | yes | A list of objects, which may be empty, in drawing order. Each object is a mapping with one key, its type. |
 | `paper` | no | The paper the sheet is drawn on, which the checker holds it to. See [Paper](#paper). |
 
@@ -120,6 +121,34 @@ A text style is a font that text draws with, and how wide. Every drawing already
 
 The DWG names the font, and AutoCAD finds it on the machine that opens the drawing. AgentDrafter reads the font only to measure text, which it does to place justified text and for `agentdrafter measure-text`; see [Fonts](#fonts).
 
+### Table styles
+
+A table style is what a [table](#tables)'s cells draw with unless they give their own: AutoCAD's TABLESTYLE. Every drawing already has `Standard`: on a metric sheet its title rows are 6 mm high, its header and data rows 4.5 mm and its margins 1.5 mm, and on an imperial sheet 0.25, 0.18 and 0.06 in, all in the text style `Standard`, its titles and headers middle centre and its data top centre, and its borders `ByBlock`. Listing `Standard` under `table_styles` sets what it draws with; it is written `Standard` exactly, as a text style's name is.
+
+```yaml
+table_styles:
+  schedule:
+    text_style: notes
+    text_height: 2.5
+    horizontal_margin: 1
+    vertical_margin: 1
+    border_lineweight: 0.35
+    title: {text_height: 3.5}
+    data: {justify: middle_left}
+```
+
+| Key | Required | What it is |
+|---|---|---|
+| `text_height` | yes | The height of the capitals of every kind of row's text, unless the row gives its own: a length more than 0. |
+| `text_style` | no | The text style every kind of row's text draws with, unless the row gives its own: `Standard` or a name under `text_styles`. Without it, `Standard`. |
+| `horizontal_margin` | no | The space between a cell's sides and its text: a length of 0 or more. Without it, 1.5 mm on a metric sheet and 0.06 in on an imperial one. |
+| `vertical_margin` | no | The space between a cell's top and bottom and its text, as `horizontal_margin` is. |
+| `border_color` | no | The colour the borders draw in, as an [object's own colour](#an-objects-own-colour-linetype-and-lineweight) is written. Without it, `ByBlock`: the table's own colour, or its layer's where that is `ByLayer`. |
+| `border_lineweight` | no | The lineweight the borders draw with, as an object's own lineweight is written. Without it, `ByBlock`. |
+| `title`, `header`, `data` | no | What the cells of each kind of row draw with, where it is not the style's own: `text_style`, `text_height` and `justify`, one of the nine justifications of `mtext`. Without `justify`, titles and headers are `middle_center` and data `top_center`, as in AutoCAD. |
+
+Every border of a table style draws in one pen, and every kind of row has the same margins; a cell is not filled. AutoCAD's TABLESTYLE offers more, such as a pen for each edge of each kind of row, a fill and a text colour; a DWG table style that uses them, in its rows or in any of the cell styles AutoCAD 2010 and later keep, such as turned text, is counted as not read, and so is a table in it.
+
 ### Objects
 
 Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight unless it gives its own, under `color`, `linetype`, `lineweight` and `linetype_scale`; see [An object's own colour, linetype and lineweight](#an-objects-own-colour-linetype-and-lineweight). Every object may also take an `id` key, its ID in the record, and a `name` key, a name an agent selects it by; see [IDs and names](#ids-and-names).
@@ -138,6 +167,7 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 | `text` | `contents`, `position`, `height`; `style`, `width_factor`, `rotation`, `justify` | A single line of text, as AutoCAD's TEXT draws it. See [Text](#text). |
 | `mtext` | `contents`, `position`, `height`; `width`, `style`, `width_factor`, `rotation`, `justify` | Text of one or more lines in a box, as AutoCAD's MTEXT draws it. See [Text](#text). |
 | `insert` | `block`, `position`; `scale`, `rotation`, `attributes` | A block from the sheet's block library, placed as AutoCAD's INSERT places it. See [Inserts](#inserts). |
+| `table` | `position`, `columns`, `rows`, `cells`; `title`, `header`, `table_style` | A grid of cells with text, as AutoCAD's TABLE draws it. See [Tables](#tables). |
 
 Keys before the semicolon are required; keys after it are not. A `radius` is a length more than 0.
 
@@ -329,6 +359,52 @@ A block may define one tag on more than one attribute definition, as AutoCAD all
 A tag written in lowercase, such as `note`, is taken in capitals, `NOTE`, as AutoCAD keeps every tag, and the reply carries a `tag_in_capitals` notice saying where it is written: the build's `notices` for a sheet built on its own, and the sheet's `notices` in a drawing set's build or a change set's reply. Giving one tag twice, in two cases, such as `{note: A, NOTE: B}`, is an error.
 
 A built sheet holds the blocks it inserts, as the library defines them, and the library's layers, linetypes and text styles those blocks use. A layer, linetype or text style the sheet defines too must be defined the same in both, or the build stops with an error at the sheet's definition: otherwise a block would not draw on the sheet as the library defines it. Layer `0`, `Continuous` and `Standard`, when the library does not list them, are the sheet's own, as they are in AutoCAD. The sheet's own objects, an insert among them, sit on the sheet's layers, so an insert on a layer the library defines lists that layer under `layers` as well.
+
+### Tables
+
+A table is a grid of cells with text, AutoCAD's TABLE: an I/O list, a cable schedule, a bill of materials. It hangs from its top left corner, its rows running down and its columns across, as AutoCAD's TABLE draws one. A table belongs on a sheet, not in a block.
+
+```yaml
+- table:
+    id: cables
+    position: [20, 277, 0]
+    columns: [30, 40, 40, 25]
+    rows: [8, 6, 6, 6, 6]
+    title: true
+    header: true
+    table_style: schedule
+    cells:
+      - [{text: CABLE SCHEDULE, merge: [1, 4]}, '', '', '']
+      - [CABLE, FROM, TO, CORES]
+      - [C-101, JB-101, MCC-1, {text: '4', justify: middle_center}]
+      - [C-102, JB-102 STRIP B, MCC-1, {text: '2', justify: middle_center}]
+      - [{text: C-103, style: Standard}, {text: JB-103, height: 2}, {text: SPARE, merge: [1, 2]}, '']
+```
+
+| Key | Required | What it is |
+|---|---|---|
+| `position` | yes | The table's top left corner: a point. |
+| `columns` | yes | The width of each column, left to right: at least one length more than 0. |
+| `rows` | yes | The height of each row, top to bottom: at least one length more than 0. A row is as high as it is given; text that needs more is reported by [the checker](check.md), as AutoCAD would make the row taller. |
+| `cells` | yes | The cells, row by row from the top: one row of cells for each of `rows`, each holding one cell for each of `columns`. |
+| `title` | no | Whether the first row is a title row, drawn as the table style's `title` rows are: `true` or `false`. Without it, `false`. |
+| `header` | no | Whether the row after the title, or the first row when there is no title, is a header row. Without it, `false`. The other rows are data rows. |
+| `table_style` | no | The [table style](#table-styles): `Standard` or a name under `table_styles`, written exactly as it is there. Without it, `Standard`. |
+| `layer` | no | The layer the table sits on, as for every object. |
+
+A cell is its text alone, such as `C-101` or `'4'`, `''` for an empty cell, or a mapping:
+
+| Key | What it is |
+|---|---|
+| `text` | What the cell says, exactly as it shows: a line break starts a new line, and line breaks at the end are dropped. Empty, or something that shows; no control characters but line breaks. A `\`, `{` or `}` shows as itself. Without it, the cell is empty. |
+| `style` | The text style its text draws with, instead of its row's. |
+| `height` | The height of its text's capitals, instead of its row's: a length more than 0. |
+| `justify` | Where its text sits in it, instead of where its row's does: one of the nine justifications of `mtext`. |
+| `merge` | How many rows and columns the cell spans, `[rows, columns]`, itself among them: two whole numbers from 1, not both 1. The cells it spans are written `''`; a merge keeps within the table and off other merges. |
+
+A cell's text is laid out as AutoCAD lays it out: as multiline text as wide as its cell less both side margins, so it wraps between words, at the cell's left margin, its middle or its right margin across and its top margin, its middle or its bottom margin up, as it is justified. The borders are every row's boundary and every column's, left out inside a merged cell, in the table style's border pen. A cell's text draws in the table's own colour and its layer's lineweight, as AutoCAD 2026 wrote the texts of a table it laid out: `ByBlock` in colour and `ByLayer` in lineweight, on the table's layer. Where the style's border pen is `ByBlock`, the borders take the table's own colour, linetype and lineweight.
+
+The DWG holds an AutoCAD TABLE, its table style and its anonymous block of the lines and text it draws, which AutoCAD shows until it next lays the table out; AutoCAD 2026 opened made-up tables without recovery, audited them clean, and laid them out again as they were written. Reading a DWG back gives the table, and its style, when they have a model in the core; a table whose cell holds a block, a field or a formula, or overrides more than its text style, height and justification, is counted as not read, as is a table with any override of its own, a row's or a column's, such as a fill. In a [template](drawing-set.md#templates), a cell's text may be a value from the row, `{row: NAME}`, written as the cell or as its `text`.
 
 ### IDs and names
 

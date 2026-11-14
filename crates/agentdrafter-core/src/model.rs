@@ -17,10 +17,15 @@ use crate::units::Unit;
 
 pub(crate) mod block;
 pub(crate) mod hatch;
+pub(crate) mod table;
 pub use block::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
 };
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
+pub use table::{
+    LaidCell, RowKind, RowStyle, Table, TableCell, TableStyle, LINE_BOX, LINE_STEP,
+    STANDARD_TABLE_STYLE,
+};
 
 /// The layer every drawing has, and the one an object sits on unless it names another.
 pub const LAYER_ZERO: &str = "0";
@@ -303,6 +308,8 @@ pub enum Object {
     AttributeDefinition(AttributeDefinition),
     /// An insert of a block, which belongs on a sheet.
     Insert(Insert),
+    /// A table, which belongs on a sheet.
+    Table(Table),
 }
 
 impl Object {
@@ -322,6 +329,7 @@ impl Object {
             Object::MText(_) => "mtext",
             Object::AttributeDefinition(_) => "attdef",
             Object::Insert(_) => "insert",
+            Object::Table(_) => "table",
         }
     }
 
@@ -341,6 +349,7 @@ impl Object {
             Object::MText(o) => &o.layer,
             Object::AttributeDefinition(o) => &o.layer,
             Object::Insert(o) => &o.layer,
+            Object::Table(o) => &o.layer,
         }
     }
 
@@ -360,6 +369,7 @@ impl Object {
             Object::MText(o) => &o.properties,
             Object::AttributeDefinition(o) => &o.properties,
             Object::Insert(o) => &o.properties,
+            Object::Table(o) => &o.properties,
         }
     }
 
@@ -378,6 +388,7 @@ impl Object {
             Object::MText(o) => &mut o.properties,
             Object::AttributeDefinition(o) => &mut o.properties,
             Object::Insert(o) => &mut o.properties,
+            Object::Table(o) => &mut o.properties,
         }
     }
 }
@@ -772,6 +783,10 @@ pub struct Sheet {
     /// drawing; listing it here sets its font and width factor.
     #[serde(default)]
     pub text_styles: Vec<TextStyle>,
+    /// The table styles the sheet defines. Style `Standard` is in every
+    /// drawing; listing it here sets what it draws with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_styles: Vec<TableStyle>,
     /// The blocks the sheet's inserts place, as the block library defines
     /// them. The layers, linetypes and text styles their objects use are
     /// among the sheet's.
@@ -787,6 +802,20 @@ pub struct Sheet {
     /// AutoCAD's LTSCALE. An object's own linetype scale multiplies it.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub ltscale: f64,
+}
+
+impl Sheet {
+    /// The table style named `name` a table draws with: one the sheet
+    /// lists, or, for `Standard` when the sheet does not list it, the
+    /// Standard table style of the sheet's unit. None for a name the sheet
+    /// does not have.
+    pub fn table_style(&self, name: &str) -> Option<TableStyle> {
+        self.table_styles
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
+            .or_else(|| (name == STANDARD_TABLE_STYLE).then(|| TableStyle::standard(self.units)))
+    }
 }
 
 /// The paper a sheet is drawn on, as its sheet description or template
@@ -844,12 +873,22 @@ pub struct DrawingContents {
     /// How many text styles the core has no model for yet, such as those
     /// that slant, mirror or fix the height of their text, or add a big font.
     pub text_styles_not_read: usize,
+    /// The drawing's table styles the core has a model for, `Standard`
+    /// among them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_styles: Vec<TableStyle>,
+    /// How many table styles the core has no model for yet, such as those
+    /// whose rows draw with different margins or borders, or fill their
+    /// cells.
+    #[serde(default)]
+    pub table_styles_not_read: usize,
     /// The drawing's block definitions the core has a model for, in table
     /// order, leaving out model space and the layouts.
     pub blocks: Vec<Block>,
     /// How many block definitions the core has no model for yet, such as
     /// anonymous blocks, external references and blocks holding an object
-    /// the core has no model for.
+    /// the core has no model for. A table's own anonymous block, which
+    /// holds what it draws, is read with the table and not counted.
     pub blocks_not_read: usize,
     /// The model-space objects the core has a model for, in drawing order.
     pub objects: Vec<Object>,

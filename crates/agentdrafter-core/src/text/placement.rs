@@ -78,6 +78,19 @@ impl SheetFonts {
                 Object::Text(text) => text.style == STANDARD,
                 Object::MText(text) => text.style == STANDARD,
                 Object::AttributeDefinition(definition) => definition.style == STANDARD,
+                Object::Table(table) => {
+                    let rows = sheet.table_style(&table.table_style).is_some_and(|style| {
+                        [&style.title, &style.header, &style.data]
+                            .iter()
+                            .any(|row| row.text_style == STANDARD)
+                    });
+                    let cells = table
+                        .cells
+                        .iter()
+                        .flatten()
+                        .any(|cell| cell.style.as_deref() == Some(STANDARD));
+                    rows || cells
+                }
                 _ => false,
             });
         if standard_used && !styles.iter().any(|s| s.name == STANDARD) {

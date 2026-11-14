@@ -36,6 +36,9 @@
 //!   The extents take in the block's box, placed, as AutoCAD's do. Each
 //!   shape an insert draws says which object of its block drew it, so the
 //!   checker can measure a title block's texts and attributes apart.
+//! - A table draws its borders and each cell's text as AutoCAD lays a
+//!   table out ([`Drawer::table`]): each cell's text is multiline text in
+//!   the cell's margins, so it wraps and is justified as an mtext is.
 //! - The sheet is seen from above: `z` is dropped.
 //!
 //! Everything here is plain computation. It opens no window and uses no
@@ -56,7 +59,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::block::{definition_text, Placement};
 use crate::model::{
     attribute_text, Block, Insert, Layer, Object, ObjectColor, ObjectLinetype, ObjectLineweight,
-    Point3, Polyline, Properties, Sheet, CONTINUOUS, LAYER_ZERO, WHITE,
+    Point3, Polyline, Properties, Sheet, Table, TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
 };
 use crate::text::placement::SheetFonts;
 
@@ -64,6 +67,7 @@ pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
 pub use pick::{object_bounds, pick};
 pub(crate) use polyline::bulge_of;
+pub(crate) use text::mtext_lines;
 
 /// AutoCAD's default lineweight, which a layer with none of its own plots
 /// with: 0.25 mm, AutoCAD's `LWDEFAULT` as installed.
@@ -165,6 +169,10 @@ pub struct TextRun {
     /// object of the sheet's own, or of the insert's block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nested: Vec<usize>,
+    /// When a table draws it, the cell whose text it is: its row and its
+    /// column, counted from 0 from the top left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell: Option<[usize; 2]>,
     /// The box round what its characters draw, in the line's frame: its
     /// lower left and upper right corners `(u, v)`. None when they draw
     /// nothing, as spaces do.
@@ -200,6 +208,11 @@ pub struct Item {
     /// object of the sheet's own, or of the insert's block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nested: Vec<usize>,
+    /// When a table draws it, the cell whose text it draws: its row and its
+    /// column, counted from 0 from the top left. None for its borders and
+    /// for every other object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell: Option<[usize; 2]>,
     /// The AutoCAD colour index it draws in.
     pub color: Color,
     pub shape: Shape,
@@ -544,6 +557,10 @@ impl<'a> Drawer<'a> {
             self.insert(index, insert, tolerance, list);
             return;
         }
+        if let Object::Table(table) = object {
+            self.table(index, table, tolerance, list);
+            return;
+        }
         let shown = self.shown(object.layer());
         if shown == Shown::Hidden {
             return;
@@ -866,7 +883,80 @@ impl<'a> Drawer<'a> {
                 pen.lineweight,
                 tolerance,
             )),
-            Object::Insert(_) => Drawn::default(),
+            // An insert and a table draw nothing here: [`Drawer::insert`]
+            // and [`Drawer::table`] draw them.
+            Object::Insert(_) | Object::Table(_) => Drawn::default(),
+        }
+    }
+
+    /// Adds what a table draws to `list`, as AutoCAD 2026 laid out
+    /// made-up tables: its borders, every row's boundary and every
+    /// column's but inside a merged cell, in the table style's border pen,
+    /// `ByBlock` taking the table's own; and each cell's text as multiline
+    /// text in the cell's margins, in the table's own colour and its
+    /// layer's lineweight, as AutoCAD 2026 wrote a table's texts laying it
+    /// out: `ByBlock` in colour, `ByLayer` in lineweight, on the table's
+    /// layer. Each shape and line of text a cell's text draws says which
+    /// cell it is.
+    fn table(&self, index: usize, table: &Table, tolerance: f64, list: &mut DisplayList) {
+        let shown = self.shown(&table.layer);
+        if shown == Shown::Hidden {
+            return;
+        }
+        let pen = self.pen(&table.layer, &table.properties, None);
+        let style = self
+            .sheet
+            .table_style(&table.table_style)
+            .unwrap_or_else(|| TableStyle::standard(self.sheet.units));
+        let by_layer = self.layer_pen(&table.layer);
+        let border = Pen {
+            color: match style.border_color {
+                ObjectColor::ByBlock => pen.color,
+                ObjectColor::ByLayer => by_layer.color,
+                ObjectColor::Index(i) => Color(i),
+            },
+            lineweight: match style.border_lineweight {
+                ObjectLineweight::ByBlock => pen.lineweight,
+                ObjectLineweight::ByLayer => by_layer.lineweight,
+                ObjectLineweight::Default => DEFAULT_LINEWEIGHT,
+                ObjectLineweight::Width(w) => w.millimetres(),
+            },
+            ..pen
+        };
+        let dashes = border.dashes();
+        let mut runs = Vec::new();
+        for [from, to] in table.borders() {
+            runs.extend(linetype::along(&[from, to], dashes.as_deref(), false));
+        }
+        let lines = if runs.is_empty() {
+            Vec::new()
+        } else {
+            vec![Shape::Stroke {
+                lineweight: border.lineweight,
+                runs,
+            }]
+        };
+        list.add_shown(
+            shown,
+            index,
+            &[],
+            border.color,
+            Drawn {
+                shapes: lines,
+                ..Drawn::default()
+            },
+        );
+        for cell in table.laid_out(&style) {
+            let Some(text) = &cell.text else {
+                continue;
+            };
+            let lettering = text::draw_mtext(text, self.fonts, by_layer.lineweight, tolerance);
+            let drawn = Drawn {
+                shapes: lettering.shapes,
+                runs: lettering.runs,
+                ..Drawn::default()
+            };
+            list.add_cell(shown, index, cell.at, pen.color, drawn);
         }
     }
 
@@ -946,6 +1036,7 @@ impl DisplayList {
             object: index,
             part,
             nested: nested.clone(),
+            cell: None,
             color,
             shape,
         }));
@@ -961,6 +1052,42 @@ impl DisplayList {
             nested: nested.clone(),
             ..run
         }));
+    }
+
+    /// Adds what the text of the cell `cell` of the table at `index`
+    /// draws, as its layer's states decide, each shape and line of text
+    /// marked with the cell.
+    fn add_cell(
+        &mut self,
+        shown: Shown,
+        index: usize,
+        cell: [usize; 2],
+        color: Color,
+        drawn: Drawn,
+    ) {
+        match shown {
+            Shown::Drawn => {
+                self.items
+                    .extend(drawn.shapes.into_iter().map(|shape| Item {
+                        object: index,
+                        part: None,
+                        nested: Vec::new(),
+                        cell: Some(cell),
+                        color,
+                        shape,
+                    }));
+                self.text.extend(drawn.runs.into_iter().map(|run| TextRun {
+                    object: index,
+                    cell: Some(cell),
+                    ..run
+                }));
+            }
+            Shown::Counted => {
+                let points: Vec<Point2> = drawn.shapes.iter().flat_map(Shape::points).collect();
+                self.take_in(points);
+            }
+            Shown::Hidden => {}
+        }
     }
 
     /// Takes `points` into the extents without drawing them.

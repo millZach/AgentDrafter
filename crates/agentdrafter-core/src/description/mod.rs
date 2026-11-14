@@ -9,8 +9,8 @@
 //!
 //! [`layers`] reads linetypes and layers, [`objects`] reads the objects,
 //! [`hatch`] reads hatch patterns and hatches, [`text`] reads text styles
-//! and text, [`blocks`] reads block libraries, their blocks and inserts of
-//! them, [`ids`] reads each object's ID, [`records`] gives a sheet with its
+//! and text, [`table`] reads table styles and tables, [`blocks`] reads
+//! block libraries, their blocks and inserts of them, [`ids`] reads each object's ID, [`records`] gives a sheet with its
 //! objects' IDs, and [`schema`] states the same keys as a JSON Schema for
 //! agents to read. [`set`] reads a drawing set's settings and rows, [`template`] fills
 //! a template in from a row, and [`set_schema`] states their schemas.
@@ -33,6 +33,8 @@ pub(crate) mod schema;
 mod set;
 mod set_schema;
 mod strict_yaml;
+mod table;
+mod table_schema;
 mod template;
 mod text;
 pub(crate) use text::TEXT_STYLE_KEYS;
@@ -64,7 +66,7 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 9] = [
+pub(crate) const SHEET_KEYS: [&str; 10] = [
     "units",
     "block_library",
     "ltscale",
@@ -72,6 +74,7 @@ pub(crate) const SHEET_KEYS: [&str; 9] = [
     "layers",
     "hatch_patterns",
     "text_styles",
+    "table_styles",
     "objects",
     paper::PAPER_KEY,
 ];
@@ -359,6 +362,10 @@ fn sheet_and_records(
         Some(node) => text::text_styles(node)?,
         None => Vec::new(),
     };
+    let table_styles = match fields.get("table_styles") {
+        Some(node) => table::table_styles(node, units, &text_styles)?,
+        None => Vec::new(),
+    };
     let ltscale = match fields.get("ltscale") {
         Some(node) => layers::linetype_scale(node, "ltscale")?,
         None => 1.0,
@@ -374,6 +381,7 @@ fn sheet_and_records(
         layers: &layers,
         hatch_patterns: &hatch_patterns,
         styles: &text_styles,
+        table_styles: &table_styles,
     };
     let mut place = Place::Sheet {
         library: library.as_ref(),
@@ -425,6 +433,7 @@ fn sheet_and_records(
         linetypes,
         layers,
         text_styles,
+        table_styles,
         blocks: Vec::new(),
         objects,
         paper,

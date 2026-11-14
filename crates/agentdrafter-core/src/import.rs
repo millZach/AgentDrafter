@@ -1340,6 +1340,9 @@ fn object_value(object: &Object, names: &Names) -> Value {
         keys.insert(key.to_owned(), value);
     };
     match object {
+        // A block read from a DWG holds no table: a block holding one is
+        // not read.
+        Object::Table(_) => {}
         Object::Line(line) => {
             put("from", point_value(line.from));
             put("to", point_value(line.to));
