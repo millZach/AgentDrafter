@@ -661,23 +661,81 @@ pub(crate) fn crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
         *u = u.clamp(d0, d1);
     }
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
-    // One point is found once. Where the curves touch, rather than cross,
-    // it is found only to the square root of the arithmetic's precision,
-    // so points there that close are one.
-    found.dedup_by(|a, b| {
-        let gap = plan_distance(c.point(a.0), c.point(b.0));
-        gap <= 1e-9 * size || (gap <= 1e-6 * size && touching(c, d, *b))
-    });
+    // One point is found once: two within the tolerance are one. Where
+    // curves touch, each crossing found there has been refined to the one
+    // point they touch at ([`numeric_crossings`]), so they are within it.
+    found.dedup_by(|a, b| plan_distance(c.point(a.0), c.point(b.0)) <= 1e-9 * size);
     found
 }
 
-/// Whether the curves run the same way, seen from above, where they cross
-/// at `at`: they touch there rather than cross.
-fn touching(c: &Curve, d: &Curve, at: Crossing) -> bool {
+/// How near two curves must come to touch, for curves as large as `size`:
+/// far less than the tolerance points are one within, so that two real
+/// crossings at a shallow angle, whose curves part between them by less
+/// than that tolerance, are not taken for one touch.
+fn touch_tolerance(size: f64) -> f64 {
+    1e-12 * size
+}
+
+/// The sine of the angle between the curves, seen from above, at `at`.
+fn crossing_sine(c: &Curve, d: &Curve, at: Crossing) -> f64 {
     let (u, v) = (c.tangent(at.0), d.tangent(at.1));
-    let cross = u[0] * v[1] - u[1] * v[0];
     let lengths = u[0].hypot(u[1]) * v[0].hypot(v[1]);
-    lengths > 0.0 && cross.abs() <= 1e-3 * lengths
+    if lengths == 0.0 {
+        return 0.0;
+    }
+    (u[0] * v[1] - u[1] * v[0]).abs() / lengths
+}
+
+/// The parameter of the foot on `d`, near `u`, of the perpendicular from
+/// `q`, seen from above.
+fn foot_on(d: &Curve, q: P3, mut u: f64) -> f64 {
+    for _ in 0..64 {
+        let (p, v) = (d.point(u), d.tangent(u));
+        let speed = v[0] * v[0] + v[1] * v[1];
+        if speed == 0.0 {
+            break;
+        }
+        let step = ((p[0] - q[0]) * v[0] + (p[1] - q[1]) * v[1]) / speed;
+        u -= step;
+        if step.abs() <= 1e-15 * (1.0 + u.abs()) {
+            break;
+        }
+    }
+    u
+}
+
+/// Where two curves touch, near a point Newton's method found where they
+/// meet at a very shallow angle: where, along `c`, its direction and that
+/// of `d` at its nearest point turn parallel. That angle passes through 0
+/// steadily at a touch, so the point is found to the last digits, where
+/// the curves' meeting alone gives it only to the square root of the
+/// arithmetic's precision. None when the angle does not pass through 0
+/// nearby.
+fn touch_point(c: &Curve, d: &Curve, t: f64, u: f64) -> Option<Crossing> {
+    let (c0, c1) = c.domain();
+    let angle = |t: f64| {
+        let w = foot_on(d, c.point(t), u);
+        let (a, b) = (c.tangent(t), d.tangent(w));
+        a[0] * b[1] - a[1] * b[0]
+    };
+    let mut reach = (c1 - c0) * 1e-7;
+    while reach <= (c1 - c0) * 1e-2 {
+        let (lo, hi) = ((t - reach).max(c0), (t + reach).min(c1));
+        let (flo, fhi) = (angle(lo), angle(hi));
+        if flo == 0.0 {
+            return Some((lo, foot_on(d, c.point(lo), u)));
+        }
+        if fhi == 0.0 || flo.signum() != fhi.signum() {
+            let at = if fhi == 0.0 {
+                hi
+            } else {
+                bisect(&angle, lo, hi, flo)
+            };
+            return Some((at, foot_on(d, c.point(at), u)));
+        }
+        reach *= 10.0;
+    }
+    None
 }
 
 /// A straight segment seen end on from above, a line along Z: the point
@@ -753,21 +811,28 @@ fn line_ellipse(c: &Curve, e: &Curve) -> Vec<Crossing> {
     if qa == 0.0 {
         return Vec::new();
     }
-    let qb = w[0] * v[0] + w[1] * v[1];
-    let qc = w[0] * w[0] + w[1] * w[1] - 1.0;
-    let disc = qb * qb - qa * qc;
-    let tolerance = 1e-12 * (qb * qb).max((qa * qc).abs()).max(qa);
-    let ts: Vec<f64> = if disc < -tolerance {
+    // Along the line from its point nearest the centre, `w0`, the ellipse
+    // is where `s² qa = 1 - |w0|²`: no large terms that cancel, however
+    // far the segment reaches.
+    let t0 = -(w[0] * v[0] + w[1] * v[1]) / qa;
+    let w0 = [w[0] + v[0] * t0, w[1] + v[1] * t0];
+    let h = 1.0 - (w0[0] * w0[0] + w0[1] * w0[1]);
+    // What rounding leaves in `h`, from the size of `w`.
+    let rounding = 64.0 * f64::EPSILON * (1.0 + w[0].hypot(w[1]));
+    let along: Vec<f64> = if h < -rounding {
         Vec::new()
-    } else if disc <= tolerance {
-        vec![-qb / qa]
+    } else if h <= rounding {
+        vec![0.0]
     } else {
-        let root = disc.sqrt();
-        vec![(-qb - root) / qa, (-qb + root) / qa]
+        let s = (h / qa).sqrt();
+        vec![-s, s]
     };
-    ts.into_iter()
-        .map(|t| {
-            let (x, y) = (w[0] + v[0] * t, w[1] + v[1] * t);
+    let size = scale_of(c).max(scale_of(e));
+    along
+        .into_iter()
+        .map(|s| {
+            let t = t0 + s;
+            let (x, y) = (w0[0] + v[0] * s, w0[1] + v[1] * s);
             let share = (y.atan2(x) - start).rem_euclid(TAU) / sweep;
             // A point a hair before the start is at the start.
             let turn = TAU / sweep;
@@ -778,6 +843,8 @@ fn line_ellipse(c: &Curve, e: &Curve) -> Vec<Crossing> {
             };
             (t, share)
         })
+        // Only a point on both: a touch is one where they meet.
+        .filter(|&(t, u)| plan_distance(c.point(t), e.point(u)) <= 1e-9 * size)
         .collect()
 }
 
@@ -929,9 +996,19 @@ fn numeric_crossings(c: &Curve, d: &Curve) -> Vec<Crossing> {
             let t = ts[i] + (ts[i + 1] - ts[i]) * s.clamp(0.0, 1.0);
             let u = us[j] + (us[j + 1] - us[j]) * r.clamp(0.0, 1.0);
             if let Some((t, u)) = refine(c, d, t, u) {
-                if plan_distance(c.point(t), d.point(u)) <= 1e-9 * size {
-                    found.push((t, u));
+                if plan_distance(c.point(t), d.point(u)) > 1e-9 * size {
+                    continue;
                 }
+                // Where the curves run nearly the same way they may touch
+                // rather than cross: if they meet where they come nearest,
+                // that is the one point they touch at.
+                let touch = (crossing_sine(c, d, (t, u)) < 1e-4)
+                    .then(|| touch_point(c, d, t, u))
+                    .flatten()
+                    .filter(|&(t, u)| {
+                        plan_distance(c.point(t), d.point(u)) <= touch_tolerance(size)
+                    });
+                found.push(touch.unwrap_or((t, u)));
             }
         }
     }

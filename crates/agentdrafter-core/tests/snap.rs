@@ -548,6 +548,9 @@ objects:
   - ellipse: {id: oval, center: [0, 0, 0], major_axis: [2, 0, 0], ratio: 0.5}
   - line: {id: touching, from: [2, -1, 0], to: [2, 1, 0]}
   - circle: {id: kissing, center: [3, 0, 0], radius: 1}
+  - line: {id: far, from: [-1000000, 1.1, 0], to: [1000000, 1.1, 0]}
+  - circle: {id: wheel, center: [1000000, 0, 0], radius: 1000}
+  - line: {id: grazing, from: [999000, 999.9999199999968, 0], to: [1001000, 999.9999199999968, 0]}
   - line: {id: through, from: [6000, 0, 0], to: [6010, 0, 0]}
   - polyline: {id: hairpin, points: [[6009, -1, 0], [6009, 1, 0], [6001, 1, 0], [6001, -1, 0]]}
 "#,
@@ -646,9 +649,9 @@ fn a_line_or_a_circle_tangent_to_an_ellipse_meets_it_once() {
         ),
     );
     assert_eq!(points.len(), 1, "{points:#?}");
-    // Where two curves touch, the point is found to the square root of
-    // the arithmetic's precision.
-    assert!((points[0].at.x - 2.0).abs() < 1e-6 && points[0].at.y.abs() < 1e-6);
+    // Where two curves touch, the point is where their directions turn
+    // parallel, found to the last digits.
+    close(points[0].at, [2.0, 0.0, 0.0]);
 }
 
 #[test]
@@ -685,4 +688,29 @@ fn a_which_on_a_snap_of_one_point_says_it_takes_none() {
         "{}",
         e.message
     );
+}
+
+#[test]
+fn a_long_line_that_passes_an_ellipse_by_does_not_touch_it() {
+    // The line runs 0.1 above the ellipse's top, from a million away.
+    let (_, points) = snap(
+        &review("passing"),
+        with(kind("review/far", SnapKind::Intersection), "review/oval"),
+    );
+    assert!(points.is_empty(), "{points:#?}");
+}
+
+#[test]
+fn a_line_crossing_a_large_circle_at_a_shallow_angle_crosses_it_twice() {
+    // 0.8 apart, near the top of a circle of 1000 a million from the origin.
+    let (_, points) = snap(
+        &review("shallow"),
+        with(
+            kind("review/grazing", SnapKind::Intersection),
+            "review/wheel",
+        ),
+    );
+    assert_eq!(points.len(), 2, "{points:#?}");
+    assert!((points[0].at.x - 999_999.6).abs() < 1e-6, "{points:#?}");
+    assert!((points[1].at.x - 1_000_000.4).abs() < 1e-6, "{points:#?}");
 }
