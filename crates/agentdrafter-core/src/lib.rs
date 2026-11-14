@@ -102,7 +102,7 @@ pub use change::{
 pub use change::{
     change, change_set_schema, change_with, operations, AttributeRemoved, ChangeReport,
     ChangeRequest, Failure, Fill, Inconsistent, OperationInfo, OperationList, OperationOutcome,
-    RowValueSet, SheetChange, MARK_FILE,
+    RowValueSet, SheetChange, SnapResolved, MARK_FILE,
 };
 pub use change::{
     journal, undo, CommitState, Entry, EntryKind, FileState, FileUndone, JournalEntry,
@@ -126,7 +126,7 @@ pub use draw::{
 };
 pub use error::{Error, ErrorCode};
 pub use geometry::measure::{Box3, Measures};
-pub use geometry::snap::SnapPoint;
+pub use geometry::snap::{SnapPoint, Touch};
 pub use geometry::{ObjectRef, SnapKind, SnapRef};
 pub use import::{
     import_blocks, BlocksImported, ImportBlocksReport, ImportBlocksRequest, ImportNotice,
@@ -155,8 +155,8 @@ pub use plot_style::NotFollowed;
 pub use query::{
     query, query_with, Answer, AttributeValues, BlockInserts, BlockText, End, Extents, FoundObject,
     InsertAttributes, LayerUse, Matching, Measure, MeasuredPoint, ObjectGeometry, Query,
-    QueryReport, QueryRequest, Selection, SheetBlocks, SheetExtents, SheetLayers, SnapObject,
-    SnappedFrom, WrittenAt, EXTENTS_TOLERANCE,
+    QueryReport, QueryRequest, Selection, SelectionBox, SheetBlocks, SheetExtents, SheetLayers,
+    SnapObject, SnappedFrom, WrittenAt, EXTENTS_TOLERANCE,
 };
 pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;

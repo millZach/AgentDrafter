@@ -17,6 +17,8 @@ use crate::description::{
     CELL_KEYS, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
 };
 use crate::error::{Error, ErrorCode};
+use crate::geometry::{SnapKind, SnapRef};
+use crate::query::snap::{check_shape, no_kind};
 use crate::units::{parse_length, LengthError, Unit};
 
 /// What an operation does.
@@ -315,7 +317,11 @@ const HOW: &str = "A change set is {\"operations\": [...]}: a list of operations
                    An operation that edits an object names it under target, by its ID, \
                    {\"id\": \"DEMO-001/border\"}, or by its name, {\"name\": \"title-block\", \
                    \"sheet\": \"DEMO-001\"}, where sheet may be left out when the name is on one \
-                   sheet only; never by coordinates. An object of a template is on every sheet \
+                   sheet only; never by coordinates. Wherever an operation takes a point, it \
+                   may take a snapped point instead, {\"snap\": {\"id\": \"DEMO-001/border\", \
+                   \"snap\": \"endpoint\", \"which\": \"points[2]\"}}, as query snap names one: \
+                   it is worked out when the operation applies, on the sheet as it stands then, \
+                   must name one point, and is written as coordinates. An object of a template is on every sheet \
                    built from it, and editing it edits the template, so every one of those \
                    sheets follows. An object added with sheet goes in that sheet's row, and \
                    with template in the template. Each sheet takes its part fully or not at \
@@ -336,7 +342,9 @@ fn does(spec: &Spec) -> String {
              every sheet built from it. It is drawn after the objects already there. Without \
              an id it is given one, {object}-1 or the next number free, so that its ID is \
              fixed for its life. A key sent as null is read as a sheet description reads a \
-             bare null: it leaves an optional text key, such as layer, out. AutoCAD's {}.",
+             bare null: it leaves an optional text key, such as layer, out. Any point may be a \
+             snapped point, {{\"snap\": {{...}}}}, which is written as the coordinates it \
+             names. AutoCAD's {}.",
             article(object),
             article(object),
             spec.alias
@@ -351,7 +359,9 @@ fn does(spec: &Spec) -> String {
                          text alone; any other change of them edits the template. AutoCAD's \
                          CHANGE."
             .to_owned(),
-        Kind::Move => "Moves an object by by, [dx, dy, dz]: every point it is drawn through \
+        Kind::Move => "Moves an object by by, [dx, dy, dz], or from a base point, from, to a \
+                       second point, to, as AutoCAD's MOVE takes them, each a point or a \
+                       snapped point: give by, or from and to. Every point it is drawn through \
                        moves, and an ellipse's major axis, an arc's angles and the like stay \
                        as they are. AutoCAD's MOVE."
             .to_owned(),
@@ -451,7 +461,7 @@ fn does(spec: &Spec) -> String {
              its ID or its name: points, from its arrow's point through any bends, up to but not \
              including the point where the multileader's leader lines meet its landing, which \
              the operation appends, so that every leader line meets the landing at the same \
-             point. At least one point; each apart from the one before and from that point; \
+             point, each a point or a snapped point. At least one point; each apart from the one before and from that point; \
              the first segment at least as long as the arrow, unless the arrowhead is none. A \
              multileader of a template is edited in the template, so every sheet built from it \
              follows, all or nothing. AutoCAD's MLEADEREDIT, adding leaders."
@@ -599,6 +609,7 @@ fn definitions() -> Map<String, Value> {
          none."
     );
     defs.insert("template_cell".into(), cell);
+    add_snap_definitions(&mut defs);
     defs.insert(
         "target".into(),
         json!({
@@ -637,6 +648,214 @@ fn definitions() -> Map<String, Value> {
         }),
     );
     defs
+}
+
+/// Adds to `defs` the snapped point an operation takes wherever it takes a
+/// point, `snapped_point`, the snap it names, `snap_ref`, and, for each
+/// object an add writes and each definition it holds that holds a point,
+/// its definition as an operation takes it, under `op_` and its name, such
+/// as `op_line`: a snapped point wherever the sheet description takes a
+/// point, but a direction, such as an ellipse's `major_axis`. The sheet
+/// description's own definitions stay as they are: a description holds
+/// coordinates, never a snap.
+fn add_snap_definitions(defs: &mut Map<String, Value>) {
+    let kinds: Vec<&str> = SnapKind::ALL.iter().map(|k| k.name()).collect();
+    let object = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "id": { "description": "The object's ID.", "type": "string", "minLength": 1 },
+            "name": {
+                "description": "The object's name, on the sheet the operation reaches.",
+                "type": "string",
+                "minLength": 1,
+            },
+        },
+        // By its ID or by its name, and not both, as the reader takes it.
+        "oneOf": [
+            { "required": ["id"], "not": { "required": ["name"] } },
+            { "required": ["name"], "not": { "required": ["id"] } },
+        ],
+    });
+    let mut snap = object.clone();
+    snap["description"] = json!(
+        "A point one of AutoCAD's object snaps finds, as query snap names it: an object by id \
+         or by name, on the sheet the operation reaches, its snap, and which of its points of \
+         that snap, as query snap's reply names it, when it has several. An intersection or an \
+         apparent intersection takes the other object as with; a perpendicular, a tangent or a \
+         nearest point the point it is taken from as from, a snap of another object that names \
+         one point. It is worked out when the operation applies, on the sheet as it stands \
+         then, earlier operations of the change set included, and must name one point."
+    );
+    snap["required"] = json!(["snap"]);
+    let properties = snap["properties"].as_object_mut().expect("properties");
+    properties.insert(
+        "snap".into(),
+        json!({
+            "description": "The snap: endpoint, midpoint, center, quadrant, insertion or node of \
+                            the object by itself; intersection or apparent_intersection with \
+                            with; perpendicular, tangent or nearest from from.",
+            "enum": kinds,
+        }),
+    );
+    properties.insert(
+        "which".into(),
+        json!({
+            "description": "Which of the object's points of the snap, as query snap's reply \
+                            names it: points[2], segments[1], 90, objects[3].to of an insert's \
+                            block, 0 of several intersections. Needed when the snap finds more \
+                            than one point.",
+            "type": "string",
+            "minLength": 1,
+        }),
+    );
+    let mut with = object;
+    with["description"] =
+        json!("The other object of an intersection or an apparent intersection, by id or by name.");
+    properties.insert("with".into(), with);
+    properties.insert(
+        "from".into(),
+        json!({
+            "description": "The point a perpendicular, a tangent or a nearest point is taken \
+                            from: a snap of another object that names one point.",
+            "$ref": "#/$defs/snap_ref",
+        }),
+    );
+    // `with` just for the two intersections, which need it, and `from`
+    // just for a perpendicular, a tangent and a nearest point, which need
+    // it, as the reader takes them.
+    let only = |takes: fn(SnapKind) -> bool, key: &str| {
+        let kinds: Vec<&str> = SnapKind::ALL
+            .iter()
+            .filter(|k| takes(**k))
+            .map(|k| k.name())
+            .collect();
+        json!({
+            "if": { "properties": { "snap": { "enum": kinds } } },
+            "then": { "required": [key] },
+            "else": { "not": { "required": [key] } },
+        })
+    };
+    snap["allOf"] = json!([
+        only(SnapKind::takes_with, "with"),
+        only(SnapKind::takes_from, "from"),
+    ]);
+    defs.insert("snap_ref".into(), snap);
+    defs.insert(
+        "snapped_point".into(),
+        json!({
+            "description": "A point: [x, y, z], three lengths, or a snapped point, \
+                            {\"snap\": {...}}, which the record writes as the coordinates it \
+                            names, in the declared unit.",
+            "oneOf": [
+                { "$ref": "#/$defs/point" },
+                {
+                    "type": "object",
+                    "required": ["snap"],
+                    "additionalProperties": false,
+                    "properties": { "snap": { "$ref": "#/$defs/snap_ref" } },
+                },
+            ],
+        }),
+    );
+    let mut made: Map<String, Value> = Map::new();
+    for spec in &SPECS {
+        if let Kind::Add(object) = spec.kind {
+            snapped_def(object, defs, &mut made);
+        }
+    }
+    for (name, def) in made {
+        if !def.is_null() {
+            defs.insert(name, def);
+        }
+    }
+}
+
+/// Makes the definition `name` as an operation takes it, `op_` and its
+/// name, into `made`, when it holds a point, and gives whether it does. A
+/// definition that holds none is marked null in `made`.
+fn snapped_def(name: &str, defs: &Map<String, Value>, made: &mut Map<String, Value>) -> bool {
+    let key = format!("op_{name}");
+    if let Some(done) = made.get(&key) {
+        return !done.is_null();
+    }
+    made.insert(key.clone(), Value::Null);
+    let Some(def) = defs.get(name) else {
+        return false;
+    };
+    let (def, holds) = snapify(def, None, defs, made);
+    if holds {
+        made.insert(key, def);
+    }
+    holds
+}
+
+/// `value`, a schema or a part of one, with a snapped point wherever it
+/// takes a point but under `major_axis`, which is a direction, and whether
+/// it takes one. `key` is the property `value` is the schema of.
+fn snapify(
+    value: &Value,
+    key: Option<&str>,
+    defs: &Map<String, Value>,
+    made: &mut Map<String, Value>,
+) -> (Value, bool) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(reference)) = map.get("$ref") {
+                let name = reference.strip_prefix("#/$defs/").unwrap_or_default();
+                let to = if name == "point" && key != Some("major_axis") {
+                    Some("snapped_point".to_owned())
+                } else if name != "point" && snapped_def(name, defs, made) {
+                    Some(format!("op_{name}"))
+                } else {
+                    None
+                };
+                let mut map = map.clone();
+                let holds = to.is_some();
+                if let Some(to) = to {
+                    map.insert("$ref".into(), Value::String(format!("#/$defs/{to}")));
+                }
+                return (Value::Object(map), holds);
+            }
+            let mut out = Map::new();
+            let mut holds = false;
+            for (k, v) in map {
+                let (v, h) = if k == "properties" {
+                    match v {
+                        Value::Object(properties) => {
+                            let mut each = Map::new();
+                            let mut any = false;
+                            for (pk, pv) in properties {
+                                let (pv, h) = snapify(pv, Some(pk), defs, made);
+                                any |= h;
+                                each.insert(pk.clone(), pv);
+                            }
+                            (Value::Object(each), any)
+                        }
+                        other => (other.clone(), false),
+                    }
+                } else {
+                    snapify(v, None, defs, made)
+                };
+                holds |= h;
+                out.insert(k.clone(), v);
+            }
+            (Value::Object(out), holds)
+        }
+        Value::Array(items) => {
+            let mut holds = false;
+            let items = items
+                .iter()
+                .map(|v| {
+                    let (v, h) = snapify(v, None, defs, made);
+                    holds |= h;
+                    v
+                })
+                .collect();
+            (Value::Array(items), holds)
+        }
+        other => (other.clone(), false),
+    }
 }
 
 /// Adds the block library's definition of a block to `defs`, as
@@ -695,7 +914,10 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
     let target = json!({ "$ref": "#/$defs/target" });
     let mut schema = match spec.kind {
         Kind::Add(object) => {
-            let mut schema = defs[object].clone();
+            let mut schema = defs
+                .get(&format!("op_{object}"))
+                .unwrap_or(&defs[object])
+                .clone();
             let properties = schema["properties"]
                 .as_object_mut()
                 .expect("an object's definition has properties");
@@ -745,14 +967,30 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
         }),
         Kind::Move => json!({
             "type": "object",
-            "required": ["target", "by"],
+            "required": ["target"],
             "additionalProperties": false,
+            "oneOf": [
+                { "required": ["by"], "not": { "anyOf": [{ "required": ["from"] }, { "required": ["to"] }] } },
+                { "required": ["from", "to"], "not": { "required": ["by"] } },
+            ],
             "properties": {
                 "target": target,
                 "by": {
                     "description": "How far to move it, [dx, dy, dz], as lengths in the set's \
-                                    declared unit or carrying their own.",
+                                    declared unit or carrying their own. Give by, or from and \
+                                    to.",
                     "$ref": "#/$defs/point",
+                },
+                "from": {
+                    "description": "The base point, as AutoCAD's MOVE takes it: a point or a \
+                                    snapped point, such as a point of the object moved. It \
+                                    moves by to less from.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "to": {
+                    "description": "The second point, where the base point lands: a point or \
+                                    a snapped point, such as a point of another object.",
+                    "$ref": "#/$defs/snapped_point",
                 },
             },
         }),
@@ -779,9 +1017,9 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                                     not including, the point where the multileader's leader \
                                     lines meet its landing, which the operation appends: at least \
                                     one, as lengths in the set's declared unit or carrying their \
-                                    own.",
+                                    own, or snapped points.",
                     "type": "array",
-                    "items": { "$ref": "#/$defs/point" },
+                    "items": { "$ref": "#/$defs/snapped_point" },
                     "minItems": 1,
                 },
             },
@@ -1201,6 +1439,8 @@ pub(crate) enum Body {
     Add {
         to: AddTo,
         keys: Map<String, Value>,
+        /// The snapped points its keys hold, to be written as coordinates.
+        snaps: Vec<PointSnap>,
     },
     Change {
         target: Target,
@@ -1208,7 +1448,7 @@ pub(crate) enum Body {
     },
     Move {
         target: Target,
-        by: [f64; 3],
+        motion: Motion,
     },
     Delete {
         target: Target,
@@ -1241,6 +1481,9 @@ pub(crate) enum Body {
     LeaderLine {
         target: Target,
         edit: LeaderLineEdit,
+        /// The snapped points of a leader line added, each with its place
+        /// among its points, where the edit holds a stand-in.
+        snaps: Vec<(usize, PointSnap)>,
     },
     /// A block operation: on the block `name`, or every block for an
     /// attsync without one, of the block library `library` names, with the
@@ -1254,6 +1497,37 @@ pub(crate) enum Body {
         /// What an import_blocks imports.
         import: Option<Import>,
     },
+}
+
+/// A snapped point an operation takes, as sent: where it is in the
+/// operation, and the snap.
+#[derive(Clone, Debug)]
+pub(crate) struct PointSnap {
+    /// Its place in an add's keys, as a JSON pointer, such as
+    /// `/points/0/point`; empty elsewhere.
+    pub pointer: String,
+    /// Its place in the operation, for an error and the reply, such as
+    /// `points[0].point` or `from`.
+    pub field: String,
+    pub snap: SnapRef,
+}
+
+/// How a move moves its object: by a distance, or from a base point to a
+/// second point, as AutoCAD's MOVE takes them.
+#[derive(Clone, Debug)]
+pub(crate) enum Motion {
+    By([f64; 3]),
+    Between {
+        from: Box<OpPoint>,
+        to: Box<OpPoint>,
+    },
+}
+
+/// A point an operation takes: coordinates, or a snapped point.
+#[derive(Clone, Debug)]
+pub(crate) enum OpPoint {
+    At([f64; 3]),
+    Snap(PointSnap),
 }
 
 /// What an import_blocks operation imports: the blocks of the drawing at
@@ -1338,12 +1612,14 @@ pub(crate) fn read_change_set(value: &Value, units: Unit) -> Result<ChangeSet, E
                 .at_field("operations"),
         );
     };
-    // What each object an add writes requires, as the schema states it.
+    // What each object an add writes requires, as the schema states it, and
+    // where each takes a point, which may be snapped.
     let objects = sheet_description_schema()["$defs"].take();
+    let defs = definitions();
     let operations = items
         .iter()
         .enumerate()
-        .map(|(index, item)| operation(index, item, units, &objects))
+        .map(|(index, item)| operation(index, item, units, &objects, &defs))
         .collect::<Result<_, _>>()?;
     let fixes = match map.get("fixes") {
         None => Vec::new(),
@@ -1589,6 +1865,7 @@ fn operation(
     value: &Value,
     units: Unit,
     objects: &Value,
+    defs: &Map<String, Value>,
 ) -> Result<Operation, Error> {
     let Value::Object(map) = value else {
         return Err(Error::new(
@@ -1732,7 +2009,14 @@ fn operation(
                 .filter(|(k, _)| !matches!(k.as_str(), OP_KEY | "sheet" | "template"))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            Body::Add { to, keys }
+            let schema = defs.get(&format!("op_{object}")).unwrap_or(&defs[object]);
+            let mut snaps = Vec::new();
+            for (key, value) in &keys {
+                let slots: Vec<&Value> = schema["properties"].get(key).into_iter().collect();
+                snaps_in(value, &slots, defs, &format!("/{key}"), key, &mut snaps)
+                    .map_err(|(code, message, field)| fail(code, message, &field))?;
+            }
+            Body::Add { to, keys, snaps }
         }
         Kind::Change => {
             keys(&["target", "set"])?;
@@ -1759,34 +2043,69 @@ fn operation(
             Body::Change { target, set }
         }
         Kind::Move => {
-            keys(&["target", "by"])?;
+            keys(&["target", "by", "from", "to"])?;
             let target = target()?;
-            let by = match map.get("by") {
-                Some(Value::Array(items)) if items.len() == 3 => {
-                    let mut by = [0.0; 3];
-                    for (axis, item) in items.iter().enumerate() {
-                        by[axis] = length(item, units).map_err(|message| {
-                            fail(ErrorCode::BadNumber, message, &format!("by[{axis}]"))
-                        })?;
+            let given = |key: &str| map.contains_key(key);
+            let motion = match (given("by"), given("from"), given("to")) {
+                (true, false, false) => match map.get("by") {
+                    Some(Value::Array(items)) if items.len() == 3 => {
+                        let mut by = [0.0; 3];
+                        for (axis, item) in items.iter().enumerate() {
+                            by[axis] = length(item, units).map_err(|message| {
+                                fail(ErrorCode::BadNumber, message, &format!("by[{axis}]"))
+                            })?;
+                        }
+                        Motion::By(by)
                     }
-                    by
+                    _ => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected how far to move it, three lengths [dx, dy, dz]".to_owned(),
+                            "by",
+                        ))
+                    }
+                },
+                (false, true, true) => {
+                    let point = |key: &str| {
+                        op_point(&map[key], units, key)
+                            .map_err(|(code, message, field)| fail(code, message, &field))
+                    };
+                    Motion::Between {
+                        from: Box::new(point("from")?),
+                        to: Box::new(point("to")?),
+                    }
                 }
-                Some(_) => {
+                (false, false, false) => {
                     return Err(fail(
-                        ErrorCode::WrongType,
-                        "expected how far to move it, three lengths [dx, dy, dz]".to_owned(),
+                        ErrorCode::MissingKey,
+                        "missing key `by`, how far to move it, [dx, dy, dz]; or give from, a \
+                         base point, and to, where it lands"
+                            .to_owned(),
                         "by",
                     ))
                 }
-                None => {
+                (false, true, false) | (false, false, true) => {
+                    let missing = if given("from") { "to" } else { "from" };
                     return Err(fail(
                         ErrorCode::MissingKey,
-                        "missing key `by`, how far to move it, [dx, dy, dz]".to_owned(),
-                        "by",
+                        format!(
+                            "missing key `{missing}`: a move from a base point to a second \
+                             point takes both, from and to"
+                        ),
+                        missing,
+                    ));
+                }
+                (true, _, _) => {
+                    return Err(fail(
+                        ErrorCode::Usage,
+                        "give by, or from and to, not both: a move is by a distance, or from a \
+                         base point to a second point"
+                            .to_owned(),
+                        "",
                     ))
                 }
             };
-            Body::Move { target, by }
+            Body::Move { target, motion }
         }
         Kind::Delete => {
             keys(&["target"])?;
@@ -1860,6 +2179,7 @@ fn operation(
             Body::TableEdit { target, edit }
         }
         Kind::LeaderLine(line_op) => {
+            let mut line_snaps: Vec<(usize, PointSnap)> = Vec::new();
             match line_op {
                 LeaderLineOp::Add => keys(&["target", "points"])?,
                 LeaderLineOp::Delete => keys(&["target", "leader"])?,
@@ -1889,31 +2209,17 @@ fn operation(
                     }
                     let mut points = Vec::with_capacity(items.len());
                     for (i, item) in items.iter().enumerate() {
-                        let Value::Array(xyz) = item else {
-                            return Err(fail(
-                                ErrorCode::WrongType,
-                                "expected a point, [x, y, z]".to_owned(),
-                                &format!("points[{i}]"),
-                            ));
-                        };
-                        if xyz.len() != 3 {
-                            return Err(fail(
-                                ErrorCode::WrongType,
-                                "expected a point, three lengths [x, y, z]".to_owned(),
-                                &format!("points[{i}]"),
-                            ));
+                        let at = format!("points[{i}]");
+                        match op_point(item, units, &at)
+                            .map_err(|(code, message, field)| fail(code, message, &field))?
+                        {
+                            OpPoint::At(point) => points.push(point),
+                            // A stand-in, until the snap is worked out.
+                            OpPoint::Snap(snap) => {
+                                points.push([0.0; 3]);
+                                line_snaps.push((i, snap));
+                            }
                         }
-                        let mut point = [0.0; 3];
-                        for (axis, v) in xyz.iter().enumerate() {
-                            point[axis] = length(v, units).map_err(|message| {
-                                fail(
-                                    ErrorCode::BadNumber,
-                                    message,
-                                    &format!("points[{i}][{axis}]"),
-                                )
-                            })?;
-                        }
-                        points.push(point);
                     }
                     LeaderLineEdit::Add { points }
                 }
@@ -1941,7 +2247,11 @@ fn operation(
                     LeaderLineEdit::Delete { leader }
                 }
             };
-            Body::LeaderLine { target, edit }
+            Body::LeaderLine {
+                target,
+                edit,
+                snaps: line_snaps,
+            }
         }
         Kind::Block(op) => {
             let allowed: &[&str] = match op {
@@ -2272,6 +2582,200 @@ fn read_target(value: &Value) -> Result<Target, (ErrorCode, String, String)> {
             "a target names its object by its ID, id, or by its name, name".to_owned(),
             "target".to_owned(),
         )),
+    }
+}
+
+/// A point an operation takes at `field`, as sent: three lengths `[x, y,
+/// z]` in `units`, or a snapped point `{"snap": {...}}`; or the code,
+/// message and key of what is wrong with it.
+fn op_point(
+    value: &Value,
+    units: Unit,
+    field: &str,
+) -> Result<OpPoint, (ErrorCode, String, String)> {
+    match value {
+        Value::Array(xyz) if xyz.len() == 3 => {
+            let mut point = [0.0; 3];
+            for (axis, v) in xyz.iter().enumerate() {
+                point[axis] = length(v, units).map_err(|message| {
+                    (ErrorCode::BadNumber, message, format!("{field}[{axis}]"))
+                })?;
+            }
+            Ok(OpPoint::At(point))
+        }
+        Value::Object(map) => Ok(OpPoint::Snap(PointSnap {
+            pointer: String::new(),
+            field: field.to_owned(),
+            snap: read_snap(map, field)?,
+        })),
+        _ => Err((
+            ErrorCode::WrongType,
+            "expected a point, three lengths [x, y, z], or a snapped point, {\"snap\": {...}}"
+                .to_owned(),
+            field.to_owned(),
+        )),
+    }
+}
+
+/// The snap of a snapped point sent as `map` at `field`, `{"snap": {...}}`,
+/// checked as a query checks one, with its snap named; or the code, message
+/// and key of what is wrong with it.
+fn read_snap(
+    map: &Map<String, Value>,
+    field: &str,
+) -> Result<SnapRef, (ErrorCode, String, String)> {
+    if let Some(key) = map.keys().find(|k| *k != "snap") {
+        return Err((
+            ErrorCode::UnknownKey,
+            format!(
+                "unknown key `{key}`; a snapped point is {{\"snap\": {{...}}}} alone, the snap \
+                 written as query snap takes it"
+            ),
+            format!("{field}.{key}"),
+        ));
+    }
+    let at = format!("{field}.snap");
+    let Some(sent) = map.get("snap") else {
+        return Err((
+            ErrorCode::WrongType,
+            "expected a point, three lengths [x, y, z], or a snapped point, {\"snap\": {...}}"
+                .to_owned(),
+            field.to_owned(),
+        ));
+    };
+    let snap: SnapRef = serde_json::from_value(sent.clone()).map_err(|e| {
+        (
+            ErrorCode::WrongType,
+            format!(
+                "expected a snap, as query snap takes it: an object by id or name, its snap, \
+                 and which, with or from where the snap takes them ({e})"
+            ),
+            at.clone(),
+        )
+    })?;
+    let into = |e: Error| (e.code, e.message, e.field.unwrap_or_default());
+    let mut each = Some((&snap, at));
+    while let Some((snap, at)) = each {
+        if snap.snap.is_none() {
+            return Err(into(no_kind(&at)));
+        }
+        check_shape(snap, &at).map_err(into)?;
+        each = snap
+            .from
+            .as_deref()
+            .map(|from| (from, format!("{at}.from")));
+    }
+    Ok(snap)
+}
+
+/// Adds to `out` each snapped point `value` holds where one of `slots`, the
+/// schemas that may take it, takes a point. `pointer` and `field` are its
+/// place in an add's keys, as a JSON pointer and as a field. A snapped
+/// point where a direction is taken, such as an ellipse's `major_axis`, is
+/// an error; a mapping anywhere else is the object's own, whatever its
+/// keys, such as an insert's attributes with a tag `SNAP`.
+fn snaps_in(
+    value: &Value,
+    slots: &[&Value],
+    defs: &Map<String, Value>,
+    pointer: &str,
+    field: &str,
+    out: &mut Vec<PointSnap>,
+) -> Result<(), (ErrorCode, String, String)> {
+    let mut schemas: Vec<&Value> = Vec::new();
+    for slot in slots {
+        expand(slot, defs, &mut schemas, 0);
+    }
+    let refers = |to: &str| {
+        schemas
+            .iter()
+            .any(|s| s.get("$ref").and_then(Value::as_str) == Some(to))
+    };
+    // Where a point is taken that may be snapped, and where a point is
+    // taken that may not, a direction.
+    let (takes_snap, takes_point) = (refers("#/$defs/snapped_point"), refers("#/$defs/point"));
+    match value {
+        Value::Object(map) if map.contains_key("snap") && takes_snap => {
+            out.push(PointSnap {
+                pointer: pointer.to_owned(),
+                field: field.to_owned(),
+                snap: read_snap(map, field)?,
+            });
+        }
+        Value::Object(map) if map.contains_key("snap") && takes_point => {
+            return Err((
+                ErrorCode::BadValue,
+                format!(
+                    "`{field}` takes no snapped point: it is a direction, [dx, dy, dz], and a \
+                     snapped point is taken where a point is"
+                ),
+                field.to_owned(),
+            ));
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                let inner: Vec<&Value> = schemas
+                    .iter()
+                    .filter_map(|s| s.get("properties").and_then(|p| p.get(key)))
+                    .collect();
+                snaps_in(
+                    item,
+                    &inner,
+                    defs,
+                    &format!("{pointer}/{key}"),
+                    &format!("{field}.{key}"),
+                    out,
+                )?;
+            }
+        }
+        Value::Array(items) => {
+            let inner: Vec<&Value> = schemas.iter().filter_map(|s| s.get("items")).collect();
+            for (i, item) in items.iter().enumerate() {
+                snaps_in(
+                    item,
+                    &inner,
+                    defs,
+                    &format!("{pointer}/{i}"),
+                    &format!("{field}[{i}]"),
+                    out,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Adds `schema` to `out`, with every schema it stands for: the definition
+/// it refers to, but a snapped point's, and each of its `allOf`, `oneOf`
+/// and `anyOf`.
+fn expand<'a>(
+    schema: &'a Value,
+    defs: &'a Map<String, Value>,
+    out: &mut Vec<&'a Value>,
+    depth: usize,
+) {
+    if depth > 32 {
+        return;
+    }
+    out.push(schema);
+    if let Some(name) = schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix("#/$defs/"))
+    {
+        if name != "snapped_point" {
+            if let Some(def) = defs.get(name) {
+                expand(def, defs, out, depth + 1);
+            }
+        }
+    }
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(Value::Array(branches)) = schema.get(key) {
+            for branch in branches {
+                expand(branch, defs, out, depth + 1);
+            }
+        }
     }
 }
 

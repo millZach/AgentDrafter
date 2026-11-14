@@ -24,16 +24,17 @@ use serde_json::Value;
 use super::commit::Replacement;
 use super::journal::{commit_change_set, HowChanged, Landing, ObjectChanged, SheetFailed};
 use super::operations::{
-    op_error, read_change_set, AddTo, BlockOp, Body, Import, Kind, Operation, Table, TableOp,
-    Target,
+    op_error, read_change_set, AddTo, BlockOp, Body, Import, Kind, Motion, OpPoint, Operation,
+    PointSnap, Table, TableOp, Target,
 };
 use super::MARK_FILE;
 use super::{
     mark_report, quoted_list, read_mark, relative_to, AttributeRemoved, ChangeReport,
-    ChangeRequest, Fill, OperationOutcome, RowValueSet, SheetChange,
+    ChangeRequest, Fill, OperationOutcome, RowValueSet, SheetChange, SnapResolved,
 };
 use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::blocks::tag_in_capitals;
+use crate::description::SheetRecord;
 use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
     template_at, template_in, template_path, AttributeSet, Disk, GivenValue, LeaderLineEdit,
@@ -41,6 +42,7 @@ use crate::description::{
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
+use crate::geometry::SnapRef;
 use crate::import::{drawing_unit, is_dxf, plan, write_plan, BlocksImported, Existing};
 use crate::set::{set_in_mark, Notice, SET_SETTINGS_FILE};
 use crate::settings::Settings;
@@ -408,6 +410,8 @@ struct Done {
     attributes_removed: Vec<AttributeRemoved>,
     /// What an import_blocks imported.
     imported: Option<BlocksImported>,
+    /// Each snapped point it took, and the point it was worked out to.
+    snapped: Vec<SnapResolved>,
     message: String,
 }
 
@@ -488,7 +492,7 @@ pub(super) fn apply(
     let (attempt, prepared) = loop {
         let mut at = Attempt::new(&files)?;
         for op in ops.iter().filter(|op| included[op.index]) {
-            let applied = apply_op(&mut at, op);
+            let applied = apply_op(&mut at, op, settings);
             if applied.refuse {
                 return Err(applied.outcome.err().expect("a refusal is an error"));
             }
@@ -736,6 +740,7 @@ pub(super) fn apply(
                     .unwrap_or_default(),
                 inserts: d.as_ref().map(|d| d.inserts.clone()).unwrap_or_default(),
                 imported: d.as_ref().and_then(|d| d.imported.clone()),
+                snapped: d.as_ref().map(|d| d.snapped.clone()).unwrap_or_default(),
                 attributes_removed: d.map(|d| d.attributes_removed).unwrap_or_default(),
                 error: if included[i] {
                     None
@@ -907,7 +912,7 @@ fn fixes(
 }
 
 /// Applies one operation to the records in memory.
-fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
+fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
     let files = at.files;
     let fail = |sheets: Vec<usize>, e: Error| Applied {
         sheets,
@@ -929,7 +934,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         op_err(e.code, message, if own { &field } else { "" })
     };
 
-    if let Body::Add { to, keys } = &op.body {
+    if let Body::Add { to, keys, snaps } = &op.body {
         let Kind::Add(object) = op.spec.kind else {
             unreachable!("an add is an add")
         };
@@ -968,6 +973,23 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 .expect("a free number");
             keys.insert("id".into(), serde_json::Value::String(id));
         }
+        // Each snapped point is written as the coordinates it names on the
+        // sheets the object is added to, as they stand now.
+        let snaps: Vec<&PointSnap> = snaps.iter().collect();
+        let snapped = match snapped_points(at, op, &sheets, &snaps, settings) {
+            Ok(snapped) => snapped,
+            Err(e) => return fail(sheets, e),
+        };
+        let mut whole = serde_json::Value::Object(keys);
+        for (snap, (point, _)) in snaps.iter().zip(&snapped) {
+            if let Some(slot) = whole.pointer_mut(&snap.pointer) {
+                *slot = coordinates(*point);
+            }
+        }
+        let serde_json::Value::Object(keys) = whole else {
+            unreachable!("a mapping stays one")
+        };
+        let snapped: Vec<SnapResolved> = snapped.into_iter().map(|(_, r)| r).collect();
         let record = match at.file(file) {
             Ok(record) => record,
             Err(e) => return fail(sheets, e),
@@ -999,7 +1021,12 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
                 inserts: Vec::new(),
                 attributes_removed: Vec::new(),
                 imported: None,
-                message: format!("adds {} {object}, `{id}`, {place}", article(object)),
+                message: format!(
+                    "adds {} {object}, `{id}`, {place}{}",
+                    article(object),
+                    snapped_words(&snapped)
+                ),
+                snapped,
             }),
             sheets,
             refuse: false,
@@ -1119,6 +1146,59 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         }
         _ => None,
     };
+    // A move from a base point to a second point, and a leader line's
+    // snapped points, are worked out on the sheets the object is on, as
+    // they stand now, before it is edited.
+    let mut snapped: Vec<SnapResolved> = Vec::new();
+    let moved_by = match &op.body {
+        Body::Move { motion, .. } => match motion {
+            Motion::By(by) => Some(*by),
+            Motion::Between { from, to } => {
+                let snaps: Vec<&PointSnap> = [&**from, &**to]
+                    .into_iter()
+                    .filter_map(|p| match p {
+                        OpPoint::Snap(snap) => Some(snap),
+                        OpPoint::At(_) => None,
+                    })
+                    .collect();
+                let mut found = match snapped_points(at, op, &reach, &snaps, settings) {
+                    Ok(found) => found.into_iter(),
+                    Err(e) => return fail(reach, e),
+                };
+                let mut point_of = |p: &OpPoint| match p {
+                    OpPoint::At(at) => *at,
+                    OpPoint::Snap(_) => {
+                        let (point, resolved) = found.next().expect("one for each snap");
+                        snapped.push(resolved);
+                        point
+                    }
+                };
+                let (a, b) = (point_of(from), point_of(to));
+                Some([b[0] - a[0], b[1] - a[1], b[2] - a[2]])
+            }
+        },
+        _ => None,
+    };
+    let line_edit = match &op.body {
+        Body::LeaderLine {
+            edit: LeaderLineEdit::Add { points },
+            snaps,
+            ..
+        } => {
+            let only: Vec<&PointSnap> = snaps.iter().map(|(_, s)| s).collect();
+            let found = match snapped_points(at, op, &reach, &only, settings) {
+                Ok(found) => found,
+                Err(e) => return fail(reach, e),
+            };
+            let mut points = points.clone();
+            for ((place, _), (point, resolved)) in snaps.iter().zip(found) {
+                points[*place] = point;
+                snapped.push(resolved);
+            }
+            Some(LeaderLineEdit::Add { points })
+        }
+        _ => None,
+    };
     let record = match at.file(file) {
         Ok(record) => record,
         Err(e) => return fail(reach, e),
@@ -1144,6 +1224,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
         inserts: Vec::new(),
         attributes_removed: Vec::new(),
         imported: None,
+        snapped: Vec::new(),
         message: String::new(),
     };
     let mut sheets = reach.clone();
@@ -1174,19 +1255,23 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
             }
             Err(e) => return fail(reach, from_record(e)),
         },
-        Body::Move { by, .. } => match record.move_by(list, index, *by, units, op.index) {
-            Ok(()) => {
-                let by: Vec<String> = by
-                    .iter()
-                    .map(|d| crate::description::number_text(*d))
-                    .collect();
-                done.message = format!(
-                    "moves `{id}` by [{}] ({units}){template_note}",
-                    by.join(", ")
-                );
+        Body::Move { .. } => {
+            let by = moved_by.expect("a move's distance");
+            match record.move_by(list, index, by, units, op.index) {
+                Ok(()) => {
+                    let by: Vec<String> = by
+                        .iter()
+                        .map(|d| crate::description::number_text(*d))
+                        .collect();
+                    done.message = format!(
+                        "moves `{id}` by [{}] ({units}){template_note}{}",
+                        by.join(", "),
+                        snapped_words(&snapped)
+                    );
+                }
+                Err(e) => return fail(reach, from_record(e)),
             }
-            Err(e) => return fail(reach, from_record(e)),
-        },
+        }
         Body::Delete { .. } => {
             let kept = record.delete(list, index, op.index);
             done.ids_written = kept
@@ -1273,12 +1358,16 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
             }
         },
         Body::LeaderLine { edit, .. } => {
+            let edit = line_edit.as_ref().unwrap_or(edit);
             match record.leader_line_edit(list, index, edit, units, op.index) {
                 Ok(words) => {
                     if let Some(refusal) = many_paths(files, file, op, "target") {
                         return refusal;
                     }
-                    done.message = format!("{words} of `{id}`{template_note}");
+                    done.message = format!(
+                        "{words} of `{id}`{template_note}{}",
+                        snapped_words(&snapped)
+                    );
                 }
                 Err(e) => {
                     let field = e.field.clone().unwrap_or_default();
@@ -1293,6 +1382,7 @@ fn apply_op(at: &mut Attempt, op: &Operation) -> Applied {
     if let (Some(layer), true) = (&target_locked, edits_object) {
         return fail(reach, locked(&id, layer));
     }
+    done.snapped = snapped;
     done.after = Some(record.object_text(list, index));
     if done.after == done.before {
         done.after = None;
@@ -1647,6 +1737,7 @@ fn apply_table(
             inserts: Vec::new(),
             attributes_removed: Vec::new(),
             imported: None,
+            snapped: Vec::new(),
             message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
         }),
         sheets,
@@ -1822,6 +1913,7 @@ fn apply_block(
             inserts: synced.inserts,
             attributes_removed: synced.removed,
             imported: None,
+            snapped: Vec::new(),
             message: format!("{what}{removed}{on}"),
         }),
         sheets,
@@ -1979,6 +2071,7 @@ fn apply_import(
             inserts: synced.inserts,
             attributes_removed: synced.removed,
             imported: Some(imported),
+            snapped: Vec::new(),
             message: format!(
                 "imports from `{}` into the block library `{written}`: {}{left_out}{on}",
                 import.from,
@@ -2526,6 +2619,29 @@ fn validate(
 ) -> Result<PreparedSheet, Error> {
     let files = at.files;
     let t = files.template_of[k];
+    let record = sheet_record(at, rows, k, notices)?;
+    let dwg = files.dwg(k);
+    writable(&dwg)?;
+    prepare_sheet(
+        &record,
+        &files.templates[t].path,
+        &dwg,
+        &files.mark,
+        true,
+        settings,
+    )
+}
+
+/// Reads sheet `k` from the records in memory, adding what reading noticed
+/// to `notices`.
+fn sheet_record(
+    at: &Attempt,
+    rows: &[Row],
+    k: usize,
+    notices: &mut Vec<Notice>,
+) -> Result<SheetRecord, Error> {
+    let files = at.files;
+    let t = files.template_of[k];
     let template = &files.templates[t];
     let text = match &at.templates[t] {
         Some(Ok(file)) => match file.new_text()? {
@@ -2557,9 +2673,206 @@ fn validate(
         files.units,
         notices,
     )?;
-    let dwg = files.dwg(k);
-    writable(&dwg)?;
-    prepare_sheet(&record, &template.path, &dwg, &files.mark, true, settings)
+    Ok(record)
+}
+
+/// The point each of `snaps`, the snapped points operation `op` takes,
+/// names on `sheets`, the sheets the operation reaches, as the change set
+/// has left them so far, with what it was worked out to, for the reply.
+/// Each must name one point, and the same on every sheet: an object of a
+/// template is drawn through the same point on every sheet built from it.
+/// An ID in a snap names its object on the sheet it gives, which must be
+/// one the operation reaches; the object of the same place is looked for
+/// on each other sheet.
+fn snapped_points(
+    at: &Attempt,
+    op: &Operation,
+    sheets: &[usize],
+    snaps: &[&PointSnap],
+    settings: &Settings,
+) -> Result<Vec<([f64; 3], SnapResolved)>, Error> {
+    if snaps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let files = at.files;
+    let rows_text = at
+        .rows
+        .new_text()?
+        .unwrap_or_else(|| files.rows_text.clone());
+    let rows = rows_at(&rows_text, &files.rows_path)?;
+    let mut records: Vec<SheetRecord> = Vec::with_capacity(sheets.len());
+    for &k in sheets {
+        records.push(
+            sheet_record(at, &rows, k, &mut Vec::new()).map_err(|e| Error {
+                message: format!(
+                    "operation {} (`{}`): sheet `{}` cannot be read to work out its snapped \
+                     points: {}",
+                    op.index,
+                    op.spec.name,
+                    files.name(k),
+                    e.message
+                ),
+                ..e
+            })?,
+        );
+    }
+    let names: Vec<&str> = sheets.iter().map(|&k| files.name(k)).collect();
+    let mut out = Vec::with_capacity(snaps.len());
+    for snap in snaps {
+        let field = format!("{}.snap", snap.field);
+        let mut first: Option<(usize, [f64; 3], SnapResolved)> = None;
+        for (s, record) in records.iter().enumerate() {
+            let on = localized(&snap.snap, names[s], &names, &field).map_err(|(message, at)| {
+                op_error(op.index, op.spec.name, ErrorCode::BadValue, message, &at)
+            })?;
+            let (object, point) = crate::query::snap::one_point(&[record], &on, settings, &field)
+                .map_err(|e| {
+                let at = e.field.clone().unwrap_or_default();
+                op_error(op.index, op.spec.name, e.code, e.message, &at)
+            })?;
+            let xyz = [point.at.x, point.at.y, point.at.z];
+            match &first {
+                None => {
+                    first = Some((
+                        s,
+                        xyz,
+                        SnapResolved {
+                            field: snap.field.clone(),
+                            id: object.id,
+                            snap: point.snap,
+                            which: on.which.clone().or(point.which),
+                            at: point.at,
+                        },
+                    ));
+                }
+                Some((f, seen, _)) if *seen != xyz => {
+                    return Err(op_error(
+                        op.index,
+                        op.spec.name,
+                        ErrorCode::BadValue,
+                        format!(
+                            "the snapped point is [{}, {}, {}] on sheet `{}` and [{}, {}, {}] on \
+                             sheet `{}`; the operation reaches every sheet built from its \
+                             template, where an object is drawn through the same point on \
+                             each, so give its coordinates, or snap to an object whose place \
+                             the rows do not set",
+                            seen[0], seen[1], seen[2], names[*f], xyz[0], xyz[1], xyz[2], names[s]
+                        ),
+                        &snap.field,
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        let (_, xyz, mut resolved) = first.expect("an operation reaches a sheet");
+        // The object as the snap names it: on the sheet its ID gives.
+        if let Some((sheet, _)) = snap
+            .snap
+            .id
+            .as_deref()
+            .and_then(|id| id.split_once(ID_SEPARATOR))
+        {
+            if let Some((_, local)) = resolved.id.split_once(ID_SEPARATOR) {
+                if let Some(named) = names.iter().find(|n| n.eq_ignore_ascii_case(sheet)) {
+                    resolved.id = format!("{named}{ID_SEPARATOR}{local}");
+                }
+            }
+        }
+        out.push((xyz, resolved));
+    }
+    Ok(out)
+}
+
+/// `snap` as it names its objects on sheet `sheet`: an ID that gives one
+/// of `reached`, the sheets the operation reaches, names the object of
+/// the same ID on `sheet`; or the message and field of an ID on a sheet the
+/// operation does not reach. `field` is the snap's place in the operation.
+fn localized(
+    snap: &SnapRef,
+    sheet: &str,
+    reached: &[&str],
+    field: &str,
+) -> Result<SnapRef, (String, String)> {
+    let local = |id: &Option<String>, at: &str| -> Result<Option<String>, (String, String)> {
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let Some((on, rest)) = id.split_once(ID_SEPARATOR) else {
+            return Ok(Some(id.clone()));
+        };
+        if !reached.iter().any(|r| r.eq_ignore_ascii_case(on)) {
+            return Err((
+                format!(
+                    "the snapped point's object `{id}` is on sheet `{on}`, which the operation \
+                     does not reach; a snapped point is on the sheet it is drawn on: {}",
+                    reached
+                        .iter()
+                        .map(|r| format!("`{r}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                format!("{at}.id"),
+            ));
+        }
+        Ok(Some(format!("{sheet}{ID_SEPARATOR}{rest}")))
+    };
+    let mut out = snap.clone();
+    out.id = local(&snap.id, field)?;
+    if let Some(with) = &snap.with {
+        let mut with = with.clone();
+        with.id = local(&with.id, &format!("{field}.with"))?;
+        out.with = Some(with);
+    }
+    if let Some(from) = &snap.from {
+        out.from = Some(Box::new(localized(
+            from,
+            sheet,
+            reached,
+            &format!("{field}.from"),
+        )?));
+    }
+    Ok(out)
+}
+
+/// A point as JSON, as a record writes it: a whole number as one.
+fn coordinates(point: [f64; 3]) -> serde_json::Value {
+    serde_json::Value::Array(
+        point
+            .iter()
+            .map(|&c| {
+                let c = c + 0.0;
+                if c.fract() == 0.0 && c.abs() < 1e15 {
+                    serde_json::Value::from(c as i64)
+                } else {
+                    serde_json::Number::from_f64(c)
+                        .map_or(serde_json::Value::Null, serde_json::Value::Number)
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The snapped points an operation took, in words, for its message:
+/// "; `from` is the endpoint `objects[0].to` of `S/strip`, [50, 52, 0]".
+fn snapped_words(snapped: &[SnapResolved]) -> String {
+    snapped
+        .iter()
+        .map(|s| {
+            format!(
+                "; `{}` is the {}{} of `{}`, [{}, {}, {}]",
+                s.field,
+                s.snap.word(),
+                s.which
+                    .as_ref()
+                    .map(|w| format!(" `{w}`"))
+                    .unwrap_or_default(),
+                s.id,
+                s.at.x,
+                s.at.y,
+                s.at.z
+            )
+        })
+        .collect()
 }
 
 /// The files a sheet is read from while a change set is applied: the block
@@ -2864,7 +3177,11 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
                 "set".to_owned()
             }
         }
-        Body::Move { .. } => "by".to_owned(),
+        Body::Move {
+            motion: Motion::By(_),
+            ..
+        } => "by".to_owned(),
+        Body::Move { .. } => "to".to_owned(),
         Body::Delete { .. } => String::new(),
         Body::TableEdit { edit, .. } => grid_field(edit, within, matched),
         Body::LeaderLine { edit, .. } => match edit {

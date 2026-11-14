@@ -10,8 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    query_with, Answer, ErrorCode, ObjectGeometry, ObjectRef, Point3, Query, QueryReport,
-    QueryRequest, Selection, Settings, SnapKind, SnapPoint, SnapRef,
+    query_with, Answer, ErrorCode, FoundObject, ObjectGeometry, ObjectRef, Point3, Query,
+    QueryReport, QueryRequest, Selection, SelectionBox, Settings, SnapKind, SnapPoint, SnapRef,
 };
 
 /// An empty folder for one test, under Cargo's scratch folder in `target/`.
@@ -944,4 +944,383 @@ fn a_spline_passing_a_point_twice_meets_another_there_at_its_height() {
             "{first}: {points:#?}"
         );
     }
+}
+
+/// The objects a find with `selection` matches on `source`, and the
+/// reply's message.
+fn found(source: &Path, selection: Selection) -> (String, Vec<FoundObject>) {
+    let report = ask(source, Query::Find(selection));
+    let Answer::Find { objects, .. } = report.answer else {
+        panic!("not a find")
+    };
+    (report.message, objects)
+}
+
+fn ids(objects: &[FoundObject]) -> Vec<&str> {
+    objects.iter().map(|o| o.id.as_str()).collect()
+}
+
+fn window(a: [f64; 2], b: [f64; 2]) -> Selection {
+    Selection {
+        window: Some(SelectionBox([a, b])),
+        ..Selection::default()
+    }
+}
+
+fn crossing(a: [f64; 2], b: [f64; 2]) -> Selection {
+    Selection {
+        crossing: Some(SelectionBox([a, b])),
+        ..Selection::default()
+    }
+}
+
+fn touching(id: &str) -> Selection {
+    Selection {
+        touching: Some(ObjectRef {
+            id: Some(id.to_owned()),
+            name: None,
+        }),
+        ..Selection::default()
+    }
+}
+
+#[test]
+fn a_window_takes_what_lies_wholly_within_it_and_a_crossing_what_reaches_it() {
+    // These were also asked of AutoCAD 2026's ssget "_W" and "_C" on a
+    // made-up sheet of every kind of object (see the pull request).
+    let sheet = every_kind("window-crossing");
+    // Seen from above, whatever the height; edges included.
+    let (message, objects) = found(&sheet, window([-1.0, -6.0], [11.0, 6.0]));
+    assert_eq!(ids(&objects), ["kinds/line", "kinds/high"]);
+    assert_eq!(
+        message,
+        "2 objects are within the window from [-1, -6] to [11, 6], on the sheet `kinds`"
+    );
+    assert_eq!(
+        ids(&found(&sheet, window([26.0, 16.0], [14.0, 4.0])).1),
+        ["kinds/circle"],
+        "the corners in either order, the circle's edge on the box's"
+    );
+    assert!(found(&sheet, window([15.5, 4.0], [26.0, 16.0]))
+        .1
+        .is_empty());
+    // A crossing takes a curve that runs across the box, not one the box
+    // lies inside; a hatch across its boundary, not inside it or its hole.
+    assert_eq!(
+        ids(&found(&sheet, crossing([14.0, 9.0], [16.0, 11.0])).1),
+        ["kinds/circle"]
+    );
+    assert!(found(&sheet, crossing([15.5, 9.0], [16.0, 11.0]))
+        .1
+        .is_empty());
+    assert_eq!(
+        ids(&found(&sheet, crossing([49.0, 31.0], [51.0, 32.0])).1),
+        ["kinds/hatch"]
+    );
+    let (message, objects) = found(&sheet, crossing([56.0, 36.0], [57.0, 37.0]));
+    assert!(objects.is_empty());
+    assert_eq!(
+        message,
+        "nothing matches: no object on the sheet `kinds` is within or crossing the box from \
+         [56, 36] to [57, 37]"
+    );
+    // Text is selected by what its letters draw.
+    assert_eq!(
+        ids(&found(&sheet, window([-10.0, 55.0], [10.0, 65.0])).1),
+        ["kinds/justified"]
+    );
+    // An older leader is selected by its own lines and arrow, as AutoCAD's
+    // LEADER is: its annotation is an MTEXT of its own in the DWG.
+    assert_eq!(
+        ids(&found(&sheet, window([140.0, 30.0], [175.0, 65.0])).1),
+        ["kinds/leader"]
+    );
+    assert!(found(&sheet, crossing([160.5, 30.0], [200.0, 70.0]))
+        .1
+        .is_empty());
+    // A box combines with the other parts of a selection.
+    let both = Selection {
+        id: Some("kinds/high".into()),
+        ..window([-1.0, -6.0], [11.0, 6.0])
+    };
+    let (message, objects) = found(&sheet, both);
+    assert_eq!(ids(&objects), ["kinds/high"]);
+    assert_eq!(
+        message,
+        "1 object has the ID `kinds/high` and is within the window from [-1, -6] to [11, 6], on \
+         the sheet `kinds`"
+    );
+}
+
+#[test]
+fn an_insert_is_within_a_window_only_with_everything_its_block_draws() {
+    // The strip, turned 90° and twice as large about [50, 40], draws its
+    // frame from [28, 34] to [56, 58], and its second lug's number, turned
+    // with it, across the frame's left side at x = 28.
+    let (_, objects) = found(&lugs(), window([26.0, 33.0], [57.0, 59.0]));
+    assert_eq!(ids(&objects), ["lugs/strip"]);
+    let (_, objects) = found(&lugs(), window([27.0, 33.0], [57.0, 59.0]));
+    assert!(objects.is_empty(), "the number reaches past the frame");
+    let (_, objects) = found(&lugs(), crossing([29.0, 33.0], [30.0, 34.0]));
+    assert_eq!(ids(&objects), ["lugs/strip"]);
+}
+
+#[test]
+fn a_wire_touches_the_lug_it_ends_on_and_the_frame_it_crosses() {
+    let (message, objects) = found(&lugs(), touching("lugs/wire"));
+    assert_eq!(ids(&objects), ["lugs/strip"]);
+    assert_eq!(
+        message,
+        "1 object is touching `lugs/wire`, on the sheet `lugs`"
+    );
+    // Where it meets the wire, and the part of the strip that meets it,
+    // into its block and the lug nested in it.
+    let touches = &objects[0].touches;
+    assert_eq!(touches.len(), 2, "{touches:#?}");
+    assert_eq!(touches[0].part.as_deref(), Some("objects[0].objects[1]"));
+    assert_eq!(touches[0].with_part, None);
+    close(touches[0].at, [50.0, 52.0, 0.0]);
+    assert_eq!(touches[1].part.as_deref(), Some("objects[2].segments[2]"));
+    close(touches[1].at, [28.0, 57.86666666666667, 0.0]);
+    // The other way round: the wire touches the strip.
+    let (_, objects) = found(&lugs(), touching("lugs/strip"));
+    assert_eq!(ids(&objects), ["lugs/wire"]);
+    assert_eq!(
+        objects[0].touches[0].with_part.as_deref(),
+        Some("objects[0].objects[1]")
+    );
+    // The plate touches nothing; an object no sheet holds says so.
+    let (message, objects) = found(&lugs(), touching("lugs/plate"));
+    assert!(objects.is_empty());
+    assert_eq!(
+        message,
+        "nothing matches: no object on the sheet `lugs` is touching `lugs/plate`"
+    );
+    let nameless = Selection {
+        touching: Some(ObjectRef {
+            id: None,
+            name: Some("nope".into()),
+        }),
+        ..Selection::default()
+    };
+    assert_eq!(
+        found(&lugs(), nameless).0,
+        "nothing matches: no object on the sheet `lugs` has the name `nope`, the object to touch"
+    );
+    // Touching combines with the other parts of a selection.
+    let of_block = Selection {
+        block: Some("STRIP".into()),
+        ..touching("lugs/wire")
+    };
+    assert_eq!(ids(&found(&lugs(), of_block).1), ["lugs/strip"]);
+}
+
+#[test]
+fn a_wire_ending_on_a_line_touches_it_and_one_short_of_it_or_above_it_does_not() {
+    let dir = scratch("touch-ends");
+    let sheet = dir.join("ends.yaml");
+    fs::write(
+        &sheet,
+        "units: mm
+objects:
+  - line: {id: bus, from: [0, 0, 0], to: [0, 30, 0]}
+  - line: {id: on, from: [0, 10, 0], to: [20, 10, 0]}
+  - line: {id: short, from: [0.001, 20, 0], to: [20, 20, 0]}
+  - line: {id: along, from: [0, 30, 0], to: [0, 40, 0]}
+  - line: {id: above, from: [0, 10, 1], to: [20, 10, 1]}
+",
+    )
+    .unwrap();
+    let (_, objects) = found(&sheet, touching("ends/bus"));
+    // A wire ending on it touches it, and so does one carrying on from its
+    // end, collinear; one a thousandth short of it, or a unit above it,
+    // does not.
+    assert_eq!(ids(&objects), ["ends/on", "ends/along"]);
+    close(objects[0].touches[0].at, [0.0, 10.0, 0.0]);
+    close(objects[1].touches[0].at, [0.0, 30.0, 0.0]);
+}
+
+#[test]
+fn a_crossing_takes_a_hatch_or_a_band_by_its_edges_and_lines_not_its_box_or_inside() {
+    // As AutoCAD 2026's ssget "_C" took them on a made-up sheet: a hatch,
+    // solid or patterned, across its boundary or its pattern's lines; a
+    // wide straight segment across its band's edge; a wide arc, a donut's,
+    // anywhere in its band; none of them by a box wholly inside otherwise,
+    // nor one in the corner of its box.
+    let dir = scratch("crossing-areas");
+    let sheet = dir.join("areas.yaml");
+    fs::write(
+        &sheet,
+        "units: mm
+hatch_patterns:
+  DIAG:
+    lines:
+      - {angle: 45, delta: [0, 10]}
+objects:
+  - hatch:
+      id: triangle
+      pattern: SOLID
+      boundary:
+        - polyline: {points: [[100, 0, 0], [140, 0, 0], [120, 30, 0]]}
+  - hatch:
+      id: half
+      pattern: DIAG
+      boundary:
+        - edges:
+            - line: {from: [130, 80, 0], to: [170, 80, 0]}
+            - arc: {center: [150, 80, 0], radius: 20, start_angle: 0, end_angle: 180}
+  - polyline: {id: wide, points: [[0, 0, 0], [60, 30, 0]], width: 6}
+  - donut: {id: ring, center: [60, 80, 0], inside_diameter: 8, outside_diameter: 16}
+",
+    )
+    .unwrap();
+    let crossed = |a: [f64; 2], b: [f64; 2]| -> Vec<String> {
+        found(&sheet, crossing(a, b))
+            .1
+            .iter()
+            .map(|o| o.id.clone())
+            .collect()
+    };
+    let none: Vec<String> = Vec::new();
+    // The corner of the triangle's box, and of the half disc's, beyond the arc.
+    assert_eq!(crossed([99.0, 28.0], [101.0, 29.0]), none);
+    assert_eq!(crossed([132.0, 96.0], [134.0, 98.0]), none);
+    // Wholly inside: the solid triangle, between the half disc's lines, the
+    // band, clear of its centreline.
+    assert_eq!(crossed([118.0, 5.0], [122.0, 8.0]), none);
+    assert_eq!(crossed([148.0, 84.0], [150.0, 86.0]), none);
+    assert_eq!(crossed([29.5, 16.2], [30.5, 16.9]), none);
+    // Across an edge, the arc, a band's edge; inside a donut's band.
+    assert_eq!(crossed([99.0, 1.0], [101.0, 2.0]), ["areas/triangle"]);
+    assert_eq!(crossed([168.0, 84.0], [172.0, 86.0]), ["areas/half"]);
+    assert_eq!(crossed([16.0, 10.5], [20.0, 12.6]), ["areas/wide"]);
+    assert_eq!(crossed([65.5, 79.5], [66.5, 80.5]), ["areas/ring"]);
+    // A window takes a band whole, not its centreline alone.
+    assert!(found(&sheet, window([-0.5, -0.5], [60.5, 30.5]))
+        .1
+        .is_empty());
+}
+
+#[test]
+fn a_line_seen_end_on_touches_one_it_lies_along() {
+    let dir = scratch("touch-vertical");
+    let sheet = dir.join("upright.yaml");
+    fs::write(
+        &sheet,
+        "units: mm
+objects:
+  - line: {id: post, from: [0, 0, 0], to: [0, 0, 30]}
+  - line: {id: along, from: [0, 0, 10], to: [0, 0, 20]}
+  - line: {id: beside, from: [1, 0, 10], to: [1, 0, 20]}
+",
+    )
+    .unwrap();
+    let (_, objects) = found(&sheet, touching("upright/post"));
+    assert_eq!(ids(&objects), ["upright/along"]);
+    close(objects[0].touches[0].at, [0.0, 0.0, 10.0]);
+}
+
+#[test]
+fn an_object_a_snaps_from_names_that_is_not_there_is_named_at_its_place() {
+    // The nearest point to the circle from an intersection of the line with
+    // an object no sheet holds: the missing object is the intersection's.
+    let report = ask(
+        &every_kind("nested-missing"),
+        Query::Snap(SnapRef {
+            from: Some(Box::new(SnapRef {
+                snap: Some(SnapKind::Intersection),
+                with: Some(ObjectRef {
+                    id: Some("kinds/missing".into()),
+                    name: None,
+                }),
+                ..of("kinds/line")
+            })),
+            ..kind("kinds/circle", SnapKind::Nearest)
+        }),
+    );
+    assert_eq!(
+        report.message,
+        "nothing matches: no object on the sheet `kinds` has the ID `kinds/missing`, the object \
+         to intersect with"
+    );
+}
+
+/// A made-up sheet of wide polylines: a straight band drawn on the sheet,
+/// the same band in a block, inserted and as a multileader's content, a
+/// band of two segments mitred at a corner, a donut, and a wide arc.
+fn bands(test: &str) -> PathBuf {
+    let dir = scratch(test);
+    fs::write(
+        dir.join("wide.yaml"),
+        "units: mm
+blocks:
+  WIDE:
+    objects:
+      - polyline: {points: [[0, -10, 0], [0, 10, 0]], width: 4}
+",
+    )
+    .unwrap();
+    let sheet = dir.join("bands.yaml");
+    fs::write(
+        &sheet,
+        "units: mm
+block_library: wide.yaml
+objects:
+  - polyline: {id: band, points: [[100, -10, 0], [100, 10, 0]], width: 4}
+  - insert: {id: inserted, block: WIDE, position: [200, 0, 0]}
+  - mleader: {id: callout, leaders: [[[0, 0, 0], [20, 0, 0]]], landing: 10, content: {block: WIDE, connection: insertion}}
+  - polyline: {id: corner, points: [[300, 0, 0], [340, 0, 0], [340, 40, 0]], width: 6}
+  - donut: {id: ring, center: [130, 10, 0], inside_diameter: 8, outside_diameter: 16}
+  - polyline: {id: bend, points: [[400, 0, 0], {point: [420, 0, 0], bulge: 1}, [440, 0, 0]], width: 4}
+",
+    )
+    .unwrap();
+    sheet
+}
+
+#[test]
+fn a_wide_band_is_crossed_alike_on_the_sheet_in_an_insert_and_in_a_multileaders_block() {
+    let sheet = bands("bands-alike");
+    let crossed = |a: [f64; 2], b: [f64; 2]| -> Vec<String> {
+        found(&sheet, crossing(a, b))
+            .1
+            .iter()
+            .map(|o| o.id.clone())
+            .collect()
+    };
+    let none: Vec<String> = Vec::new();
+    // Across its middle, inside its band, it is taken nowhere, as AutoCAD
+    // 2026 took it nowhere but on the diagonal of the triangles it fills
+    // the band with; across its band's edge, everywhere.
+    for (x, id) in [(100.0, "band"), (200.0, "inserted"), (30.0, "callout")] {
+        assert_eq!(crossed([x - 0.2, 4.5], [x + 0.2, 5.5]), none, "{id}");
+        assert_eq!(
+            crossed([x + 1.8, 4.5], [x + 2.2, 5.5]),
+            [format!("bands/{id}")],
+            "{id}"
+        );
+    }
+}
+
+#[test]
+fn a_wide_polylines_seams_are_its_bands_edges_and_a_wide_arc_is_crossed_inside() {
+    let sheet = bands("bands-seams");
+    let crossed = |a: [f64; 2], b: [f64; 2]| -> Vec<String> {
+        found(&sheet, crossing(a, b))
+            .1
+            .iter()
+            .map(|o| o.id.clone())
+            .collect()
+    };
+    let none: Vec<String> = Vec::new();
+    // Across the mitre where two wide segments meet, as AutoCAD 2026 took
+    // it; inside a straight band clear of it, not.
+    assert_eq!(crossed([341.4, -1.6], [341.6, -1.4]), ["bands/corner"]);
+    assert_eq!(crossed([320.0, 1.0], [320.3, 1.3]), none);
+    // A donut's two half circles meet at a seam; a wide arc is taken by a
+    // box anywhere in its band, as AutoCAD 2026 took it.
+    assert_eq!(crossed([135.0, 9.8], [135.2, 10.2]), ["bands/ring"]);
+    assert_eq!(crossed([130.0, 15.0], [130.2, 15.2]), ["bands/ring"]);
+    assert_eq!(crossed([430.0, -8.6], [430.1, -8.5]), ["bands/bend"]);
+    assert_eq!(crossed([429.5, -1.0], [429.6, -0.9]), none);
 }

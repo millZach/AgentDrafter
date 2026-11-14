@@ -1,7 +1,8 @@
 {
   "change_sets": {
     "move.json": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]},
-    "partial.json": {"operations": [{"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5}, {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "nope"}]}
+    "partial.json": {"operations": [{"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5}, {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "nope"}]},
+    "snap.json": {"operations": [{"op": "add_line", "sheet": "DEMO-002", "from": {"snap": {"id": "DEMO-002/border", "snap": "endpoint", "which": "points[0]"}}, "to": {"snap": {"id": "DEMO-002/border", "snap": "midpoint", "which": "segments[1]"}}}, {"op": "move", "target": {"id": "DEMO-002/heading"}, "from": {"snap": {"id": "DEMO-002/heading", "snap": "insertion"}}, "to": [1, 9.5, 0]}]}
   },
   "calls": {
     "build": {
@@ -75,6 +76,26 @@
       "command": "query",
       "args": ["query", "geometry", "demo-set", "--id", "DEMO-002/border"],
       "input": {"source": "demo-set", "query": {"kind": "geometry", "id": "DEMO-002/border"}}
+    },
+    {
+      "command": "query",
+      "args": ["query", "find", "demo-set", "--window", "0.4,0.4,16.6,10.6", "--sheet", "DEMO-001"],
+      "input": {"source": "demo-set", "sheet": "DEMO-001", "query": {"kind": "find", "window": [[0.4, 0.4], [16.6, 10.6]]}}
+    },
+    {
+      "command": "query",
+      "args": ["query", "attributes", "demo-set", "--crossing", "15,0,17,1"],
+      "input": {"source": "demo-set", "query": {"kind": "attributes", "crossing": [[15, 0], [17, 1]]}}
+    },
+    {
+      "command": "query",
+      "args": ["query", "find", "demo-set", "--touching", "DEMO-003/border"],
+      "input": {"source": "demo-set", "query": {"kind": "find", "touching": {"id": "DEMO-003/border"}}}
+    },
+    {
+      "command": "change",
+      "args": ["change", "demo-set", "snap.json"],
+      "input": {"set": "demo-set", "change_set": {"operations": [{"op": "add_line", "sheet": "DEMO-002", "from": {"snap": {"id": "DEMO-002/border", "snap": "endpoint", "which": "points[0]"}}, "to": {"snap": {"id": "DEMO-002/border", "snap": "midpoint", "which": "segments[1]"}}}, {"op": "move", "target": {"id": "DEMO-002/heading"}, "from": {"snap": {"id": "DEMO-002/heading", "snap": "insertion"}}, "to": [1, 9.5, 0]}]}}
     }
   ]
 }

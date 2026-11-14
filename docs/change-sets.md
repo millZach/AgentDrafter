@@ -35,6 +35,27 @@ A sheet's template is the file its row's path names, as the file system resolves
 
 **Lengths** are in the set's declared unit and may carry their own, as in a sheet description: `"radius": "6 mm"` in a set in inches is converted. An object's keys are written as a sheet description writes them, as JSON: `[0, 0, 0]` for a point, `"0.25 in"` for a length with its unit.
 
+### Snapped points
+
+Wherever an operation takes a point, it may take a snapped point instead, `{"snap": {...}}`: one of AutoCAD's [object snaps](query.md#snap), written as `query snap` takes it, its object by `id` or `name`, its `snap`, and `which` of its points, with `with` or `from` where the snap takes them. An add takes one for each point of the object it adds, a line's `from` and `to`, a polyline's points, a centre, a text's or an insert's `position`, a hatch's boundary points, each point of a multileader's leader lines and an older leader's, and so does `add_leader_line` for each of its points and `move` for its `from` and `to`. A direction, such as an ellipse's `major_axis`, is not a point and takes none, and neither does a block's definition, whose points are in the block's own coordinates.
+
+```json
+{"op": "add_line", "sheet": "SNAP-001", "layer": "wires",
+ "from": {"snap": {"id": "SNAP-001/strip", "snap": "endpoint", "which": "objects[0].objects[1].to"}},
+ "to": {"snap": {"id": "SNAP-001/ring", "snap": "quadrant", "which": "90"}}}
+```
+
+- **It names one point.** Its `snap` is given, and `which` when the snap finds more than one point; one that finds none, or several without `which`, is refused at its key, `bad_value` at `operations[0].to.snap` or `operations[0].to.snap.which`, the second listing each point with where it is, as `query snap`'s reply names them. An object the sheet does not hold is `unknown_name` at its `id` or `name`, listing the sheet's IDs or names. These fail the sheets the operation reaches, as a target that names nothing does. A snapped point that is wrong in itself, with no `snap`, a key a snap does not take, or `with` or `from` where its snap takes none, refuses the change set whole.
+- **It is worked out when the operation applies**, on the sheet as it stands then: the operations before it in the change set have landed on it, so a line may run to a circle an earlier operation added or moved. The object an add adds is not on the sheet yet, and the object a move moves is where it was.
+- **The record is written with the coordinates it names**, in the declared unit, as plain numbers: a sheet description holds points, never snaps. The point does not follow the object afterwards: moving the circle later leaves the line where it was.
+- **On every sheet it reaches.** An operation on a template reaches every sheet built from it, and its snapped point is worked out on each. An ID names its object on the sheet it gives, which must be one the operation reaches, and the object of the same ID on each other sheet; a name, the object of that name on each. When the point is not the same on every sheet, as when it is on a row's own object, the operation is refused at its key, `bad_value`, naming two sheets and the point on each: a template's object is drawn through the same point on every sheet. A snap to an object only one of the sheets holds is `unknown_name` on another. Either holds back every sheet the template reaches, all or nothing (decision 4).
+
+The operation's reply lists each snapped point under `snapped`: its key in the operation (`field`), the object (`id`, on the sheet its ID gives), the `snap`, `which` and where it is (`at`), the coordinates the record writes; its message says the same.
+
+```json
+{"index":0,"op":"add_line","ok":true,"message":"adds a line, `SNAP-001/line-1`, to sheet `SNAP-001`, in its row; `from` is the endpoint `objects[0].objects[1].to` of `SNAP-001/strip`, [50, 52, 0]; `to` is the quadrant `90` of `SNAP-001/ring`, [90, 68, 0]","after":"line: {from: [50, 52, 0], to: [90, 68, 0], layer: wires, id: line-1}","snapped":[{"field":"from","id":"SNAP-001/strip","snap":"endpoint","which":"objects[0].objects[1].to","at":[50.0,52.0,0.0]},{"field":"to","id":"SNAP-001/ring","snap":"quadrant","which":"90","at":[90.0,68.0,0.0]}],"...":"..."}
+```
+
 ## The operations
 
 | Operation | AutoCAD | What it does |
@@ -83,7 +104,15 @@ A sheet's template is the file its row's path names, as the file system resolves
 
 **`change`** takes `target` and `set`, a mapping from each key to set to its new value, written as a sheet description writes it; `null` takes an optional key away. It sets any key the object's type takes, and `name`. It does not set `id`, since an object's ID is fixed for its life, nor an insert's `attributes`, which `set_attribute` sets one at a time, nor the object's type. A text's or an mtext's `contents` whose template takes them from the row is set in the sheet's row (decision 5), and so is the text of a multileader's `content` or an older leader's `annotation` ([Leaders](#leaders)).
 
-**`move`** takes `target` and `by`, `[dx, dy, dz]`. Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, the position of a text, an mtext, an insert or a table, every point of each of a multileader's leader lines, and an older leader's points; a leader's text moves with it, laid out again where its landing or end puts it. An arrow is placed at a point and does not follow an object it points at, since pointing it at an object by its ID or name waits for object snaps (#74); so is the arrow of a leader line `add_leader_line` adds. A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
+**`move`** takes `target` and `by`, `[dx, dy, dz]`, or `from`, a base point, and `to`, a second point, as AutoCAD's MOVE takes them, each a point or a snapped point: the object moves by `to` less `from`. Give `by`, or `from` and `to`; both is `usage`, and one of `from` and `to` alone `missing_key`. So a lug moves until its stub's end lands on a terminal:
+
+```json
+{"op": "move", "target": {"id": "SNAP-001/term"},
+ "from": {"snap": {"id": "SNAP-001/term", "snap": "endpoint", "which": "objects[1].to"}},
+ "to": {"snap": {"id": "SNAP-001/ring", "snap": "quadrant", "which": "0"}}}
+```
+
+Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, the position of a text, an mtext, an insert or a table, every point of each of a multileader's leader lines, and an older leader's points; a leader's text moves with it, laid out again where its landing or end puts it. An arrow is placed at a point and does not follow an object it points at, and so is the arrow of a leader line `add_leader_line` adds; a [snapped point](#snapped-points) puts it on the object when the operation applies. A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
 
 **`delete`** takes `target`.
 
@@ -131,7 +160,7 @@ The reply's operation says what else it did to keep the table in line, such as `
 
 Two operations edit a [multileader](sheet-description.md#leaders)'s leader lines, as AutoCAD's MLEADEREDIT adds and removes leaders. Each names its multileader under `target`, by its ID or its name, and lands as any edit of an object does: a multileader of a template is edited in the template, so every sheet built from it follows, all or nothing, and one of a row's own objects on that sheet alone. Once applied, each sheet they reach is read back and built, so a leader line the multileader cannot take fails the sheet, with the error at the operation's key.
 
-- **`add_leader_line`** (`MLEADEREDIT`) takes `target` and `points`: the new leader line from its arrow's point through any bends, up to but not including the point where the multileader's leader lines meet its landing, which the operation appends, written as the multileader's first leader line writes it. At least one point, each apart from the one before and from that point, and the first segment at least as long as the arrow, unless the arrowhead is `none`; the error of one that is not is at `points`. It may come from either side of the landing: AutoCAD 2026 kept a second leader line from the landing's far side where it was when it laid the multileader out again.
+- **`add_leader_line`** (`MLEADEREDIT`) takes `target` and `points`, each a point or a [snapped point](#snapped-points): the new leader line from its arrow's point through any bends, up to but not including the point where the multileader's leader lines meet its landing, which the operation appends, written as the multileader's first leader line writes it. At least one point, each apart from the one before and from that point, and the first segment at least as long as the arrow, unless the arrowhead is `none`; the error of one that is not is at `points`. It may come from either side of the landing: AutoCAD 2026 kept a second leader line from the landing's far side where it was when it laid the multileader out again.
 
   ```json
   {"op": "add_leader_line", "target": {"id": "DEMO-001/terminals"}, "points": [[4, 2, 0], [5, 2.5, 0]]}
@@ -213,7 +242,7 @@ failures:
 | `message` | What the change set did, in words. |
 | `landed`, `failed` | How many sheets took their part, and how many did not. |
 | `sheets` | Each sheet the change set touched, in the set's order: whether it took its part, the operations that were its part, whether it was cleared from the mark (`fixed`), whether its DWG was written, what its build wrote (`result`, as `build` reports a sheet), and why it failed (`error`). |
-| `operations` | Each operation, in the order sent: whether it landed, what it does in words, the sheets it reaches, the record it writes, the object's ID, the object as its record writes it `before` and `after`, the row value it sets (`row_value`), the IDs it wrote (`ids_written`), the inserts a block operation brought into line (`inserts`) and the attribute values it removed (`attributes_removed`, [Blocks](#blocks)), and why it did not land (`error`). |
+| `operations` | Each operation, in the order sent: whether it landed, what it does in words, the sheets it reaches, the record it writes, the object's ID, the object as its record writes it `before` and `after`, the row value it sets (`row_value`), the IDs it wrote (`ids_written`), the inserts a block operation brought into line (`inserts`) and the attribute values it removed (`attributes_removed`, [Blocks](#blocks)), each snapped point it took and what it named (`snapped`, [Snapped points](#snapped-points)), and why it did not land (`error`). |
 | `records` | The records written, or that a dry run would write. |
 | `inconsistent` | The set's mark as it stands after the change set, or would after a dry run; absent when the set is consistent. |
 | `checks` | The [checker](check.md)'s reply on the sheets the change set landed on, read back from their saved files once they were written: `{"ok": true, "result": {...}}`, with each failed check under `findings`. A failed check does not stop a change set from landing, and does not make its reply not `ok`. Absent for a dry run, which saves nothing to read back, and when no sheet took its part. |
@@ -230,10 +259,10 @@ An error from an operation names it, `operation 1 (`add_circle`)`, and the sheet
 
 | Code | In a change set it means |
 |---|---|
-| `unknown_name` | No operation, sheet, template, ID or name of that name; or a layer, text style, block or attribute tag the sheet does not have; or a block library the set's templates do not name, or a block it does not have. |
+| `unknown_name` | No operation, sheet, template, ID or name of that name; or a layer, text style, block or attribute tag the sheet does not have; or a block library the set's templates do not name, or a block it does not have; or a snapped point's object, or its `which`, that the sheet does not have. |
 | `unknown_key` | A key the change set, an operation or the object's type does not take. |
-| `missing_key`, `wrong_type`, `bad_number`, `bad_value` | As in a sheet description, for an operation's keys or the object it writes. `missing_key` also: a block operation with no `library` when the set's templates name more than one. `bad_value` also: a name with no sheet on more than one sheet, a `change` of an `id`, `fixes` naming a sheet the mark does not hold. |
-| `usage` | An add given both `sheet` and `template`, or a target given both an ID and a name. |
+| `missing_key`, `wrong_type`, `bad_number`, `bad_value` | As in a sheet description, for an operation's keys or the object it writes. `missing_key` also: a block operation with no `library` when the set's templates name more than one. `bad_value` also: a name with no sheet on more than one sheet, a `change` of an `id`, `fixes` naming a sheet the mark does not hold, a snapped point that names no point, several without `which`, an object on a sheet the operation does not reach, or a different point on two sheets a template edit reaches, or one where a direction is taken. |
+| `usage` | An add given both `sheet` and `template`, a target or a snapped point given both an ID and a name, or a move given `by` with `from` and `to`. |
 | `duplicate_id`, `duplicate_name` | An `id` or a name the sheet has already, the template's and the row's objects together; or a layer, linetype or text style the template has already; or a block the block library has already. |
 | `locked` | An edit to an object on a locked layer. |
 | `in_use` | A delete of a layer, linetype or text style that something still uses. |

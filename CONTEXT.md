@@ -89,7 +89,7 @@ What a table's cells draw with unless they give their own, as AutoCAD's TABLESTY
 _Avoid_: table format, cell style (AutoCAD's name for one kind of row's part of a table style)
 
 **Leader**:
-An arrow from a point on the sheet, a line through any bends, and the text it points from: what calls out a device or a part, or points a note at a wire. A sheet holds two kinds, as AutoCAD does: the multileader, and the older leader, AutoCAD's LEADER object, one line with an optional multiline text annotation beyond its end, hooked when its last segment is steep. Its arrow is placed at a point; pointing it at an object by its ID or name waits for object snaps.
+An arrow from a point on the sheet, a line through any bends, and the text it points from: what calls out a device or a part, or points a note at a wire. A sheet holds two kinds, as AutoCAD does: the multileader, and the older leader, AutoCAD's LEADER object, one line with an optional multiline text annotation beyond its end, hooked when its last segment is steep. Its arrow is placed at a point, which an operation may give as a snapped point on the object it points at; it does not follow the object afterwards.
 _Avoid_: callout (a callout is one use of a leader), arrow (the arrow is a leader's arrowhead), pointer, QLEADER (AutoCAD's command that draws one)
 
 **Multileader**:
@@ -272,12 +272,24 @@ The command that issues the working revision: every change set still in place, a
 _Avoid_: approve, sign off, release
 
 **Query**:
-A question an agent asks a drawing set about what is on its sheets, such as which objects carry a tag, which blocks a sheet inserts, or how far apart two objects are. It reads the records, changes nothing, and selects objects by ID, name, block, attribute or text, never by coordinates. A query that matches nothing says so.
+A question an agent asks a drawing set about what is on its sheets, such as which objects carry a tag, which blocks a sheet inserts, or how far apart two objects are. It reads the records, changes nothing, and selects objects by ID, name, block, attribute or text, or by where they are: within or crossing a box, as AutoCAD's selection windows take them, or touching another object. A box is the only coordinates a query takes. A query that matches nothing says so.
 _Avoid_: search, lookup, select
 
 **Object snap**:
 A point AutoCAD's object snaps find on an object, an endpoint, a midpoint, a centre, a quadrant, an insertion point or a node, or between two objects, an intersection, an apparent intersection, or a perpendicular, a tangent or a nearest point from a snap of another, named by the object's ID or name, the snap and which of its points (`which`), so that it can be asked for again. An insert's snaps are those of its block's own geometry, where the insert places it, each named by its place in the block, such as `objects[3].to`.
 _Avoid_: snap point by coordinates, pick point, osnap (AutoCAD's setting of which snaps are on)
+
+**Snapped point**:
+An object snap given where an operation takes a point, `{"snap": {...}}`, written as `query snap` takes it and naming one point. It is worked out when the operation applies, on the sheet as it stands then, and the record is written with the coordinates it names: a sheet description holds points, never snaps. A move takes one as its base point or its second point, as AutoCAD's MOVE does.
+_Avoid_: reference point, linked point (it does not follow the object afterwards)
+
+**Window**, **crossing** (selection):
+A box on the sheet, by two corners, that a find selects by, as AutoCAD's selection windows do: a window takes the objects wholly within it, a crossing those within it or crossing its edge, each by what it draws, its text and its block's objects among it.
+_Avoid_: region, area, fence
+
+**Touching**:
+Two objects whose geometry meets: one crosses the other, or an end of one lies on the other. How an agent checks that a wire reaches its terminal.
+_Avoid_: connected (a trade's word for what the drawing shows), adjacent
 
 **Geometry** (of an object):
 An object's length, area, extents and angles, as AutoCAD's LIST and AREA give them, from the object's own curves: not text's, whose extents are its font's.

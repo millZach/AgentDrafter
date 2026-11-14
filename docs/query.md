@@ -1,6 +1,6 @@
 # Queries
 
-A query is what an agent asks a drawing set about what is on its sheets, to check its own work: which objects carry a tag or say a piece of text, which blocks a sheet inserts, what an insert's attributes are, how far apart two objects are, how large a sheet is, which points AutoCAD's object snaps find on an object and how long an object is and what it encloses (see [`CONTEXT.md`](../CONTEXT.md)). Objects are selected by [ID](sheet-description.md#ids-and-names), name, block, attribute or text, never by coordinates. A query changes nothing.
+A query is what an agent asks a drawing set about what is on its sheets, to check its own work: which objects carry a tag or say a piece of text, which blocks a sheet inserts, what an insert's attributes are, how far apart two objects are, how large a sheet is, which points AutoCAD's object snaps find on an object and how long an object is and what it encloses (see [`CONTEXT.md`](../CONTEXT.md)). Objects are selected by [ID](sheet-description.md#ids-and-names), name, block, attribute or text, and by where they are: within or crossing a box, or touching another object. A box is the only coordinates a query takes: it is how AutoCAD selects, a window or a crossing dragged on the sheet, and how an agent asks what is in a part of a sheet, which no ID or name says. A query changes nothing.
 
 `agentdrafter query <kind> <drawing-set-folder | sheet-description> [options]` asks a drawing set's folder, or one sheet description, and prints one line of JSON. It is a thin layer over the core's `query_with`, which takes a request and returns the answer as plain data (ADR-0007).
 
@@ -32,7 +32,7 @@ Every answer has the same frame, then what its kind found:
 
 ## Find
 
-`agentdrafter query find <source> [--id <id>] [--name <name>] [--block <block>] [--tag <tag>] [--value <value>] [--text <text>] [--contains] [--sheet <sheet>]` lists the objects that match every option given; with none, every object.
+`agentdrafter query find <source> [--id <id>] [--name <name>] [--block <block>] [--tag <tag>] [--value <value>] [--text <text>] [--contains] [--window <x1,y1,x2,y2>] [--crossing <x1,y1,x2,y2>] [--touching <id> | --touching-name <name>] [--sheet <sheet>] [--fonts <folder>]...` lists the objects that match every option given; with none, every object.
 
 | Option | Matches |
 |---|---|
@@ -42,6 +42,9 @@ Every answer has the same frame, then what its kind found:
 | `--tag` | An insert carrying the attribute; with `--value`, the attribute the value is looked for in. |
 | `--value` | An insert one of whose attributes has the value, or the attribute `--tag` names: any occurrence of a tag its block defines more than once. |
 | `--text` | A text or an mtext saying it, a table one of whose cells says it, a multileader whose text or an older leader whose annotation says it, or an insert whose block draws a text or an mtext saying it. |
+| `--window` | An object wholly within the box, as AutoCAD's selection window takes it: see [Within a box, and touching](#within-a-box-and-touching). |
+| `--crossing` | An object within the box or crossing its edge, as AutoCAD's crossing selection takes it. |
+| `--touching`, `--touching-name` | An object whose geometry meets the object of that ID or name. |
 
 **How each matches.** An ID, a name, a block and an attribute tag are identifiers, and no two of a kind differ only in case, so each matches the whole of it in any case: `--name TITLE-BLOCK` finds `title-block`. A value and a text match the whole of it, case and all. With `--contains`, every option matches a value that holds it, in any case: `--id border --contains` finds the border on every sheet, and `--text made-up --contains` the notes.
 
@@ -58,6 +61,28 @@ Each object found comes with its sheet, its ID, whether the record writes that I
 ```
 
 An attribute's value is not text the block draws: it is found with `--value`.
+
+### Within a box, and touching
+
+`--window` and `--crossing` take a box by two opposite corners, `x1,y1,x2,y2`, in the declared unit and in either order; in JSON, `"window": [[x1, y1], [x2, y2]]`, a corner taking a height that is not looked at. Everything is seen from above. An object is looked at as it draws, through the one drawing pipeline (ADR-0011), every layer continuous as for [extents](#extents), so its text counts as its font draws it, an insert as everything its block draws, its attributes among it, and a table or a multileader as its lines and its text; an object on a layer that is off or frozen draws nothing and is not selected, as in AutoCAD. The box's edges are in it.
+
+- **A window** takes an object that draws something and draws all of it inside the box, a hatch's boundary too, which its pattern's lines may stop short of, and a wide polyline's or a donut's whole band.
+- **A crossing** takes an object that draws something inside the box or across its edge: a line or a curve, the outline of a filled area such as a solid, a hatch's boundary or its pattern's lines, and each wide segment's band, so the seam where two wide segments meet, or a donut's two half circles, is an edge too. A wide arc, a donut's among them, is taken by a box anywhere inside its band. Otherwise a box wholly inside a filled area crosses nothing, as in AutoCAD 2026: inside a solid, a straight band, a hatch, solid or patterned, between its lines, or a circle's outline, and in the corner of a hatch's box outside it. A wide polyline is taken alike wherever it is drawn: on the sheet, in an insert's block or in a multileader's.
+- **An older leader** is selected by its own line, hook and arrow: AutoCAD holds its annotation as an MTEXT of its own, which AutoCAD's window selects apart from the LEADER. A multileader is one object with its text, as in AutoCAD.
+
+```json
+{"ok":true,"result":{"source":"examples/snaps/lugs.yaml","units":"mm","sheets":["lugs"],"message":"1 object is within the window from [26, 33] to [57, 59], on the sheet `lugs`","kind":"find","count":1,"objects":[{"sheet":"lugs","id":"lugs/strip","...":"..."}]}}
+```
+
+`--touching` takes an object by its ID, or `--touching-name` by its name (`"touching": {"id": ...}` in JSON), and finds the objects whose geometry meets it, so an agent can check that a wire reaches its terminal. Two objects meet where one crosses or touches the other, as an [intersection snap](#snap) finds it, or where an end of a part of either lies on a part of the other, a line carrying on from another's end among them, within a billionth of their size, in space: a wire a unit above a terminal does not reach it. Their geometry is their curves as [`snap`](#snap) reads them, an insert's its block's, nested inserts too; text, hatches and multileaders have none and touch nothing. The object is looked for on each sheet looked at, by its ID on the sheet it gives, or by its name on every sheet that has it. Each object found lists under `touches` where it meets it, `at`, with `part`, its own part there, and `with_part`, the named object's, as a snap's `part` and `with_part` name them, each place once:
+
+```json
+{"ok":true,"result":{"source":"examples/snaps/lugs.yaml","units":"mm","sheets":["lugs"],"message":"1 object is touching `lugs/wire`, on the sheet `lugs`","kind":"find","count":1,"objects":[{"sheet":"lugs","id":"lugs/strip","...":"...","touches":[{"part":"objects[0].objects[1]","at":[50.0,52.0,0.0]},{"part":"objects[2].segments[2]","at":[28.0,57.86666666666667,0.0]}]}]}}
+```
+
+A box and `--touching` combine with every other option, and work in `attributes` and `geometry` as in `find`: `query find <set> --touching-name wire-12 --block TERMINAL` finds the terminals a wire reaches. An object to touch that no sheet looked at holds is not an error: nothing matches, and the message names it.
+
+**What AutoCAD 2026 gave.** On a made-up sheet of every kind of object, with inserts scaled, turned and nested, a solid, solid and patterned hatches of straight and curved edges, wide polylines straight, mitred and arced, on the sheet, in an insert and in a multileader's block, a donut and turned text, 161 boxes, each asked as a window and as a crossing, selected the same objects as AutoCAD 2026's `ssget "_W"` and `ssget "_C"` with the box zoomed into view, 317 of 322, but five crossings, each wholly inside a filled area, crossing none of its edges, that AutoCAD took: it takes a solid hatch or a straight band across the inner edges of the triangles it fills it with, which are its own, so a box on a square hatch's or a band's one diagonal took it and a box off it, or on the other diagonal, did not. AgentDrafter does not take them by a box inside them. A box whose edge passes within a pixel of an object at the zoom it is taken at may differ, as AutoCAD's selection is made on the screen.
 
 ## Attributes
 
@@ -126,7 +151,7 @@ A point is named as its key in the sheet description. Without one, the object's 
 
 `agentdrafter query snap <source> (--id <id> | --name <name>) [--snap <snap>] [--which <which>] [--with <id> | --with-name <name>] [--from <id> | --from-name <name> --from-snap <snap> [--from-which <which>] [--from-with <id> | --from-with-name <name>]] [--sheet <sheet>] [--fonts <folder>]...` gives the points AutoCAD's [object snaps](../CONTEXT.md) find on an object, each in the declared unit: its `snap`, which of the object's points it is (`which`), and where it is (`at`). The object is named by its ID or its name, as an end of a [measure](#measure) is, with `--sheet` when its name is on more than one of the sheets looked at. Without `--snap`, every snap of the object by itself: endpoint, midpoint, center, quadrant, insertion and node. Everything is seen from above, as AutoCAD's snaps are in its top view, and every point keeps its height.
 
-**A snapped point is named so it can be asked for again.** Its `which` is its place in the object, such as `points[2]`, `segments[1]` or `objects[3].to`, and the same object, `snap` and `which` give the same point. A point the object has once, with no place of its own, such as a line's midpoint or a circle's centre, has no `which` and needs none. In JSON a snap is written `{"kind": "snap", "id": "lugs/strip", "snap": "endpoint", "which": "objects[0].objects[1].to"}`, with `with` and `from` as below; the same mapping, without `kind`, is the snapped point an operation will take.
+**A snapped point is named so it can be asked for again.** Its `which` is its place in the object, such as `points[2]`, `segments[1]` or `objects[3].to`, and the same object, `snap` and `which` give the same point. A point the object has once, with no place of its own, such as a line's midpoint or a circle's centre, has no `which` and needs none. In JSON a snap is written `{"kind": "snap", "id": "lugs/strip", "snap": "endpoint", "which": "objects[0].objects[1].to"}`, with `with` and `from` as below; the same mapping, without `kind`, is the [snapped point](change-sets.md#snapped-points) an operation takes wherever it takes a point.
 
 | Object | `endpoint` | `midpoint` | `center` | `quadrant` | `insertion` | `node` |
 |---|---|---|---|---|---|---|
@@ -205,14 +230,14 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 
 ## How it works
 
-`crates/agentdrafter-core/src/query.rs` reads the set's settings and rows and each sheet's record (`description/records.rs`, and `description/template.rs` for a sheet of a set), selects and measures, and draws a sheet's extents with `draw::draw_sheet`. `query/snap.rs` works out a snap and an object's geometry on the records, from `geometry.rs`, which reads each object as the curves it is made of, an insert's block's placed by the one placement rule, and the points its own snaps find; `geometry/curve.rs` holds the curves' arithmetic, `geometry/snap.rs` the snaps between two objects and `geometry/measure.rs` the lengths, areas and extents. A polyline's arcs come from their bulges as the drawing pipeline's do (`draw/polyline.rs`), and a spline is the B-spline it draws (`draw/curves.rs`).
+`crates/agentdrafter-core/src/query.rs` reads the set's settings and rows and each sheet's record (`description/records.rs`, and `description/template.rs` for a sheet of a set), selects and measures, and draws a sheet's extents, and what each object draws for a box, with `draw::draw_sheet`. `query/snap.rs` works out a snap and an object's geometry on the records, from `geometry.rs`, which reads each object as the curves it is made of, an insert's block's placed by the one placement rule, and the points its own snaps find; `geometry/curve.rs` holds the curves' arithmetic, `geometry/snap.rs` the snaps between two objects and where two objects touch, and `geometry/measure.rs` the lengths, areas and extents. `query/snap.rs`'s `one_point` is the one point a change set's snapped point names. A polyline's arcs come from their bulges as the drawing pipeline's do (`draw/polyline.rs`), and a spline is the B-spline it draws (`draw/curves.rs`).
 
 ## What is not offered yet
 
 - Querying DWGs, built or someone else's. Every DWG a build writes carries each object's ID, ready for it.
 - Patterns other than a whole value or a part of it, such as wildcards.
-- A distance from a point given by coordinates. Nothing is selected by coordinates.
-- A snapped point as an operation's point, and selecting the objects within or crossing a box or touching another object: the next part of [#74](https://github.com/millZach/AgentDrafter/issues/74).
+- A distance from a point given by coordinates. A box is the only coordinates a query takes.
+- AutoCAD's other selections by place, such as a fence or a polygon window, and AutoCAD's `OSNAPHATCH`, a hatch's boundary as geometry to touch.
 - AutoCAD's extended intersections and apparent intersections, where two objects would cross if drawn on, and a snap picked by a cursor's place: every point of the kind is listed, named.
 - A node on multiline text, which AutoCAD 2026 finds at a point of its box that moves with its attachment, and snaps into a multileader's block content or a table's text.
 - The geometric extents of text, inserts, tables and leaders: [`extents`](#extents) gives what a sheet draws, text as its font draws it.

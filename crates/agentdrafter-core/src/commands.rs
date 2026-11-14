@@ -585,8 +585,11 @@ fn run_stale(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<Js
 
 fn query_does() -> String {
     "Asks a drawing set, or one sheet description, what is on its sheets, from the records, \
-     with nothing selected by coordinates; `query` says what, by its `kind`. find lists the \
-     objects matching every part given, each with its ID and where it is written; attributes \
+     with nothing selected by coordinates but a box; `query` says what, by its `kind`. find \
+     lists the objects matching every part given, each with its ID and where it is written, \
+     `window` and `crossing` the objects within a box or crossing it, as AutoCAD's selection \
+     windows take them, and `touching` those whose geometry meets an object's, with where; \
+     attributes \
      gives each matching insert's attributes as JSON from tag to value; blocks lists the \
      blocks each sheet inserts; measure gives the distance between a point of two objects on \
      one sheet, each named by ID or name, by default an insert's or a text's position, a \
@@ -634,6 +637,17 @@ fn query_schema() -> Value {
                 "match": {
                     "description": "How the parts match: `exact`, the whole value, or `contains`, a value that holds what is given, in any case. Without it, exact.",
                     "enum": ["exact", "contains"],
+                },
+                "window": selection_box("Objects wholly within this box, as AutoCAD's selection window takes them: everything they draw, text and inserts' blocks among it, inside it, edges included."),
+                "crossing": selection_box("Objects within this box or crossing it, as AutoCAD's crossing selection takes them: something they draw inside it or across its edge, a line, the outline of a filled area, a hatch's boundary or pattern, each wide segment's band, seams included; a box wholly inside an area crosses nothing, but inside a wide arc's band."),
+                "touching": {
+                    "description": "Objects whose geometry meets this object's, on each sheet it is on: crossing it, or an end of one lying on the other; each found with where it meets it, `part` its own and `with_part` the object's.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "id": text("The object's ID."),
+                        "name": text("The object's name."),
+                    },
                 },
             },
         })
@@ -689,6 +703,22 @@ fn query_schema() -> Value {
                  given, as AutoCAD's LIST and AREA give them; with none given, every object's.",
             ),
         ],
+    })
+}
+
+/// The schema of a box a selection looks within: two opposite corners.
+fn selection_box(what: &str) -> Value {
+    json!({
+        "description": format!("{what} Two opposite corners, [[x1, y1], [x2, y2]], in the declared unit, in either order; a corner may carry a height, which is not looked at."),
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": { "type": "number" },
+        },
     })
 }
 
