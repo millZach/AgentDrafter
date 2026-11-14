@@ -359,6 +359,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("add_block", "BLOCK"),
             ("redefine_block", "BEDIT"),
             ("attsync", "ATTSYNC"),
+            ("import_blocks", "ADCENTER"),
         ]
     );
     let samples = [
@@ -393,6 +394,7 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "BLOCK", "name": "BADGE", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1}}, {"attdef": {"tag": "CODE", "position": [0, 0, 0], "height": 1, "cell": [[0, 0, 0], [1, 1, 0]]}}]}),
         json!({"op": "BEDIT", "library": "blocks.yaml", "name": "BADGE", "base_point": [1, 0, 0], "objects": [{"text": {"contents": "A", "position": [0, 0, 0], "height": 1, "cell": [[0, 0, 0], [1, 1, 0]]}}]}),
         json!({"op": "ATTSYNC", "name": "BADGE"}),
+        json!({"op": "adcenter", "library": "blocks.yaml", "from": "../parts/badges.dxf", "blocks": ["BADGE"], "replace": true, "units": "in"}),
     ];
     for (info, sample) in listed.operations.iter().zip(&samples) {
         assert!(info.does.contains(&info.alias), "{}", info.does);

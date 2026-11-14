@@ -24,8 +24,8 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert, Layer, Linetype, Object,
-    ObjectLinetype, Point3, Sheet, CONTINUOUS,
+    Attribute, AttributeDefinition, Block, BlockLibrary, Cell, HatchPattern, Insert, Layer,
+    Linetype, Object, ObjectLinetype, Point3, Sheet, CONTINUOUS,
 };
 use crate::set::NoticeCode;
 use crate::text::TextStyle;
@@ -224,6 +224,23 @@ pub(crate) fn read_block_library(text: &str) -> Result<(BlockLibrary, Vec<Notice
         .sort_by_key(|b| entries.iter().position(|e| e.key == b.name));
     noticed.sort_by_key(|n| (n.at.line, n.at.column));
     Ok((library, noticed))
+}
+
+/// The hatch patterns the block library whose text is `text` defines,
+/// each with its lines, as its hatches take them.
+pub(crate) fn library_hatch_patterns(text: &str) -> Result<Vec<HatchPattern>, Error> {
+    let Some(root) = strict_yaml::read(text)? else {
+        return Ok(Vec::new());
+    };
+    let fields = Fields::of(&root, "", &LIBRARY_KEYS, "a block library")?;
+    let Some(units) = fields.get("units") else {
+        return Ok(Vec::new());
+    };
+    let units = unit(units, "units")?;
+    match fields.get("hatch_patterns") {
+        Some(node) => hatch::hatch_patterns(node, units),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// The order to read the blocks of `entries` in: each block after every

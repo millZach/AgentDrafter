@@ -335,6 +335,52 @@ objects: []
     );
 }
 
+/// An entry added to a table the file writes an entry to a line goes after
+/// its last, and every line the file wrote stays as it was, its comments
+/// and its block-style entries among them; a table written in braces, or
+/// one an edit changes otherwise, is written again whole.
+#[test]
+fn an_entry_added_to_a_table_goes_after_its_last_and_keeps_its_comments() {
+    let keys = |json: serde_json::Value| json.as_object().unwrap().clone();
+    let text = "units: in
+layers:
+  # ours
+  title: {color: red}   # red, as the client asks
+  frame:
+    color: 3
+blocks: {}
+";
+    let mut record = RecordFile::from_text(Path::new("t.yaml"), text.to_owned()).unwrap();
+    record
+        .table_add("layers", &["color"], "notes", &keys(json!({"color": 2})))
+        .unwrap();
+    let written = record.new_text().unwrap().unwrap();
+    assert_eq!(
+        written,
+        text.replace("blocks: {}", "  notes: {color: 2}\nblocks: {}")
+    );
+
+    let mut record = RecordFile::from_text(Path::new("t.yaml"), text.to_owned()).unwrap();
+    record
+        .table_add("layers", &["color"], "notes", &keys(json!({"color": 2})))
+        .unwrap();
+    record
+        .table_change("layers", &["color"], "frame", &keys(json!({"color": 4})))
+        .unwrap();
+    let written = record.new_text().unwrap().unwrap();
+    assert!(!written.contains("# red"), "written again whole: {written}");
+
+    let flow = "units: in\nlayers: {title: {color: red}}\nblocks: {}\n";
+    let mut record = RecordFile::from_text(Path::new("t.yaml"), flow.to_owned()).unwrap();
+    record
+        .table_add("layers", &["color"], "notes", &keys(json!({})))
+        .unwrap();
+    assert_eq!(
+        record.new_text().unwrap().unwrap(),
+        "units: in\nlayers:\n  title: {color: red}\n  notes: {}\nblocks: {}\n"
+    );
+}
+
 const LIBRARY: &str = include_str!("../../../../examples/demo-set/blocks.yaml");
 
 /// A made-up block library with comments between its blocks, and a block

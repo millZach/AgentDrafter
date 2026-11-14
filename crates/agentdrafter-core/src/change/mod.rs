@@ -58,6 +58,7 @@ pub use operations::{change_set_schema, operations, OperationInfo, OperationList
 
 pub use accept::{accept_with, AcceptReport, AcceptRequest, StampRevision};
 pub(crate) use accept::{relative_to, stamp_revision};
+pub(crate) use apply::fit_library_inserts;
 pub(crate) use history::FilesAsOf;
 pub use journal::{
     journal, CheckFailed, CommitState, Entry, EntryKind, FileIssued, FileState, HowChanged,
@@ -190,6 +191,11 @@ pub struct OperationOutcome {
     /// block no longer carries the tag.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attributes_removed: Vec<AttributeRemoved>,
+    /// What an import_blocks imported: the blocks it added and replaced,
+    /// with the blocks each nests, the entries it added to the library's
+    /// tables, what it could not carry, block by block, and its notices.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imported: Option<crate::import::BlocksImported>,
     /// Why it did not land.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,

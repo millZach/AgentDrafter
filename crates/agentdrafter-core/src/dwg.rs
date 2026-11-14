@@ -6,7 +6,8 @@
 //! itself, changes these files and `Cargo.toml` only. Moving the pin means
 //! running the judge again. [`hatch`] carries hatches through the seam,
 //! [`text`] text styles and text, [`block`] blocks, attribute
-//! definitions and inserts, and [`ids`] each object's ID.
+//! definitions and inserts, [`ids`] each object's ID, and [`import`] a
+//! DWG's or a DXF's blocks for an import into a block library.
 //!
 //! Our own names here follow `CONTEXT.md`: a DWG file's contents are a
 //! drawing and the things in it are objects. acadrust's names, such as
@@ -39,7 +40,10 @@ use crate::units::Unit;
 mod block;
 mod hatch;
 mod ids;
+mod import;
 mod text;
+
+pub(crate) use import::read_blocks;
 
 /// The DWG version a new sheet is written in: the 2018 format, AC1032 (ADR-0006).
 const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;
