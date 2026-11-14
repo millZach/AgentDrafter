@@ -584,6 +584,9 @@ fn cases() -> Vec<Case> {
         (&LAYER_DESCRIPTION, "Trim marks", json!("Trim marks"), true),
         (&LAYER_DESCRIPTION, "null", json!(null), true),
         (&LAYER_DESCRIPTION, "[a]", json!(["a"]), false),
+        (&LAYER_DESCRIPTION, Box::leak("a".repeat(255).into_boxed_str()), json!("a".repeat(255)), true),
+        (&LAYER_DESCRIPTION, Box::leak("a".repeat(256).into_boxed_str()), json!("a".repeat(256)), false),
+        (&LAYER_DESCRIPTION, "\"a\tb\"", json!("a	b"), false),
         // closed: true or false, quoted or not.
         (&CLOSED, "true", json!(true), true),
         (&CLOSED, "'true'", json!("true"), true),

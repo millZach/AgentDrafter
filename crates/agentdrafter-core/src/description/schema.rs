@@ -544,9 +544,11 @@ fn defs() -> Map<String, Value> {
                 "description": optional_text(json!({
                     "description": format!(
                         "What AutoCAD's layer manager shows beside the name: one line of text, \
-                         at most {LONGEST_LAYER_DESCRIPTION} characters."
+                         at most {LONGEST_LAYER_DESCRIPTION} characters, with no control characters."
                     ),
                     "type": TEXT_TYPES,
+                    "maxLength": LONGEST_LAYER_DESCRIPTION,
+                    "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
                 })),
             },
         }),

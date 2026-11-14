@@ -516,7 +516,8 @@ impl<'a> Drawer<'a> {
         }
         let pen = self.pen(object.layer(), object.properties(), None);
         let drawn = self.object(object, pen, tolerance, None);
-        if drawn.cut_short {
+        // Only a hatch that draws is reported as cut short.
+        if drawn.cut_short && shown == Shown::Drawn {
             list.hatches_cut_short
                 .push(self.cut_short(index, object, None));
         }
@@ -554,9 +555,15 @@ impl<'a> Drawer<'a> {
                 LAYER_ZERO => insert.layer.as_str(),
                 layer => layer,
             };
+            // What lies on a frozen layer neither draws nor counts towards
+            // the block's box.
+            let shown = self.shown(layer);
+            if shown == Shown::Hidden {
+                continue;
+            }
             let pen = self.pen(layer, object.properties(), Some(insert_pen));
             let drawn = self.object(object, pen, within, Some(&placed));
-            if drawn.cut_short {
+            if drawn.cut_short && shown == Shown::Drawn {
                 let cut = self.cut_short(index, object, Some(&block.name));
                 list.hatches_cut_short.push(cut);
             }
@@ -564,7 +571,7 @@ impl<'a> Drawer<'a> {
             let points = drawn_points.chain(drawn.reach.iter().copied());
             let had = own.into_iter().flat_map(|b| [b.min, b.max]);
             own = Bounds::of(had.chain(points.map(|p| placed.back(p))));
-            list.add_shown(self.shown(layer), index, Some(part), pen.color, drawn);
+            list.add_shown(shown, index, Some(part), pen.color, drawn);
         }
         // AutoCAD's extents take in an insert's block box: the box round the
         // block's objects in its own coordinates, placed whole. Turned, it

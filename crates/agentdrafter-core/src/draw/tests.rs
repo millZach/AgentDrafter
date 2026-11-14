@@ -730,3 +730,45 @@ blocks:
     let frozen = draw_with_library("insert-frozen", library, &sheet("frozen: true"));
     assert!(frozen.items.is_empty() && frozen.extents().is_none());
 }
+
+/// A block's object on a frozen layer neither draws nor counts towards the
+/// insert's box, and a hatch that does not draw is not reported cut short.
+#[test]
+fn what_a_layer_hides_takes_no_room_and_raises_no_warning() {
+    let library = r#"
+units: mm
+layers:
+  gone: {frozen: true}
+blocks:
+  B:
+    objects:
+      - line: {from: [0, 0, 0], to: [10, 0, 0]}
+      - line: {from: [0, 100, 0], to: [10, 100, 0], layer: gone}
+"#;
+    let sheet = "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {block: B, position: [0, 0, 0]}
+";
+    let list = draw_with_library("frozen-in-block", library, sheet);
+    let extents = list.extents().unwrap();
+    assert!(extents.max[1] < 1.0, "{extents:?}");
+
+    let fine = "units: mm
+hatch_patterns:
+  FINE:
+    lines:
+      - {angle: 0, delta: [0, 0.000001]}
+layers:
+  off: {on: false}
+objects:
+  - hatch: {pattern: FINE, boundary: [{polyline: {points: [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]]}}], layer: off}
+";
+    let list = draw(fine);
+    assert!(list.items.is_empty());
+    assert!(
+        list.hatches_cut_short.is_empty(),
+        "{:?}",
+        list.hatches_cut_short
+    );
+}

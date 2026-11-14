@@ -109,7 +109,7 @@ A point is named as its key in the sheet description. Without one, the object's 
 `agentdrafter query layers <set | sheet-description> [--sheet <sheet>]` lists each sheet's layers: layer `0` first, as every drawing has it, then the sheet's own in order, those its block library brings among them. Each gives its `name`, `color`, `linetype` and `lineweight`, its states where they are not AutoCAD's defaults (`on`, `frozen`, `locked`, `plot`) and its `description` if it has one, as the sheet description writes them, and `objects`: how many of the sheet's objects sit on it, its inserts among them, not counting the objects of a block. The message names every layer that is off, frozen or does not plot.
 
 ```json
-{"kind": "layers", "count": 3, "layers": [{"sheet": "frame-plate", "layers": [{"name": "0", "color": 7, "linetype": "Continuous", "objects": 1}, {"name": "trim", "color": 8, "linetype": "Continuous", "plot": false, "objects": 2}]}]}
+{"kind": "layers", "count": 2, "layers": [{"sheet": "frame-plate", "layers": [{"name": "0", "color": 7, "linetype": "Continuous", "objects": 1}, {"name": "trim", "color": 8, "linetype": "Continuous", "plot": false, "objects": 2}]}]}
 ```
 
 ## Extents
