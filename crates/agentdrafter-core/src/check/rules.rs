@@ -29,15 +29,27 @@
 //!   Every text on the sheet counts, each line of a multiline text on its
 //!   own, and each text and visible attribute an insert draws, against
 //!   those of the same insert too.
+//! - **`text_on_line`**: no line touches a text's letters as they print,
+//!   by more than the tolerance (Zach, 2026-11-13). The sheet is drawn a
+//!   second time as it prints ([`printing_drawing`]): linetypes laid out,
+//!   so a line is its dashes, and layers that do not plot left out. A
+//!   line is a line, polyline, arc, circle, ellipse or spline, a wide
+//!   polyline's band among them; its ink is its pen's width round its
+//!   path. A text's letters are its font's strokes, with their pen, or its
+//!   outlines, filled. A line through the gaps between letters does not
+//!   touch them. The lines of the text's own insert, such as a title
+//!   block's cell lines, never count, nor do hatches, 2D solids and
+//!   donuts, which are fills.
 
 use std::collections::BTreeMap;
 
+use super::ink::Ink;
 use super::{BlockPart, CheckedObject, Finding, Rule, Sides};
 use crate::description::SheetRecord;
 use crate::draw::{Bounds, DisplayList, Item, Point2, TextRun};
 use crate::model::block::Placement;
 use crate::model::{Block, Insert, Object, Paper};
-use crate::query::{measuring_drawing, written_at, Extents};
+use crate::query::{measuring_drawing, printing_drawing, written_at, Extents};
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
 
@@ -66,6 +78,8 @@ pub(super) fn check_sheet(
     }
     findings.extend(on.text_overflow());
     findings.extend(on.text_on_text());
+    let printed = printing_drawing(&record.sheet, fonts);
+    findings.extend(on.text_on_line(&printed));
     findings
 }
 
@@ -92,6 +106,7 @@ impl Sheet<'_> {
             off_by: None,
             past: None,
             overlap: None,
+            at: None,
         }
     }
 
@@ -377,6 +392,99 @@ impl Sheet<'_> {
             .collect()
     }
 
+    /// A finding for each text whose letters a line touches as they print,
+    /// once for each text and line, at the first point found where they
+    /// touch.
+    fn text_on_line(&self, printed: &DisplayList) -> Vec<Finding> {
+        let u = self.units;
+        let units_per_mm = Unit::Mm.convert(1.0, u);
+        let mut letters: BTreeMap<Key, Ink> = BTreeMap::new();
+        let mut lines: BTreeMap<Key, Ink> = BTreeMap::new();
+        for item in &printed.items {
+            let key = (item.object, item.part);
+            match self.drawn_as(key) {
+                Drawn::Letters => letters
+                    .entry(key)
+                    .or_default()
+                    .add(&item.shape, units_per_mm),
+                Drawn::Line => lines.entry(key).or_default().add(&item.shape, units_per_mm),
+                Drawn::Fill => {}
+            }
+        }
+        let mut findings = Vec::new();
+        for (&text, letter_ink) in &letters {
+            for (&line, line_ink) in &lines {
+                // An insert's own lines, such as its cell lines, never
+                // count against its own text.
+                if line.0 == text.0 {
+                    continue;
+                }
+                let Some(at) = line_ink.touches(letter_ink, self.tolerance) else {
+                    continue;
+                };
+                let says = printed
+                    .text
+                    .iter()
+                    .filter(|run| (run.object, run.part) == text)
+                    .map(|run| run.characters.iter().map(|&(c, _)| c).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut finding = self.finding(
+                    Rule::TextOnLine,
+                    format!(
+                        "{} runs through {}: it touches the letters at {}, as they print",
+                        self.line_words(line.0, line.1),
+                        self.text_words(text.0, text.1, &says),
+                        point(at),
+                    ),
+                );
+                finding.object = Some(self.checked(text.0, text.1));
+                finding.other = Some(self.checked(line.0, line.1));
+                finding.drawn = letter_ink.bounds.as_ref().map(Extents::of);
+                finding.other_drawn = line_ink.bounds.as_ref().map(Extents::of);
+                finding.at = Some(at);
+                findings.push(finding);
+            }
+        }
+        findings
+    }
+
+    /// What the sheet's object `i` draws, or the object of its block at
+    /// `part`: letters, a line, or a fill that no line rule counts.
+    fn drawn_as(&self, (i, part): Key) -> Drawn {
+        let object = match self.in_block(i, part) {
+            Some(inner) => inner.object,
+            None => &self.record.sheet.objects[i],
+        };
+        match object {
+            Object::Text(_) | Object::MText(_) | Object::AttributeDefinition(_) => Drawn::Letters,
+            Object::Line(_)
+            | Object::Polyline(_)
+            | Object::Arc(_)
+            | Object::Circle(_)
+            | Object::Ellipse(_)
+            | Object::Spline(_) => Drawn::Line,
+            Object::Hatch(_) | Object::Solid(_) | Object::Donut(_) | Object::Insert(_) => {
+                Drawn::Fill
+            }
+        }
+    }
+
+    /// A line, as a finding names it: the sheet's object `i`, or the
+    /// object of its block at `part` and the insert that draws it.
+    fn line_words(&self, i: usize, part: Option<usize>) -> String {
+        let words = self.object_words(i);
+        match self.in_block(i, part) {
+            Some(inner) => format!(
+                "the {} at `{}` of the block {} that {words} inserts",
+                inner.object.type_name(),
+                inner.field(),
+                inner.block.name
+            ),
+            None => words,
+        }
+    }
+
     /// The block an insert places, as the sheet holds it.
     fn block(&self, insert: &Insert) -> Option<&Block> {
         self.record
@@ -545,6 +653,13 @@ fn says(object: &Object) -> Option<String> {
 /// Which text draws a line: the sheet's object, and the object of its block
 /// when it is an insert's.
 type Key = (usize, Option<usize>);
+
+/// What an object draws, for `text_on_line`.
+enum Drawn {
+    Letters,
+    Line,
+    Fill,
+}
 
 /// The box round what one line of text draws, in the line's own direction.
 struct TextBox {

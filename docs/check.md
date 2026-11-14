@@ -1,6 +1,6 @@
 # The checker
 
-The checker re-reads a drawing set's saved files, or one sheet description, and reports each [check](../CONTEXT.md) a sheet fails (see [`CONTEXT.md`](../CONTEXT.md)). It is separate from whatever made a change: it reads the records on disk, as a build reads them, never the records another part held in memory, so whatever made a change never marks its own work (`docs/plan.md`). Its default checks are the ones a reviewer would otherwise catch by eye: the exact paper size, nothing off the sheet, no text overflowing its cell, and no text sitting on other text.
+The checker re-reads a drawing set's saved files, or one sheet description, and reports each [check](../CONTEXT.md) a sheet fails (see [`CONTEXT.md`](../CONTEXT.md)). It is separate from whatever made a change: it reads the records on disk, as a build reads them, never the records another part held in memory, so whatever made a change never marks its own work (`docs/plan.md`). Its default checks are the ones a reviewer would otherwise catch by eye: the exact paper size, nothing off the sheet, no text overflowing its cell, no text sitting on other text, and no line running through a text's letters.
 
 `agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...` checks every sheet of a set, or only those `--sheet` names, in any case, and prints one line of JSON. It is a thin layer over the core's `check_with`, which takes a request and returns the report as plain data (ADR-0007). A change set's reply carries the checker's reply too ([below](#after-a-change-set)).
 
@@ -22,7 +22,7 @@ Two keys, decided by Zach on 2026-11-11, say what a sheet is held to. Only the c
 
 ## The checks
 
-Each check is held to one tolerance, **0.01 mm on paper**, given in the reply's declared unit as `tolerance`: a sheet is drawn at its paper's size, so a length on it is a length on paper. Within it, a sheet is its paper's size, an object is on the paper, a text is in its cell, and two texts do not sit on each other.
+Each check is held to one tolerance, **0.01 mm on paper**, given in the reply's declared unit as `tolerance`: a sheet is drawn at its paper's size, so a length on it is a length on paper. Within it, a sheet is its paper's size, an object is on the paper, a text is in its cell, two texts do not sit on each other, and no line touches a text's letters.
 
 | Rule | A sheet fails it when |
 |---|---|
@@ -30,6 +30,7 @@ Each check is held to one tolerance, **0.01 mm on paper**, given in the reply's 
 | `off_sheet` | One of its objects draws past the paper, from `[0, 0]` to the paper's width and height, by more than the tolerance. An insert is one object: what its block draws and its attributes together. A patterned hatch's boundary counts, as it does towards the extents, though the hatch's lines may stop short of it. |
 | `text_overflow` | A text or an attribute an insert draws, whose block declares its cell, draws past the cell. What it draws, as its font draws it, is taken back into the block's own coordinates by the insert's position, scale and rotation, and held to the cell there; how far it reaches past a side, enlarged by the insert's scale, is held to the tolerance. An attribute that draws nothing, being empty or invisible, is not checked. |
 | `text_on_text` | Two texts on it have drawn boxes that overlap by more than the tolerance. Each line of text has its own box: the box round what the line draws, as the pipeline draws it, seen in the line's own direction, so text turned with its insert or on its own is boxed as it runs, and the clear space beside a short line of an mtext is not text. How far two boxes overlap is how far one would move to clear the other, the least along the sides of either; a box with no width, round a single upright stroke such as `I`, counts too, so two `I`s at one place sit on each other. Every text counts: the sheet's text and mtext, and each text, mtext and visible attribute an insert draws, against the others of the same insert too. The text drawn later is named as sitting on the one drawn before it, once for each two texts, by their deepest overlap; for an mtext, the message names the line. |
+| `text_on_line` | A line touches a text's letters as they print, by more than the tolerance (Zach decided on 2026-11-13). The sheet is drawn a second time as it prints: each linetype laid out, so a line is its dashes, and layers that do not plot left out. A line is a line, polyline, arc, circle, ellipse or spline, a wide polyline's band among them, and its ink is its pen's width round its path; a text's letters are its font's strokes with their pen, or its TrueType outlines, filled. So a line through the gaps between letters, or the empty corner of an `L`, is not a finding, and a line through a stroke is. Never counted: the lines of the text's own insert, such as a title block's cell lines or a tag's bubble; hatches, 2D solids and donuts, which are fills; and a line on a layer that is off, frozen or does not plot. Every text counts, the text and attributes an insert draws among them, against every other line on the sheet, another insert's among them. Each text and line is named once, at the first point found where they touch. No sheet or layer opts out yet. |
 
 ## The reply
 
@@ -46,7 +47,7 @@ Each check is held to one tolerance, **0.01 mm on paper**, given in the reply's 
 | `passed` | Whether every check passed on every sheet checked. |
 | `tolerance` | How far past a limit counts, 0.01 mm on paper, in the declared unit. |
 | `count` | How many checks failed. |
-| `findings` | Each failed check, sheet by sheet in the set's order, and on each sheet `paper_size`, `off_sheet`, `text_overflow`, then `text_on_text`. |
+| `findings` | Each failed check, sheet by sheet in the set's order, and on each sheet `paper_size`, `off_sheet`, `text_overflow`, `text_on_text`, then `text_on_line`. |
 | `font_substitutions` | Each text style whose font was not in a font folder, and the look-alike its text was measured with. |
 | `inconsistent` | The set's [inconsistent mark](change-sets.md#an-inconsistent-set), while it is marked. |
 
@@ -59,16 +60,17 @@ Each check is held to one tolerance, **0.01 mm on paper**, given in the reply's 
 | Key | What it is |
 |---|---|
 | `sheet` | The sheet. |
-| `rule` | The check it failed: `paper_size`, `off_sheet`, `text_overflow` or `text_on_text`. |
+| `rule` | The check it failed: `paper_size`, `off_sheet`, `text_overflow`, `text_on_text` or `text_on_line`. |
 | `message` | What is wrong, in words and numbers. |
 | `object` | The object that fails it, by its ID, its name when it has one, its type and where it is written (`file`, `field`, `line`, `column`), as a [query](query.md#find) gives it. For text an insert draws, `in_block` says which object of its block: the block, the block library's `file`, its place in the block (`field`), its type and an attribute's `tag`. `text` is what the text says. None for `paper_size`, a check of the whole sheet. |
-| `other` | For `text_on_text`, the text the object sits on. |
-| `drawn` | The box round what is drawn: the sheet's extents for `paper_size`, the object's for `off_sheet`, its hatches' boundaries among it, the text's in its block's own coordinates for `text_overflow`, and for `text_on_text` the line's that sits deepest on the other text. `other_drawn` is the other text's line's. |
+| `other` | For `text_on_text`, the text the object sits on; for `text_on_line`, the line that runs through it. |
+| `drawn` | The box round what is drawn: the sheet's extents for `paper_size`, the object's for `off_sheet`, its hatches' boundaries among it, the text's in its block's own coordinates for `text_overflow`, and for `text_on_text` the line's that sits deepest on the other text. `other_drawn` is the other text's line's; for `text_on_line`, the text's letters', and `other_drawn` the line's, each with its pen's width. |
 | `paper` | The paper declared, for `paper_size` and `off_sheet`: its `width`, `height` and `name` if it was declared by one. |
 | `cell` | For `text_overflow`, the cell, in its block's own coordinates. |
 | `off_by` | For `paper_size`, `[width, height]`: how much wider and taller the sheet draws than its paper, less than 0 where it is narrower or shorter. |
 | `past` | For `off_sheet` and `text_overflow`, how far what is drawn reaches past each side, `left`, `bottom`, `right` and `top`, of the paper or of the cell in its block's own coordinates; 0 on a side it keeps within. |
 | `overlap` | For `text_on_text`, how far the two drawn boxes overlap. |
+| `at` | For `text_on_line`, a point where the line touches the letters. |
 
 ## After a change set
 
@@ -103,5 +105,5 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 - Checks in an undo's reply: an undo reports the files it put back, not the sheets they draw.
 - A paper placed anywhere but at the origin, or a paper in the set's settings.
 - A cell for a text or mtext on a sheet, outside a block, or for a block's mtext.
-- Text sitting on lines or other objects: `text_on_text` holds text to text.
+- Text sitting on a fill, such as a hatch or a solid: `text_on_line` holds text to lines, and `text_on_text` to text.
 - Checking DWGs, built or someone else's.

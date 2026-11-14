@@ -559,7 +559,10 @@ fn the_checker_reads_only_what_is_saved_on_disk() {
     )
     .unwrap();
     let report = check(&set, &[]);
-    assert_eq!(report.count, 1, "{:#?}", report.findings);
+    // The title runs past its cell, and on past the right side of the
+    // cell across the sheet's border.
+    assert_eq!(report.count, 2, "{:#?}", report.findings);
+    assert_eq!(report.findings[1].rule, Rule::TextOnLine);
     let finding = &report.findings[0];
     assert_eq!(finding.sheet, "DEMO-002");
     assert_eq!(finding.rule, Rule::TextOverflow);
@@ -649,6 +652,7 @@ fn a_change_sets_reply_carries_the_failed_checks_for_the_sheets_it_landed_on() {
         found,
         [
             ("DEMO-001", Rule::TextOverflow, "DEMO-001/objects[2]".into()),
+            ("DEMO-001", Rule::TextOnLine, "DEMO-001/objects[2]".into()),
             ("DEMO-002", Rule::PaperSize, String::new()),
             ("DEMO-002", Rule::OffSheet, "DEMO-002/edge".into()),
         ]
@@ -661,7 +665,7 @@ fn a_change_sets_reply_carries_the_failed_checks_for_the_sheets_it_landed_on() {
     assert_eq!(checked, check(&set, &["DEMO-001", "DEMO-002"]));
 
     // In JSON, each finding names the sheet, the rule and the object.
-    let written = serde_json::to_value(&checked.findings[2]).unwrap();
+    let written = serde_json::to_value(&checked.findings[3]).unwrap();
     assert_eq!(written["sheet"], "DEMO-002");
     assert_eq!(written["rule"], "off_sheet");
     assert_eq!(written["object"]["id"], "DEMO-002/edge");
@@ -801,4 +805,104 @@ fn the_journal_and_undo_leave_the_checker_reading_the_sets_files() {
     });
     assert!(undone.ok, "{:#?}", undone.error);
     passes(&check(&set, &[]));
+}
+
+/// Zach decided on 2026-11-13: a line sits on text only where it touches
+/// the letters as they print, never the lines of the text's own insert,
+/// never a fill, and never a line on a layer that is off or does not plot.
+#[test]
+fn a_line_through_a_texts_letters_is_found_and_one_through_its_gaps_is_not() {
+    let dir = scratch("text-on-line");
+    let sheet = |extra: &str| {
+        format!(
+            "units: mm
+paper: [200, 100]
+block_library: lib.yaml
+layers:
+  trim: {{plot: false}}
+  hidden: {{on: false}}
+objects:
+{TRIM}  - text: {{contents: TAG, position: [30, 30, 0], height: 5, id: tag}}
+  - insert: {{block: BOX, position: [100, 50, 0], attributes: {{TAG: P-101}}, id: box}}
+{extra}"
+        )
+    };
+    // The insert's own outline runs round its tag, and touches nothing.
+    passes(&check_sheet(&dir, &sheet("")));
+
+    // A wire across the tag's letters.
+    let across = check_sheet(
+        &dir,
+        &sheet("  - line: {from: [20, 32.5, 0], to: [60, 32.5, 0], id: wire}\n"),
+    );
+    let found = of(&across, Rule::TextOnLine);
+    assert_eq!(found.len(), 1, "{:#?}", across.findings);
+    assert_eq!(found[0].object.as_ref().unwrap().id, "sheet/tag");
+    assert_eq!(found[0].other.as_ref().unwrap().id, "sheet/wire");
+    let at = found[0].at.unwrap();
+    assert!(
+        (at[1] - 32.5).abs() < 1e-9 && (30.0..45.0).contains(&at[0]),
+        "{at:?}"
+    );
+    assert!(
+        found[0]
+            .message
+            .contains("the line `sheet/wire` runs through the text `sheet/tag` saying `TAG`"),
+        "{}",
+        found[0].message
+    );
+
+    // Another object's line through an insert's attribute.
+    let through = check_sheet(
+        &dir,
+        &sheet("  - line: {from: [110, 40, 0], to: [130, 60, 0], id: leader}\n"),
+    );
+    let found = of(&through, Rule::TextOnLine);
+    assert_eq!(found.len(), 1, "{:#?}", through.findings);
+    assert_eq!(found[0].object.as_ref().unwrap().id, "sheet/box");
+    assert_eq!(
+        found[0]
+            .object
+            .as_ref()
+            .unwrap()
+            .in_block
+            .as_ref()
+            .unwrap()
+            .tag
+            .as_deref(),
+        Some("TAG")
+    );
+
+    // The same wire on a layer that does not plot, or is off; a solid fill
+    // over the tag; none is a finding.
+    for extra in [
+        "  - line: {from: [20, 32.5, 0], to: [60, 32.5, 0], layer: trim}\n",
+        "  - line: {from: [20, 32.5, 0], to: [60, 32.5, 0], layer: hidden}\n",
+        "  - hatch: {pattern: SOLID, boundary: [{polyline: {points: [[25, 25, 0], [50, 25, 0], [50, 40, 0], [25, 40, 0]]}}]}\n",
+    ] {
+        let report = check_sheet(&dir, &sheet(extra));
+        assert!(of(&report, Rule::TextOnLine).is_empty(), "{extra}: {:#?}", report.findings);
+    }
+
+    // A line through the empty corner of an `L`'s box, clear of its
+    // strokes: it crosses the text's box, not its letters.
+    let l = |extra: &str| {
+        format!("units: mm\npaper: [200, 100]\nobjects:\n{TRIM}  - text: {{contents: L, position: [30, 30, 0], height: 10, id: l}}\n{extra}")
+    };
+    let alone = check_sheet(&dir, &l(""));
+    passes(&alone);
+    let corner = check_sheet(
+        &dir,
+        &l("  - line: {from: [36, 39, 0], to: [60, 39, 0], id: past}\n"),
+    );
+    assert!(
+        of(&corner, Rule::TextOnLine).is_empty(),
+        "a line in the L's empty corner: {:#?}",
+        corner.findings
+    );
+    let stem = check_sheet(
+        &dir,
+        &l("  - line: {from: [20, 39, 0], to: [60, 39, 0], id: past}\n"),
+    );
+    assert_eq!(of(&stem, Rule::TextOnLine).len(), 1, "{:#?}", stem.findings);
 }

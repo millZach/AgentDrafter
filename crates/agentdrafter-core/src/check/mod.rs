@@ -15,6 +15,7 @@
 //! reported, not refused: it does not stop a change set from landing, and
 //! the reviewer can accept a set after a warning that lists them.
 
+mod ink;
 mod rules;
 
 use std::path::{Path, PathBuf};
@@ -65,6 +66,9 @@ pub enum Rule {
     /// No two texts on a sheet, the text inserts draw among them, have
     /// drawn boxes that overlap by more than the tolerance.
     TextOnText,
+    /// No line touches a text's letters as they print, by more than the
+    /// tolerance, but the lines of the text's own insert.
+    TextOnLine,
 }
 
 impl Rule {
@@ -75,6 +79,7 @@ impl Rule {
             Rule::OffSheet => "off_sheet",
             Rule::TextOverflow => "text_overflow",
             Rule::TextOnText => "text_on_text",
+            Rule::TextOnLine => "text_on_line",
         }
     }
 }
@@ -154,6 +159,10 @@ pub struct Finding {
     /// would move to clear the other.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlap: Option<f64>,
+    /// For `text_on_line`, a point where the line touches the text's
+    /// letters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<[f64; 2]>,
 }
 
 /// How far something reaches past each side of a box.
