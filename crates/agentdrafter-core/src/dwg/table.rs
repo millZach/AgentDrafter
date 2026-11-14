@@ -8,9 +8,11 @@
 //! data, but with every text in `Standard` and every line in the table's
 //! own pen; AutoCAD 2026, laying out the same made-up table, drew each
 //! cell's text in its row's text style and the borders in the table style's
-//! border colour and lineweight. So once acadrust has filled the block, each
-//! of its texts is given the text style its cell draws with, and each of its
-//! lines the border pen, as AutoCAD would draw them.
+//! border colour and lineweight, every text and line on the table's own
+//! layer, the texts `ByBlock` in colour and `ByLayer` in lineweight. So once
+//! acadrust has filled the block, each of its texts is given the text style
+//! its cell draws with, and each of its lines the border pen, all on the
+//! table's layer, as AutoCAD 2026 wrote them laying out made-up tables.
 //!
 //! A cell's text is coded as multiline text is, and its own text style,
 //! height and justification are written as AutoCAD 2026 wrote them on a
@@ -20,22 +22,27 @@
 //! A table is read back when it has a model in the core: flat on the XY
 //! plane and running along X, in a table style the core read, each cell
 //! holding text or nothing, with no override but a text style, a height and
-//! a justification.
+//! a justification, and no override of the table's own, a row's or a
+//! column's at all. A table style is read back when every cell style it
+//! holds, the R2010 `_TITLE`, `_HEADER` and `_DATA` and any other, draws as
+//! the model does: no fill, no turned text, its text `ByBlock`, every
+//! border in the one pen and the style's margins.
 
 use acadrust::entities::table::{CellRange, CellStyle, CellStylePropertyFlags as Override};
 use acadrust::entities::{EntityType, Table as DwgTable, TableCell as DwgCell};
 use acadrust::objects::{
-    CellAlignment, ObjectType, RowCellStyle, TableCellBorder, TableStyle as DwgTableStyle,
+    CellAlignment, NamedTableCellStyle, ObjectType, RowCellStyle, TableBorderType, TableCellBorder,
+    TableCellStyleData, TableStyle as DwgTableStyle,
 };
 use acadrust::types::{Color, Handle, LineWeight, Vector3};
 use acadrust::CadDocument;
 
-use super::text::{mtext_code, mtext_contents};
+use super::text::{attachment_of, mtext_code, mtext_contents};
 use super::{point, vector};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Lineweight, ObjectColor, ObjectLineweight, RowKind, RowStyle, Sheet, Table, TableCell,
-    TableStyle, STANDARD_TABLE_STYLE,
+    LaidCell, Lineweight, ObjectColor, ObjectLineweight, RowKind, RowStyle, Sheet, Table,
+    TableCell, TableStyle, STANDARD_TABLE_STYLE,
 };
 use crate::text::{Attachment, STANDARD};
 
@@ -292,26 +299,31 @@ pub(super) fn fill_block(
     // the origin.
     let origin = table.position;
     let laid = table.laid_out(style);
+    // How far a text's point is moved into its own cell before it is looked
+    // for: a quarter of the narrowest column and of the lowest row, so a
+    // point on an edge two cells share lies inside one of them only.
+    let nudge = [
+        table.columns.iter().copied().fold(f64::INFINITY, f64::min) / 4.0,
+        table.rows.iter().copied().fold(f64::INFINITY, f64::min) / 4.0,
+    ];
     for member in members {
         match drawing.get_entity_mut(member) {
             Some(EntityType::MText(text)) => {
+                let justify = attachment_of(text.attachment_point).ok_or_else(failed)?;
                 let at = [
                     text.insertion_point.x + origin.x,
                     text.insertion_point.y + origin.y,
                 ];
-                let cell = laid.iter().find(|cell| {
-                    cell.text.is_some()
-                        && (cell.x[0]..=cell.x[1]).contains(&at[0])
-                        && (cell.y[0]..=cell.y[1]).contains(&at[1])
-                });
-                if let Some(text_style) = cell
-                    .and_then(|cell| cell.text.as_ref())
-                    .map(|t| t.style.clone())
-                {
-                    text.style = text_style;
+                let cell = cell_of(&laid, at, justify, nudge).ok_or_else(failed)?;
+                if let Some(cell_text) = &cell.text {
+                    text.style.clone_from(&cell_text.style);
                 }
+                table.layer.clone_into(&mut text.common.layer);
+                text.common.color = Color::ByBlock;
+                text.common.line_weight = LineWeight::ByLayer;
             }
             Some(EntityType::Line(line)) if !line.common.invisible => {
+                table.layer.clone_into(&mut line.common.layer);
                 line.common.color = dwg_color(style.border_color);
                 line.common.line_weight = dwg_lineweight(style.border_lineweight);
             }
@@ -319,6 +331,32 @@ pub(super) fn fill_block(
         }
     }
     Ok(())
+}
+
+/// The cell whose text acadrust placed at `at`, attached at `justify`: the
+/// one cell with text so justified whose inside holds `at` moved by `nudge`
+/// toward the side the text is attached at, inward from a left, right, top
+/// or bottom margin. A point on an edge two cells share is so inside one
+/// cell only.
+fn cell_of(
+    laid: &[LaidCell],
+    at: [f64; 2],
+    justify: Attachment,
+    nudge: [f64; 2],
+) -> Option<&LaidCell> {
+    let place = Attachment::ALL.iter().position(|a| *a == justify)?;
+    let across = [1.0, 0.0, -1.0][place % 3];
+    let up = [-1.0, 0.0, 1.0][place / 3];
+    let p = [at[0] + across * nudge[0], at[1] + up * nudge[1]];
+    let mut found = laid.iter().filter(|cell| {
+        cell.text.as_ref().is_some_and(|t| t.justify == justify)
+            && cell.x[0] < p[0]
+            && p[0] < cell.x[1]
+            && cell.y[0] < p[1]
+            && p[1] < cell.y[1]
+    });
+    let cell = found.next()?;
+    found.next().is_none().then_some(cell)
 }
 
 /// The drawing's table styles the core has a model for, and how many it
@@ -403,7 +441,7 @@ fn read_table_style(drawing: &CadDocument, written: &DwgTableStyle) -> Option<Ta
     if written.flow_direction != acadrust::objects::TableFlowDirection::Down {
         return None;
     }
-    Some(TableStyle {
+    let read = TableStyle {
         name: written.name.clone(),
         horizontal_margin: written.horizontal_margin,
         vertical_margin: written.vertical_margin,
@@ -412,7 +450,93 @@ fn read_table_style(drawing: &CadDocument, written: &DwgTableStyle) -> Option<Ta
         title: row(rows[0])?,
         header: row(rows[1])?,
         data: row(rows[2])?,
-    })
+    };
+    // The R2010 cell styles, which AutoCAD draws from, hold no more than
+    // the legacy rows the style was read from.
+    let first_pen = (first.color, first.line_weight);
+    if let Some(base) = &written.modern_style {
+        modern_draws_as_read(drawing, base, &read, first_pen, None)?;
+    }
+    for (_, named) in &written.modern_overrides {
+        let kind = match named.name.as_str() {
+            "_TITLE" => Some(&read.title),
+            "_HEADER" => Some(&read.header),
+            "_DATA" => Some(&read.data),
+            _ => None,
+        };
+        modern_draws_as_read(drawing, named, &read, first_pen, kind)?;
+    }
+    Some(read)
+}
+
+/// Whether an R2010 cell style of a table style draws as the style the core
+/// read, `read`: no fill, no turned text, text `ByBlock` and laid out in a
+/// flow, every border shown, single, continuous and in the one pen `pen`,
+/// and the style's margins. A cell style of a kind of row also has that
+/// row's text style, height and justification, `row`. None when it does not.
+fn modern_draws_as_read(
+    drawing: &CadDocument,
+    named: &NamedTableCellStyle,
+    read: &TableStyle,
+    pen: (Color, LineWeight),
+    row: Option<&RowStyle>,
+) -> Option<()> {
+    let style: &TableCellStyleData = &named.cell_style;
+    if style.data_flags == 0 {
+        return Some(());
+    }
+    let format = &style.content_format;
+    let plain = matches!(style.background_color, Color::None)
+        && style.content_layout == 1
+        && format.rotation == 0.0
+        && matches!(format.content_color, Color::ByBlock);
+    if !plain {
+        return None;
+    }
+    if style.margin_override_flags != 0 {
+        let margins = [
+            style.horizontal_margin,
+            style.right_margin,
+            style.vertical_margin,
+            style.bottom_margin,
+        ];
+        let want = [
+            read.horizontal_margin,
+            read.horizontal_margin,
+            read.vertical_margin,
+            read.vertical_margin,
+        ];
+        if margins != want {
+            return None;
+        }
+    }
+    // acadrust keeps an R2010 border's flag the other way round from a
+    // legacy row's: `is_invisible` set on a border AutoCAD draws.
+    let borders_drawn_in_pen = style.borders.iter().all(|grid| {
+        grid.index_mask == 0
+            || (grid.border.is_invisible
+                && grid.border.border_type == TableBorderType::Single
+                && grid.line_type.is_null()
+                && (grid.border.color, grid.border.line_weight) == pen)
+    });
+    if !borders_drawn_in_pen {
+        return None;
+    }
+    if let Some(row) = row {
+        let text_style = drawing
+            .text_styles
+            .iter()
+            .find(|s| s.handle == format.text_style)
+            .map(|s| s.name.as_str())
+            .unwrap_or(STANDARD);
+        let same = format.text_height == row.text_height
+            && justify(format.cell_alignment) == Some(row.justify)
+            && (format.text_style.is_null() || text_style == row.text_style);
+        if !same {
+            return None;
+        }
+    }
+    Some(())
 }
 
 /// The table's block, which holds what it draws and is read with it.
@@ -435,6 +559,26 @@ pub(super) fn read_table(
         || written.rows.is_empty()
         || written.columns.is_empty()
         || !written.break_data.is_empty()
+    {
+        return None;
+    }
+    // An override of the table's own, a row's or a column's draws what the
+    // model has no place for, such as a fill.
+    let table_overrides = written.override_flag
+        || written.override_border_color
+        || written.override_border_line_weight
+        || written.override_border_visibility
+        || written.legacy_style_override.is_some()
+        || written.legacy_border_colors.is_some()
+        || written.legacy_border_line_weights.is_some()
+        || written.legacy_border_visibility.is_some();
+    let scopes = std::iter::once(&written.base_style)
+        .chain(written.rows.iter().map(|row| &row.style))
+        .chain(written.columns.iter().map(|column| &column.style));
+    if table_overrides
+        || scopes
+            .flatten()
+            .any(|style| overrides_beyond(style, Override::NONE))
     {
         return None;
     }
@@ -549,14 +693,275 @@ fn read_cell(drawing: &CadDocument, cell: &DwgCell) -> Option<TableCell> {
             read.height = Some(content.text_height);
         }
     }
+    if cell.style_id != 0 {
+        return None;
+    }
     if let Some(own) = &cell.style {
-        let overridden = own.overridden();
-        if overridden.bits() & !Override::ALIGNMENT.bits() != 0 {
+        if overrides_beyond(own, Override::ALIGNMENT) {
             return None;
         }
-        if overridden.contains(Override::ALIGNMENT) {
+        if own.overridden().contains(Override::ALIGNMENT) {
             read.justify = Some(justify(own.alignment)?);
         }
     }
     Some(read)
+}
+
+/// Whether a table's, a row's, a column's or a cell's own style overrides
+/// anything but `allowed`: a property, its content's format, a margin, or a
+/// border.
+fn overrides_beyond(style: &CellStyle, allowed: Override) -> bool {
+    let borders = [
+        &style.top_border,
+        &style.right_border,
+        &style.bottom_border,
+        &style.left_border,
+    ];
+    !(style.overridden() - allowed).is_empty()
+        || style.content_format_override_flags != 0
+        || style.margin_override_flags != 0
+        || style.fill_enabled
+        || !style.applied_border_edges.is_empty()
+        || !style.additional_borders.is_empty()
+        || borders.iter().any(|b| !b.override_flags.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+
+    use acadrust::entities::table::{CellStyle, CellStylePropertyFlags as Override};
+    use acadrust::entities::EntityType;
+    use acadrust::objects::ObjectType;
+    use acadrust::types::{Color, LineWeight};
+    use acadrust::{CadDocument, DwgReader, DwgWriter};
+
+    use crate::build::{build, BuildRequest};
+    use crate::model::{DrawingContents, Object};
+
+    /// A change made to a drawing's table, or to one of a table style's
+    /// R2010 cell styles, with what it is called.
+    type TableChange = (&'static str, fn(&mut acadrust::entities::Table));
+    type CellStyleChange = (&'static str, fn(&mut acadrust::objects::TableCellStyleData));
+
+    /// An empty folder for one test under the system's temporary folder.
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("agentdrafter-dwg-table-{}", std::process::id()))
+            .join(test);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A made-up sheet of one table on layer `list`, in table style `s`.
+    const SHEET: &str = "units: mm
+layers:
+  list: {color: green, lineweight: 0.18}
+text_styles:
+  A: {font: arial.ttf}
+  B: {font: romans.shx}
+table_styles:
+  s:
+    text_height: 2.5
+    horizontal_margin: 0
+    vertical_margin: 1
+    data: {justify: top_left}
+objects:
+  - table:
+      position: [0, 50, 0]
+      columns: [20, 20]
+      rows: [10, 10]
+      table_style: s
+      layer: list
+      cells:
+        - [{text: LEFT, style: A}, {text: RIGHT, style: B}]
+        - [ONE, TWO]
+";
+
+    /// Builds `text` in a folder of its own, and gives the folder and the
+    /// drawing the DWG holds.
+    fn built(test: &str, text: &str) -> (PathBuf, CadDocument) {
+        let dir = scratch(test);
+        let description = dir.join("sheet.yaml");
+        fs::write(&description, text).unwrap();
+        build(&BuildRequest {
+            description,
+            output: None,
+            overwrite: false,
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        let bytes = fs::read(dir.join("sheet.dwg")).unwrap();
+        let drawing = DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
+        (dir, drawing)
+    }
+
+    /// Writes `drawing` beside the built DWG and reads it as the core does.
+    fn read_back(dir: &std::path::Path, drawing: &CadDocument) -> DrawingContents {
+        let path = dir.join("changed.dwg");
+        fs::write(&path, DwgWriter::write_to_vec(drawing).unwrap()).unwrap();
+        super::super::read(&path).unwrap()
+    }
+
+    fn table_of(drawing: &mut CadDocument) -> &mut acadrust::entities::Table {
+        let handle = drawing
+            .model_space_entities()
+            .find_map(|e| match e {
+                EntityType::Table(t) => Some(t.common.handle),
+                _ => None,
+            })
+            .unwrap();
+        match drawing.get_entity_mut(handle) {
+            Some(EntityType::Table(t)) => t,
+            _ => unreachable!(),
+        }
+    }
+
+    /// A style that fills its cells red: a background the model has no
+    /// place for.
+    fn filled() -> CellStyle {
+        let mut style = CellStyle::new();
+        style.property_flags = Override::BACKGROUND_COLOR;
+        style.background_color = Color::Index(1);
+        style.fill_enabled = true;
+        style
+    }
+
+    #[test]
+    fn a_table_rewritten_as_it_was_reads_back() {
+        let (dir, drawing) = built("as-it-was", SHEET);
+        let read = read_back(&dir, &drawing);
+        assert_eq!(read.objects_not_read, 0, "{read:?}");
+        assert!(matches!(read.objects[0], Object::Table(_)));
+        assert_eq!(read.table_styles_not_read, 0);
+    }
+
+    #[test]
+    fn a_fill_of_the_table_a_row_or_a_column_is_not_read() {
+        let scopes: [TableChange; 3] = [
+            ("table", |t| t.base_style = Some(filled())),
+            ("row", |t| t.rows[1].style = Some(filled())),
+            ("column", |t| t.columns[0].style = Some(filled())),
+        ];
+        for (scope, fill) in scopes {
+            let (dir, mut drawing) = built(&format!("fill-{scope}"), SHEET);
+            fill(table_of(&mut drawing));
+            let read = read_back(&dir, &drawing);
+            assert_eq!(read.objects_not_read, 1, "a filled {scope}: {read:?}");
+            assert!(read.objects.is_empty(), "a filled {scope}");
+        }
+    }
+
+    #[test]
+    fn a_table_style_whose_cell_styles_draw_more_than_the_model_is_not_read() {
+        let changes: [CellStyleChange; 3] = [
+            ("turned", |c| {
+                c.content_format.rotation = std::f64::consts::FRAC_PI_2;
+            }),
+            ("filled", |c| c.background_color = Color::Index(2)),
+            ("red text", |c| {
+                c.content_format.content_color = Color::Index(1)
+            }),
+        ];
+        for (what, change) in changes {
+            let (dir, mut drawing) = built(&format!("style-{}", what.replace(' ', "-")), SHEET);
+            let style = drawing
+                .objects
+                .values_mut()
+                .find_map(|o| match o {
+                    ObjectType::TableStyle(s) if s.name == "s" => Some(s),
+                    _ => None,
+                })
+                .unwrap();
+            let data = style
+                .modern_overrides
+                .iter_mut()
+                .find(|(_, n)| n.name == "_DATA")
+                .expect("the R2010 data cell style");
+            change(&mut data.1.cell_style);
+            let read = read_back(&dir, &drawing);
+            assert!(
+                !read.table_styles.iter().any(|s| s.name == "s"),
+                "{what}: {:?}",
+                read.table_styles
+            );
+            assert_eq!(read.table_styles_not_read, 1, "{what}");
+            assert_eq!(
+                read.objects_not_read, 1,
+                "{what}: the table in it is not read"
+            );
+        }
+    }
+
+    /// Each text of the table's block: what it says, its text style, layer,
+    /// colour and lineweight.
+    fn block_texts(drawing: &CadDocument) -> Vec<(String, String, String, Color, LineWeight)> {
+        let names: Vec<String> = drawing
+            .block_records
+            .iter()
+            .filter(|r| r.name.starts_with("*T"))
+            .map(|r| r.name.clone())
+            .collect();
+        names
+            .iter()
+            .flat_map(|name| drawing.entities_in_block(name))
+            .filter_map(|e| match e {
+                EntityType::MText(m) => Some((
+                    m.value.clone(),
+                    m.style.clone(),
+                    m.common.layer.clone(),
+                    m.common.color,
+                    m.common.line_weight,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_text_on_an_edge_two_cells_share_takes_its_own_cells_style() {
+        // With no side margin, the right cell's top left text sits on the
+        // edge it shares with the left cell.
+        let (_, drawing) = built("shared-edge", SHEET);
+        let texts = block_texts(&drawing);
+        let style_of = |says: &str| {
+            texts
+                .iter()
+                .find(|t| t.0 == says)
+                .map(|t| t.1.clone())
+                .unwrap()
+        };
+        assert_eq!(style_of("LEFT"), "A");
+        assert_eq!(style_of("RIGHT"), "B");
+        assert_eq!(style_of("TWO"), "Standard");
+    }
+
+    #[test]
+    fn the_blocks_texts_and_lines_are_written_as_autocad_lays_a_table_out() {
+        // AutoCAD 2026, laying a made-up table out, put each of its block's
+        // texts and lines on the table's layer, the texts ByBlock in colour
+        // and ByLayer in lineweight.
+        let (_, drawing) = built("block-pens", SHEET);
+        for (says, _, layer, color, lineweight) in block_texts(&drawing) {
+            assert_eq!(layer, "list", "{says}");
+            assert_eq!(color, Color::ByBlock, "{says}");
+            assert_eq!(lineweight, LineWeight::ByLayer, "{says}");
+        }
+        let name = drawing
+            .block_records
+            .iter()
+            .find(|r| r.name.starts_with("*T"))
+            .unwrap()
+            .name
+            .clone();
+        for e in drawing.entities_in_block(&name) {
+            if let EntityType::Line(line) = e {
+                if !line.common.invisible {
+                    assert_eq!(line.common.layer, "list");
+                }
+            }
+        }
+    }
 }

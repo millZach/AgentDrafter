@@ -432,7 +432,7 @@ fn check_merges(cells: &[Vec<TableCell>], listed: &[Node], path: &str) -> Result
             };
             let cell_node = &sequence(&listed[r], "", "")?[c];
             let merge_path = key_path(&index_path(&index_path(path, r), c), "merge");
-            if r + down > rows || c + across > columns {
+            if down > rows - r || across > columns - c {
                 return Err(bad_value(
                     cell_node,
                     &merge_path,

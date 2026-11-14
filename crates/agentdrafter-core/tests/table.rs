@@ -178,6 +178,29 @@ fn the_reader_refuses_a_table_it_cannot_draw_and_names_the_field() {
 }
 
 #[test]
+fn a_merge_too_large_to_add_is_past_the_table_not_a_panic() {
+    // From row 3, column 2, a span of the largest whole number would run
+    // past the end of the numbers if added to its place.
+    for merge in [
+        "merge: [18446744073709551615, 1]",
+        "merge: [1, 18446744073709551615]",
+    ] {
+        let text = with("merge: [1, 2]", merge);
+        let error = parse_sheet_description(&text).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BadValue, "{error:?}");
+        assert_eq!(
+            error.field.as_deref(),
+            Some("objects[0].table.cells[3][2].merge")
+        );
+        assert!(
+            error.message.contains("past the table"),
+            "{}",
+            error.message
+        );
+    }
+}
+
+#[test]
 fn a_table_belongs_on_a_sheet_not_in_a_block() {
     let library = "units: mm
 blocks:
@@ -269,6 +292,83 @@ fn the_pipeline_draws_the_borders_and_each_cells_text_in_its_margins() {
     let run = list.text.iter().find(|r| r.cell == Some([1, 3])).unwrap();
     let says: String = run.characters.iter().map(|(c, _)| c).collect();
     assert_eq!(says, "CORES");
+}
+
+#[test]
+fn a_cells_text_draws_in_the_tables_colour_and_its_layers_lineweight() {
+    // AutoCAD 2026 wrote a laid-out table's texts ByBlock in colour and
+    // ByLayer in lineweight, on the table's layer: its borders take the
+    // table's own lineweight, its text the layer's.
+    let dir = scratch("text-pen");
+    let text = "units: mm
+layers:
+  list: {color: green, lineweight: 0.18}
+objects:
+  - table: {position: [0, 50, 0], columns: [40], rows: [10], cells: [[PUMP]], layer: list, color: red, lineweight: 0.7}
+";
+    let report = display(&dir, text);
+    let list = &report.display_list;
+    let mut cells = 0;
+    for item in &list.items {
+        let Shape::Stroke { lineweight, .. } = &item.shape else {
+            continue;
+        };
+        assert_eq!(item.color.0, 1, "{item:?}");
+        if item.cell.is_some() {
+            cells += 1;
+            assert_eq!(*lineweight, 0.18, "the text: {item:?}");
+        } else {
+            assert_eq!(*lineweight, 0.7, "a border: {item:?}");
+        }
+    }
+    assert!(cells > 0);
+}
+
+#[test]
+fn a_blank_line_in_a_cell_counts_towards_the_height_its_text_needs() {
+    // Three lines, the middle one blank: 2.5 + 2 * 5/3 * 2.5 = 10.8333 and
+    // both margins, 12.8333, in a row 10 high.
+    let dir = scratch("blank-line");
+    let path = dir.join("sheet.yaml");
+    fs::write(
+        &path,
+        "units: mm
+paper: [100, 100]
+table_styles:
+  s: {text_height: 2.5, horizontal_margin: 1, vertical_margin: 1}
+objects:
+  - polyline: {points: [[0, 0, 0], [100, 0, 0], [100, 100, 0], [0, 100, 0]], closed: true}
+  - table:
+      position: [10, 90, 0]
+      columns: [40]
+      rows: [10]
+      table_style: s
+      cells:
+        - [\"A\\n\\nB\"]
+",
+    )
+    .unwrap();
+    let sheet = parse_sheet_description(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(the_table(&sheet).cells[0][0].text, "A\n\nB");
+    let report = check(&path);
+    let found: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule == Rule::TextOverflow)
+        .collect();
+    assert_eq!(found.len(), 1, "{:#?}", report.findings);
+    let past = found[0].past.as_ref().unwrap();
+    // Data is top centre: the lines hang from the top margin.
+    assert!(past.top.abs() < 1e-9, "{past:?}");
+    assert!(
+        (past.bottom - (12.8333333333 - 10.0)).abs() < 1e-6,
+        "{past:?}"
+    );
+    assert!(
+        found[0].message.contains("10.833333"),
+        "{}",
+        found[0].message
+    );
 }
 
 #[test]

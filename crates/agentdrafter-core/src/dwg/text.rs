@@ -60,6 +60,14 @@ const ATTACHMENTS: [(Attachment, AttachmentPoint); 9] = [
     (Attachment::BottomRight, AttachmentPoint::BottomRight),
 ];
 
+/// The attachment of multiline text that AutoCAD's `point` is.
+pub(super) fn attachment_of(point: AttachmentPoint) -> Option<Attachment> {
+    ATTACHMENTS
+        .into_iter()
+        .find(|(_, p)| *p == point)
+        .map(|(attachment, _)| attachment)
+}
+
 /// The code multiline text writes a `%` of a run with.
 const PERCENT_CODE: &str = "\\U+0025";
 

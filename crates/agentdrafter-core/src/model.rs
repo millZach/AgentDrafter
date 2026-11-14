@@ -23,7 +23,8 @@ pub use block::{
 };
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use table::{
-    RowKind, RowStyle, Table, TableCell, TableStyle, LINE_BOX, LINE_STEP, STANDARD_TABLE_STYLE,
+    LaidCell, RowKind, RowStyle, Table, TableCell, TableStyle, LINE_BOX, LINE_STEP,
+    STANDARD_TABLE_STYLE,
 };
 
 /// The layer every drawing has, and the one an object sits on unless it names another.

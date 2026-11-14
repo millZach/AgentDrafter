@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 use super::ink::Ink;
 use super::{BlockPart, CheckedObject, Finding, Rule, Sides};
 use crate::description::SheetRecord;
-use crate::draw::{Bounds, DisplayList, Item, Point2, TextRun};
+use crate::draw::{mtext_lines, Bounds, DisplayList, Item, Point2, TextRun};
 use crate::model::block::Placement;
 use crate::model::{Block, Insert, Object, Paper, Table, TableStyle, LINE_BOX, LINE_STEP};
 use crate::query::{measuring_drawing, printing_drawing, written_at, Extents};
@@ -70,6 +70,7 @@ pub(super) fn check_sheet(
     let on = Sheet {
         record,
         list: &list,
+        fonts,
         units,
         tolerance,
     };
@@ -92,6 +93,7 @@ pub(super) fn check_sheet(
 struct Sheet<'a> {
     record: &'a SheetRecord,
     list: &'a DisplayList,
+    fonts: &'a SheetFonts,
     units: Unit,
     tolerance: f64,
 }
@@ -365,13 +367,9 @@ impl Sheet<'_> {
             let Some(drawn) = drawn else {
                 continue;
             };
-            let lines = self
-                .list
-                .text
-                .iter()
-                .filter(|run| run.object == i && mine(run.cell))
-                .count()
-                .max(1);
+            // Every line the text is laid out in, a blank one among them,
+            // which draws no run of its own.
+            let lines = mtext_lines(text, self.fonts).max(1);
             let [h, v] = cell.margins;
             let inside = Bounds {
                 min: [cell.x[0] + h, cell.y[0] + v],

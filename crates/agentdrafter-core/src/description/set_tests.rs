@@ -746,6 +746,18 @@ const LAYER_NAME: Place = Place {
     json: r#"{"units": "mm", "objects": [{"circle": {"center": [0, 0, 0], "radius": 1, "layer": V}}]}"#,
 };
 
+const TABLE_CELL: Place = Place {
+    name: "a table's cell in a template",
+    yaml: "units: mm\nobjects:\n  - table: {position: [0, 0, 0], columns: [10], rows: [5], cells: [[V]]}\n",
+    json: r#"{"units": "mm", "objects": [{"table": {"position": [0, 0, 0], "columns": [10], "rows": [5], "cells": [[V]]}}]}"#,
+};
+
+const TABLE_CELL_TEXT: Place = Place {
+    name: "a table cell's text in a template",
+    yaml: "units: mm\nobjects:\n  - table: {position: [0, 0, 0], columns: [10], rows: [5], cells: [[{text: V, height: 2}]]}\n",
+    json: r#"{"units": "mm", "objects": [{"table": {"position": [0, 0, 0], "columns": [10], "rows": [5], "cells": [[{"text": V, "height": 2}]]}}]}"#,
+};
+
 /// Reads a template as a set builds it, from a row that gives each value
 /// it takes the text `A`.
 fn read_template_with_every_value(yaml: &str) -> Result<(), Error> {
@@ -819,6 +831,23 @@ fn the_template_schema_accepts_exactly_the_templates_the_reader_accepts() {
         cases.push((place, "' '", json!(" "), false));
     }
     cases.push((&ATTRIBUTE_VALUE, "''", json!(""), true));
+    // A table's cell may be a value from the row, as may its text.
+    for place in [&TABLE_CELL, &TABLE_CELL_TEXT] {
+        cases.extend([
+            (place, "PLAIN TEXT", json!("PLAIN TEXT"), true),
+            (place, "''", json!(""), true),
+            (place, "{row: TITLE}", json!({"row": "TITLE"}), true),
+            (place, "{row: 7}", json!({"row": 7}), true),
+            (place, "{row: 'DWG NO'}", json!({"row": "DWG NO"}), false),
+            (place, "{row: [A]}", json!({"row": ["A"]}), false),
+        ]);
+    }
+    cases.push((
+        &TABLE_CELL,
+        "{row: A, height: 2}",
+        json!({"row": "A", "height": 2}),
+        false,
+    ));
     // Only an attribute's value and text's contents come from the row.
     cases.push((&LAYER_NAME, "{row: LAYER}", json!({"row": "LAYER"}), false));
     assert_reader_and_schema_agree(&template_schema(), cases, read_template_with_every_value);
@@ -835,4 +864,19 @@ fn the_sheet_description_schema_takes_no_value_from_a_row() {
     .unwrap();
     assert!(!validator.is_valid(&json));
     assert!(parse_sheet_description(&TEXT_CONTENTS.yaml.replace('V', "{row: TITLE}")).is_err());
+    // Nor as a table's cell, or a cell's text.
+    for place in [&TABLE_CELL, &TABLE_CELL_TEXT] {
+        let json: Value = serde_json::from_str(
+            &place
+                .json
+                .replace('V', &json!({"row": "TITLE"}).to_string()),
+        )
+        .unwrap();
+        assert!(!validator.is_valid(&json), "{}", place.name);
+        assert!(
+            parse_sheet_description(&place.yaml.replace('V', "{row: TITLE}")).is_err(),
+            "{}",
+            place.name
+        );
+    }
 }

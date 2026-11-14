@@ -67,6 +67,7 @@ pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
 pub use pick::{object_bounds, pick};
 pub(crate) use polyline::bulge_of;
+pub(crate) use text::mtext_lines;
 
 /// AutoCAD's default lineweight, which a layer with none of its own plots
 /// with: 0.25 mm, AutoCAD's `LWDEFAULT` as installed.
@@ -892,8 +893,11 @@ impl<'a> Drawer<'a> {
     /// made-up tables: its borders, every row's boundary and every
     /// column's but inside a merged cell, in the table style's border pen,
     /// `ByBlock` taking the table's own; and each cell's text as multiline
-    /// text in the cell's margins, in the table's own pen. Each shape and
-    /// line of text a cell's text draws says which cell it is.
+    /// text in the cell's margins, in the table's own colour and its
+    /// layer's lineweight, as AutoCAD 2026 wrote a table's texts laying it
+    /// out: `ByBlock` in colour, `ByLayer` in lineweight, on the table's
+    /// layer. Each shape and line of text a cell's text draws says which
+    /// cell it is.
     fn table(&self, index: usize, table: &Table, tolerance: f64, list: &mut DisplayList) {
         let shown = self.shown(&table.layer);
         if shown == Shown::Hidden {
@@ -946,7 +950,7 @@ impl<'a> Drawer<'a> {
             let Some(text) = &cell.text else {
                 continue;
             };
-            let lettering = text::draw_mtext(text, self.fonts, pen.lineweight, tolerance);
+            let lettering = text::draw_mtext(text, self.fonts, by_layer.lineweight, tolerance);
             let drawn = Drawn {
                 shapes: lettering.shapes,
                 runs: lettering.runs,

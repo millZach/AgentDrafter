@@ -59,6 +59,14 @@ pub(super) fn draw_text(
     out.lettering(lineweight)
 }
 
+/// How many lines multiline text is laid out in: each line its contents
+/// break, a blank one among them, and each line wrapping makes in its box.
+pub(crate) fn mtext_lines(text: &MText, fonts: &SheetFonts) -> usize {
+    let (font, style_width) = fonts.style(&text.style);
+    let along = text.height * text.width_factor.unwrap_or(style_width);
+    wrap(font, &text.contents, text.width / along).len()
+}
+
 /// What multiline text draws.
 pub(super) fn draw_mtext(
     text: &MText,
