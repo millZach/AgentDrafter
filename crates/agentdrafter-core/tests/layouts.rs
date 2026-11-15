@@ -289,7 +289,10 @@ fn a_dwg_saved_on_the_model_tab_reads_and_plots_every_layout() {
     assert_eq!(read.opens_on.as_deref(), Some("Front"));
     // The same drawing with only its Model tab made current, as AutoCAD
     // saves one left on the Model tab.
-    let mut drawing = acadrust::DwgReader::from_file(&dwg).unwrap().read().unwrap();
+    let mut drawing = acadrust::DwgReader::from_file(&dwg)
+        .unwrap()
+        .read()
+        .unwrap();
     drawing.header.show_model_space = true;
     let on_model = dir.join("model-tab.dwg");
     fs::write(
@@ -758,8 +761,7 @@ fn a_shared_templates_viewport_is_clipped_through_any_sheet_built_from_it() {
     );
     assert!(built.ok, "{:#?}", built.error);
     let template = || {
-        parse_sheet_description(&fs::read_to_string(set.join("templates/t.yaml")).unwrap())
-            .unwrap()
+        parse_sheet_description(&fs::read_to_string(set.join("templates/t.yaml")).unwrap()).unwrap()
     };
     // Named on the second sheet, the template's viewport is clipped, and
     // the change lands on both sheets built from it.

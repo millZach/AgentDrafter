@@ -418,10 +418,7 @@ pub(crate) fn triangles(outline: &[Point2]) -> Vec<[Point2; 3]> {
         let n = left.len();
         let ear = (0..n).find(|&i| {
             let t = [left[(i + n - 1) % n], left[i], left[(i + 1) % n]];
-            turn(t[0], t[1], t[2]) > 0.0
-                && !left
-                    .iter()
-                    .any(|&p| !t.contains(&p) && inside(p, t))
+            turn(t[0], t[1], t[2]) > 0.0 && !left.iter().any(|&p| !t.contains(&p) && inside(p, t))
         });
         match ear {
             Some(i) => {
