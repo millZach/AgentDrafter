@@ -39,8 +39,10 @@ use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
 
+mod layout;
 pub(crate) mod snap;
 
+pub use layout::{PageSetupUsed, SheetLayout, ViewportFound};
 pub use snap::{ObjectGeometry, SnapObject, SnappedFrom};
 
 /// How finely a sheet's curves are drawn to find its extents: within this
@@ -87,6 +89,8 @@ pub enum Query {
     /// The length, area, extents and angles of each object that matches
     /// every part of the selection.
     Geometry(Selection),
+    /// Each sheet's paper-space layout, its page setup and its viewports.
+    Layout,
 }
 
 /// A [`Query`] as it is read. A kind that takes nothing is an empty struct
@@ -104,6 +108,7 @@ enum QueryInput {
     Layers {},
     Snap(SnapRef),
     Geometry(Selection),
+    Layout {},
 }
 
 impl From<QueryInput> for Query {
@@ -117,6 +122,7 @@ impl From<QueryInput> for Query {
             QueryInput::Layers {} => Self::Layers,
             QueryInput::Snap(snap) => Self::Snap(snap),
             QueryInput::Geometry(selection) => Self::Geometry(selection),
+            QueryInput::Layout {} => Self::Layout,
         }
     }
 }
@@ -344,6 +350,12 @@ pub enum Answer {
         count: usize,
         objects: Vec<ObjectGeometry>,
     },
+    Layout {
+        /// How many viewports the sheets' layouts hold; 0 when none.
+        count: usize,
+        /// Each sheet looked at, with its layout, if it is drawn in one.
+        layouts: Vec<SheetLayout>,
+    },
 }
 
 /// One sheet's layers.
@@ -540,6 +552,7 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
         Query::Geometry(selection) => {
             snap::geometry(&looked_at, selection, settings, units, &looked)
         }
+        Query::Layout => layout::layout(&looked_at, settings, units, &looked),
     };
     Ok(QueryReport {
         source: source.display().to_string(),
@@ -943,7 +956,10 @@ impl Space {
             drawn = (0..record.objects.len())
                 .map(|_| Drawn::default())
                 .collect();
-            let list = measuring_drawing(&record.sheet, &fonts);
+            // Each object is selected where it is in its own space: on a
+            // sheet drawn in a layout, model space's at full size and paper
+            // space's on the paper.
+            let list = measuring_objects(&record.sheet, &fonts);
             for item in list.items {
                 // An older leader's annotation is an MTEXT of its own in
                 // the DWG, which AutoCAD selects apart from its LEADER: the
@@ -1571,6 +1587,7 @@ fn points_of(object: &Object) -> Vec<(String, Point3)> {
         Object::Hatch(_) => Vec::new(),
         Object::Donut(donut) => one("center", donut.center),
         Object::Solid(solid) => listed("corners", &solid.corners),
+        Object::Viewport(viewport) => one("center", viewport.center),
         Object::Text(text) => one("position", text.position),
         Object::MText(text) => one("position", text.position),
         Object::AttributeDefinition(definition) => one("position", definition.position),
@@ -1704,6 +1721,30 @@ pub(crate) fn measuring_drawing(sheet: &Sheet, fonts: &SheetFonts) -> DisplayLis
         EXTENTS_TOLERANCE
     };
     draw::draw_sheet(sheet, fonts, tolerance, MOST_HATCH_DASHES)
+}
+
+/// Each of the sheet's objects drawn in its own coordinates, as
+/// [`measuring_drawing`] draws a sheet with no layout: on a sheet drawn in
+/// a layout, model space's at full size and paper space's on the paper, as
+/// a query selects them by a box.
+pub(crate) fn measuring_objects(sheet: &Sheet, fonts: &SheetFonts) -> DisplayList {
+    if sheet.layout.is_none() {
+        return measuring_drawing(sheet, fonts);
+    }
+    let mut sheet = sheet.clone();
+    sheet.linetypes.clear();
+    let sheet = &sheet;
+    let coarse = draw::draw_objects(sheet, fonts, 1.0, MOST_HATCH_DASHES);
+    let Some(bounds) = coarse.extents() else {
+        return coarse;
+    };
+    let size = bounds.width().max(bounds.height());
+    let tolerance = if size > 0.0 {
+        size * EXTENTS_TOLERANCE
+    } else {
+        EXTENTS_TOLERANCE
+    };
+    draw::draw_objects(sheet, fonts, tolerance, MOST_HATCH_DASHES)
 }
 
 /// The sheet drawn as it prints, to see what touches what: drawn as

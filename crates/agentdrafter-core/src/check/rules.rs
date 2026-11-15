@@ -51,10 +51,10 @@ use std::collections::BTreeMap;
 use super::ink::Ink;
 use super::{BlockPart, CheckedObject, Finding, Rule, Sides};
 use crate::description::SheetRecord;
-use crate::draw::{mtext_lines, Bounds, DisplayList, Item, Point2, TextRun};
+use crate::draw::{clip_polygon, mtext_lines, Bounds, DisplayList, Item, Point2, TextRun};
 use crate::model::block::Placement;
 use crate::model::{Block, Insert, Object, Paper, Table, TableStyle, LINE_BOX, LINE_STEP};
-use crate::query::{measuring_drawing, printing_drawing, written_at, Extents};
+use crate::query::{measuring_drawing, measuring_objects, printing_drawing, written_at, Extents};
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
 
@@ -67,6 +67,14 @@ pub(super) fn check_sheet(
     tolerance: f64,
 ) -> Vec<Finding> {
     let list = measuring_drawing(&record.sheet, fonts);
+    // On a sheet drawn in a layout, each object in its own space too: a
+    // text's cell and a table's are measured there, at the largest scale
+    // the object shows at on the paper.
+    let own = record
+        .sheet
+        .layout
+        .is_some()
+        .then(|| measuring_objects(&record.sheet, fonts));
     let contents: Vec<Option<Insert>> = record
         .sheet
         .objects
@@ -79,6 +87,7 @@ pub(super) fn check_sheet(
     let on = Sheet {
         record,
         list: &list,
+        own: own.as_ref(),
         fonts,
         units,
         tolerance,
@@ -103,6 +112,8 @@ pub(super) fn check_sheet(
 struct Sheet<'a> {
     record: &'a SheetRecord,
     list: &'a DisplayList,
+    /// On a sheet drawn in a layout, each object drawn in its own space.
+    own: Option<&'a DisplayList>,
     fonts: &'a SheetFonts,
     units: Unit,
     tolerance: f64,
@@ -294,12 +305,15 @@ impl Sheet<'_> {
             let Some(block) = self.block(insert) else {
                 continue;
             };
+            let Some((list, view, through)) = self.measured_in(i) else {
+                continue;
+            };
+            let enlarged = insert.scale * view;
             let placement = Placement::of(insert, block.base_point);
             for cell in &block.cells {
                 // What the text draws, taken back into the block's own
                 // coordinates.
-                let points = self
-                    .list
+                let points = list
                     .items
                     .iter()
                     .filter(|item| {
@@ -316,16 +330,22 @@ impl Sheet<'_> {
                     right: beyond(b.max[0] - cell.max[0]),
                     top: beyond(b.max[1] - cell.max[1]),
                 };
-                if past.most() * insert.scale <= self.tolerance {
+                if past.most() * enlarged <= self.tolerance {
                     continue;
                 }
-                let scaled = if insert.scale == 1.0 {
-                    String::new()
-                } else {
-                    format!(
+                let scaled = match (insert.scale == 1.0, through) {
+                    (true, None) => String::new(),
+                    (false, None) => format!(
                         ", which the insert's scale of {} enlarges on the sheet",
                         num(insert.scale)
-                    )
+                    ),
+                    (_, Some(v)) => format!(
+                        ", which the insert's scale of {} and the scale of {} of viewport `{}` \
+                         it shows through enlarge on the paper",
+                        num(insert.scale),
+                        num(view),
+                        self.record.id(v)
+                    ),
                 };
                 let mut finding = self.finding(
                     Rule::TextOverflow,
@@ -333,7 +353,7 @@ impl Sheet<'_> {
                         "{} draws {} its cell: in the block {}'s own coordinates it draws from {} \
                          to {}, and its cell runs from {} to {} {u}{scaled}",
                         self.text_words(i, &[cell.object], ""),
-                        past.words(self.tolerance, insert.scale, u, "side"),
+                        past.words(self.tolerance, enlarged, u, "side"),
                         block.name,
                         point(b.min),
                         point(b.max),
@@ -341,7 +361,7 @@ impl Sheet<'_> {
                         point(cell.max),
                     ),
                 );
-                finding.object = Some(self.checked(i, &[cell.object]));
+                finding.object = Some(self.checked_through(i, &[cell.object], through));
                 finding.drawn = Some(Extents::of(&b));
                 finding.cell = Some(Extents::of(&Bounds {
                     min: cell.min,
@@ -365,14 +385,16 @@ impl Sheet<'_> {
             .table_style(&table.table_style)
             .unwrap_or_else(|| TableStyle::standard(sheet.units));
         let mut findings = Vec::new();
+        let Some((list, view, through)) = self.measured_in(i) else {
+            return findings;
+        };
         for cell in table.laid_out(&style) {
             let Some(text) = &cell.text else {
                 continue;
             };
             let mine = |c: Option<[usize; 2]>| c == Some(cell.at);
             let drawn = Bounds::of(
-                self.list
-                    .items
+                list.items
                     .iter()
                     .filter(|item| item.object == i && mine(item.cell))
                     .flat_map(Item::points),
@@ -414,7 +436,7 @@ impl Sheet<'_> {
                 right: beyond(needed.max[0] - inside.max[0]),
                 top: beyond(needed.max[1] - inside.max[1]),
             };
-            if past.most() <= self.tolerance {
+            if past.most() * view <= self.tolerance {
                 continue;
             }
             let path = cell.at.to_vec();
@@ -425,7 +447,7 @@ impl Sheet<'_> {
                      its {} set {} {u} high, and inside its margins the cell runs from {} to {} \
                      {u}; AutoCAD would make the row taller where the text needs more height",
                     self.text_words(i, &path, ""),
-                    past.words(self.tolerance, 1.0, u, "side"),
+                    past.words(self.tolerance, view, u, "side"),
                     num(needed.min[0]),
                     num(needed.max[0]),
                     if lines == 1 { "line is" } else { "lines are" },
@@ -434,7 +456,7 @@ impl Sheet<'_> {
                     point(inside.max),
                 ),
             );
-            finding.object = Some(self.checked(i, &path));
+            finding.object = Some(self.checked_through(i, &path, through));
             finding.drawn = Some(Extents::of(&needed));
             finding.cell = Some(Extents::of(&inside));
             finding.past = Some(past);
@@ -448,32 +470,49 @@ impl Sheet<'_> {
     fn text_on_text(&self) -> Vec<Finding> {
         let u = self.units;
         // Each line of text as the pipeline draws it, in its own box.
-        let boxes: Vec<TextBox> = self.list.text.iter().filter_map(TextBox::of).collect();
+        let sheet = &self.record.sheet;
+        let window = |v: Option<usize>| match v.map(|v| &sheet.objects[v]) {
+            Some(Object::Viewport(viewport)) => {
+                let [min, max] = viewport.corners();
+                Some(Bounds { min, max })
+            }
+            _ => None,
+        };
+        let boxes: Vec<TextBox> = self
+            .list
+            .text
+            .iter()
+            .filter_map(|run| TextBox::of(run, window(run.viewport)))
+            .collect();
         // Sweep across: two boxes apart across by more than the tolerance
         // are apart.
         let mut order: Vec<usize> = (0..boxes.len()).collect();
         order.sort_by(|&a, &b| boxes[a].seen.min[0].total_cmp(&boxes[b].seen.min[0]));
         // Each two texts once, by the deepest overlap of their lines: the
         // one drawn later, then the one it sits on.
-        let mut pairs: BTreeMap<(Key, Key), (usize, usize, f64)> = BTreeMap::new();
+        let mut pairs: BTreeMap<(Seen, Seen), (usize, usize, f64)> = BTreeMap::new();
         for (k, &a) in order.iter().enumerate() {
             for &b in &order[k + 1..] {
                 if boxes[b].seen.min[0] > boxes[a].seen.max[0] + self.tolerance {
                     break;
                 }
-                if boxes[a].key == boxes[b].key {
+                if boxes[a].key == boxes[b].key && boxes[a].viewport == boxes[b].viewport {
                     continue;
                 }
                 let Some(depth) = boxes[a].sits_on(&boxes[b], self.tolerance) else {
                     continue;
                 };
-                let (earlier, later) = if boxes[a].key < boxes[b].key {
-                    (a, b)
-                } else {
-                    (b, a)
-                };
+                let (earlier, later) =
+                    if (&boxes[a].key, boxes[a].viewport) < (&boxes[b].key, boxes[b].viewport) {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    };
                 let deepest = pairs
-                    .entry((boxes[later].key.clone(), boxes[earlier].key.clone()))
+                    .entry((
+                        (boxes[later].key.clone(), boxes[later].viewport),
+                        (boxes[earlier].key.clone(), boxes[earlier].viewport),
+                    ))
                     .or_insert((later, earlier, depth));
                 if depth > deepest.2 {
                     *deepest = (later, earlier, depth);
@@ -498,8 +537,10 @@ impl Sheet<'_> {
                         point(earlier.seen.max),
                     ),
                 );
-                finding.object = Some(self.checked(later.key.0, &later.key.1));
-                finding.other = Some(self.checked(earlier.key.0, &earlier.key.1));
+                finding.object =
+                    Some(self.checked_through(later.key.0, &later.key.1, later.viewport));
+                finding.other =
+                    Some(self.checked_through(earlier.key.0, &earlier.key.1, earlier.viewport));
                 finding.drawn = Some(Extents::of(&later.seen));
                 finding.other_drawn = Some(Extents::of(&earlier.seen));
                 finding.overlap = Some(depth);
@@ -514,22 +555,27 @@ impl Sheet<'_> {
     fn text_on_line(&self, printed: &DisplayList) -> Vec<Finding> {
         let u = self.units;
         let units_per_mm = Unit::Mm.convert(1.0, u);
-        let mut letters: BTreeMap<Key, Ink> = BTreeMap::new();
-        let mut lines: BTreeMap<Key, Ink> = BTreeMap::new();
+        let mut letters: BTreeMap<Seen, Ink> = BTreeMap::new();
+        let mut lines: BTreeMap<Seen, Ink> = BTreeMap::new();
         for item in &printed.items {
             let key = (item.object, item_path(item.part, &item.nested, item.cell));
-            match self.drawn_as(&key) {
+            let drawn = self.drawn_as(&key);
+            let seen = (key, item.viewport);
+            match drawn {
                 Drawn::Letters => letters
-                    .entry(key)
+                    .entry(seen)
                     .or_default()
                     .add(&item.shape, units_per_mm),
-                Drawn::Line => lines.entry(key).or_default().add(&item.shape, units_per_mm),
+                Drawn::Line => lines
+                    .entry(seen)
+                    .or_default()
+                    .add(&item.shape, units_per_mm),
                 Drawn::Fill => {}
             }
         }
         let mut findings = Vec::new();
-        for (text, letter_ink) in &letters {
-            for (line, line_ink) in &lines {
+        for ((text, text_through), letter_ink) in &letters {
+            for ((line, line_through), line_ink) in &lines {
                 // An insert's own lines, such as its cell lines, never
                 // count against its own text.
                 if line.0 == text.0 {
@@ -542,7 +588,9 @@ impl Sheet<'_> {
                     .text
                     .iter()
                     .filter(|run| {
-                        run.object == text.0 && item_path(run.part, &run.nested, run.cell) == text.1
+                        run.object == text.0
+                            && run.viewport == *text_through
+                            && item_path(run.part, &run.nested, run.cell) == text.1
                     })
                     .map(|run| run.characters.iter().map(|&(c, _)| c).collect::<String>())
                     .collect::<Vec<_>>()
@@ -556,8 +604,8 @@ impl Sheet<'_> {
                         point(at),
                     ),
                 );
-                finding.object = Some(self.checked(text.0, &text.1));
-                finding.other = Some(self.checked(line.0, &line.1));
+                finding.object = Some(self.checked_through(text.0, &text.1, *text_through));
+                finding.other = Some(self.checked_through(line.0, &line.1, *line_through));
                 finding.drawn = letter_ink.bounds.as_ref().map(Extents::of);
                 finding.other_drawn = line_ink.bounds.as_ref().map(Extents::of);
                 finding.at = Some(at);
@@ -582,7 +630,8 @@ impl Sheet<'_> {
             | Object::Arc(_)
             | Object::Circle(_)
             | Object::Ellipse(_)
-            | Object::Spline(_) => Drawn::Line,
+            | Object::Spline(_)
+            | Object::Viewport(_) => Drawn::Line,
             Object::Hatch(_) | Object::Solid(_) | Object::Donut(_) | Object::Insert(_) => {
                 Drawn::Fill
             }
@@ -659,6 +708,42 @@ impl Sheet<'_> {
     /// The sheet's object `i`, as a finding names it: by its ID, its name
     /// and where it is written, and for `part` of an insert, which object
     /// of its block.
+    /// The object `i`, or the object of its block at `path`, as a finding
+    /// names it, seen through the viewport `through` of the sheet's layout
+    /// when it is in model space.
+    fn checked_through(&self, i: usize, path: &[usize], through: Option<usize>) -> CheckedObject {
+        CheckedObject {
+            viewport: through.map(|v| self.record.id(v)),
+            ..self.checked(i, path)
+        }
+    }
+
+    /// Where the object `i` is measured for its cells: the drawing it is
+    /// measured in, what a length there is enlarged by on the paper, and
+    /// the viewport it shows through at its largest. On a sheet with no
+    /// layout, and for paper space, the sheet's drawing at 1. On a sheet
+    /// drawn in a layout, a model-space object is measured in its own space
+    /// at the largest scale it shows at, and not at all when it shows
+    /// through no viewport, since it does not print.
+    fn measured_in(&self, i: usize) -> Option<(&DisplayList, f64, Option<usize>)> {
+        let sheet = &self.record.sheet;
+        let Some(own) = self.own.filter(|_| !sheet.in_paper_space(i)) else {
+            return Some((self.list, 1.0, None));
+        };
+        let largest = self
+            .list
+            .items
+            .iter()
+            .filter(|item| item.object == i)
+            .filter_map(|item| item.viewport)
+            .filter_map(|v| match &sheet.objects[v] {
+                Object::Viewport(viewport) => Some((v, viewport.scale)),
+                _ => None,
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        Some((own, largest.1, Some(largest.0)))
+    }
+
     fn checked(&self, i: usize, path: &[usize]) -> CheckedObject {
         let record = self.record;
         let object = &record.sheet.objects[i];
@@ -675,6 +760,7 @@ impl Sheet<'_> {
                     .get(*row)
                     .and_then(|r| r.get(*column))
                     .map(|c| c.text.clone()),
+                viewport: None,
             };
         }
         let (in_block, text) = match self.in_block(i, path) {
@@ -712,6 +798,7 @@ impl Sheet<'_> {
             in_block,
             table_cell: None,
             text,
+            viewport: None,
         }
     }
 
@@ -877,6 +964,11 @@ fn says(object: &Object) -> Option<String> {
 /// as [`path`] gives it.
 type Key = (usize, Vec<usize>);
 
+/// What a sheet's object draws, by its [`Key`], as it shows on the paper:
+/// through a viewport of the sheet's layout, for model space, or in paper
+/// space.
+type Seen = (Key, Option<usize>);
+
 /// The path to the object of an insert's block that draws an item or a
 /// line of text: its `part`, then its `nested` places. Empty for an object
 /// of the sheet's own.
@@ -904,13 +996,20 @@ enum Drawn {
 /// The box round what one line of text draws, in the line's own direction.
 struct TextBox {
     key: Key,
+    /// The viewport a model-space text shows through, on a sheet drawn in
+    /// a layout.
+    viewport: Option<usize>,
     /// What the line says.
     says: String,
     /// The line's direction: along it, and up from it, each of length 1.
     along: Point2,
     up: Point2,
-    /// The box's corners on the sheet.
-    corners: [Point2; 4],
+    /// The box's corners on the sheet: cut at the edge of the viewport it
+    /// shows through, if it is cut there.
+    corners: Vec<Point2>,
+    /// Whether the box is cut at a viewport's edge, which it is held to
+    /// along the paper's axes too.
+    cut: bool,
     /// The box round its corners, square to the sheet.
     seen: Bounds,
 }
@@ -918,7 +1017,7 @@ struct TextBox {
 impl TextBox {
     /// The box round what `run` draws, as the pipeline draws it; none when
     /// it draws nothing.
-    fn of(run: &TextRun) -> Option<TextBox> {
+    fn of(run: &TextRun, window: Option<Bounds>) -> Option<TextBox> {
         let [lo, hi] = run.drawn?;
         let at = |u: f64, v: f64| {
             [
@@ -936,13 +1035,22 @@ impl TextBox {
             let length = v[0].hypot(v[1]);
             (length > 0.0).then(|| [v[0] / length, v[1] / length])
         };
+        // A model-space text shows on the paper only within its viewport.
+        let (corners, cut) = match window {
+            Some(w) if corners.iter().any(|p| !within(*p, &w)) => {
+                (clip_polygon(&corners, w.min, w.max), true)
+            }
+            _ => (corners.to_vec(), false),
+        };
         Some(TextBox {
             key: (run.object, item_path(run.part, &run.nested, run.cell)),
+            viewport: run.viewport,
             says: run.characters.iter().map(|&(c, _)| c).collect(),
             along: unit(run.across)?,
             up: unit(run.up)?,
+            seen: Bounds::of(corners.iter().copied())?,
             corners,
-            seen: Bounds::of(corners.into_iter())?,
+            cut,
         })
     }
 
@@ -958,7 +1066,11 @@ impl TextBox {
     /// whichever way that side would part them, so it does not.
     fn sits_on(&self, other: &TextBox, tolerance: f64) -> Option<f64> {
         let mut depth = f64::INFINITY;
-        for axis in [self.along, self.up, other.along, other.up] {
+        let mut axes = vec![self.along, self.up, other.along, other.up];
+        if self.cut || other.cut {
+            axes.extend([[1.0, 0.0], [0.0, 1.0]]);
+        }
+        for axis in axes {
             let (a_lo, a_hi) = span(&self.corners, axis);
             let (b_lo, b_hi) = span(&other.corners, axis);
             let clear = (a_hi - b_lo).min(b_hi - a_lo);
@@ -977,8 +1089,13 @@ impl TextBox {
     }
 }
 
+/// Whether `p` is inside `window`, its edge included.
+fn within(p: Point2, window: &Bounds) -> bool {
+    p[0] >= window.min[0] && p[0] <= window.max[0] && p[1] >= window.min[1] && p[1] <= window.max[1]
+}
+
 /// Where `corners` reach along `axis`: from the least to the most.
-fn span(corners: &[Point2; 4], axis: Point2) -> (f64, f64) {
+fn span(corners: &[Point2], axis: Point2) -> (f64, f64) {
     corners
         .iter()
         .map(|c| c[0] * axis[0] + c[1] * axis[1])

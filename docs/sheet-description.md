@@ -2,7 +2,7 @@
 
 A sheet description is the text file that states what is on a new sheet. It is the sheet's record: the DWG is built from it (ADR-0003). It is written in a strict subset of YAML, set out below, so that an agent can write it, a person can read it, and a mistake is an error that names its field rather than a guess.
 
-So far a sheet description holds lines, polylines, arcs, circles, ellipses, splines and hatches, on layers that carry a colour, a linetype and a lineweight, text and multiline text in text styles that name a TrueType or an SHX font, inserts of blocks with attributes from a [block library](block-library.md), tables in table styles, and multileaders in multileader styles and older leaders. A template is written with the same keys, and leaves some values to a row of a [drawing set](drawing-set.md), which builds one sheet per row.
+So far a sheet description holds lines, polylines, arcs, circles, ellipses, splines and hatches, on layers that carry a colour, a linetype and a lineweight, text and multiline text in text styles that name a TrueType or an SHX font, inserts of blocks with attributes from a [block library](block-library.md), tables in table styles, multileaders in multileader styles and older leaders, dimensions in dimension styles, and, on a sheet drawn in a paper-space layout, viewports onto model space. A template is written with the same keys, and leaves some values to a row of a [drawing set](drawing-set.md), which builds one sheet per row.
 
 `agentdrafter schema` prints the same keys as a JSON Schema (draft 2020-12), with what each means, for an agent to read before it writes a sheet description. `agentdrafter schema block-library` prints the block library's.
 
@@ -17,7 +17,7 @@ objects:
       to: [100, 50, 0]
 ```
 
-`agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on. `examples/blocks/` holds a block library and two sheets that insert its blocks, `examples/table.yaml` two tables, and `examples/leaders.yaml` callouts on a panel layout, multileaders, some ending in a block of `examples/leader-blocks.yaml`, and older leaders.
+`agentdrafter build examples/one-line.yaml` writes `examples/one-line.dwg` in the 2018 format and prints what it wrote as JSON. `examples/geometry.yaml` holds every kind of line and curve, on layers with linetypes, `examples/hatch.yaml` holds solid and patterned hatches, and `examples/text.yaml` every kind of text, in every justification. `examples/text-widths.yaml` holds the fixed strings AgentDrafter's measured widths are compared with AutoCAD's on. `examples/blocks/` holds a block library and two sheets that insert its blocks, `examples/table.yaml` two tables, `examples/leaders.yaml` callouts on a panel layout, multileaders, some ending in a block of `examples/leader-blocks.yaml`, and older leaders, and `examples/layout.yaml` a made-up control panel's backplane drawn at full size in model space and sheeted in a paper-space layout through three viewports at 1:4, 1:1 and 2:1.
 
 Every DWG a build writes carries AgentDrafter's build mark: a custom drawing property, `AgentDrafter` with the value `build`, which AutoCAD shows under DWGPROPS. `--overwrite` replaces only a DWG that carries it. A sheet built from a drawing set records its set in the same property, as `build; set=` and the set's folder relative to the DWG ([the drawing set](drawing-set.md#the-build-mark-names-the-set)); a sheet description built on its own records none.
 
@@ -55,6 +55,7 @@ Keys are spelled as AutoCAD spells them: `color`, `center`.
 | `dimension_styles` | no | The sheet's dimension styles: a mapping from each style's name to what its dimensions draw with. See [Dimension styles](#dimension-styles). |
 | `objects` | yes | A list of objects, which may be empty, in drawing order. Each object is a mapping with one key, its type. |
 | `paper` | no | The paper the sheet is drawn on, which the checker holds it to. See [Paper](#paper). |
+| `layout` | no | The paper-space layout the sheet is drawn in, with its name. See [Layouts and viewports](#layouts-and-viewports). |
 
 ### Linetypes
 
@@ -234,7 +235,7 @@ The DWG writes a style as AutoCAD 2026's own of the sheet's unit with these set,
 
 ### Objects
 
-Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight unless it gives its own, under `color`, `linetype`, `lineweight` and `linetype_scale`; see [An object's own colour, linetype and lineweight](#an-objects-own-colour-linetype-and-lineweight). Every object may also take an `id` key, its ID in the record, and a `name` key, a name an agent selects it by; see [IDs and names](#ids-and-names).
+Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight unless it gives its own, under `color`, `linetype`, `lineweight` and `linetype_scale`; see [An object's own colour, linetype and lineweight](#an-objects-own-colour-linetype-and-lineweight). Every object may also take an `id` key, its ID in the record, and a `name` key, a name an agent selects it by; see [IDs and names](#ids-and-names). On a sheet drawn in a layout, every object may take a `space` key too, `model` or `paper`; see [Layouts and viewports](#layouts-and-viewports).
 
 | Type | Keys | What it is |
 |---|---|---|
@@ -254,6 +255,7 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 | `mleader` | `leaders`, `content`; `landing`, `arrowhead`, `arrow_size`, `mleader_style` | One or more leader lines from their arrows to a landing, and multiline text or a block beyond it, as AutoCAD's MLEADER draws it. See [Leaders](#leaders). |
 | `leader` | `points`; `arrowhead`, `arrow_size`, `gap`, `annotation` | One leader line, arrow first, with an optional multiline text annotation beyond its end, as AutoCAD's older LEADER draws it. See [Leaders](#leaders). |
 | `dimension` | `kind`, `location`, and its kind's own keys; `text`, `dimension_style`, `continued` | A dimension that measures a length or an angle and shows it, as AutoCAD's DIMLINEAR, DIMALIGNED, DIMRADIUS, DIMDIAMETER, DIMANGULAR and DIMORDINATE draw it. See [Dimensions](#dimensions). |
+| `viewport` | `center`, `width`, `height`, `view_center`, `scale`; `locked` | A window on the paper that shows model space at a scale, as AutoCAD's MVIEW makes one, on a sheet drawn in a layout. See [Layouts and viewports](#layouts-and-viewports). |
 
 Keys before the semicolon are required; keys after it are not. A `radius` is a length more than 0.
 
@@ -686,9 +688,45 @@ Zach decided on 2026-11-11 that a sheet's paper is declared. `paper` says what t
 
 - **Its size**: two lengths more than 0, `[width, height]`, such as `[17, 11]`, in the declared unit, or each with its own, such as `[431.8 mm, 279.4 mm]`.
 - **Or a standard size by name, with the way it lies**: `landscape` lays its longer side across, along X, and `portrait` up. The names are `ANSI A`, `ANSI B`, `ANSI C`, `ANSI D` and `ANSI E` (8.5 by 11, 11 by 17, 17 by 22, 22 by 34 and 34 by 44 inches), and `ISO A0`, `ISO A1`, `ISO A2`, `ISO A3` and `ISO A4` (841 by 1189, 594 by 841, 420 by 594, 297 by 420 and 210 by 297 mm), each followed by `landscape` or `portrait` and written exactly so: `ANSI B landscape` is 17 by 11 inches, converted to the declared unit. A name without the way it lies is the `bad_value` error, which names both.
-- **Its lower left corner is at the origin**, `[0, 0]`: the sheet is drawn in model space at its paper's size from there, as a template draws its trim line.
+- **Its lower left corner is at the origin**, `[0, 0]`: the sheet is drawn in model space at its paper's size from there, as a template draws its trim line, or, on a sheet drawn in a layout, in paper space.
 
 A template declares its paper as a sheet description does; the set's settings take none, since the template draws the border.
+
+### Layouts and viewports
+
+```yaml
+units: mm
+paper: ISO A3 landscape
+layout:
+  name: Backplane
+objects:
+  # Model space, at full size: a backplane 600 wide and 800 tall.
+  - polyline: {id: backplane, points: [[0, 0, 0], [600, 0, 0], [600, 800, 0], [0, 800, 0]], closed: true}
+  - text: {id: tag, contents: PLC-101, position: [160, 660, 0], height: 10, justify: middle_center}
+  # Paper space, at the paper's size: the border and the title.
+  - polyline: {id: frame, space: paper, points: [[10, 10, 0], [410, 10, 0], [410, 287, 0], [10, 287, 0]], closed: true}
+  - text: {id: title, space: paper, contents: CONTROL PANEL CP-101 BACKPLANE, position: [255, 37, 0], height: 4}
+  # The whole backplane at 1:4, and a detail at 2:1, locked.
+  - viewport: {id: view-a, center: [110, 148, 0], width: 180, height: 250, view_center: [300, 380, 0], scale: '1:4'}
+  - viewport: {id: view-c, center: [320, 90, 0], width: 60, height: 50, view_center: [81, 462, 0], scale: '2:1', locked: true}
+```
+
+A sheet may be drawn in a paper-space layout, as plants draw panel layouts and network one-lines: the drawing at full size in model space, and the sheet's border and title block in paper space, at the paper's size, with viewports that show model space at a scale. `layout` makes a sheet one, and gives the layout its name, as AutoCAD's tab shows it: 1 to 255 characters, none of `<>/\":;?*|,=` and the backquote, and not `Model`, the model-space tab's. `examples/layout.yaml` is one.
+
+- **Its paper is a standard size by name**, such as `ISO A3 landscape`, which the layout's page setup plots whole, and its unit is `mm` or `in`, as AutoCAD's paper is. A layout without a paper, or on a paper given by its size, is the `bad_value` or `missing_key` error. Paper space's lower left corner is at the paper's, `[0, 0]`.
+- **Each object is in model space** unless it says `space: paper`; a sheet without a layout has model space alone, and an object that says `space: paper` on one is the `bad_value` error. Both spaces are in the declared unit.
+- **A viewport** is in paper space: a window `width` by `height` on the paper round its `center`, that shows model space round `view_center`, the point of model space at its middle, AutoCAD's view centre, at its `scale`. A scale is paper to model: a ratio, `1:4` or `2:1`, quoted or not, or a number more than 0, `0.25`. `locked: true` locks its view, as AutoCAD's display lock does: it draws the same, and [`change_viewport`](change-sets.md#viewports) will not change its scale or view centre unless it unlocks it too. A viewport is rectangular and looks straight down, so its points have 0 for `z`. A viewport frames what it shows with its own pen; put it on a layer that does not plot to leave its frame off a PDF.
+
+**How it draws.** A [render](render.md), a [plot](plot.md), the viewer and [the checker](check.md) draw a sheet drawn in a layout as it prints, on its paper: paper space first, as the page setup plots it, then each viewport in turn, model space seen through it and its frame. Model space shows through a viewport moved and scaled from its view centre to its centre, by its scale, and cut at its edge; a line that lies along its edge is left out, as AutoCAD 2026 left it out of its plot. Text, hatch patterns and geometry scale with it. A lineweight is a width on paper, so it does not; and a linetype's dashes are as long on the paper as in paper space, as AutoCAD's PSLTSCALE 1, every drawing's own, draws them. A viewport's frame plots as AutoCAD's does: its thinnest line, in its colour, whatever its lineweight. A model object that no viewport shows draws nothing. These were measured in AutoCAD 2026's plots of made-up layouts at 1:48 to 2:1, in millimetres and inches, through acad.ctb: at 300 dots per inch every pixel of AutoCAD's ink lies within a pixel of AgentDrafter's, and 99.99% or more of AgentDrafter's within a pixel of AutoCAD's away from the paper's edge, where AutoCAD leaves out a line on the edge itself.
+
+**What the DWG holds.** Every new drawing has AutoCAD's empty layout `Layout1`, which a sheet without a layout leaves as it is, so its DWG is the same byte for byte as before layouts. A sheet with one names that layout after its own, and writes, as AutoCAD 2026 wrote made-up ones:
+
+- its page setup: AutoCAD's own `DWG To PDF.pc3`, the full-bleed paper of the sheet's size laid its way, such as `ISO_full_bleed_A3_(420.00_x_297.00_MM)`, the plot area the layout, at 1:1, or 1:25.4 when a millimetre sheet is on inch paper and 25.4:1 when an inch sheet is on millimetre paper, through `monochrome.ctb` with lineweights, paper space first;
+- the layout's own overall viewport, then its paper-space objects and viewports on `*Paper_Space`, each with its ID, and model space's objects on `*Model_Space`;
+- each viewport as AutoCAD's VIEWPORT seen from above: its centre and size on the paper, its view centre, and its view height, its height over its scale, with its display lock;
+- AutoCAD's TILEMODE 0, so that the drawing opens on its layout.
+
+AutoCAD 2026 opened every such DWG without recovery, its audit found no errors, regenerating every viewport moved none, and its save reads back whole. Reading a DWG back gives the sheet it opens on: model space alone when it opens on the Model tab, and its layout when it opens on one, its objects from both spaces in the order they were made, each with its space. A viewport reads back when the core draws it: rectangular, on, seen from above with no twist, perspective or clipping, and freezing no layer; any other is counted not read. Its scale reads back as the simplest ratio that gives its view height, so `1:4` is 0.25. The layout's page setup reads back as the sheet's paper when it is a standard paper plotted whole at full size, as a build writes it; any other page setup, and a layout that holds anything other than the one the drawing opens on, is counted under `layouts_not_read`.
 
 ### Fonts
 

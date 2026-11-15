@@ -254,6 +254,11 @@ impl<'a> Reader<'a> {
                 let corners: Vec<P3> = solid.corners.iter().map(|&p| p3(p)).collect();
                 outline(&corners)
             }
+            // A viewport's frame, on the paper.
+            Object::Viewport(viewport) => {
+                let corners: Vec<P3> = viewport.frame().iter().map(|&p| p3(p)).collect();
+                outline(&corners)
+            }
             Object::Table(table) => {
                 let z = table.position.z;
                 table
@@ -560,6 +565,17 @@ impl<'a> Reader<'a> {
                 for (place, curve) in self.curves(object) {
                     out.push((Midpoint, place, curve.point(0.5)));
                 }
+            }
+            // A viewport's frame's corners, from its lower left corner
+            // anticlockwise, the middles of its sides and its middle.
+            Object::Viewport(viewport) => {
+                for (name, p) in named("corners", &viewport.frame()) {
+                    out.push((Endpoint, name, p));
+                }
+                for (place, curve) in self.curves(object) {
+                    out.push((Midpoint, place, curve.point(0.5)));
+                }
+                out.push((Center, String::new(), p3(viewport.center)));
             }
             Object::Text(text) => {
                 for (kind, at) in self.text_snaps(text) {

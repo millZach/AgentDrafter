@@ -35,9 +35,9 @@ pub(crate) const ID_KEY: &str = "id";
 /// The key of an object's name.
 pub(crate) const NAME_KEY: &str = "name";
 
-/// The keys every object on a sheet takes besides its own: its ID and its
-/// name. A block's objects do not take them.
-pub(crate) const SHEET_OBJECT_KEYS: [&str; 2] = [ID_KEY, NAME_KEY];
+/// The keys every object on a sheet takes besides its own: its ID, its
+/// name and the space it is in. A block's objects do not take them.
+pub(crate) const SHEET_OBJECT_KEYS: [&str; 3] = [ID_KEY, NAME_KEY, super::layout::SPACE_KEY];
 
 /// What joins a sheet's name to the ID its object carries in its file. No
 /// sheet's name and no written ID holds it, so an ID splits back at its

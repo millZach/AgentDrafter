@@ -29,8 +29,24 @@ One CAD file, DWG or DXF.
 _Avoid_: document, model
 
 **Sheet**:
-One titled page that prints: a border, a title block and the content inside them.
+One titled page that prints: a border, a title block and the content inside them. It is drawn in model space alone, or in a layout: its border and title block in paper space, and its content in model space, shown through viewports.
 _Avoid_: page, layout (a layout is AutoCAD's paper-space tab, which may hold a sheet)
+
+**Model space**:
+Where a drawing is drawn at full size, in the declared unit, as in AutoCAD: every object of a sheet with no layout, and the objects of a sheet drawn in a layout that do not say they are in paper space.
+_Avoid_: model (alone it is AutoCAD's tab), drawing area
+
+**Paper space**:
+Where a sheet drawn in a layout draws at its paper's size, as in AutoCAD: its border, its title block, its notes and its viewports, its lower left corner at the paper's.
+_Avoid_: sheet space, layout space
+
+**Layout**:
+AutoCAD's paper-space tab that holds a sheet: its name, its paper space, and its page setup, which plots its whole paper at full size, as AutoCAD's LAYOUT and PAGESETUP make it. A sheet drawn in one prints its layout: paper space as it is drawn, and model space through its viewports. A DWG is read as the layout it opens on, or as model space when it opens on the Model tab.
+_Avoid_: sheet (a sheet is the page; a layout holds one), tab, paper space (the space a layout draws in)
+
+**Viewport**:
+A window on a layout's paper that shows model space at a scale, centred on a model point, its view centre, as AutoCAD's MVIEW makes one: rectangular and seen from above, cut at its edge, and locked or not against its view being changed. It is an object of paper space, and its frame plots as AutoCAD's does, its thinnest line.
+_Avoid_: view, window (a window is a selection box), viewport alone for AutoCAD's model-space tiles (VPORTS)
 
 **Drawing set**:
 A job's sheets together with the block library, templates and data they share. It is the unit AgentDrafter works on: a change can span its sheets and is undone as one.
@@ -336,7 +352,7 @@ One failed check: the sheet, the rule, the object by ID and name, and what is wr
 _Avoid_: violation, error (an error stops a request; a finding does not), issue
 
 **Paper**:
-What a sheet is drawn on, as its template or sheet description declares it: a width and a height, or a standard size such as `ANSI B landscape`, with its lower left corner at the origin. The checker holds the sheet to it, and a plot and a render are drawn on it.
+What a sheet is drawn on, as its template or sheet description declares it: a width and a height, or a standard size such as `ANSI B landscape`, with its lower left corner at the origin. The checker holds the sheet to it, and a plot and a render are drawn on it. A sheet drawn in a layout declares a standard size, which its layout's page setup plots, and draws paper space on it.
 _Avoid_: page, sheet size, limits (AutoCAD's limits are a setting of its own)
 
 **Cell**:

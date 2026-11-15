@@ -56,7 +56,7 @@ const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...";
 const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
-const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...]";
+const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
 /// name, as the binary does: it prints the reply on standard output, or
@@ -660,12 +660,12 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
     if !selecting
         && !matches!(
             kind.as_str(),
-            "blocks" | "measure" | "extents" | "layers" | "snap"
+            "blocks" | "measure" | "extents" | "layers" | "snap" | "layout"
         )
     {
         return Err(usage(format!(
-            "query asks find, blocks, attributes, measure, extents, layers, snap or geometry, not \
-             `{kind}`"
+            "query asks find, blocks, attributes, measure, extents, layers, snap, geometry or \
+             layout, not `{kind}`"
         )));
     }
     let mut source: Option<PathBuf> = None;
@@ -822,6 +822,7 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
         "blocks" => Query::Blocks,
         "extents" => Query::Extents,
         "layers" => Query::Layers,
+        "layout" => Query::Layout,
         _ => Query::Measure(Measure { from, to }),
     };
     let request = QueryRequest {

@@ -1463,6 +1463,7 @@ pub(crate) mod tests {
             part: None,
             nested: Vec::new(),
             cell: None,
+            viewport: None,
             drawn: None,
             origin: [0.0, 0.0],
             across: [1.0, 0.0],

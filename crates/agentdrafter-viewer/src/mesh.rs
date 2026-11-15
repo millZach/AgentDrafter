@@ -344,6 +344,7 @@ mod tests {
             part: None,
             nested: Vec::new(),
             cell: None,
+            viewport: None,
             color: Color(color),
             shape,
         }

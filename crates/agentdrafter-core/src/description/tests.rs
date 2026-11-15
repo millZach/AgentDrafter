@@ -48,6 +48,7 @@ fn reads_one_line() {
             })],
             paper: None,
             ltscale: 1.0,
+            layout: None,
         }
     );
 }
@@ -142,7 +143,7 @@ fn an_unknown_key_is_named() {
     let e = error("units: mm\nobjects:\n  - line:\n      form: [0, 0, 0]\n");
     assert_eq!(
         e.message,
-        "unknown key `form`; a line takes from, to, layer, color, linetype, lineweight, linetype_scale, id, name"
+        "unknown key `form`; a line takes from, to, layer, color, linetype, lineweight, linetype_scale, id, name, space"
     );
 }
 
@@ -153,7 +154,7 @@ fn an_unknown_object_type_is_named() {
     assert_eq!(e.field.as_deref(), Some("objects[0].hexagon"));
     assert_eq!(
         e.message,
-        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline, hatch, text, mtext, donut, solid, insert, table, mleader, leader, dimension"
+        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline, hatch, text, mtext, donut, solid, insert, table, mleader, leader, dimension, viewport"
     );
 }
 

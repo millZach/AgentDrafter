@@ -1139,6 +1139,53 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
     } = found;
     let reach = at.reach(file, k);
     let units = files.units;
+    // change_viewport changes a viewport alone, and neither it nor change
+    // changes the scale or the view centre of a locked viewport unless it
+    // unlocks it too, as AutoCAD's display lock keeps a view from being
+    // zoomed or panned.
+    if let Body::Change { set, viewport, .. } = &op.body {
+        let record = match at.file(file) {
+            Ok(record) => record,
+            Err(e) => return fail(reach, e),
+        };
+        let kind = record
+            .objects(list)
+            .get(index)
+            .map(|l| l.kind.clone())
+            .unwrap_or_default();
+        if *viewport && kind != "viewport" {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "change_viewport changes a viewport, and `{id}` is {} {kind}; change sets \
+                         its keys",
+                        article(&kind)
+                    ),
+                    "target",
+                ),
+            );
+        }
+        let locked_now = record.object_value(list, index, "locked").as_deref() == Some("true");
+        let view = ["scale", "view_center"]
+            .into_iter()
+            .find(|key| set.contains_key(*key));
+        let unlocks = set.get("locked") == Some(&Value::Bool(false));
+        if let (true, true, Some(key), false) = (kind == "viewport", locked_now, view, unlocks) {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "viewport `{id}` is locked, which keeps its scale and its view centre \
+                         as they are; send \"locked\": false with the change to unlock it"
+                    ),
+                    key,
+                ),
+            );
+        }
+    }
     // The block a set_attribute's insert places, with the attributes it
     // carries as its library holds it now, so that the operation can tell
     // which of a tag the block defines more than once it sets.
@@ -1190,6 +1237,24 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 Some([b[0] - a[0], b[1] - a[1], b[2] - a[2]])
             }
         },
+        _ => None,
+    };
+    // A change_viewport's snapped view centre, worked out as a move's
+    // points are and written as coordinates.
+    let change_set = match &op.body {
+        Body::Change { set, snaps, .. } if !snaps.is_empty() => {
+            let only: Vec<&PointSnap> = snaps.iter().map(|(_, s)| s).collect();
+            let found = match snapped_points(at, op, &reach, &only, settings) {
+                Ok(found) => found,
+                Err(e) => return fail(reach, e),
+            };
+            let mut set = set.clone();
+            for ((key, _), (point, resolved)) in snaps.iter().zip(found) {
+                set.insert(key.clone(), coordinates(point));
+                snapped.push(resolved);
+            }
+            Some(set)
+        }
         _ => None,
     };
     let line_edit = match &op.body {
@@ -1254,7 +1319,13 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         }
     }
     match &op.body {
-        Body::Change { set, .. } => match record.change(list, index, set, units, op.index) {
+        Body::Change { set, .. } => match record.change(
+            list,
+            index,
+            change_set.as_ref().unwrap_or(set),
+            units,
+            op.index,
+        ) {
             Ok(changed) => {
                 let keys: Vec<&str> = set.keys().map(String::as_str).collect();
                 done.message = format!("sets {} of `{id}`{template_note}", keys.join(", "));

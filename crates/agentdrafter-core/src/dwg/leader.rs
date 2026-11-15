@@ -1366,7 +1366,7 @@ pub(super) fn arrow_blocks(drawing: &CadDocument) -> Vec<Handle> {
             handles.extend(s.arrowhead_handle);
         }
     }
-    for entity in drawing.model_space_entities() {
+    for entity in super::in_every_space(drawing) {
         match entity {
             EntityType::MultiLeader(m) => handles.extend(m.arrowhead_handle),
             EntityType::Leader(l) => {
@@ -1388,7 +1388,7 @@ pub(super) fn arrow_blocks(drawing: &CadDocument) -> Vec<Handle> {
 /// an arrowhead too.
 pub(super) fn content_blocks(drawing: &CadDocument) -> Vec<Handle> {
     let mut handles = Vec::new();
-    for entity in drawing.model_space_entities() {
+    for entity in super::in_every_space(drawing) {
         if let EntityType::MultiLeader(m) = entity {
             handles.extend(m.block_content_handle);
             handles.extend(m.context.block_content_handle);

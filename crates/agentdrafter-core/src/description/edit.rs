@@ -1425,6 +1425,8 @@ impl RecordFile {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
                 ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,
+                // A viewport moves on the paper; its view moves with it.
+                ("viewport", "center") => move_point(&mut entry.value, by, units, &field)?,
                 ("dimension", "center" | "point" | "location" | "feature") => {
                     move_point(&mut entry.value, by, units, &field)?;
                 }

@@ -45,11 +45,13 @@ mod dimension;
 mod hatch;
 mod ids;
 mod import;
+mod layout;
 mod leader;
 mod table;
 mod text;
 
 pub(crate) use import::read_blocks;
+pub(crate) use layout::{PageSetup, PLOTTER, PLOT_STYLE};
 
 /// The DWG version a new sheet is written in: the 2018 format, AC1032 (ADR-0006).
 const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;
@@ -191,8 +193,28 @@ pub(crate) fn write_new_sheet(
     // AutoCAD's arrowhead block is the one a leader draws with.
     leader::add_leader_styles(&mut drawing, sheet)?;
     dimension::add_dimension_styles(&mut drawing, sheet)?;
+    // A sheet drawn in a layout names AutoCAD's `Layout1` after it, sets
+    // its page setup and adds its overall viewport before its objects.
+    layout::prepare(&mut drawing, sheet)?;
     let mut dimensions = 0;
-    for (object, written) in sheet.objects.iter().zip(&record.objects) {
+    for (i, (object, written)) in sheet.objects.iter().zip(&record.objects).enumerate() {
+        let paper = sheet.in_paper_space(i);
+        if let (Object::Viewport(v), Some(on)) = (object, &sheet.layout) {
+            let mut dwg_viewport = layout::dwg_viewport(v, sheet.units);
+            let common = dwg_viewport.common_mut();
+            v.layer.clone_into(&mut common.layer);
+            set_properties(common, &v.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            drawing
+                .add_entity_to_layout(dwg_viewport, &on.name)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorCode::DwgWrite,
+                        format!("could not add a viewport to the layout: {e}"),
+                    )
+                })?;
+            continue;
+        }
         if let Object::Table(t) = object {
             let style = sheet.table_style(&t.table_style).ok_or_else(|| {
                 Error::new(
@@ -208,7 +230,7 @@ pub(crate) fn write_new_sheet(
             t.layer.clone_into(&mut common.layer);
             set_properties(common, &t.properties);
             ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
-            let handle = drawing.add_entity(dwg_table).map_err(|e| {
+            let handle = add_to(&mut drawing, dwg_table, paper).map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
                     format!("could not add a table to the drawing: {e}"),
@@ -238,7 +260,7 @@ pub(crate) fn write_new_sheet(
             m.layer.clone_into(&mut common.layer);
             set_properties(common, &m.properties);
             ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
-            drawing.add_entity(dwg_mleader).map_err(|e| {
+            add_to(&mut drawing, dwg_mleader, paper).map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
                     format!("could not add a multileader to the drawing: {e}"),
@@ -269,7 +291,7 @@ pub(crate) fn write_new_sheet(
             d.layer.clone_into(&mut common.layer);
             set_properties(common, &d.properties);
             ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
-            drawing.add_entity(dwg_dimension).map_err(|e| {
+            add_to(&mut drawing, dwg_dimension, paper).map_err(|e| {
                 Error::new(
                     ErrorCode::DwgWrite,
                     format!("could not add a dimension to the drawing: {e}"),
@@ -290,12 +312,11 @@ pub(crate) fn write_new_sheet(
                     format!("could not add a leader to the drawing: {e}"),
                 )
             };
-            let handle = drawing.add_entity(dwg_leader).map_err(added)?;
+            let handle = add_to(&mut drawing, dwg_leader, paper).map_err(added)?;
             if let Some(mut text) = annotation {
                 l.layer.clone_into(&mut text.common.layer);
                 set_properties(&mut text.common, &l.properties);
-                let text = drawing
-                    .add_entity(EntityType::MText(Box::new(text)))
+                let text = add_to(&mut drawing, EntityType::MText(Box::new(text)), paper)
                     .map_err(added)?;
                 leader::link_annotation(&mut drawing, handle, text);
             }
@@ -308,7 +329,7 @@ pub(crate) fn write_new_sheet(
             &written.id,
             written.name.as_deref(),
         );
-        drawing.add_entity(dwg_object).map_err(|e| {
+        add_to(&mut drawing, dwg_object, paper).map_err(|e| {
             Error::new(
                 ErrorCode::DwgWrite,
                 format!("could not add a {} to the drawing: {e}", object.type_name()),
@@ -328,6 +349,20 @@ pub(crate) fn write_new_sheet(
                 panic_message(panic)
             ),
         )),
+    }
+}
+
+/// Adds `object` to paper space when `paper` says so, and otherwise to
+/// model space.
+fn add_to(
+    drawing: &mut CadDocument,
+    object: EntityType,
+    paper: bool,
+) -> Result<acadrust::types::Handle, acadrust::DxfError> {
+    if paper {
+        drawing.add_paper_space_entity(object)
+    } else {
+        drawing.add_entity(object)
     }
 }
 
@@ -409,6 +444,12 @@ fn dwg_object(
             return Err(Error::new(
                 ErrorCode::DwgWrite,
                 "a dimension belongs on a sheet, not in a block",
+            ))
+        }
+        Object::Viewport(_) => {
+            return Err(Error::new(
+                ErrorCode::DwgWrite,
+                "a viewport belongs in a sheet's paper space",
             ))
         }
         Object::Insert(insert) => {
@@ -623,9 +664,14 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
     arrow_blocks.extend(dimension::style_arrow_blocks(&drawing));
     // A dimension's own block holds what it draws, and is read with it.
     let dimension_blocks = dimension::dimension_blocks(&drawing);
+    // The sheet the drawing opens on: model space, and its layout's paper
+    // space when it opens on one.
+    let opened = layout::opened_on(&drawing);
+    let on_sheet = sheet_objects(&drawing, opened.as_ref().map(|(_, block)| *block));
     // A table's own block holds what it draws, and is read with the table.
-    let table_blocks: Vec<(Option<acadrust::types::Handle>, String)> = drawing
-        .model_space_entities()
+    let table_blocks: Vec<(Option<acadrust::types::Handle>, String)> = on_sheet
+        .iter()
+        .map(|(e, _)| *e)
         .filter_map(|e| match e {
             EntityType::Table(t) => {
                 let (handle, name) = table::block_of(t);
@@ -715,7 +761,7 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
     // when the leader is not read, nor is its annotation.
     let mut leaders = Vec::new();
     let mut annotations = Vec::new();
-    for dwg_object in drawing.model_space_entities() {
+    for &(dwg_object, _) in &on_sheet {
         if let EntityType::Leader(l) = dwg_object {
             let read = read_properties(&l.common)
                 .filter(|_| !l.common.invisible)
@@ -730,7 +776,8 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             leaders.push((l.common.handle, read));
         }
     }
-    for dwg_object in drawing.model_space_entities() {
+    let mut paper_space = Vec::new();
+    for &(dwg_object, paper) in &on_sheet {
         let handle = dwg_object.common().handle;
         if let Some((_, read_with_its_leader)) = annotations.iter().find(|(a, _)| *a == handle) {
             if !read_with_its_leader {
@@ -776,11 +823,19 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
                     read.properties = properties;
                     Some(Object::Table(read))
                 }),
+            EntityType::Viewport(v) if paper => read_properties(&v.common)
+                .filter(|_| !v.common.invisible)
+                .and_then(|properties| {
+                    let mut read = layout::read_viewport(v, layer_of(&v.common))?;
+                    read.properties = properties;
+                    Some(Object::Viewport(read))
+                }),
             _ => read_object(dwg_object, &blocks),
         };
         match read {
             Some(object) => {
                 objects.push(object);
+                paper_space.push(paper);
                 ids_and_names.push(IdAndName {
                     id: ids::read_id(dwg_object.common()),
                     name: ids::read_name(dwg_object.common()),
@@ -789,9 +844,22 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             None => objects_not_read += 1,
         }
     }
+    let units = unit(drawing.header.insertion_units);
+    let mut layouts_not_read =
+        layout::other_layouts(&drawing, opened.as_ref().map(|(_, block)| *block));
+    let (layout, paper) = match opened {
+        Some((name, block)) => {
+            let paper = layout::read_paper(&drawing, block, units.unwrap_or(Unit::Mm));
+            if paper.is_none() {
+                layouts_not_read += 1;
+            }
+            (Some(crate::model::Layout { name, paper_space }), paper)
+        }
+        None => (None, None),
+    };
     Ok(DrawingContents {
         dwg_version: drawing.version.to_string(),
-        units: unit(drawing.header.insertion_units),
+        units,
         linetypes,
         linetypes_not_read,
         layers,
@@ -810,7 +878,58 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         ids_and_names,
         objects_not_read,
         ltscale: drawing.header.linetype_scale,
+        layout,
+        paper,
+        layouts_not_read,
     })
+}
+
+/// The objects of model space and of every layout's paper space, in no
+/// order: what owns the blocks a dimension draws from and the blocks a
+/// leader draws with, wherever it is.
+pub(super) fn in_every_space(drawing: &CadDocument) -> Vec<&EntityType> {
+    let mut all: Vec<&EntityType> = drawing.model_space_entities().collect();
+    for record in drawing.block_records.iter().filter(|r| r.is_paper_space()) {
+        all.extend(drawing.entities_in_block(&record.name));
+    }
+    all
+}
+
+/// The objects of the sheet a drawing opens on, each with whether it is in
+/// paper space: model space's in drawing order, and, when the drawing opens
+/// on a layout, whose paper-space block is `paper`, that layout's but its
+/// own overall viewport, the two merged in the order they were made, by
+/// handle, as a build writes a sheet's objects in its order.
+fn sheet_objects(
+    drawing: &CadDocument,
+    paper: Option<acadrust::types::Handle>,
+) -> Vec<(&EntityType, bool)> {
+    let model: Vec<(&EntityType, bool)> =
+        drawing.model_space_entities().map(|e| (e, false)).collect();
+    let Some(block) = paper else {
+        return model;
+    };
+    let Some(record) = drawing.block_records.iter().find(|r| r.handle == block) else {
+        return model;
+    };
+    let paper: Vec<(&EntityType, bool)> = drawing
+        .entities_in_block(&record.name)
+        .filter(|e| !layout::is_overall(e))
+        .map(|e| (e, true))
+        .collect();
+    let mut merged = Vec::with_capacity(model.len() + paper.len());
+    let (mut m, mut p) = (model.into_iter().peekable(), paper.into_iter().peekable());
+    loop {
+        let take_model = match (m.peek(), p.peek()) {
+            (Some((a, _)), Some((b, _))) => a.common().handle.value() <= b.common().handle.value(),
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        let next = if take_model { m.next() } else { p.next() };
+        merged.extend(next);
+    }
+    merged
 }
 
 /// A block definition the core can read back whole: named, not an
@@ -1274,6 +1393,7 @@ mod tests {
             objects: Vec::new(),
             paper: None,
             ltscale: 1.0,
+            layout: None,
         }
     }
 
@@ -1558,6 +1678,8 @@ mod tests {
             "EntityCommon",
             "EntityType",
             "acadrust::entities",
+            "add_paper_space_entity",
+            "add_entity_to_layout",
             "add_entity",
             "entities_in_block",
             "model_space_entities",

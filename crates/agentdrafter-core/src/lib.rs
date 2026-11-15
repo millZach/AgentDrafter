@@ -149,7 +149,7 @@ pub use model::{
     LeaderAttachment, MLeader, MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, MTextBox,
     STANDARD_MLEADER_STYLE,
 };
-pub use model::{Cell, Paper};
+pub use model::{Cell, Layout, Paper, Viewport};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use model::{RowKind, RowStyle, Table, TableCell, TableStyle, STANDARD_TABLE_STYLE};
 pub use plot::{
@@ -159,9 +159,9 @@ pub use plot::{
 pub use plot_style::NotFollowed;
 pub use query::{
     query, query_with, Answer, AttributeValues, BlockInserts, BlockText, End, Extents, FoundObject,
-    InsertAttributes, LayerUse, Matching, Measure, MeasuredPoint, ObjectGeometry, Query,
-    QueryReport, QueryRequest, Selection, SelectionBox, SheetBlocks, SheetExtents, SheetLayers,
-    SnapObject, SnappedFrom, WrittenAt, EXTENTS_TOLERANCE,
+    InsertAttributes, LayerUse, Matching, Measure, MeasuredPoint, ObjectGeometry, PageSetupUsed,
+    Query, QueryReport, QueryRequest, Selection, SelectionBox, SheetBlocks, SheetExtents,
+    SheetLayers, SheetLayout, SnapObject, SnappedFrom, ViewportFound, WrittenAt, EXTENTS_TOLERANCE,
 };
 pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;

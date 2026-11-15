@@ -201,6 +201,10 @@ pub struct CheckedObject {
     /// mtext's contents, an attribute's value, or a table cell's text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// On a sheet drawn in a layout, the viewport a model-space object is
+    /// checked through, by its ID: where it shows on the paper.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<String>,
 }
 
 /// One object of an insert's block, as its block library defines it.

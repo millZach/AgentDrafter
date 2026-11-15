@@ -31,6 +31,8 @@ pub(crate) enum Kind {
     /// names, when it names one.
     Add(&'static str, Option<&'static str>),
     Change,
+    /// Sets a viewport's scale, view centre or display lock.
+    ChangeViewport,
     Move,
     Delete,
     SetAttribute,
@@ -191,7 +193,7 @@ pub(crate) struct Spec {
 }
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 55] = [
+pub(crate) const SPECS: [Spec; 57] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -218,6 +220,7 @@ pub(crate) const SPECS: [Spec; 55] = [
         "three_point_angular",
     ),
     dimension("add_ordinate_dimension", "DIMORDINATE", "ordinate"),
+    add("add_viewport", "MVIEW", "viewport"),
     Spec {
         name: "add_baseline_dimension",
         alias: "DIMBASELINE",
@@ -232,6 +235,11 @@ pub(crate) const SPECS: [Spec; 55] = [
         name: "change",
         alias: "CHANGE",
         kind: Kind::Change,
+    },
+    Spec {
+        name: "change_viewport",
+        alias: "",
+        kind: Kind::ChangeViewport,
     },
     Spec {
         name: "move",
@@ -463,6 +471,17 @@ fn does(spec: &Spec) -> String {
                          takes from the row, when the new content or annotation differs in its \
                          text alone; any other change of them edits the template. AutoCAD's \
                          CHANGE."
+            .to_owned(),
+        Kind::ChangeViewport => "Sets a viewport's scale, its view centre, the point of model \
+                                 space at its middle, or its display lock, locked: each that is \
+                                 sent takes its new value, and the viewport stays where it is on \
+                                 the paper, as AutoCAD's ZOOM with a scale, PAN and the display \
+                                 lock do in it. A viewport is named by target, by its ID or its \
+                                 name. view_center is a point or a snapped point, on model space. \
+                                 The scale or the view centre of a locked viewport is refused \
+                                 unless locked: false is sent with it, as AutoCAD keeps a locked \
+                                 view from being zoomed or panned; move moves a viewport on the \
+                                 paper, its view with it."
             .to_owned(),
         Kind::Move => "Moves an object by by, [dx, dy, dz], or from a base point, from, to a \
                        second point, to, as AutoCAD's MOVE takes them, each a point or a \
@@ -1119,6 +1138,36 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                 },
             },
         }),
+        Kind::ChangeViewport => json!({
+            "type": "object",
+            "required": ["target"],
+            "additionalProperties": false,
+            "anyOf": [
+                { "required": ["scale"] },
+                { "required": ["view_center"] },
+                { "required": ["locked"] },
+            ],
+            "properties": {
+                "target": target,
+                "scale": {
+                    "description": "The viewport's new scale, paper to model: a ratio such as \
+                                    `1:4` or `2:1`, or a number more than 0 such as 0.25.",
+                    "anyOf": [
+                        { "type": "number", "exclusiveMinimum": 0 },
+                        { "type": "string" },
+                    ],
+                },
+                "view_center": {
+                    "description": "The point of model space at the viewport's middle: a point \
+                                    [x, y, 0] or a snapped point on model space.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "locked": {
+                    "description": "Whether the viewport's view is locked.",
+                    "type": "boolean",
+                },
+            },
+        }),
         Kind::Move => json!({
             "type": "object",
             "required": ["target"],
@@ -1630,6 +1679,11 @@ pub(crate) enum Body {
     Change {
         target: Target,
         set: Map<String, Value>,
+        /// The snapped points among its keys, each by its key, to be
+        /// written as coordinates: a change_viewport's view centre.
+        snaps: Vec<(String, PointSnap)>,
+        /// Whether it is a change_viewport, which changes a viewport alone.
+        viewport: bool,
     },
     Move {
         target: Target,
@@ -2263,7 +2317,66 @@ fn operation(
                     ))
                 }
             };
-            Body::Change { target, set }
+            Body::Change {
+                target,
+                set,
+                snaps: Vec::new(),
+                viewport: false,
+            }
+        }
+        Kind::ChangeViewport => {
+            keys(&["target", "scale", "view_center", "locked"])?;
+            let target = target()?;
+            let mut set = Map::new();
+            let mut snaps = Vec::new();
+            if let Some(scale) = map.get("scale") {
+                if !matches!(scale, Value::Number(_) | Value::String(_)) {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a scale, a ratio such as `1:4` or a number such as 0.25"
+                            .to_owned(),
+                        "scale",
+                    ));
+                }
+                set.insert("scale".into(), scale.clone());
+            }
+            if let Some(center) = map.get("view_center") {
+                match op_point(center, units, "view_center")
+                    .map_err(|(code, message, field)| fail(code, message, &field))?
+                {
+                    OpPoint::At(at) => {
+                        set.insert("view_center".into(), json!(at));
+                    }
+                    OpPoint::Snap(snap) => {
+                        // Stands in until the snap is worked out.
+                        set.insert("view_center".into(), json!([0.0, 0.0, 0.0]));
+                        snaps.push(("view_center".to_owned(), snap));
+                    }
+                }
+            }
+            if let Some(locked) = map.get("locked") {
+                let Value::Bool(_) = locked else {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `true` or `false`".to_owned(),
+                        "locked",
+                    ));
+                };
+                set.insert("locked".into(), locked.clone());
+            }
+            if set.is_empty() {
+                return Err(fail(
+                    ErrorCode::MissingKey,
+                    "missing key: change_viewport sets scale, view_center or locked".to_owned(),
+                    "scale",
+                ));
+            }
+            Body::Change {
+                target,
+                set,
+                snaps,
+                viewport: true,
+            }
         }
         Kind::Move => {
             keys(&["target", "by", "from", "to"])?;

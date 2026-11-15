@@ -16,7 +16,9 @@ Zach decided on 2026-11-13 that a sheet that declares its [paper](sheet-descript
 
 The paper matters when what a sheet draws falls short of it, as a sheet whose trim marks sit on a layer that does not plot does. On the extents its page would come out smaller than its paper and fail the exact paper size check; on its paper it is the paper's size.
 
-A DWG holds no paper (the DWG is unchanged by it). A DWG AgentDrafter built for a drawing set names the set in its build mark ([the build mark](drawing-set.md#the-build-mark-names-the-set)), so a plot of the DWG on its own reads the paper from that sheet's template filled in from its row, and the PDF is stamped with the template and the rows as well as the DWG. A DWG with no set, or whose set or row cannot be read, plots to its extents.
+A sheet drawn in a [paper-space layout](sheet-description.md#layouts-and-viewports) plots its layout on its paper at 1:1, as its page setup says and as AutoCAD plots a layout: paper space at full size, and model space through each viewport at the viewport's scale, cut at its edge. Its page is always its paper, a standard size, and its DWG holds the paper in its page setup, so a plot of the DWG on its own plots on that paper. AutoCAD 2026 plotted made-up layouts at 1:48, 1:12, 1:4, 3:8, 1:1 and 2:1, in millimetres, in inches and in millimetres on inch paper, through acad.ctb, and at 300 dots per inch every pixel of AutoCAD's ink lay within a pixel of AgentDrafter's, and 99.99% or more of AgentDrafter's within a pixel of AutoCAD's away from the paper's very edge.
+
+A DWG drawn in model space holds no paper (the DWG is unchanged by it). A DWG AgentDrafter built for a drawing set names the set in its build mark ([the build mark](drawing-set.md#the-build-mark-names-the-set)), so a plot of the DWG on its own reads the paper from that sheet's template filled in from its row, and the PDF is stamped with the template and the rows as well as the DWG. A DWG with no set, or whose set or row cannot be read, plots to its extents.
 
 - The demo set's template draws its trim line from (0, 0) to (17, 11) inches, so each of its sheets plots on a page of exactly 17 by 11 inches: 431.8 by 279.4 mm, 1224 by 792 points. Inches are exact in points, so the page box is exact; a sheet drawn in millimetres lands on the same page to within a millionth of a point.
 - The page's lower left corner is the paper's, the origin; or, for a sheet with no paper, the drawing's corner at its extents' lower left.
@@ -131,7 +133,9 @@ What still differs: the trim line on the page's edge (above); AutoCAD writes its
 
 ## What is not offered yet
 
-- Paper-space layouts and viewports, and a scale other than 1:1: a sheet is model space plotted at 1:1 onto its declared paper, or to its extents when it declares none.
+- A plot scale other than 1:1 in the sheet's unit: a sheet drawn in model space plots at 1:1 onto its declared paper, or to its extents when it declares none, and one drawn in a layout plots its layout at 1:1, its scales in its viewports.
+- A layout's page setup other than the one a build writes, such as another plotter, a paper with margins, or a window: a DWG whose layout has one is plotted on its paper only when the paper reads back.
+- More than one layout, and clipped viewports and layers frozen in one viewport (VPLAYER), which [#77](https://github.com/millZach/AgentDrafter/issues/77)'s second part adds.
 - A plot style's screening, grayscale, linetypes, line ends and joins and fill styles (listed under `not_followed` when a CTB sets them), and named plot styles (STB).
 - PDF layers from the drawing's layers, and PDF/A.
 - More than one sheet in one PDF.
