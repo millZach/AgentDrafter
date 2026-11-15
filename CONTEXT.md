@@ -105,11 +105,27 @@ What a multileader draws with unless it gives its own, as AutoCAD's MLEADERSTYLE
 _Avoid_: leader style (an older leader takes its arrowhead and sizes from a dimension style), callout style
 
 **Dimension**:
-A measurement drawn on the sheet, as AutoCAD's DIMENSION draws it: extension lines from the points it measures, a dimension line with an arrowhead at each end, and text that shows the measured value as its dimension style formats it, or its own text with `<>` standing for the value. A linear dimension measures along an angle, an aligned one between its points, and a radius or diameter dimension a circle or an arc by its centre and a point on it. AutoCAD's commands for them are DIMLINEAR, DIMALIGNED, DIMRADIUS and DIMDIAMETER; it keeps what each draws in a block of its own, `*D1` and on, which it lays out again from the dimension.
+A measurement drawn on the sheet, as AutoCAD's DIMENSION draws it: extension lines from the points it measures, a dimension line with an arrowhead at each end, and text that shows the measured value as its dimension style formats it, or its own text with `<>` standing for the value. A linear dimension measures along an angle, an aligned one between its points, a radius or diameter dimension a circle or an arc by its centre and a point on it, an angular dimension the angle between two lines or at a vertex between two points, with an arc for its dimension line, and an ordinate dimension a feature's X or Y from the origin, with a leader from the feature to its text. AutoCAD's commands for them are DIMLINEAR, DIMALIGNED, DIMRADIUS, DIMDIAMETER, DIMANGULAR and DIMORDINATE; it keeps what each draws in a block of its own, `*D1` and on, which it lays out again from the dimension.
 _Avoid_: dim alone in prose, measurement (the measurement is what a dimension shows), callout
 
+**Baseline dimension**:
+A dimension added from another's first extension line, as AutoCAD's DIMBASELINE adds it: it measures from the same point, its dimension line further out by its style's baseline spacing, so that a row of them stacks. Once added it is an ordinary dimension of its kind.
+_Avoid_: datum dimension, stacked dimension
+
+**Continued dimension**:
+A dimension added from another's second extension line, on the same dimension line, as AutoCAD's DIMCONTINUE adds it, so that a chain of them runs end to end. AutoCAD marks it by overriding its style's DIMTMOVE, which draws nothing different, and AgentDrafter keeps the mark as `continued`.
+_Avoid_: chain dimension, string dimension
+
+**Unit format**:
+How a dimension style writes a length, as AutoCAD's DIMLUNIT: scientific, decimal, engineering (feet and decimal inches), architectural (feet and fractional inches), fractional or Windows desktop; and an angle, as its DIMAUNIT: decimal degrees, degrees, minutes and seconds, gradians or radians.
+_Avoid_: units (the sheet's unit is what its lengths are in), number format
+
+**Stacked fraction**:
+A fraction in a dimension's text drawn as AutoCAD stacks it, its numerator over its denominator across a bar, or across a slash, both as high as the rest of the text, as an architectural or fractional length shows its part of an inch.
+_Avoid_: stacked text, built-up fraction
+
 **Dimension style**:
-What a dimension draws with, as AutoCAD's DIMSTYLE: its arrowhead and their size, its text style and height, the gap round its text, how far its extension lines start from their points and reach past the dimension line, its centre mark, where its text sits, and how a value is written, its precision, decimal separator, zeros, prefix and suffix, all multiplied by its scale. A metric sheet has AutoCAD's `ISO-25` and an imperial one AutoCAD's `Standard` without listing it.
+What a dimension draws with, as AutoCAD's DIMSTYLE: its arrowhead and their size, its text style and height, the gap round its text, how far its extension lines start from their points and reach past the dimension line, its centre mark, where its text sits, its baseline spacing, and how a value is written, its unit format, precision, fraction, decimal separator, zeros, prefix and suffix, all multiplied by its scale. A metric sheet has AutoCAD's `ISO-25` and an imperial one AutoCAD's `Standard` without listing it.
 _Avoid_: dimstyle alone in prose, dimension format
 
 **Hatch**:

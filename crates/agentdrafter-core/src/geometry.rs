@@ -276,13 +276,27 @@ impl<'a> Reader<'a> {
                 path_through(&path)
             }
             Object::Dimension(dimension) => match self.laid_dimension(dimension) {
-                Some(laid) => laid
-                    .lines()
-                    .enumerate()
-                    .map(|(i, [a, b])| {
-                        (format!("lines[{i}]"), Curve::Segment { a: p3(a), b: p3(b) })
-                    })
-                    .collect(),
+                Some(laid) => {
+                    let mut curves: Vec<(String, Curve)> = laid
+                        .lines()
+                        .enumerate()
+                        .map(|(i, [a, b])| {
+                            (format!("lines[{i}]"), Curve::Segment { a: p3(a), b: p3(b) })
+                        })
+                        .collect();
+                    curves.extend(laid.arcs().enumerate().map(
+                        |(i, (center, radius, start, end))| {
+                            let curve = Curve::Arc {
+                                center: p3(center),
+                                radius,
+                                start: start.to_radians(),
+                                sweep: (end - start).to_radians(),
+                            };
+                            (format!("arcs[{i}]"), curve)
+                        },
+                    ));
+                    curves
+                }
                 None => Vec::new(),
             },
             Object::Hatch(_)
@@ -608,10 +622,13 @@ impl<'a> Reader<'a> {
                 out.push((Insertion, String::new(), p3(content)));
             }
             Object::Dimension(dimension) => {
+                // Its lines' and arcs' ends and middles, and an arc's centre
+                // and quadrants, as AutoCAD snaps to the objects of its block.
                 for (place, curve) in self.curves(object) {
                     out.push((Endpoint, join(&place, "from"), curve.start()));
                     out.push((Endpoint, join(&place, "to"), curve.end()));
-                    out.push((Midpoint, place, curve.point(0.5)));
+                    out.push((Midpoint, place.clone(), curve.point(0.5)));
+                    round(&mut out, &place, &curve);
                 }
                 if let Some(laid) = self.laid_dimension(dimension) {
                     // AutoCAD's node snap finds a dimension's definition
@@ -632,7 +649,7 @@ impl<'a> Reader<'a> {
     pub(crate) fn laid_dimension(&self, dimension: &Dimension) -> Option<LaidDimension> {
         let style = self.sheet.dimension_style(&dimension.dimension_style)?;
         let fonts = self.fonts;
-        Some(dimension.laid_out(&style, &|t| mtext_box(t, fonts)))
+        Some(dimension.laid_out(&style, self.sheet.units, &|t| mtext_box(t, fonts)))
     }
 }
 

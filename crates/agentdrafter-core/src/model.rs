@@ -25,8 +25,9 @@ pub use block::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
 };
 pub use dimension::{
-    DecimalSeparator, Dimension, DimensionKind, DimensionPart, DimensionStyle, LaidDimension,
-    Measured, TextPlacement, DIAMETER_SIGN, ISO_DIMENSION_STYLE, MEASURED,
+    AngularUnit, DecimalSeparator, Dimension, DimensionKind, DimensionPart, DimensionStyle,
+    FractionFormat, LaidDimension, Lettered, Measured, OrdinateAxis, TextPiece, TextPlacement,
+    UnitFormat, DEGREE_SIGN, DIAMETER_SIGN, ISO_DIMENSION_STYLE, MEASURED,
     STANDARD_DIMENSION_STYLE,
 };
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};

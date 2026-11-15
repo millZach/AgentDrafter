@@ -1425,7 +1425,7 @@ impl RecordFile {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
                 ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,
-                ("dimension", "center" | "point" | "location") => {
+                ("dimension", "center" | "point" | "location" | "feature") => {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
                 ("polyline" | "leader" | "dimension", "points")
@@ -1433,7 +1433,7 @@ impl RecordFile {
                 | ("solid", "corners") => {
                     move_points(&mut entry.value, by, units, &field)?;
                 }
-                ("mleader", "leaders") => {
+                ("mleader", "leaders") | ("dimension", "lines") => {
                     let Kind::Sequence(lines) = &mut entry.value.kind else {
                         return Err(not_a_point(&field));
                     };

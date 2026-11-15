@@ -22,10 +22,11 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::commit::Replacement;
+use super::from_dimension::dimension_from;
 use super::journal::{commit_change_set, HowChanged, Landing, ObjectChanged, SheetFailed};
 use super::operations::{
-    op_error, read_change_set, AddTo, BlockOp, Body, Import, Kind, Motion, OpPoint, Operation,
-    PointSnap, Table, TableOp, Target,
+    op_error, read_change_set, AddTo, BlockOp, Body, FromOp, Import, Kind, Motion, OpPoint,
+    Operation, PointSnap, Table, TableOp, Target,
 };
 use super::MARK_FILE;
 use super::{
@@ -847,7 +848,8 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             | Body::Delete { target }
             | Body::SetAttribute { target, .. }
             | Body::TableEdit { target, .. }
-            | Body::LeaderLine { target, .. } => match target {
+            | Body::LeaderLine { target, .. }
+            | Body::DimensionFrom { target, .. } => match target {
                 Target::Id { sheet, .. } => (sheet, "target.id"),
                 Target::Name {
                     sheet: Some(sheet), ..
@@ -1083,6 +1085,17 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         );
     }
 
+    if let Body::DimensionFrom {
+        from,
+        target,
+        point,
+        id,
+        name,
+    } = &op.body
+    {
+        return apply_dimension_from(at, op, *from, target, point, id, name, settings);
+    }
+
     let target = match &op.body {
         Body::Change { target, .. }
         | Body::Move { target, .. }
@@ -1090,7 +1103,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::SetAttribute { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. } => target,
-        Body::Add { .. } | Body::Table { .. } | Body::Block { .. } => {
+        Body::Add { .. } | Body::Table { .. } | Body::Block { .. } | Body::DimensionFrom { .. } => {
             unreachable!("handled above")
         }
     };
@@ -1375,7 +1388,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 }
             }
         }
-        Body::Add { .. } | Body::Table { .. } | Body::Block { .. } => {
+        Body::Add { .. } | Body::Table { .. } | Body::Block { .. } | Body::DimensionFrom { .. } => {
             unreachable!("handled above")
         }
     }
@@ -2621,6 +2634,175 @@ fn resolve(at: &mut Attempt, target: &Target, op: &Operation) -> Result<Found, B
     }
 }
 
+/// Adds a dimension `from` the one `target` names, to `point`, written
+/// where that one is, with the id and the name given: AutoCAD's
+/// DIMBASELINE and DIMCONTINUE.
+#[allow(clippy::too_many_arguments)]
+fn apply_dimension_from(
+    at: &mut Attempt,
+    op: &Operation,
+    from: FromOp,
+    target: &Target,
+    point: &OpPoint,
+    id: &Option<String>,
+    name: &Option<String>,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let found = match resolve(at, target, op) {
+        Ok(found) => found,
+        Err(applied) => return *applied,
+    };
+    let reach = at.reach(found.file, found.row);
+    if let Some(refusal) = many_paths(files, found.file, op, "target") {
+        return refusal;
+    }
+    // The dimension it is added from, as the sheet it is on stands now.
+    let rows_text = match at.rows.new_text() {
+        Ok(text) => text.unwrap_or_else(|| files.rows_text.clone()),
+        Err(e) => return fail(reach, e),
+    };
+    let rows = match rows_at(&rows_text, &files.rows_path) {
+        Ok(rows) => rows,
+        Err(e) => return fail(reach, e),
+    };
+    let record = match sheet_record(at, &rows, found.row, &mut Vec::new()) {
+        Ok(record) => record,
+        Err(e) => return fail(reach, e),
+    };
+    let local = found
+        .id
+        .split_once(ID_SEPARATOR)
+        .map_or(found.id.as_str(), |(_, local)| local);
+    let in_row = found.file == FileRef::Rows;
+    let base = record
+        .objects
+        .iter()
+        .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(local))
+        .and_then(|i| record.sheet.objects.get(i));
+    let Some(crate::model::Object::Dimension(base)) = base else {
+        let what = base.map_or("object", |o| o.type_name());
+        return fail(
+            reach,
+            op_err(
+                ErrorCode::BadValue,
+                format!(
+                    "`{}` is {} {what}; a dimension is added from a dimension",
+                    found.id,
+                    article(what)
+                ),
+                "target",
+            ),
+        );
+    };
+    let Some(style) = record.sheet.dimension_style(&base.dimension_style) else {
+        return fail(
+            reach,
+            op_err(
+                ErrorCode::UnknownName,
+                format!(
+                    "`{}` draws with the dimension style `{}`, which its sheet does not have",
+                    found.id, base.dimension_style
+                ),
+                "target",
+            ),
+        );
+    };
+    let mut snapped: Vec<SnapResolved> = Vec::new();
+    let xyz = match point {
+        OpPoint::At(p) => *p,
+        OpPoint::Snap(snap) => match snapped_points(at, op, &reach, &[snap], settings) {
+            Ok(mut found) => {
+                let (p, resolved) = found.remove(0);
+                snapped.push(resolved);
+                p
+            }
+            Err(e) => return fail(reach, e),
+        },
+    };
+    let to = crate::model::Point3::new(xyz[0], xyz[1], xyz[2]);
+    let mut keys = match dimension_from(base, &style, from, to) {
+        Ok(keys) => keys,
+        Err(why) => return fail(reach, op_err(ErrorCode::BadValue, why, "target")),
+    };
+    let new_id = match id {
+        Some(id) => id.clone(),
+        None => {
+            let mut taken: BTreeSet<String> = BTreeSet::new();
+            for &k in &reach {
+                match at.objects(k) {
+                    Ok(objects) => {
+                        taken.extend(objects.into_iter().map(|o| o.3.id.to_lowercase()));
+                    }
+                    Err(e) => return fail(reach.clone(), e),
+                }
+            }
+            (1..)
+                .map(|n| format!("dimension-{n}"))
+                .find(|id| !taken.contains(id))
+                .expect("a free number")
+        }
+    };
+    keys.insert("id".into(), serde_json::Value::String(new_id));
+    if let Some(name) = name {
+        keys.insert("name".into(), serde_json::Value::String(name.clone()));
+    }
+    let first = reach[0];
+    let file = match at.file(found.file) {
+        Ok(file) => file,
+        Err(e) => return fail(reach, e),
+    };
+    let index = match file.add(found.list, "dimension", &keys, op.index) {
+        Ok(index) => index,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "point")),
+    };
+    let listed = &file.objects(found.list)[index];
+    let added = format!("{}/{}", files.name(first), listed.id);
+    let after = file.object_text(found.list, index);
+    let path = file.path.clone();
+    let what = match from {
+        FromOp::Baseline => "a baseline dimension",
+        FromOp::Continued => "a continued dimension",
+    };
+    let place = match found.file {
+        FileRef::Rows => format!("to sheet `{}`, in its row", files.name(first)),
+        FileRef::Template(t) => format!(
+            "to the template `{}`, so it is on {}",
+            files.templates[t].written,
+            every_sheet(&files.names(&reach))
+        ),
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: Some(added.clone()),
+            before: None,
+            after: Some(after),
+            row_value: None,
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            message: format!(
+                "adds {what}, `{added}`, from `{}`, {place}{}",
+                found.id,
+                snapped_words(&snapped)
+            ),
+            snapped,
+        }),
+        sheets: reach,
+        refuse: false,
+    }
+}
+
 /// Reads sheet `k` from the records in memory and builds it, adding what
 /// reading noticed to `notices`.
 fn validate(
@@ -3088,7 +3270,8 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
         | Body::TableEdit { target, .. }
-        | Body::LeaderLine { target, .. } => match target {
+        | Body::LeaderLine { target, .. }
+        | Body::DimensionFrom { target, .. } => match target {
             Target::Id { sheet, .. }
             | Target::Name {
                 sheet: Some(sheet), ..
@@ -3201,6 +3384,8 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
             LeaderLineEdit::Add { .. } => "points".to_owned(),
             LeaderLineEdit::Delete { .. } => "leader".to_owned(),
         },
+        // What is wrong with the dimension it adds comes of its point.
+        Body::DimensionFrom { .. } => "point".to_owned(),
         // A place within the block it wrote, such as `objects[0].line.layer`,
         // is that place in the operation.
         Body::Block { .. } => rest.to_owned(),
@@ -3381,7 +3566,8 @@ fn target_words(op: &Operation) -> String {
         | Body::Delete { target }
         | Body::SetAttribute { target, .. }
         | Body::TableEdit { target, .. }
-        | Body::LeaderLine { target, .. } => target.words(),
+        | Body::LeaderLine { target, .. }
+        | Body::DimensionFrom { target, .. } => target.words(),
         Body::Add {
             to: AddTo::Sheet(s),
             ..

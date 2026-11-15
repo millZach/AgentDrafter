@@ -6,7 +6,9 @@
 //! `change`, `move`, `delete` and `set_attribute` edit an object an agent
 //! names by its ID or by its name, `set_cell`, `add_row`, `delete_row`,
 //! `add_column` and `delete_column` a table's grid, and `add_leader_line`
-//! and `delete_leader_line` a multileader's leader lines.
+//! and `delete_leader_line` a multileader's leader lines, and
+//! `add_baseline_dimension` and `add_continued_dimension` add a dimension
+//! from another, as AutoCAD's DIMBASELINE and DIMCONTINUE do.
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -43,6 +45,20 @@ pub(crate) enum Kind {
     /// Adds a leader line to a multileader, or deletes one: AutoCAD's
     /// MLEADEREDIT.
     LeaderLine(LeaderLineOp),
+    /// Adds a dimension from another: AutoCAD's DIMBASELINE or
+    /// DIMCONTINUE.
+    DimensionFrom(FromOp),
+}
+
+/// How a dimension added from another is added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FromOp {
+    /// From the other's first extension line, its line further out:
+    /// AutoCAD's DIMBASELINE.
+    Baseline,
+    /// From the other's second extension line, on its line: AutoCAD's
+    /// DIMCONTINUE.
+    Continued,
 }
 
 /// What an operation on a multileader's leader lines does.
@@ -175,7 +191,7 @@ pub(crate) struct Spec {
 }
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 50] = [
+pub(crate) const SPECS: [Spec; 55] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -195,6 +211,23 @@ pub(crate) const SPECS: [Spec; 50] = [
     dimension("add_aligned_dimension", "DIMALIGNED", "aligned"),
     dimension("add_radius_dimension", "DIMRADIUS", "radius"),
     dimension("add_diameter_dimension", "DIMDIAMETER", "diameter"),
+    dimension("add_angular_dimension", "DIMANGULAR", "angular"),
+    dimension(
+        "add_three_point_angular_dimension",
+        "",
+        "three_point_angular",
+    ),
+    dimension("add_ordinate_dimension", "DIMORDINATE", "ordinate"),
+    Spec {
+        name: "add_baseline_dimension",
+        alias: "DIMBASELINE",
+        kind: Kind::DimensionFrom(FromOp::Baseline),
+    },
+    Spec {
+        name: "add_continued_dimension",
+        alias: "DIMCONTINUE",
+        kind: Kind::DimensionFrom(FromOp::Continued),
+    },
     Spec {
         name: "change",
         alias: "CHANGE",
@@ -538,6 +571,33 @@ fn does(spec: &Spec) -> String {
              multileader of a template is edited in the template, so every sheet built from it \
              follows, all or nothing. AutoCAD's MLEADEREDIT, adding leaders."
             .to_owned(),
+        Kind::DimensionFrom(from) => {
+            let (what, how) = match from {
+                FromOp::Baseline => (
+                    "a baseline dimension",
+                    "from the same first extension line as target, its dimension line \
+                     further out by target's style's baseline_spacing, AutoCAD's DIMDLI; an \
+                     angular dimension's arc further out by it",
+                ),
+                FromOp::Continued => (
+                    "a continued dimension",
+                    "from target's second extension line, on the same dimension line or arc, \
+                     marked continued, as AutoCAD marks it",
+                ),
+            };
+            format!(
+                "Adds {what} from target, a linear, aligned, three-point angular or ordinate \
+                 dimension, by its ID or its name: {how}, to point, the new second extension \
+                 line's origin, or an ordinate dimension's new feature, its leader ending level \
+                 with target's. A dimension from an aligned one is linear, at the aligned one's \
+                 angle turned half round, as AutoCAD makes it; an ordinate dimension's is the \
+                 same either way. It takes target's kind, style and layer, and is added where \
+                 target is written, so a template's reaches every sheet built from it. point is \
+                 a point or a snapped point. Without an id it is given one, dimension-1 or the \
+                 next number free. AutoCAD's {}.",
+                spec.alias
+            )
+        }
         Kind::LeaderLine(LeaderLineOp::Delete) => {
             "Deletes a leader line of a multileader, target, \
              by its ID or its name: leader, its place among the multileader's leader lines, \
@@ -1118,6 +1178,37 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                 },
             },
         }),
+        Kind::DimensionFrom(_) => json!({
+            "type": "object",
+            "required": ["target", "point"],
+            "additionalProperties": false,
+            "properties": {
+                "target": {
+                    "description": "The dimension it is added from, by its ID or its name: a \
+                                    linear, aligned, three-point angular or ordinate one.",
+                    "$ref": "#/$defs/target",
+                },
+                "point": {
+                    "description": "The new dimension's second extension line's origin, or an \
+                                    ordinate dimension's feature: a point, as lengths in the \
+                                    set's declared unit or carrying their own, or a snapped \
+                                    point.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "id": {
+                    "description": "The new dimension's ID in its file. Without it, \
+                                    dimension-1 or the next number free.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "name": {
+                    "description": "The new dimension's name, which an operation or a query \
+                                    may name it by.",
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+        }),
         Kind::LeaderLine(LeaderLineOp::Delete) => json!({
             "type": "object",
             "required": ["target", "leader"],
@@ -1570,6 +1661,15 @@ pub(crate) enum Body {
     TableEdit {
         target: Target,
         edit: TableEdit,
+    },
+    /// A dimension added from another, `target`, to `point`, with the id
+    /// and the name it is given.
+    DimensionFrom {
+        from: FromOp,
+        target: Target,
+        point: OpPoint,
+        id: Option<String>,
+        name: Option<String>,
     },
     /// A leader line added to a multileader, or deleted.
     LeaderLine {
@@ -2374,6 +2474,39 @@ fn operation(
                 target,
                 edit,
                 snaps: line_snaps,
+            }
+        }
+        Kind::DimensionFrom(from) => {
+            keys(&["target", "point", "id", "name"])?;
+            let target = target()?;
+            let Some(sent) = map.get("point") else {
+                return Err(fail(
+                    ErrorCode::MissingKey,
+                    "missing key `point`, the new dimension's second extension line's origin, \
+                     or an ordinate dimension's feature"
+                        .to_owned(),
+                    "point",
+                ));
+            };
+            let point = op_point(sent, units, "point")
+                .map_err(|(code, message, field)| fail(code, message, &field))?;
+            let text = |key: &str| -> Result<Option<String>, Error> {
+                match map.get(key) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::String(s)) if !s.is_empty() => Ok(Some(s.clone())),
+                    Some(_) => Err(fail(
+                        ErrorCode::WrongType,
+                        format!("expected the new dimension's {key}, a text"),
+                        key,
+                    )),
+                }
+            };
+            Body::DimensionFrom {
+                from,
+                target,
+                point,
+                id: text("id")?,
+                name: text("name")?,
             }
         }
         Kind::Block(op) => {

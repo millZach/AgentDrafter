@@ -67,8 +67,8 @@ use serde::{Deserialize, Serialize};
 use crate::model::block::{definition_text, Placement};
 use crate::model::leader::{arrowhead_shapes, trimmed};
 use crate::model::{
-    attribute_text, Arrowhead, Block, Dimension, Insert, LaidContent, Layer, Leader, MLeader,
-    MLeaderStyle, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
+    attribute_text, Arrowhead, Block, Dimension, Insert, LaidContent, Layer, Leader, Lettered,
+    MLeader, MLeaderStyle, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
     Properties, Sheet, Table, TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
 };
 use crate::text::placement::SheetFonts;
@@ -1116,12 +1116,21 @@ impl<'a> Drawer<'a> {
             &block(ObjectLineweight::ByLayer),
             Some(own),
         );
-        let laid = dimension.laid_out(&style, &|t| text::mtext_box(t, self.fonts));
+        let laid = dimension.laid_out(&style, self.sheet.units, &|t| {
+            text::mtext_box(t, self.fonts)
+        });
         let dashes = line_pen.dashes();
         let mut runs = Vec::new();
         for [a, b] in laid.lines() {
             runs.extend(linetype::along(
                 &[flat(a), flat(b)],
+                dashes.as_deref(),
+                false,
+            ));
+        }
+        for (center, radius, start, end) in laid.arcs() {
+            runs.extend(linetype::along(
+                &curves::arc(flat(center), radius, start, end, tolerance),
                 dashes.as_deref(),
                 false,
             ));
@@ -1152,12 +1161,41 @@ impl<'a> Drawer<'a> {
             });
         }
         list.add_shown(shown, index, &[], line_pen.color, drawn);
-        let lettering = text::draw_mtext(&laid.text, self.fonts, text_pen.lineweight, tolerance);
-        let drawn = Drawn {
-            shapes: lettering.shapes,
-            runs: lettering.runs,
-            ..Drawn::default()
-        };
+        let mut drawn = Drawn::default();
+        if laid.lettering.is_empty() {
+            let lettering =
+                text::draw_mtext(&laid.text, self.fonts, text_pen.lineweight, tolerance);
+            drawn.shapes = lettering.shapes;
+            drawn.runs = lettering.runs;
+        } else {
+            // A stacked fraction draws as AutoCAD draws its MTEXT exploded:
+            // a line of text for each piece, and its bar or slash.
+            let width_factor = self.fonts.style(&laid.text.style).1;
+            let mut bars = Vec::new();
+            for piece in &laid.lettering {
+                match piece {
+                    Lettered::Text { contents, start } => {
+                        let line = crate::text::Text {
+                            contents: contents.clone(),
+                            position: *start,
+                            height: laid.text.height,
+                            style: laid.text.style.clone(),
+                            width_factor,
+                            rotation: laid.text.rotation,
+                            justify: crate::text::Justify::Left,
+                            layer: laid.text.layer.clone(),
+                            properties: laid.text.properties.clone(),
+                        };
+                        let lettering =
+                            text::draw_text(&line, self.fonts, text_pen.lineweight, tolerance);
+                        drawn.shapes.extend(lettering.shapes);
+                        drawn.runs.extend(lettering.runs);
+                    }
+                    Lettered::Line([a, b]) => bars.push(vec![flat(*a), flat(*b)]),
+                }
+            }
+            add_stroke(&mut drawn, text_pen.lineweight, bars);
+        }
         list.add_shown(shown, index, &[0], text_pen.color, drawn);
     }
 

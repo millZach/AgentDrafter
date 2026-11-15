@@ -1591,6 +1591,17 @@ fn points_of(object: &Object) -> Vec<(String, Point3)> {
                 Measured::Radius { center, point } | Measured::Diameter { center, point } => {
                     vec![("center".to_owned(), *center), ("point".to_owned(), *point)]
                 }
+                Measured::Angular { lines } => {
+                    let mut points = listed("lines[0]", &lines[0]);
+                    points.extend(listed("lines[1]", &lines[1]));
+                    points
+                }
+                Measured::ThreePointAngular { center, points } => {
+                    let mut all = vec![("center".to_owned(), *center)];
+                    all.extend(listed("points", points));
+                    all
+                }
+                Measured::Ordinate { feature, .. } => vec![("feature".to_owned(), *feature)],
             };
             points.push(("location".to_owned(), dimension.location));
             points

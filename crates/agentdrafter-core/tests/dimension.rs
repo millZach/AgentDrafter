@@ -146,9 +146,44 @@ fn the_reader_refuses_a_dimension_it_cannot_draw_and_names_the_field() {
     let on = |dimension: &str| format!("units: mm\nobjects:\n  - dimension: {dimension}\n");
     let cases = [
         (
-            "{kind: angular, points: [[0, 0, 0], [1, 0, 0]], location: [0, 1, 0]}",
+            "{kind: baseline, points: [[0, 0, 0], [1, 0, 0]], location: [0, 1, 0]}",
             "objects[0].dimension.kind",
-            "angular, ordinate, baseline and continued dimensions wait",
+            "`baseline` is not a kind of dimension",
+        ),
+        (
+            "{kind: angular, points: [[0, 0, 0], [1, 0, 0]], location: [0, 1, 0]}",
+            "objects[0].dimension.points",
+            "an angular dimension takes `lines`, not `points`",
+        ),
+        (
+            "{kind: angular, lines: [[[0, 0, 0], [1, 0, 0]], [[0, 2, 0], [1, 2, 0]]], location: [0, 1, 0]}",
+            "objects[0].dimension.location",
+            "lines meet, at an angle",
+        ),
+        (
+            "{kind: angular, lines: [[[0, 0, 0], [0, 0, 0]], [[0, 2, 0], [1, 2, 0]]], location: [0, 1, 0]}",
+            "objects[0].dimension.lines[0]",
+            "a line's two points lie apart",
+        ),
+        (
+            "{kind: three_point_angular, center: [0, 0, 0], points: [[0, 0, 0], [1, 2, 0]], location: [0, 1, 0]}",
+            "objects[0].dimension.points",
+            "lies apart from its centre",
+        ),
+        (
+            "{kind: ordinate, feature: [3, 4, 0], axis: x, location: [3, 4, 0]}",
+            "objects[0].dimension.location",
+            "lies apart from its feature",
+        ),
+        (
+            "{kind: ordinate, feature: [3, 4, 0], axis: z, location: [3, 8, 0]}",
+            "objects[0].dimension.axis",
+            "`z` is not an axis",
+        ),
+        (
+            "{kind: radius, center: [0, 0, 0], point: [5, 0, 0], location: [9, 0, 0], continued: true}",
+            "objects[0].dimension.continued",
+            "a radius dimension takes `center` and `point`, not `continued`",
         ),
         (
             "{kind: aligned, angle: 30, points: [[0, 0, 0], [1, 0, 0]], location: [0, 1, 0]}",

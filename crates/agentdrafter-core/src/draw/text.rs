@@ -72,11 +72,21 @@ pub(crate) fn mtext_lines(text: &MText, fonts: &SheetFonts) -> usize {
 /// far its last line draws below its baseline.
 pub(crate) fn mtext_box(text: &MText, fonts: &SheetFonts) -> MTextBox {
     let (font, style_width) = fonts.style(&text.style);
-    let laid = lay_out(text, font, text.width_factor.unwrap_or(style_width));
+    let width_factor = text.width_factor.unwrap_or(style_width);
+    let laid = lay_out(text, font, width_factor);
+    let along = text.height * width_factor;
+    let first = laid.lines.first().map(|line| font.line(line));
     MTextBox {
         width: laid.box_width,
         height: laid.box_height,
         last_descent: laid.descent,
+        left: laid
+            .inks
+            .first()
+            .copied()
+            .flatten()
+            .map_or(0.0, |ink| ink.left),
+        advance: first.map_or(0.0, |line| line.advance * along),
     }
 }
 
