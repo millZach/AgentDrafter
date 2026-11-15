@@ -42,6 +42,7 @@ The page's renderer, `crates/agentdrafter-viewer`, is Rust compiled to WebAssemb
 
 - **In the display list's order**, as the PNG paints it: a later item covers an earlier one, a blue line over a red one where they cross, a fill over the line under it. Nothing is blended. Items next to one another that draw strokes, or fills, are drawn by one draw call, run after run, and the GPU applies each draw's triangles, and each draw, in order: a demo plant loop sheet, all strokes, is one draw call. A sheet whose strokes and fills alternate more than 64 times is drawn instead in two draws, every item at a depth by its place in the list, a later one nearer, so the depth test keeps the later item's colour in every sample.
 - **Strokes**: each segment of each stroke is a quad exactly as wide as its pen and long enough for its round ends, so every pen is as wide as the PNG draws it. The samples the quad's sides cover are the pen's; at a round end the fragment shader works out the share of the pixel the pen covers, by its distance, and that share of the pixel's samples is written (alpha to coverage). Each sample is written opaque, so where one stroke's segments overlap at a corner they cover the same samples once, and the canvas's multisampling, four samples a pixel, smooths the edges.
+- **A viewport's contents**, a sheet's model space seen through a viewport of its layout, keep the viewport's window: the stroke shader draws none of a segment's ink outside it, as the PNG cuts it with a mask and the PDF with a clipping path. Fills are cut at the window already.
 - **Fills** (solid hatches, TrueType text) are cut into triangles once, by their fill rule, with [lyon](https://crates.io/crates/lyon_tessellation); the multisampling smooths their edges.
 - **Colours** are the core's own: each colour index in the colour it plots in on paper, index 7 black, as the PNG draws them.
 - **Pens are widths on paper**, as in the PNG and the PDF: a 0.5 mm pen is twice as wide when the sheet is shown twice as large. The finest pen is one CSS pixel wide, as a PNG's finest is one pixel.
@@ -145,7 +146,7 @@ The page's packages, all permissive or MPL-2.0 (ADR-0010): `react`, `react-dom` 
 
 ### Measured against the PNG
 
-The canvas is drawn at the view and size of `agentdrafter render --scale 1 --dpi <dpi>` of the same sheet, at one device pixel to a CSS pixel, white round the paper as a PNG's paper is, and read back. A demo plant sheet in the viewer is the set's sheet; its PNG is rendered from its DWG, which draws the same display list point for point. `viewer/e2e/overlap.yaml` is a made-up sheet of colours drawn over one another: a blue line over a red one, a black line over both, a green fill over the three, a red line over that and a yellow fill over part of it.
+The canvas is drawn at the view and size of `agentdrafter render --scale 1 --dpi <dpi>` of the same sheet, at one device pixel to a CSS pixel, white round the paper as a PNG's paper is, and read back. A demo plant sheet in the viewer is the set's sheet; its PNG is rendered from its DWG, which draws the same display list point for point. `viewer/e2e/overlap.yaml` is a made-up sheet of colours drawn over one another: a blue line over a red one, a black line over both, a green fill over the three, a red line over that and a yellow fill over part of it. `viewer/e2e/viewport-clip.yaml` is a made-up layout of lines 2.11 mm wide that a viewport cuts, round ends among them; `examples/layout.yaml` is the layout example.
 
 For every inked pixel of each image (its darkest channel below 192), the nearest pixel of the other image darker than 224 is looked for, within one pixel and within two, as ticket #11 measured the PNG against AutoCAD; and the nearest in the same colour, no channel more than 96 levels off. That is more than anti-aliasing moves an edge pixel, and less than red, blue or green differ from black, or from one another, even at half a pixel's coverage.
 
@@ -166,6 +167,8 @@ Software WebGL in headless Chromium on forge:
 | `examples/hatch.yaml` | 150 | 1359 by 1241 | 100%, 100% | 99.99%, 100% | 0.037% | 0.26 |
 | `examples/text.yaml` | 150 | 1478 by 789 | 100%, 100% | 99.97%, 100% | 0.088% | 0.47 |
 | `viewer/e2e/overlap.yaml` | 150 | 650 by 414 | 100%, 100% | 100%, 100% | 0.076% | 0.23 |
+| `examples/layout.yaml` | 100 | 1654 by 1170 | 100%, 100% | 99.99%, 99.98% | 0.31% | 0.61 |
+| `viewer/e2e/viewport-clip.yaml` | 200 | 2339 by 1654 | 100%, 100% | 100%, 100% | 0.00005% | 0.015 |
 
 The viewer of the pull request's first commit took each pixel's darkest ink. On the overlap sheet it kept only 94.6% and 93.4% of the ink in its colour, and on `geometry.yaml` 99.5%, so this test fails it.
 

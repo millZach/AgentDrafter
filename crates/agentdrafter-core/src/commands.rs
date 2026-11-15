@@ -674,7 +674,7 @@ fn query_schema() -> Value {
         })
     };
     json!({
-        "description": "What to ask, by its `kind`: find, blocks, attributes, measure, extents, layers, snap or geometry.",
+        "description": "What to ask, by its `kind`: find, blocks, attributes, measure, extents, layers, snap, geometry or layout.",
         "oneOf": [
             selection("find", "The objects that match every part given; with none given, every object."),
             bare("blocks", "The blocks each sheet inserts."),
@@ -701,6 +701,13 @@ fn query_schema() -> Value {
                 "geometry",
                 "The length, area, extents and angles of each object that matches every part \
                  given, as AutoCAD's LIST and AREA give them; with none given, every object's.",
+            ),
+            bare(
+                "layout",
+                "Each sheet's paper-space layout, if it is drawn in one: its name, its paper and \
+                 page setup, how many objects are in paper and model space, model space's \
+                 extents, and its viewports, each with its window on the paper, its view centre, \
+                 its scale, whether it is locked, and the part of model space it shows.",
             ),
         ],
     })

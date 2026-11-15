@@ -12,6 +12,7 @@ use super::dimension::{dimension, DIMENSION_KEYS};
 use super::hatch::{self, HATCH_KEYS};
 use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
 use super::layers::{layer_name, properties};
+use super::layout::{in_paper_space, viewport, VIEWPORT_KEYS};
 use super::leader::{leader, mleader, LEADER_KEYS, MLEADER_KEYS};
 use super::polyline;
 use super::strict_yaml::{index_path, key_path, Kind, Node};
@@ -59,10 +60,11 @@ const fn drawn_and(last: ObjectType) -> [ObjectType; 12] {
 }
 
 /// Every object type a sheet description can hold, and the keys each takes:
-/// the drawn objects, inserts, tables, multileaders and older leaders.
-pub(crate) const OBJECT_TYPES: [ObjectType; 16] = {
+/// the drawn objects, inserts, tables, multileaders, older leaders,
+/// dimensions and viewports.
+pub(crate) const OBJECT_TYPES: [ObjectType; 17] = {
     let drawn = drawn_and(("insert", &INSERT_KEYS));
-    let mut types = [("table", &TABLE_KEYS as &[&str]); 16];
+    let mut types = [("table", &TABLE_KEYS as &[&str]); 17];
     let mut i = 0;
     while i < drawn.len() {
         types[i] = drawn[i];
@@ -71,6 +73,7 @@ pub(crate) const OBJECT_TYPES: [ObjectType; 16] = {
     types[13] = ("mleader", &MLEADER_KEYS);
     types[14] = ("leader", &LEADER_KEYS);
     types[15] = ("dimension", &DIMENSION_KEYS);
+    types[16] = ("viewport", &VIEWPORT_KEYS);
     types
 };
 
@@ -126,6 +129,9 @@ pub(super) struct Tables<'a> {
     pub mleader_styles: &'a [MLeaderStyle],
     /// The dimension styles a sheet's dimensions may name; none in a block.
     pub dimension_styles: &'a [DimensionStyle],
+    /// Whether the sheet is drawn in a layout, so that its objects may be
+    /// in paper space; never in a block.
+    pub layout: bool,
 }
 
 /// Where an object is: on a sheet, which may insert blocks from its block
@@ -139,6 +145,8 @@ pub(super) enum Place<'a> {
         /// What reading the objects so far noticed, such as an attribute
         /// tag written in lowercase.
         noticed: Vec<Noticed>,
+        /// For each object read so far, whether it is in paper space.
+        paper_space: Vec<bool>,
     },
     Block {
         /// What reading the block's objects so far noticed.
@@ -170,6 +178,9 @@ impl Place<'_> {
             (Place::Block { .. }, "leader") => Some("a leader belongs on a sheet, not in a block"),
             (Place::Block { .. }, "dimension") => {
                 Some("a dimension belongs on a sheet, not in a block")
+            }
+            (Place::Block { .. }, "viewport") => {
+                Some("a viewport belongs in a sheet's paper space, not in a block")
             }
             _ => None,
         }
@@ -372,6 +383,7 @@ pub(super) fn object(
         ("dimension", Place::Sheet { .. }) => {
             dimension(&fields, units, layer, tables.dimension_styles).map(Object::Dimension)
         }
+        ("viewport", Place::Sheet { .. }) => viewport(&fields, units, layer).map(Object::Viewport),
         ("attdef", Place::Block { noticed, .. }) => {
             attribute_definition(&fields, tables, layer, noticed).map(Object::AttributeDefinition)
         }
@@ -387,7 +399,14 @@ pub(super) fn object(
         (other, _) => unreachable!("object type `{other}` is listed but not read"),
     }?;
     *object.properties_mut() = properties;
-    if let Place::Sheet { objects, .. } = place {
+    if let Place::Sheet {
+        objects,
+        paper_space,
+        ..
+    } = place
+    {
+        let viewport = matches!(object, Object::Viewport(_));
+        paper_space.push(in_paper_space(&fields, tables.layout, viewport)?);
         let record = object_record(&fields, node, place_in_file, objects)?;
         // An insert keeps its name in the model too, as it has since blocks.
         if let Object::Insert(insert) = &mut object {

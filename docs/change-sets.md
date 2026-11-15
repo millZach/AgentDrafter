@@ -82,9 +82,11 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `add_angular_dimension` | `DIMANGULAR` | Adds an angular dimension between two lines. |
 | `add_three_point_angular_dimension` | none | Adds an angular dimension at a vertex between two points, as DIMANGULAR measures an arc, a circle or three points. |
 | `add_ordinate_dimension` | `DIMORDINATE` | Adds an ordinate dimension. |
+| `add_viewport` | `MVIEW` | Adds a viewport to a sheet's layout: a window on the paper onto model space, at a scale. |
 | `add_baseline_dimension` | `DIMBASELINE` | Adds a dimension from another's first extension line, its line further out. |
 | `add_continued_dimension` | `DIMCONTINUE` | Adds a dimension from another's second extension line, on its line. |
 | `change` | `CHANGE` | Sets keys of an object. |
+| `change_viewport` | none | Sets a viewport's scale, its view centre or its display lock. |
 | `move` | `MOVE` | Moves an object. |
 | `delete` | `ERASE` | Deletes an object. |
 | `set_attribute` | `ATTEDIT` | Sets one attribute value of an insert, naming one occurrence of a tag its block defines more than once. |
@@ -110,7 +112,7 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 {"ok":true,"result":{"how":"A change set is {\"operations\": [...]}: ...","operations":[{"name":"add_line","alias":"LINE","does":"Adds a line, written with the keys a line takes in a sheet description, ...","schema":{"type":"object","required":["op","from","to"],"...":"..."}},"..."]}}
 ```
 
-**Adding.** Every object a sheet description holds has an operation that adds it. It takes the keys that object takes in a [sheet description](sheet-description.md#objects), `id`, `name` and `layer` among them, and where it goes: `sheet`, to add it to that sheet's row, or `template`, the template's path as the rows write it, to add it to the template and so to every sheet built from it. The object is drawn after the objects already in its list. An object added without an `id` is given one, its type and the first number free on the sheets it is added to, such as `line-1` or `insert-2`, so that its ID is fixed for its life; the reply gives its ID. A key sent as `null` is a [bare null](sheet-description.md#the-yaml-subset) (rule 8), JSON's form of `layer: null`: the record writes it so, and the sheet reads it as a sheet description does. On an optional text or path field it leaves the field out, so `"layer": null` puts the object on layer `0`, an attribute's value sent as `null` takes its definition's default, and an `id` sent as `null` is given one as above. On a required one, such as a text's `contents`, it is the `missing_key` error, and on any other key, such as `closed` or `radius`, it is an error as `closed: null` is in a sheet description; either fails the sheet, as a bad value does.
+**Adding.** Every object a sheet description holds has an operation that adds it. It takes the keys that object takes in a [sheet description](sheet-description.md#objects), `id`, `name`, `layer` and, on a sheet drawn in a layout, `space` among them, and where it goes: `sheet`, to add it to that sheet's row, or `template`, the template's path as the rows write it, to add it to the template and so to every sheet built from it. The object is drawn after the objects already in its list. An object added without an `id` is given one, its type and the first number free on the sheets it is added to, such as `line-1` or `insert-2`, so that its ID is fixed for its life; the reply gives its ID. A key sent as `null` is a [bare null](sheet-description.md#the-yaml-subset) (rule 8), JSON's form of `layer: null`: the record writes it so, and the sheet reads it as a sheet description does. On an optional text or path field it leaves the field out, so `"layer": null` puts the object on layer `0`, an attribute's value sent as `null` takes its definition's default, and an `id` sent as `null` is given one as above. On a required one, such as a text's `contents`, it is the `missing_key` error, and on any other key, such as `closed` or `radius`, it is an error as `closed: null` is in a sheet description; either fails the sheet, as a bad value does.
 
 **`change`** takes `target` and `set`, a mapping from each key to set to its new value, written as a sheet description writes it; `null` takes an optional key away. It sets any key the object's type takes, and `name`. It does not set `id`, since an object's ID is fixed for its life, nor an insert's `attributes`, which `set_attribute` sets one at a time, nor the object's type. A text's or an mtext's `contents` whose template takes them from the row is set in the sheet's row (decision 5), and so is the text of a multileader's `content` or an older leader's `annotation` ([Leaders](#leaders)).
 
@@ -122,7 +124,7 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
  "to": {"snap": {"id": "SNAP-001/ring", "snap": "quadrant", "which": "0"}}}
 ```
 
-Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, the position of a text, an mtext, an insert or a table, every point of each of a multileader's leader lines, an older leader's points, and a dimension's points, centre, point and location; a leader's text moves with it, laid out again where its landing or end puts it. An arrow is placed at a point and does not follow an object it points at, and so is the arrow of a leader line `add_leader_line` adds; a [snapped point](#snapped-points) puts it on the object when the operation applies. A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
+Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, the position of a text, an mtext, an insert or a table, every point of each of a multileader's leader lines, an older leader's points, a dimension's points, centre, point and location, and a viewport's centre on the paper, its view moving with it; a leader's text moves with it, laid out again where its landing or end puts it. An arrow is placed at a point and does not follow an object it points at, and so is the arrow of a leader line `add_leader_line` adds; a [snapped point](#snapped-points) puts it on the object when the operation applies. A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
 
 **`delete`** takes `target`.
 
@@ -149,6 +151,21 @@ Zach decided on 2026-11-13 (#99) how it names one of a tag the block defines mor
 - When the tag repeats, `occurrence` is needed: without it the operation fails with `missing_key` at `occurrence`, listing each occurrence with its value, such as ``1 `ISSUED`, 2 `-` (its default)``. An occurrence past the last fails with `bad_value`, listing them too.
 - When the tag does not repeat, `occurrence` is 1 or left out; any other is `bad_value`.
 - It writes that item of the insert's list in its record, growing a shorter list with nulls, which take their defaults, and writing a list where the record gave none. An item the template takes from the row, `{row: NAME}`, sets the sheet's row value, as a whole attribute from the row does.
+
+### Viewports
+
+A sheet drawn in a [layout](sheet-description.md#layouts-and-viewports) is changed as any sheet is, in either space: an object added with `"space": "paper"` goes in paper space, such as a note in the title block, and one without it in model space. `change` sets `space` as any key, and moves the object to the other space as it stands, unscaled, unlike AutoCAD's CHSPACE, which scales it by a viewport's.
+
+**`add_viewport`** (`MVIEW`) adds a viewport with the keys a viewport takes, `center`, `width` and `height` on the paper, `view_center` in model space and `scale`, and `locked`, to a sheet's row or to its template, as every add does: MVIEW's two corners are given as the window's centre and size. A viewport goes in a sheet drawn in a layout; one added to a sheet without a layout fails the sheet with `bad_value`.
+
+**`change_viewport`** takes `target`, a viewport by its ID or its name, and one or more of `scale`, a ratio such as `"1:5"` or a number, `view_center`, a point or a [snapped point](#snapped-points) on model space, and `locked`, `true` or `false`, and sets them, as AutoCAD's ZOOM with a scale, PAN and the display lock do in a viewport: the viewport stays where it is on the paper. AutoCAD has no one command for it. Its target is a viewport; anything else fails with `bad_value`. `move` moves a viewport on the paper, and its view moves with it.
+
+**A locked viewport.** `change_viewport`, and `change`, do not change the scale or the view centre of a locked viewport, as AutoCAD's display lock keeps them: the operation fails with `locked` unless it sends `"locked": false` too, which unlocks it and changes them at once. A locked viewport can still be moved, resized, or put on another layer.
+
+```json
+{"op": "change_viewport", "target": {"id": "PANEL-001/view-a"}, "scale": "1:5",
+ "view_center": {"snap": {"id": "PANEL-001/terminals", "snap": "midpoint", "which": "segments[0]"}}}
+```
 
 ### Tables
 

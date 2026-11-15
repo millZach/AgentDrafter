@@ -54,9 +54,11 @@
 //! `wasm32-unknown-unknown` and the viewer can run it in the page. A test
 //! keeps it that way.
 
+mod clip;
 pub(crate) mod color;
 pub(crate) mod curves;
 mod hatch;
+mod layout;
 mod linetype;
 mod pick;
 pub(crate) mod polyline;
@@ -73,6 +75,7 @@ use crate::model::{
 };
 use crate::text::placement::SheetFonts;
 
+pub(crate) use clip::clip_polygon;
 pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
 pub(crate) use pick::inside;
@@ -196,6 +199,11 @@ pub struct TextRun {
     /// column, counted from 0 from the top left.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell: Option<[usize; 2]>,
+    /// When it is model space seen through a viewport of the sheet's
+    /// layout, that viewport: its place in the sheet's objects, counted
+    /// from 0. None for paper space, and on a sheet with no layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<usize>,
     /// The box round what its characters draw, in the line's frame: its
     /// lower left and upper right corners `(u, v)`. None when they draw
     /// nothing, as spaces do.
@@ -236,6 +244,18 @@ pub struct Item {
     /// for every other object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell: Option<[usize; 2]>,
+    /// When it is model space seen through a viewport of the sheet's
+    /// layout, that viewport: its place in the sheet's objects, counted
+    /// from 0. None for paper space, and on a sheet with no layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<usize>,
+    /// The box its ink is cut at, in drawing units: the window of the
+    /// viewport it shows through. An output draws none of its ink outside
+    /// it, a pen's width and round ends among it, as AutoCAD 2026's plot
+    /// cuts a viewport's contents at its edge. None for an item drawn
+    /// whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<Bounds>,
     /// The AutoCAD colour index it draws in.
     pub color: Color,
     pub shape: Shape,
@@ -532,6 +552,11 @@ struct Drawer<'a> {
     most_dashes: usize,
     layer_zero: Layer,
     purpose: Purpose,
+    /// What every linetype's dashes are enlarged by besides the sheet's
+    /// and the object's own linetype scale: 1, but for model space seen
+    /// through a viewport, one over its scale, so its dashes are as long
+    /// on the paper as paper space's, as AutoCAD's PSLTSCALE 1 draws them.
+    linetype_factor: f64,
 }
 
 impl<'a> Drawer<'a> {
@@ -560,7 +585,7 @@ impl<'a> Drawer<'a> {
         Pen {
             color,
             pattern,
-            scale: self.sheet.ltscale * properties.linetype_scale,
+            scale: self.sheet.ltscale * properties.linetype_scale * self.linetype_factor,
             lineweight,
         }
     }
@@ -658,7 +683,12 @@ impl<'a> Drawer<'a> {
         if shown == Shown::Hidden {
             return;
         }
-        let pen = self.pen(object.layer(), object.properties(), None);
+        let mut pen = self.pen(object.layer(), object.properties(), None);
+        if let Object::Viewport(_) = object {
+            // AutoCAD 2026 plotted a viewport's frame as its thinnest line,
+            // in its colour, whatever its own lineweight or its layer's.
+            pen.lineweight = 0.0;
+        }
         let drawn = self.object(object, pen, tolerance, None);
         // Only a hatch that draws is reported as cut short.
         if drawn.cut_short && shown == Shown::Drawn {
@@ -910,6 +940,12 @@ impl<'a> Drawer<'a> {
             )),
             Object::Polyline(polyline) if polyline.is_flat() => flat_polyline(polyline),
             Object::Donut(donut) => flat_polyline(&donut.polyline()),
+            // A viewport's frame, on the paper.
+            Object::Viewport(viewport) => flat_polyline(&Polyline::through(
+                viewport.frame().to_vec(),
+                true,
+                viewport.layer.clone(),
+            )),
             Object::Solid(solid) => shapes(vec![Shape::Fill {
                 rule: FillRule::NonZero,
                 contours: vec![polyline::anticlockwise(
@@ -1352,6 +1388,8 @@ impl DisplayList {
             part,
             nested: nested.clone(),
             cell: None,
+            viewport: None,
+            clip: None,
             color,
             shape,
         }));
@@ -1388,6 +1426,8 @@ impl DisplayList {
                         part: None,
                         nested: Vec::new(),
                         cell: Some(cell),
+                        viewport: None,
+                        clip: None,
                         color,
                         shape,
                     }));
@@ -1445,6 +1485,39 @@ pub(crate) fn draw_sheet_for(
         most_dashes,
         layer_zero: Layer::new(LAYER_ZERO),
         purpose,
+        linetype_factor: 1.0,
+    };
+    let mut list = DisplayList::default();
+    if sheet.layout.is_some() {
+        // A sheet drawn in a layout prints its layout.
+        layout::draw(&drawer, tolerance, &mut list);
+        return list;
+    }
+    for (index, object) in sheet.objects.iter().enumerate() {
+        drawer.sheet_object(index, object, tolerance, &mut list);
+    }
+    list
+}
+
+/// Draws each of a sheet's objects in its own coordinates, as
+/// [`draw_sheet`] draws a sheet with no layout: model space's at full
+/// size, and, on a sheet drawn in a layout, paper space's at the paper's
+/// size, each a viewport's frame among them, over one another. A query
+/// selects a sheet's objects by where they are in their own space.
+pub(crate) fn draw_objects(
+    sheet: &Sheet,
+    fonts: &SheetFonts,
+    tolerance: f64,
+    most_dashes: usize,
+) -> DisplayList {
+    let tolerance = if tolerance > 0.0 { tolerance } else { 1e-3 };
+    let drawer = Drawer {
+        sheet,
+        fonts,
+        most_dashes,
+        layer_zero: Layer::new(LAYER_ZERO),
+        purpose: Purpose::Screen,
+        linetype_factor: 1.0,
     };
     let mut list = DisplayList::default();
     for (index, object) in sheet.objects.iter().enumerate() {

@@ -18,6 +18,7 @@ use crate::units::Unit;
 pub(crate) mod block;
 pub(crate) mod dimension;
 pub(crate) mod hatch;
+pub(crate) mod layout;
 pub(crate) mod leader;
 pub(crate) mod leader_block;
 pub(crate) mod table;
@@ -31,6 +32,7 @@ pub use dimension::{
     STANDARD_DIMENSION_STYLE,
 };
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
+pub use layout::{Layout, Viewport};
 pub use leader::{
     Arrowhead, LaidContent, LaidMLeader, Leader, LeaderAnnotation, LeaderAttachment, MLeader,
     MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, MTextBox, STANDARD_MLEADER_STYLE,
@@ -331,6 +333,8 @@ pub enum Object {
     Leader(Leader),
     /// A dimension, which belongs on a sheet.
     Dimension(Dimension),
+    /// A viewport, which belongs in a sheet's paper space.
+    Viewport(Viewport),
 }
 
 impl Object {
@@ -354,6 +358,7 @@ impl Object {
             Object::MLeader(_) => "mleader",
             Object::Leader(_) => "leader",
             Object::Dimension(_) => "dimension",
+            Object::Viewport(_) => "viewport",
         }
     }
 
@@ -377,6 +382,7 @@ impl Object {
             Object::MLeader(o) => &o.layer,
             Object::Leader(o) => &o.layer,
             Object::Dimension(o) => &o.layer,
+            Object::Viewport(o) => &o.layer,
         }
     }
 
@@ -400,6 +406,7 @@ impl Object {
             Object::MLeader(o) => &o.properties,
             Object::Leader(o) => &o.properties,
             Object::Dimension(o) => &o.properties,
+            Object::Viewport(o) => &o.properties,
         }
     }
 
@@ -422,6 +429,7 @@ impl Object {
             Object::MLeader(o) => &mut o.properties,
             Object::Leader(o) => &mut o.properties,
             Object::Dimension(o) => &mut o.properties,
+            Object::Viewport(o) => &mut o.properties,
         }
     }
 }
@@ -844,9 +852,34 @@ pub struct Sheet {
     /// AutoCAD's LTSCALE. An object's own linetype scale multiplies it.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub ltscale: f64,
+    /// The paper-space layout the sheet is drawn in, if it is drawn in
+    /// one: its border and title block in paper space, at the paper's size,
+    /// and its viewports onto model space. Without one, the sheet is drawn
+    /// in model space alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Layout>,
 }
 
 impl Sheet {
+    /// Whether the sheet's object at `index` is in paper space: one of its
+    /// layout's, never on a sheet without a layout.
+    pub fn in_paper_space(&self, index: usize) -> bool {
+        self.layout
+            .as_ref()
+            .is_some_and(|l| l.paper_space.get(index).copied().unwrap_or(false))
+    }
+
+    /// The sheet's viewports, each with its place in the sheet's objects.
+    pub fn viewports(&self) -> impl Iterator<Item = (usize, &Viewport)> {
+        self.objects
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| match o {
+                Object::Viewport(v) if self.layout.is_some() => Some((i, v)),
+                _ => None,
+            })
+    }
+
     /// The table style named `name` a table draws with: one the sheet
     /// lists, or, for `Standard` when the sheet does not list it, the
     /// Standard table style of the sheet's unit. None for a name the sheet
@@ -1006,4 +1039,26 @@ pub struct DrawingContents {
     /// What every linetype in the drawing is enlarged by: its LTSCALE.
     #[serde(default = "one")]
     pub ltscale: f64,
+    /// The layout the drawing opens on, when it opens on one rather than
+    /// on model space, as AutoCAD saves it: `objects` then holds its paper
+    /// space's objects and viewports beside model space's, and the layout
+    /// says which are which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Layout>,
+    /// The paper the layout's page setup plots, when the core can read it:
+    /// a standard paper, whole, at full size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<Paper>,
+    /// How many of the drawing's layouts the core has no model for yet: a
+    /// layout that holds anything, other than the one the drawing opens
+    /// on, and the page setup of that one when it is not a standard paper
+    /// plotted whole at full size. AutoCAD's own empty layout is not
+    /// counted.
+    #[serde(default, skip_serializing_if = "is_none_of")]
+    pub layouts_not_read: usize,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_none_of(n: &usize) -> bool {
+    *n == 0
 }

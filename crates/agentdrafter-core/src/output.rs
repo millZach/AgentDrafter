@@ -122,8 +122,10 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
             dimension_styles: drawing.dimension_styles,
             blocks: drawing.blocks,
             objects: drawing.objects,
-            paper,
+            // A DWG that opens on its layout plots on its layout's paper.
+            paper: drawing.paper.or(paper),
             ltscale: drawing.ltscale,
+            layout: drawing.layout,
         };
         return Ok(Record {
             sheet,

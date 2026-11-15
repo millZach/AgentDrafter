@@ -1289,6 +1289,9 @@ impl RecordFile {
             .filter(|k| !(kind == "insert" && *k == "attributes"))
             .collect();
         allowed.push(NAME_KEY);
+        // An object moves to the other space of a sheet drawn in a layout
+        // as it stands, unscaled.
+        allowed.push(super::layout::SPACE_KEY);
         let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
         let mut from_row = None;
         // The key whose text the row's value is, when it is not `contents`.
@@ -1425,6 +1428,8 @@ impl RecordFile {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
                 ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,
+                // A viewport moves on the paper; its view moves with it.
+                ("viewport", "center") => move_point(&mut entry.value, by, units, &field)?,
                 ("dimension", "center" | "point" | "location" | "feature") => {
                     move_point(&mut entry.value, by, units, &field)?;
                 }

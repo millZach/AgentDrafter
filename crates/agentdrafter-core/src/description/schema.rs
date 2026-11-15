@@ -26,6 +26,7 @@ use super::layers::{
     colour_names, COLOUR_NAMES, FORBIDDEN_IN_NAMES, LONGEST_DESCRIPTION, LONGEST_LAYER_DESCRIPTION,
     LONGEST_NAME, LONGEST_PATTERN, PROPERTY_KEYS,
 };
+use super::layout::SPACE_KEY;
 use super::objects::{FEWEST_FIT_POINTS, HIGHEST_DEGREE, OBJECT_TYPES};
 use super::{
     block_schema, dimension_schema, hatch_schema, leader_schema, table_schema, SHEET_KEYS,
@@ -93,7 +94,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key] =
+    let [units_key, block_library_key, ltscale_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key, layout_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -129,6 +130,7 @@ pub fn sheet_description_schema() -> Value {
                 "items": { "oneOf": object_choices(&OBJECT_TYPES) },
             },
             paper_key: super::paper::paper_property(),
+            layout_key: super::layout::layout_property(),
         },
         // Engineering and architectural lengths count inches, so they are
         // for a sheet in inches, as the reader has it.
@@ -168,12 +170,22 @@ fn sheet_defs() -> Map<String, Value> {
             .and_then(|def| def["properties"].as_object_mut())
         {
             for key in SHEET_OBJECT_KEYS {
-                let def = if key == ID_KEY {
-                    "object_id"
-                } else {
-                    "object_name"
+                let def = match key {
+                    ID_KEY => "object_id",
+                    SPACE_KEY => "object_space",
+                    _ => "object_name",
                 };
                 properties.insert(key.into(), json!({ "$ref": format!("#/$defs/{def}") }));
+            }
+            if name == "viewport" {
+                // A viewport is in paper space.
+                properties.insert(
+                    SPACE_KEY.into(),
+                    json!({
+                        "description": "A viewport is in paper space.",
+                        "const": super::layout::PAPER,
+                    }),
+                );
             }
         }
     }
@@ -182,6 +194,7 @@ fn sheet_defs() -> Map<String, Value> {
         .map(|c| format!("`{c}`"))
         .collect::<Vec<_>>()
         .join(", ");
+    defs.insert("object_space".into(), super::layout::space_property());
     defs.insert(
         "object_id".into(),
         optional_text(json!({
@@ -900,6 +913,7 @@ fn defs() -> Map<String, Value> {
     table_schema::table_defs(&mut defs);
     leader_schema::leader_defs(&mut defs);
     dimension_schema::dimension_defs(&mut defs);
+    defs.insert("viewport".into(), super::layout::viewport_def());
     block_schema::add_defs(&mut defs);
     defs
 }

@@ -391,7 +391,8 @@ impl Outline {
                 Object::Table(_)
                 | Object::MLeader(_)
                 | Object::Leader(_)
-                | Object::Dimension(_) => {
+                | Object::Dimension(_)
+                | Object::Viewport(_) => {
                     return Err(refuse(index, "an object that belongs on a sheet"))
                 }
             }

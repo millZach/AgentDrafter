@@ -31,7 +31,7 @@ use pdf_writer::types::{LineCapStyle, LineJoinStyle, TextRenderingMode};
 use pdf_writer::types::{SystemInfo, UnicodeCmap};
 use pdf_writer::{Content, Filter, Name, Pdf, Rect, Ref, Str, TextStr};
 
-use crate::draw::{DisplayList, FillRule, Point2, Shape, TextRun};
+use crate::draw::{Bounds, DisplayList, FillRule, Point2, Shape, TextRun};
 use crate::plot_style::PlotStyle;
 
 /// The key in a PDF's document information an output's stamp is written
@@ -203,7 +203,31 @@ fn drawing(list: &DisplayList, page: &Page, style: &PlotStyle, codes: &Codes) ->
     let mut stroke: Option<([u8; 3], f32)> = None;
     let mut fill: Option<[u8; 3]> = None;
     let unit = |c: u8| f32::from(c) / 255.0;
+    // The box the items drawn now are cut at: a viewport's window, a
+    // clipping path its items draw inside, as AutoCAD 2026's plot cuts a
+    // viewport's contents. Items next to one another with one box share
+    // one clipping path.
+    let mut clipped: Option<Bounds> = None;
     for item in &list.items {
+        if item.clip != clipped {
+            if clipped.is_some() {
+                // Restoring the state forgets the pen and the fill set
+                // inside it.
+                content.restore_state();
+                stroke = None;
+                fill = None;
+            }
+            if let Some(clip) = item.clip {
+                let (x0, y0) = page.at(clip.min);
+                let (x1, y1) = page.at(clip.max);
+                content.save_state();
+                content
+                    .rect(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+                    .clip_nonzero()
+                    .end_path();
+            }
+            clipped = item.clip;
+        }
         let rgb = style.color(item.color);
         match &item.shape {
             Shape::Stroke { lineweight, runs } => {
@@ -272,6 +296,9 @@ fn drawing(list: &DisplayList, page: &Page, style: &PlotStyle, codes: &Codes) ->
                 }
             }
         }
+    }
+    if clipped.is_some() {
+        content.restore_state();
     }
     if !list.text.is_empty() {
         content.begin_text();
@@ -1463,6 +1490,7 @@ pub(crate) mod tests {
             part: None,
             nested: Vec::new(),
             cell: None,
+            viewport: None,
             drawn: None,
             origin: [0.0, 0.0],
             across: [1.0, 0.0],

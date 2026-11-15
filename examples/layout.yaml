@@ -1,0 +1,93 @@
+# A made-up control panel's backplane, drawn at full size in model space
+# and sheeted at a scale in a paper-space layout on an A3 sheet. Model space
+# holds the 600 by 800 backplane: its outline and mounting holes, three DIN
+# rails, the wire ducts with their centre lines, a PLC, a power supply, a
+# row of breakers and a terminal strip, each labelled, and the backplane's
+# overall size dimensioned in a style four times the size, to read at 1:4.
+# Paper space holds the border, the title block and a note, and three
+# viewports: the whole backplane at 1:4, the terminal strip at 1:1, and a
+# breaker at 2:1, the last two locked. The viewports' frames are on a layer
+# that does not plot. Everything here is made up.
+units: mm
+paper: ISO A3 landscape
+layout:
+  name: Backplane
+linetypes:
+  CENTER:
+    description: Center ____ _ ____ _
+    pattern: [12, -3, 3, -3]
+layers:
+  border: {color: white, lineweight: 0.5}
+  title: {color: white, lineweight: 0.25}
+  notes: {color: yellow}
+  viewports: {color: 8, plot: false}
+  panel: {color: white, lineweight: 0.5}
+  rails: {color: cyan, lineweight: 0.35}
+  ducts: {color: 8, lineweight: 0.25}
+  centre: {color: red, linetype: CENTER, lineweight: 0.18}
+  devices: {color: green, lineweight: 0.35}
+  labels: {color: white}
+  dims: {color: magenta}
+dimension_styles:
+  quarter:
+    scale: 4
+objects:
+  # Model space, at full size: the backplane, 600 wide and 800 tall.
+  - polyline: {id: backplane, points: [[0, 0, 0], [600, 0, 0], [600, 800, 0], [0, 800, 0]], closed: true, layer: panel}
+  - circle: {id: hole-1, center: [20, 20, 0], radius: 5, layer: panel}
+  - circle: {id: hole-2, center: [580, 20, 0], radius: 5, layer: panel}
+  - circle: {id: hole-3, center: [580, 780, 0], radius: 5, layer: panel}
+  - circle: {id: hole-4, center: [20, 780, 0], radius: 5, layer: panel}
+  # Three DIN rails, 35 tall.
+  - polyline: {id: rail-1, points: [[40, 632.5, 0], [560, 632.5, 0], [560, 667.5, 0], [40, 667.5, 0]], closed: true, layer: rails}
+  - polyline: {id: rail-2, points: [[40, 432.5, 0], [560, 432.5, 0], [560, 467.5, 0], [40, 467.5, 0]], closed: true, layer: rails}
+  - polyline: {id: rail-3, points: [[40, 132.5, 0], [560, 132.5, 0], [560, 167.5, 0], [40, 167.5, 0]], closed: true, layer: rails}
+  # The wire ducts, 40 wide, with their centre lines.
+  - polyline: {id: duct-1, points: [[40, 540, 0], [560, 540, 0], [560, 580, 0], [40, 580, 0]], closed: true, layer: ducts}
+  - polyline: {id: duct-2, points: [[40, 260, 0], [560, 260, 0], [560, 300, 0], [40, 300, 0]], closed: true, layer: ducts}
+  - line: {id: duct-1-centre, from: [30, 560, 0], to: [570, 560, 0], layer: centre}
+  - line: {id: duct-2-centre, from: [30, 280, 0], to: [570, 280, 0], layer: centre}
+  # The devices on the top rail: a PLC and a power supply.
+  - polyline: {id: plc, points: [[60, 600, 0], [260, 600, 0], [260, 720, 0], [60, 720, 0]], closed: true, layer: devices}
+  - text: {id: plc-tag, contents: PLC-101, position: [160, 660, 0], height: 10, justify: middle_center, layer: labels}
+  - polyline: {id: psu, points: [[300, 610, 0], [400, 610, 0], [400, 700, 0], [300, 700, 0]], closed: true, layer: devices}
+  - text: {id: psu-tag, contents: PSU-1, position: [350, 655, 0], height: 10, justify: middle_center, layer: labels}
+  # A row of breakers on the middle rail.
+  - polyline: {id: cb-1, points: [[60, 410, 0], [78, 410, 0], [78, 490, 0], [60, 490, 0]], closed: true, layer: devices}
+  - polyline: {id: cb-2, points: [[84, 410, 0], [102, 410, 0], [102, 490, 0], [84, 490, 0]], closed: true, layer: devices}
+  - polyline: {id: cb-3, points: [[108, 410, 0], [126, 410, 0], [126, 490, 0], [108, 490, 0]], closed: true, layer: devices}
+  - polyline: {id: cb-4, points: [[132, 410, 0], [150, 410, 0], [150, 490, 0], [132, 490, 0]], closed: true, layer: devices}
+  - line: {id: cb-1-toggle, from: [69, 440, 0], to: [69, 460, 0], layer: devices}
+  - text: {id: cb-tags, contents: CB-1 TO CB-4, position: [105, 395, 0], height: 10, justify: top_center, layer: labels}
+  # A terminal strip on the bottom rail: eight terminals 6 wide.
+  - polyline: {id: terminals, points: [[60, 125, 0], [108, 125, 0], [108, 175, 0], [60, 175, 0]], closed: true, layer: devices}
+  - line: {from: [66, 125, 0], to: [66, 175, 0], layer: devices}
+  - line: {from: [72, 125, 0], to: [72, 175, 0], layer: devices}
+  - line: {from: [78, 125, 0], to: [78, 175, 0], layer: devices}
+  - line: {from: [84, 125, 0], to: [84, 175, 0], layer: devices}
+  - line: {from: [90, 125, 0], to: [90, 175, 0], layer: devices}
+  - line: {from: [96, 125, 0], to: [96, 175, 0], layer: devices}
+  - line: {from: [102, 125, 0], to: [102, 175, 0], layer: devices}
+  - text: {id: strip-tag, contents: X1, position: [84, 185, 0], height: 10, justify: bottom_center, layer: labels}
+  - text: {id: strip-note, contents: TERMINALS 1 TO 8, position: [116, 150, 0], height: 3.5, justify: middle_left, layer: labels}
+  # The backplane's overall size, dimensioned to read at 1:4.
+  - dimension: {id: width, kind: linear, points: [[0, 0, 0], [600, 0, 0]], location: [300, -40, 0], dimension_style: quarter, layer: dims}
+  - dimension: {id: height, kind: linear, angle: 90, points: [[600, 0, 0], [600, 800, 0]], location: [640, 400, 0], dimension_style: quarter, layer: dims}
+  # Paper space: the trim line, the border and the title block.
+  - polyline: {id: trim, space: paper, points: [[0, 0, 0], [420, 0, 0], [420, 297, 0], [0, 297, 0]], closed: true, layer: border}
+  - polyline: {id: frame, space: paper, points: [[10, 10, 0], [410, 10, 0], [410, 287, 0], [10, 287, 0]], closed: true, layer: border}
+  - polyline: {id: title-block, space: paper, points: [[250, 10, 0], [410, 10, 0], [410, 50, 0], [250, 50, 0]], closed: true, layer: title}
+  - line: {id: title-rule-1, space: paper, from: [250, 30, 0], to: [410, 30, 0], layer: title}
+  - line: {id: title-rule-2, space: paper, from: [350, 10, 0], to: [350, 30, 0], layer: title}
+  - text: {id: title, space: paper, contents: CONTROL PANEL CP-101 BACKPLANE, position: [255, 37, 0], height: 4, layer: title}
+  - text: {id: drawing-number, space: paper, contents: DEMO-LAY-001, position: [255, 17, 0], height: 3.5, layer: title}
+  - text: {id: scale-note, space: paper, contents: AS SHOWN, position: [355, 17, 0], height: 3.5, layer: title}
+  - mtext: {id: notes, space: paper, contents: "NOTES:\nVIEW A, BACKPLANE, 1:4.\nVIEW B, TERMINAL STRIP X1, 1:1.\nVIEW C, BREAKER CB-1, 2:1.", position: [250, 140, 0], height: 3, layer: notes}
+  # The viewports: the whole backplane at 1:4, the terminal strip at 1:1
+  # and a breaker at 2:1.
+  - viewport: {id: view-a, center: [110, 148, 0], width: 180, height: 250, view_center: [300, 380, 0], scale: '1:4', layer: viewports}
+  - viewport: {id: view-b, center: [320, 230, 0], width: 160, height: 90, view_center: [100, 155, 0], scale: '1:1', locked: true, layer: viewports}
+  - viewport: {id: view-c, center: [320, 90, 0], width: 60, height: 50, view_center: [81, 462, 0], scale: '2:1', locked: true, layer: viewports}
+  - text: {id: view-a-label, space: paper, contents: VIEW A  1:4, position: [110, 15, 0], height: 3.5, justify: bottom_center, layer: notes}
+  - text: {id: view-b-label, space: paper, contents: VIEW B  1:1, position: [320, 278, 0], height: 3.5, justify: bottom_center, layer: notes}
+  - text: {id: view-c-label, space: paper, contents: VIEW C  2:1, position: [320, 58, 0], height: 3.5, justify: bottom_center, layer: notes}

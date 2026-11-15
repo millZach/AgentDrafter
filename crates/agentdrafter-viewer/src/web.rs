@@ -23,6 +23,9 @@
 //!   once, and the canvas's multisampling smooths the edges. The quads are
 //!   plain triangles, not instances, which software WebGL draws several
 //!   times faster.
+//!   A segment of model space seen through a viewport carries the
+//!   viewport's window, and the shader draws none of its ink outside it,
+//!   as the PNG and the PDF cut it.
 //! - Fills are drawn as one draw of their triangles, their edges smoothed
 //!   by the multisampling.
 //! - Over the ink, a halo marks each object a change set added or changed,
@@ -48,6 +51,7 @@ layout(location = 0) in vec4 a_segment;
 layout(location = 1) in float a_lineweight;
 layout(location = 2) in vec4 a_color;
 layout(location = 3) in float a_item;
+layout(location = 4) in vec4 a_clip;
 uniform vec2 u_scale;
 uniform vec2 u_offset;
 uniform vec2 u_size;
@@ -59,8 +63,13 @@ flat out vec2 v_a;
 flat out vec2 v_b;
 flat out float v_half;
 flat out vec3 v_color;
+flat out vec4 v_clip;
 void main() {
   vec2 a = a_segment.xy * u_scale + u_offset;
+  // The box the segment's ink is cut at, on the canvas.
+  vec2 c0 = a_clip.xy * u_scale + u_offset;
+  vec2 c1 = a_clip.zw * u_scale + u_offset;
+  v_clip = vec4(min(c0, c1), max(c0, c1));
   vec2 b = a_segment.zw * u_scale + u_offset;
   float half_width = max(a_lineweight * u_pixels_per_mm, u_finest) * 0.5;
   // Along the segment, room for the round ends and their smoothing; across
@@ -93,9 +102,12 @@ flat in vec2 v_a;
 flat in vec2 v_b;
 flat in float v_half;
 flat in vec3 v_color;
+flat in vec4 v_clip;
 uniform bool u_multisampled;
 out vec4 o_color;
 void main() {
+  // A viewport's contents draw no ink past its edge.
+  if (v_at.x < v_clip.x || v_at.y < v_clip.y || v_at.x > v_clip.z || v_at.y > v_clip.w) discard;
   vec2 pa = v_at - v_a;
   vec2 ba = v_b - v_a;
   float length2 = dot(ba, ba);
@@ -672,6 +684,12 @@ impl Viewer {
         buffer(Gl::ARRAY_BUFFER, &four(&places(&mesh.segment_items), 4))?;
         gl.enable_vertex_attrib_array(3);
         gl.vertex_attrib_pointer_with_i32(3, 1, Gl::FLOAT, false, 0, 0);
+        buffer(
+            Gl::ARRAY_BUFFER,
+            &four(&floats(mesh.segment_clips.as_flattened()), 16),
+        )?;
+        gl.enable_vertex_attrib_array(4);
+        gl.vertex_attrib_pointer_with_i32(4, 4, Gl::FLOAT, false, 0, 0);
         let quads: Vec<u8> = (0..mesh.segments.len() as u32)
             .flat_map(|s| [0, 1, 2, 2, 1, 3].map(|corner| 4 * s + corner))
             .flat_map(u32::to_le_bytes)

@@ -573,8 +573,8 @@ fn overridden(base: &mut DimensionBase, code: i16) {
 /// The names of the blocks the drawing's dimensions draw from, which are
 /// read with them and never as blocks of the drawing's.
 pub(super) fn dimension_blocks(drawing: &CadDocument) -> Vec<String> {
-    drawing
-        .model_space_entities()
+    super::in_every_space(drawing)
+        .into_iter()
         .filter_map(|e| match e {
             EntityType::Dimension(d) => Some(d.base().block_name.clone()),
             _ => None,
@@ -615,7 +615,7 @@ pub(super) fn is_own_defpoints(layer: &DwgLayer) -> bool {
 /// dimension draws with is counted only when the core can read it.
 pub(super) fn read_dimension_styles(drawing: &CadDocument) -> (Vec<DimensionStyle>, usize) {
     let mut used: Vec<String> = Vec::new();
-    for entity in drawing.model_space_entities() {
+    for entity in super::in_every_space(drawing) {
         if let EntityType::Dimension(d) = entity {
             let name = &d.base().style_name;
             if !used.iter().any(|u| u.eq_ignore_ascii_case(name)) {

@@ -25,6 +25,7 @@ mod hatch;
 mod hatch_schema;
 pub(crate) mod ids;
 mod layers;
+pub(crate) mod layout;
 pub(crate) use layers::{one_name, LAYER_KEYS, LINETYPE_KEYS};
 mod leader;
 mod leader_schema;
@@ -51,7 +52,7 @@ use objects::{Place, Tables};
 use strict_yaml::{index_path, key_path, Entry, Kind, Node, Pos};
 
 use crate::error::{Error, ErrorCode};
-use crate::model::{BlockLibrary, Point3, Sheet};
+use crate::model::{BlockLibrary, Layout, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 pub use blocks::parse_block_library;
@@ -75,7 +76,7 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 12] = [
+pub(crate) const SHEET_KEYS: [&str; 13] = [
     "units",
     "block_library",
     "ltscale",
@@ -88,6 +89,7 @@ pub(crate) const SHEET_KEYS: [&str; 12] = [
     "dimension_styles",
     "objects",
     paper::PAPER_KEY,
+    layout::LAYOUT_KEY,
 ];
 
 /// The keys an object of type `object` takes on a sheet: its own, then its
@@ -393,6 +395,15 @@ fn sheet_and_records(
         Some(node) => Some(paper::paper(node, paper::PAPER_KEY, units)?),
         None => None,
     };
+    let layout_name = match fields.get(layout::LAYOUT_KEY) {
+        Some(node) => Some(layout::layout(
+            node,
+            layout::LAYOUT_KEY,
+            units,
+            paper.as_ref().zip(fields.get(paper::PAPER_KEY)),
+        )?),
+        None => None,
+    };
     let list = sequence(fields.require("objects")?, "objects", "a list of objects")?;
     let tables = Tables {
         units,
@@ -403,11 +414,13 @@ fn sheet_and_records(
         table_styles: &table_styles,
         mleader_styles: &mleader_styles,
         dimension_styles: &dimension_styles,
+        layout: layout_name.is_some(),
     };
     let mut place = Place::Sheet {
         library: library.as_ref(),
         objects: Vec::new(),
         noticed: Vec::new(),
+        paper_space: Vec::new(),
     };
     let mut objects = list
         .iter()
@@ -436,6 +449,7 @@ fn sheet_and_records(
     let Place::Sheet {
         objects: mut records,
         noticed: in_rows,
+        paper_space,
         ..
     } = place
     else {
@@ -461,6 +475,7 @@ fn sheet_and_records(
         objects,
         paper,
         ltscale,
+        layout: layout_name.map(|name| Layout { name, paper_space }),
     };
     if let Some(library) = &library {
         blocks::take_from_library(&mut sheet, library, &fields)?;

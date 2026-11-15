@@ -316,6 +316,7 @@ impl Placement {
             part: None,
             nested: Vec::new(),
             cell: None,
+            viewport: None,
             drawn: None,
             origin: place(pen, [0.0, 0.0]),
             across: [along * cos, along * sin],

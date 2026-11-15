@@ -99,10 +99,11 @@ cpSync(join(root, 'examples', 'demo-plant'), join(scratch, 'demo-plant'), {
   recursive: true,
   filter: (path) => !path.includes(`${join('demo-plant', 'dwg')}`),
 });
-for (const sheet of ['geometry.yaml', 'hatch.yaml', 'text.yaml']) {
+for (const sheet of ['geometry.yaml', 'hatch.yaml', 'text.yaml', 'layout.yaml']) {
   cpSync(join(root, 'examples', sheet), join(scratch, sheet));
 }
 cpSync(join(viewer, 'e2e', 'overlap.yaml'), join(scratch, 'overlap.yaml'));
+cpSync(join(viewer, 'e2e', 'viewport-clip.yaml'), join(scratch, 'viewport-clip.yaml'));
 
 /** Runs the command line in the scratch folder and gives its JSON reply. */
 function agentdrafter(...args) {
@@ -255,6 +256,10 @@ const checks = {
       { name: 'text', source: 'text.yaml', png: 'text.yaml', dpi: 150 },
       // Colours drawn over one another, in order.
       { name: 'overlap', source: 'overlap.yaml', png: 'overlap.yaml', dpi: 150 },
+      // A paper-space layout, model space through its viewports, and thick
+      // lines cut at a viewport's edge.
+      { name: 'layout', source: 'layout.yaml', png: 'layout.yaml', dpi: 100 },
+      { name: 'viewport-clip', source: 'viewport-clip.yaml', png: 'viewport-clip.yaml', dpi: 200 },
     ];
     const server = await serve('127.0.0.1:0');
     const b = await browser();

@@ -291,10 +291,10 @@ fn operations_are_listed_and_a_change_set_is_applied_from_a_file() {
     let (code, json) = agentdrafter(&["operations"], &dir);
     assert_eq!(code, 0, "{json}");
     let listed = json["result"]["operations"].as_array().unwrap();
-    assert_eq!(listed.len(), 55);
-    assert_eq!(listed[25]["name"], "move");
-    assert_eq!(listed[25]["alias"], "MOVE");
-    assert!(listed[25]["schema"]["$defs"]["point"].is_object());
+    assert_eq!(listed.len(), 57);
+    assert_eq!(listed[27]["name"], "move");
+    assert_eq!(listed[27]["alias"], "MOVE");
+    assert!(listed[27]["schema"]["$defs"]["point"].is_object());
     let (code, json) = agentdrafter(&["schema", "change-set"], &dir);
     assert_eq!(code, 0, "{json}");
     assert_eq!(json["result"]["title"], "AgentDrafter change set");

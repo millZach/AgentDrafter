@@ -57,6 +57,9 @@ pub struct SheetReply {
     pub display_list: DisplayList,
 }
 
+/// The clip of a segment drawn whole: a box larger than any sheet.
+pub const NO_CLIP: [f32; 4] = [-1e30, -1e30, 1e30, 1e30];
+
 /// What a run of items draws: stroke segments or fill triangles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -90,6 +93,10 @@ pub struct Mesh {
     pub segment_colors: Vec<[u8; 4]>,
     /// Each segment's item: its place in the display list, counted from 0.
     pub segment_items: Vec<u32>,
+    /// The box each segment's ink is cut at, `[left, bottom, right, top]`
+    /// from the origin: its item's clip, a viewport's window, or
+    /// [`NO_CLIP`] for an item drawn whole.
+    pub segment_clips: Vec<[f32; 4]>,
     /// Every fill's triangles' corners, from the origin.
     pub fill_points: Vec<[f32; 2]>,
     /// Each corner's colour on paper, opaque RGBA.
@@ -159,6 +166,7 @@ impl Mesh {
             widths: Vec::new(),
             segment_colors: Vec::new(),
             segment_items: Vec::new(),
+            segment_clips: Vec::new(),
             fill_points: Vec::new(),
             fill_colors: Vec::new(),
             fill_items: Vec::new(),
@@ -172,6 +180,10 @@ impl Mesh {
         for (place, item) in sheet.display_list.items.iter().enumerate() {
             let place = place as u32;
             let color = rgba(item.color);
+            let clip = item.clip.map_or(NO_CLIP, |b| {
+                let (min, max) = (at(b.min), at(b.max));
+                [min[0], min[1], max[0], max[1]]
+            });
             let (segments, triangles) = (mesh.segments.len(), mesh.triangles.len());
             match &item.shape {
                 Shape::Stroke { lineweight, runs } => {
@@ -182,6 +194,7 @@ impl Mesh {
                             mesh.widths.push(*lineweight as f32);
                             mesh.segment_colors.push(color);
                             mesh.segment_items.push(place);
+                            mesh.segment_clips.push(clip);
                         };
                         match run.as_slice() {
                             [] => {}
@@ -344,6 +357,8 @@ mod tests {
             part: None,
             nested: Vec::new(),
             cell: None,
+            viewport: None,
+            clip: None,
             color: Color(color),
             shape,
         }
@@ -358,6 +373,32 @@ mod tests {
                 ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() / 2.0
             })
             .sum()
+    }
+
+    #[test]
+    fn a_segment_seen_through_a_viewport_is_cut_at_its_window() {
+        let mut clipped = item(
+            1,
+            Shape::Stroke {
+                lineweight: 2.11,
+                runs: vec![vec![[0.0, 5.0], [10.0, 5.0]]],
+            },
+        );
+        clipped.clip = Some(agentdrafter_core::Bounds {
+            min: [0.0, 0.0],
+            max: [10.0, 10.0],
+        });
+        let whole = item(
+            7,
+            Shape::Stroke {
+                lineweight: 0.5,
+                runs: vec![vec![[0.0, 0.0], [10.0, 0.0]]],
+            },
+        );
+        let mesh = Mesh::of(&sheet(vec![clipped, whole], None));
+        // The window, from the origin, the paper's middle, [5, 2.5].
+        assert_eq!(mesh.origin, [5.0, 2.5]);
+        assert_eq!(mesh.segment_clips, vec![[-5.0, -2.5, 5.0, 7.5], NO_CLIP]);
     }
 
     #[test]
