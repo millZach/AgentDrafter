@@ -40,9 +40,13 @@ pub fn pick(
             Shape::Fill { rule, contours } => match item.clip_boundary {
                 // A fill seen through a clipped viewport is cut at its box
                 // alone; what shows of it is what lies inside the boundary.
-                Some(b) if b < list.clip_boundaries.len() => {
-                    to_visible_fill(at, *rule, contours, &list.clip_boundaries[b])
-                }
+                Some(b) if b < list.clip_boundaries.len() => to_visible_fill(
+                    at,
+                    *rule,
+                    contours,
+                    &list.clip_boundaries[b],
+                    millimetres_per_unit,
+                ),
                 _ => to_fill(at, *rule, contours),
             },
         };
@@ -67,43 +71,58 @@ fn to_fill(at: Point2, rule: FillRule, contours: &[Vec<Point2>]) -> f64 {
     }
 }
 
+/// How far off a piece of edge its sides are sampled, in millimetres of
+/// paper: a tenth of a micrometre.
+const SIDE_MM: f64 = 1e-4;
+
 /// How far `at` lies from what shows of the fill of `contours` by `rule`
-/// inside the closed outline `outline`, a clipped viewport's boundary: 0
-/// where the rule fills it inside the outline. Otherwise the distance to
-/// the nearest edge where filled meets unfilled there: a part of a contour
-/// inside the outline, or a part of the outline the fill reaches. Contours
-/// that cancel by the rule leave no edge. When nothing of it shows, it is
-/// out of reach.
+/// through the closed outline `outline`, a clipped viewport's boundary, in
+/// a drawing whose unit spans `millimetres_per_unit` millimetres of paper.
+///
+/// One rule: a point is visible-filled when it lies inside the outline, or
+/// on it, and the rule fills it. A point visible-filled is on the fill.
+/// Otherwise the distance is to the nearest pickable piece of edge: a
+/// piece of a contour or of the outline, each cut where it crosses any of
+/// them, whose two sides, sampled just off its middle, differ in being
+/// visible-filled. A seam, or contours that cancel by the rule, have both
+/// sides alike and are not pickable; a fill's edge on the outline is, once
+/// filled inside and not shown outside. When no piece is pickable, nothing
+/// of the fill shows and it is out of reach.
 fn to_visible_fill(
     at: Point2,
     rule: FillRule,
     contours: &[Vec<Point2>],
     outline: &[Point2],
+    millimetres_per_unit: f64,
 ) -> f64 {
-    if inside_outline(at, outline) && inside(at, rule, contours) {
+    let side = SIDE_MM / millimetres_per_unit.max(f64::MIN_POSITIVE);
+    // On the outline is inside it, within a hundredth of the side's step.
+    let visible_filled = |p: Point2| {
+        (inside_outline(p, outline) || distance_to_outline(p, outline) <= side / 100.0)
+            && inside(p, rule, contours)
+    };
+    if visible_filled(at) {
         return 0.0;
     }
-    let rings: Vec<&[Point2]> = contours.iter().map(Vec::as_slice).collect();
+    let mut rings: Vec<&[Point2]> = contours.iter().map(Vec::as_slice).collect();
+    rings.push(outline);
     let mut nearest = f64::INFINITY;
-    // Each contour's parts inside the outline, off its edge.
     for ring in &rings {
         for i in 0..ring.len() {
             let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
-            for (p, q) in pieces(a, b, &[outline]) {
+            for (p, q) in pieces(a, b, &rings) {
+                let d = [q[0] - p[0], q[1] - p[1]];
+                let length = d[0].hypot(d[1]);
+                if length == 0.0 {
+                    continue;
+                }
                 let middle = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
-                if inside_outline(middle, outline) && distance_to_outline(middle, outline) > 0.0 {
+                let off = [-d[1] / length * side, d[0] / length * side];
+                let left = visible_filled([middle[0] + off[0], middle[1] + off[1]]);
+                let right = visible_filled([middle[0] - off[0], middle[1] - off[1]]);
+                if left != right {
                     nearest = nearest.min(to_segment(at, p, q));
                 }
-            }
-        }
-    }
-    // Each part of the outline the fill reaches.
-    for i in 0..outline.len() {
-        let (a, b) = (outline[i], outline[(i + 1) % outline.len()]);
-        for (p, q) in pieces(a, b, &rings) {
-            let middle = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
-            if inside(middle, rule, contours) {
-                nearest = nearest.min(to_segment(at, p, q));
             }
         }
     }

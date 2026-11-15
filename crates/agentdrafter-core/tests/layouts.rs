@@ -573,21 +573,58 @@ fn a_text_cut_at_a_slanting_edge_is_apart_from_what_lies_past_it() {
     assert_eq!(texts_on_texts("slant-on", &sheet(45.0)).len(), 1);
 }
 
+/// A point picked, how far it reaches, and the object it picks.
+type Pick = ([f64; 2], f64, Option<usize>);
+
 #[test]
-fn a_hatch_whose_hole_covers_a_clipped_viewport_is_not_picked_there() {
-    // A solid hatch with a hole that covers the whole of a concave
-    // viewport: nothing of it prints there, on a seam or anywhere.
-    let dir = scratch("hole-seam");
-    let path = sheet_at(
-        &dir,
-        "units: mm\npaper: ISO A4 landscape\nlayout: {name: Panel}\nobjects:\n  - hatch:\n      id: hidden\n      pattern: SOLID\n      boundary:\n        - polyline: {points: [[-20, -20, 0], [120, -20, 0], [120, 120, 0], [-20, 120, 0]]}\n        - polyline: {points: [[-10, -10, 0], [110, -10, 0], [110, 110, 0], [-10, 110, 0]]}\n  - viewport: {id: window, clip: {points: [[0, 0, 0], [100, 0, 0], [20, 20, 0], [0, 100, 0]]}, view_center: [50, 50, 0], scale: 1}\n",
-    );
-    let list = drawn(&path, None).display_list;
-    for at in [[10.0, 10.0], [5.0, 50.0], [50.0, 5.0]] {
-        assert_eq!(agentdrafter_core::pick(&list, at, 0.1, 1.0), None, "{at:?}");
+fn a_fill_seen_through_a_clipped_viewport_is_picked_where_it_shows() {
+    // Each case: a made-up sheet in a layout, a viewport clipped to a
+    // boundary, and the points picked on it, each with what it picks.
+    let head = "units: mm\npaper: ISO A4 landscape\nlayout: {name: Panel}\nlayers:\n  frame: {color: 8, on: false}\nobjects:\n";
+    let triangle = "clip: {points: [[20, 20, 0], [120, 20, 0], [20, 120, 0]]}";
+    let cases: Vec<(&str, String, Vec<Pick>)> = vec![
+        (
+            "pick-clip",
+            format!(
+                "  - solid: {{id: fill, corners: [[-100, -100, 0], [200, -100, 0], [200, 200, 0], [-100, 200, 0]]}}\n  - viewport: {{id: window, {triangle}, view_center: [50, 50, 0], scale: 1}}\n"
+            ),
+            vec![([110.0, 110.0], 0.1, None), ([40.0, 40.0], 0.1, Some(0))],
+        ),
+        (
+            "pick-hidden-near",
+            format!(
+                "  - solid: {{id: hidden, corners: [[70, 70.2, 0], [70.4, 70.2, 0], [70.4, 70.6, 0], [70, 70.6, 0]]}}\n  - viewport: {{id: window, layer: frame, {triangle}, view_center: [70, 70, 0], scale: 1}}\n"
+            ),
+            vec![([70.0, 69.8], 0.5, None)],
+        ),
+        (
+            "pick-hole-seam",
+            "  - hatch:\n      id: hidden\n      pattern: SOLID\n      boundary:\n        - polyline: {points: [[-20, -20, 0], [120, -20, 0], [120, 120, 0], [-20, 120, 0]]}\n        - polyline: {points: [[-10, -10, 0], [110, -10, 0], [110, 110, 0], [-10, 110, 0]]}\n  - viewport: {id: window, clip: {points: [[0, 0, 0], [100, 0, 0], [20, 20, 0], [0, 100, 0]]}, view_center: [50, 50, 0], scale: 1}\n".to_owned(),
+            vec![([10.0, 10.0], 0.1, None)],
+        ),
+        (
+            "pick-coincident-visible-edge",
+            "  - solid: {id: triangle, corners: [[0, 0, 0], [100, 0, 0], [0, 100, 0]]}\n  - viewport: {layer: frame, clip: {points: [[0, 0, 0], [100, 0, 0], [0, 100, 0]]}, view_center: [50, 50, 0], scale: 1}\n".to_owned(),
+            vec![([50.1, 50.1], 0.5, Some(0)), ([50.0, 50.0], 0.5, Some(0))],
+        ),
+        (
+            "pick-notch",
+            "  - solid: {id: fill, corners: [[-50, -50, 0], [150, -50, 0], [150, 150, 0], [-50, 150, 0]]}\n  - viewport: {layer: frame, clip: {points: [[0, 0, 0], [100, 0, 0], [100, 100, 0], [60, 100, 0], [60, 20, 0], [40, 20, 0], [40, 100, 0], [0, 100, 0]]}, view_center: [50, 50, 0], scale: 1}\n".to_owned(),
+            vec![([20.0, 60.0], 0.1, Some(0)), ([50.0, 60.0], 0.1, None)],
+        ),
+    ];
+    for (name, objects, picks) in cases {
+        let path = sheet_at(&scratch(name), &format!("{head}{objects}"));
+        let list = drawn(&path, None).display_list;
+        for (at, reach, expected) in picks {
+            assert_eq!(
+                agentdrafter_core::pick(&list, at, reach, 1.0),
+                expected,
+                "{name} at {at:?}"
+            );
+        }
     }
 }
-
 fn query(path: &Path, query: Query) -> agentdrafter_core::QueryReport {
     query_with(
         &QueryRequest {
