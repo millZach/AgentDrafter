@@ -29,24 +29,32 @@ One CAD file, DWG or DXF.
 _Avoid_: document, model
 
 **Sheet**:
-One titled page that prints: a border, a title block and the content inside them. It is drawn in model space alone, or in a layout: its border and title block in paper space, and its content in model space, shown through viewports.
+One titled page that prints: a border, a title block and the content inside them. It is drawn in model space alone, or in a layout: its border and title block in paper space, and its content in model space, shown through viewports. A sheet drawn in several layouts is one DWG that prints once for each layout, each on its own paper, all showing its one model space; it keeps one name, and its objects one set of IDs.
 _Avoid_: page, layout (a layout is AutoCAD's paper-space tab, which may hold a sheet)
 
 **Model space**:
-Where a drawing is drawn at full size, in the declared unit, as in AutoCAD: every object of a sheet with no layout, and the objects of a sheet drawn in a layout that do not say they are in paper space.
+Where a drawing is drawn at full size, in the declared unit, as in AutoCAD: every object of a sheet with no layout, and the objects of a sheet drawn in layouts that are in no layout's paper space. A sheet's layouts share its model space.
 _Avoid_: model (alone it is AutoCAD's tab), drawing area
 
 **Paper space**:
-Where a sheet drawn in a layout draws at its paper's size, as in AutoCAD: its border, its title block, its notes and its viewports, its lower left corner at the paper's.
+Where a layout draws at its paper's size, as in AutoCAD: its border, its title block, its notes and its viewports, its lower left corner at the paper's. Each layout of a sheet has its own, which an object names by the layout's name under `space`.
 _Avoid_: sheet space, layout space
 
 **Layout**:
-AutoCAD's paper-space tab that holds a sheet: its name, its paper space, and its page setup, which plots its whole paper at full size, as AutoCAD's LAYOUT and PAGESETUP make it. A sheet drawn in one prints its layout: paper space as it is drawn, and model space through its viewports. A DWG is read as the layout it opens on, or as model space when it opens on the Model tab.
+AutoCAD's paper-space tab that holds a sheet: its name, its paper, its paper space, and its page setup, which plots its whole paper at full size, as AutoCAD's LAYOUT and PAGESETUP make it. A sheet drawn in one prints its layout: paper space as it is drawn, and model space through its viewports. A sheet may be drawn in several, in the order of their tabs, each printing on its own. A DWG is read with every layout it holds, whatever tab it was saved on; the tab says only which it opens on.
 _Avoid_: sheet (a sheet is the page; a layout holds one), tab, paper space (the space a layout draws in)
 
 **Viewport**:
-A window on a layout's paper that shows model space at a scale, centred on a model point, its view centre, as AutoCAD's MVIEW makes one: rectangular and seen from above, cut at its edge, and locked or not against its view being changed. It is an object of paper space, and its frame plots as AutoCAD's does, its thinnest line.
+A window on a layout's paper that shows model space at a scale, centred on a model point, its view centre, as AutoCAD's MVIEW makes one: seen from above, rectangular or clipped to a clipping boundary, cut at its edge, and locked or not against its view being changed, with layers frozen in it alone or none. It is an object of paper space, and its frame plots as AutoCAD's does: a rectangle as its thinnest line, a clipping boundary with the viewport's pen.
 _Avoid_: view, window (a window is a selection box), viewport alone for AutoCAD's model-space tiles (VPORTS)
+
+**Clipping boundary**:
+The closed polyline, its segments straight or arcs, or the circle on a layout's paper that a viewport is clipped to instead of its rectangle, as AutoCAD's VPCLIP and MVIEW's Object and Polygonal options make it: model space shows inside it alone, its ink cut there, and it is the viewport's frame. The viewport's window is the box round it.
+_Avoid_: clip path (the PDF's way of cutting ink), mask (the PNG's), polygonal viewport
+
+**Frozen in a viewport**:
+A layer frozen in one viewport alone, as AutoCAD's VPLAYER freezes it: its objects neither draw nor plot through that viewport, and are not checked through it, but draw through the sheet's other viewports. A layer frozen everywhere is frozen on the layer itself.
+_Avoid_: VP freeze, hidden, off (a layer that is off draws nowhere and still counts)
 
 **Drawing set**:
 A job's sheets together with the block library, templates and data they share. It is the unit AgentDrafter works on: a change can span its sheets and is undone as one.

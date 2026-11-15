@@ -291,10 +291,10 @@ fn operations_are_listed_and_a_change_set_is_applied_from_a_file() {
     let (code, json) = agentdrafter(&["operations"], &dir);
     assert_eq!(code, 0, "{json}");
     let listed = json["result"]["operations"].as_array().unwrap();
-    assert_eq!(listed.len(), 57);
-    assert_eq!(listed[27]["name"], "move");
-    assert_eq!(listed[27]["alias"], "MOVE");
-    assert!(listed[27]["schema"]["$defs"]["point"].is_object());
+    assert_eq!(listed.len(), 59);
+    assert_eq!(listed[29]["name"], "move");
+    assert_eq!(listed[29]["alias"], "MOVE");
+    assert!(listed[29]["schema"]["$defs"]["point"].is_object());
     let (code, json) = agentdrafter(&["schema", "change-set"], &dir);
     assert_eq!(code, 0, "{json}");
     assert_eq!(json["result"]["title"], "AgentDrafter change set");
@@ -397,6 +397,50 @@ fn build_builds_a_drawing_set_from_its_folder() {
     let (code, json) = agentdrafter(&["build", "demo-set", "--output", "x.dwg"], &dir);
     assert_eq!(code, 2, "{json}");
     assert_eq!(json["error"]["code"], "usage");
+}
+
+#[test]
+fn a_sheet_of_two_layouts_draws_and_queries_each_by_name() {
+    let dir = scratch("layouts");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/layouts.yaml"),
+        dir.join("layouts.yaml"),
+    )
+    .unwrap();
+
+    let (code, json) = agentdrafter(
+        &["display-list", "layouts.yaml", "--layout", "Wiring"],
+        &dir,
+    );
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["layout"], "Wiring");
+    assert_eq!(
+        json["result"]["layouts"],
+        serde_json::json!(["Assembly", "Wiring"])
+    );
+    assert_eq!(json["result"]["paper"]["name"], "ISO A4 portrait");
+
+    let (code, json) = agentdrafter(
+        &[
+            "query",
+            "find",
+            "layouts.yaml",
+            "--space",
+            "Wiring",
+            "--crossing",
+            "0,0,210,297",
+        ],
+        &dir,
+    );
+    assert_eq!(code, 0, "{json}");
+    let found = json["result"]["objects"].as_array().unwrap();
+    assert!(!found.is_empty());
+    assert!(found.iter().all(|o| o["space"] == "Wiring"), "{json}");
+
+    let (code, json) = agentdrafter(&["render", "layouts.yaml"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert!(dir.join("layouts-Assembly.png").exists() && dir.join("layouts-Wiring.png").exists());
+    assert_eq!(json["result"]["other_layouts"][0]["layout"], "Wiring");
 }
 
 #[test]

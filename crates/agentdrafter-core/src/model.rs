@@ -32,7 +32,7 @@ pub use dimension::{
     STANDARD_DIMENSION_STYLE,
 };
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
-pub use layout::{Layout, Viewport};
+pub use layout::{Clip, Layout, Viewport};
 pub use leader::{
     Arrowhead, LaidContent, LaidMLeader, Leader, LeaderAnnotation, LeaderAttachment, MLeader,
     MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, MTextBox, STANDARD_MLEADER_STYLE,
@@ -858,24 +858,74 @@ pub struct Sheet {
     /// in model space alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<Layout>,
+    /// The sheet's other layouts, when it is drawn in more than one, in the
+    /// order of their tabs after `layout`'s. They share its model space;
+    /// each has its own paper, paper-space objects and viewports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_layouts: Vec<Layout>,
 }
 
 impl Sheet {
-    /// Whether the sheet's object at `index` is in paper space: one of its
-    /// layout's, never on a sheet without a layout.
+    /// Whether the sheet's object at `index` is in the paper space of the
+    /// layout it draws, `layout`: never on a sheet without a layout.
     pub fn in_paper_space(&self, index: usize) -> bool {
-        self.layout
-            .as_ref()
-            .is_some_and(|l| l.paper_space.get(index).copied().unwrap_or(false))
+        self.layout.as_ref().is_some_and(|l| l.holds(index))
     }
 
-    /// The sheet's viewports, each with its place in the sheet's objects.
+    /// Whether the sheet's object at `index` is in model space: in no
+    /// layout's paper space.
+    pub fn in_model_space(&self, index: usize) -> bool {
+        self.layout_of(index).is_none()
+    }
+
+    /// The layout whose paper space holds the sheet's object at `index`;
+    /// none for an object of model space.
+    pub fn layout_of(&self, index: usize) -> Option<&Layout> {
+        self.layouts().find(|l| l.holds(index))
+    }
+
+    /// Every layout the sheet is drawn in, in the order of their tabs.
+    pub fn layouts(&self) -> impl Iterator<Item = &Layout> {
+        self.layout.iter().chain(&self.other_layouts)
+    }
+
+    /// The sheet as each of its layouts prints it, in the order of their
+    /// tabs: the sheet itself when it has one layout or none, and for each
+    /// of several, the sheet with that layout first, as `layout`, and its
+    /// paper as the sheet's. Each keeps every object in its place, so an
+    /// object's place counts the same in all of them.
+    pub fn pages(&self) -> Vec<std::borrow::Cow<'_, Sheet>> {
+        if self.other_layouts.is_empty() {
+            return vec![std::borrow::Cow::Borrowed(self)];
+        }
+        let all: Vec<&Layout> = self.layouts().collect();
+        (0..all.len())
+            .map(|k| {
+                if k == 0 {
+                    return std::borrow::Cow::Borrowed(self);
+                }
+                let mut page = self.clone();
+                page.layout = Some(all[k].clone());
+                page.other_layouts = all
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != k)
+                    .map(|(_, l)| (*l).clone())
+                    .collect();
+                page.paper.clone_from(&all[k].paper);
+                std::borrow::Cow::Owned(page)
+            })
+            .collect()
+    }
+
+    /// The sheet's viewports in the layout it draws, `layout`, each with
+    /// its place in the sheet's objects.
     pub fn viewports(&self) -> impl Iterator<Item = (usize, &Viewport)> {
         self.objects
             .iter()
             .enumerate()
             .filter_map(|(i, o)| match o {
-                Object::Viewport(v) if self.layout.is_some() => Some((i, v)),
+                Object::Viewport(v) if self.in_paper_space(i) => Some((i, v)),
                 _ => None,
             })
     }
@@ -1039,20 +1089,31 @@ pub struct DrawingContents {
     /// What every linetype in the drawing is enlarged by: its LTSCALE.
     #[serde(default = "one")]
     pub ltscale: f64,
-    /// The layout the drawing opens on, when it opens on one rather than
-    /// on model space, as AutoCAD saves it: `objects` then holds its paper
-    /// space's objects and viewports beside model space's, and the layout
-    /// says which are which.
+    /// The drawing's first layout the core reads, in the order of their
+    /// tabs, whatever tab the drawing was saved on: `objects` then holds
+    /// its paper space's objects and viewports beside model space's, and
+    /// the layout says which are which. None for a drawing of model space
+    /// alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<Layout>,
+    /// The drawing's other layouts the core reads, after `layout`, in the
+    /// order of their tabs: each with its paper, when the core can read
+    /// its page setup, and its paper space's objects among `objects`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_layouts: Vec<Layout>,
+    /// The layout the drawing opens on, by its name, as AutoCAD saved it
+    /// current; none when it opens on the Model tab. It says which tab
+    /// AutoCAD shows first, and changes nothing the core reads or draws.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opens_on: Option<String>,
     /// The paper the layout's page setup plots, when the core can read it:
     /// a standard paper, whole, at full size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper: Option<Paper>,
-    /// How many of the drawing's layouts the core has no model for yet: a
-    /// layout that holds anything, other than the one the drawing opens
-    /// on, and the page setup of that one when it is not a standard paper
-    /// plotted whole at full size. AutoCAD's own empty layout is not
+    /// How many of the drawing's layouts the core reads no page setup of:
+    /// the one the drawing opens on, and any other that holds anything,
+    /// whose page setup is not a standard paper plotted whole at full size.
+    /// Each is read, without a paper. AutoCAD's own empty layout is not
     /// counted.
     #[serde(default, skip_serializing_if = "is_none_of")]
     pub layouts_not_read: usize,

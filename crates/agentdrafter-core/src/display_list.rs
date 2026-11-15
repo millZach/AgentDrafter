@@ -54,6 +54,10 @@ pub struct DisplayListRequest {
     /// rebuilt in memory from the undo states. Without it, as it is now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<u64>,
+    /// Which layout of a sheet drawn in several to draw, by its name, in
+    /// any case. Without it, the sheet's first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
 }
 
 impl DisplayListRequest {
@@ -64,6 +68,7 @@ impl DisplayListRequest {
             sheet: None,
             tolerance: None,
             entry: None,
+            layout: None,
         }
     }
 }
@@ -107,6 +112,13 @@ pub struct DisplayListReport {
     /// Every sheet of the drawing set, in its order; the one sheet of a
     /// sheet description or a DWG.
     pub sheets: Vec<String>,
+    /// On a sheet drawn in several layouts, the layout drawn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    /// On a sheet drawn in several layouts, every one of them, in the order
+    /// of their tabs; each draws to a display list of its own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<String>,
     /// The drawing's unit; none when a DWG has none the core knows, and it
     /// is drawn as millimetres.
     pub units: Option<Unit>,
@@ -168,7 +180,47 @@ pub fn display_list_with(
     }
     let source = request.source.as_path();
     let drawn = read(source, request.sheet.as_deref(), request.entry)?;
-    let sheet = &drawn.sheet;
+    // A sheet drawn in several layouts draws the one asked for.
+    let pages = drawn.sheet.pages();
+    let layouts: Vec<String> = if pages.len() > 1 {
+        drawn.sheet.layouts().map(|l| l.name.clone()).collect()
+    } else {
+        Vec::new()
+    };
+    let at = match &request.layout {
+        None => 0,
+        Some(asked) => pages
+            .iter()
+            .position(|p| {
+                p.layout
+                    .as_ref()
+                    .is_some_and(|l| l.name.eq_ignore_ascii_case(asked))
+            })
+            .ok_or_else(|| {
+                let names: Vec<String> = drawn
+                    .sheet
+                    .layouts()
+                    .map(|l| format!("`{}`", l.name))
+                    .collect();
+                Error::new(
+                    ErrorCode::UnknownName,
+                    if names.is_empty() {
+                        format!(
+                            "sheet `{}` is drawn in no layout, so it has no layout `{asked}`",
+                            drawn.name
+                        )
+                    } else {
+                        format!(
+                            "sheet `{}` has no layout `{asked}`; its layouts are {}",
+                            drawn.name,
+                            names.join(", ")
+                        )
+                    },
+                )
+                .at_field("layout")
+            })?,
+    };
+    let sheet: &Sheet = &pages[at];
     let fonts = SheetFonts::find(sheet, settings);
     let tolerance = match request.tolerance {
         Some(tolerance) => tolerance,
@@ -190,11 +242,16 @@ pub fn display_list_with(
     let name = own(source)
         .or_else(|| source.canonicalize().ok().and_then(|path| own(&path)))
         .unwrap_or_else(|| source.display().to_string());
+    let layout = (!layouts.is_empty())
+        .then(|| sheet.layout.as_ref().map(|l| l.name.clone()))
+        .flatten();
     Ok(DisplayListReport {
         source: source.display().to_string(),
         name,
-        sheet: drawn.name,
-        sheets: drawn.names,
+        sheet: drawn.name.clone(),
+        sheets: drawn.names.clone(),
+        layout,
+        layouts,
         units: drawn.units,
         millimetres_per_unit: sheet.units.convert(1.0, Unit::Mm),
         paper: sheet.paper.clone(),
@@ -204,7 +261,7 @@ pub fn display_list_with(
         font_substitutions: fonts.substitutions(),
         hatches_cut_short: list.hatches_cut_short.clone(),
         entry: request.entry,
-        objects: drawn.objects,
+        objects: drawn.objects.clone(),
         display_list: list,
     })
 }

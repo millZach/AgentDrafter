@@ -126,6 +126,7 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
             paper: drawing.paper.or(paper),
             ltscale: drawing.ltscale,
             layout: drawing.layout,
+            other_layouts: drawing.other_layouts,
         };
         return Ok(Record {
             sheet,

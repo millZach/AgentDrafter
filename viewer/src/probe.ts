@@ -14,6 +14,10 @@ export interface Summary {
   name: string;
   sheet: string;
   sheets: string[];
+  /** On a sheet drawn in several layouts, the layout drawn. */
+  layout: string | null;
+  /** On a sheet drawn in several layouts, every one of them, in order; empty otherwise. */
+  layouts: string[];
   millimetres_per_unit: number;
   paper: Paper;
   segments: number;

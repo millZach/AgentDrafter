@@ -49,6 +49,7 @@ fn reads_one_line() {
             paper: None,
             ltscale: 1.0,
             layout: None,
+            other_layouts: Vec::new(),
         }
     );
 }

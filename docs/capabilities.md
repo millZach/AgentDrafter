@@ -11,7 +11,7 @@ Every capability is done the same way, and each issue says so: the schema and th
 - **Operations:** add each kind of object, `change`, `move`, `delete`, `set_attribute`, and a table's `set_cell` and its row and column operations, in change sets that land on a set's own files, with a journal, undo and accept.
 - **Queries:** find by ID, name, block, attribute or text; a sheet's blocks; an insert's attributes; the distance between two objects' own points; a sheet's extents.
 - **Checks:** the exact paper size, nothing off the sheet, no text overflowing its cell, no text on other text.
-- **Existing DWGs:** `render` and `plot` read a DWG's model space, or the paper-space layout it opens on through its viewports, drawing what the core models and counting the rest. Nothing revises one yet.
+- **Existing DWGs:** `render` and `plot` read a DWG's model space and every paper-space layout through its viewports, whatever tab it was saved on, clipped ones and layers frozen in one among them, drawing what the core models and counting the rest. Nothing revises one yet.
 
 acadrust, behind the seam in `src/dwg.rs`, already models most of what the gap needs: dimensions, leaders and multileaders, tables, layouts and viewports, wipeouts, images and underlays, fields, groups, dynamic blocks, multilines, points, construction lines and 3D solids, as well as transforms and explode. Most of the gap is AgentDrafter's own model, operations and drawing pipeline, not the DWG library.
 
@@ -44,7 +44,7 @@ A second real controls job, 25 sheets on 2026-11-13, met the same gaps in nearly
 | 10 | Leaders and multileaders | MLEADER, LEADER, QLEADER | [#76](https://github.com/millZach/AgentDrafter/issues/76) |
 | 11 | Object snaps and geometric queries | OSNAP, LIST, AREA, MEASUREGEOM, DIST | [#74](https://github.com/millZach/AgentDrafter/issues/74) |
 | 12 | Dimensions and dimension styles | DIMLINEAR and the rest, DIMSTYLE | [#75](https://github.com/millZach/AgentDrafter/issues/75) |
-| 13 | Paper-space layouts and viewports | LAYOUT, MVIEW, VPLAYER | [#77](https://github.com/millZach/AgentDrafter/issues/77) |
+| 13 | Paper-space layouts and viewports (built: one or more layouts in a DWG, viewports rectangular or clipped, layers frozen in one viewport) | LAYOUT, MVIEW, VPCLIP, VPLAYER | [#77](https://github.com/millZach/AgentDrafter/issues/77) |
 | 14 | Font folders: the system's fonts, and a warning when a look-alike stands in | FONTALT | [#101](https://github.com/millZach/AgentDrafter/issues/101) |
 | 15 | A row's value inside other text | none: drawing sets | [#102](https://github.com/millZach/AgentDrafter/issues/102) |
 | 16 | More than one rows file in a drawing set | none: drawing sets | [#103](https://github.com/millZach/AgentDrafter/issues/103) |

@@ -51,7 +51,10 @@ use std::collections::BTreeMap;
 use super::ink::Ink;
 use super::{BlockPart, CheckedObject, Finding, Rule, Sides};
 use crate::description::SheetRecord;
-use crate::draw::{clip_polygon, mtext_lines, Bounds, DisplayList, Item, Point2, TextRun};
+use crate::draw::{
+    clip_polygon, clip_to_convex, inside_outline, is_convex, mtext_lines, outlines_cross,
+    triangles, Bounds, DisplayList, Item, Point2, TextRun,
+};
 use crate::model::block::Placement;
 use crate::model::{Block, Insert, Object, Paper, Table, TableStyle, LINE_BOX, LINE_STEP};
 use crate::query::{measuring_drawing, measuring_objects, printing_drawing, written_at, Extents};
@@ -126,6 +129,7 @@ impl Sheet<'_> {
     fn finding(&self, rule: Rule, message: String) -> Finding {
         Finding {
             sheet: self.record.name.clone(),
+            layout: self.record.sheet.layout.as_ref().map(|l| l.name.clone()),
             rule,
             message,
             object: None,
@@ -474,7 +478,18 @@ impl Sheet<'_> {
         let window = |v: Option<usize>| match v.map(|v| &sheet.objects[v]) {
             Some(Object::Viewport(viewport)) => {
                 let [min, max] = viewport.corners();
-                Some(Bounds { min, max })
+                // A clipped viewport's boundary, as its contents are cut at it.
+                let boundary = self
+                    .list
+                    .items
+                    .iter()
+                    .find(|i| i.viewport == v)
+                    .and_then(|i| i.clip_boundary)
+                    .map(|b| self.list.clip_boundaries[b].as_slice());
+                Some(Window {
+                    box_: Bounds { min, max },
+                    boundary,
+                })
             }
             _ => None,
         };
@@ -482,7 +497,7 @@ impl Sheet<'_> {
             .list
             .text
             .iter()
-            .filter_map(|run| TextBox::of(run, window(run.viewport)))
+            .flat_map(|run| TextBox::of(run, window(run.viewport)))
             .collect();
         // Sweep across: two boxes apart across by more than the tolerance
         // are apart.
@@ -727,7 +742,7 @@ impl Sheet<'_> {
     /// through no viewport, since it does not print.
     fn measured_in(&self, i: usize) -> Option<(&DisplayList, f64, Option<usize>)> {
         let sheet = &self.record.sheet;
-        let Some(own) = self.own.filter(|_| !sheet.in_paper_space(i)) else {
+        let Some(own) = self.own.filter(|_| sheet.in_model_space(i)) else {
             return Some((self.list, 1.0, None));
         };
         let largest = self
@@ -1015,10 +1030,12 @@ struct TextBox {
 }
 
 impl TextBox {
-    /// The box round what `run` draws, as the pipeline draws it; none when
-    /// it draws nothing.
-    fn of(run: &TextRun, window: Option<Bounds>) -> Option<TextBox> {
-        let [lo, hi] = run.drawn?;
+    /// The box round what `run` draws, as the pipeline draws it, in the
+    /// pieces of it that print; none when it draws nothing.
+    fn of(run: &TextRun, window: Option<Window>) -> Vec<TextBox> {
+        let Some([lo, hi]) = run.drawn else {
+            return Vec::new();
+        };
         let at = |u: f64, v: f64| {
             [
                 run.origin[0] + u * run.across[0] + v * run.up[0],
@@ -1035,23 +1052,56 @@ impl TextBox {
             let length = v[0].hypot(v[1]);
             (length > 0.0).then(|| [v[0] / length, v[1] / length])
         };
-        // A model-space text shows on the paper only within its viewport.
-        let (corners, cut) = match window {
-            Some(w) if corners.iter().any(|p| !within(*p, &w)) => {
-                (clip_polygon(&corners, w.min, w.max), true)
+        // A model-space text shows on the paper only within its viewport:
+        // a box cut at a clipped viewport's boundary is each convex piece of
+        // it that prints, so that a part the boundary cuts away, such as one
+        // in a concave boundary's notch, does not count.
+        let pieces: Vec<(Vec<Point2>, bool)> = match window {
+            Some(Window {
+                boundary: Some(boundary),
+                ..
+            }) => {
+                // Whole only when nothing of the boundary reaches into the
+                // box: no corner of it outside, no point of the boundary in
+                // it, and no edge of the boundary across it.
+                let whole = corners.iter().all(|p| inside_outline(*p, boundary))
+                    && !boundary.iter().any(|p| inside_outline(*p, &corners))
+                    && !outlines_cross(&corners, boundary);
+                if whole {
+                    vec![(corners.to_vec(), false)]
+                } else if is_convex(boundary) {
+                    vec![(clip_to_convex(&corners, boundary), true)]
+                } else {
+                    triangles(boundary)
+                        .iter()
+                        .map(|t| (clip_to_convex(&corners, t), true))
+                        .collect()
+                }
             }
-            _ => (corners.to_vec(), false),
+            Some(Window {
+                box_: w,
+                boundary: None,
+            }) if corners.iter().any(|p| !within(*p, &w)) => {
+                vec![(clip_polygon(&corners, w.min, w.max), true)]
+            }
+            _ => vec![(corners.to_vec(), false)],
         };
-        Some(TextBox {
-            key: (run.object, item_path(run.part, &run.nested, run.cell)),
-            viewport: run.viewport,
-            says: run.characters.iter().map(|&(c, _)| c).collect(),
-            along: unit(run.across)?,
-            up: unit(run.up)?,
-            seen: Bounds::of(corners.iter().copied())?,
-            corners,
-            cut,
-        })
+        let (along, up) = (unit(run.across), unit(run.up));
+        pieces
+            .into_iter()
+            .filter_map(|(corners, cut)| {
+                Some(TextBox {
+                    key: (run.object, item_path(run.part, &run.nested, run.cell)),
+                    viewport: run.viewport,
+                    says: run.characters.iter().map(|&(c, _)| c).collect(),
+                    along: along?,
+                    up: up?,
+                    seen: Bounds::of(corners.iter().copied())?,
+                    corners,
+                    cut,
+                })
+            })
+            .collect()
     }
 
     /// How far this box and `other` overlap, when they sit on each other:
@@ -1069,6 +1119,12 @@ impl TextBox {
         let mut axes = vec![self.along, self.up, other.along, other.up];
         if self.cut || other.cut {
             axes.extend([[1.0, 0.0], [0.0, 1.0]]);
+            // A box cut at a viewport's edge or boundary is a convex piece of
+            // its own: two pieces are apart when they are apart across one
+            // of the edges of either.
+            for piece in [&self.corners, &other.corners] {
+                axes.extend(edge_normals(piece));
+            }
         }
         for axis in axes {
             let (a_lo, a_hi) = span(&self.corners, axis);
@@ -1089,9 +1145,30 @@ impl TextBox {
     }
 }
 
+/// The window a viewport shows model space in: its box on the paper, and
+/// the boundary it is clipped to, when it is.
+#[derive(Clone, Copy)]
+struct Window<'a> {
+    box_: Bounds,
+    boundary: Option<&'a [Point2]>,
+}
+
 /// Whether `p` is inside `window`, its edge included.
 fn within(p: Point2, window: &Bounds) -> bool {
     p[0] >= window.min[0] && p[0] <= window.max[0] && p[1] >= window.min[1] && p[1] <= window.max[1]
+}
+
+/// The unit normal of each edge of the closed outline `corners` that has a
+/// length.
+fn edge_normals(corners: &[Point2]) -> Vec<Point2> {
+    (0..corners.len())
+        .filter_map(|i| {
+            let (a, b) = (corners[i], corners[(i + 1) % corners.len()]);
+            let d = [b[0] - a[0], b[1] - a[1]];
+            let length = d[0].hypot(d[1]);
+            (length > 0.0).then(|| [-d[1] / length, d[0] / length])
+        })
+        .collect()
 }
 
 /// Where `corners` reach along `axis`: from the least to the most.

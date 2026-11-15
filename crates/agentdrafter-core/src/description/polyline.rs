@@ -122,6 +122,57 @@ pub(super) fn polyline(fields: &Fields, units: Unit, layer: String) -> Result<Po
     })
 }
 
+/// The points of a viewport's clipping boundary at `node`, a closed
+/// polyline's on the paper: at least three, each `[x, y, 0]` or a mapping
+/// that gives the bulge or arc angle of the segment that starts there, and
+/// no width. The bulges are empty when every segment is straight.
+pub(super) fn clip_points(
+    node: &Node,
+    path: &str,
+    units: Unit,
+) -> Result<(Vec<Point3>, Vec<f64>), Error> {
+    let items = sequence(node, path, "a list of points")?;
+    if items.len() < 3 {
+        return Err(super::at(
+            Error::new(
+                ErrorCode::WrongType,
+                format!(
+                    "a clipping boundary encloses an area, so it has at least 3 points; found {}",
+                    items.len()
+                ),
+            ),
+            path,
+            node.at,
+        ));
+    }
+    let mut points = Vec::with_capacity(items.len());
+    let mut bulges = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let at = index_path(path, i);
+        let (p, extra) = vertex(item, &at, units, false)?;
+        if let Some((key, width)) = extra.first_width {
+            return Err(bad_value(
+                &width,
+                &key,
+                "a clipping boundary is a line on the paper, so its segments have no width",
+            ));
+        }
+        if p.z != 0.0 {
+            return Err(bad_value(
+                item,
+                &at,
+                "a clipping boundary lies on the paper, so its points have 0 for z",
+            ));
+        }
+        points.push(p);
+        bulges.push(extra.bulge.unwrap_or(0.0));
+    }
+    if bulges.iter().all(|&b| b == 0.0) {
+        bulges.clear();
+    }
+    Ok((points, bulges))
+}
+
 /// One point of a polyline: `[x, y, z]`, or a mapping that gives its
 /// point, the bulge or arc angle of the segment that starts there, and
 /// that segment's widths. `last` is whether it starts no segment: the last

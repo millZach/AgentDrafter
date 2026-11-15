@@ -1,0 +1,87 @@
+# A made-up junction box's backplate, drawn once at full size in model
+# space and sheeted in two paper-space layouts of one DWG, which share it.
+# Model space holds the 500 by 700 backplate: its outline, two DIN rails,
+# a relay, a fuse block and a terminal strip, the field wiring between
+# them, their tags, and the plate's size dimensioned to read at 1:5.
+#
+# The first layout, Assembly, on an A3 sheet, shows the whole plate at 1:5,
+# a round detail of the terminal strip at 1:1 through a viewport clipped to
+# a circle, and the relay at 1:2 through a viewport clipped to a polyline
+# with a rounded end. The second, Wiring, on an A4 sheet laid upright,
+# shows the plate at 1:6 with its dimensions frozen in that viewport, and
+# the plate again at 1:6 with its wiring frozen too. Everything here is made up.
+units: mm
+layouts:
+  - name: Assembly
+    paper: ISO A3 landscape
+  - name: Wiring
+    paper: ISO A4 portrait
+layers:
+  border: {color: white, lineweight: 0.5}
+  title: {color: white, lineweight: 0.25}
+  notes: {color: yellow}
+  viewports: {color: 8, plot: false}
+  details: {color: cyan, lineweight: 0.35}
+  plate: {color: white, lineweight: 0.5}
+  rails: {color: cyan, lineweight: 0.35}
+  devices: {color: green, lineweight: 0.35}
+  wiring: {color: red, lineweight: 0.25}
+  labels: {color: white}
+  dims: {color: magenta}
+dimension_styles:
+  fifth:
+    scale: 5
+objects:
+  # Model space, at full size: the backplate, 500 wide and 700 tall.
+  - polyline: {id: plate, points: [[0, 0, 0], [500, 0, 0], [500, 700, 0], [0, 700, 0]], closed: true, layer: plate}
+  - polyline: {id: rail-1, points: [[30, 532.5, 0], [470, 532.5, 0], [470, 567.5, 0], [30, 567.5, 0]], closed: true, layer: rails}
+  - polyline: {id: rail-2, points: [[30, 132.5, 0], [470, 132.5, 0], [470, 167.5, 0], [30, 167.5, 0]], closed: true, layer: rails}
+  # A relay and a fuse block on the top rail.
+  - polyline: {id: relay, points: [[60, 500, 0], [140, 500, 0], [140, 600, 0], [60, 600, 0]], closed: true, layer: devices}
+  - circle: {id: relay-coil, center: [100, 560, 0], radius: 15, layer: devices}
+  - text: {id: relay-tag, contents: K1, position: [100, 520, 0], height: 10, justify: middle_center, layer: labels}
+  - polyline: {id: fuses, points: [[300, 510, 0], [420, 510, 0], [420, 590, 0], [300, 590, 0]], closed: true, layer: devices}
+  - text: {id: fuses-tag, contents: F1 TO F4, position: [360, 550, 0], height: 10, justify: middle_center, layer: labels}
+  # A terminal strip on the bottom rail: six terminals 8 wide.
+  - polyline: {id: terminals, points: [[200, 120, 0], [248, 120, 0], [248, 180, 0], [200, 180, 0]], closed: true, layer: devices}
+  - line: {from: [208, 120, 0], to: [208, 180, 0], layer: devices}
+  - line: {from: [216, 120, 0], to: [216, 180, 0], layer: devices}
+  - line: {from: [224, 120, 0], to: [224, 180, 0], layer: devices}
+  - line: {from: [232, 120, 0], to: [232, 180, 0], layer: devices}
+  - line: {from: [240, 120, 0], to: [240, 180, 0], layer: devices}
+  - text: {id: strip-tag, contents: X2, position: [252, 150, 0], height: 10, justify: middle_left, layer: labels}
+  - text: {id: strip-note, contents: TERMINALS 1 TO 6, position: [224, 112, 0], height: 3.5, justify: top_center, layer: labels}
+  # The field wiring, from the relay and the fuses down to the strip.
+  - polyline: {id: wire-1, points: [[100, 500, 0], [100, 300, 0], [204, 300, 0], [204, 180, 0]], layer: wiring}
+  - polyline: {id: wire-2, points: [[340, 510, 0], [340, 320, 0], [220, 320, 0], [220, 180, 0]], layer: wiring}
+  - polyline: {id: wire-3, points: [[380, 510, 0], [380, 280, 0], [236, 280, 0], [236, 180, 0]], layer: wiring}
+  # The plate's size, dimensioned to read at 1:5.
+  - dimension: {id: width, kind: linear, points: [[0, 0, 0], [500, 0, 0]], location: [250, -50, 0], dimension_style: fifth, layer: dims}
+  - dimension: {id: height, kind: linear, angle: 90, points: [[500, 0, 0], [500, 700, 0]], location: [550, 350, 0], dimension_style: fifth, layer: dims}
+  # The Assembly layout's paper space: its trim line, border and title
+  # block.
+  - polyline: {id: a-trim, space: Assembly, points: [[0, 0, 0], [420, 0, 0], [420, 297, 0], [0, 297, 0]], closed: true, layer: border}
+  - polyline: {id: a-frame, space: Assembly, points: [[10, 10, 0], [410, 10, 0], [410, 287, 0], [10, 287, 0]], closed: true, layer: border}
+  - polyline: {id: a-title-block, space: Assembly, points: [[250, 10, 0], [410, 10, 0], [410, 40, 0], [250, 40, 0]], closed: true, layer: title}
+  - text: {id: a-title, space: Assembly, contents: JUNCTION BOX JB-201 ASSEMBLY, position: [255, 28, 0], height: 4, layer: title}
+  - text: {id: a-number, space: Assembly, contents: DEMO-LAY-002 SHEET 1, position: [255, 16, 0], height: 3.5, layer: title}
+  # Its viewports: the whole plate at 1:5; the terminal strip at 1:1
+  # through a circle; the relay at 1:2 through a polyline with a rounded
+  # end. The two details' boundaries plot as their frames.
+  - viewport: {id: view-a, space: Assembly, center: [90, 150, 0], width: 140, height: 200, view_center: [250, 330, 0], scale: '1:5', layer: viewports}
+  - viewport: {id: detail-x2, space: Assembly, clip: {center: [230, 195, 0], radius: 55}, view_center: [224, 150, 0], scale: '1:1', locked: true, layer: details}
+  - viewport: {id: detail-k1, space: Assembly, clip: {points: [[290, 80, 0], [370, 80, 0], {point: [370, 190, 0], arc_angle: 180}, [290, 190, 0]]}, view_center: [100, 550, 0], scale: '1:2', layer: details}
+  - text: {id: view-a-label, space: Assembly, contents: VIEW A  1:5, position: [90, 42, 0], height: 3.5, justify: bottom_center, layer: notes}
+  - text: {id: detail-x2-label, space: Assembly, contents: DETAIL X2  1:1, position: [230, 255, 0], height: 3.5, justify: bottom_center, layer: notes}
+  - text: {id: detail-k1-label, space: Assembly, contents: DETAIL K1  1:2, position: [330, 65, 0], height: 3.5, justify: bottom_center, layer: notes}
+  # The Wiring layout's paper space, on A4 laid upright.
+  - polyline: {id: w-trim, space: Wiring, points: [[0, 0, 0], [210, 0, 0], [210, 297, 0], [0, 297, 0]], closed: true, layer: border}
+  - polyline: {id: w-frame, space: Wiring, points: [[10, 10, 0], [200, 10, 0], [200, 287, 0], [10, 287, 0]], closed: true, layer: border}
+  - polyline: {id: w-title-block, space: Wiring, points: [[10, 10, 0], [200, 10, 0], [200, 30, 0], [10, 30, 0]], closed: true, layer: title}
+  - text: {id: w-title, space: Wiring, contents: JB-201 WIRING  DEMO-LAY-002 SHEET 2, position: [15, 17, 0], height: 3.5, layer: title}
+  # The plate at 1:6 twice: once with its dimensions frozen, as VPLAYER
+  # freezes a layer in one viewport, and once with its wiring frozen.
+  - viewport: {id: view-wired, space: Wiring, center: [57.5, 160, 0], width: 85, height: 160, view_center: [250, 350, 0], scale: '1:6', frozen_layers: [dims], layer: viewports}
+  - viewport: {id: view-bare, space: Wiring, center: [152.5, 160, 0], width: 85, height: 160, view_center: [250, 350, 0], scale: '1:6', frozen_layers: [wiring, dims], layer: viewports}
+  - text: {id: view-wired-label, space: Wiring, contents: WITH WIRING, position: [57.5, 245, 0], height: 3.5, justify: bottom_center, layer: notes}
+  - text: {id: view-bare-label, space: Wiring, contents: PLATE ONLY, position: [152.5, 245, 0], height: 3.5, justify: bottom_center, layer: notes}

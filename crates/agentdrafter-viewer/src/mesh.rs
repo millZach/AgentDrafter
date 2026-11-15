@@ -1,7 +1,9 @@
 //! A display list made ready for the GPU: every stroke's segments, each
 //! with its pen's width and colour, and every fill cut into triangles, each
 //! with its item's place in the display list, so the GPU can draw a later
-//! item over an earlier one, as the PNG paints them.
+//! item over an earlier one, as the PNG paints them. The boundary of each
+//! clipped viewport is cut into a fan of triangles too, which the GPU marks
+//! the stencil with, so that the viewport's items draw only inside it.
 //!
 //! This is plain computation, tested natively. The colours are the core's
 //! own, [`Color::on_paper`], so the screen draws each colour index as the
@@ -40,6 +42,12 @@ pub struct SheetReply {
     pub name: String,
     pub sheet: String,
     pub sheets: Vec<String>,
+    /// On a sheet drawn in several layouts, the layout drawn.
+    #[serde(default)]
+    pub layout: Option<String>,
+    /// On a sheet drawn in several layouts, every one of them, in order.
+    #[serde(default)]
+    pub layouts: Vec<String>,
     pub millimetres_per_unit: f64,
     #[serde(default)]
     pub paper: Option<Paper>,
@@ -68,7 +76,8 @@ pub enum Kind {
 }
 
 /// Items next to one another in the display list that draw the same kind
-/// of shape, so one draw call draws them, in their order.
+/// of shape, seen through the same clipped viewport or none, so one draw
+/// call draws them, in their order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Run {
     pub kind: Kind,
@@ -76,6 +85,21 @@ pub struct Run {
     pub first: u32,
     /// How many segments, or triangles, it draws.
     pub count: u32,
+    /// The clipped viewport's boundary its items are cut at: its place in
+    /// the mesh's `stencils`. None for items drawn whole or cut at a box.
+    pub clip: Option<u32>,
+}
+
+/// Items next to one another in the display list seen through the same
+/// clipped viewport, or none: what a sheet drawn by depth draws at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    /// The boundary its items are cut at, as a run's is.
+    pub clip: Option<u32>,
+    /// Its first segment and how many.
+    pub segments: (u32, u32),
+    /// Its first triangle and how many.
+    pub triangles: (u32, u32),
 }
 
 /// A sheet ready to draw.
@@ -112,6 +136,14 @@ pub struct Mesh {
     /// The display list's items as runs of one kind, in its order: drawn
     /// one after another, a later item paints over an earlier one.
     pub runs: Vec<Run>,
+    /// The display list's items as spans by the clipped viewport they are
+    /// seen through, in its order.
+    pub spans: Vec<Span>,
+    /// The fan of triangles each clipped viewport's boundary is cut into,
+    /// among the fill triangles after every item's: its first triangle and
+    /// how many. Drawn into the stencil, each inverting it, they leave it
+    /// set inside the boundary, by the even-odd rule.
+    pub stencils: Vec<(u32, u32)>,
     /// The sheet of paper the drawing sits on, in drawing units:
     /// `[left, bottom, right, top]`.
     pub paper: [f64; 4],
@@ -124,6 +156,10 @@ pub struct Summary {
     pub name: String,
     pub sheet: String,
     pub sheets: Vec<String>,
+    /// On a sheet drawn in several layouts, the layout drawn.
+    pub layout: Option<String>,
+    /// On a sheet drawn in several layouts, every one of them, in order.
+    pub layouts: Vec<String>,
     pub millimetres_per_unit: f64,
     /// `[left, bottom, right, top]` in drawing units.
     pub paper: [f64; 4],
@@ -174,12 +210,19 @@ impl Mesh {
             fills_not_drawn: 0,
             items: sheet.display_list.items.len(),
             runs: Vec::new(),
+            spans: Vec::new(),
+            stencils: Vec::new(),
             paper,
         };
         let mut tessellator = FillTessellator::new();
         for (place, item) in sheet.display_list.items.iter().enumerate() {
             let place = place as u32;
             let color = rgba(item.color);
+            // Cut at a clipped viewport's boundary, by the stencil.
+            let cut = item
+                .clip_boundary
+                .filter(|&b| b < sheet.display_list.clip_boundaries.len())
+                .map(|b| b as u32);
             let clip = item.clip.map_or(NO_CLIP, |b| {
                 let (min, max) = (at(b.min), at(b.max));
                 [min[0], min[1], max[0], max[1]]
@@ -261,19 +304,55 @@ impl Mesh {
             ];
             for (kind, before, after) in added {
                 if after > before {
-                    mesh.extend_run(kind, before as u32, (after - before) as u32);
+                    mesh.extend_run(kind, before as u32, (after - before) as u32, cut);
                 }
             }
+            let (segments_now, triangles_now) = (mesh.segments.len(), mesh.triangles.len());
+            match mesh.spans.last_mut() {
+                Some(span) if span.clip == cut => {
+                    span.segments.1 = segments_now as u32 - span.segments.0;
+                    span.triangles.1 = triangles_now as u32 - span.triangles.0;
+                }
+                _ => mesh.spans.push(Span {
+                    clip: cut,
+                    segments: (segments as u32, (segments_now - segments) as u32),
+                    triangles: (triangles as u32, (triangles_now - triangles) as u32),
+                }),
+            }
+        }
+        // Each clipped viewport's boundary, a fan from its first corner,
+        // after every item's triangles, drawn into the stencil alone.
+        for outline in &sheet.display_list.clip_boundaries {
+            let first = mesh.triangles.len() as u32;
+            let base = mesh.fill_points.len() as u32;
+            mesh.fill_points.extend(outline.iter().map(|&p| at(p)));
+            mesh.fill_colors
+                .extend(std::iter::repeat_n([0, 0, 0, 0], outline.len()));
+            mesh.fill_items
+                .extend(std::iter::repeat_n(0, outline.len()));
+            let corners = outline.len() as u32;
+            mesh.triangles
+                .extend((1..corners.saturating_sub(1)).map(|i| [base, base + i, base + i + 1]));
+            mesh.stencils
+                .push((first, mesh.triangles.len() as u32 - first));
         }
         mesh
     }
 
-    /// Adds `count` segments or triangles of `kind`, from `first`, to the
-    /// last run when it is of that kind, or as a run of their own.
-    fn extend_run(&mut self, kind: Kind, first: u32, count: u32) {
+    /// Adds `count` segments or triangles of `kind`, from `first`, cut at
+    /// the boundary `clip` or none, to the last run when it is of that kind
+    /// and cut there, or as a run of their own.
+    fn extend_run(&mut self, kind: Kind, first: u32, count: u32, clip: Option<u32>) {
         match self.runs.last_mut() {
-            Some(run) if run.kind == kind && run.first + run.count == first => run.count += count,
-            _ => self.runs.push(Run { kind, first, count }),
+            Some(run) if run.kind == kind && run.clip == clip && run.first + run.count == first => {
+                run.count += count;
+            }
+            _ => self.runs.push(Run {
+                kind,
+                first,
+                count,
+                clip,
+            }),
         }
     }
 
@@ -284,6 +363,8 @@ impl Mesh {
             name: sheet.name.clone(),
             sheet: sheet.sheet.clone(),
             sheets: sheet.sheets.clone(),
+            layout: sheet.layout.clone(),
+            layouts: sheet.layouts.clone(),
             millimetres_per_unit: sheet.millimetres_per_unit,
             paper: self.paper,
             segments: self.segments.len(),
@@ -342,6 +423,8 @@ mod tests {
             name: "made-up.yaml".to_owned(),
             sheet: "made-up".to_owned(),
             sheets: vec!["made-up".to_owned()],
+            layout: None,
+            layouts: Vec::new(),
             millimetres_per_unit: 1.0,
             paper,
             extents: display_list.extents(),
@@ -359,6 +442,7 @@ mod tests {
             cell: None,
             viewport: None,
             clip: None,
+            clip_boundary: None,
             color: Color(color),
             shape,
         }
@@ -399,6 +483,57 @@ mod tests {
         // The window, from the origin, the paper's middle, [5, 2.5].
         assert_eq!(mesh.origin, [5.0, 2.5]);
         assert_eq!(mesh.segment_clips, vec![[-5.0, -2.5, 5.0, 7.5], NO_CLIP]);
+    }
+
+    #[test]
+    fn a_clipped_viewports_items_draw_through_its_boundarys_fan() {
+        let stroke = |color, cut| {
+            let mut i = item(
+                color,
+                Shape::Stroke {
+                    lineweight: 0.5,
+                    runs: vec![vec![[0.0, 5.0], [10.0, 5.0]]],
+                },
+            );
+            if cut {
+                i.clip = Some(agentdrafter_core::Bounds {
+                    min: [0.0, 0.0],
+                    max: [10.0, 10.0],
+                });
+                i.clip_boundary = Some(0);
+            }
+            i
+        };
+        let mut reply = sheet(
+            vec![
+                stroke(7, false),
+                stroke(1, true),
+                stroke(1, true),
+                stroke(7, false),
+            ],
+            None,
+        );
+        // A notched outline of five corners: a fan of three triangles.
+        reply.display_list.clip_boundaries = vec![vec![
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [5.0, 5.0],
+            [0.0, 10.0],
+        ]];
+        let mesh = Mesh::of(&reply);
+        // The clipped items are a run of their own, between the others.
+        let cut: Vec<Option<u32>> = mesh.runs.iter().map(|r| r.clip).collect();
+        assert_eq!(cut, [None, Some(0), None]);
+        assert_eq!(mesh.runs[1].count, 2);
+        // The fan follows every item's triangles, from the first corner.
+        assert_eq!(mesh.stencils, [(0, 3)]);
+        assert_eq!(mesh.triangles.len(), 3);
+        assert_eq!(mesh.fill_items.len(), mesh.fill_points.len());
+        // Spans for a sheet drawn by depth, by the boundary they are cut at.
+        let spans: Vec<(Option<u32>, (u32, u32))> =
+            mesh.spans.iter().map(|s| (s.clip, s.segments)).collect();
+        assert_eq!(spans, [(None, (0, 1)), (Some(0), (1, 2)), (None, (3, 1))]);
     }
 
     #[test]
@@ -452,7 +587,8 @@ mod tests {
             vec![Run {
                 kind: Kind::Strokes,
                 first: 0,
-                count: 4
+                count: 4,
+                clip: None,
             }]
         );
         // Index 7 draws black on paper, as the PNG draws it; 1 is red.
@@ -517,12 +653,14 @@ mod tests {
                 Run {
                     kind: Kind::Fills,
                     first: 0,
-                    count: both.triangles.len() as u32
+                    count: both.triangles.len() as u32,
+                    clip: None,
                 },
                 Run {
                     kind: Kind::Strokes,
                     first: 0,
-                    count: 1
+                    count: 1,
+                    clip: None,
                 },
             ]
         );

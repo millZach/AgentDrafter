@@ -13,6 +13,7 @@ import {
   notIssued,
   recordedEntries,
   sheetsTouched,
+  staleDrawings,
   since,
   undoneWith,
   type JournalReport,
@@ -182,4 +183,10 @@ test('showing a change set\'s objects zooms in on them, no less than the fit and
   assert.ok(Math.abs((small.top - 5.05) * small.scale - 300) < 1e-9);
   // A box larger than the fit: no less than the fit.
   assert.equal(focusOn([-50, -50, 50, 50], area, fitted).scale, 50);
+});
+
+test('a change set makes stale every drawing kept of the sheets it touched, each layout among them', () => {
+  const kept = ['live|A|', 'live|A|FRONT', 'live|A|BACK', 'live|B|', 'live||', '3|A|FRONT'];
+  assert.deepEqual(staleDrawings(kept, ['A']), ['live|A|', 'live|A|FRONT', 'live|A|BACK', 'live||']);
+  assert.deepEqual(staleDrawings(kept, []), []);
 });

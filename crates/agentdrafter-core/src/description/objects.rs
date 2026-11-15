@@ -12,7 +12,7 @@ use super::dimension::{dimension, DIMENSION_KEYS};
 use super::hatch::{self, HATCH_KEYS};
 use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
 use super::layers::{layer_name, properties};
-use super::layout::{in_paper_space, viewport, VIEWPORT_KEYS};
+use super::layout::{space, viewport, VIEWPORT_KEYS};
 use super::leader::{leader, mleader, LEADER_KEYS, MLEADER_KEYS};
 use super::polyline;
 use super::strict_yaml::{index_path, key_path, Kind, Node};
@@ -129,9 +129,9 @@ pub(super) struct Tables<'a> {
     pub mleader_styles: &'a [MLeaderStyle],
     /// The dimension styles a sheet's dimensions may name; none in a block.
     pub dimension_styles: &'a [DimensionStyle],
-    /// Whether the sheet is drawn in a layout, so that its objects may be
-    /// in paper space; never in a block.
-    pub layout: bool,
+    /// The names of the layouts the sheet is drawn in, in order, so that
+    /// its objects may be in one's paper space; none in a block.
+    pub layouts: &'a [String],
 }
 
 /// Where an object is: on a sheet, which may insert blocks from its block
@@ -145,8 +145,9 @@ pub(super) enum Place<'a> {
         /// What reading the objects so far noticed, such as an attribute
         /// tag written in lowercase.
         noticed: Vec<Noticed>,
-        /// For each object read so far, whether it is in paper space.
-        paper_space: Vec<bool>,
+        /// For each object read so far, the place of the layout whose
+        /// paper space it is in; none for model space.
+        spaces: Vec<Option<usize>>,
     },
     Block {
         /// What reading the block's objects so far noticed.
@@ -383,7 +384,9 @@ pub(super) fn object(
         ("dimension", Place::Sheet { .. }) => {
             dimension(&fields, units, layer, tables.dimension_styles).map(Object::Dimension)
         }
-        ("viewport", Place::Sheet { .. }) => viewport(&fields, units, layer).map(Object::Viewport),
+        ("viewport", Place::Sheet { .. }) => {
+            viewport(&fields, units, layer, tables.layers).map(Object::Viewport)
+        }
         ("attdef", Place::Block { noticed, .. }) => {
             attribute_definition(&fields, tables, layer, noticed).map(Object::AttributeDefinition)
         }
@@ -400,13 +403,11 @@ pub(super) fn object(
     }?;
     *object.properties_mut() = properties;
     if let Place::Sheet {
-        objects,
-        paper_space,
-        ..
+        objects, spaces, ..
     } = place
     {
         let viewport = matches!(object, Object::Viewport(_));
-        paper_space.push(in_paper_space(&fields, tables.layout, viewport)?);
+        spaces.push(space(&fields, tables.layouts, viewport)?);
         let record = object_record(&fields, node, place_in_file, objects)?;
         // An insert keeps its name in the model too, as it has since blocks.
         if let Object::Insert(insert) = &mut object {

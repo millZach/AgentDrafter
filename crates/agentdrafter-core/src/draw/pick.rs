@@ -7,8 +7,14 @@
 //! `reach` of its pen's edge, and a fill anywhere inside it, by its fill
 //! rule, or within `reach` of its edge. The object drawn nearest the point
 //! is picked; of two as near, the one drawn later, which lies on top.
+//!
+//! What model space draws through a viewport is cut at the viewport's
+//! window, or at the boundary it is clipped to, as every output cuts its
+//! ink there: a point outside it is no nearer to the item than to the
+//! window or the boundary, so a fill cut away there is not picked.
 
-use super::{Bounds, DisplayList, FillRule, Point2, Shape};
+use super::clip::{distance_to_outline, inside_outline};
+use super::{Bounds, DisplayList, FillRule, Item, Point2, Shape};
 
 /// The place in the sheet's objects of the object drawn nearest `at`,
 /// within `reach` drawing units, or none when nothing is drawn that near.
@@ -31,23 +37,141 @@ pub fn pick(
                     .fold(f64::INFINITY, f64::min);
                 (nearest - half).max(0.0)
             }
-            Shape::Fill { rule, contours } => {
-                if inside(at, *rule, contours) {
-                    0.0
-                } else {
-                    contours
-                        .iter()
-                        .map(|c| to_ring(at, c))
-                        .fold(f64::INFINITY, f64::min)
-                }
-            }
+            Shape::Fill { rule, contours } => match item.clip_boundary {
+                // A fill seen through a clipped viewport is cut at its box
+                // alone; what shows of it is what lies inside the boundary.
+                Some(b) if b < list.clip_boundaries.len() => to_visible_fill(
+                    at,
+                    *rule,
+                    contours,
+                    &list.clip_boundaries[b],
+                    millimetres_per_unit,
+                ),
+                _ => to_fill(at, *rule, contours),
+            },
         };
+        let distance = distance.max(outside_cut(list, item, at));
         // Later items lie on top, so they win a tie.
         if distance <= reach && best.is_none_or(|(d, _)| distance <= d) {
             best = Some((distance, item.object));
         }
     }
     best.map(|(_, object)| object)
+}
+
+/// How far `at` lies from the fill of `contours` by `rule`: 0 inside it.
+fn to_fill(at: Point2, rule: FillRule, contours: &[Vec<Point2>]) -> f64 {
+    if inside(at, rule, contours) {
+        0.0
+    } else {
+        contours
+            .iter()
+            .map(|c| to_ring(at, c))
+            .fold(f64::INFINITY, f64::min)
+    }
+}
+
+/// How far off a piece of edge its sides are sampled, in millimetres of
+/// paper: a tenth of a micrometre.
+const SIDE_MM: f64 = 1e-4;
+
+/// How far `at` lies from what shows of the fill of `contours` by `rule`
+/// through the closed outline `outline`, a clipped viewport's boundary, in
+/// a drawing whose unit spans `millimetres_per_unit` millimetres of paper.
+///
+/// One rule: a point is visible-filled when it lies inside the outline, or
+/// on it, and the rule fills it. A point visible-filled is on the fill.
+/// Otherwise the distance is to the nearest pickable piece of edge: a
+/// piece of a contour or of the outline, each cut where it crosses any of
+/// them, whose two sides, sampled just off its middle, differ in being
+/// visible-filled. A seam, or contours that cancel by the rule, have both
+/// sides alike and are not pickable; a fill's edge on the outline is, once
+/// filled inside and not shown outside. When no piece is pickable, nothing
+/// of the fill shows and it is out of reach.
+fn to_visible_fill(
+    at: Point2,
+    rule: FillRule,
+    contours: &[Vec<Point2>],
+    outline: &[Point2],
+    millimetres_per_unit: f64,
+) -> f64 {
+    let side = SIDE_MM / millimetres_per_unit.max(f64::MIN_POSITIVE);
+    // On the outline is inside it, within a hundredth of the side's step.
+    let visible_filled = |p: Point2| {
+        (inside_outline(p, outline) || distance_to_outline(p, outline) <= side / 100.0)
+            && inside(p, rule, contours)
+    };
+    if visible_filled(at) {
+        return 0.0;
+    }
+    let mut rings: Vec<&[Point2]> = contours.iter().map(Vec::as_slice).collect();
+    rings.push(outline);
+    let mut nearest = f64::INFINITY;
+    for ring in &rings {
+        for i in 0..ring.len() {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            for (p, q) in pieces(a, b, &rings) {
+                let d = [q[0] - p[0], q[1] - p[1]];
+                let length = d[0].hypot(d[1]);
+                if length == 0.0 {
+                    continue;
+                }
+                let middle = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+                let off = [-d[1] / length * side, d[0] / length * side];
+                let left = visible_filled([middle[0] + off[0], middle[1] + off[1]]);
+                let right = visible_filled([middle[0] - off[0], middle[1] - off[1]]);
+                if left != right {
+                    nearest = nearest.min(to_segment(at, p, q));
+                }
+            }
+        }
+    }
+    nearest
+}
+
+/// The segment from `a` to `b` cut where it meets an edge of any of the
+/// closed `rings`, in order along it.
+fn pieces(a: Point2, b: Point2, rings: &[&[Point2]]) -> Vec<(Point2, Point2)> {
+    let r = [b[0] - a[0], b[1] - a[1]];
+    let mut cuts = vec![0.0, 1.0];
+    for ring in rings {
+        for j in 0..ring.len() {
+            let (c, d) = (ring[j], ring[(j + 1) % ring.len()]);
+            let s = [d[0] - c[0], d[1] - c[1]];
+            let denominator = r[0] * s[1] - r[1] * s[0];
+            if denominator == 0.0 {
+                continue;
+            }
+            let q = [c[0] - a[0], c[1] - a[1]];
+            let t = (q[0] * s[1] - q[1] * s[0]) / denominator;
+            let u = (q[0] * r[1] - q[1] * r[0]) / denominator;
+            if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
+                cuts.push(t);
+            }
+        }
+    }
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let at = |t: f64| [a[0] + t * r[0], a[1] + t * r[1]];
+    cuts.windows(2).map(|w| (at(w[0]), at(w[1]))).collect()
+}
+
+/// How far `at` lies outside what `item` is cut at, the window of the
+/// viewport it shows through or the boundary that viewport is clipped to:
+/// 0 inside it, or for an item drawn whole.
+fn outside_cut(list: &DisplayList, item: &Item, at: Point2) -> f64 {
+    if let Some(outline) = item.clip_boundary.and_then(|b| list.clip_boundaries.get(b)) {
+        return if inside_outline(at, outline) {
+            0.0
+        } else {
+            distance_to_outline(at, outline)
+        };
+    }
+    item.clip.map_or(0.0, |b| {
+        let dx = (b.min[0] - at[0]).max(at[0] - b.max[0]).max(0.0);
+        let dy = (b.min[1] - at[1]).max(at[1] - b.max[1]).max(0.0);
+        dx.hypot(dy)
+    })
 }
 
 /// The box round everything the sheet's object at `object` draws, or none
@@ -144,6 +268,7 @@ mod tests {
             cell: None,
             viewport: None,
             clip: None,
+            clip_boundary: None,
             color: Color(7),
             shape: Shape::Stroke {
                 lineweight,
@@ -161,6 +286,7 @@ mod tests {
             cell: None,
             viewport: None,
             clip: None,
+            clip_boundary: None,
             color: Color(1),
             shape: Shape::Fill {
                 rule: FillRule::EvenOdd,
@@ -179,6 +305,94 @@ mod tests {
             items,
             ..DisplayList::default()
         }
+    }
+
+    #[test]
+    fn a_fill_wholly_cut_away_is_not_picked_beside_the_boundary() {
+        // A small solid just outside a triangular boundary, within reach of
+        // both the solid and the boundary: nothing of it shows.
+        let mut solid = square(0, [70.0, 70.2], 0.4);
+        solid.viewport = Some(1);
+        solid.clip = Some(Bounds {
+            min: [20.0, 20.0],
+            max: [120.0, 120.0],
+        });
+        solid.clip_boundary = Some(0);
+        let mut sheet = list(vec![solid]);
+        sheet.clip_boundaries = vec![vec![[20.0, 20.0], [120.0, 20.0], [20.0, 120.0]]];
+        assert_eq!(pick(&sheet, [70.0, 69.8], 0.5, 1.0), None);
+        // Inside a notched boundary, the part that shows is picked; in the
+        // notch, beside it, what is cut away is not.
+        let mut wide = square(0, [0.0, 40.0], 100.0);
+        wide.viewport = Some(1);
+        wide.clip = Some(Bounds {
+            min: [0.0, 0.0],
+            max: [100.0, 100.0],
+        });
+        wide.clip_boundary = Some(0);
+        let mut sheet = list(vec![wide]);
+        sheet.clip_boundaries = vec![vec![
+            [0.0, 0.0],
+            [100.0, 0.0],
+            [100.0, 100.0],
+            [60.0, 100.0],
+            [60.0, 20.0],
+            [40.0, 20.0],
+            [40.0, 100.0],
+            [0.0, 100.0],
+        ]];
+        assert_eq!(pick(&sheet, [20.0, 60.0], 0.1, 1.0), Some(0));
+        assert_eq!(pick(&sheet, [50.0, 60.0], 0.1, 1.0), None);
+    }
+
+    #[test]
+    fn a_fill_whose_hole_covers_the_boundary_is_not_picked_on_a_seam() {
+        // A hatch whose hole covers the whole of a concave boundary, cut at
+        // the boundary's box as the pipeline cuts it: the outer contour and
+        // the hole meet there and cancel by the even-odd rule, so nothing of
+        // it shows, on a seam of the boundary's triangles or anywhere.
+        let mut hatch = Item {
+            shape: Shape::Fill {
+                rule: FillRule::EvenOdd,
+                contours: vec![
+                    vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]],
+                    vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]],
+                ],
+            },
+            ..square(0, [0.0, 0.0], 1.0)
+        };
+        hatch.viewport = Some(1);
+        hatch.clip = Some(Bounds {
+            min: [0.0, 0.0],
+            max: [100.0, 100.0],
+        });
+        hatch.clip_boundary = Some(0);
+        let mut sheet = list(vec![hatch]);
+        sheet.clip_boundaries = vec![vec![[0.0, 0.0], [100.0, 0.0], [20.0, 20.0], [0.0, 100.0]]];
+        assert_eq!(pick(&sheet, [10.0, 10.0], 0.1, 1.0), None);
+        assert_eq!(pick(&sheet, [5.0, 50.0], 0.1, 1.0), None);
+    }
+
+    #[test]
+    fn what_a_viewport_cuts_away_is_not_picked() {
+        // A solid seen through a viewport clipped to a triangle: its fill
+        // is cut at the triangle's box, and its ink at the triangle.
+        let mut solid = square(0, [-100.0, -100.0], 300.0);
+        solid.viewport = Some(1);
+        solid.clip = Some(Bounds {
+            min: [20.0, 20.0],
+            max: [120.0, 120.0],
+        });
+        solid.clip_boundary = Some(0);
+        let mut sheet = list(vec![solid.clone()]);
+        sheet.clip_boundaries = vec![vec![[20.0, 20.0], [120.0, 20.0], [20.0, 120.0]]];
+        assert_eq!(pick(&sheet, [110.0, 110.0], 0.1, 1.0), None);
+        assert_eq!(pick(&sheet, [40.0, 40.0], 0.1, 1.0), Some(0));
+        // Through a rectangular viewport, outside its window.
+        solid.clip_boundary = None;
+        let sheet = list(vec![solid]);
+        assert_eq!(pick(&sheet, [130.0, 50.0], 0.1, 1.0), None);
+        assert_eq!(pick(&sheet, [110.0, 110.0], 0.1, 1.0), Some(0));
     }
 
     #[test]

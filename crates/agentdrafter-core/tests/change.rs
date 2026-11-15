@@ -355,6 +355,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("add_continued_dimension", "DIMCONTINUE"),
             ("change", "CHANGE"),
             ("change_viewport", ""),
+            ("clip_viewport", "VPCLIP"),
+            ("set_frozen_layers", "VPLAYER"),
             ("move", "MOVE"),
             ("delete", "ERASE"),
             ("set_attribute", "ATTEDIT"),
@@ -415,6 +417,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "add_continued_dimension", "target": {"name": "width"}, "point": {"snap": {"id": "S/plate", "snap": "endpoint", "which": "points[1]"}}}),
         json!({"op": "change", "target": {"id": "S/a"}, "set": {"layer": "notes"}}),
         json!({"op": "change_viewport", "target": {"id": "S/view"}, "scale": 0.5, "view_center": {"snap": {"id": "S/hole", "snap": "center"}}, "locked": false}),
+        json!({"op": "vpclip", "target": {"id": "S/view"}, "clip": {"points": [[0, 0, 0], {"point": [10, 0, 0], "bulge": 0.5}, [10, 10, 0]]}}),
+        json!({"op": "VPLAYER", "target": {"id": "S/view"}, "frozen_layers": ["wiring", "0"]}),
         json!({"op": "move", "target": {"name": "n", "sheet": "S"}, "by": [1, 0, 0]}),
         json!({"op": "erase", "target": {"name": "n"}}),
         json!({"op": "set_attribute", "target": {"id": "S/objects[2]"}, "tag": "NOTE", "occurrence": 2, "value": "B"}),
@@ -478,6 +482,18 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         (
             "add_column",
             json!({"op": "add_column", "target": {"id": "S/t"}, "at": 1, "cells": [{"row": "PUMP"}, "A"]}),
+        ),
+        (
+            "clip_viewport",
+            json!({"op": "clip_viewport", "target": {"id": "S/view"}, "clip": {"center": [5, 5, 0], "radius": 2}}),
+        ),
+        (
+            "clip_viewport",
+            json!({"op": "clip_viewport", "target": {"id": "S/view"}, "clip": null}),
+        ),
+        (
+            "set_frozen_layers",
+            json!({"op": "set_frozen_layers", "target": {"id": "S/view"}, "frozen_layers": []}),
         ),
     ] {
         let info = listed.operations.iter().find(|o| o.name == name).unwrap();

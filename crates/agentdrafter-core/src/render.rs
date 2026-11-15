@@ -15,14 +15,17 @@
 //! to paper keeps them.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 pub use crate::draw::HatchCutShort;
 use crate::draw::{self, Bounds, PageFrom};
 use crate::error::{Error, ErrorCode};
-use crate::output::{object_counts, read_record, refuse_to_replace, write_whole, OutputKind};
+use crate::model::Sheet;
+use crate::output::{
+    object_counts, read_record, refuse_to_replace, write_whole, OutputKind, Record,
+};
 use crate::raster::{self, View};
 use crate::settings::Settings;
 use crate::stamp::Stamp;
@@ -64,7 +67,10 @@ pub struct RenderRequest {
     /// ends `.dwg`.
     pub source: PathBuf,
     /// Where to write the PNG. Without it, the PNG goes beside the source
-    /// with the same name and a `.png` extension.
+    /// with the same name and a `.png` extension. A sheet drawn in several
+    /// layouts writes one PNG for each, named after this one with `-` and
+    /// the layout's name before the extension, such as
+    /// `panel-Details.png`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<PathBuf>,
     /// Replace the file at the output path, which is allowed only when it
@@ -115,6 +121,10 @@ impl RenderRequest {
 pub struct RenderReport {
     /// The record that was rendered.
     pub source: String,
+    /// The layout the PNG draws, on a sheet drawn in several, each of which
+    /// is rendered to a PNG of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
     /// The PNG that was written.
     pub png: String,
     /// The image's width in pixels.
@@ -154,6 +164,11 @@ pub struct RenderReport {
     pub hatches_cut_short: Vec<HatchCutShort>,
     /// The stamp written into the PNG.
     pub stamp: Stamp,
+    /// On a sheet drawn in several layouts, what the render wrote for each
+    /// layout after the first, in the order of their tabs: this report is
+    /// the first's.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub other_layouts: Vec<RenderReport>,
 }
 
 /// Renders a sheet to a PNG, reading fonts from the font folders the
@@ -178,14 +193,68 @@ fn render_within(
     check(request)?;
     let source = request.source.as_path();
     let record = read_record(source)?;
-    let sheet = &record.sheet;
-
     let output = request
         .output
         .clone()
         .unwrap_or_else(|| source.with_extension("png"));
-    refuse_to_replace(source, &output, request.overwrite, OutputKind::Png)?;
+    let pages = record.sheet.pages();
+    // A sheet drawn in several layouts renders each to a PNG of its own.
+    let several = pages.len() > 1;
+    let outputs: Vec<PathBuf> = if several {
+        pages
+            .iter()
+            .map(|page| {
+                let name = page.layout.as_ref().map_or("", |l| l.name.as_str());
+                layout_output(&output, name)
+            })
+            .collect()
+    } else {
+        vec![output]
+    };
+    for output in &outputs {
+        refuse_to_replace(source, output, request.overwrite, OutputKind::Png)?;
+    }
+    let mut reports = pages
+        .iter()
+        .zip(&outputs)
+        .map(|(page, output)| {
+            let mut report = render_page(request, &record, page, output, settings, most_dashes)?;
+            if several {
+                report.layout = page.layout.as_ref().map(|l| l.name.clone());
+            }
+            Ok(report)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let mut first = reports.remove(0);
+    first.other_layouts = reports;
+    Ok(first)
+}
 
+/// Where a render of `output` writes the PNG of the layout named `layout`,
+/// on a sheet drawn in several: beside it, its name followed by `-` and
+/// the layout's, such as `panel-Details.png`. A layout's name holds none of
+/// the characters a file name cannot.
+pub(crate) fn layout_output(output: &Path, layout: &str) -> PathBuf {
+    // Written into the path as given, so that its folders keep the
+    // separator they were given with.
+    let text = output.to_string_lossy();
+    let extension = output.extension().map_or(0, |e| e.len() + 1);
+    let (stem, extension) = text.split_at(text.len() - extension);
+    PathBuf::from(format!("{stem}-{layout}{extension}"))
+}
+
+/// Renders the sheet `record` holds, as `sheet`, one of its layouts, prints
+/// it, to a PNG at `output`, written whole or not at all.
+fn render_page(
+    request: &RenderRequest,
+    record: &Record,
+    sheet: &Sheet,
+    output: &Path,
+    settings: &Settings,
+    most_dashes: usize,
+) -> Result<RenderReport, Error> {
+    let source = request.source.as_path();
+    let output = output.to_path_buf();
     let fonts = SheetFonts::find(sheet, settings);
     let pixels_per_millimetre = request.dpi / 25.4;
     // The paper is the page, as a plot's is: no margin round it.
@@ -261,6 +330,7 @@ fn render_within(
 
     Ok(RenderReport {
         source: source.display().to_string(),
+        layout: None,
         png: output.display().to_string(),
         width: view.width,
         height: view.height,
@@ -281,6 +351,7 @@ fn render_within(
         font_substitutions: fonts.substitutions(),
         hatches_cut_short: list.hatches_cut_short.clone(),
         stamp,
+        other_layouts: Vec::new(),
     })
 }
 

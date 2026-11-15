@@ -198,21 +198,21 @@ pub(crate) fn write_new_sheet(
     layout::prepare(&mut drawing, sheet)?;
     let mut dimensions = 0;
     for (i, (object, written)) in sheet.objects.iter().zip(&record.objects).enumerate() {
-        let paper = sheet.in_paper_space(i);
-        if let (Object::Viewport(v), Some(on)) = (object, &sheet.layout) {
-            let mut dwg_viewport = layout::dwg_viewport(v, sheet.units);
-            let common = dwg_viewport.common_mut();
-            v.layer.clone_into(&mut common.layer);
-            set_properties(common, &v.properties);
-            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
-            drawing
-                .add_entity_to_layout(dwg_viewport, &on.name)
-                .map_err(|e| {
-                    Error::new(
-                        ErrorCode::DwgWrite,
-                        format!("could not add a viewport to the layout: {e}"),
-                    )
-                })?;
+        // The space it is in: model space, the first layout's paper space,
+        // AutoCAD's `*Paper_Space`, or another layout's, by its name.
+        let paper = match sheet.layout_of(i) {
+            None => Space::Model,
+            Some(_) if sheet.in_paper_space(i) => Space::Paper,
+            Some(other) => Space::Layout(&other.name),
+        };
+        if let (Object::Viewport(v), Some(on)) = (object, sheet.layout_of(i)) {
+            add_viewport(
+                &mut drawing,
+                sheet,
+                v,
+                &on.name,
+                (&record.name, &written.id, written.name.as_deref()),
+            )?;
             continue;
         }
         if let Object::Table(t) = object {
@@ -354,16 +354,94 @@ pub(crate) fn write_new_sheet(
 
 /// Adds `object` to paper space when `paper` says so, and otherwise to
 /// model space.
+/// The space an object of a sheet is added to.
+#[derive(Clone, Copy)]
+enum Space<'a> {
+    /// Model space.
+    Model,
+    /// The paper space of the sheet's first layout, AutoCAD's
+    /// `*Paper_Space`.
+    Paper,
+    /// The paper space of another of its layouts, by its name.
+    Layout(&'a str),
+}
+
 fn add_to(
     drawing: &mut CadDocument,
     object: EntityType,
-    paper: bool,
+    space: Space,
 ) -> Result<acadrust::types::Handle, acadrust::DxfError> {
-    if paper {
-        drawing.add_paper_space_entity(object)
-    } else {
-        drawing.add_entity(object)
+    match space {
+        Space::Model => drawing.add_entity(object),
+        Space::Paper => drawing.add_paper_space_entity(object),
+        Space::Layout(name) => drawing.add_entity_to_layout(object, name),
     }
+}
+
+/// Adds the sheet's viewport `viewport` to its layout, named `layout`,
+/// with its ID and name, as AutoCAD's MVIEW makes one: a clipped one after
+/// its boundary, an object of the layout's paper space on the viewport's
+/// layer, with its pen, whose reactor is the viewport, as AutoCAD 2026's
+/// VPCLIP and MVIEW left made-up ones; and freezing the layers it lists,
+/// by their handles, as VPLAYER does.
+fn add_viewport(
+    drawing: &mut CadDocument,
+    sheet: &crate::model::Sheet,
+    viewport: &crate::model::Viewport,
+    layout: &str,
+    (sheet_name, id, name): (&str, &str, Option<&str>),
+) -> Result<(), Error> {
+    let failed = |e: acadrust::DxfError| {
+        Error::new(
+            ErrorCode::DwgWrite,
+            format!("could not add a viewport to layout `{layout}`: {e}"),
+        )
+    };
+    let boundary = match &viewport.clip {
+        Some(clip) => {
+            let mut boundary = layout::dwg_boundary(clip);
+            let common = boundary.common_mut();
+            viewport.layer.clone_into(&mut common.layer);
+            set_properties(common, &viewport.properties);
+            Some(
+                drawing
+                    .add_entity_to_layout(boundary, layout)
+                    .map_err(failed)?,
+            )
+        }
+        None => None,
+    };
+    let frozen = viewport
+        .frozen_layers
+        .iter()
+        .map(|name| {
+            drawing
+                .layers
+                .iter()
+                .find(|l| l.name.eq_ignore_ascii_case(name))
+                .map(|l| l.handle)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::DwgWrite,
+                        format!("a viewport freezes layer `{name}`, which the drawing lacks"),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut dwg_viewport = layout::dwg_viewport(viewport, sheet.units, boundary, frozen);
+    let common = dwg_viewport.common_mut();
+    viewport.layer.clone_into(&mut common.layer);
+    set_properties(common, &viewport.properties);
+    ids::write_id_and_name(common, sheet_name, id, name);
+    let handle = drawing
+        .add_entity_to_layout(dwg_viewport, layout)
+        .map_err(failed)?;
+    if let Some(boundary) = boundary {
+        if let Some(object) = drawing.get_entity_mut(boundary) {
+            object.common_mut().reactors = vec![handle];
+        }
+    }
+    Ok(())
 }
 
 fn dwg_linetype(linetype: &Linetype) -> LineType {
@@ -664,10 +742,13 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
     arrow_blocks.extend(dimension::style_arrow_blocks(&drawing));
     // A dimension's own block holds what it draws, and is read with it.
     let dimension_blocks = dimension::dimension_blocks(&drawing);
-    // The sheet the drawing opens on: model space, and its layout's paper
-    // space when it opens on one.
-    let opened = layout::opened_on(&drawing);
-    let on_sheet = sheet_objects(&drawing, opened.as_ref().map(|(_, block)| *block));
+    // The sheet the drawing holds: model space, and the paper space of
+    // each layout the core reads, whatever tab it was saved on.
+    let units = unit(drawing.header.insertion_units);
+    let (read_layouts, layouts_not_read) =
+        layout::read_layouts(&drawing, units.unwrap_or(Unit::Mm));
+    let blocks_of: Vec<acadrust::types::Handle> = read_layouts.iter().map(|l| l.block).collect();
+    let on_sheet = sheet_objects(&drawing, &blocks_of);
     // A table's own block holds what it draws, and is read with the table.
     let table_blocks: Vec<(Option<acadrust::types::Handle>, String)> = on_sheet
         .iter()
@@ -776,9 +857,25 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             leaders.push((l.common.handle, read));
         }
     }
-    let mut paper_space = Vec::new();
-    for &(dwg_object, paper) in &on_sheet {
+    // A viewport is read before its boundary is met, so that a boundary
+    // whose viewport is read is read with it, not on its own.
+    let mut viewports: Vec<(acadrust::types::Handle, Option<Object>)> = Vec::new();
+    let mut boundaries = Vec::new();
+    for &(dwg_object, space) in &on_sheet {
+        if let (EntityType::Viewport(v), Some(_)) = (dwg_object, space) {
+            let read = read_viewport_of(&drawing, v);
+            if read.is_some() && !v.clip_boundary_handle.is_null() {
+                boundaries.push(v.clip_boundary_handle);
+            }
+            viewports.push((v.common.handle, read));
+        }
+    }
+    let mut spaces = Vec::new();
+    for &(dwg_object, space) in &on_sheet {
         let handle = dwg_object.common().handle;
+        if boundaries.contains(&handle) {
+            continue;
+        }
         if let Some((_, read_with_its_leader)) = annotations.iter().find(|(a, _)| *a == handle) {
             if !read_with_its_leader {
                 objects_not_read += 1;
@@ -823,19 +920,16 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
                     read.properties = properties;
                     Some(Object::Table(read))
                 }),
-            EntityType::Viewport(v) if paper => read_properties(&v.common)
-                .filter(|_| !v.common.invisible)
-                .and_then(|properties| {
-                    let mut read = layout::read_viewport(v, layer_of(&v.common))?;
-                    read.properties = properties;
-                    Some(Object::Viewport(read))
-                }),
+            EntityType::Viewport(v) if space.is_some() => viewports
+                .iter()
+                .find(|(h, _)| *h == v.common.handle)
+                .and_then(|(_, read)| read.clone()),
             _ => read_object(dwg_object, &blocks),
         };
         match read {
             Some(object) => {
                 objects.push(object);
-                paper_space.push(paper);
+                spaces.push(space);
                 ids_and_names.push(IdAndName {
                     id: ids::read_id(dwg_object.common()),
                     name: ids::read_name(dwg_object.common()),
@@ -844,19 +938,17 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             None => objects_not_read += 1,
         }
     }
-    let units = unit(drawing.header.insertion_units);
-    let mut layouts_not_read =
-        layout::other_layouts(&drawing, opened.as_ref().map(|(_, block)| *block));
-    let (layout, paper) = match opened {
-        Some((name, block)) => {
-            let paper = layout::read_paper(&drawing, block, units.unwrap_or(Unit::Mm));
-            if paper.is_none() {
-                layouts_not_read += 1;
-            }
-            (Some(crate::model::Layout { name, paper_space }), paper)
-        }
-        None => (None, None),
-    };
+    let mut layouts = read_layouts
+        .into_iter()
+        .enumerate()
+        .map(|(k, read)| crate::model::Layout {
+            name: read.name,
+            paper: read.paper,
+            paper_space: spaces.iter().map(|s| *s == Some(k)).collect(),
+        });
+    let layout = layouts.next();
+    let other_layouts: Vec<crate::model::Layout> = layouts.collect();
+    let paper = layout.as_ref().and_then(|l| l.paper.clone());
     Ok(DrawingContents {
         dwg_version: drawing.version.to_string(),
         units,
@@ -879,9 +971,47 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         objects_not_read,
         ltscale: drawing.header.linetype_scale,
         layout,
+        other_layouts,
+        opens_on: layout::opened_on(&drawing).map(|(name, _)| name),
         paper,
         layouts_not_read,
     })
+}
+
+/// One of our viewports, if the DWG viewport `v` is one the core draws,
+/// with its pen: its boundary, when it is clipped, one the core reads,
+/// drawn with the viewport's pen as a build writes it, and every layer it
+/// freezes one of the drawing's.
+fn read_viewport_of(drawing: &CadDocument, v: &acadrust::entities::Viewport) -> Option<Object> {
+    let properties = read_properties(&v.common).filter(|_| !v.common.invisible)?;
+    let layer = layer_of(&v.common);
+    let clip = if v.clip_boundary_handle.is_null() {
+        None
+    } else {
+        let boundary = drawing.get_entity(v.clip_boundary_handle)?;
+        let common = boundary.common();
+        let same_pen = layer_of(common) == layer
+            && !common.invisible
+            && read_properties(common).as_ref() == Some(&properties);
+        if !same_pen {
+            return None;
+        }
+        Some(layout::read_boundary(boundary)?)
+    };
+    let frozen = v
+        .frozen_layers
+        .iter()
+        .map(|h| {
+            drawing
+                .layers
+                .iter()
+                .find(|l| l.handle == *h)
+                .map(|l| l.name.clone())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut read = layout::read_viewport(v, layer, clip, frozen)?;
+    read.properties = properties;
+    Some(Object::Viewport(read))
 }
 
 /// The objects of model space and of every layout's paper space, in no
@@ -895,39 +1025,39 @@ pub(super) fn in_every_space(drawing: &CadDocument) -> Vec<&EntityType> {
     all
 }
 
-/// The objects of the sheet a drawing opens on, each with whether it is in
-/// paper space: model space's in drawing order, and, when the drawing opens
-/// on a layout, whose paper-space block is `paper`, that layout's but its
-/// own overall viewport, the two merged in the order they were made, by
-/// handle, as a build writes a sheet's objects in its order.
-fn sheet_objects(
-    drawing: &CadDocument,
-    paper: Option<acadrust::types::Handle>,
-) -> Vec<(&EntityType, bool)> {
-    let model: Vec<(&EntityType, bool)> =
-        drawing.model_space_entities().map(|e| (e, false)).collect();
-    let Some(block) = paper else {
-        return model;
-    };
-    let Some(record) = drawing.block_records.iter().find(|r| r.handle == block) else {
-        return model;
-    };
-    let paper: Vec<(&EntityType, bool)> = drawing
-        .entities_in_block(&record.name)
-        .filter(|e| !layout::is_overall(e))
-        .map(|e| (e, true))
-        .collect();
-    let mut merged = Vec::with_capacity(model.len() + paper.len());
-    let (mut m, mut p) = (model.into_iter().peekable(), paper.into_iter().peekable());
+/// The objects of the sheet a drawing opens on, each with the place of
+/// the layout whose paper space it is in, none for model space: model
+/// space's in drawing order, and the paper space of each layout whose
+/// paper-space block is among `layouts`, but its own overall viewport, all
+/// merged in the order they were made, by handle, as a build writes a
+/// sheet's objects in its order.
+fn sheet_objects<'a>(
+    drawing: &'a CadDocument,
+    layouts: &[acadrust::types::Handle],
+) -> Vec<(&'a EntityType, Option<usize>)> {
+    let mut lists: Vec<Vec<(&EntityType, Option<usize>)>> =
+        vec![drawing.model_space_entities().map(|e| (e, None)).collect()];
+    for (k, block) in layouts.iter().enumerate() {
+        if let Some(record) = drawing.block_records.iter().find(|r| r.handle == *block) {
+            lists.push(
+                drawing
+                    .entities_in_block(&record.name)
+                    .filter(|e| !layout::is_overall(e))
+                    .map(|e| (e, Some(k)))
+                    .collect(),
+            );
+        }
+    }
+    let mut merged = Vec::with_capacity(lists.iter().map(Vec::len).sum());
+    let mut heads = vec![0_usize; lists.len()];
     loop {
-        let take_model = match (m.peek(), p.peek()) {
-            (Some((a, _)), Some((b, _))) => a.common().handle.value() <= b.common().handle.value(),
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => break,
-        };
-        let next = if take_model { m.next() } else { p.next() };
-        merged.extend(next);
+        // The list whose next object was made first; model space's on a tie.
+        let next = (0..lists.len())
+            .filter(|&l| heads[l] < lists[l].len())
+            .min_by_key(|&l| lists[l][heads[l]].0.common().handle.value());
+        let Some(l) = next else { break };
+        merged.push(lists[l][heads[l]]);
+        heads[l] += 1;
     }
     merged
 }
@@ -1394,6 +1524,7 @@ mod tests {
             paper: None,
             ltscale: 1.0,
             layout: None,
+            other_layouts: Vec::new(),
         }
     }
 
@@ -1681,6 +1812,8 @@ mod tests {
             "add_paper_space_entity",
             "add_entity_to_layout",
             "add_entity",
+            "get_entity_mut",
+            "get_entity",
             "entities_in_block",
             "model_space_entities",
         ] {

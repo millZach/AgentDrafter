@@ -8,14 +8,14 @@ import './styles.css';
 
 // The token is taken off the address first, before anything else runs.
 const token = takeToken(window.location, window.sessionStorage, window.history);
-const { source, sheet } = wanted(window.location.search);
+const { source, sheet, layout } = wanted(window.location.search);
 const root = createRoot(document.getElementById('app') as HTMLElement);
 
 init().then(
   () =>
     root.render(
       <StrictMode>
-        <App token={token} source={source} sheet={sheet} />
+        <App token={token} source={source} sheet={sheet} layout={layout} />
       </StrictMode>,
     ),
   (e: unknown) =>

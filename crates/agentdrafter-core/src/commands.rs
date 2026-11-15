@@ -400,7 +400,9 @@ fn render_does() -> String {
      either, its longer side is 2000 pixels. It goes beside the source with a .png extension \
      unless `output` names another path, and is stamped with the source's fingerprint. An \
      existing file is never replaced without `overwrite`, and `overwrite` replaces only a PNG \
-     AgentDrafter rendered."
+     AgentDrafter rendered. A sheet drawn in several layouts renders each to a PNG of its own, \
+     named after the PNG with `-` and the layout's name, such as panel-Details.png; the reply is \
+     the first layout's, with the others' under `other_layouts`."
         .to_owned()
 }
 
@@ -408,7 +410,7 @@ fn render_input() -> Value {
     input(
         json!({
             "source": text("The record to render: a sheet description, or a DWG when the file ends .dwg."),
-            "output": text("Where to write the PNG. Without it, beside the source."),
+            "output": text("Where to write the PNG. Without it, beside the source. A sheet drawn in several layouts writes one for each, its name followed by `-` and the layout's."),
             "overwrite": flag("Replace a PNG already there, which is allowed only when AgentDrafter rendered it."),
             "dpi": number("How many pixels an inch of paper spans. Without it, 150."),
             "scale": number("The plot scale, such as 1 for 1:1 and 0.02 for 1:50. Not given with `width` or `height`."),
@@ -444,8 +446,10 @@ fn display_list_does() -> String {
      objects is: its ID, name, type and layer, and an insert's block and attributes. Curves \
      are drawn within `tolerance` drawing units, by default a 100,000th of the sheet's larger \
      side. With `entry`, a drawing set is drawn as it was just after that entry of its journal, \
-     rebuilt in memory from the undo states, or the reply says why it cannot be. A loop \
-     sheet's display list runs to megabytes: it is for the viewer to draw, not to read."
+     rebuilt in memory from the undo states, or the reply says why it cannot be. A sheet drawn \
+     in several layouts draws the one `layout` names, its first without it, and the reply lists \
+     them all under `layouts`. A loop sheet's display list runs to megabytes: it is for the \
+     viewer to draw, not to read."
         .to_owned()
 }
 
@@ -454,6 +458,7 @@ fn display_list_input() -> Value {
         json!({
             "source": text("The record to draw: a sheet description, a DWG when the file ends .dwg, or a drawing set's folder."),
             "sheet": text("Which of the drawing set's sheets to draw, by name. Without it, the set's first."),
+            "layout": text("Which layout of a sheet drawn in several to draw, by its name, in any case. Without it, the sheet's first."),
             "tolerance": number("How far, in drawing units, a curve's chords may stray from it. Without it, a 100,000th of the sheet's larger side."),
             "entry": {
                 "description": "Draw the drawing set as it was just after this entry of its journal, by its number, rebuilt in memory from the undo states; nothing is written. Without it, as it is now.",
@@ -504,7 +509,9 @@ fn plot_does() -> String {
          of the drawing set in it, each its template filled in from its row, into the output \
          folder its settings ({SET_SETTINGS_FILE}) name, as <sheet>.pdf. A sheet that fails \
          writes nothing and the others are still plotted; the reply gives each sheet's outcome \
-         under `sheets`, and is not ok when any sheet failed."
+         under `sheets`, and is not ok when any sheet failed. A sheet drawn in several layouts \
+         plots a page for each, in the order of their tabs, each on its own paper, and the reply \
+         lists them under `layouts`."
     )
 }
 
@@ -639,6 +646,11 @@ fn query_schema() -> Value {
                     "enum": ["exact", "contains"],
                 },
                 "window": selection_box("Objects wholly within this box, as AutoCAD's selection window takes them: everything they draw, text and inserts' blocks among it, inside it, edges included."),
+                "space": {
+                    "description": "Objects in this space, on a sheet drawn in a layout: `model`, or a layout's paper space by its name, or `paper` on a sheet drawn in one. A box looks at each object in its own space, so on a sheet drawn in several layouts a box on the paper names its layout here.",
+                    "type": "string",
+                    "minLength": 1,
+                },
                 "crossing": selection_box("Objects within this box or crossing it, as AutoCAD's crossing selection takes them: something they draw inside it or across its edge, a line, the outline of a filled area, a hatch's boundary or pattern, each wide segment's band, seams included; a box wholly inside an area crosses nothing, but inside a wide arc's band."),
                 "touching": {
                     "description": "Objects whose geometry meets this object's, on each sheet it is on: crossing it, or an end of one lying on the other; each found with where it meets it, `part` its own and `with_part` the object's.",
@@ -704,10 +716,12 @@ fn query_schema() -> Value {
             ),
             bare(
                 "layout",
-                "Each sheet's paper-space layout, if it is drawn in one: its name, its paper and \
-                 page setup, how many objects are in paper and model space, model space's \
+                "Each sheet's paper-space layouts, if it is drawn in any, in the order of their \
+                 tabs: each one's name, its paper and page setup, how many objects are in its \
+                 paper space and in the model space its sheet's layouts share, model space's \
                  extents, and its viewports, each with its window on the paper, its view centre, \
-                 its scale, whether it is locked, and the part of model space it shows.",
+                 its scale, whether it is locked, the boundary it is clipped to, the layers \
+                 frozen in it, and the part of model space it shows.",
             ),
         ],
     })

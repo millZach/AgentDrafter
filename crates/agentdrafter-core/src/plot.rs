@@ -177,6 +177,26 @@ pub struct PlotReport {
     pub hatches_cut_short: Vec<HatchCutShort>,
     /// The stamp written into the PDF.
     pub stamp: Stamp,
+    /// On a sheet drawn in several layouts, each layout's page, in the
+    /// order of their tabs, which is the PDF's order: the first's is the
+    /// one `sheet_size`, `page` and `extents` give.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<PlottedLayout>,
+}
+
+/// One page of a plot of a sheet drawn in several layouts: one layout.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PlottedLayout {
+    /// The layout's name.
+    pub layout: String,
+    /// The page's size, the layout's paper.
+    pub sheet_size: SheetSize,
+    /// What the page covers.
+    pub page: PageFrom,
+    /// The box round everything the page draws, in drawing units.
+    pub extents: Option<Bounds>,
+    /// How many lines of searchable text the page holds.
+    pub text_lines: usize,
 }
 
 /// What a drawing set's plot did.
@@ -459,21 +479,30 @@ fn plot_record(
     let sheet = &record.sheet;
     let fonts = SheetFonts::find(sheet, settings);
     let millimetres_per_unit = sheet.units.convert(1.0, Unit::Mm);
-    // On paper: a layer that does not plot is left out (Zach, 2026-11-13).
-    let list = draw::draw_sheet_for(
-        sheet,
-        &fonts,
-        CHORD_TOLERANCE_MM / millimetres_per_unit,
-        draw::MOST_HATCH_DASHES,
-        draw::Purpose::Plot,
-    );
-    let page = page(sheet, &list)?;
+    // A sheet drawn in several layouts plots a page for each, in the order
+    // of their tabs, each at its own paper.
+    let pages = sheet.pages();
+    let mut drawn = Vec::with_capacity(pages.len());
+    for on in &pages {
+        // On paper: a layer that does not plot is left out (Zach,
+        // 2026-11-13).
+        let list = draw::draw_sheet_for(
+            on,
+            &fonts,
+            CHORD_TOLERANCE_MM / millimetres_per_unit,
+            draw::MOST_HATCH_DASHES,
+            draw::Purpose::Plot,
+        );
+        let page = page(on, &list)?;
+        drawn.push((list, page));
+    }
     let stamp = Stamp::new(&record.read(), output);
     let producer = format!("agentdrafter {}", env!("CARGO_PKG_VERSION"));
     let creator = format!("agentdrafter plot, plot style {}", used.name);
-    let bytes = pdf::pdf(
-        &list,
-        &page.0,
+    let sheets: Vec<(&draw::DisplayList, Page)> =
+        drawn.iter().map(|(list, page)| (list, page.0)).collect();
+    let bytes = pdf::pdf_pages(
+        &sheets,
         style,
         &About {
             title,
@@ -482,6 +511,25 @@ fn plot_record(
             stamp: &stamp.to_json(),
         },
     );
+    let layouts: Vec<PlottedLayout> = if pages.len() > 1 {
+        pages
+            .iter()
+            .zip(&drawn)
+            .map(|(on, (list, page))| PlottedLayout {
+                layout: on
+                    .layout
+                    .as_ref()
+                    .map_or_else(String::new, |l| l.name.clone()),
+                sheet_size: page.1,
+                page: page.3,
+                extents: list.extents(),
+                text_lines: list.text.len(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (list, page) = drawn.swap_remove(0);
     write_whole(output, &bytes, OutputKind::Pdf)?;
     Ok(PlotReport {
         source: source.display().to_string(),
@@ -497,8 +545,15 @@ fn plot_record(
         text_lines: list.text.len(),
         bytes: bytes.len(),
         font_substitutions: fonts.substitutions(),
-        hatches_cut_short: list.hatches_cut_short.clone(),
+        hatches_cut_short: drawn.iter().fold(
+            list.hatches_cut_short.clone(),
+            |mut all, (other, _)| {
+                all.extend(other.hatches_cut_short.iter().cloned());
+                all
+            },
+        ),
         stamp,
+        layouts,
     })
 }
 

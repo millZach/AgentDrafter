@@ -172,6 +172,19 @@ export const recordedEntries = (report: JournalReport): Map<number, string> =>
   new Map(report.entries.map((e) => [e.entry, recorded(e)]));
 
 /**
+ * The keys of the drawings kept as the set is now, `live|SHEET|LAYOUT`,
+ * that the sheets `touched` (in capitals) make stale: each touched sheet's,
+ * whatever its layout, and the one kept for a sheet not yet named.
+ */
+export function staleDrawings(keys: Iterable<string>, touched: readonly string[]): string[] {
+  if (!touched.length) return [];
+  return [...keys].filter((key) => {
+    const [at, sheet] = key.split('|');
+    return at === 'live' && (sheet === '' || touched.includes(sheet ?? ''));
+  });
+}
+
+/**
  * Whether `report` is not the journal the entries in `seen` came from, but
  * one cut back or rewritten: an entry seen is gone, as when a commit is
  * rolled back or the journal's first lines are taken away, or an entry of

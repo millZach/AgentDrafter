@@ -1,35 +1,35 @@
-//! `query layout`: each sheet's paper-space layout, its page setup and its
-//! viewports, with the part of model space each shows.
+//! `query layout`: each sheet's paper-space layouts, each with its page
+//! setup and its viewports, with the part of model space each shows, in
+//! the order of their tabs.
 
 use serde::Serialize;
 
 use super::{counted, measuring_drawing, written_at, Answer, Extents, LookedAt, WrittenAt};
 use crate::description::SheetRecord;
 use crate::dwg::{PageSetup, PLOTTER, PLOT_STYLE};
-use crate::model::{Paper, Point3};
+use crate::model::{Clip, Paper, Point3, Sheet};
 use crate::settings::Settings;
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
 
-/// One sheet's layout.
+/// One layout of a sheet, or a sheet drawn in model space alone.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SheetLayout {
     pub sheet: String,
     /// The layout's name; none for a sheet drawn in model space alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
-    /// The paper the sheet is drawn on, which the layout's page setup
-    /// plots.
+    /// The paper the layout is drawn on, which its page setup plots.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paper: Option<Paper>,
     /// How the layout plots, as its DWG's page setup holds it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_setup: Option<PageSetupUsed>,
-    /// How many of the sheet's objects are in paper space, its viewports
-    /// among them.
+    /// How many of the sheet's objects are in the layout's paper space, its
+    /// viewports among them.
     pub paper_space: usize,
-    /// How many of the sheet's objects are in model space: every one of
-    /// them on a sheet with no layout.
+    /// How many of the sheet's objects are in model space, which its
+    /// layouts share: every one of them on a sheet with no layout.
     pub model_space: usize,
     /// The box round what model space draws, at full size; none when it
     /// draws nothing.
@@ -79,6 +79,13 @@ pub struct ViewportFound {
     pub ratio: String,
     /// Whether its view is locked.
     pub locked: bool,
+    /// The boundary it is clipped to, when it is not rectangular: its
+    /// window is the box round it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clip: Option<Clip>,
+    /// The layers frozen in it alone.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub frozen_layers: Vec<String>,
     pub layer: String,
     /// The part of model space it shows: its lower left and upper right
     /// corners in model space.
@@ -95,10 +102,37 @@ pub(super) fn layout(
     let on = looked.on();
     let listed: Vec<SheetLayout> = sheets
         .iter()
-        .map(|record| sheet_layout(record, settings))
+        .flat_map(|record| {
+            record
+                .sheet
+                .pages()
+                .iter()
+                .map(|page| sheet_layout(record, page, settings))
+                .collect::<Vec<_>>()
+        })
         .collect();
     let count: usize = listed.iter().map(|s| s.viewports.len()).sum();
+    let one_sheet = sheets.len() == 1;
     let message = match listed.as_slice() {
+        several if one_sheet && several.len() > 1 => format!(
+            "sheet `{}` is drawn in {} layouts, which share its model space: {}",
+            several[0].sheet,
+            several.len(),
+            several
+                .iter()
+                .map(|l| format!(
+                    "`{}`{}, with {}",
+                    l.layout.as_deref().unwrap_or_default(),
+                    l.paper
+                        .as_ref()
+                        .and_then(|p| p.name.as_deref())
+                        .map(|p| format!(" on {p}"))
+                        .unwrap_or_default(),
+                    counted(l.viewports.len(), "viewport"),
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
         [one] => match &one.layout {
             Some(name) => format!(
                 "sheet `{}` is drawn in layout `{name}`{}, with {}{}",
@@ -128,12 +162,14 @@ pub(super) fn layout(
             ),
         },
         all => {
-            let drawn = all.iter().filter(|s| s.layout.is_some()).count();
+            let drawn = sheets.iter().filter(|s| s.sheet.layout.is_some()).count();
+            let layouts = all.iter().filter(|s| s.layout.is_some()).count();
             format!(
-                "{drawn} of the {} sheets {on} {} drawn in a layout, with {} in all; \
+                "{drawn} of the {} sheets {on} {} drawn in a layout, with {} and {} in all; \
                  lengths in {units}",
-                all.len(),
+                sheets.len(),
                 if drawn == 1 { "is" } else { "are" },
+                counted(layouts, "layout"),
                 counted(count, "viewport"),
             )
         }
@@ -147,9 +183,9 @@ pub(super) fn layout(
     )
 }
 
-/// One sheet's layout and viewports.
-fn sheet_layout(record: &SheetRecord, settings: &Settings) -> SheetLayout {
-    let sheet = &record.sheet;
+/// One layout of a sheet and its viewports: the layout `sheet` draws, the
+/// sheet `record` holds as one of its layouts prints it.
+fn sheet_layout(record: &SheetRecord, sheet: &Sheet, settings: &Settings) -> SheetLayout {
     let paper_space = (0..sheet.objects.len())
         .filter(|&i| sheet.in_paper_space(i))
         .count();
@@ -159,13 +195,15 @@ fn sheet_layout(record: &SheetRecord, settings: &Settings) -> SheetLayout {
     let fonts = SheetFonts::find(sheet, settings);
     let mut model = sheet.clone();
     model.layout = None;
+    model.other_layouts.clear();
     model.objects = sheet
         .objects
         .iter()
         .enumerate()
-        .filter(|&(i, _)| !sheet.in_paper_space(i))
+        .filter(|&(i, _)| sheet.in_model_space(i))
         .map(|(_, o)| o.clone())
         .collect();
+    let model_space = model.objects.len();
     let model_extents = measuring_drawing(&model, &fonts)
         .extents()
         .map(|b| Extents::of(&b));
@@ -195,6 +233,8 @@ fn sheet_layout(record: &SheetRecord, settings: &Settings) -> SheetLayout {
             scale: v.scale,
             ratio: v.ratio(),
             locked: v.locked,
+            clip: v.clip.clone(),
+            frozen_layers: v.frozen_layers.clone(),
             layer: v.layer.clone(),
             view: v.view(),
         })
@@ -205,7 +245,7 @@ fn sheet_layout(record: &SheetRecord, settings: &Settings) -> SheetLayout {
         paper: sheet.paper.clone(),
         page_setup,
         paper_space,
-        model_space: sheet.objects.len() - paper_space,
+        model_space,
         model_extents,
         viewports,
     }
