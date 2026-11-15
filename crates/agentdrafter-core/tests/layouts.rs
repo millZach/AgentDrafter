@@ -573,6 +573,21 @@ fn a_text_cut_at_a_slanting_edge_is_apart_from_what_lies_past_it() {
     assert_eq!(texts_on_texts("slant-on", &sheet(45.0)).len(), 1);
 }
 
+#[test]
+fn a_hatch_whose_hole_covers_a_clipped_viewport_is_not_picked_there() {
+    // A solid hatch with a hole that covers the whole of a concave
+    // viewport: nothing of it prints there, on a seam or anywhere.
+    let dir = scratch("hole-seam");
+    let path = sheet_at(
+        &dir,
+        "units: mm\npaper: ISO A4 landscape\nlayout: {name: Panel}\nobjects:\n  - hatch:\n      id: hidden\n      pattern: SOLID\n      boundary:\n        - polyline: {points: [[-20, -20, 0], [120, -20, 0], [120, 120, 0], [-20, 120, 0]]}\n        - polyline: {points: [[-10, -10, 0], [110, -10, 0], [110, 110, 0], [-10, 110, 0]]}\n  - viewport: {id: window, clip: {points: [[0, 0, 0], [100, 0, 0], [20, 20, 0], [0, 100, 0]]}, view_center: [50, 50, 0], scale: 1}\n",
+    );
+    let list = drawn(&path, None).display_list;
+    for at in [[10.0, 10.0], [5.0, 50.0], [50.0, 5.0]] {
+        assert_eq!(agentdrafter_core::pick(&list, at, 0.1, 1.0), None, "{at:?}");
+    }
+}
+
 fn query(path: &Path, query: Query) -> agentdrafter_core::QueryReport {
     query_with(
         &QueryRequest {

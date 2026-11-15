@@ -13,7 +13,7 @@
 //! ink there: a point outside it is no nearer to the item than to the
 //! window or the boundary, so a fill cut away there is not picked.
 
-use super::clip::{clip_to_convex, distance_to_outline, inside_outline, is_convex, triangles};
+use super::clip::{distance_to_outline, inside_outline};
 use super::{Bounds, DisplayList, FillRule, Item, Point2, Shape};
 
 /// The place in the sheet's objects of the object drawn nearest `at`,
@@ -27,8 +27,6 @@ pub fn pick(
     millimetres_per_unit: f64,
 ) -> Option<usize> {
     let mut best: Option<(f64, usize)> = None;
-    // Each clipped viewport's boundary as convex regions, made once.
-    let mut regions: Vec<Option<Vec<Vec<Point2>>>> = vec![None; list.clip_boundaries.len()];
     for item in &list.items {
         let distance = match &item.shape {
             Shape::Stroke { lineweight, runs } => {
@@ -43,9 +41,7 @@ pub fn pick(
                 // A fill seen through a clipped viewport is cut at its box
                 // alone; what shows of it is what lies inside the boundary.
                 Some(b) if b < list.clip_boundaries.len() => {
-                    let convex =
-                        regions[b].get_or_insert_with(|| convex_regions(&list.clip_boundaries[b]));
-                    to_visible_fill(at, *rule, contours, convex)
+                    to_visible_fill(at, *rule, contours, &list.clip_boundaries[b])
                 }
                 _ => to_fill(at, *rule, contours),
             },
@@ -71,41 +67,74 @@ fn to_fill(at: Point2, rule: FillRule, contours: &[Vec<Point2>]) -> f64 {
     }
 }
 
-/// A closed outline as convex regions that cover it: itself when it is
-/// convex, or else the triangles it is cut into.
-fn convex_regions(outline: &[Point2]) -> Vec<Vec<Point2>> {
-    if is_convex(outline) {
-        vec![outline.to_vec()]
-    } else {
-        triangles(outline).iter().map(|t| t.to_vec()).collect()
-    }
-}
-
 /// How far `at` lies from what shows of the fill of `contours` by `rule`
-/// inside the convex regions `convex`, which cover a clipped viewport's
-/// boundary: the fill cut at each region, which keeps its rule there. When
-/// nothing of it shows, it is out of reach.
+/// inside the closed outline `outline`, a clipped viewport's boundary: 0
+/// where the rule fills it inside the outline. Otherwise the distance to
+/// the nearest edge where filled meets unfilled there: a part of a contour
+/// inside the outline, or a part of the outline the fill reaches. Contours
+/// that cancel by the rule leave no edge. When nothing of it shows, it is
+/// out of reach.
 fn to_visible_fill(
     at: Point2,
     rule: FillRule,
     contours: &[Vec<Point2>],
-    convex: &[Vec<Point2>],
+    outline: &[Point2],
 ) -> f64 {
-    convex
-        .iter()
-        .map(|region| {
-            let cut: Vec<Vec<Point2>> = contours
-                .iter()
-                .map(|c| clip_to_convex(c, region))
-                .filter(|c| !c.is_empty())
-                .collect();
-            if cut.is_empty() {
-                f64::INFINITY
-            } else {
-                to_fill(at, rule, &cut)
+    if inside_outline(at, outline) && inside(at, rule, contours) {
+        return 0.0;
+    }
+    let rings: Vec<&[Point2]> = contours.iter().map(Vec::as_slice).collect();
+    let mut nearest = f64::INFINITY;
+    // Each contour's parts inside the outline, off its edge.
+    for ring in &rings {
+        for i in 0..ring.len() {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            for (p, q) in pieces(a, b, &[outline]) {
+                let middle = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+                if inside_outline(middle, outline) && distance_to_outline(middle, outline) > 0.0 {
+                    nearest = nearest.min(to_segment(at, p, q));
+                }
             }
-        })
-        .fold(f64::INFINITY, f64::min)
+        }
+    }
+    // Each part of the outline the fill reaches.
+    for i in 0..outline.len() {
+        let (a, b) = (outline[i], outline[(i + 1) % outline.len()]);
+        for (p, q) in pieces(a, b, &rings) {
+            let middle = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+            if inside(middle, rule, contours) {
+                nearest = nearest.min(to_segment(at, p, q));
+            }
+        }
+    }
+    nearest
+}
+
+/// The segment from `a` to `b` cut where it meets an edge of any of the
+/// closed `rings`, in order along it.
+fn pieces(a: Point2, b: Point2, rings: &[&[Point2]]) -> Vec<(Point2, Point2)> {
+    let r = [b[0] - a[0], b[1] - a[1]];
+    let mut cuts = vec![0.0, 1.0];
+    for ring in rings {
+        for j in 0..ring.len() {
+            let (c, d) = (ring[j], ring[(j + 1) % ring.len()]);
+            let s = [d[0] - c[0], d[1] - c[1]];
+            let denominator = r[0] * s[1] - r[1] * s[0];
+            if denominator == 0.0 {
+                continue;
+            }
+            let q = [c[0] - a[0], c[1] - a[1]];
+            let t = (q[0] * s[1] - q[1] * s[0]) / denominator;
+            let u = (q[0] * r[1] - q[1] * r[0]) / denominator;
+            if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
+                cuts.push(t);
+            }
+        }
+    }
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let at = |t: f64| [a[0] + t * r[0], a[1] + t * r[1]];
+    cuts.windows(2).map(|w| (at(w[0]), at(w[1]))).collect()
 }
 
 /// How far `at` lies outside what `item` is cut at, the window of the
@@ -295,6 +324,34 @@ mod tests {
         ]];
         assert_eq!(pick(&sheet, [20.0, 60.0], 0.1, 1.0), Some(0));
         assert_eq!(pick(&sheet, [50.0, 60.0], 0.1, 1.0), None);
+    }
+
+    #[test]
+    fn a_fill_whose_hole_covers_the_boundary_is_not_picked_on_a_seam() {
+        // A hatch whose hole covers the whole of a concave boundary, cut at
+        // the boundary's box as the pipeline cuts it: the outer contour and
+        // the hole meet there and cancel by the even-odd rule, so nothing of
+        // it shows, on a seam of the boundary's triangles or anywhere.
+        let mut hatch = Item {
+            shape: Shape::Fill {
+                rule: FillRule::EvenOdd,
+                contours: vec![
+                    vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]],
+                    vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]],
+                ],
+            },
+            ..square(0, [0.0, 0.0], 1.0)
+        };
+        hatch.viewport = Some(1);
+        hatch.clip = Some(Bounds {
+            min: [0.0, 0.0],
+            max: [100.0, 100.0],
+        });
+        hatch.clip_boundary = Some(0);
+        let mut sheet = list(vec![hatch]);
+        sheet.clip_boundaries = vec![vec![[0.0, 0.0], [100.0, 0.0], [20.0, 20.0], [0.0, 100.0]]];
+        assert_eq!(pick(&sheet, [10.0, 10.0], 0.1, 1.0), None);
+        assert_eq!(pick(&sheet, [5.0, 50.0], 0.1, 1.0), None);
     }
 
     #[test]
