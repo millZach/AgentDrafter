@@ -2972,8 +2972,13 @@ fn clipped_keys(
         .new_text()?
         .unwrap_or_else(|| files.rows_text.clone());
     let rows = rows_at(&rows_text, &files.rows_path)?;
+    // The sheet the target is named on: a template's viewport is on every
+    // sheet built from it, and its ID names one of them.
+    let on = id.split_once(ID_SEPARATOR).map(|(sheet, _)| sheet);
     let &k = sheets
-        .first()
+        .iter()
+        .find(|&&k| on.is_some_and(|on| files.name(k).eq_ignore_ascii_case(on)))
+        .or_else(|| sheets.first())
         .ok_or_else(|| fail(ErrorCode::BadValue, format!("`{id}` is on no sheet")))?;
     let record = sheet_record(at, &rows, k, &mut Vec::new()).map_err(|e| {
         fail(
@@ -2986,7 +2991,7 @@ fn clipped_keys(
         )
     })?;
     let viewport = (0..record.sheet.objects.len())
-        .find(|&i| record.id(i) == id)
+        .find(|&i| record.id(i).eq_ignore_ascii_case(id))
         .and_then(|i| match &record.sheet.objects[i] {
             crate::model::Object::Viewport(v) => Some(v.clone()),
             _ => None,

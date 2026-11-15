@@ -705,6 +705,68 @@ fn clip_viewport_and_set_frozen_layers_are_operations_with_autocads_aliases() {
 }
 
 #[test]
+fn a_shared_templates_viewport_is_clipped_through_any_sheet_built_from_it() {
+    let set = scratch("shared");
+    fs::create_dir_all(set.join("templates")).unwrap();
+    let write = |name: &str, text: &str| fs::write(set.join(name), text).unwrap();
+    write("set.yaml", "units: mm\noutput: dwg\nrows: rows.yaml\n");
+    write(
+        "rows.yaml",
+        "rows:\n  - {sheet: A, template: templates/t.yaml}\n  - {sheet: B, template: templates/t.yaml}\n",
+    );
+    write(
+        "templates/t.yaml",
+        "units: mm\npaper: ISO A4 landscape\nlayout: {name: Main}\nlayers:\n  wires: {color: red}\nobjects:\n  - line: {id: wire, from: [-20, 0, 0], to: [20, 0, 0], layer: wires}\n  - viewport: {id: v, center: [50, 50, 0], width: 80, height: 80, view_center: [0, 0, 0], scale: 1}\n",
+    );
+    let built = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: false,
+        },
+        &Settings::default(),
+    );
+    assert!(built.ok, "{:#?}", built.error);
+    let template = || {
+        parse_sheet_description(&fs::read_to_string(set.join("templates/t.yaml")).unwrap())
+            .unwrap()
+    };
+    // Named on the second sheet, the template's viewport is clipped, and
+    // the change lands on both sheets built from it.
+    for (op, check) in [
+        (
+            json!({ "op": "clip_viewport", "target": {"id": "B/v"}, "clip": {"center": [50, 50, 0], "radius": 20} }),
+            "clip",
+        ),
+        (
+            json!({ "op": "set_frozen_layers", "target": {"id": "B/v"}, "frozen_layers": ["wires"] }),
+            "frozen",
+        ),
+        (
+            json!({ "op": "change_viewport", "target": {"id": "B/v"}, "scale": "1:2" }),
+            "scale",
+        ),
+    ] {
+        let reply = apply(&set, json!([op]));
+        assert!(reply.ok, "{check}: {:#?}", reply.error);
+        let landed = reply.result.as_ref().unwrap().landed;
+        assert_eq!(landed, 2, "{check}");
+    }
+    let v = template();
+    let v = viewport(&v.objects[1]);
+    assert!(matches!(v.clip, Some(Clip::Circle { .. })));
+    assert_eq!(v.frozen_layers, ["wires"]);
+    assert_eq!(v.scale, 0.5);
+    // Both sheets build with the clipped viewport.
+    for sheet in ["A", "B"] {
+        let read = read_dwg(&set.join(format!("dwg/{sheet}.dwg"))).unwrap();
+        assert!(
+            matches!(&read.objects[1], Object::Viewport(r) if r.clip.is_some()),
+            "{sheet}"
+        );
+    }
+}
+
+#[test]
 fn an_add_names_the_layout_whose_paper_space_it_draws_in() {
     let set = two_set("add-space");
     let reply = apply(
