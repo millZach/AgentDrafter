@@ -33,6 +33,7 @@
 mod accept;
 mod apply;
 mod commit;
+mod from_dimension;
 mod history;
 mod journal;
 mod operations;

@@ -9,24 +9,29 @@
 //!
 //! What the reader is given it puts where AutoCAD keeps it: a linear or
 //! aligned dimension's location on its dimension line where the second
-//! extension line meets it, and a radius or diameter dimension's point on
-//! the line from its centre through its location, where its arrow points.
+//! extension line meets it, a radius or diameter dimension's point on the
+//! line from its centre through its location, where its arrow points, and
+//! an angular dimension's location on its arc a third of the way round.
 
 use super::layers::{name_error, named_entries};
 use super::leader::{arrowhead, not_negative, positive};
 use super::strict_yaml::{key_path, Node};
 use super::text::{character_code, contents_problem, text_style_at};
-use super::{angle, at, bad_value, boolean, choice, plain_number, point, points, scalar, Fields};
+use super::{
+    angle, at, bad_value, boolean, choice, index_path, plain_number, point, points, scalar,
+    sequence, Fields,
+};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    DecimalSeparator, Dimension, DimensionKind, DimensionStyle, Measured, Point3, TextPlacement,
-    ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE,
+    AngularUnit, DecimalSeparator, Dimension, DimensionKind, DimensionStyle, FractionFormat,
+    Measured, OrdinateAxis, Point3, TextPlacement, UnitFormat, ISO_DIMENSION_STYLE,
+    STANDARD_DIMENSION_STYLE,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
 
 /// The keys a dimension style takes.
-pub(crate) const DIMENSION_STYLE_KEYS: [&str; 18] = [
+pub(crate) const DIMENSION_STYLE_KEYS: [&str; 26] = [
     "arrowhead",
     "arrow_size",
     "text_style",
@@ -36,27 +41,39 @@ pub(crate) const DIMENSION_STYLE_KEYS: [&str; 18] = [
     "extension_beyond",
     "line_extension",
     "center_mark",
+    "baseline_spacing",
     "placement",
     "unit_format",
     "precision",
+    "fraction_format",
     "decimal_separator",
     "suppress_leading_zeros",
     "suppress_trailing_zeros",
+    "suppress_zero_feet",
+    "suppress_zero_inches",
+    "angular_unit",
+    "angular_precision",
+    "suppress_angular_leading_zeros",
+    "suppress_angular_trailing_zeros",
     "prefix",
     "suffix",
     "scale",
 ];
 
 /// The keys a dimension takes.
-pub(crate) const DIMENSION_KEYS: [&str; 13] = [
+pub(crate) const DIMENSION_KEYS: [&str; 17] = [
     "kind",
     "points",
     "angle",
     "center",
     "point",
+    "lines",
+    "feature",
+    "axis",
     "location",
     "dimension_style",
     "text",
+    "continued",
     "layer",
     "color",
     "linetype",
@@ -76,16 +93,81 @@ pub(crate) fn kind_keys(
     &'static [&'static str],
 ) {
     match kind {
-        DimensionKind::Linear => (&["points"], &["angle"], &["center", "point"]),
-        DimensionKind::Aligned => (&["points"], &[], &["center", "point", "angle"]),
-        DimensionKind::Radius | DimensionKind::Diameter => {
-            (&["center", "point"], &[], &["points", "angle"])
-        }
+        DimensionKind::Linear => (
+            &["points"],
+            &["angle", "continued"],
+            &["center", "point", "lines", "feature", "axis"],
+        ),
+        DimensionKind::Aligned => (
+            &["points"],
+            &["continued"],
+            &["center", "point", "angle", "lines", "feature", "axis"],
+        ),
+        DimensionKind::Radius | DimensionKind::Diameter => (
+            &["center", "point"],
+            &[],
+            &["points", "angle", "lines", "feature", "axis", "continued"],
+        ),
+        DimensionKind::Angular => (
+            &["lines"],
+            &["continued"],
+            &["points", "angle", "center", "point", "feature", "axis"],
+        ),
+        DimensionKind::ThreePointAngular => (
+            &["center", "points"],
+            &["continued"],
+            &["angle", "point", "lines", "feature", "axis"],
+        ),
+        DimensionKind::Ordinate => (
+            &["feature", "axis"],
+            &[],
+            &["points", "angle", "center", "point", "lines", "continued"],
+        ),
     }
 }
 
-/// The one unit format the pipeline draws: AutoCAD's decimal.
-pub(crate) const DECIMAL: &str = "decimal";
+/// One of `all` by its name at `key`, if the fields give it: `what` it is,
+/// and the sentence that lists them.
+fn named<T: Copy>(
+    fields: &Fields,
+    key: &str,
+    what: &str,
+    all: &[T],
+    name: fn(T) -> &'static str,
+    listed: &str,
+) -> Result<Option<T>, Error> {
+    let Some(node) = fields.get(key) else {
+        return Ok(None);
+    };
+    let path = fields.path_of(key);
+    let text = choice(node, &path, what, listed)?;
+    all.iter()
+        .copied()
+        .find(|t| name(*t) == text)
+        .map(Some)
+        .ok_or_else(|| bad_value(node, &path, format!("`{text}` is not {what}; {listed}")))
+}
+
+/// The names of `all`, as a sentence lists them.
+fn names<T: Copy>(all: &[T], name: fn(T) -> &'static str) -> String {
+    all.iter()
+        .map(|t| format!("`{}`", name(*t)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A whole number from `least` to `most` at `key`, if the fields give it.
+fn whole(fields: &Fields, key: &str, least: i8, most: i8, says: &str) -> Result<Option<i8>, Error> {
+    let Some(node) = fields.get(key) else {
+        return Ok(None);
+    };
+    let path = fields.path_of(key);
+    let text = scalar(node, &path, "a whole number")?;
+    match text.parse::<i8>() {
+        Ok(n) if (least..=most).contains(&n) => Ok(Some(n)),
+        _ => Err(bad_value(node, &path, says.to_owned())),
+    }
+}
 
 /// The most decimals AutoCAD shows.
 pub(crate) const MOST_DECIMALS: u8 = 8;
@@ -125,7 +207,7 @@ pub(super) fn dimension_styles(
         if let Some(a) = arrowhead(&fields)? {
             style.arrowhead = a;
         }
-        let lengths: [(&str, &str, &mut f64, bool); 7] = [
+        let lengths: [(&str, &str, &mut f64, bool); 8] = [
             ("arrow_size", "an arrow's size", &mut style.arrow_size, true),
             ("text_height", "a text height", &mut style.text_height, true),
             ("gap", "a gap", &mut style.gap, false),
@@ -151,6 +233,12 @@ pub(super) fn dimension_styles(
                 "center_mark",
                 "a centre mark",
                 &mut style.center_mark,
+                false,
+            ),
+            (
+                "baseline_spacing",
+                "how far apart baseline dimensions are",
+                &mut style.baseline_spacing,
                 false,
             ),
         ];
@@ -194,32 +282,87 @@ pub(super) fn dimension_styles(
                     )
                 })?;
         }
-        if let Some(node) = fields.get("unit_format") {
-            let path = fields.path_of("unit_format");
-            let listed = "the pipeline draws AutoCAD's `decimal` unit format; scientific, \
-                          engineering, architectural and fractional wait";
-            let text = choice(node, &path, "a unit format", listed)?;
-            if text != DECIMAL {
+        let listed = format!(
+            "a unit format is {}",
+            names(&UnitFormat::ALL, UnitFormat::name)
+        );
+        if let Some(format) = named(
+            &fields,
+            "unit_format",
+            "a unit format",
+            &UnitFormat::ALL,
+            UnitFormat::name,
+            &listed,
+        )? {
+            // AutoCAD counts a drawing unit as an inch in these, whatever
+            // the drawing's unit: on a sheet in another unit they would show
+            // a length as so many inches that is not.
+            if format.counts_inches() && units != Unit::In {
                 return Err(bad_value(
-                    node,
-                    &path,
-                    format!("`{text}` is not a unit format the pipeline draws; {listed}"),
+                    fields.require("unit_format")?,
+                    &fields.path_of("unit_format"),
+                    format!(
+                        "an {} length counts feet and inches, so it is for a sheet in `in`; this \
+                         sheet is in `{}`",
+                        format.name(),
+                        units.symbol()
+                    ),
                 ));
             }
+            style.unit_format = format;
         }
-        if let Some(node) = fields.get("precision") {
-            let path = fields.path_of("precision");
-            let text = scalar(node, &path, "a whole number of decimals, 0 to 8")?;
-            match text.parse::<u8>() {
-                Ok(n) if n <= MOST_DECIMALS => style.precision = n,
-                _ => {
-                    return Err(bad_value(
-                        node,
-                        &path,
-                        format!("a precision is a whole number of decimals from 0 to {MOST_DECIMALS}, as AutoCAD shows them"),
-                    ))
-                }
-            }
+        if let Some(n) = whole(
+            &fields,
+            "precision",
+            0,
+            MOST_DECIMALS as i8,
+            &format!(
+                "a precision is a whole number from 0 to {MOST_DECIMALS}: how many decimals a \
+                 length shows, or for an architectural or fractional one how fine its fraction \
+                 is, 1/2 to 1/256"
+            ),
+        )? {
+            style.precision = n as u8;
+        }
+        let listed = format!(
+            "a fraction format is {}",
+            names(&FractionFormat::ALL, FractionFormat::name)
+        );
+        if let Some(format) = named(
+            &fields,
+            "fraction_format",
+            "a fraction format",
+            &FractionFormat::ALL,
+            FractionFormat::name,
+            &listed,
+        )? {
+            style.fraction_format = format;
+        }
+        let listed = format!(
+            "an angular unit is {}",
+            names(&AngularUnit::ALL, AngularUnit::name)
+        );
+        if let Some(unit) = named(
+            &fields,
+            "angular_unit",
+            "an angular unit",
+            &AngularUnit::ALL,
+            AngularUnit::name,
+            &listed,
+        )? {
+            style.angular_unit = unit;
+        }
+        if let Some(n) = whole(
+            &fields,
+            "angular_precision",
+            0,
+            MOST_DECIMALS as i8,
+            &format!(
+                "an angular precision is a whole number of decimals from 0 to {MOST_DECIMALS}, \
+                 as AutoCAD's DIMADEC in a dimension style"
+            ),
+        )? {
+            style.angular_precision = n as u8;
         }
         if let Some(node) = fields.get("decimal_separator") {
             let path = fields.path_of("decimal_separator");
@@ -244,6 +387,23 @@ pub(super) fn dimension_styles(
         if let Some(node) = fields.get("suppress_trailing_zeros") {
             style.suppress_trailing_zeros =
                 boolean(node, &fields.path_of("suppress_trailing_zeros"))?;
+        }
+        let switches: [(&str, &mut bool); 4] = [
+            ("suppress_zero_feet", &mut style.suppress_zero_feet),
+            ("suppress_zero_inches", &mut style.suppress_zero_inches),
+            (
+                "suppress_angular_leading_zeros",
+                &mut style.suppress_angular_leading_zeros,
+            ),
+            (
+                "suppress_angular_trailing_zeros",
+                &mut style.suppress_angular_trailing_zeros,
+            ),
+        ];
+        for (key, value) in switches {
+            if let Some(node) = fields.get(key) {
+                *value = boolean(node, &fields.path_of(key))?;
+            }
         }
         style.prefix = affix(&fields, "prefix")?;
         style.suffix = affix(&fields, "suffix")?;
@@ -294,10 +454,7 @@ pub(super) fn dimension(
     let kind_node = fields.require("kind")?;
     let kind_path = fields.path_of("kind");
     let names = DimensionKind::ALL.map(DimensionKind::name);
-    let listed = format!(
-        "a dimension is {}; angular, ordinate, baseline and continued dimensions wait",
-        names.join(", ")
-    );
+    let listed = format!("a dimension is {}", names.join(", "));
     let text = choice(kind_node, &kind_path, "a kind of dimension", &listed)?;
     let Some(kind) = DimensionKind::ALL.into_iter().find(|k| k.name() == text) else {
         return Err(bad_value(
@@ -308,7 +465,12 @@ pub(super) fn dimension(
     };
     // Each kind takes its own points.
     let (required, optional, others) = kind_keys(kind);
-    let own: Vec<&str> = required.iter().chain(optional).copied().collect();
+    let own: Vec<&str> = required
+        .iter()
+        .chain(optional)
+        .copied()
+        .filter(|k| *k != "continued")
+        .collect();
     if let Some(key) = others.iter().find(|k| fields.get(k).is_some()) {
         let node = fields.require(key)?;
         return Err(bad_value(
@@ -446,8 +608,137 @@ pub(super) fn dimension(
                 }
             }
         }
+        DimensionKind::Angular | DimensionKind::ThreePointAngular => {
+            let (measured, node, path) = if kind == DimensionKind::Angular {
+                let node = fields.require("lines")?;
+                let path = fields.path_of("lines");
+                let lines = two_lines(node, &path, units)?;
+                (Measured::Angular { lines }, node, path)
+            } else {
+                let center_node = fields.require("center")?;
+                let center = point(center_node, &fields.path_of("center"), units)?;
+                let node = fields.require("points")?;
+                let path = fields.path_of("points");
+                let read = points(node, &path, units, 2)?;
+                let [p1, p2] = read.as_slice() else {
+                    return Err(refused(
+                        node,
+                        &path,
+                        format!(
+                            "a three-point angular dimension measures between two points; this \
+                             lists {}",
+                            read.len()
+                        ),
+                    ));
+                };
+                for p in [p1, p2] {
+                    if p.x == center.x && p.y == center.y {
+                        return Err(refused(
+                            node,
+                            &path,
+                            "each of a three-point angular dimension's points lies apart from \
+                             its centre"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                let measured = Measured::ThreePointAngular {
+                    center,
+                    points: [*p1, *p2],
+                };
+                (measured, node, path)
+            };
+            let probe = Dimension {
+                measured: measured.clone(),
+                location,
+                dimension_style: String::new(),
+                text: None,
+                continued: false,
+                layer: String::new(),
+                properties: Default::default(),
+            };
+            let mut flat_points = probe.points();
+            flat_points.push(location);
+            flat(&flat_points, node, &path)?;
+            let Some(sector) = probe.sector() else {
+                return Err(refused(
+                    location_node,
+                    &location_path,
+                    if kind == DimensionKind::Angular {
+                        "an angular dimension's lines meet, at an angle, and its location lies \
+                         apart from where they meet"
+                    } else {
+                        "a three-point angular dimension's points lie at an angle to each other \
+                         round its centre, and its location apart from the centre"
+                    }
+                    .to_owned(),
+                ));
+            };
+            // Kept on the arc a third of the way round, as AutoCAD keeps it.
+            return finish(
+                fields,
+                measured,
+                sector.arc_point(),
+                layer,
+                units,
+                dimension_styles,
+            );
+        }
+        DimensionKind::Ordinate => {
+            let node = fields.require("feature")?;
+            let path = fields.path_of("feature");
+            let feature = point(node, &path, units)?;
+            let listed =
+                "an ordinate dimension measures a feature's `x` or its `y`, from the origin";
+            let axis = named(
+                fields,
+                "axis",
+                "an axis",
+                &OrdinateAxis::ALL,
+                OrdinateAxis::name,
+                listed,
+            )?
+            .expect("the kind requires its axis");
+            flat(&[feature, location], node, &path)?;
+            if feature.x == location.x && feature.y == location.y {
+                return Err(refused(
+                    location_node,
+                    &location_path,
+                    "an ordinate dimension's location, the end of its leader, lies apart from \
+                     its feature"
+                        .to_owned(),
+                ));
+            }
+            Measured::Ordinate { feature, axis }
+        }
     };
     finish(fields, measured, location, layer, units, dimension_styles)
+}
+
+/// An angular dimension's two lines, each through two points apart.
+fn two_lines(node: &Node, path: &str, units: Unit) -> Result<[[Point3; 2]; 2], Error> {
+    let says = "an angular dimension measures between two lines, each a list of two points";
+    let items = sequence(node, path, "a list of two lines")?;
+    if items.len() != 2 {
+        return Err(bad_value(node, path, says.to_owned()));
+    }
+    let mut lines = [[Point3::new(0.0, 0.0, 0.0); 2]; 2];
+    for (i, item) in items.iter().enumerate() {
+        let line_path = index_path(path, i);
+        let read = points(item, &line_path, units, 2)?;
+        let [a, b] = read.as_slice() else {
+            return Err(bad_value(item, &line_path, says.to_owned()));
+        };
+        if a.x == b.x && a.y == b.y {
+            return Err(bad_value(
+                item,
+                &line_path,
+                "a line's two points lie apart".to_owned(),
+            ));
+        }
+        lines[i] = [*a, *b];
+    }
+    Ok(lines)
 }
 
 /// Refuses points of a dimension at different heights: a dimension lies
@@ -476,6 +767,10 @@ fn finish(
         location,
         dimension_style: dimension_style_name(fields, units, dimension_styles)?,
         text: own_text(fields)?,
+        continued: match fields.get("continued") {
+            Some(node) => boolean(node, &fields.path_of("continued"))?,
+            None => false,
+        },
         layer,
         properties: Default::default(),
     })

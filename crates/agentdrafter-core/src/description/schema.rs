@@ -130,8 +130,31 @@ pub fn sheet_description_schema() -> Value {
             },
             paper_key: super::paper::paper_property(),
         },
+        // Engineering and architectural lengths count inches, so they are
+        // for a sheet in inches, as the reader has it.
+        "if": { "not": { "properties": { units_key: { "const": Unit::In.symbol() } } } },
+        "then": {
+            "properties": {
+                dimension_styles_key: {
+                    "additionalProperties": {
+                        "properties": {
+                            "unit_format": { "not": { "enum": inch_formats() } },
+                        },
+                    },
+                },
+            },
+        },
         "$defs": sheet_defs(),
     })
+}
+
+/// The unit formats that count inches.
+fn inch_formats() -> Vec<&'static str> {
+    crate::model::UnitFormat::ALL
+        .into_iter()
+        .filter(|f| f.counts_inches())
+        .map(|f| f.name())
+        .collect()
 }
 
 /// Every definition the sheet description's schema refers to: the

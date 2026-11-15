@@ -5,11 +5,12 @@
 //! and its own anonymous block, `*D1` and on, holding what it draws, as
 //! AutoCAD 2026 wrote its own: the extension lines, the dimension line and
 //! any tails and landing, `ByBlock` in colour and lineweight on the
-//! dimension's own layer;
+//! dimension's own layer, an angular dimension's arcs as ARCs;
 //! a closed filled arrowhead as a SOLID and any other as an insert of the
 //! block AutoCAD draws it from, at its point, as long as the arrow and
-//! turned along it; the text as MTEXT attached at its middle; and a POINT
-//! on layer `Defpoints` at each definition point. So AutoCAD shows it as
+//! turned along it; the text as MTEXT attached at its middle, a stacked
+//! fraction in it as AutoCAD codes it, `{\H1x;\S1/2;}`; and a POINT on
+//! layer `Defpoints` at each definition point. So AutoCAD shows it as
 //! the pipeline draws it without laying it out again, and lays it out to
 //! the same place when it does.
 //!
@@ -20,15 +21,17 @@
 //! has none and it holds a dimension.
 //!
 //! A dimension and its style are read back when the model draws them: one
-//! of the four kinds, flat, with no override of its style but AutoCAD's
-//! own, its text where AutoCAD keeps it, and a style whose every value is
-//! one the pipeline draws. Its block is read with it, never as a block of
+//! of the seven kinds, flat, with no override of its style but AutoCAD's
+//! own, its text where AutoCAD keeps it, an angular dimension's arc point a
+//! third of the way round its arc and an ordinate dimension's origin the
+//! world's, and a style whose every value is one the pipeline draws. Its block is read with it, never as a block of
 //! the drawing's; the pipeline draws it again from the dimension, as AutoCAD
 //! does.
 
 use acadrust::entities::{
-    AttachmentPoint, Dimension as DwgDimension, DimensionAligned, DimensionBase, DimensionDiameter,
-    DimensionLinear, DimensionRadius, EntityCommon, EntityType, Insert as DwgInsert,
+    Arc as DwgArc, AttachmentPoint, Dimension as DwgDimension, DimensionAligned,
+    DimensionAngular2Ln, DimensionAngular3Pt, DimensionBase, DimensionDiameter, DimensionLinear,
+    DimensionOrdinate, DimensionRadius, EntityCommon, EntityType, Insert as DwgInsert,
     Line as DwgLine, MText as DwgMText, Point as DwgPoint, Solid as DwgSolid,
 };
 use acadrust::tables::{AppId, BlockRecord, DimStyle, Layer as DwgLayer, TableEntry};
@@ -41,8 +44,9 @@ use super::text::{mtext_code, style_name};
 use super::{point, vector};
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arrowhead, DecimalSeparator, Dimension, DimensionPart, DimensionStyle, LaidDimension, MTextBox,
-    Measured, Object, Point3, Sheet, TextPlacement, DIAMETER_SIGN, MEASURED,
+    AngularUnit, Arrowhead, DecimalSeparator, Dimension, DimensionPart, DimensionStyle,
+    FractionFormat, LaidDimension, MTextBox, Measured, Object, OrdinateAxis, Point3, Sheet,
+    TextPiece, TextPlacement, UnitFormat, DEGREE_SIGN, DIAMETER_SIGN, MEASURED,
     STANDARD_DIMENSION_STYLE,
 };
 use crate::text::MText;
@@ -65,6 +69,10 @@ const DSTYLE: &str = "DSTYLE";
 /// dimension it makes.
 const DIMUPT: i16 = 288;
 
+/// AutoCAD's DIMTMOVE, which it overrides to 1 on every dimension its
+/// DIMCONTINUE makes.
+const DIMTMOVE: i16 = 279;
+
 /// The flags byte AutoCAD 2026 wrote on its own dimensions: with the text
 /// at its default place on a linear or aligned one, and placed on a radius
 /// or diameter one.
@@ -77,6 +85,9 @@ const ALIGN_MIDDLE: &str = "\\A1;";
 
 /// AutoCAD's code for the diameter sign in multiline text.
 const DIAMETER_CODE: &str = "\\U+2205";
+
+/// AutoCAD's code for the degree sign in multiline text.
+const DEGREE_CODE: &str = "\\U+00B0";
 
 /// Whether the sheet holds a dimension.
 fn has_dimensions(sheet: &Sheet) -> bool {
@@ -184,7 +195,6 @@ fn dwg_style(
     s.dimpost = String::new();
     if units.is_metric() {
         // ISO-25's extras, which draw nothing the model holds.
-        s.dimdli = Unit::Mm.convert(3.75, units);
         s.dimaltf = 0.039_370_078_740_16;
         s.dimaltd = 3;
         s.dimtdec = 2;
@@ -200,10 +210,24 @@ fn dwg_style(
     s.dimdle = style.line_extension;
     s.dimcen = style.center_mark;
     s.dimscale = style.scale;
+    s.dimdli = style.baseline_spacing;
+    s.dimlunit = style.unit_format.code();
     s.dimdec = i16::from(style.precision);
+    s.dimfrac = style.fraction_format.code();
     s.dimdsep = i16::try_from(u32::from(style.decimal_separator.character())).unwrap_or(46);
-    s.dimzin =
-        4 * i16::from(style.suppress_leading_zeros) + 8 * i16::from(style.suppress_trailing_zeros);
+    let feet_and_inches = match (style.suppress_zero_feet, style.suppress_zero_inches) {
+        (true, true) => 0,
+        (false, false) => 1,
+        (false, true) => 2,
+        (true, false) => 3,
+    };
+    s.dimzin = feet_and_inches
+        + 4 * i16::from(style.suppress_leading_zeros)
+        + 8 * i16::from(style.suppress_trailing_zeros);
+    s.dimaunit = style.angular_unit.code();
+    s.dimadec = i16::from(style.angular_precision);
+    s.dimazin = i16::from(style.suppress_angular_leading_zeros)
+        + 2 * i16::from(style.suppress_angular_trailing_zeros);
     if !style.prefix.is_empty() || !style.suffix.is_empty() {
         s.dimpost = format!("{}{MEASURED}{}", style.prefix, style.suffix);
     }
@@ -277,13 +301,34 @@ fn block_entities(laid: &LaidDimension, middle_aligned: bool) -> Vec<EntityType>
                 by_block(&mut line.common, layer, true);
                 entities.push(EntityType::Line(line));
             }
+            DimensionPart::Arc {
+                center,
+                radius,
+                start,
+                end,
+            } => {
+                let mut arc = DwgArc::new();
+                arc.center = vector(*center);
+                arc.radius = *radius;
+                arc.start_angle = start.rem_euclid(360.0).to_radians();
+                arc.end_angle = end.rem_euclid(360.0).to_radians();
+                by_block(&mut arc.common, layer, true);
+                entities.push(EntityType::Arc(arc));
+            }
             DimensionPart::Arrow { tip, base } => {
                 let back: V = [base.x - tip.x, base.y - tip.y];
                 match laid.arrowhead {
                     Arrowhead::ClosedFilled => {
                         // The corners on the left of the line's readable
-                        // direction first, as AutoCAD writes them.
-                        let angle = readable(back[1].atan2(back[0]).to_degrees()).to_radians();
+                        // direction first, as AutoCAD writes them; on an
+                        // arc, those on the right of the body.
+                        let degrees = back[1].atan2(back[0]).to_degrees();
+                        let angle = if laid.arrows_on_arc {
+                            degrees - 180.0
+                        } else {
+                            readable(degrees)
+                        }
+                        .to_radians();
                         let across = [-angle.sin() * size / 6.0, angle.cos() * size / 6.0];
                         let corner = |k: f64| {
                             Vector3::new(base.x + k * across[0], base.y + k * across[1], base.z)
@@ -305,6 +350,7 @@ fn block_entities(laid: &LaidDimension, middle_aligned: bool) -> Vec<EntityType>
             }
             DimensionPart::Text => entities.push(EntityType::MText(Box::new(block_text(
                 &laid.text,
+                &laid.pieces,
                 middle_aligned,
             )))),
         }
@@ -319,11 +365,33 @@ fn block_entities(laid: &LaidDimension, middle_aligned: bool) -> Vec<EntityType>
     entities
 }
 
-/// The MTEXT of a dimension's text, as AutoCAD writes it in the block: the
-/// diameter sign as its code, and, in a style whose tolerances align at
+/// What a dimension's text says, coded as AutoCAD codes it in its MTEXT:
+/// the diameter and degree signs as their codes, and a stacked fraction as
+/// `{\H1x;\S1/2;}`, `#` for its slash when it is diagonal.
+pub(super) fn coded_pieces(pieces: &[TextPiece]) -> String {
+    pieces
+        .iter()
+        .map(|piece| match piece {
+            TextPiece::Plain(s) => mtext_code(s, None)
+                .replace(DIAMETER_SIGN, DIAMETER_CODE)
+                .replace(DEGREE_SIGN, DEGREE_CODE),
+            TextPiece::Fraction {
+                numerator,
+                denominator,
+                diagonal,
+            } => format!(
+                "{{\\H1x;\\S{numerator}{}{denominator};}}",
+                if *diagonal { '#' } else { '/' }
+            ),
+        })
+        .collect()
+}
+
+/// The MTEXT of a dimension's text, as AutoCAD writes it in the block:
+/// coded as AutoCAD codes it, and, in a style whose tolerances align at
 /// their middle, as Standard's do, aligned at its middle.
-fn block_text(text: &MText, middle_aligned: bool) -> DwgMText {
-    let coded = mtext_code(&text.contents, None).replace(DIAMETER_SIGN, DIAMETER_CODE);
+fn block_text(text: &MText, pieces: &[TextPiece], middle_aligned: bool) -> DwgMText {
+    let coded = coded_pieces(pieces);
     let value = if middle_aligned {
         format!("{ALIGN_MIDDLE}{coded}")
     } else {
@@ -353,7 +421,7 @@ pub(super) fn dwg_dimension(
     number: usize,
     units: Unit,
 ) -> Result<EntityType, Error> {
-    let laid = dimension.laid_out(style, measure);
+    let laid = dimension.laid_out(style, units, measure);
     let name = format!("*D{number}");
     let mut record = BlockRecord::new(name.clone());
     record.flags.anonymous = true;
@@ -381,6 +449,9 @@ pub(super) fn dwg_dimension(
         base.text_middle_point = vector(laid.text_point);
         base.actual_measurement = dimension.measurement();
         base.set_text_override(dimension.text.clone());
+        if dimension.continued {
+            overridden(&mut base, DIMTMOVE);
+        }
         base
     };
     use acadrust::entities::DimensionType;
@@ -417,6 +488,50 @@ pub(super) fn dwg_dimension(
             radial_flags(&mut d.base, laid.text_placed);
             DwgDimension::Diameter(d)
         }
+        Measured::Angular { lines } => {
+            let mut d = DimensionAngular2Ln::new(
+                vector(lines[0][0]),
+                vector(lines[1][0]),
+                vector(lines[1][1]),
+            );
+            d.base = base(DimensionType::Angular);
+            d.base.actual_measurement = dimension.measurement().to_radians();
+            // AutoCAD keeps the second line by its 13 and 14, the first by
+            // its 15 and 10, and the arc's point as its 16.
+            d.dimension_arc = vector(laid.arc_point.unwrap_or(dimension.location));
+            d.first_point = vector(lines[1][0]);
+            d.second_point = vector(lines[1][1]);
+            d.angle_vertex = vector(lines[0][0]);
+            d.definition_point = vector(lines[0][1]);
+            d.base.definition_point = d.definition_point;
+            d.base.dwg_flags_byte = FLAGS_DEFAULT_TEXT;
+            DwgDimension::Angular2Ln(d)
+        }
+        Measured::ThreePointAngular { center, points } => {
+            let mut d =
+                DimensionAngular3Pt::new(vector(*center), vector(points[0]), vector(points[1]));
+            d.base = base(DimensionType::Angular3Point);
+            d.base.actual_measurement = dimension.measurement().to_radians();
+            d.definition_point = vector(laid.arc_point.unwrap_or(dimension.location));
+            d.first_point = vector(points[0]);
+            d.second_point = vector(points[1]);
+            d.angle_vertex = vector(*center);
+            d.base.definition_point = d.definition_point;
+            d.base.dwg_flags_byte = FLAGS_DEFAULT_TEXT;
+            DwgDimension::Angular3Pt(d)
+        }
+        Measured::Ordinate { feature, axis } => {
+            let mut d = DimensionOrdinate::new(
+                vector(*feature),
+                vector(dimension.location),
+                *axis == OrdinateAxis::X,
+            );
+            d.base = base(DimensionType::Ordinate);
+            d.definition_point = Vector3::new(0.0, 0.0, feature.z);
+            d.base.definition_point = d.definition_point;
+            d.base.dwg_flags_byte = FLAGS_DEFAULT_TEXT;
+            DwgDimension::Ordinate(d)
+        }
     };
     Ok(EntityType::Dimension(Box::new(written)))
 }
@@ -432,13 +547,7 @@ fn radial_flags(base: &mut DimensionBase, placed: bool) {
         base.dwg_flags_byte = FLAGS_DEFAULT_TEXT;
         base.text_user_positioned = false;
     }
-    let mut overrides = ExtendedDataRecord::new(ACAD);
-    overrides.add_value(XDataValue::String(DSTYLE.to_owned()));
-    overrides.add_value(XDataValue::ControlString("{".to_owned()));
-    overrides.add_value(XDataValue::Integer16(DIMUPT));
-    overrides.add_value(XDataValue::Integer16(1));
-    overrides.add_value(XDataValue::ControlString("}".to_owned()));
-    base.common.extended_data.upsert_record(overrides);
+    overridden(base, DIMUPT);
     let mut extension = ExtendedDataRecord::new(RADIAL_EXTENSION);
     extension.add_value(XDataValue::Integer16(387));
     extension.add_value(XDataValue::Integer16(1));
@@ -447,6 +556,18 @@ fn radial_flags(base: &mut DimensionBase, placed: bool) {
     extension.add_value(XDataValue::Integer16(390));
     extension.add_value(XDataValue::Real(0.0));
     base.common.extended_data.upsert_record(extension);
+}
+
+/// The dimension's style overridden, as AutoCAD keeps it on a dimension,
+/// with `code` set to 1.
+fn overridden(base: &mut DimensionBase, code: i16) {
+    let mut overrides = ExtendedDataRecord::new(ACAD);
+    overrides.add_value(XDataValue::String(DSTYLE.to_owned()));
+    overrides.add_value(XDataValue::ControlString("{".to_owned()));
+    overrides.add_value(XDataValue::Integer16(code));
+    overrides.add_value(XDataValue::Integer16(1));
+    overrides.add_value(XDataValue::ControlString("}".to_owned()));
+    base.common.extended_data.upsert_record(overrides);
 }
 
 /// The names of the blocks the drawing's dimensions draw from, which are
@@ -546,7 +667,6 @@ fn read_style(drawing: &CadDocument, s: &DimStyle) -> Option<DimensionStyle> {
         && s.dimtfill == 0
         && !s.dimtxtdirection
         && !s.dimfxlon
-        && s.dimlunit == 2
         && s.dimlfac == 1.0
         && s.dimrnd == 0.0
         && !s.dimalt
@@ -566,7 +686,10 @@ fn read_style(drawing: &CadDocument, s: &DimStyle) -> Option<DimensionStyle> {
         && s.dimdle >= 0.0
         && s.dimcen >= 0.0
         && (0..=8).contains(&s.dimdec)
-        && matches!(s.dimzin, 0 | 4 | 8 | 12)
+        && (0..=15).contains(&s.dimzin)
+        && (0..=8).contains(&s.dimadec)
+        && (0..=3).contains(&s.dimazin)
+        && s.dimdli >= 0.0
         && !s.xref_dependent;
     if !plain {
         return None;
@@ -606,19 +729,28 @@ fn read_style(drawing: &CadDocument, s: &DimStyle) -> Option<DimensionStyle> {
         line_extension: s.dimdle,
         center_mark: s.dimcen,
         placement,
+        unit_format: UnitFormat::of_code(s.dimlunit)?,
         precision: u8::try_from(s.dimdec).ok()?,
+        fraction_format: FractionFormat::of_code(s.dimfrac)?,
         decimal_separator: DecimalSeparator::of_code(s.dimdsep)?,
         suppress_leading_zeros: s.dimzin & 4 != 0,
         suppress_trailing_zeros: s.dimzin & 8 != 0,
+        suppress_zero_feet: matches!(s.dimzin & 3, 0 | 3),
+        suppress_zero_inches: matches!(s.dimzin & 3, 0 | 2),
+        angular_unit: AngularUnit::of_code(s.dimaunit)?,
+        angular_precision: u8::try_from(s.dimadec).ok()?,
+        suppress_angular_leading_zeros: s.dimazin & 1 != 0,
+        suppress_angular_trailing_zeros: s.dimazin & 2 != 0,
         prefix,
         suffix,
         scale: s.dimscale,
+        baseline_spacing: s.dimdli,
     })
 }
 
 /// The overrides of its style AutoCAD keeps on a dimension, by their
-/// numbers, or none when its record of them cannot be read.
-fn overrides(common: &EntityCommon) -> Option<Vec<i16>> {
+/// numbers and values, or none when its record of them cannot be read.
+fn overrides(common: &EntityCommon) -> Option<Vec<(i16, XDataValue)>> {
     let Some(record) = common
         .extended_data
         .records()
@@ -642,8 +774,7 @@ fn overrides(common: &EntityCommon) -> Option<Vec<i16>> {
     loop {
         match rest.next()? {
             XDataValue::Integer16(code) => {
-                rest.next()?;
-                codes.push(*code);
+                codes.push((*code, rest.next()?.clone()));
             }
             XDataValue::ControlString(s) if s == "}" => return Some(codes),
             _ => return None,
@@ -697,7 +828,22 @@ pub(super) fn read_dimension(
     if !plain {
         return None;
     }
-    if !overrides(&base.common)?.iter().all(|&c| c == DIMUPT) || !no_arc_extension(&base.common) {
+    // AutoCAD's own overrides: DIMUPT on a radius or a diameter, DIMTMOVE
+    // 1 on a dimension DIMCONTINUE made, which marks it continued.
+    let radial = matches!(written, DwgDimension::Radius(_) | DwgDimension::Diameter(_));
+    let mut continued = false;
+    let one = |v: &XDataValue| matches!(v, XDataValue::Integer16(1));
+    for (code, value) in overrides(&base.common)? {
+        match code {
+            DIMUPT if radial => {}
+            DIMTMOVE if !radial && one(&value) => continued = true,
+            _ => return None,
+        }
+    }
+    if !no_arc_extension(&base.common) {
+        return None;
+    }
+    if continued && matches!(written, DwgDimension::Ordinate(_)) {
         return None;
     }
     let style = styles
@@ -772,6 +918,43 @@ pub(super) fn read_dimension(
                 location,
             )
         }
+        DwgDimension::Angular2Ln(d) => {
+            if base.text_user_positioned {
+                return None;
+            }
+            let lines = [
+                [point(d.angle_vertex), point(d.definition_point)],
+                [point(d.first_point), point(d.second_point)],
+            ];
+            (Measured::Angular { lines }, point(d.dimension_arc))
+        }
+        DwgDimension::Angular3Pt(d) => {
+            if base.text_user_positioned {
+                return None;
+            }
+            let measured = Measured::ThreePointAngular {
+                center: point(d.angle_vertex),
+                points: [point(d.first_point), point(d.second_point)],
+            };
+            (measured, point(d.definition_point))
+        }
+        DwgDimension::Ordinate(d) => {
+            let origin = point(d.definition_point);
+            if base.text_user_positioned || origin.x != 0.0 || origin.y != 0.0 {
+                return None;
+            }
+            let feature = point(d.feature_location);
+            let axis = if d.is_ordinate_type_x {
+                OrdinateAxis::X
+            } else {
+                OrdinateAxis::Y
+            };
+            let end = point(d.leader_endpoint);
+            if feature.x == end.x && feature.y == end.y {
+                return None;
+            }
+            (Measured::Ordinate { feature, axis }, end)
+        }
         _ => return None,
     };
     let dimension = Dimension {
@@ -779,6 +962,7 @@ pub(super) fn read_dimension(
         location,
         dimension_style: style.name.clone(),
         text,
+        continued,
         layer,
         properties: Default::default(),
     };
@@ -787,7 +971,34 @@ pub(super) fn read_dimension(
         .iter()
         .map(|p| p.x.abs().max(p.y.abs()))
         .fold(0.0, f64::max);
-    if points.iter().any(|p| !near(p.z, points[0].z, reach)) || dimension.measurement() == 0.0 {
+    if points.iter().any(|p| !near(p.z, points[0].z, reach)) {
+        return None;
+    }
+    if dimension.kind().is_angular() {
+        // AutoCAD keeps the arc's point a third of the way round it, or two
+        // thirds when the text is outside: the model keeps it at a third,
+        // and writes it where AutoCAD keeps it again.
+        let sector = dimension.sector()?;
+        let share = {
+            let to = [
+                dimension.location.x - sector.vertex.x,
+                dimension.location.y - sector.vertex.y,
+            ];
+            let at = to[1].atan2(to[0]).to_degrees();
+            (at - sector.start).rem_euclid(360.0) / sector.sweep
+        };
+        if (share - 1.0 / 3.0).abs() <= 1e-9 {
+            return Some(dimension);
+        }
+        if (share - 2.0 / 3.0).abs() > 1e-9 {
+            return None;
+        }
+        let mut dimension = dimension;
+        dimension.location = sector.arc_point();
+        return Some(dimension);
+    } else if dimension.kind() != crate::model::DimensionKind::Ordinate
+        && dimension.measurement() == 0.0
+    {
         return None;
     }
     Some(dimension)

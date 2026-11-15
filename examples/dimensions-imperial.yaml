@@ -1,0 +1,58 @@
+# A made-up mounting bracket, dimensioned on an ANSI B sheet in inches: its
+# hole pattern by ordinate dimensions from the origin, the sheet's corner,
+# 2 in from the bracket's; its edges by a row of continued dimensions and a stack of
+# baseline ones; its angled edge's angle in degrees and minutes; and a hole
+# size, in feet and fractional inches, as AutoCAD's architectural unit
+# format writes them, and the angled edge's length in decimal inches, as
+# its engineering format does. Everything here is made up.
+units: in
+paper: ANSI B landscape
+layers:
+  border: {color: white, lineweight: 0.5}
+  part: {color: white, lineweight: 0.35}
+  holes: {color: white, lineweight: 0.25}
+  dims: {color: green}
+  notes: {color: yellow}
+dimension_styles:
+  feet-and-inches:
+    unit_format: architectural
+    precision: 4
+    angular_unit: degrees_minutes_seconds
+    angular_precision: 2
+  decimal-inches:
+    unit_format: engineering
+    precision: 2
+objects:
+  - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, layer: border}
+  # The bracket: 10 by 6, its top right corner cut at 45°.
+  - polyline:
+      id: bracket
+      points: [[2, 2, 0], [12, 2, 0], [12, 5, 0], [9, 8, 0], [2, 8, 0]]
+      closed: true
+      layer: part
+  # Five holes 3/8 across.
+  - circle: {id: hole-1, center: [3, 3, 0], radius: 0.1875, layer: holes}
+  - circle: {id: hole-2, center: [6.5, 3, 0], radius: 0.1875, layer: holes}
+  - circle: {id: hole-3, center: [10.25, 3, 0], radius: 0.1875, layer: holes}
+  - circle: {id: hole-4, center: [3, 7, 0], radius: 0.1875, layer: holes}
+  - circle: {id: hole-5, center: [6.5, 7, 0], radius: 0.1875, layer: holes}
+  # The hole pattern, from the origin.
+  - dimension: {id: x-0, kind: ordinate, feature: [2, 2, 0], axis: x, location: [2, 1.1, 0], dimension_style: feet-and-inches, layer: dims}
+  - dimension: {id: x-1, kind: ordinate, feature: [3, 3, 0], axis: x, location: [3, 1.1, 0], dimension_style: feet-and-inches, layer: dims}
+  - dimension: {id: x-2, kind: ordinate, feature: [6.5, 3, 0], axis: x, location: [6.5, 1.1, 0], dimension_style: feet-and-inches, layer: dims}
+  - dimension: {id: x-3, kind: ordinate, feature: [10.25, 3, 0], axis: x, location: [10.25, 1.1, 0], dimension_style: feet-and-inches, layer: dims}
+  - dimension: {id: y-0, kind: ordinate, feature: [2, 2, 0], axis: y, location: [1.1, 2, 0], dimension_style: feet-and-inches, layer: dims}
+  - dimension: {id: y-1, kind: ordinate, feature: [3, 3, 0], axis: y, location: [1.1, 3, 0], dimension_style: feet-and-inches, layer: dims}
+  - dimension: {id: y-4, kind: ordinate, feature: [3, 7, 0], axis: y, location: [1.1, 7, 0], dimension_style: feet-and-inches, layer: dims}
+  # The top edge, as a row of continued dimensions.
+  - dimension: {id: top, kind: linear, points: [[2, 8, 0], [9, 8, 0]], location: [5.5, 9, 0], dimension_style: feet-and-inches, layer: dims}
+  - dimension: {id: top-corner, kind: linear, points: [[9, 8, 0], [12, 5, 0]], location: [10.5, 9, 0], dimension_style: feet-and-inches, continued: true, layer: dims}
+  # The right edge and the overall height, a stack of baseline dimensions.
+  - dimension: {id: right, kind: linear, angle: 90, points: [[12, 2, 0], [12, 5, 0]], location: [13, 3.5, 0], dimension_style: feet-and-inches, layer: dims}
+  - dimension: {id: height, kind: linear, angle: 90, points: [[12, 2, 0], [9, 8, 0]], location: [13.38, 5, 0], dimension_style: feet-and-inches, layer: dims}
+  # The angled edge: its angle off the top edge, and its length.
+  - dimension: {id: corner-angle, kind: angular, lines: [[[2, 8, 0], [9, 8, 0]], [[9, 8, 0], [12, 5, 0]]], location: [10.4, 7.7, 0], dimension_style: feet-and-inches, layer: dims}
+  - dimension: {id: corner-length, kind: aligned, points: [[9, 8, 0], [12, 5, 0]], location: [10.2, 5.6, 0], dimension_style: decimal-inches, layer: dims}
+  # One hole for all five.
+  - dimension: {id: holes, kind: diameter, center: [6.5, 7, 0], point: [6.6875, 7, 0], location: [5.6, 7.6, 0], dimension_style: feet-and-inches, text: 5X <>, layer: dims}
+  - mtext: {contents: "MOUNTING BRACKET MB-2\nMADE-UP PART, 1/4 IN PLATE", position: [12, 0.8, 0], height: 0.18, layer: notes}

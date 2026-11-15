@@ -194,12 +194,16 @@ impl LeaderAttachment {
 
 /// Multiline text's box as the pipeline lays it out, for placing a
 /// leader's text: its width, its height and how far its last line draws
-/// below its baseline.
+/// below its baseline; and, for placing pieces of text one after another,
+/// where its first line's ink starts and how far that line moves the pen,
+/// along its baseline from where it starts.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MTextBox {
     pub width: f64,
     pub height: f64,
     pub last_descent: f64,
+    pub left: f64,
+    pub advance: f64,
 }
 
 /// What a multileader draws with unless it gives its own: AutoCAD's
@@ -807,6 +811,7 @@ mod tests {
                     width: 0.0,
                     height: 7.5,
                     last_descent: 2.5 / 3.0,
+                    ..MTextBox::default()
                 },
                 [0.0, 1.666_666_7, 3.75, 5.833_333_3, 7.5],
             ),
@@ -816,6 +821,7 @@ mod tests {
                     width: 0.0,
                     height: 6.666_666_7,
                     last_descent: 0.0,
+                    ..MTextBox::default()
                 },
                 [0.0, 1.25, 3.333_333_3, 5.416_666_7, 6.666_666_7],
             ),
@@ -826,6 +832,7 @@ mod tests {
                     width: 0.0,
                     height: 7.446,
                     last_descent: 0.735,
+                    ..MTextBox::default()
                 },
                 [0.0, 1.6175, 3.723, 5.8285, 7.446],
             ),
@@ -835,6 +842,7 @@ mod tests {
                     width: 0.0,
                     height: 2.587,
                     last_descent: 0.0426,
+                    ..MTextBox::default()
                 },
                 [0.0, 1.2713, 1.2935, 1.3157, 2.587],
             ),
@@ -884,6 +892,7 @@ mod tests {
             width: 9.6905,
             height: 2.5,
             last_descent: 0.0,
+            ..MTextBox::default()
         };
         // As AutoCAD 2026 placed NOTE in romans: at (26, 10), top left.
         let laid = mleader.laid_out(&style, &measure, &[]);

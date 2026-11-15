@@ -1,10 +1,10 @@
 # A made-up enclosure's back panel, dimensioned on an A3 sheet: its overall
 # size, a fan cut-out and a gland plate cut-out, a slot with round ends, a
-# chamfered corner, four mounting holes and two gland holes. Linear,
-# aligned, radius and diameter dimensions in ISO-25, the metric sheet's
-# own style, and in two styles of the sheet's: one with open arrowheads and
-# a suffix, one with text centred and horizontal, as Standard draws it.
-# Everything here is made up.
+# chamfered corner and its angle, four mounting holes and two gland holes.
+# Linear, aligned, angular, radius and diameter dimensions in ISO-25, the
+# metric sheet's own style, and in two styles of the sheet's: one with open
+# arrowheads and a suffix, one with text centred and horizontal, as Standard
+# draws it. Everything here is made up.
 units: mm
 paper: ISO A3 landscape
 layers:
@@ -53,6 +53,7 @@ objects:
   - dimension: {id: width, kind: linear, points: [[60, 50, 0], [360, 50, 0]], location: [210, 30, 0], layer: dims}
   - dimension: {id: height, kind: linear, angle: 90, points: [[60, 50, 0], [60, 250, 0]], location: [40, 150, 0], layer: dims}
   - dimension: {id: chamfer, kind: aligned, points: [[360, 230, 0], [340, 250, 0]], location: [360, 250, 0], layer: dims}
+  - dimension: {id: chamfer-angle, kind: angular, lines: [[[60, 250, 0], [340, 250, 0]], [[340, 250, 0], [360, 230, 0]]], location: [358, 246, 0], layer: dims}
   # The cut-outs, in their own style.
   - dimension: {id: fan-width, kind: linear, points: [[90, 200, 0], [210, 200, 0]], location: [150, 212, 0], dimension_style: cutout, layer: dims}
   - dimension: {id: fan-height, kind: linear, angle: 90, points: [[210, 120, 0], [210, 200, 0]], location: [222, 160, 0], dimension_style: cutout, layer: dims}

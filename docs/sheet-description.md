@@ -195,6 +195,11 @@ dimension_styles:
     placement: centered
     precision: 1
     suppress_trailing_zeros: true
+  feet-and-inches:
+    unit_format: architectural
+    precision: 4
+    angular_unit: degrees_minutes_seconds
+    angular_precision: 2
 ```
 
 | Key | AutoCAD's | What it is | `ISO-25` | `Standard` |
@@ -208,13 +213,21 @@ dimension_styles:
 | `extension_beyond` | DIMEXE | How far an extension line reaches past the dimension line: a length of 0 or more. | 1.25 mm | 0.18 in |
 | `line_extension` | DIMDLE | How far the dimension line reaches past the extension lines when its arrowhead is `none`: a length of 0 or more. | 0 | 0 |
 | `center_mark` | DIMCEN | How far the arms of the cross that marks a circle's centre reach, 0 for none. It is drawn when a radius or diameter dimension's text is centred and outside the circle. | 2.5 mm | 0.09 in |
+| `baseline_spacing` | DIMDLI | How much further out a [baseline dimension](change-sets.md#dimensions-from-others)'s line, or an angular one's arc, is than the one it is added from: a length of 0 or more. | 3.75 mm | 0.38 in |
 | `placement` | DIMTAD, DIMTIH, DIMTOH, DIMTOFL | Where its text sits, one of AutoCAD's two defaults: `above`, aligned with the dimension line and above it, which then runs between the extension lines even when the arrowheads are outside them; or `centered`, horizontal in the middle of the dimension line, which breaks for it. | `above` | `centered` |
-| `unit_format` | DIMLUNIT | How a value is written: `decimal`. Scientific, engineering, architectural and fractional wait. | `decimal` | `decimal` |
-| `precision` | DIMDEC | How many decimals a value shows: 0 to 8. | 2 | 4 |
-| `decimal_separator` | DIMDSEP | `period`, `comma` or `space`. | `comma` | `period` |
+| `unit_format` | DIMLUNIT | How a length is written: `scientific`, `1.25E+01`; `decimal`, `12.50`; `engineering`, feet and decimal inches, `1'-0.50"`; `architectural`, feet and fractional inches, `1'-0½"`; `fractional`, `12½`; or `windows_desktop`, decimal with a period and its thousands grouped with commas. Engineering and architectural count the sheet's unit as an inch, so they are for a sheet in `in`; see [Unit formats](#unit-formats). | `decimal` | `decimal` |
+| `precision` | DIMDEC | How many decimals a length shows, or for an architectural or fractional one how fine its fraction is, 1/2 at 1 to 1/256 at 8: 0 to 8. | 2 | 4 |
+| `fraction_format` | DIMFRAC | How an architectural or fractional length's fraction shows: `horizontal`, stacked over a bar; `diagonal`, stacked across a slash; `not_stacked`, on the line, `12 1/2`. | `horizontal` | `horizontal` |
+| `decimal_separator` | DIMDSEP | `period`, `comma` or `space`, between a decimal length's or an angle's whole part and its decimals. | `comma` | `period` |
 | `suppress_leading_zeros` | DIMZIN 4 | Whether 0.5 shows as .5: `true` or `false`. | `false` | `false` |
 | `suppress_trailing_zeros` | DIMZIN 8 | Whether 2.50 shows as 2.5, and 2.00 as 2. | `true` | `false` |
-| `prefix`, `suffix` | DIMPOST | What comes before and after every value: one line, with no `<`, `>`, `\`, `{`, `}` or `%%`, which AutoCAD reads in DIMPOST as a control code. Either takes the place of a radius's R and a diameter's ∅, as in AutoCAD. | none | none |
+| `suppress_zero_feet` | DIMZIN 0 and 3 | Whether an engineering or architectural length leaves out zero feet, `0'-6"` showing as `6"`. | `true` | `true` |
+| `suppress_zero_inches` | DIMZIN 0 and 2 | Whether it leaves out zero inches, `1'-0"` showing as `1'`. | `true` | `true` |
+| `angular_unit` | DIMAUNIT | How an angle is written: `decimal_degrees`, `45.5°`; `degrees_minutes_seconds`, `45°30'0"`; `gradians`, `50.56g`; or `radians`, `0.794r`. | `decimal_degrees` | `decimal_degrees` |
+| `angular_precision` | DIMADEC | How many decimals an angle shows, 0 to 8; AutoCAD takes -1, as many as a length, only as a variable, and its audit refuses it in a style. In degrees, minutes and seconds, 0 shows whole degrees, 1 and 2 minutes, 3 and 4 seconds, and 5 to 8 a decimal of seconds to four. | 0 | 0 |
+| `suppress_angular_leading_zeros` | DIMAZIN 1 | Whether an angle's 0.5 shows as .5. | `false` | `false` |
+| `suppress_angular_trailing_zeros` | DIMAZIN 2 | Whether an angle's 2.50 shows as 2.5. | `false` | `false` |
+| `prefix`, `suffix` | DIMPOST | What comes before and after every value, a length or an angle, as AutoCAD writes them: one line, with no `<`, `>`, `\`, `{`, `}` or `%%`, which AutoCAD reads in DIMPOST as a control code. Either takes the place of a radius's R and a diameter's ∅, as in AutoCAD. | none | none |
 | `scale` | DIMSCALE | What every length of the style is multiplied by: a number more than 0. | 1 | 1 |
 
 The DWG writes a style as AutoCAD 2026's own of the sheet's unit with these set, and reads one back when every value is one of these: a style that draws tolerances, alternate units, ticks, fixed extension lines, a frame or fill round its text, or another placement or fit than AutoCAD's defaults is counted as not read, and so is a dimension drawn with it.
@@ -240,7 +253,7 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 | `table` | `position`, `columns`, `rows`, `cells`; `title`, `header`, `table_style` | A grid of cells with text, as AutoCAD's TABLE draws it. See [Tables](#tables). |
 | `mleader` | `leaders`, `content`; `landing`, `arrowhead`, `arrow_size`, `mleader_style` | One or more leader lines from their arrows to a landing, and multiline text or a block beyond it, as AutoCAD's MLEADER draws it. See [Leaders](#leaders). |
 | `leader` | `points`; `arrowhead`, `arrow_size`, `gap`, `annotation` | One leader line, arrow first, with an optional multiline text annotation beyond its end, as AutoCAD's older LEADER draws it. See [Leaders](#leaders). |
-| `dimension` | `kind`, `location`; `points` and `angle`, or `center` and `point`; `text`, `dimension_style` | A dimension that measures a length and shows it, as AutoCAD's DIMLINEAR, DIMALIGNED, DIMRADIUS and DIMDIAMETER draw it. See [Dimensions](#dimensions). |
+| `dimension` | `kind`, `location`, and its kind's own keys; `text`, `dimension_style`, `continued` | A dimension that measures a length or an angle and shows it, as AutoCAD's DIMLINEAR, DIMALIGNED, DIMRADIUS, DIMDIAMETER, DIMANGULAR and DIMORDINATE draw it. See [Dimensions](#dimensions). |
 
 Keys before the semicolon are required; keys after it are not. A `radius` is a length more than 0.
 
@@ -575,39 +588,69 @@ A change set adds a multileader with `add_mleader` (AutoCAD's `MLEADER`) and an 
 
 ### Dimensions
 
-A dimension measures a length on the sheet and shows it, drawn as AutoCAD 2026 draws its own: a panel's cut-outs, a back panel's drilling. It belongs on a sheet, not in a block. Its `kind` says what it measures:
+A dimension measures a length or an angle on the sheet and shows it, drawn as AutoCAD 2026 draws its own: a panel's cut-outs, a back panel's drilling, a bracket's angle, a hole pattern's ordinates. It belongs on a sheet, not in a block. Its `kind` says what it measures:
 
 | `kind` | AutoCAD's | Keys | What it measures |
 |---|---|---|---|
-| `linear` | DIMLINEAR | `points`, `location`; `angle` | The distance between its two points along its angle, in degrees anticlockwise from the X axis: 0, horizontal, without it; 90, vertical. |
-| `aligned` | DIMALIGNED | `points`, `location` | The distance between its two points. |
+| `linear` | DIMLINEAR | `points`, `location`; `angle`, `continued` | The distance between its two points along its angle, in degrees anticlockwise from the X axis: 0, horizontal, without it; 90, vertical. |
+| `aligned` | DIMALIGNED | `points`, `location`; `continued` | The distance between its two points. |
 | `radius` | DIMRADIUS | `center`, `point`, `location` | The radius of the circle or arc round `center` through `point`. |
 | `diameter` | DIMDIAMETER | `center`, `point`, `location` | Its diameter. |
+| `angular` | DIMANGULAR, of two lines | `lines`, `location`; `continued` | The angle between two lines, each by two points, `[[a, b], [c, d]]`, the first selected and then the second: of the four sectors their rays make where they meet, the one `location` is in. The lines need not reach each other. |
+| `three_point_angular` | DIMANGULAR, of an arc, a circle or three points | `center`, `points`, `location`; `continued` | The angle at `center`, the vertex, between the rays through its two `points`: of the two, the one `location` is in, which may be more than 180°. An arc's or a circle's is measured from its centre. |
+| `ordinate` | DIMORDINATE | `feature`, `axis`, `location` | The X, `axis: x`, or the Y, `axis: y`, of its `feature`, from the origin: the world's, which is AutoCAD's UCS origin in the drawings AgentDrafter writes. The value shows without its sign. |
 
-Every dimension also takes `text`, its own text, where `<>` stands for the measured value, as in AutoCAD: `4X <>` shows `4X ∅8`. It is one line that shows something, with no `\`, `{`, `}` or `%%`; without it, the dimension shows the measured value. It takes `dimension_style`, the [dimension style](#dimension-styles) it draws with: its unit's own or a name under `dimension_styles`, and without it, its unit's own. Its points and location lie at one height.
+Every dimension also takes `text`, its own text, where `<>` stands for the measured value, as in AutoCAD: `4X <>` shows `4X ∅8`. It is one line that shows something, with no `\`, `{`, `}` or `%%`; without it, the dimension shows the measured value. It takes `dimension_style`, the [dimension style](#dimension-styles) it draws with: its unit's own or a name under `dimension_styles`, and without it, its unit's own. A linear, aligned or angular dimension takes `continued: true` when it continues another, as AutoCAD's DIMCONTINUE adds it: AutoCAD marks it so, by overriding the style's DIMTMOVE to 1, which moves nothing while its text is in its own place, and it draws as any other. A baseline or continued dimension is otherwise an ordinary dimension of its kind, which the operations `add_baseline_dimension` and `add_continued_dimension` add from another ([Dimensions from others](change-sets.md#dimensions-from-others)). Its points and location lie at one height.
 
 ```yaml
 - dimension: {id: width, kind: linear, points: [[60, 50, 0], [360, 50, 0]], location: [210, 30, 0], layer: dims}
 - dimension: {id: chamfer, kind: aligned, points: [[360, 230, 0], [340, 250, 0]], location: [360, 250, 0]}
 - dimension: {id: slot-end, kind: radius, center: [150, 80, 0], point: [156, 80, 0], location: [168, 64, 0]}
 - dimension: {id: mounting-holes, kind: diameter, center: [75, 235, 0], point: [79, 235, 0], location: [95, 270, 0], text: 4X <>}
+- dimension: {id: arm-angle, kind: angular, lines: [[[20, 20, 0], [120, 20, 0]], [[20, 20, 0], [90, 90, 0]]], location: [70, 35, 0]}
+- dimension: {id: vent, kind: three_point_angular, center: [200, 60, 0], points: [[230, 60, 0], [200, 90, 0]], location: [215, 70, 0]}
+- dimension: {id: hole-x, kind: ordinate, feature: [130, 60, 0], axis: x, location: [140, 90, 0]}
 ```
 
 `location` is where the dimension line goes, as AutoCAD's commands ask for it, and a point of it may be a [snapped point](change-sets.md#snapped-points) in an operation, such as a polyline's endpoint or a circle's centre and a quadrant on it:
 
 - A linear or aligned dimension's `points` are where its extension lines start, the first and then the second, apart along its line; its `location` is a point its dimension line passes through, to one side of both. The reader keeps it where AutoCAD does, where the dimension line meets the second extension line.
 - A radius or diameter dimension's `location` is where its text goes, inside or outside the circle: its line runs from the centre through it, and its arrow points where that line meets the circle. The reader keeps `point` there, as AutoCAD's DIMRADIUS does; its distance from `center` is the radius. Text too near the circle is moved clear of it, as AutoCAD moves it, and a DWG keeps only where it was moved to, so the reader gives back a `location` that draws the same: where the text went, or, when that lies past the centre, the point halfway from the centre to the arrow.
+- An angular dimension's `location` is a point its arc passes through, in the angle it measures: the arc is centred on the vertex, its radius the location's distance from it. The reader keeps it a third of the way round the arc from its first end, as AutoCAD keeps it; when the text is outside and nearer the first ray than the second, AutoCAD keeps it two thirds of the way round, and the DWG writes it there and reads it back to its third.
+- An ordinate dimension's `location` is the end of its leader, where its text goes, apart from its feature.
 
 A dimension is laid out as AutoCAD 2026 laid out its own of made-up geometry in its `acad` and `acadiso` templates, measured across lengths, angles and style values, and laid out again unchanged:
 
 - An extension line starts its style's offset from its point and reaches its extension past the dimension line. The dimension line runs between them with an arrowhead at each end, the line starting an arrowhead's length behind each tip, as a leader's does.
-- Text and arrowheads sit between the extension lines when they fit, AutoCAD's best fit: the text needs its length along the line and a gap at each end, the arrowheads their two lengths and a gap each. Text above its line fits apart from the arrowheads; centred text, which breaks the line, needs room for both. When both fit, both are inside; when only the text fits, the arrowheads go outside, each with a tail as long as itself; when only the arrowheads fit, the text goes past the second extension line, an arrowhead's length and a gap beyond it; when neither fits, both go outside, the text past the second arrowhead's tail. No arrowheads always fit.
+- Text and arrowheads sit between the extension lines when they fit, AutoCAD's best fit: the text needs its length along the line and a gap at each end, the arrowheads their two lengths and a gap each. Text above its line fits apart from the arrowheads; centred text, which breaks the line, needs room for both. When both fit, both are inside; when each fits alone but not both, the one that needs more room is inside, the text when they need the same; when only the text fits, the arrowheads go outside, each with a tail as long as itself; when only the arrowheads fit, the text goes past the second extension line, an arrowhead's length and a gap beyond it; when neither fits, both go outside, the text past the second arrowhead's tail. No arrowheads always fit.
 - Text above its line is turned to read from the bottom or the right, a gap above the line. Centred text is horizontal; outside the extension lines it goes the way the line reads, and ends in a landing as long as an arrowhead when the line runs 15° or more from the horizontal.
 - A radius or diameter dimension's text outside the circle is no nearer than two arrowheads' lengths past it, and inside no nearer than two short of it: text placed nearer is moved, as AutoCAD moves it, past the centre to the far side when the circle is too small to hold it inside. Its leader runs from the text to the arrow, which points in from outside the circle or out from inside it. Above its line, the line runs on to the centre, or across the circle with an arrow at its far side, when the text is outside. Centred, the text lands as centred text does, and a centre mark crosses the circle's centre when the text is outside it.
-- A value is rounded to the style's precision and its zeros suppressed as it says, with its decimal separator; a radius's starts with R and a diameter's with ∅, unless the style gives a prefix or a suffix.
+- An angular dimension's arc runs round its vertex, anticlockwise from the first ray of the angle it measures to the second, with an arrowhead at each end, its point on the ray and its body on the arc. An extension line runs along each ray from the line or the point there, any of a line behind the vertex where it meets the other taken as at the vertex, from its end nearer the arc, the style's offset towards it, to the style's extension past it; there is none where the arc meets the line itself. Text and arrowheads fit by the angles they need on the arc, a length `c` taking the angle of a chord `c` long, or half a turn when the circle is not that wide across: text above the arc its length and a gap at each end; centred text its box, a gap round it, across the arc's tangent at its middle, and an arrowhead's length, or three when the arrowheads are inside too; each arrowhead its length. Text inside sits at the middle of the arc, above it along its tangent and turned to read from the bottom or the right, or centred on it, which breaks the arc wherever its box and a gap round it cover it, as often as the arc goes in and out of the box, as centred text outside does where it lies across the arc. Text outside goes beyond the first ray, clockwise: the arc runs on past the arrowhead, and its tail, and the text sits above a line along the arc's tangent as long as itself and its gaps, read along it and turned round when the first ray points into the lower half, or, centred, beside a landing an arrowhead long, to the right when the first ray points into the upper half and the left when the lower. Arrowheads outside have tails as long as themselves, and text above its arc keeps the arc between the rays, as a linear dimension's line.
+- Not matched: an angular dimension over 180° on an arc too small for its centred text, the text wider than the arc's whole circle or outside it, as a long text on a small arc. Of 489 such made-up angles measured, AutoCAD laid out 80 otherwise, its arrowheads outside or its landing the other way, and no rule found fitted them; such a dimension draws as these rules lay it out, and AutoCAD lays it out its own way when it is edited. The other 1,403 dimensions measured with it AutoCAD laid out again unchanged.
+- An ordinate dimension's leader runs from its style's offset past the feature, across the axis it measures, to its location, backwards when the location is level with the feature across the axis, as AutoCAD runs it: straight when the two are in line; otherwise kinked, from the feature to four arrowheads short of the location, or two past the feature when that is nearer, then across to two short of the location, in line with it, and on. Its text reads along the leader, up for an X and across for a Y, whichever way it runs: above its line, a gap above the leader past its end, which runs on under it; centred, in line with the leader past its end, a gap away.
+- A length shows in the style's unit format, an angle in its angular unit, each rounded half away from zero as AutoCAD rounds it, its zeros suppressed as the style says ([Unit formats](#unit-formats)); a radius's starts with R and a diameter's with ∅, unless the style gives a prefix or a suffix, which an angle takes too.
 - The lines and arrowheads draw in the dimension's own colour and lineweight and its layer's linetype, and the text in its own colour and its layer's lineweight, as AutoCAD's block of a dimension draws.
 
-The DWG holds AutoCAD's DIMENSION with its own block, `*D1` and on, holding what it draws as AutoCAD writes it, so AutoCAD shows it without laying it out again; the build adds AutoCAD's `Defpoints` layer for its definition points. A dimension reads back from a DWG when the model draws it: one of the four kinds, flat, with no override of its style but AutoCAD's own, and its text where AutoCAD keeps it. One that does otherwise, such as angular, ordinate and arc length dimensions, text moved off its line or rotated, or oblique extension lines, is counted as not read. Its block and `Defpoints` are read with it, never as a block or a layer of the sheet's. Angular, ordinate, baseline and continued dimensions wait (#75).
+The DWG holds AutoCAD's DIMENSION with its own block, `*D1` and on, holding what it draws as AutoCAD writes it, an angular dimension's arcs as ARCs and a stacked fraction in its MTEXT as AutoCAD codes it, so AutoCAD shows it without laying it out again; the build adds AutoCAD's `Defpoints` layer for its definition points. A dimension reads back from a DWG when the model draws it: one of the seven kinds, flat, with no override of its style but AutoCAD's own, DIMUPT on a radius or diameter and DIMTMOVE on a continued one, its text where AutoCAD keeps it, an angular one's arc point where AutoCAD keeps it and an ordinate one's origin the world's. One that does otherwise, such as arc length and jogged radius dimensions, text moved off its line or rotated, oblique extension lines, or an ordinate measured from another origin, is counted as not read. Its block and `Defpoints` are read with it, never as a block or a layer of the sheet's.
+
+#### Unit formats
+
+A style shows lengths and angles as AutoCAD 2026 showed made-up ones in every unit format of its `acad` and `acadiso` templates' styles:
+
+| Format | `12.5` shows | Its rules |
+|---|---|---|
+| `scientific` | `1.2500E+01` | One digit, the precision's decimals and a signed exponent of two digits, after a period. |
+| `decimal` | `12.5000` | The precision's decimals after the style's decimal separator. |
+| `engineering` | `1'-0.50"` | Feet and decimal inches, twelve to the foot, after a period. Zero feet are left out when `suppress_zero_feet` says, and the inches are then always shown: `0.50"`; zero inches when `suppress_zero_inches` says, when the feet are shown: `1'`. |
+| `architectural` | `1'-0½"` | Feet and inches with a fraction of them, as fine as 1/2^precision and reduced, zeros left out as for engineering; a fraction with no whole inches before it and no feet shows alone, `½"`. |
+| `fractional` | `12½` | A whole number and a fraction, with no feet and no inch mark. |
+| `windows_desktop` | `12.50` | Decimal, with a period whatever the separator, and the thousands grouped with commas, `2,380.44`, as Windows writes a number in US English, the language of the laptop AutoCAD was measured on. |
+
+A stacked fraction draws as AutoCAD lays out its MTEXT: over a bar as long as the wider number, the numerator `h/6` above the bar and the denominator `7h/6` below, each in its middle; or across a slash `2h` long at 55°, the numerator on the text's middle and the denominator `h` below; both numbers as high as the rest, the text beside them on the box's bottom, or in its middle on an imperial sheet, where AutoCAD aligns Standard's text at its middle.
+
+An angle in degrees, gradians or radians takes the angular precision's decimals after the decimal separator; in degrees, minutes and seconds, its seconds' decimals follow a period. An angle rounded to a whole turn shows as 0, in degrees and in degrees, minutes and seconds, as AutoCAD shows it.
+
+AutoCAD allows engineering and architectural on a metric drawing, counting its millimetre as an inch, so that 25.4 mm shows as `2'-1.40"`; the reader refuses them on a sheet not in `in`, where they would show a length as so many inches that is not.
 
 ### IDs and names
 

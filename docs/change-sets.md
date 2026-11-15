@@ -79,6 +79,11 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `add_aligned_dimension` | `DIMALIGNED` | Adds an aligned dimension. |
 | `add_radius_dimension` | `DIMRADIUS` | Adds a radius dimension. |
 | `add_diameter_dimension` | `DIMDIAMETER` | Adds a diameter dimension. |
+| `add_angular_dimension` | `DIMANGULAR` | Adds an angular dimension between two lines. |
+| `add_three_point_angular_dimension` | none | Adds an angular dimension at a vertex between two points, as DIMANGULAR measures an arc, a circle or three points. |
+| `add_ordinate_dimension` | `DIMORDINATE` | Adds an ordinate dimension. |
+| `add_baseline_dimension` | `DIMBASELINE` | Adds a dimension from another's first extension line, its line further out. |
+| `add_continued_dimension` | `DIMCONTINUE` | Adds a dimension from another's second extension line, on its line. |
 | `change` | `CHANGE` | Sets keys of an object. |
 | `move` | `MOVE` | Moves an object. |
 | `delete` | `ERASE` | Deletes an object. |
@@ -177,6 +182,20 @@ Two operations edit a [multileader](sheet-description.md#leaders)'s leader lines
 
 ```json
 {"op": "change", "target": {"id": "DEMO-002/callout"}, "set": {"content": {"text": "AREA 200 RENAMED", "height": 0.2}}}
+```
+
+### Dimensions from others
+
+Two operations add a [dimension](sheet-description.md#dimensions) from another, as AutoCAD 2026's DIMBASELINE and DIMCONTINUE added its own from made-up linear, aligned, angular and ordinate dimensions. Each names the dimension it is added from under `target`, by its ID or its name, and takes `point`, a point or a [snapped point](#snapped-points): the new dimension's second extension line's origin, or an ordinate dimension's new feature; and `id` and `name`, the new dimension's, when given. Without an `id` it is given one, `dimension-1` or the next number free. The new dimension takes the other's kind, style and layer, and is added where the other is written: beside a template's in the template, so it is on every sheet built from it, and beside a row's own in the row.
+
+- **`add_baseline_dimension`** (`DIMBASELINE`) measures from the other's first extension line, its dimension line further out from the points than the other's by the style's `baseline_spacing`, AutoCAD's DIMDLI, times its `scale`; an angular dimension's arc that much further from the vertex.
+- **`add_continued_dimension`** (`DIMCONTINUE`) measures from the other's second extension line, on the same dimension line or arc, and is written `continued: true`, as AutoCAD marks it.
+
+A dimension from an aligned one is linear, at the aligned one's angle turned half round, as AutoCAD makes it. An angular one runs the same way round from the point it keeps as the other does, and keeps its location a third of the way round. An ordinate one, baseline and continued alike, measures the new feature on the same axis, its leader straight and ending level with the other's, and AutoCAD marks neither. A dimension is added from a linear, aligned, three-point angular or ordinate dimension: one from a radius or a diameter dimension, which AutoCAD's commands do not take, is refused, and so is one from an angular dimension between two lines, which AutoCAD 2026 was not measured adding from; add it from a three-point angular dimension at their vertex.
+
+```json
+{"op": "add_baseline_dimension", "target": {"id": "BRACKET-001/width"}, "point": [90, 20, 0], "id": "overall"}
+{"op": "dimcontinue", "target": {"name": "first-hole"}, "point": {"snap": {"id": "BRACKET-001/hole-2", "snap": "center"}}}
 ```
 
 ### Blocks

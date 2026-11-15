@@ -14,7 +14,8 @@
 //!   text. Text and arrowheads sit between the extension lines when they
 //!   fit, AutoCAD's best fit: the text needs its own length along the line
 //!   and a gap at each end, the arrowheads their two lengths and a gap each.
-//!   When both fit, both are inside; when only the text fits, the arrowheads
+//!   When both fit, both are inside; when each fits alone but not both, the
+//!   one that needs more room is inside; when only the text fits, the arrowheads
 //!   go outside, each with a tail as long as itself; when only the
 //!   arrowheads fit, the text goes beyond the second extension line, an
 //!   arrowhead's length and a gap past it; when neither fits, both go
@@ -38,10 +39,22 @@
 //!   a circle a radius or diameter dimension's text is outside of is marked
 //!   at its centre by a cross, the centre mark.
 //!
+//! - An angular dimension draws an arc round its vertex, through its
+//!   location, between the two lines or the two points it measures, with an
+//!   arrowhead at each end; an extension line from each line or point the
+//!   arc does not reach; and its text, fitted as a linear dimension's is,
+//!   by the angles the text and arrowheads need on the arc (`angular.rs`).
+//! - An ordinate dimension draws a leader from its feature to its
+//!   location, kinked when the two are not in line, and its text at the
+//!   leader's end (`ordinate.rs`).
+//!
 //! The text says the measured value, as the style formats it, or the
 //! dimension's own text, where `<>` stands for the measured value, as in
 //! AutoCAD. A radius's value starts with `R` and a diameter's with `∅` unless
-//! the style gives a prefix or a suffix.
+//! the style gives a prefix or a suffix, which an angle takes too. A
+//! length shows in the style's unit format and an angle in its angular
+//! unit (`units.rs`); a stacked fraction is laid out as AutoCAD lays out its
+//! MTEXT (`stack.rs`).
 
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +63,14 @@ use super::{layer_zero, Point3, Properties};
 use crate::description::normalize_degrees;
 use crate::text::{Attachment, MText, STANDARD};
 use crate::units::Unit;
+
+mod angular;
+mod ordinate;
+mod stack;
+mod units;
+
+pub use angular::Sector;
+pub use units::{AngularUnit, FractionFormat, UnitFormat, DEGREE_SIGN};
 
 /// The dimension style an imperial sheet's dimensions draw with unless they
 /// name another: AutoCAD's own `Standard`.
@@ -85,15 +106,25 @@ pub enum DimensionKind {
     Radius,
     /// AutoCAD's DIMDIAMETER: a circle's or an arc's diameter.
     Diameter,
+    /// AutoCAD's DIMANGULAR of two lines: the angle between them.
+    Angular,
+    /// AutoCAD's DIMANGULAR of a vertex and two points: the angle at the
+    /// vertex between them, as AutoCAD measures an arc's or a circle's.
+    ThreePointAngular,
+    /// AutoCAD's DIMORDINATE: a feature's X or Y from the origin.
+    Ordinate,
 }
 
 impl DimensionKind {
     /// Every kind, in the order messages list them.
-    pub const ALL: [DimensionKind; 4] = [
+    pub const ALL: [DimensionKind; 7] = [
         DimensionKind::Linear,
         DimensionKind::Aligned,
         DimensionKind::Radius,
         DimensionKind::Diameter,
+        DimensionKind::Angular,
+        DimensionKind::ThreePointAngular,
+        DimensionKind::Ordinate,
     ];
 
     /// The name a sheet description writes, such as `linear`.
@@ -103,12 +134,44 @@ impl DimensionKind {
             DimensionKind::Aligned => "aligned",
             DimensionKind::Radius => "radius",
             DimensionKind::Diameter => "diameter",
+            DimensionKind::Angular => "angular",
+            DimensionKind::ThreePointAngular => "three_point_angular",
+            DimensionKind::Ordinate => "ordinate",
         }
     }
 
     /// Whether it measures a circle, from its centre and a point on it.
     pub const fn is_radial(self) -> bool {
         matches!(self, DimensionKind::Radius | DimensionKind::Diameter)
+    }
+
+    /// Whether it measures an angle.
+    pub const fn is_angular(self) -> bool {
+        matches!(
+            self,
+            DimensionKind::Angular | DimensionKind::ThreePointAngular
+        )
+    }
+}
+
+/// Which of a feature's coordinates an ordinate dimension measures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrdinateAxis {
+    /// Its X, AutoCAD's X datum: the leader runs up or down.
+    X,
+    /// Its Y, AutoCAD's Y datum: the leader runs across.
+    Y,
+}
+
+impl OrdinateAxis {
+    pub const ALL: [OrdinateAxis; 2] = [OrdinateAxis::X, OrdinateAxis::Y];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            OrdinateAxis::X => "x",
+            OrdinateAxis::Y => "y",
+        }
     }
 }
 
@@ -205,13 +268,34 @@ pub struct DimensionStyle {
     /// none: DIMCEN.
     pub center_mark: f64,
     pub placement: TextPlacement,
-    /// How many decimals a value shows, 0 to 8: DIMDEC.
+    /// How lengths show: DIMLUNIT.
+    pub unit_format: UnitFormat,
+    /// How many decimals a length shows, 0 to 8, or for an architectural or
+    /// fractional one how fine its fraction is, to 1/2^precision: DIMDEC.
     pub precision: u8,
+    /// How an architectural or fractional length's fraction shows: DIMFRAC.
+    pub fraction_format: FractionFormat,
     pub decimal_separator: DecimalSeparator,
     /// Whether `0.5` shows as `.5`: DIMZIN 4.
     pub suppress_leading_zeros: bool,
     /// Whether `2.50` shows as `2.5`, and `2.00` as `2`: DIMZIN 8.
     pub suppress_trailing_zeros: bool,
+    /// Whether an engineering or architectural length leaves out zero
+    /// feet, `0'-6"` showing as `6"`: DIMZIN 0 and 3.
+    pub suppress_zero_feet: bool,
+    /// Whether it leaves out zero inches, `1'-0"` showing as `1'`: DIMZIN
+    /// 0 and 2.
+    pub suppress_zero_inches: bool,
+    /// How angles show: DIMAUNIT.
+    pub angular_unit: AngularUnit,
+    /// How many decimals an angle shows, 0 to 8: DIMADEC. AutoCAD takes -1,
+    /// as many as a length, as a variable, and its audit refuses it in a
+    /// style.
+    pub angular_precision: u8,
+    /// Whether an angle's `0.5` shows as `.5`: DIMAZIN 1.
+    pub suppress_angular_leading_zeros: bool,
+    /// Whether an angle's `2.50` shows as `2.5`: DIMAZIN 2.
+    pub suppress_angular_trailing_zeros: bool,
     /// What comes before every value it shows: DIMPOST's part before `<>`.
     pub prefix: String,
     /// What comes after: DIMPOST's part after `<>`.
@@ -219,13 +303,16 @@ pub struct DimensionStyle {
     /// What every length of the style is multiplied by, more than 0:
     /// DIMSCALE.
     pub scale: f64,
+    /// How far apart a baseline dimension's lines are, 0 or more: DIMDLI.
+    pub baseline_spacing: f64,
 }
 
 impl DimensionStyle {
     /// AutoCAD 2026's own `Standard`, of its `acad` template, in `units`:
     /// arrows and text 0.18 in, a gap of 0.09, extension lines offset
-    /// 0.0625 and reaching 0.18 beyond, a centre mark 0.09, text centred,
-    /// four decimals after a period and no zeros suppressed.
+    /// 0.0625 and reaching 0.18 beyond, a centre mark 0.09, baseline
+    /// dimensions 0.38 apart, text centred, four decimals after a period
+    /// and no zeros suppressed, angles in whole degrees.
     pub fn standard(units: Unit) -> Self {
         let inch = |x: f64| Unit::In.convert(x, units);
         Self {
@@ -240,20 +327,30 @@ impl DimensionStyle {
             line_extension: 0.0,
             center_mark: inch(0.09),
             placement: TextPlacement::Centered,
+            unit_format: UnitFormat::Decimal,
             precision: 4,
+            fraction_format: FractionFormat::Horizontal,
             decimal_separator: DecimalSeparator::Period,
             suppress_leading_zeros: false,
             suppress_trailing_zeros: false,
+            suppress_zero_feet: true,
+            suppress_zero_inches: true,
+            angular_unit: AngularUnit::DecimalDegrees,
+            angular_precision: 0,
+            suppress_angular_leading_zeros: false,
+            suppress_angular_trailing_zeros: false,
             prefix: String::new(),
             suffix: String::new(),
             scale: 1.0,
+            baseline_spacing: inch(0.38),
         }
     }
 
     /// AutoCAD 2026's own `ISO-25`, of its `acadiso` template, in `units`:
     /// arrows and text 2.5 mm, a gap of 0.625, extension lines offset 0.625
-    /// and reaching 1.25 beyond, a centre mark 2.5, text above the line,
-    /// two decimals after a comma and trailing zeros suppressed.
+    /// and reaching 1.25 beyond, a centre mark 2.5, baseline dimensions
+    /// 3.75 apart, text above the line, two decimals after a comma and
+    /// trailing zeros suppressed, angles in whole degrees.
     pub fn iso_25(units: Unit) -> Self {
         let mm = |x: f64| Unit::Mm.convert(x, units);
         Self {
@@ -268,13 +365,22 @@ impl DimensionStyle {
             line_extension: 0.0,
             center_mark: mm(2.5),
             placement: TextPlacement::Above,
+            unit_format: UnitFormat::Decimal,
             precision: 2,
+            fraction_format: FractionFormat::Horizontal,
             decimal_separator: DecimalSeparator::Comma,
             suppress_leading_zeros: false,
             suppress_trailing_zeros: true,
+            suppress_zero_feet: true,
+            suppress_zero_inches: true,
+            angular_unit: AngularUnit::DecimalDegrees,
+            angular_precision: 0,
+            suppress_angular_leading_zeros: false,
+            suppress_angular_trailing_zeros: false,
             prefix: String::new(),
             suffix: String::new(),
             scale: 1.0,
+            baseline_spacing: mm(3.75),
         }
     }
 
@@ -316,17 +422,10 @@ impl DimensionStyle {
         }
     }
 
-    /// `value` as the style shows it: rounded to its precision, its zeros
-    /// suppressed as it says, with its decimal separator.
+    /// The length `value` as the style shows it, in its unit format, each
+    /// stacked fraction written `N/D`.
     pub fn format(&self, value: f64) -> String {
-        let mut shown = format!("{:.*}", usize::from(self.precision), value.abs());
-        if self.suppress_trailing_zeros && shown.contains('.') {
-            shown = shown.trim_end_matches('0').trim_end_matches('.').to_owned();
-        }
-        if self.suppress_leading_zeros && shown.starts_with("0.") {
-            shown.remove(0);
-        }
-        shown.replace('.', &self.decimal_separator.character().to_string())
+        flat(&self.length_pieces(value))
     }
 
     /// Whether DIMPOST holds anything: a prefix or a suffix.
@@ -347,6 +446,43 @@ struct Sizes {
     center_mark: f64,
 }
 
+/// A piece of a dimension's text: plain text, or a fraction AutoCAD
+/// stacks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextPiece {
+    Plain(String),
+    /// A fraction over a bar, or across a slash when `diagonal`.
+    Fraction {
+        numerator: String,
+        denominator: String,
+        diagonal: bool,
+    },
+}
+
+/// Pieces of text as one line: each stacked fraction written `N/D`, a
+/// space between it and a number before it.
+pub fn flat(pieces: &[TextPiece]) -> String {
+    let mut out = String::new();
+    for piece in pieces {
+        match piece {
+            TextPiece::Plain(s) => out.push_str(s),
+            TextPiece::Fraction {
+                numerator,
+                denominator,
+                ..
+            } => {
+                if out.ends_with(|c: char| c.is_ascii_digit()) {
+                    out.push(' ');
+                }
+                out.push_str(numerator);
+                out.push('/');
+                out.push_str(denominator);
+            }
+        }
+    }
+    out
+}
+
 /// What a dimension measures, and from what.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -360,6 +496,14 @@ pub enum Measured {
     Radius { center: Point3, point: Point3 },
     /// The diameter of the circle round `center` through `point`.
     Diameter { center: Point3, point: Point3 },
+    /// The angle between two lines, each through its two points, in the
+    /// sector between them that the location is in.
+    Angular { lines: [[Point3; 2]; 2] },
+    /// The angle at `center` from one point to the other: of the two, the
+    /// one the location is in.
+    ThreePointAngular { center: Point3, points: [Point3; 2] },
+    /// The X or Y of `feature`, from the origin.
+    Ordinate { feature: Point3, axis: OrdinateAxis },
 }
 
 /// A dimension: AutoCAD's DIMENSION.
@@ -368,7 +512,10 @@ pub enum Measured {
 /// meets its second extension line, as AutoCAD keeps it; a radius or
 /// diameter dimension's is where its text sits along the line from its
 /// centre, and its point is where that line meets the circle, its arrow's
-/// point. The description's reader puts both there from what it is given.
+/// point; an angular dimension's is on its arc a third of the way round
+/// from the arc's first end, as AutoCAD keeps it; an ordinate dimension's
+/// is the end of its leader. The description's reader puts each there from
+/// what it is given.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Dimension {
     #[serde(flatten)]
@@ -379,6 +526,11 @@ pub struct Dimension {
     /// none to show the measured value alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Whether it continues another dimension, as AutoCAD's DIMCONTINUE
+    /// adds it: AutoCAD marks it by overriding DIMTMOVE to 1, which moves
+    /// nothing while its text is in its own place.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continued: bool,
     #[serde(default = "layer_zero")]
     pub layer: String,
     #[serde(flatten)]
@@ -391,6 +543,13 @@ pub struct Dimension {
 pub enum DimensionPart {
     /// A line, from one end to the other as AutoCAD writes it.
     Line([Point3; 2]),
+    /// An arc round `center`, anticlockwise from `start` to `end` degrees.
+    Arc {
+        center: Point3,
+        radius: f64,
+        start: f64,
+        end: f64,
+    },
     /// An arrowhead with its point at `tip`, its body towards `base`, an
     /// arrowhead's length away.
     Arrow { tip: Point3, base: Point3 },
@@ -398,15 +557,34 @@ pub enum DimensionPart {
     Text,
 }
 
+/// A line of a stacked text, or one of its bars or slashes, as it draws.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Lettered {
+    /// A line of text starting at `start`, on its baseline, along the
+    /// text's rotation.
+    Text {
+        contents: String,
+        start: Point3,
+    },
+    Line([Point3; 2]),
+}
+
 /// A dimension laid out as AutoCAD lays out its block.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LaidDimension {
     pub parts: Vec<DimensionPart>,
-    /// The text as it draws: multiline text attached at its middle.
+    /// The text as it draws: multiline text attached at its middle, a
+    /// stacked fraction written `N/D` in it.
     pub text: MText,
+    /// What the text says, piece by piece, as AutoCAD writes its MTEXT.
+    pub pieces: Vec<TextPiece>,
+    /// The text, when it holds a stacked fraction, as it draws: each line of
+    /// text, bar and slash. Empty when the text draws as `text` does.
+    pub lettering: Vec<Lettered>,
     /// Where AutoCAD keeps the text's place on the dimension: the middle
-    /// of the text for a linear or aligned dimension, and for a radius or
-    /// diameter dimension the point along its line the text goes from.
+    /// of the text for a linear, aligned, angular or ordinate dimension,
+    /// and for a radius or diameter dimension the point along its line the
+    /// text goes from.
     pub text_point: Point3,
     /// Whether AutoCAD keeps the text as placed where the dimension says,
     /// as it keeps a radius's or diameter's text, rather than at its own
@@ -414,15 +592,35 @@ pub struct LaidDimension {
     pub text_placed: bool,
     pub arrowhead: Arrowhead,
     pub arrow_size: f64,
+    /// Whether its arrowheads sit on an arc, as an angular dimension's do:
+    /// AutoCAD writes each one's corners from the right of its body first.
+    pub arrows_on_arc: bool,
+    /// Where AutoCAD keeps an angular dimension's arc point when it is not
+    /// its location, a third of the way round its arc: two thirds of the
+    /// way, when its text is outside.
+    pub arc_point: Option<Point3>,
     /// The points AutoCAD marks in the block on layer `Defpoints`.
     pub defpoints: Vec<Point3>,
 }
 
 impl LaidDimension {
-    /// The lines it draws, without its arrowheads and text.
+    /// The lines it draws, without its arcs, arrowheads and text.
     pub fn lines(&self) -> impl Iterator<Item = [Point3; 2]> + '_ {
         self.parts.iter().filter_map(|p| match p {
             DimensionPart::Line(l) => Some(*l),
+            _ => None,
+        })
+    }
+
+    /// Its arcs: each one's centre, radius, and start and end in degrees.
+    pub fn arcs(&self) -> impl Iterator<Item = (Point3, f64, f64, f64)> + '_ {
+        self.parts.iter().filter_map(|p| match p {
+            DimensionPart::Arc {
+                center,
+                radius,
+                start,
+                end,
+            } => Some((*center, *radius, *start, *end)),
             _ => None,
         })
     }
@@ -443,17 +641,25 @@ impl Dimension {
             Measured::Aligned { .. } => DimensionKind::Aligned,
             Measured::Radius { .. } => DimensionKind::Radius,
             Measured::Diameter { .. } => DimensionKind::Diameter,
+            Measured::Angular { .. } => DimensionKind::Angular,
+            Measured::ThreePointAngular { .. } => DimensionKind::ThreePointAngular,
+            Measured::Ordinate { .. } => DimensionKind::Ordinate,
         }
     }
 
-    /// Every point that defines it, its location last: its two points, or
-    /// its centre and its point.
+    /// Every point that defines it, its location last: its two points; its
+    /// centre and its point; its two lines' points; or its feature.
     pub fn points(&self) -> Vec<Point3> {
         let mut points = match &self.measured {
             Measured::Linear { points, .. } | Measured::Aligned { points } => points.to_vec(),
             Measured::Radius { center, point } | Measured::Diameter { center, point } => {
                 vec![*center, *point]
             }
+            Measured::Angular { lines } => lines.iter().flatten().copied().collect(),
+            Measured::ThreePointAngular { center, points } => {
+                vec![*center, points[0], points[1]]
+            }
+            Measured::Ordinate { feature, .. } => vec![*feature],
         };
         points.push(self.location);
         points
@@ -468,13 +674,26 @@ impl Dimension {
             Measured::Radius { center, point } | Measured::Diameter { center, point } => {
                 vec![center, point]
             }
+            Measured::Angular { lines } => lines.iter_mut().flatten().collect(),
+            Measured::ThreePointAngular { center, points } => {
+                let [a, b] = points;
+                vec![center, a, b]
+            }
+            Measured::Ordinate { feature, .. } => vec![feature],
         };
         points.push(&mut self.location);
         points
     }
 
-    /// The length it measures, in the sheet's unit, as AutoCAD measures
-    /// it: in the plane, along its line, or the radius or diameter.
+    /// The sector an angular dimension measures, from its lines or points
+    /// and its location; none for another kind, or lines that never meet.
+    pub fn sector(&self) -> Option<Sector> {
+        angular::sector(&self.measured, self.location)
+    }
+
+    /// What it measures, as AutoCAD measures it: a length in the sheet's
+    /// unit, in the plane, along its line, the radius or the diameter, or
+    /// the X or Y from the origin; or an angle, in degrees.
     pub fn measurement(&self) -> f64 {
         match &self.measured {
             Measured::Linear { points, angle } => {
@@ -488,44 +707,88 @@ impl Dimension {
             Measured::Diameter { center, point } => {
                 2.0 * (point.x - center.x).hypot(point.y - center.y)
             }
+            Measured::Angular { .. } | Measured::ThreePointAngular { .. } => {
+                self.sector().map_or(0.0, |s| s.sweep)
+            }
+            Measured::Ordinate { feature, axis } => match axis {
+                OrdinateAxis::X => feature.x.abs(),
+                OrdinateAxis::Y => feature.y.abs(),
+            },
         }
     }
 
-    /// The measured value as `style` shows it, with the radius's `R` or
-    /// the diameter's `∅` before it unless the style gives a prefix or a
-    /// suffix.
+    /// The measured value as `style` shows it, piece by piece: a length in
+    /// its unit format, an angle in its angular unit, with the style's
+    /// prefix and suffix, or without them a radius's `R` or a diameter's
+    /// `∅` before it.
+    pub fn measured_pieces(&self, style: &DimensionStyle) -> Vec<TextPiece> {
+        let mut pieces = if self.kind().is_angular() {
+            vec![TextPiece::Plain(style.angle_text(self.measurement()))]
+        } else {
+            style.length_pieces(self.measurement())
+        };
+        let (before, after) = if style.has_post() {
+            (style.prefix.clone(), style.suffix.clone())
+        } else {
+            match self.kind() {
+                DimensionKind::Radius => ("R".to_owned(), String::new()),
+                DimensionKind::Diameter => (DIAMETER_SIGN.to_string(), String::new()),
+                _ => (String::new(), String::new()),
+            }
+        };
+        if !before.is_empty() {
+            pieces.insert(0, TextPiece::Plain(before));
+        }
+        if !after.is_empty() {
+            pieces.push(TextPiece::Plain(after));
+        }
+        joined(pieces)
+    }
+
+    /// The measured value as `style` shows it, a stacked fraction written
+    /// `N/D`.
     pub fn measured_text(&self, style: &DimensionStyle) -> String {
-        let value = style.format(self.measurement());
-        if style.has_post() {
-            return format!("{}{value}{}", style.prefix, style.suffix);
-        }
-        match self.kind() {
-            DimensionKind::Radius => format!("R{value}"),
-            DimensionKind::Diameter => format!("{DIAMETER_SIGN}{value}"),
-            _ => value,
-        }
+        flat(&self.measured_pieces(style))
     }
 
-    /// What its text says: its own, each `<>` the measured value, or the
-    /// measured value.
+    /// What its text says, piece by piece: its own, each `<>` the measured
+    /// value, or the measured value.
+    pub fn text_pieces(&self, style: &DimensionStyle) -> Vec<TextPiece> {
+        let measured = self.measured_pieces(style);
+        let Some(own) = &self.text else {
+            return measured;
+        };
+        let mut pieces = Vec::new();
+        for (i, part) in own.split(MEASURED).enumerate() {
+            if i > 0 {
+                pieces.extend(measured.iter().cloned());
+            }
+            if !part.is_empty() {
+                pieces.push(TextPiece::Plain(part.to_owned()));
+            }
+        }
+        joined(pieces)
+    }
+
+    /// What its text says, a stacked fraction written `N/D`.
     pub fn displayed_text(&self, style: &DimensionStyle) -> String {
-        let measured = self.measured_text(style);
-        match &self.text {
-            Some(own) => own.replace(MEASURED, &measured),
-            None => measured,
-        }
+        flat(&self.text_pieces(style))
     }
 
-    /// Lays the dimension out with `style`, its text's box measured by
-    /// `measure`, as AutoCAD 2026 lays out its block.
+    /// Lays the dimension out with `style` on a sheet in `units`, its
+    /// text's box measured by `measure`, as AutoCAD 2026 lays out its
+    /// block. A text with a stacked fraction is aligned at its middle on an
+    /// imperial sheet, as AutoCAD aligns Standard's.
     pub fn laid_out(
         &self,
         style: &DimensionStyle,
+        units: Unit,
         measure: &dyn Fn(&MText) -> MTextBox,
     ) -> LaidDimension {
         let sizes = style.sizes();
+        let pieces = self.text_pieces(style);
         let mut text = MText {
-            contents: self.displayed_text(style),
+            contents: flat(&pieces),
             position: self.location,
             height: sizes.text,
             width: 0.0,
@@ -536,8 +799,25 @@ impl Dimension {
             layer: self.layer.clone(),
             properties: self.properties.clone(),
         };
-        let measured = measure(&text);
-        let box_size = (measured.width, measured.height);
+        let stacked = pieces
+            .iter()
+            .any(|p| matches!(p, TextPiece::Fraction { .. }))
+            .then(|| {
+                let piece = |contents: &str| {
+                    measure(&MText {
+                        contents: contents.to_owned(),
+                        ..text.clone()
+                    })
+                };
+                stack::stacked(&pieces, sizes.text, !units.is_metric(), &piece)
+            });
+        let box_size = match &stacked {
+            Some(s) => (s.width, s.height),
+            None => {
+                let measured = measure(&text);
+                (measured.width, measured.height)
+            }
+        };
         let mut laid = match &self.measured {
             Measured::Linear { points, angle } => {
                 let (s, c) = angle.to_radians().sin_cos();
@@ -564,19 +844,86 @@ impl Dimension {
                 sizes,
                 box_size,
             ),
+            Measured::Angular { lines } => match self.sector() {
+                Some(sector) => {
+                    let mut laid = angular::angular(&sector, style, sizes, box_size);
+                    let arc = laid.arc_point.unwrap_or(self.location);
+                    laid.defpoints = vec![arc, lines[0][0], lines[1][0], lines[1][1], lines[0][1]];
+                    laid
+                }
+                None => Layout::empty(self.location),
+            },
+            Measured::ThreePointAngular { center, points } => match self.sector() {
+                Some(sector) => {
+                    let mut laid = angular::angular(&sector, style, sizes, box_size);
+                    let arc = laid.arc_point.unwrap_or(self.location);
+                    // The point on the first ray first, as AutoCAD marks them.
+                    let first = sector.first_point(points);
+                    let second = if first == points[0] {
+                        points[1]
+                    } else {
+                        points[0]
+                    };
+                    laid.defpoints = vec![*center, first, second, arc];
+                    laid
+                }
+                None => Layout::empty(self.location),
+            },
+            Measured::Ordinate { feature, axis } => {
+                ordinate::ordinate(*feature, *axis, self.location, style, sizes, box_size)
+            }
         };
         text.position = laid.center;
         text.rotation = normalize_degrees(laid.rotation);
+        let lettering = match stacked {
+            Some(stacked) => {
+                let along = direction(laid.rotation);
+                let up = left(along);
+                let at = |[u, v]: [f64; 2]| add(add(laid.center, along, u), up, v);
+                let mut lettering: Vec<Lettered> = stacked
+                    .texts
+                    .into_iter()
+                    .map(|(contents, start)| Lettered::Text {
+                        contents,
+                        start: at(start),
+                    })
+                    .collect();
+                lettering.extend(
+                    stacked
+                        .lines
+                        .into_iter()
+                        .map(|[a, b]| Lettered::Line([at(a), at(b)])),
+                );
+                lettering
+            }
+            None => Vec::new(),
+        };
         LaidDimension {
             parts: std::mem::take(&mut laid.parts),
             text,
+            pieces,
+            lettering,
             text_point: laid.text_point,
             text_placed: laid.placed,
             arrowhead: style.arrowhead,
             arrow_size: sizes.arrow,
+            arrows_on_arc: self.kind().is_angular(),
+            arc_point: laid.arc_point,
             defpoints: laid.defpoints,
         }
     }
+}
+
+/// Pieces with each run of plain text joined into one.
+pub(super) fn joined(pieces: Vec<TextPiece>) -> Vec<TextPiece> {
+    let mut out: Vec<TextPiece> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        match (out.last_mut(), piece) {
+            (Some(TextPiece::Plain(before)), TextPiece::Plain(after)) => before.push_str(&after),
+            (_, piece) => out.push(piece),
+        }
+    }
+    out
 }
 
 /// A layout before its text is put together.
@@ -588,7 +935,24 @@ struct Layout {
     rotation: f64,
     text_point: Point3,
     placed: bool,
+    arc_point: Option<Point3>,
     defpoints: Vec<Point3>,
+}
+
+impl Layout {
+    /// Nothing drawn but the text, at `at`: what a dimension whose lines
+    /// never meet lays out, which the description's reader refuses.
+    fn empty(at: Point3) -> Layout {
+        Layout {
+            parts: vec![DimensionPart::Text],
+            center: at,
+            rotation: 0.0,
+            text_point: at,
+            placed: false,
+            arc_point: None,
+            defpoints: Vec::new(),
+        }
+    }
 }
 
 type V = [f64; 2];
@@ -713,8 +1077,13 @@ fn along(
     } else {
         fits(2.0 * half + 2.0 * (a + g))
     };
+    // When each fits alone but not both, AutoCAD keeps inside the one that
+    // needs more room, the text when they need the same.
     let (text_in, arrows_in) = if both {
         (true, true)
+    } else if text_fits && arrows_fit {
+        let text_first = 2.0 * half >= 2.0 * (a + g);
+        (text_first, !text_first)
     } else if text_fits {
         (true, false)
     } else if arrows_fit {
@@ -814,6 +1183,7 @@ fn along(
         rotation: if aligned { angle } else { 0.0 },
         text_point: center,
         placed: false,
+        arc_point: None,
         defpoints: vec![p1, p2, t2],
     }
 }
@@ -942,6 +1312,7 @@ fn radial(
         rotation,
         text_point,
         placed: !moved,
+        arc_point: None,
         defpoints: vec![tip, if diameter { far } else { c }],
     }
 }
@@ -971,6 +1342,7 @@ mod tests {
                 width,
                 height: t.height,
                 last_descent: 0.0,
+                ..MTextBox::default()
             }
         }
     }
@@ -991,6 +1363,7 @@ mod tests {
             location,
             dimension_style: ISO_DIMENSION_STYLE.to_owned(),
             text: None,
+            continued: false,
             layer: "0".to_owned(),
             properties: Properties::default(),
         }
@@ -1003,8 +1376,11 @@ mod tests {
     #[test]
     fn an_iso_linear_dimension_is_laid_out_as_autocad_laid_out_its_own() {
         let style = DimensionStyle::iso_25(Unit::Mm);
-        let laid = linear(p(10.0, 10.0), p(60.0, 10.0), p(35.0, 25.0), 0.0)
-            .laid_out(&style, &txt_box(2.5));
+        let laid = linear(p(10.0, 10.0), p(60.0, 10.0), p(35.0, 25.0), 0.0).laid_out(
+            &style,
+            Unit::Mm,
+            &txt_box(2.5),
+        );
         let l = lines(&laid);
         close(l[0][0], p(10.0, 10.625));
         close(l[0][1], p(10.0, 26.25));
@@ -1022,8 +1398,11 @@ mod tests {
     #[test]
     fn iso_text_and_arrows_go_outside_as_autocad_put_them() {
         let style = DimensionStyle::iso_25(Unit::Mm);
-        let one =
-            linear(p(0.0, 0.0), p(1.0, 0.0), p(0.5, 8.0), 0.0).laid_out(&style, &txt_box(2.5));
+        let one = linear(p(0.0, 0.0), p(1.0, 0.0), p(0.5, 8.0), 0.0).laid_out(
+            &style,
+            Unit::Mm,
+            &txt_box(2.5),
+        );
         // Both outside: tails, the line under the text, and the line between.
         let l = lines(&one);
         close(l[2][0], p(-2.5, 8.0));
@@ -1033,12 +1412,18 @@ mod tests {
         close(l[4][0], p(0.0, 8.0));
         close(l[4][1], p(1.0, 8.0));
         close(one.text.position, p(7.0417, 9.875));
-        let three =
-            linear(p(0.0, 40.0), p(3.0, 40.0), p(1.5, 48.0), 0.0).laid_out(&style, &txt_box(2.5));
+        let three = linear(p(0.0, 40.0), p(3.0, 40.0), p(1.5, 48.0), 0.0).laid_out(
+            &style,
+            Unit::Mm,
+            &txt_box(2.5),
+        );
         close(three.text.position, p(1.5, 49.875));
         assert_eq!(lines(&three).len(), 5);
-        let seven = linear(p(0.0, 120.0), p(7.0, 120.0), p(3.5, 128.0), 0.0)
-            .laid_out(&style, &txt_box(2.5));
+        let seven = linear(p(0.0, 120.0), p(7.0, 120.0), p(3.5, 128.0), 0.0).laid_out(
+            &style,
+            Unit::Mm,
+            &txt_box(2.5),
+        );
         let l = lines(&seven);
         assert_eq!(l.len(), 3);
         close(l[2][0], p(2.5, 128.0));
@@ -1066,7 +1451,7 @@ mod tests {
             location: p(200.0 + 25.0 * r45, 100.0 + 25.0 * r45),
             ..linear(p(0.0, 0.0), p(1.0, 0.0), p(0.0, 1.0), 0.0)
         };
-        let laid = radius.laid_out(&style, &txt_box(2.5));
+        let laid = radius.laid_out(&style, Unit::Mm, &txt_box(2.5));
         assert_eq!(laid.text.contents, "R15");
         close(laid.text_point, p(217.6777, 117.6777));
         let l = lines(&laid);
@@ -1079,7 +1464,7 @@ mod tests {
         };
         // AutoCAD moved it to 23.5417 from the centre, and keeps it as
         // text at its own place, by its middle, 1.875 above the line.
-        let moved = near.laid_out(&style, &txt_box(2.5));
+        let moved = near.laid_out(&style, Unit::Mm, &txt_box(2.5));
         assert!(!moved.text_placed);
         close(
             moved.text_point,
@@ -1102,6 +1487,7 @@ mod tests {
             width: 0.96,
             height: t.height,
             last_descent: 0.0,
+            ..MTextBox::default()
         };
         let inside = |r: f64, d: f64, degrees: f64| {
             let u = direction(degrees);
@@ -1113,10 +1499,11 @@ mod tests {
                 location: p(d * u[0], d * u[1]),
                 dimension_style: STANDARD_DIMENSION_STYLE.to_owned(),
                 text: None,
+                continued: false,
                 layer: "0".to_owned(),
                 properties: Properties::default(),
             }
-            .laid_out(&style, &measure)
+            .laid_out(&style, Unit::In, &measure)
         };
         for (r, d) in [(0.3, 0.05), (0.3, 0.1), (0.3, 0.25)] {
             let level = inside(r, d, 0.0);
@@ -1147,6 +1534,7 @@ mod tests {
             width: 0.93,
             height: t.height,
             last_descent: 0.0,
+            ..MTextBox::default()
         };
         let at = |degrees: f64| {
             let d = direction(degrees);
@@ -1158,10 +1546,11 @@ mod tests {
                 location: p(2.5 * d[0], 2.5 * d[1]),
                 dimension_style: STANDARD_DIMENSION_STYLE.to_owned(),
                 text: None,
+                continued: false,
                 layer: "0".to_owned(),
                 properties: Properties::default(),
             }
-            .laid_out(&style, &measure)
+            .laid_out(&style, Unit::In, &measure)
         };
         let steep = at(45.0);
         let d = direction(45.0);
@@ -1212,5 +1601,46 @@ mod tests {
             own.displayed_text(&DimensionStyle::iso_25(Unit::Mm)),
             "HOLE R6 TYP"
         );
+    }
+
+    /// AutoCAD 2026 in ISO-25 with its text centred: 8 between points
+    /// 7.996 apart, where the arrowheads need more room than the text and
+    /// each fits alone, keeps the arrowheads inside and puts the text out.
+    #[test]
+    fn centred_text_gives_way_to_arrowheads_that_need_more_room() {
+        let style = DimensionStyle {
+            placement: TextPlacement::Centered,
+            unit_format: UnitFormat::Fractional,
+            precision: 4,
+            ..DimensionStyle::iso_25(Unit::Mm)
+        };
+        let laid = linear(
+            p(1760.0, 1540.0),
+            p(1767.996, 1540.0),
+            p(1764.0, 1548.0),
+            0.0,
+        )
+        .laid_out(&style, Unit::Mm, &txt_box(2.5));
+        assert_eq!(laid.text.contents, "8");
+        close(laid.text.position, p(1771.9543, 1548.0));
+        let arrows: Vec<_> = laid.arrows().collect();
+        close(arrows[0].1, p(1762.5, 1548.0));
+    }
+
+    /// AutoCAD 2026 puts a style's suffix after an angle too.
+    #[test]
+    fn an_angle_takes_the_styles_prefix_and_suffix() {
+        let style = DimensionStyle {
+            suffix: " TYP".to_owned(),
+            ..DimensionStyle::iso_25(Unit::Mm)
+        };
+        let angle = Dimension {
+            measured: Measured::ThreePointAngular {
+                center: p(0.0, 0.0),
+                points: [p(10.0, 0.0), p(0.0, 10.0)],
+            },
+            ..linear(p(0.0, 0.0), p(1.0, 0.0), p(5.0, 5.0), 0.0)
+        };
+        assert_eq!(angle.displayed_text(&style), "90\u{b0} TYP");
     }
 }

@@ -57,8 +57,9 @@ pub struct Measures {
     pub total_angle: Option<f64>,
     /// What a dimension measures, as AutoCAD keeps it in the dimension: a
     /// linear dimension's distance along its angle, an aligned one's
-    /// between its points, a radius or a diameter, in the declared unit,
-    /// unrounded.
+    /// between its points, a radius, a diameter or an ordinate's X or Y
+    /// from the origin, in the declared unit; an angular one's angle, in
+    /// degrees, which AutoCAD keeps in radians; unrounded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub measurement: Option<f64>,
     /// What a dimension's text shows: its measured value as its style
