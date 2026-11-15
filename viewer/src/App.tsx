@@ -26,6 +26,7 @@ import {
   notIssued,
   sheetsTouched,
   since,
+  staleDrawings,
   viaWords,
   type Entry,
   type JournalReport,
@@ -379,8 +380,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
         const fresh = since(report, before);
         if (!fresh.length) return;
         const touched = [...new Set(fresh.flatMap((e) => sheetsTouched(e, report)).map(upper))];
-        for (const s of touched) replies.current.delete(`live|${s}`);
-        if (touched.length) replies.current.delete('live|');
+        // Every drawing kept of a touched sheet goes, each of its layouts
+        // among them, and so does the one kept for a sheet not yet named.
+        for (const key of staleDrawings(replies.current.keys(), touched)) replies.current.delete(key);
         // The versions move on now, so a reply already on its way is seen
         // as old when it comes.
         const next = { ...versionsNow.current };
