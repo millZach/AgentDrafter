@@ -376,6 +376,15 @@ pub(crate) fn clip_to_convex(subject: &[Point2], convex: &[Point2]) -> Vec<Point
     out
 }
 
+/// Whether an edge of the closed outline `a` meets an edge of the closed
+/// outline `b`.
+pub(crate) fn outlines_cross(a: &[Point2], b: &[Point2]) -> bool {
+    (0..a.len()).any(|i| {
+        let (p, q) = (a[i], a[(i + 1) % a.len()]);
+        (0..b.len()).any(|j| meets(p, q, b[j], b[(j + 1) % b.len()]).is_some())
+    })
+}
+
 /// Twice the area the closed outline `outline` encloses: more than 0 when
 /// it runs anticlockwise.
 fn twice_area(outline: &[Point2]) -> f64 {

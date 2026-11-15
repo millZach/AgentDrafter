@@ -525,6 +525,40 @@ fn a_text_a_concave_boundary_cuts_away_counts_only_where_it_prints() {
     assert_eq!(on_text(notch(25.0)), 1);
 }
 
+/// How many `text_on_text` findings the checker makes on `text`, the
+/// overlap of each.
+fn texts_on_texts(test: &str, text: &str) -> Vec<f64> {
+    let dir = scratch(test);
+    let report = check_with(
+        &CheckRequest {
+            source: sheet_at(&dir, text),
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    report
+        .findings
+        .iter()
+        .filter(|f| format!("{:?}", f.rule) == "TextOnText")
+        .map(|f| f.overlap.unwrap_or(0.0))
+        .collect()
+}
+
+#[test]
+fn a_notch_whose_edges_cross_a_text_cuts_it_though_its_corners_are_inside() {
+    // Six Ms reach from one arm of the U across its notch to the other:
+    // every corner of the text's box is inside the boundary, and the
+    // notch's edges cross it. The paper `I` in the notch sits on nothing.
+    let sheet = |at: f64| {
+        format!(
+            "units: mm\npaper: ISO A4 landscape\nlayout: {{name: A}}\nobjects:\n  - text: {{id: model, contents: MMMMMM, position: [20, 50, 0], height: 10}}\n  - viewport: {{id: v, clip: {{points: [[0, 0, 0], [100, 0, 0], [100, 100, 0], [60, 100, 0], [60, 20, 0], [40, 20, 0], [40, 100, 0], [0, 100, 0]]}}, view_center: [50, 50, 0], scale: 1}}\n  - text: {{id: paper, space: paper, contents: I, position: [{at}, 50, 0], height: 5}}\n"
+        )
+    };
+    assert_eq!(texts_on_texts("notch-six", &sheet(48.0)), Vec::<f64>::new());
+    assert_eq!(texts_on_texts("notch-six-on", &sheet(25.0)).len(), 1);
+}
+
 fn query(path: &Path, query: Query) -> agentdrafter_core::QueryReport {
     query_with(
         &QueryRequest {

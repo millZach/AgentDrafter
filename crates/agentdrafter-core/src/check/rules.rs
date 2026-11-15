@@ -52,8 +52,8 @@ use super::ink::Ink;
 use super::{BlockPart, CheckedObject, Finding, Rule, Sides};
 use crate::description::SheetRecord;
 use crate::draw::{
-    clip_polygon, clip_to_convex, inside_outline, is_convex, mtext_lines, triangles, Bounds,
-    DisplayList, Item, Point2, TextRun,
+    clip_polygon, clip_to_convex, inside_outline, is_convex, mtext_lines, outlines_cross,
+    triangles, Bounds, DisplayList, Item, Point2, TextRun,
 };
 use crate::model::block::Placement;
 use crate::model::{Block, Insert, Object, Paper, Table, TableStyle, LINE_BOX, LINE_STEP};
@@ -1061,8 +1061,12 @@ impl TextBox {
                 boundary: Some(boundary),
                 ..
             }) => {
+                // Whole only when nothing of the boundary reaches into the
+                // box: no corner of it outside, no point of the boundary in
+                // it, and no edge of the boundary across it.
                 let whole = corners.iter().all(|p| inside_outline(*p, boundary))
-                    && !boundary.iter().any(|p| inside_outline(*p, &corners));
+                    && !boundary.iter().any(|p| inside_outline(*p, &corners))
+                    && !outlines_cross(&corners, boundary);
                 if whole {
                     vec![(corners.to_vec(), false)]
                 } else if is_convex(boundary) {

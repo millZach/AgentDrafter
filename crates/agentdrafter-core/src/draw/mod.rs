@@ -75,7 +75,9 @@ use crate::model::{
 };
 use crate::text::placement::SheetFonts;
 
-pub(crate) use clip::{clip_polygon, clip_to_convex, inside_outline, is_convex, triangles};
+pub(crate) use clip::{
+    clip_polygon, clip_to_convex, inside_outline, is_convex, outlines_cross, triangles,
+};
 pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
 pub(crate) use pick::inside;
