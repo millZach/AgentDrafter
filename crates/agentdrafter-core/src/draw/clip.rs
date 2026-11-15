@@ -60,12 +60,26 @@ fn clip_segment(
     max: Point2,
 ) -> Option<(Point2, Point2, bool, bool)> {
     let d = [b[0] - a[0], b[1] - a[1]];
+    if !(d[0].is_finite() && d[1].is_finite()) {
+        // Points so far apart that their difference overflows are cut at
+        // a quarter of their size, exactly, and scaled back.
+        let quarter = |p: Point2| [p[0] / 4.0, p[1] / 4.0];
+        let whole = |p: Point2| [p[0] * 4.0, p[1] * 4.0];
+        let (q, r) = (quarter(a), quarter(b));
+        if !(r[0] - q[0]).is_finite() || !(r[1] - q[1]).is_finite() {
+            return None;
+        }
+        return clip_segment(q, r, quarter(min), quarter(max))
+            .map(|(p, q, s, e)| (whole(p), whole(q), s, e));
+    }
     let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
-    for (p, q) in [
-        (-d[0], a[0] - min[0]),
-        (d[0], max[0] - a[0]),
-        (-d[1], a[1] - min[1]),
-        (d[1], max[1] - a[1]),
+    // The side of the box that cut each end, by its axis and where it is.
+    let (mut cut0, mut cut1): (Option<Side>, Option<Side>) = (None, None);
+    for (p, q, side) in [
+        (-d[0], a[0] - min[0], (0, min[0])),
+        (d[0], max[0] - a[0], (0, max[0])),
+        (-d[1], a[1] - min[1], (1, min[1])),
+        (d[1], max[1] - a[1], (1, max[1])),
     ] {
         if p == 0.0 {
             if q <= ALONG_AN_EDGE {
@@ -77,26 +91,39 @@ fn clip_segment(
                 if r > t1 {
                     return None;
                 }
-                t0 = t0.max(r);
+                if r > t0 {
+                    t0 = r;
+                    cut0 = Some(side);
+                }
             } else {
                 if r < t0 {
                     return None;
                 }
-                t1 = t1.min(r);
+                if r < t1 {
+                    t1 = r;
+                    cut1 = Some(side);
+                }
             }
         }
     }
-    let at = |t: f64| {
-        if t == 0.0 {
-            a
-        } else if t == 1.0 {
-            b
-        } else {
-            [a[0] + t * d[0], a[1] + t * d[1]]
+    // An end the box cut lies on the side that cut it, and inside the box,
+    // however coarse the numbers it is worked out from.
+    let at = |t: f64, cut: Option<Side>| match cut {
+        None if t == 0.0 => a,
+        None if t == 1.0 => b,
+        _ => {
+            let mut p = [a[0] + t * d[0], a[1] + t * d[1]];
+            if let Some((axis, side)) = cut {
+                p[axis] = side;
+            }
+            [p[0].clamp(min[0], max[0]), p[1].clamp(min[1], max[1])]
         }
     };
-    Some((at(t0), at(t1), t0 == 0.0, t1 == 1.0))
+    Some((at(t0, cut0), at(t1, cut1), cut0.is_none(), cut1.is_none()))
 }
+
+/// A side of the box: its axis, 0 for x and 1 for y, and where it is.
+type Side = (usize, f64);
 
 /// Whether `p` is inside the box, its edge included.
 fn inside(p: Point2, min: Point2, max: Point2) -> bool {
@@ -124,8 +151,14 @@ pub(crate) fn clip_polygon(contour: &[Point2], min: Point2, max: Point2) -> Vec<
         }
         let keep = |p: Point2| if above { p[axis] >= at } else { p[axis] <= at };
         let cross = |a: Point2, b: Point2| {
-            let t = (at - a[axis]) / (b[axis] - a[axis]);
-            let mut p = [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+            // Halved first, exactly, so that points far apart do not
+            // overflow their difference.
+            let (h, k) = ([a[0] / 2.0, a[1] / 2.0], [b[0] / 2.0, b[1] / 2.0]);
+            let t = (at / 2.0 - h[axis]) / (k[axis] - h[axis]);
+            let mut p = [
+                (h[0] + t * (k[0] - h[0])) * 2.0,
+                (h[1] + t * (k[1] - h[1])) * 2.0,
+            ];
             p[axis] = at;
             p
         };
@@ -181,6 +214,24 @@ mod tests {
             [10.0, 10.0],
         );
         assert_eq!(runs, vec![vec![[10.0, 5.0], [5.0, 5.0]]]);
+    }
+
+    #[test]
+    fn points_far_apart_are_cut_without_overflowing() {
+        let runs = clip_run(&[[-1e308, 5.0], [1e308, 5.0]], [0.0, 0.0], [10.0, 10.0]);
+        assert_eq!(runs, vec![vec![[0.0, 5.0], [10.0, 5.0]]]);
+        let cut = clip_polygon(
+            &[
+                [-1e308, -1e308],
+                [1e308, -1e308],
+                [1e308, 1e308],
+                [-1e308, 1e308],
+            ],
+            [0.0, 0.0],
+            [10.0, 10.0],
+        );
+        assert!(cut.iter().flatten().all(|v| v.is_finite()), "{cut:?}");
+        assert_eq!(cut.len(), 4, "{cut:?}");
     }
 
     #[test]

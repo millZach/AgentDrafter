@@ -40,7 +40,11 @@ pub(crate) fn along(path: &[Point2], pattern: Option<&[f64]>, closed: bool) -> V
     } else {
         (total / repeat).floor()
     };
-    if repeat.is_nan() || repeat <= 0.0 || repeats < 1.0 || total / repeat > MOST_DASHES {
+    // A pattern or a path that is not a finite length, or one that would
+    // repeat less than once or too often, draws continuous: so does a
+    // count of repeats that is no number.
+    let counted = repeats >= 1.0 && total / repeat <= MOST_DASHES;
+    if !(repeat.is_finite() && repeat > 0.0 && total.is_finite() && counted) {
         return vec![path];
     }
     let mut runs = Vec::new();
@@ -153,6 +157,19 @@ fn piece(path: &[Point2], lengths: &[f64], from: f64, to: f64) -> Vec<Point2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_or_a_pattern_of_no_finite_length_draws_continuous() {
+        let path = [[-1e308, 0.0], [1e308, 0.0]];
+        for pattern in [
+            [f64::INFINITY, -f64::INFINITY],
+            [1.0, -1.0],
+            [f64::NAN, -1.0],
+        ] {
+            assert_eq!(along(&path, Some(&pattern), false), vec![path.to_vec()]);
+            assert_eq!(along(&path, Some(&pattern), true), vec![path.to_vec()]);
+        }
+    }
 
     /// Where each run starts and ends along a line from 0 along X.
     fn spans(length: f64, pattern: &[f64]) -> Vec<(f64, f64)> {

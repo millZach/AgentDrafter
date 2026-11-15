@@ -3,9 +3,8 @@
 
 use serde::Serialize;
 
-use super::{counted, measuring_objects, written_at, Answer, Extents, LookedAt, WrittenAt};
+use super::{counted, measuring_drawing, written_at, Answer, Extents, LookedAt, WrittenAt};
 use crate::description::SheetRecord;
-use crate::draw::Bounds;
 use crate::dwg::{PageSetup, PLOTTER, PLOT_STYLE};
 use crate::model::{Paper, Point3};
 use crate::settings::Settings;
@@ -154,15 +153,22 @@ fn sheet_layout(record: &SheetRecord, settings: &Settings) -> SheetLayout {
     let paper_space = (0..sheet.objects.len())
         .filter(|&i| sheet.in_paper_space(i))
         .count();
+    // Model space's extents as `query extents` gives a sheet's: its objects
+    // drawn on their own, a hatch's boundary and an insert's block box
+    // among what they reach.
     let fonts = SheetFonts::find(sheet, settings);
-    let own = measuring_objects(sheet, &fonts);
-    let model_extents = Bounds::of(
-        own.items
-            .iter()
-            .filter(|item| !sheet.in_paper_space(item.object))
-            .flat_map(|item| item.points()),
-    )
-    .map(|b| Extents::of(&b));
+    let mut model = sheet.clone();
+    model.layout = None;
+    model.objects = sheet
+        .objects
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| !sheet.in_paper_space(i))
+        .map(|(_, o)| o.clone())
+        .collect();
+    let model_extents = measuring_drawing(&model, &fonts)
+        .extents()
+        .map(|b| Extents::of(&b));
     let page_setup = sheet.layout.as_ref().and_then(|_| {
         let paper = sheet.paper.as_ref()?;
         let setup = PageSetup::of(paper.name.as_deref()?)?;

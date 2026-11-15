@@ -1,0 +1,15 @@
+# A made-up sheet for the viewer's browser tests (e2e/run.mjs): lines 2.11 mm
+# wide, horizontal, vertical, slanting and ending just inside, seen through a
+# viewport at 1:1 whose window runs from 90 to 130 mm, so the canvas is held
+# to the PNG where a viewport cuts its contents' ink, round ends among it.
+units: mm
+paper: ISO A4 landscape
+layout: {name: Clip}
+layers:
+  vp: {color: 8, plot: false}
+objects:
+  - line: {from: [-40, 0, 0], to: [40, 0, 0], color: red, lineweight: 2.11}
+  - line: {from: [0, -40, 0], to: [0, 40, 0], color: blue, lineweight: 2.11}
+  - line: {from: [-40, -30, 0], to: [40, 30, 0], lineweight: 2.11}
+  - line: {from: [5, 10, 0], to: [19.5, 10, 0], color: green, lineweight: 2.11}
+  - viewport: {center: [110, 110, 0], width: 40, height: 40, view_center: [0, 0, 0], scale: 1, layer: vp}

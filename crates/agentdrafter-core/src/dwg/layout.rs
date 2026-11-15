@@ -381,10 +381,7 @@ pub(super) fn read_viewport(dwg: &DwgViewport, layer: String) -> Option<Viewport
         return None;
     }
     let scale = Viewport::scale_of(dwg.height, dwg.view_height);
-    if !(scale.is_finite() && scale > 0.0) {
-        return None;
-    }
-    Some(Viewport {
+    let viewport = Viewport {
         center: Point3::new(dwg.center.x, dwg.center.y, 0.0),
         width: dwg.width,
         height: dwg.height,
@@ -393,7 +390,9 @@ pub(super) fn read_viewport(dwg: &DwgViewport, layer: String) -> Option<Viewport
         locked: status.locked,
         layer,
         properties: Default::default(),
-    })
+    };
+    // A scale the core cannot draw is not read.
+    viewport.scale_problem().is_none().then_some(viewport)
 }
 
 #[cfg(test)]

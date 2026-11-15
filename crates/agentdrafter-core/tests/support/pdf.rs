@@ -302,6 +302,29 @@ impl Pdf {
         points
     }
 
+    /// Each rectangle the page clips to, `[x, y, width, height]` in points,
+    /// in order: a `re` followed by `W`.
+    pub fn clips(&self) -> Vec<[f64; 4]> {
+        let mut clips = Vec::new();
+        let mut rect: Option<[f64; 4]> = None;
+        let mut stack: Vec<f64> = Vec::new();
+        for token in tokens(self.content()) {
+            match token {
+                Token::Number(n) => stack.push(n),
+                Token::Operator(op) => {
+                    match op.as_str() {
+                        "re" => rect = Some([stack[0], stack[1], stack[2], stack[3]]),
+                        "W" => clips.extend(rect.take()),
+                        _ => {}
+                    }
+                    stack.clear();
+                }
+                _ => stack.clear(),
+            }
+        }
+        clips
+    }
+
     /// The colour of each fill the page paints, in order.
     pub fn fills(&self) -> Vec<[f64; 3]> {
         let mut fills = Vec::new();

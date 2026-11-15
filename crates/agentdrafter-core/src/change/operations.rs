@@ -1130,7 +1130,9 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                     "description": "The keys to set, each to its new value as a sheet \
                                     description writes it, such as {\"height\": 0.3} or \
                                     {\"layer\": \"notes\"}; null takes an optional key away. \
-                                    Any key the object's type takes, and name; not id, nor an \
+                                    Any key the object's type takes, name, and, on a sheet \
+                                    drawn in a layout, space, which moves the object to the \
+                                    other space as it stands, unscaled; not id, nor an \
                                     insert's attributes.",
                     "type": "object",
                     "minProperties": 1,

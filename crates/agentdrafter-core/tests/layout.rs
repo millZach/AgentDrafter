@@ -14,11 +14,15 @@ use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
     build, build_set_with, change_with, check_with, display_list_with, operations,
-    parse_sheet_description, query_with, read_dwg, Answer, BuildRequest, ChangeReport,
-    ChangeRequest, CheckRequest, DisplayListRequest, ErrorCode, Item, Object, Query, QueryRequest,
+    parse_sheet_description, plot_with, query_with, read_dwg, render_with,
+    sheet_description_schema, Answer, BuildRequest, ChangeReport, ChangeRequest, CheckRequest,
+    DisplayListRequest, ErrorCode, Item, Object, PlotRequest, Query, QueryRequest, RenderRequest,
     Reply, Rule, Selection, SelectionBox, SetBuildRequest, Settings, Shape,
 };
 use serde_json::{json, Value};
+
+#[path = "support/pdf.rs"]
+mod pdf;
 
 /// An empty folder for one test, under Cargo's scratch folder in `target/`.
 fn scratch(test: &str) -> PathBuf {
@@ -588,4 +592,240 @@ fn viewports_are_added_and_changed_by_their_own_operations_with_autocads_alias()
         error.message.contains("change_viewport changes a viewport"),
         "{error:?}"
     );
+}
+
+/// A line 2.11 mm wide across a viewport whose window runs from x 100 to
+/// 120 mm: its ink, round ends among it, stops at the window's edge.
+const THICK: &str = "units: mm
+paper: ISO A4 landscape
+layout: {name: Thick}
+objects:
+  - line: {id: x, from: [-20, 0, 0], to: [20, 0, 0], color: red, lineweight: 2.11}
+  - viewport: {id: v, center: [110, 110, 0], width: 20, height: 20, view_center: [0, 0, 0], scale: 1}
+";
+
+#[test]
+fn a_viewport_cuts_its_contents_ink_at_its_edge_in_every_output() {
+    let dir = scratch("thick");
+    let path = sheet_at(&dir, THICK);
+    // Each item model space draws through the viewport keeps its window.
+    let list = drawn(&path).display_list;
+    let line: Vec<&Item> = list.items.iter().filter(|i| i.object == 0).collect();
+    assert!(!line.is_empty());
+    for item in line {
+        let clip = item.clip.unwrap();
+        assert_eq!((clip.min, clip.max), ([100.0, 100.0], [120.0, 120.0]));
+    }
+    // The PNG, at 10 pixels to the millimetre, draws no ink past x 120 mm.
+    let png = dir.join("thick.png");
+    let mut request = RenderRequest::new(&path);
+    request.output = Some(png.clone());
+    request.dpi = 254.0;
+    request.scale = Some(1.0);
+    let report = render_with(&request, &Settings::default()).unwrap();
+    let decoder = png::Decoder::new(std::io::BufReader::new(fs::File::open(&png).unwrap()));
+    let mut reader = decoder.read_info().unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    let at = |x: f64, y: f64| {
+        let column = ((x - report.top_left[0]) * 10.0).floor() as usize;
+        let row = ((report.top_left[1] - y) * 10.0).floor() as usize;
+        let i = (row * info.width as usize + column) * 3;
+        [pixels[i], pixels[i + 1], pixels[i + 2]]
+    };
+    assert_eq!(at(110.0, 110.0), [255, 0, 0], "the line inside the window");
+    assert_eq!(
+        at(120.5, 110.0),
+        [255, 255, 255],
+        "its round end past the edge"
+    );
+    // The PDF draws it inside a clipping path round the window.
+    let pdf_path = dir.join("thick.pdf");
+    let mut request = PlotRequest::new(&path);
+    request.output = Some(pdf_path.clone());
+    plot_with(&request, &Settings::default()).unwrap();
+    let clips = pdf::Pdf::read(fs::read(&pdf_path).unwrap()).clips();
+    let mm = 72.0 / 25.4;
+    assert_eq!(clips.len(), 1, "{clips:?}");
+    for (got, want) in clips[0]
+        .iter()
+        .zip([100.0 * mm, 100.0 * mm, 20.0 * mm, 20.0 * mm])
+    {
+        assert!((got - want).abs() < 0.01, "{clips:?}");
+    }
+}
+
+#[test]
+fn change_moves_an_object_to_paper_space_as_it_stands() {
+    let set = panel_set("change-space");
+    let reply = apply(
+        &set,
+        json!([{"op": "change", "target": {"id": "PNL-001/tag"}, "set": {"space": "paper"}}]),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    let written = template(&set);
+    assert!(
+        written.contains("contents: PNL-1, position: [200, 200, 0], height: 20, justify: middle_center, space: paper}"),
+        "{written}"
+    );
+    let read = read_dwg(&set.join("dwg/PNL-001.dwg")).unwrap();
+    assert!(read.layout.unwrap().paper_space[2]);
+}
+
+#[test]
+fn a_scale_whose_view_a_dwg_cannot_hold_is_refused() {
+    let with = |height: &str, scale: &str| {
+        format!(
+            "units: mm\npaper: ISO A4 landscape\nlayout: {{name: Demo}}\nobjects:\n  - viewport: {{center: [110, 110, 0], width: 20, height: {height}, view_center: [0, 0, 0], scale: {scale}}}\n"
+        )
+    };
+    for (height, scale) in [
+        ("20", "1e-309"),
+        ("1e-200", "1e200"),
+        ("20", "1e-320"),
+        ("20", "'1e-200:1e200'"),
+    ] {
+        let e = refused(&with(height, scale));
+        assert_eq!(
+            (e.code, e.field.as_deref()),
+            (ErrorCode::BadNumber, Some("objects[0].viewport.scale")),
+            "{height} at {scale}: {e:?}"
+        );
+    }
+    // A scale near the largest a DWG holds reads back.
+    let text = with("20", "1e300");
+    let dwg = built(&scratch("huge-scale"), &text);
+    let read = read_dwg(&dwg).unwrap();
+    assert_eq!(read.objects_not_read, 0, "{read:?}");
+    assert_eq!(
+        read.objects,
+        parse_sheet_description(&text).unwrap().objects
+    );
+}
+
+#[test]
+fn model_space_far_off_the_view_is_cut_without_overflowing() {
+    let dir = scratch("far");
+    let path = sheet_at(
+        &dir,
+        "units: mm
+paper: ISO A4 landscape
+layout: {name: Far}
+linetypes:
+  DASH: {pattern: [1, -1]}
+objects:
+  - line: {from: [-1e308, 5, 0], to: [1e308, 5, 0], linetype: DASH}
+  - viewport: {center: [110, 110, 0], width: 20, height: 20, view_center: [0, 0, 0], scale: 1}
+",
+    );
+    let list = drawn(&path).display_list;
+    let points = points(
+        &list
+            .items
+            .iter()
+            .filter(|i| i.object == 0)
+            .collect::<Vec<_>>(),
+    );
+    assert!(!points.is_empty());
+    for p in &points {
+        assert!(p.iter().all(|v| v.is_finite()), "{points:?}");
+        assert!(
+            (100.0..=120.0).contains(&p[0]) && p[1] == 115.0,
+            "{points:?}"
+        );
+    }
+}
+
+#[test]
+fn the_schema_takes_a_layout_and_a_viewport_as_the_reader_does() {
+    let schema = sheet_description_schema();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let sheet = |layout: Value, object: Value| json!({"units": "mm", "paper": "ISO A4 landscape", "layout": layout, "objects": [object]});
+    let viewport = |key: &str, value: Value| {
+        let mut v = json!({"center": [110, 110, 0], "width": 20, "height": 20, "view_center": [0, 0, 0], "scale": 1});
+        v[key] = value;
+        json!({ "viewport": v })
+    };
+    let line = |space: Value| json!({"line": {"from": [0, 0, 0], "to": [1, 0, 0], "space": space}});
+    let named = |name: Value| json!({ "name": name });
+    const LINE: &str = "  - line: {from: [0, 0, 0], to: [1, 0, 0], space: ";
+    const VIEWPORT: &str =
+        "  - viewport: {center: [110, 110, 0], width: 20, height: 20, view_center: [0, 0, 0], ";
+    // Each case as JSON, as the YAML the reader reads, and whether both
+    // take it.
+    let cases: Vec<(Value, String, bool)> = vec![
+        (
+            sheet(named(json!("A:B")), line(json!("paper"))),
+            format!("layout: {{name: 'A:B'}}\nobjects:\n{LINE}paper}}"),
+            false,
+        ),
+        (
+            sheet(named(json!(123)), line(json!("paper"))),
+            format!("layout: {{name: 123}}\nobjects:\n{LINE}paper}}"),
+            true,
+        ),
+        (
+            sheet(named(json!("Panel")), line(json!(null))),
+            format!("layout: {{name: Panel}}\nobjects:\n{LINE}null}}"),
+            false,
+        ),
+        (
+            sheet(named(json!("Panel")), viewport("scale", json!("1:0"))),
+            format!("layout: {{name: Panel}}\nobjects:\n{VIEWPORT}scale: '1:0'}}"),
+            false,
+        ),
+        (
+            sheet(named(json!("Panel")), viewport("scale", json!("0.5:2"))),
+            format!("layout: {{name: Panel}}\nobjects:\n{VIEWPORT}scale: '0.5:2'}}"),
+            true,
+        ),
+        (
+            sheet(named(json!("Panel")), viewport("locked", json!("true"))),
+            format!("layout: {{name: Panel}}\nobjects:\n{VIEWPORT}scale: 1, locked: 'true'}}"),
+            true,
+        ),
+        (
+            sheet(named(json!("Panel")), viewport("locked", json!("yes"))),
+            format!("layout: {{name: Panel}}\nobjects:\n{VIEWPORT}scale: 1, locked: 'yes'}}"),
+            false,
+        ),
+    ];
+    for (json, yaml, takes) in cases {
+        let text = format!("units: mm\npaper: ISO A4 landscape\n{yaml}\n");
+        let read = parse_sheet_description(&text);
+        assert_eq!(read.is_ok(), takes, "the reader on {yaml}: {read:?}");
+        assert_eq!(validator.is_valid(&json), takes, "the schema on {json}");
+    }
+}
+
+#[test]
+fn query_layout_gives_model_spaces_extents_as_query_extents_does() {
+    let hatch = "hatch_patterns:
+  SPARSE:
+    lines:
+      - {angle: 0, origin: [0, 0], delta: [0, 1000]}
+objects:
+  - hatch: {id: area, pattern: SPARSE, boundary: [{polyline: {points: [[0, 10, 0], [20, 10, 0], [20, 20, 0], [0, 20, 0]]}}]}
+";
+    let dir = scratch("hatch-extents");
+    let laid = sheet_at(
+        &dir,
+        &format!(
+            "units: mm\npaper: ISO A4 landscape\nlayout: {{name: Demo}}\n{hatch}  - viewport: {{center: [110, 110, 0], width: 40, height: 40, view_center: [10, 15, 0], scale: 1}}\n"
+        ),
+    );
+    let Answer::Layout { layouts, .. } = query(&laid, Query::Layout).answer else {
+        panic!("a layout answer")
+    };
+    let alone = dir.join("alone.yaml");
+    fs::write(&alone, format!("units: mm\n{hatch}")).unwrap();
+    let Answer::Extents { extents, .. } = query(&alone, Query::Extents).answer else {
+        panic!("an extents answer")
+    };
+    let (laid, alone) = (
+        layouts[0].model_extents.unwrap(),
+        extents[0].extents.unwrap(),
+    );
+    assert_eq!((laid.min, laid.max), (alone.min, alone.max));
+    assert_eq!((laid.min, laid.max), ([0.0, 10.0], [20.0, 20.0]));
 }

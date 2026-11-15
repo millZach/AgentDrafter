@@ -6,7 +6,8 @@
 //! list, this is plain computation: no window, GPU, file system or thread.
 
 use tiny_skia::{
-    FillRule as SkiaFillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform,
+    FillRule as SkiaFillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, Stroke,
+    Transform,
 };
 
 use crate::draw::{Bounds, DisplayList, FillRule, Point2, Shape};
@@ -69,6 +70,22 @@ impl View {
     }
 }
 
+/// The mask that lets ink through only inside `clip`, in drawing units,
+/// drawn through `view`. None when no pixel of the image is inside it.
+fn clip_mask(view: &View, clip: Bounds) -> Option<Mask> {
+    let (left, top) = view.pixel([clip.min[0], clip.max[1]]);
+    let (right, bottom) = view.pixel([clip.max[0], clip.min[1]]);
+    let rect = tiny_skia::Rect::from_ltrb(left, top, right, bottom)?;
+    let mut mask = Mask::new(view.width, view.height)?;
+    mask.fill_path(
+        &PathBuilder::from_rect(rect),
+        SkiaFillRule::Winding,
+        true,
+        Transform::identity(),
+    );
+    Some(mask)
+}
+
 /// Draws a display list onto white paper. None when the image cannot be
 /// made, such as one with no pixels.
 /// Paints white everything in `pixmap`, drawn through `view`, that lies
@@ -95,7 +112,22 @@ pub(crate) fn blank_outside(pixmap: &mut Pixmap, view: &View, keep: Bounds) {
 pub(crate) fn rasterize(list: &DisplayList, view: &View) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(view.width, view.height)?;
     pixmap.fill(tiny_skia::Color::WHITE);
+    // A mask for each box an item's ink is cut at, made once.
+    let mut masks: Vec<(Bounds, Option<Mask>)> = Vec::new();
     for item in &list.items {
+        let mask = item.clip.map(|clip| {
+            if let Some(i) = masks.iter().position(|(b, _)| *b == clip) {
+                i
+            } else {
+                masks.push((clip, clip_mask(view, clip)));
+                masks.len() - 1
+            }
+        });
+        let mask = mask.and_then(|i| masks[i].1.as_ref());
+        if item.clip.is_some() && mask.is_none() {
+            // A box no pixel is inside draws nothing.
+            continue;
+        }
         let [r, g, b] = item.color.on_paper();
         let mut paint = Paint::default();
         paint.set_color_rgba8(r, g, b, 255);
@@ -128,7 +160,7 @@ pub(crate) fn rasterize(list: &DisplayList, view: &View) -> Option<Pixmap> {
                     }
                 }
                 if let Some(path) = lines.finish() {
-                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), mask);
                 }
                 if let Some(path) = dots.finish() {
                     pixmap.fill_path(
@@ -136,7 +168,7 @@ pub(crate) fn rasterize(list: &DisplayList, view: &View) -> Option<Pixmap> {
                         &paint,
                         SkiaFillRule::Winding,
                         Transform::identity(),
-                        None,
+                        mask,
                     );
                 }
             }
@@ -158,7 +190,7 @@ pub(crate) fn rasterize(list: &DisplayList, view: &View) -> Option<Pixmap> {
                     FillRule::NonZero => SkiaFillRule::Winding,
                 };
                 if let Some(path) = area.finish() {
-                    pixmap.fill_path(&path, &paint, rule, Transform::identity(), None);
+                    pixmap.fill_path(&path, &paint, rule, Transform::identity(), mask);
                 }
             }
         }

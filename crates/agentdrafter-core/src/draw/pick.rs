@@ -143,6 +143,7 @@ mod tests {
             nested: Vec::new(),
             cell: None,
             viewport: None,
+            clip: None,
             color: Color(7),
             shape: Shape::Stroke {
                 lineweight,
@@ -159,6 +160,7 @@ mod tests {
             nested: Vec::new(),
             cell: None,
             viewport: None,
+            clip: None,
             color: Color(1),
             shape: Shape::Fill {
                 rule: FillRule::EvenOdd,

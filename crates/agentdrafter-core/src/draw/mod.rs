@@ -249,6 +249,13 @@ pub struct Item {
     /// from 0. None for paper space, and on a sheet with no layout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport: Option<usize>,
+    /// The box its ink is cut at, in drawing units: the window of the
+    /// viewport it shows through. An output draws none of its ink outside
+    /// it, a pen's width and round ends among it, as AutoCAD 2026's plot
+    /// cuts a viewport's contents at its edge. None for an item drawn
+    /// whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<Bounds>,
     /// The AutoCAD colour index it draws in.
     pub color: Color,
     pub shape: Shape,
@@ -1382,6 +1389,7 @@ impl DisplayList {
             nested: nested.clone(),
             cell: None,
             viewport: None,
+            clip: None,
             color,
             shape,
         }));
@@ -1419,6 +1427,7 @@ impl DisplayList {
                         nested: Vec::new(),
                         cell: Some(cell),
                         viewport: None,
+                        clip: None,
                         color,
                         shape,
                     }));

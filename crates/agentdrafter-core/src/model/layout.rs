@@ -135,6 +135,43 @@ impl Viewport {
             .unwrap_or_else(|| s.to_string())
     }
 
+    /// What is wrong with the viewport's scale for a DWG to hold it and the
+    /// pipeline to draw it, if anything: the scale, one over it, the model
+    /// height and width the window shows, and the corners of that part of
+    /// model space are each a finite number, and none of the first four is
+    /// 0 or too small to be held whole.
+    pub fn scale_problem(&self) -> Option<String> {
+        let scale = self.scale;
+        let [low, high] = self.view();
+        let values = [
+            ("the scale", scale),
+            ("one over the scale", 1.0 / scale),
+            (
+                "the model height it shows, its height over its scale",
+                self.height / scale,
+            ),
+            (
+                "the model width it shows, its width over its scale",
+                self.width / scale,
+            ),
+        ];
+        if let Some((what, value)) = values.iter().find(|(_, v)| !v.is_normal() || *v < 0.0) {
+            return Some(format!(
+                "{what} is {value:e}, which a DWG cannot hold; a viewport's scale, one over it, and \
+                 its height and width over it are each a finite number more than 0, not too \
+                 small to hold whole"
+            ));
+        }
+        if !low.iter().chain(&high).all(|v| v.is_finite()) {
+            return Some(
+                "the part of model space it shows, round its view centre, reaches past the \
+                 largest number a DWG holds"
+                    .to_owned(),
+            );
+        }
+        None
+    }
+
     /// The model height the window shows, as AutoCAD's DWG keeps it: its
     /// height on the paper over its scale.
     pub fn view_height(&self) -> f64 {

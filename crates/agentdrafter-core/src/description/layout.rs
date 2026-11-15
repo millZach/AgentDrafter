@@ -11,6 +11,7 @@
 
 use serde_json::{json, Value};
 
+use super::schema::{POSITIVE_NUMBER, TEXT_TYPES};
 use super::strict_yaml::Node;
 use super::{at, bad_value, boolean, length, point, scalar, Fields};
 use crate::error::{Error, ErrorCode};
@@ -133,13 +134,21 @@ pub(crate) fn name_problem(name: &str) -> Option<String> {
 /// Whether the object whose keys are `fields` is in paper space, on a sheet
 /// that has a layout when `layout` says so. A viewport always is.
 pub(super) fn in_paper_space(fields: &Fields, layout: bool, viewport: bool) -> Result<bool, Error> {
-    let Some(node) = fields.text(SPACE_KEY) else {
+    // A choice, as `justify` is: a bare null is no choice.
+    let Some(node) = fields.get(SPACE_KEY) else {
         if viewport && !layout {
             return Err(no_layout(fields, "a viewport"));
         }
         return Ok(viewport);
     };
     let path = fields.path_of(SPACE_KEY);
+    if node.is_bare_null() {
+        return Err(bad_value(
+            node,
+            &path,
+            "a bare null is no space; `model` or `paper`, or leave `space` out for model space",
+        ));
+    }
     let paper = match scalar(node, &path, "`model` or `paper`")? {
         MODEL if viewport => {
             return Err(bad_value(
@@ -187,12 +196,13 @@ pub(super) fn viewport(fields: &Fields, units: Unit, layer: String) -> Result<Vi
     let height = positive(fields, "height", units, "a viewport's height")?;
     let view_center = flat_point(fields, "view_center", units)?;
     let scale_node = fields.require("scale")?;
-    let scale = scale(scale_node, &fields.path_of("scale"))?;
+    let scale_path = fields.path_of("scale");
+    let scale = scale(scale_node, &scale_path)?;
     let locked = match fields.get("locked") {
         Some(node) => boolean(node, &fields.path_of("locked"))?,
         None => false,
     };
-    Ok(Viewport {
+    let viewport = Viewport {
         center,
         width,
         height,
@@ -201,7 +211,15 @@ pub(super) fn viewport(fields: &Fields, units: Unit, layer: String) -> Result<Vi
         locked,
         layer,
         properties: Default::default(),
-    })
+    };
+    if let Some(problem) = viewport.scale_problem() {
+        return Err(at(
+            Error::new(ErrorCode::BadNumber, problem),
+            &scale_path,
+            scale_node.at,
+        ));
+    }
+    Ok(viewport)
 }
 
 /// A point at `key` whose `z` is 0.
@@ -284,11 +302,13 @@ pub(crate) fn layout_property() -> Value {
                     "The layout's name, as AutoCAD's tab shows it: 1 to {LONGEST_NAME} \
                      characters, none of {NOT_IN_A_NAME}, and not `{MODEL_TAB}`."
                 ),
-                "type": "string",
+                // A plain number, true or false is read as its text, as
+                // every name is.
+                "type": TEXT_TYPES,
                 "minLength": 1,
                 "maxLength": LONGEST_NAME,
-                "pattern": "^[^<>/\\\\\":;?*|,=`]*\\S[^<>/\\\\\":;?*|,=`]*$",
-                "not": { "pattern": "^[Mm][Oo][Dd][Ee][Ll]$" },
+                "pattern": r#"^[^<>/\\":;?*|,=`]*[^<>/\\":;?*|,=`\s][^<>/\\":;?*|,=`]*$"#,
+                "not": { "type": "string", "pattern": "^[Mm][Oo][Dd][Ee][Ll]$" },
             }
         }
     })
@@ -307,8 +327,13 @@ pub(crate) fn space_property() -> Value {
 
 /// The schema of a viewport, as a sheet's objects list it.
 pub(crate) fn viewport_def() -> Value {
+    let ratio = format!(r"^\s*{POSITIVE_NUMBER}\s*(:\s*{POSITIVE_NUMBER}\s*)?$");
     super::schema::object_def(
-        "A window on the paper that shows model space at a scale, centred on a model point, as          AutoCAD's MVIEW makes one: rectangular, seen from above. It is in the sheet's paper          space, on a sheet drawn in a layout, and its frame draws there with its own pen;          model space draws inside it, cut at its edge. Put it on a layer that does not plot to          leave its frame off a PDF.",
+        "A window on the paper that shows model space at a scale, centred on a model point, as \
+         AutoCAD's MVIEW makes one: rectangular, seen from above. It is in the sheet's paper \
+         space, on a sheet drawn in a layout, and its frame draws there with its own pen; model \
+         space draws inside it, cut at its edge. Put it on a layer that does not plot to leave \
+         its frame off a PDF.",
         &["center", "width", "height", "view_center", "scale"],
         json!({
             "center": {
@@ -324,25 +349,33 @@ pub(crate) fn viewport_def() -> Value {
                 "$ref": "#/$defs/length",
             },
             "view_center": {
-                "description": "The point of model space at the middle of the window, with 0                                 for z: AutoCAD's view centre.",
+                "description": "The point of model space at the middle of the window, with 0 \
+                                for z: AutoCAD's view centre.",
                 "$ref": "#/$defs/point",
             },
             "scale": {
                 "description": format!(
-                    "{SCALE_SHAPE}. A length of model space draws this many times as long on                      the paper: 1:4 draws a quarter size. Text, hatch patterns and the geometry                      scale with it; lineweights do not, and a linetype's dashes are as long on                      the paper as in paper space, as AutoCAD's PSLTSCALE 1 draws them."
+                    "{SCALE_SHAPE}, each side of a ratio a number more than 0. Quote a ratio, \
+                     '1:4', since a YAML reader that guesses types may read 1:4 as a number. A \
+                     length of model space draws this many times as long on the paper: 1:4 \
+                     draws a quarter size. Text, hatch patterns and the geometry scale with it; \
+                     lineweights do not, and a linetype's dashes are as long on the paper as in \
+                     paper space, as AutoCAD's PSLTSCALE 1 draws them. The scale, one over it, \
+                     and the viewport's height and width over it are each a finite number more \
+                     than 0 that a DWG holds whole."
                 ),
                 "anyOf": [
                     { "type": "number", "exclusiveMinimum": 0 },
-                    {
-                        "type": "string",
-                        "pattern": r"^\s*[0-9.eE+-]+\s*(:\s*[0-9.eE+-]+\s*)?$",
-                    },
+                    { "type": "string", "pattern": ratio },
                 ],
             },
             "locked": {
-                "description": "Whether the viewport's view is locked, as AutoCAD's display                                 lock keeps it from being zoomed or panned: change_viewport                                 refuses to change the scale or the view centre of a locked                                 viewport unless it unlocks it too. It changes nothing drawn.",
-                "type": "boolean",
-                "default": false,
+                "description": "Whether the viewport's view is locked, as AutoCAD's display \
+                                lock keeps it from being zoomed or panned: change_viewport \
+                                refuses to change the scale or the view centre of a locked \
+                                viewport unless it unlocks it too. It changes nothing drawn. \
+                                Without it, false.",
+                "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
             },
         }),
     )
