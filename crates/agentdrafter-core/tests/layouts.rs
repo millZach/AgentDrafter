@@ -559,6 +559,20 @@ fn a_notch_whose_edges_cross_a_text_cuts_it_though_its_corners_are_inside() {
     assert_eq!(texts_on_texts("notch-six-on", &sheet(25.0)).len(), 1);
 }
 
+#[test]
+fn a_text_cut_at_a_slanting_edge_is_apart_from_what_lies_past_it() {
+    // A text cut at a triangle's long edge, and a paper `I` past that edge,
+    // within the cut text's box round it but clear of what prints.
+    let sheet = |at: f64| {
+        format!(
+            "units: mm\npaper: ISO A4 landscape\nlayout: {{name: A}}\nobjects:\n  - text: {{id: model, contents: MMMMMMMM, position: [40, 40, 0], height: 20}}\n  - viewport: {{id: v, clip: {{points: [[0, 0, 0], [100, 0, 0], [0, 100, 0]]}}, view_center: [50, 50, 0], scale: 1}}\n  - text: {{id: paper, space: paper, contents: I, position: [{at}, {at}, 0], height: 3}}\n"
+        )
+    };
+    assert_eq!(texts_on_texts("slant", &sheet(55.0)), Vec::<f64>::new());
+    // Inside the triangle, on the letters that print: found.
+    assert_eq!(texts_on_texts("slant-on", &sheet(45.0)).len(), 1);
+}
+
 fn query(path: &Path, query: Query) -> agentdrafter_core::QueryReport {
     query_with(
         &QueryRequest {

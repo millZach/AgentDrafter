@@ -1119,6 +1119,12 @@ impl TextBox {
         let mut axes = vec![self.along, self.up, other.along, other.up];
         if self.cut || other.cut {
             axes.extend([[1.0, 0.0], [0.0, 1.0]]);
+            // A box cut at a viewport's edge or boundary is a convex piece of
+            // its own: two pieces are apart when they are apart across one
+            // of the edges of either.
+            for piece in [&self.corners, &other.corners] {
+                axes.extend(edge_normals(piece));
+            }
         }
         for axis in axes {
             let (a_lo, a_hi) = span(&self.corners, axis);
@@ -1150,6 +1156,19 @@ struct Window<'a> {
 /// Whether `p` is inside `window`, its edge included.
 fn within(p: Point2, window: &Bounds) -> bool {
     p[0] >= window.min[0] && p[0] <= window.max[0] && p[1] >= window.min[1] && p[1] <= window.max[1]
+}
+
+/// The unit normal of each edge of the closed outline `corners` that has a
+/// length.
+fn edge_normals(corners: &[Point2]) -> Vec<Point2> {
+    (0..corners.len())
+        .filter_map(|i| {
+            let (a, b) = (corners[i], corners[(i + 1) % corners.len()]);
+            let d = [b[0] - a[0], b[1] - a[1]];
+            let length = d[0].hypot(d[1]);
+            (length > 0.0).then(|| [-d[1] / length, d[0] / length])
+        })
+        .collect()
 }
 
 /// Where `corners` reach along `axis`: from the least to the most.
