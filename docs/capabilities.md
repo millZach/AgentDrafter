@@ -11,7 +11,7 @@ Every capability is done the same way, and each issue says so: the schema and th
 - **Operations:** add each kind of object, `change`, `move`, `delete`, `set_attribute`, and a table's `set_cell` and its row and column operations, in change sets that land on a set's own files, with a journal, undo and accept.
 - **Queries:** find by ID, name, block, attribute or text; a sheet's blocks; an insert's attributes; the distance between two objects' own points; a sheet's extents.
 - **Checks:** the exact paper size, nothing off the sheet, no text overflowing its cell, no text on other text.
-- **Existing DWGs:** `render` and `plot` read a DWG's model space, or, when it opens on a layout, every paper-space layout through its viewports, clipped ones and layers frozen in one among them, drawing what the core models and counting the rest. Nothing revises one yet.
+- **Existing DWGs:** `render` and `plot` read a DWG's model space and every paper-space layout through its viewports, whatever tab it was saved on, clipped ones and layers frozen in one among them, drawing what the core models and counting the rest. Nothing revises one yet.
 
 acadrust, behind the seam in `src/dwg.rs`, already models most of what the gap needs: dimensions, leaders and multileaders, tables, layouts and viewports, wipeouts, images and underlays, fields, groups, dynamic blocks, multilines, points, construction lines and 3D solids, as well as transforms and explode. Most of the gap is AgentDrafter's own model, operations and drawing pipeline, not the DWG library.
 

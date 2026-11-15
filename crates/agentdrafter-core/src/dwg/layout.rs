@@ -23,11 +23,13 @@
 //!   height, its height over its scale, with AutoCAD's status, display
 //!   lock among it.
 //!
-//! A DWG is read as the sheet it opens on: model space alone when it
-//! opens on the Model tab, and its layout when it opens on one, as
-//! AutoCAD's TILEMODE says. A layout's viewport is read when the core
-//! draws it: rectangular, on, seen from above with no twist, perspective
-//! or clipping, and freezing no layer. Anything else is counted not read.
+//! A DWG is read with every layout it holds, whatever tab it was saved
+//! on: AutoCAD's TILEMODE says only whether it opens on the Model tab or
+//! on a layout, which. A layout's viewport is read when the core draws
+//! it: on, seen from above with no twist, perspective or front or back
+//! clipping, rectangular or clipped to a boundary the core reads, and
+//! freezing layers of the drawing's own. Anything else is counted not
+//! read.
 
 use acadrust::entities::{
     Circle, EntityType, GridFlags, LwPolyline, Viewport as DwgViewport, ViewportRenderMode,
@@ -410,13 +412,13 @@ pub(super) struct ReadLayout {
 }
 
 /// The layouts of `drawing`, in `units`, the core reads, in the order of
-/// their tabs, and how many of them it reads no page setup of. A drawing
-/// that opens on the Model tab is read as model space alone, and each
-/// layout that holds anything but its own overall viewport is counted. One
-/// that opens on a layout is read with every layout: the one it opens on,
-/// one whose page setup the core reads, and one that holds anything,
-/// whose page setup it does not read and counts. AutoCAD's own empty
-/// layout, on its own page setup, is neither read nor counted.
+/// their tabs, and how many of them it reads no page setup of, whatever
+/// tab the drawing was saved on: the one it opens on, if it opens on a
+/// layout, one whose page setup the core reads, and one that holds
+/// anything but its own overall viewport, whose page setup it does not
+/// read and counts. AutoCAD's own empty layout, on its own page setup, is
+/// neither read nor counted, so a drawing of model space alone reads as
+/// one.
 pub(super) fn read_layouts(drawing: &CadDocument, units: Unit) -> (Vec<ReadLayout>, usize) {
     let model = drawing.header.model_space_block_handle;
     let mut all: Vec<&DwgLayout> = drawing
@@ -439,20 +441,16 @@ pub(super) fn read_layouts(drawing: &CadDocument, units: Unit) -> (Vec<ReadLayou
             .find(|r| r.handle == block)
             .is_some_and(|r| drawing.entities_in_block(&r.name).any(|e| !is_overall(e)))
     };
-    let Some((_, opened)) = opened_on(drawing) else {
-        let not_read = all
-            .iter()
-            .filter(|l| holds_anything(l.block_record))
-            .count();
-        return (Vec::new(), not_read);
-    };
+    // The layout the drawing opens on, if it opens on one: read even when
+    // it holds nothing. A drawing that opens on the Model tab has none.
+    let opened = opened_on(drawing).map(|(_, block)| block);
     let mut read = Vec::new();
     let mut not_read = 0;
     for layout in all {
         let block = layout.block_record;
         let paper = read_paper(drawing, block, units);
         if paper.is_none() {
-            if block != opened && !holds_anything(block) {
+            if Some(block) != opened && !holds_anything(block) {
                 continue;
             }
             not_read += 1;

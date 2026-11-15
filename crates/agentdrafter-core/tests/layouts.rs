@@ -281,6 +281,45 @@ fn every_layout_boundary_and_frozen_layer_reads_back_from_the_dwg() {
     assert_eq!(read.objects_not_read, 0);
 }
 
+#[test]
+fn a_dwg_saved_on_the_model_tab_reads_and_plots_every_layout() {
+    let dir = scratch("model-tab");
+    let dwg = built(&dir, TWO);
+    let read = read_dwg(&dwg).unwrap();
+    assert_eq!(read.opens_on.as_deref(), Some("Front"));
+    // The same drawing with only its Model tab made current, as AutoCAD
+    // saves one left on the Model tab.
+    let mut drawing = acadrust::DwgReader::from_file(&dwg).unwrap().read().unwrap();
+    drawing.header.show_model_space = true;
+    let on_model = dir.join("model-tab.dwg");
+    fs::write(
+        &on_model,
+        acadrust::DwgWriter::write_to_vec(&drawing).unwrap(),
+    )
+    .unwrap();
+    let again = read_dwg(&on_model).unwrap();
+    assert_eq!(again.opens_on, None);
+    assert_eq!(again.layout, read.layout);
+    assert_eq!(again.other_layouts, read.other_layouts);
+    assert_eq!(again.objects, read.objects);
+    assert_eq!(again.layouts_not_read, 0);
+    // Its plot is a page for each layout, as the drawing saved on one.
+    let mut request = PlotRequest::new(&on_model);
+    request.output = Some(dir.join("model-tab.pdf"));
+    let report = plot_with(&request, &Settings::default()).unwrap();
+    let pages: Vec<&str> = report.layouts.iter().map(|l| l.layout.as_str()).collect();
+    assert_eq!(pages, ["Front", "Back"]);
+    // A drawing of model space alone, AutoCAD's own empty layout beside
+    // it, still reads as model space alone.
+    let plain = built(
+        &scratch("model-alone"),
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [10, 0, 0]}\n",
+    );
+    let read = read_dwg(&plain).unwrap();
+    assert!(read.layout.is_none() && read.opens_on.is_none());
+    assert_eq!(read.layouts_not_read, 0);
+}
+
 fn drawn(path: &Path, layout: Option<&str>) -> agentdrafter_core::DisplayListReport {
     let mut request = DisplayListRequest::new(path);
     request.layout = layout.map(str::to_owned);

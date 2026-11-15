@@ -41,7 +41,7 @@ Where a layout draws at its paper's size, as in AutoCAD: its border, its title b
 _Avoid_: sheet space, layout space
 
 **Layout**:
-AutoCAD's paper-space tab that holds a sheet: its name, its paper, its paper space, and its page setup, which plots its whole paper at full size, as AutoCAD's LAYOUT and PAGESETUP make it. A sheet drawn in one prints its layout: paper space as it is drawn, and model space through its viewports. A sheet may be drawn in several, in the order of their tabs, each printing on its own. A DWG is read with every layout when it opens on one, or as model space when it opens on the Model tab.
+AutoCAD's paper-space tab that holds a sheet: its name, its paper, its paper space, and its page setup, which plots its whole paper at full size, as AutoCAD's LAYOUT and PAGESETUP make it. A sheet drawn in one prints its layout: paper space as it is drawn, and model space through its viewports. A sheet may be drawn in several, in the order of their tabs, each printing on its own. A DWG is read with every layout it holds, whatever tab it was saved on; the tab says only which it opens on.
 _Avoid_: sheet (a sheet is the page; a layout holds one), tab, paper space (the space a layout draws in)
 
 **Viewport**:

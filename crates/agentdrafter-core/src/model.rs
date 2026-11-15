@@ -1089,26 +1089,31 @@ pub struct DrawingContents {
     /// What every linetype in the drawing is enlarged by: its LTSCALE.
     #[serde(default = "one")]
     pub ltscale: f64,
-    /// The layout the drawing opens on, when it opens on one rather than
-    /// on model space, as AutoCAD saves it: `objects` then holds its paper
-    /// space's objects and viewports beside model space's, and the layout
-    /// says which are which.
+    /// The drawing's first layout the core reads, in the order of their
+    /// tabs, whatever tab the drawing was saved on: `objects` then holds
+    /// its paper space's objects and viewports beside model space's, and
+    /// the layout says which are which. None for a drawing of model space
+    /// alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<Layout>,
     /// The drawing's other layouts the core reads, after `layout`, in the
-    /// order of their tabs, when it opens on a layout: each with its paper,
-    /// when the core can read its page setup, and its paper space's
-    /// objects among `objects`.
+    /// order of their tabs: each with its paper, when the core can read
+    /// its page setup, and its paper space's objects among `objects`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_layouts: Vec<Layout>,
+    /// The layout the drawing opens on, by its name, as AutoCAD saved it
+    /// current; none when it opens on the Model tab. It says which tab
+    /// AutoCAD shows first, and changes nothing the core reads or draws.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opens_on: Option<String>,
     /// The paper the layout's page setup plots, when the core can read it:
     /// a standard paper, whole, at full size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paper: Option<Paper>,
-    /// How many of the drawing's layouts the core has no model for yet: a
-    /// layout that holds anything, other than the one the drawing opens
-    /// on, and the page setup of that one when it is not a standard paper
-    /// plotted whole at full size. AutoCAD's own empty layout is not
+    /// How many of the drawing's layouts the core reads no page setup of:
+    /// the one the drawing opens on, and any other that holds anything,
+    /// whose page setup is not a standard paper plotted whole at full size.
+    /// Each is read, without a paper. AutoCAD's own empty layout is not
     /// counted.
     #[serde(default, skip_serializing_if = "is_none_of")]
     pub layouts_not_read: usize,

@@ -742,8 +742,8 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
     arrow_blocks.extend(dimension::style_arrow_blocks(&drawing));
     // A dimension's own block holds what it draws, and is read with it.
     let dimension_blocks = dimension::dimension_blocks(&drawing);
-    // The sheet the drawing opens on: model space, and, when it opens on a
-    // layout, the paper space of each layout the core reads.
+    // The sheet the drawing holds: model space, and the paper space of
+    // each layout the core reads, whatever tab it was saved on.
     let units = unit(drawing.header.insertion_units);
     let (read_layouts, layouts_not_read) =
         layout::read_layouts(&drawing, units.unwrap_or(Unit::Mm));
@@ -972,6 +972,7 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         ltscale: drawing.header.linetype_scale,
         layout,
         other_layouts,
+        opens_on: layout::opened_on(&drawing).map(|(name, _)| name),
         paper,
         layouts_not_read,
     })
