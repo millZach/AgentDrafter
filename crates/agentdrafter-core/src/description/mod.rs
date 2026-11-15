@@ -27,6 +27,7 @@ pub(crate) mod ids;
 mod layers;
 pub(crate) mod layout;
 pub(crate) use layers::{one_name, LAYER_KEYS, LINETYPE_KEYS};
+pub(crate) use layout::clip_from;
 mod leader;
 mod leader_schema;
 mod mark;
@@ -52,7 +53,7 @@ use objects::{Place, Tables};
 use strict_yaml::{index_path, key_path, Entry, Kind, Node, Pos};
 
 use crate::error::{Error, ErrorCode};
-use crate::model::{BlockLibrary, Layout, Point3, Sheet};
+use crate::model::{BlockLibrary, Layout, Paper, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 pub use blocks::parse_block_library;
@@ -76,7 +77,7 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 13] = [
+pub(crate) const SHEET_KEYS: [&str; 14] = [
     "units",
     "block_library",
     "ltscale",
@@ -90,6 +91,7 @@ pub(crate) const SHEET_KEYS: [&str; 13] = [
     "objects",
     paper::PAPER_KEY,
     layout::LAYOUT_KEY,
+    layout::LAYOUTS_KEY,
 ];
 
 /// The keys an object of type `object` takes on a sheet: its own, then its
@@ -395,15 +397,33 @@ fn sheet_and_records(
         Some(node) => Some(paper::paper(node, paper::PAPER_KEY, units)?),
         None => None,
     };
-    let layout_name = match fields.get(layout::LAYOUT_KEY) {
-        Some(node) => Some(layout::layout(
-            node,
-            layout::LAYOUT_KEY,
-            units,
-            paper.as_ref().zip(fields.get(paper::PAPER_KEY)),
-        )?),
-        None => None,
-    };
+    // The layouts the sheet is drawn in, each with its name and paper: one
+    // under `layout`, on the sheet's paper, or two or more under `layouts`.
+    let layouts: Vec<(String, Paper)> =
+        match (fields.get(layout::LAYOUT_KEY), fields.get(layout::LAYOUTS_KEY)) {
+            (Some(_), Some(node)) => {
+                return Err(bad_value(
+                    node,
+                    layout::LAYOUTS_KEY,
+                    "a sheet is drawn in one layout, under `layout`, or in several, under                      `layouts`, not both",
+                ))
+            }
+            (Some(node), None) => {
+                let name = layout::layout(
+                    node,
+                    layout::LAYOUT_KEY,
+                    units,
+                    paper.as_ref().zip(fields.get(paper::PAPER_KEY)),
+                )?;
+                let paper = paper.clone().expect("a layout's paper is declared");
+                vec![(name, paper)]
+            }
+            (None, Some(node)) => {
+                layout::layouts(node, layout::LAYOUTS_KEY, units, paper.as_ref())?
+            }
+            (None, None) => Vec::new(),
+        };
+    let layout_names: Vec<String> = layouts.iter().map(|(name, _)| name.clone()).collect();
     let list = sequence(fields.require("objects")?, "objects", "a list of objects")?;
     let tables = Tables {
         units,
@@ -414,13 +434,13 @@ fn sheet_and_records(
         table_styles: &table_styles,
         mleader_styles: &mleader_styles,
         dimension_styles: &dimension_styles,
-        layout: layout_name.is_some(),
+        layouts: &layout_names,
     };
     let mut place = Place::Sheet {
         library: library.as_ref(),
         objects: Vec::new(),
         noticed: Vec::new(),
-        paper_space: Vec::new(),
+        spaces: Vec::new(),
     };
     let mut objects = list
         .iter()
@@ -449,7 +469,7 @@ fn sheet_and_records(
     let Place::Sheet {
         objects: mut records,
         noticed: in_rows,
-        paper_space,
+        spaces,
         ..
     } = place
     else {
@@ -462,6 +482,16 @@ fn sheet_and_records(
     for record in &mut records[in_template..] {
         record.in_row = true;
     }
+    let mut layouts = layouts
+        .into_iter()
+        .enumerate()
+        .map(|(k, (name, paper))| Layout {
+            name,
+            paper: Some(paper),
+            paper_space: spaces.iter().map(|s| *s == Some(k)).collect(),
+        });
+    let layout = layouts.next();
+    let other_layouts: Vec<Layout> = layouts.collect();
     let mut sheet = Sheet {
         units,
         block_library,
@@ -473,9 +503,11 @@ fn sheet_and_records(
         dimension_styles,
         blocks: Vec::new(),
         objects,
-        paper,
+        // A sheet drawn in layouts is on its first layout's paper.
+        paper: layout.as_ref().and_then(|l| l.paper.clone()).or(paper),
         ltscale,
-        layout: layout_name.map(|name| Layout { name, paper_space }),
+        layout,
+        other_layouts,
     };
     if let Some(library) = &library {
         blocks::take_from_library(&mut sheet, library, &fields)?;

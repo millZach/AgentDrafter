@@ -11,37 +11,165 @@
 //! Both spaces are in the sheet's declared unit, and every object of the
 //! sheet says which it is in: model space unless it says paper. A viewport
 //! is always in paper space.
+//!
+//! A sheet may be drawn in several layouts of one DWG, which share its
+//! model space, as AutoCAD's layout tabs do. Each has its own name, paper,
+//! paper-space objects and viewports, and prints on its own paper.
 
 use serde::{Deserialize, Serialize};
 
-use super::{is_false, layer_zero, Point3, Properties};
+use super::{is_false, layer_zero, Paper, Point3, Properties};
 
-/// The paper-space layout a sheet is drawn in, as AutoCAD's layout tab
-/// holds it: its name, and which of the sheet's objects are in paper
-/// space. Its paper is the sheet's [`super::Paper`], and its page setup
-/// plots that paper whole at full size.
+/// A paper-space layout a sheet is drawn in, as AutoCAD's layout tab holds
+/// it: its name, its paper, and which of the sheet's objects are in its
+/// paper space. Its page setup plots its paper whole at full size.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     /// The layout's name, as AutoCAD's tab shows it, such as `Panel`.
     pub name: String,
-    /// For each of the sheet's objects, in order, whether it is in paper
-    /// space. Every viewport is.
+    /// The paper its page setup plots, a standard size by name. The
+    /// sheet's own [`Paper`] is the paper of the layout it draws.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<Paper>,
+    /// For each of the sheet's objects, in order, whether it is in this
+    /// layout's paper space. Every viewport is in one layout's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paper_space: Vec<bool>,
 }
 
 impl Layout {
     /// A layout named `name` with every one of `objects` objects in model
-    /// space but its viewports.
+    /// space but its viewports, which are in its paper space.
     pub fn new(name: impl Into<String>, objects: &[super::Object]) -> Self {
         Self {
             name: name.into(),
+            paper: None,
             paper_space: objects
                 .iter()
                 .map(|o| matches!(o, super::Object::Viewport(_)))
                 .collect(),
         }
     }
+
+    /// Whether the sheet's object at `index` is in this layout's paper
+    /// space.
+    pub fn holds(&self, index: usize) -> bool {
+        self.paper_space.get(index).copied().unwrap_or(false)
+    }
+}
+
+/// The boundary a viewport is clipped to instead of its rectangle, on the
+/// paper, as AutoCAD's VPCLIP and MVIEW's Object and Polygonal options
+/// clip one: model space shows inside it alone, and it is the viewport's
+/// frame. The viewport's window is the box round it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Clip {
+    /// A closed boundary through `points`, each segment straight or an arc
+    /// by its bulge, as a closed polyline is: AutoCAD's polygonal clip.
+    Polyline {
+        points: Vec<Point3>,
+        /// For each point, the bulge of the segment that starts there, as
+        /// a polyline's; empty when every segment is straight.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bulges: Vec<f64>,
+    },
+    /// A circle.
+    Circle { center: Point3, radius: f64 },
+}
+
+impl Clip {
+    /// The bulge of the segment that starts at point `i`.
+    pub fn bulge(&self, i: usize) -> f64 {
+        match self {
+            Clip::Polyline { bulges, .. } => bulges.get(i).copied().unwrap_or(0.0),
+            Clip::Circle { .. } => 0.0,
+        }
+    }
+
+    /// The box round the boundary on the paper: its lower left and upper
+    /// right corners, an arc's farthest reach among it.
+    pub fn bounds(&self) -> [[f64; 2]; 2] {
+        match self {
+            Clip::Circle { center, radius } => [
+                [center.x - radius, center.y - radius],
+                [center.x + radius, center.y + radius],
+            ],
+            Clip::Polyline { points, .. } => {
+                let mut low = [f64::INFINITY; 2];
+                let mut high = [f64::NEG_INFINITY; 2];
+                let mut take = |p: [f64; 2]| {
+                    for axis in 0..2 {
+                        low[axis] = low[axis].min(p[axis]);
+                        high[axis] = high[axis].max(p[axis]);
+                    }
+                };
+                for (i, a) in points.iter().enumerate() {
+                    let b = &points[(i + 1) % points.len()];
+                    take([a.x, a.y]);
+                    for p in arc_reach([a.x, a.y], [b.x, b.y], self.bulge(i)) {
+                        take(p);
+                    }
+                }
+                [low, high]
+            }
+        }
+    }
+
+    /// The boundary moved by `by` on the paper.
+    pub fn moved(&self, by: [f64; 2]) -> Clip {
+        let shift = |p: &Point3| Point3::new(p.x + by[0], p.y + by[1], p.z);
+        match self {
+            Clip::Polyline { points, bulges } => Clip::Polyline {
+                points: points.iter().map(shift).collect(),
+                bulges: bulges.clone(),
+            },
+            Clip::Circle { center, radius } => Clip::Circle {
+                center: shift(center),
+                radius: *radius,
+            },
+        }
+    }
+}
+
+/// The points at 0°, 90°, 180° and 270° round its centre that the arc
+/// from `a` to `b` of `bulge` passes through, which reach past its ends;
+/// none for a straight segment.
+fn arc_reach(a: [f64; 2], b: [f64; 2], bulge: f64) -> Vec<[f64; 2]> {
+    let chord = [b[0] - a[0], b[1] - a[1]];
+    let length = chord[0].hypot(chord[1]);
+    if bulge == 0.0 || !bulge.is_finite() || length == 0.0 {
+        return Vec::new();
+    }
+    let half = length / 2.0;
+    let middle = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    let left = [-chord[1] / length, chord[0] / length];
+    let off = half * (1.0 - bulge * bulge) / (2.0 * bulge);
+    let center = [middle[0] + left[0] * off, middle[1] + left[1] * off];
+    let radius = half * (1.0 + bulge * bulge) / (2.0 * bulge.abs());
+    let start = (a[1] - center[1]).atan2(a[0] - center[0]);
+    let sweep = 4.0 * bulge.atan();
+    let tau = std::f64::consts::TAU;
+    (0..4)
+        .filter_map(|quarter| {
+            let angle = f64::from(quarter) * tau / 4.0;
+            // How far round from the start, the way the arc turns.
+            let along = if sweep > 0.0 {
+                (angle - start).rem_euclid(tau)
+            } else {
+                (start - angle).rem_euclid(tau)
+            };
+            (along <= sweep.abs()).then(|| {
+                // A quarter point exactly, so that a box reads back whole.
+                match quarter {
+                    0 => [center[0] + radius, center[1]],
+                    1 => [center[0], center[1] + radius],
+                    2 => [center[0] - radius, center[1]],
+                    _ => [center[0], center[1] - radius],
+                }
+            })
+        })
+        .collect()
 }
 
 /// A rectangular window on the paper that shows model space, at a scale,
@@ -64,6 +192,16 @@ pub struct Viewport {
     /// being zoomed or panned. It changes nothing it draws.
     #[serde(default, skip_serializing_if = "is_false")]
     pub locked: bool,
+    /// The boundary it is clipped to, when it is not rectangular: its
+    /// window is then the box round it, as AutoCAD keeps a clipped
+    /// viewport's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<Clip>,
+    /// The layers frozen in it alone, as AutoCAD's VPLAYER freezes them:
+    /// their objects neither draw nor plot through it, and do through the
+    /// sheet's other viewports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frozen_layers: Vec<String>,
     #[serde(default = "layer_zero")]
     pub layer: String,
     #[serde(flatten)]
@@ -172,6 +310,31 @@ impl Viewport {
         None
     }
 
+    /// Whether the layer named `layer` is frozen in it, as AutoCAD matches
+    /// a layer's name, whatever its case.
+    pub fn freezes(&self, layer: &str) -> bool {
+        self.frozen_layers
+            .iter()
+            .any(|l| l.eq_ignore_ascii_case(layer))
+    }
+
+    /// The viewport clipped to `clip`, as AutoCAD's VPCLIP clips one: its
+    /// window becomes the box round the boundary, and its view centre the
+    /// model point there, so that model space stays where it showed.
+    pub fn clipped_to(&self, clip: Clip) -> Viewport {
+        let [low, high] = clip.bounds();
+        let center = [(low[0] + high[0]) / 2.0, (low[1] + high[1]) / 2.0];
+        let view = self.to_model(center);
+        Viewport {
+            center: Point3::new(center[0], center[1], 0.0),
+            width: high[0] - low[0],
+            height: high[1] - low[1],
+            view_center: Point3::new(view[0], view[1], 0.0),
+            clip: Some(clip),
+            ..self.clone()
+        }
+    }
+
     /// The model height the window shows, as AutoCAD's DWG keeps it: its
     /// height on the paper over its scale.
     pub fn view_height(&self) -> f64 {
@@ -235,6 +398,8 @@ mod tests {
             view_center: Point3::new(400.0, 300.0, 0.0),
             scale: 0.25,
             locked: false,
+            clip: None,
+            frozen_layers: Vec::new(),
             layer: "0".into(),
             properties: Properties::default(),
         };
@@ -242,5 +407,40 @@ mod tests {
         assert_eq!(viewport.to_paper([0.0, 20.0]), [20.0, 20.0]);
         assert_eq!(viewport.to_model([20.0, 20.0]), [0.0, 20.0]);
         assert_eq!(viewport.view(), [[0.0, 20.0], [800.0, 580.0]]);
+    }
+
+    #[test]
+    fn a_clipped_viewport_keeps_model_space_where_it_showed() {
+        // As AutoCAD 2026's VPCLIP clipped a made-up 1:4 viewport to a
+        // polyline whose half circle reaches 280 across.
+        let viewport = Viewport {
+            center: Point3::new(120.0, 150.0, 0.0),
+            width: 200.0,
+            height: 200.0,
+            view_center: Point3::new(400.0, 300.0, 0.0),
+            scale: 0.25,
+            locked: false,
+            clip: None,
+            frozen_layers: Vec::new(),
+            layer: "0".into(),
+            properties: Properties::default(),
+        };
+        let clip = Clip::Polyline {
+            points: [[30.0, 60.0], [190.0, 60.0], [190.0, 240.0], [30.0, 240.0]]
+                .map(|[x, y]| Point3::new(x, y, 0.0))
+                .to_vec(),
+            bulges: vec![0.0, 1.0, 0.0, 0.0],
+        };
+        assert_eq!(clip.bounds(), [[30.0, 60.0], [280.0, 240.0]]);
+        let clipped = viewport.clipped_to(clip);
+        assert_eq!(clipped.center, Point3::new(155.0, 150.0, 0.0));
+        assert_eq!((clipped.width, clipped.height), (250.0, 180.0));
+        assert_eq!(clipped.view_center, Point3::new(540.0, 300.0, 0.0));
+        assert_eq!(clipped.view_height(), 720.0);
+        let circle = Clip::Circle {
+            center: Point3::new(330.0, 250.0, 0.0),
+            radius: 30.0,
+        };
+        assert_eq!(circle.bounds(), [[300.0, 220.0], [360.0, 280.0]]);
     }
 }

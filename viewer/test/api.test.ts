@@ -44,8 +44,9 @@ test('other parts of the fragment stay, and an address with no token anywhere gi
 });
 
 test('the page shows the folder the server started in unless the address names another', () => {
-  assert.deepEqual(wanted(''), { source: '.', sheet: null });
-  assert.deepEqual(wanted('?source=demo-plant&sheet=DP-LD-102'), { source: 'demo-plant', sheet: 'DP-LD-102' });
+  assert.deepEqual(wanted(''), { source: '.', sheet: null, layout: null });
+  assert.deepEqual(wanted('?source=demo-plant&sheet=DP-LD-102'), { source: 'demo-plant', sheet: 'DP-LD-102', layout: null });
+  assert.deepEqual(wanted('?source=layouts.yaml&layout=Wiring'), { source: 'layouts.yaml', sheet: null, layout: 'Wiring' });
 });
 
 test('a command is posted as JSON with the token as a bearer, never in the address', () => {

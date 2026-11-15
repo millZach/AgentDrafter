@@ -995,6 +995,7 @@ fn the_set_is_drawn_as_it_was_at_each_entry_and_pruned_entries_say_they_cannot_b
     let error = display_list_with(
         &DisplayListRequest {
             entry: Some(1),
+            layout: None,
             ..DisplayListRequest::new(&set)
         },
         &Settings::default(),

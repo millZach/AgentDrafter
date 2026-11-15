@@ -50,12 +50,17 @@ export function takeToken(place: Place, storage: KeepsText, history: RewritesAdd
 /**
  * What the page shows, from its address's query: `source`, a drawing set's
  * folder, a sheet description or a DWG, as the server's own folder names
- * it (by default the folder the server started in), and `sheet`, which of
- * its sheets (by default the first).
+ * it (by default the folder the server started in), `sheet`, which of its
+ * sheets (by default the first), and `layout`, which layout of a sheet
+ * drawn in several (by default its first).
  */
-export function wanted(search: string): { source: string; sheet: string | null } {
+export function wanted(search: string): { source: string; sheet: string | null; layout: string | null } {
   const query = new URLSearchParams(search);
-  return { source: query.get('source') || '.', sheet: query.get('sheet') || null };
+  return {
+    source: query.get('source') || '.',
+    sheet: query.get('sheet') || null,
+    layout: query.get('layout') || null,
+  };
 }
 
 /** A command's request: where it goes and what it carries. */

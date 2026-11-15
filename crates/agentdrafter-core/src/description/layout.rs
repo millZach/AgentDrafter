@@ -15,7 +15,7 @@ use super::schema::{POSITIVE_NUMBER, TEXT_TYPES};
 use super::strict_yaml::Node;
 use super::{at, bad_value, boolean, length, point, scalar, Fields};
 use crate::error::{Error, ErrorCode};
-use crate::model::{Paper, Point3, Viewport};
+use crate::model::{Clip, Layer, Paper, Point3, Viewport};
 use crate::units::{parse_length, LengthError, Unit};
 
 /// The key a sheet description or template declares its layout under.
@@ -23,6 +23,13 @@ pub(crate) const LAYOUT_KEY: &str = "layout";
 
 /// The keys of a layout.
 pub(crate) const LAYOUT_KEYS: [&str; 1] = ["name"];
+
+/// The key a sheet description or template lists its layouts under, when
+/// it is drawn in more than one.
+pub(crate) const LAYOUTS_KEY: &str = "layouts";
+
+/// The keys of each layout of a list.
+pub(crate) const LIST_KEYS: [&str; 2] = ["name", "paper"];
 
 /// The key an object of a sheet says which space it is in by.
 pub(crate) const SPACE_KEY: &str = "space";
@@ -34,19 +41,29 @@ pub(crate) const MODEL: &str = "model";
 pub(crate) const PAPER: &str = "paper";
 
 /// The keys a viewport takes.
-pub(crate) const VIEWPORT_KEYS: [&str; 11] = [
+pub(crate) const VIEWPORT_KEYS: [&str; 13] = [
     "center",
     "width",
     "height",
     "view_center",
     "scale",
     "locked",
+    "clip",
+    "frozen_layers",
     "layer",
     "color",
     "linetype",
     "lineweight",
     "linetype_scale",
 ];
+
+/// The keys a viewport's clipping boundary takes: a closed polyline's
+/// points, or a circle's centre and radius.
+pub(crate) const CLIP_KEYS: [&str; 3] = ["points", "center", "radius"];
+
+/// The keys of a viewport's window, which a clipped viewport takes from
+/// its boundary instead.
+const WINDOW_KEYS: [&str; 3] = ["center", "width", "height"];
 
 /// The longest name a layout can have, as AutoCAD's: 255 characters.
 const LONGEST_NAME: usize = 255;
@@ -107,6 +124,106 @@ pub(super) fn layout(
     }
 }
 
+/// The layouts `node` lists, each with its name and paper, on a sheet in
+/// `units` whose own paper, if it declares one, is `paper`: two or more,
+/// each named once, whatever the case, as AutoCAD names its tabs, and
+/// each on a standard paper by name, its own or the sheet's.
+pub(super) fn layouts(
+    node: &Node,
+    path: &str,
+    units: Unit,
+    paper: Option<&Paper>,
+) -> Result<Vec<(String, Paper)>, Error> {
+    let items = super::sequence(node, path, "a list of layouts, each with its name")?;
+    if items.len() < 2 {
+        return Err(bad_value(
+            node,
+            path,
+            format!(
+                "`{LAYOUTS_KEY}` lists two or more layouts; a sheet drawn in one says \
+                 `{LAYOUT_KEY}: {{name: ...}}`"
+            ),
+        ));
+    }
+    if !matches!(units, Unit::Mm | Unit::In) {
+        return Err(bad_value(
+            node,
+            path,
+            format!(
+                "a sheet drawn in a layout is in mm or in, as AutoCAD's paper is, and this one is \
+                 in {units}"
+            ),
+        ));
+    }
+    let mut out: Vec<(String, Paper)> = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let at_path = super::strict_yaml::index_path(path, i);
+        let fields = Fields::of(item, &at_path, &LIST_KEYS, "a layout")?;
+        let name_node = fields.require_text("name")?;
+        let name_path = fields.path_of("name");
+        let name = scalar(
+            name_node,
+            &name_path,
+            "a layout's name, text such as `Panel`",
+        )?;
+        if let Some(problem) = name_problem(name) {
+            return Err(bad_value(name_node, &name_path, problem));
+        }
+        if let Some((other, _)) = out.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+            return Err(at(
+                Error::new(
+                    ErrorCode::DuplicateName,
+                    format!(
+                        "two layouts are named `{other}` and `{name}`; AutoCAD names each tab \
+                         once, whatever its case"
+                    ),
+                ),
+                &name_path,
+                name_node.at,
+            ));
+        }
+        let own =
+            match fields.get(super::paper::PAPER_KEY) {
+                Some(paper_node) => {
+                    let paper_path = fields.path_of(super::paper::PAPER_KEY);
+                    let own = super::paper::paper(paper_node, &paper_path, units)?;
+                    if own.name.is_none() {
+                        return Err(bad_value(
+                            paper_node,
+                            &paper_path,
+                            "a layout's paper is a standard paper by name, such as `ISO A3 \
+                         landscape`, which AutoCAD's DWG To PDF plotter has, to plot whole",
+                        ));
+                    }
+                    own
+                }
+                None => match paper {
+                    Some(sheet) if sheet.name.is_some() => sheet.clone(),
+                    Some(_) => return Err(bad_value(
+                        item,
+                        &at_path,
+                        "a layout takes the sheet's paper when it gives none of its own, and the \
+                         sheet's is not a standard paper by name; give this layout's under \
+                         `paper`, such as `ISO A3 landscape`",
+                    )),
+                    None => {
+                        return Err(at(
+                            Error::new(
+                                ErrorCode::MissingKey,
+                                "each layout plots on a standard paper by name, such as `ISO A3 \
+                             landscape`: its own under `paper`, or the sheet's",
+                            ),
+                            &at_path,
+                            item.at,
+                        ))
+                    }
+                },
+            };
+        out.push((name.to_owned(), own));
+    }
+    Ok(out)
+}
+
 /// What is wrong with `name` as a layout's name, if anything.
 pub(crate) fn name_problem(name: &str) -> Option<String> {
     if name.trim().is_empty() {
@@ -131,49 +248,103 @@ pub(crate) fn name_problem(name: &str) -> Option<String> {
     None
 }
 
-/// Whether the object whose keys are `fields` is in paper space, on a sheet
-/// that has a layout when `layout` says so. A viewport always is.
-pub(super) fn in_paper_space(fields: &Fields, layout: bool, viewport: bool) -> Result<bool, Error> {
+/// The layout whose paper space `space` names, among `layouts`, the names
+/// of a sheet's layouts in order: a layout by its exact name, or, on a
+/// sheet with one layout, `paper` for it. None when it names none of them.
+pub(crate) fn layout_named(space: &str, layouts: &[String]) -> Option<usize> {
+    layouts
+        .iter()
+        .position(|name| name == space)
+        .or_else(|| (space == PAPER && layouts.len() == 1).then_some(0))
+}
+
+/// What `space` may be on a sheet whose layouts are `layouts`, for the
+/// errors that refuse one.
+pub(crate) fn spaces_allowed(layouts: &[String]) -> String {
+    match layouts {
+        [] => "`model`; a sheet without a layout has model space alone".to_owned(),
+        [_] => "`model` or `paper`".to_owned(),
+        _ => format!(
+            "`model`, or the name of one of the sheet's layouts: {}",
+            layouts
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// The space the object whose keys are `fields` is in, on a sheet whose
+/// layouts are named `layouts`, in order: the place of the layout whose
+/// paper space holds it, or none for model space. A viewport is in a
+/// layout's paper space, the only layout's unless it names another.
+pub(super) fn space(
+    fields: &Fields,
+    layouts: &[String],
+    viewport: bool,
+) -> Result<Option<usize>, Error> {
     // A choice, as `justify` is: a bare null is no choice.
     let Some(node) = fields.get(SPACE_KEY) else {
-        if viewport && !layout {
-            return Err(no_layout(fields, "a viewport"));
-        }
-        return Ok(viewport);
+        return match (viewport, layouts.len()) {
+            (false, _) => Ok(None),
+            (true, 0) => Err(no_layout(fields, "a viewport")),
+            (true, 1) => Ok(Some(0)),
+            (true, _) => Err(Error::new(
+                ErrorCode::MissingKey,
+                format!(
+                    "a viewport on a sheet drawn in several layouts names the one it is in under \
+                     `space`: {}",
+                    spaces_allowed(layouts)
+                ),
+            )
+            .at_field(fields.path.to_owned())
+            .at_position(fields.at.line, fields.at.column)),
+        };
     };
     let path = fields.path_of(SPACE_KEY);
     if node.is_bare_null() {
         return Err(bad_value(
             node,
             &path,
-            "a bare null is no space; `model` or `paper`, or leave `space` out for model space",
+            format!(
+                "a bare null is no space; {}, or leave `space` out for model space",
+                spaces_allowed(layouts)
+            ),
         ));
     }
-    let paper = match scalar(node, &path, "`model` or `paper`")? {
-        MODEL if viewport => {
+    let named = scalar(
+        node,
+        &path,
+        "a space, `model` or `paper`, or a layout's name",
+    )?;
+    if named == MODEL {
+        if viewport {
             return Err(bad_value(
                 node,
                 &path,
                 "a viewport is in paper space, a window on the paper onto model space",
-            ))
+            ));
         }
-        MODEL => false,
-        PAPER => true,
-        other => {
-            return Err(at(
-                Error::new(
-                    ErrorCode::BadValue,
-                    format!("`{other}` is not a space; `model` or `paper`"),
-                ),
-                &path,
-                node.at,
-            ))
-        }
-    };
-    if paper && !layout {
+        return Ok(None);
+    }
+    if let Some(k) = layout_named(named, layouts) {
+        return Ok(Some(k));
+    }
+    if layouts.is_empty() && named == PAPER {
         return Err(no_layout(fields, "an object in paper space"));
     }
-    Ok(paper)
+    Err(at(
+        Error::new(
+            ErrorCode::BadValue,
+            format!(
+                "`{named}` is not a space of this sheet; {}",
+                spaces_allowed(layouts)
+            ),
+        ),
+        &path,
+        node.at,
+    ))
 }
 
 /// The error for `what` on a sheet with no layout.
@@ -189,11 +360,42 @@ fn no_layout(fields: &Fields, what: &str) -> Error {
     .at_position(fields.at.line, fields.at.column)
 }
 
-/// A viewport, on its layer.
-pub(super) fn viewport(fields: &Fields, units: Unit, layer: String) -> Result<Viewport, Error> {
-    let center = flat_point(fields, "center", units)?;
-    let width = positive(fields, "width", units, "a viewport's width")?;
-    let height = positive(fields, "height", units, "a viewport's height")?;
+/// A viewport, on its layer, on a sheet whose layers are `layers`.
+pub(super) fn viewport(
+    fields: &Fields,
+    units: Unit,
+    layer: String,
+    layers: &[Layer],
+) -> Result<Viewport, Error> {
+    let clip = match fields.get("clip") {
+        Some(node) => Some(clip(node, &fields.path_of("clip"), units)?),
+        None => None,
+    };
+    let (center, width, height) = match &clip {
+        // A clipped viewport's window is the box round its boundary, as
+        // AutoCAD's VPCLIP and MVIEW keep it.
+        Some(clip) => {
+            if let Some(key) = WINDOW_KEYS.iter().find(|k| fields.get(k).is_some()) {
+                return Err(bad_value(
+                    fields.get(key).expect("given"),
+                    &fields.path_of(key),
+                    "a clipped viewport's window is the box round its boundary, as AutoCAD keeps \
+                     it, so it takes no `center`, `width` or `height`",
+                ));
+            }
+            let [low, high] = clip.bounds();
+            (
+                Point3::new((low[0] + high[0]) / 2.0, (low[1] + high[1]) / 2.0, 0.0),
+                high[0] - low[0],
+                high[1] - low[1],
+            )
+        }
+        None => (
+            flat_point(fields, "center", units)?,
+            positive(fields, "width", units, "a viewport's width")?,
+            positive(fields, "height", units, "a viewport's height")?,
+        ),
+    };
     let view_center = flat_point(fields, "view_center", units)?;
     let scale_node = fields.require("scale")?;
     let scale_path = fields.path_of("scale");
@@ -202,6 +404,10 @@ pub(super) fn viewport(fields: &Fields, units: Unit, layer: String) -> Result<Vi
         Some(node) => boolean(node, &fields.path_of("locked"))?,
         None => false,
     };
+    let frozen_layers = match fields.get("frozen_layers") {
+        Some(node) => frozen_layers(node, &fields.path_of("frozen_layers"), layers)?,
+        None => Vec::new(),
+    };
     let viewport = Viewport {
         center,
         width,
@@ -209,6 +415,8 @@ pub(super) fn viewport(fields: &Fields, units: Unit, layer: String) -> Result<Vi
         view_center,
         scale,
         locked,
+        clip,
+        frozen_layers,
         layer,
         properties: Default::default(),
     };
@@ -220,6 +428,114 @@ pub(super) fn viewport(fields: &Fields, units: Unit, layer: String) -> Result<Vi
         ));
     }
     Ok(viewport)
+}
+
+/// A viewport's clipping boundary: `{points: [...]}`, a closed polyline's
+/// points, or `{center: [x, y, 0], radius: r}`, a circle, on the paper.
+pub(super) fn clip(node: &Node, path: &str, units: Unit) -> Result<Clip, Error> {
+    let fields = Fields::of(
+        node,
+        path,
+        &CLIP_KEYS,
+        "a clipping boundary, `{points: [...]}` or `{center: [x, y, 0], radius: r}`",
+    )?;
+    let clip =
+        match (fields.get("points"), fields.get("center")) {
+            (Some(points), None) => {
+                if let Some(radius) = fields.get("radius") {
+                    return Err(bad_value(
+                    radius,
+                    &fields.path_of("radius"),
+                    "a clipping boundary is a closed polyline's `points` or a circle's `center` \
+                     and `radius`, not both",
+                ));
+                }
+                let (points, bulges) =
+                    super::polyline::clip_points(points, &fields.path_of("points"), units)?;
+                Clip::Polyline { points, bulges }
+            }
+            (None, Some(_)) => {
+                let center = flat_point(&fields, "center", units)?;
+                let radius = positive(&fields, "radius", units, "a clipping circle's radius")?;
+                Clip::Circle { center, radius }
+            }
+            (Some(_), Some(center)) => return Err(bad_value(
+                center,
+                &fields.path_of("center"),
+                "a clipping boundary is a closed polyline's `points` or a circle's `center` and \
+                 `radius`, not both",
+            )),
+            (None, None) => {
+                return Err(at(
+                    Error::new(
+                        ErrorCode::MissingKey,
+                        "a clipping boundary gives a closed polyline's `points`, or a circle's \
+                     `center` and `radius`",
+                    ),
+                    path,
+                    node.at,
+                ))
+            }
+        };
+    let [low, high] = clip.bounds();
+    let finite = low.iter().chain(&high).all(|v| v.is_finite());
+    if !(finite && high[0] > low[0] && high[1] > low[1]) {
+        return Err(bad_value(
+            node,
+            path,
+            "a clipping boundary encloses an area on the paper; this one is a line or a point",
+        ));
+    }
+    Ok(clip)
+}
+
+/// The clipping boundary a clip_viewport sends, as JSON, read as a
+/// viewport's `clip` is.
+pub(crate) fn clip_from(value: &serde_json::Value, units: Unit) -> Result<Clip, Error> {
+    clip(&super::edit::node_of(value), "clip", units)
+}
+
+/// The layers a viewport freezes, each named exactly as the sheet defines
+/// it, or `0`, and each once, whatever the case, in the order of the
+/// drawing's layer table: layer `0`, then the sheet's, as it lists them.
+fn frozen_layers(node: &Node, path: &str, layers: &[Layer]) -> Result<Vec<String>, Error> {
+    let items = super::sequence(node, path, "a list of layer names")?;
+    let mut out: Vec<String> = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let at_path = super::strict_yaml::index_path(path, i);
+        let name = scalar(item, &at_path, "a layer's name")?;
+        let known = name == crate::model::LAYER_ZERO || layers.iter().any(|l| l.name == name);
+        if !known {
+            return Err(at(
+                Error::new(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "layer `{name}` is not defined; a viewport freezes layer `0` or one under \
+                         `layers`, named exactly as it is defined"
+                    ),
+                ),
+                &at_path,
+                item.at,
+            ));
+        }
+        if out.iter().any(|l| l.eq_ignore_ascii_case(name)) {
+            return Err(bad_value(
+                item,
+                &at_path,
+                format!("layer `{name}` is listed twice; a viewport freezes each layer once"),
+            ));
+        }
+        out.push(name.to_owned());
+    }
+    // In the order of the drawing's layer table, layer 0 first, as AutoCAD
+    // 2026 kept a viewport's frozen layers when it saved them.
+    out.sort_by_key(|name| {
+        layers
+            .iter()
+            .position(|l| l.name == *name)
+            .map_or(0, |i| i + 1)
+    });
+    Ok(out)
 }
 
 /// A point at `key` whose `z` is 0.
@@ -297,20 +613,60 @@ pub(crate) fn layout_property() -> Value {
         "required": ["name"],
         "additionalProperties": false,
         "properties": {
-            "name": {
-                "description": format!(
-                    "The layout's name, as AutoCAD's tab shows it: 1 to {LONGEST_NAME} \
-                     characters, none of {NOT_IN_A_NAME}, and not `{MODEL_TAB}`."
-                ),
-                // A plain number, true or false is read as its text, as
-                // every name is.
-                "type": TEXT_TYPES,
-                "minLength": 1,
-                "maxLength": LONGEST_NAME,
-                "pattern": r#"^[^<>/\\":;?*|,=`]*[^<>/\\":;?*|,=`\s][^<>/\\":;?*|,=`]*$"#,
-                "not": { "type": "string", "pattern": "^[Mm][Oo][Dd][Ee][Ll]$" },
-            }
+            "name": name_schema(),
         }
+    })
+}
+
+/// The schema of a layout's name.
+fn name_schema() -> Value {
+    json!({
+        "description": format!(
+            "The layout's name, as AutoCAD's tab shows it: 1 to {LONGEST_NAME} characters, none \
+             of {NOT_IN_A_NAME}, and not `{MODEL_TAB}`."
+        ),
+        // A plain number, true or false is read as its text, as every name
+        // is.
+        "type": TEXT_TYPES,
+        "minLength": 1,
+        "maxLength": LONGEST_NAME,
+        "pattern": r#"^[^<>/\\":;?*|,=`]*[^<>/\\":;?*|,=`\s][^<>/\\":;?*|,=`]*$"#,
+        "not": { "type": "string", "pattern": "^[Mm][Oo][Dd][Ee][Ll]$" },
+    })
+}
+
+/// The schema of the `layouts` key of a sheet description or template.
+pub(crate) fn layouts_property() -> Value {
+    json!({
+        "description": "The paper-space layouts the sheet is drawn in, when it is drawn in more \
+                        than one, in the order of their tabs, as AutoCAD's layout tabs hold \
+                        them: two or more, which share the sheet's model space. Each has its own \
+                        name, given once whatever its case, and its own paper, a standard size \
+                        by name, or the sheet's `paper` when it gives none; its paper-space \
+                        objects and viewports say its name under `space`. A build writes each \
+                        as its own AutoCAD layout, in this order, the first the one the DWG \
+                        opens on; a render draws each to a PNG of its own, a plot each to a page \
+                        of its own, and the checker checks each. Not with `layout`.",
+        "type": "array",
+        "minItems": 2,
+        "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+                "name": name_schema(),
+                "paper": {
+                    "description": "The paper the layout's page setup plots whole at full size, \
+                                    a standard size by name such as `ISO A3 landscape`. Without \
+                                    it, the sheet's `paper`.",
+                    "type": "string",
+                    "enum": super::paper::paper_names()
+                        .into_iter()
+                        .map(|(name, ..)| name)
+                        .collect::<Vec<_>>(),
+                },
+            },
+        },
     })
 }
 
@@ -318,34 +674,104 @@ pub(crate) fn layout_property() -> Value {
 pub(crate) fn space_property() -> Value {
     json!({
         "description": "The space the object is in, on a sheet drawn in a layout: `model`, at \
-                        full size, where an object is unless it says otherwise, or `paper`, at \
-                        the paper's size, as a sheet's border and title block are. A viewport is \
-                        in paper space. A sheet without a layout has model space alone.",
-        "enum": [MODEL, PAPER],
+                        full size, where an object is unless it says otherwise, or a layout's \
+                        paper space, at its paper's size, as a sheet's border and title block \
+                        are: `paper` on a sheet drawn in one layout, and on one drawn in \
+                        several, the name of the layout under `layouts`, exactly as it is \
+                        given. A viewport is in paper space. A sheet without a layout has model \
+                        space alone.",
+        // A layout's name, which a plain number may be, as every name may.
+        "type": TEXT_TYPES,
+        "minLength": 1,
+    })
+}
+
+/// The schema of the `space` key a viewport takes.
+pub(crate) fn viewport_space_property() -> Value {
+    json!({
+        "description": "The layout whose paper space the viewport is in: `paper`, or leave it \
+                        out, on a sheet drawn in one layout, and on one drawn in several, the \
+                        name of the layout under `layouts`, which it then gives. Never `model`.",
+        "type": TEXT_TYPES,
+        "minLength": 1,
+        "not": { "const": MODEL },
+    })
+}
+
+/// The schema of a viewport's clipping boundary: a closed polyline's
+/// points, or a circle.
+pub(crate) fn clip_def() -> Value {
+    json!({
+        "description": "A viewport's clipping boundary, on the paper: a closed polyline's \
+                        `points`, at least 3, each `[x, y, 0]` or a polyline point with a \
+                        `bulge` or an `arc_angle` and no width, or a circle's `center` and \
+                        `radius`. It encloses an area.",
+        "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["points"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "points": {
+                            "type": "array",
+                            "minItems": 3,
+                            "items": {
+                                "anyOf": [
+                                    { "$ref": "#/$defs/point" },
+                                    {
+                                        "$ref": "#/$defs/polyline_point",
+                                        "not": {
+                                            "anyOf": [
+                                                { "required": ["start_width"] },
+                                                { "required": ["end_width"] },
+                                            ],
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+                {
+                    "type": "object",
+                    "required": ["center", "radius"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "center": { "$ref": "#/$defs/point" },
+                        "radius": {
+                            "description": "A length more than 0.",
+                            "$ref": "#/$defs/length",
+                        },
+                    },
+                },
+            ],
     })
 }
 
 /// The schema of a viewport, as a sheet's objects list it.
 pub(crate) fn viewport_def() -> Value {
     let ratio = format!(r"^\s*{POSITIVE_NUMBER}\s*(:\s*{POSITIVE_NUMBER}\s*)?$");
-    super::schema::object_def(
+    let mut def = super::schema::object_def(
         "A window on the paper that shows model space at a scale, centred on a model point, as \
-         AutoCAD's MVIEW makes one: rectangular, seen from above. It is in the sheet's paper \
-         space, on a sheet drawn in a layout, and its frame draws there with its own pen; model \
-         space draws inside it, cut at its edge. Put it on a layer that does not plot to leave \
-         its frame off a PDF.",
-        &["center", "width", "height", "view_center", "scale"],
+         AutoCAD's MVIEW makes one: rectangular, or clipped to a boundary, seen from above. It \
+         is in the paper space of one of the sheet's layouts, and its frame draws there with \
+         its own pen; model space draws inside it, cut at its edge, but for the layers frozen \
+         in it. Put it on a layer that does not plot to leave its frame off a PDF.",
+        &["view_center", "scale"],
         json!({
             "center": {
-                "description": "The middle of the window, on the paper, with 0 for z.",
+                "description": "The middle of the window, on the paper, with 0 for z. Not on a \
+                                clipped viewport.",
                 "$ref": "#/$defs/point",
             },
             "width": {
-                "description": "How wide the window is on the paper, a length more than 0.",
+                "description": "How wide the window is on the paper, a length more than 0. Not \
+                                on a clipped viewport.",
                 "$ref": "#/$defs/length",
             },
             "height": {
-                "description": "How tall the window is on the paper, a length more than 0.",
+                "description": "How tall the window is on the paper, a length more than 0. Not \
+                                on a clipped viewport.",
                 "$ref": "#/$defs/length",
             },
             "view_center": {
@@ -377,6 +803,47 @@ pub(crate) fn viewport_def() -> Value {
                                 Without it, false.",
                 "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
             },
+            "clip": {
+                "description": "The boundary the viewport is clipped to instead of its \
+                                rectangle, on the paper, as AutoCAD's VPCLIP and MVIEW's Object \
+                                and Polygonal options clip one: a closed polyline's `points`, at \
+                                least 3, each `[x, y, 0]` or a polyline point with a `bulge` or \
+                                an `arc_angle` and no width, or a circle's `center` and \
+                                `radius`. Model space shows inside it alone, its ink cut there, \
+                                and it is the viewport's frame, which plots with the viewport's \
+                                pen at its lineweight, as AutoCAD plots a clipping boundary. The \
+                                viewport's window is the box round it, so a clipped viewport \
+                                takes no `center`, `width` or `height`, and `view_center` is the \
+                                model point at the middle of that box. The boundary encloses an \
+                                area.",
+                "$ref": "#/$defs/viewport_clip",
+            },
+            "frozen_layers": {
+                "description": "The layers frozen in this viewport alone, as AutoCAD's VPLAYER \
+                                freezes them: their objects neither draw nor plot through it, \
+                                and the checker does not check them through it, but they draw \
+                                through the sheet's other viewports. Each is layer `0` or one \
+                                under `layers`, named exactly as it is defined, and listed once \
+                                whatever its case.",
+                "type": "array",
+                "items": { "type": TEXT_TYPES },
+            },
         }),
-    )
+    );
+    // A rectangular viewport gives its window; a clipped one takes it
+    // from its boundary.
+    def["oneOf"] = json!([
+        { "required": ["center", "width", "height"], "not": { "required": ["clip"] } },
+        {
+            "required": ["clip"],
+            "not": {
+                "anyOf": [
+                    { "required": ["center"] },
+                    { "required": ["width"] },
+                    { "required": ["height"] },
+                ],
+            },
+        },
+    ]);
+    def
 }

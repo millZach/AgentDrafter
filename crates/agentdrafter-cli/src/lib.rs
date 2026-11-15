@@ -50,13 +50,13 @@ const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [-
 const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]...";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...";
-const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--tolerance <length>] [--entry <journal-entry>] [--fonts <folder>]...";
+const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--fonts <folder>]...";
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]...";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...";
 const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
-const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...]";
+const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --space <space> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
 /// name, as the binary does: it prints the reply on standard output, or
@@ -313,6 +313,14 @@ fn parse_display_list(mut args: Args) -> Result<Value, Error> {
                     .map_err(|_| Error::usage("the sheet's name is not valid text"))?;
                 if request.sheet.replace(sheet).is_some() {
                     return Err(Error::usage("--sheet is given twice"));
+                }
+            }
+            Some("--layout") => {
+                let layout = value("--layout", args.next())?
+                    .into_string()
+                    .map_err(|_| Error::usage("the layout's name is not valid text"))?;
+                if request.layout.replace(layout).is_some() {
+                    return Err(Error::usage("--layout is given twice"));
                 }
             }
             Some("--tolerance") => {
@@ -725,15 +733,16 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
                 };
                 once(slot, flag, value(flag, args.next())?)?;
             }
-            Some(flag @ ("--id" | "--name" | "--block" | "--tag" | "--value" | "--text"))
-                if selecting =>
-            {
+            Some(
+                flag @ ("--id" | "--name" | "--block" | "--tag" | "--value" | "--text" | "--space"),
+            ) if selecting => {
                 let slot = match flag {
                     "--id" => &mut selection.id,
                     "--name" => &mut selection.name,
                     "--block" => &mut selection.block,
                     "--tag" => &mut selection.tag,
                     "--value" => &mut selection.value,
+                    "--space" => &mut selection.space,
                     _ => &mut selection.text,
                 };
                 once(slot, flag, value(flag, args.next())?)?;

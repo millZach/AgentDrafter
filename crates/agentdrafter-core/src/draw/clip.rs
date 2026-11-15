@@ -186,9 +186,275 @@ pub(crate) fn clip_polygon(contour: &[Point2], min: Point2, max: Point2) -> Vec<
     out
 }
 
+/// Whether `p` is inside the closed outline `outline`, by the even-odd
+/// rule, its edge included.
+pub(crate) fn inside_outline(p: Point2, outline: &[Point2]) -> bool {
+    if distance_to_outline(p, outline) == 0.0 {
+        return true;
+    }
+    let mut inside = false;
+    for i in 0..outline.len() {
+        let a = outline[i];
+        let b = outline[(i + 1) % outline.len()];
+        if (a[1] > p[1]) != (b[1] > p[1]) {
+            let x = a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+            if p[0] < x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+/// How far `p` is from the nearest edge of the closed outline `outline`.
+fn distance_to_outline(p: Point2, outline: &[Point2]) -> f64 {
+    (0..outline.len())
+        .map(|i| {
+            let a = outline[i];
+            let b = outline[(i + 1) % outline.len()];
+            let d = [b[0] - a[0], b[1] - a[1]];
+            let length = d[0] * d[0] + d[1] * d[1];
+            let t = if length > 0.0 {
+                (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / length).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (p[0] - (a[0] + t * d[0])).hypot(p[1] - (a[1] + t * d[1]))
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Whether `p` lies within `along` of one of the edges of `outline` that
+/// `square` marks.
+fn along_a_square_edge(p: Point2, outline: &[Point2], square: &[bool], along: f64) -> bool {
+    (0..outline.len()).any(|i| {
+        if !square.get(i).copied().unwrap_or(false) {
+            return false;
+        }
+        let (a, b) = (outline[i], outline[(i + 1) % outline.len()]);
+        distance_to_outline(p, &[a, b]) <= along
+    })
+}
+
+/// Where along the segment from `a` to `b`, from 0 to 1, it meets the
+/// segment from `c` to `d`; none when they are parallel or do not meet.
+fn meets(a: Point2, b: Point2, c: Point2, d: Point2) -> Option<f64> {
+    let r = [b[0] - a[0], b[1] - a[1]];
+    let s = [d[0] - c[0], d[1] - c[1]];
+    let denominator = r[0] * s[1] - r[1] * s[0];
+    if denominator == 0.0 {
+        return None;
+    }
+    let q = [c[0] - a[0], c[1] - a[1]];
+    let t = (q[0] * s[1] - q[1] * s[0]) / denominator;
+    let u = (q[0] * r[1] - q[1] * r[0]) / denominator;
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some(t)
+}
+
+/// The parts of the run of points `run` inside the closed outline
+/// `outline`, each a run of its own, as [`clip_run`] cuts a run at a box.
+/// A part that lies along one of the outline's edges that `square` marks,
+/// within `along` of it, is left out: AutoCAD 2026 left out of its plot a
+/// line along a clipped viewport's straight edge that runs across or up
+/// the paper, as along a rectangular viewport's, and drew one along a
+/// slanting edge or an arc. `square` holds a mark for each edge, from
+/// point `i` to the next. A part within `near` of the outline counts as on
+/// it, and is kept: AutoCAD 2026 drew a circle lying on a clipping circle,
+/// whose chords and the outline's differ by up to the drawing's tolerance.
+/// The run lies within the outline's box, so that nothing overflows.
+pub(super) fn clip_run_to_outline(
+    run: &[Point2],
+    outline: &[Point2],
+    square: &[bool],
+    along: f64,
+    near: f64,
+) -> Vec<Vec<Point2>> {
+    if let [only] = run {
+        return if inside_outline(*only, outline) {
+            vec![vec![*only]]
+        } else {
+            Vec::new()
+        };
+    }
+    let mut out: Vec<Vec<Point2>> = Vec::new();
+    let mut current: Vec<Point2> = Vec::new();
+    for pair in run.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        // The segment cut where it meets the outline's edges.
+        let mut cuts = vec![0.0, 1.0];
+        for i in 0..outline.len() {
+            let (c, d) = (outline[i], outline[(i + 1) % outline.len()]);
+            if let Some(t) = meets(a, b, c, d) {
+                cuts.push(t);
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
+        let at = |t: f64| {
+            if t == 0.0 {
+                a
+            } else if t == 1.0 {
+                b
+            } else {
+                [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]
+            }
+        };
+        for piece in cuts.windows(2) {
+            let (p, q) = (at(piece[0]), at(piece[1]));
+            let middle = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+            let kept = (p == q || !along_a_square_edge(middle, outline, square, along))
+                && (inside_outline(middle, outline)
+                    || distance_to_outline(middle, outline) <= near);
+            if kept {
+                if current.last() != Some(&p) {
+                    if current.len() > 1 {
+                        out.push(std::mem::take(&mut current));
+                    }
+                    current.clear();
+                    current.push(p);
+                }
+                current.push(q);
+            } else if current.len() > 1 {
+                out.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+        }
+    }
+    if current.len() > 1 {
+        out.push(current);
+    }
+    out
+}
+
+/// The closed contour `subject` cut at the convex contour `convex`, by
+/// Sutherland and Hodgman's clipping, whichever way either winds: empty
+/// when nothing of it is inside.
+pub(crate) fn clip_to_convex(subject: &[Point2], convex: &[Point2]) -> Vec<Point2> {
+    // Which side of each edge is in: the side the convex contour's area is.
+    let area: f64 = (0..convex.len())
+        .map(|i| {
+            let (a, b) = (convex[i], convex[(i + 1) % convex.len()]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum();
+    let sign = if area < 0.0 { -1.0 } else { 1.0 };
+    let mut out = subject.to_vec();
+    for i in 0..convex.len() {
+        if out.is_empty() {
+            break;
+        }
+        let (c, d) = (convex[i], convex[(i + 1) % convex.len()]);
+        let side =
+            |p: Point2| sign * ((d[0] - c[0]) * (p[1] - c[1]) - (d[1] - c[1]) * (p[0] - c[0]));
+        let input = std::mem::take(&mut out);
+        for j in 0..input.len() {
+            let current = input[j];
+            let previous = input[(j + input.len() - 1) % input.len()];
+            let (sp, sc) = (side(previous), side(current));
+            let cross = || {
+                let t = sp / (sp - sc);
+                [
+                    previous[0] + t * (current[0] - previous[0]),
+                    previous[1] + t * (current[1] - previous[1]),
+                ]
+            };
+            match (sp >= 0.0, sc >= 0.0) {
+                (true, true) => out.push(current),
+                (true, false) => out.push(cross()),
+                (false, true) => {
+                    out.push(cross());
+                    out.push(current);
+                }
+                (false, false) => {}
+            }
+        }
+    }
+    if out.len() < 3 {
+        out.clear();
+    }
+    out
+}
+
+/// Whether the box from `min` to `max` and the closed outline `outline`
+/// share any point.
+pub(super) fn box_meets_outline(min: Point2, max: Point2, outline: &[Point2]) -> bool {
+    let corners = [min, [max[0], min[1]], max, [min[0], max[1]]];
+    corners.iter().any(|&p| inside_outline(p, outline))
+        || outline.iter().any(|&p| inside(p, min, max))
+        || (0..4).any(|i| {
+            let (a, b) = (corners[i], corners[(i + 1) % 4]);
+            (0..outline.len())
+                .any(|j| meets(a, b, outline[j], outline[(j + 1) % outline.len()]).is_some())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_across_a_triangle_is_cut_at_its_sides() {
+        let triangle = [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]];
+        let square = [true, false, true];
+        let runs = clip_run_to_outline(
+            &[[-5.0, 2.0], [15.0, 2.0]],
+            &triangle,
+            &square,
+            ALONG_AN_EDGE,
+            ALONG_AN_EDGE,
+        );
+        assert_eq!(runs, vec![vec![[0.0, 2.0], [8.0, 2.0]]]);
+        // Along the slanting side: drawn, as AutoCAD 2026 drew it.
+        let runs = clip_run_to_outline(
+            &[[0.0, 10.0], [10.0, 0.0]],
+            &triangle,
+            &square,
+            ALONG_AN_EDGE,
+            ALONG_AN_EDGE,
+        );
+        assert_eq!(runs, vec![vec![[0.0, 10.0], [10.0, 0.0]]]);
+        // Along the side across the paper: left out, as along a rectangle's.
+        let runs = clip_run_to_outline(
+            &[[0.0, 0.0], [10.0, 0.0]],
+            &triangle,
+            &square,
+            ALONG_AN_EDGE,
+            ALONG_AN_EDGE,
+        );
+        assert_eq!(runs, Vec::<Vec<Point2>>::new());
+        // A run that leaves a notch and comes back is two.
+        let notch = [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [5.0, 5.0],
+            [0.0, 10.0],
+        ];
+        let runs = clip_run_to_outline(
+            &[[0.0, 8.0], [10.0, 8.0]],
+            &notch,
+            &[true, true, false, false, true],
+            ALONG_AN_EDGE,
+            ALONG_AN_EDGE,
+        );
+        assert_eq!(
+            runs,
+            vec![vec![[0.0, 8.0], [2.0, 8.0]], vec![[8.0, 8.0], [10.0, 8.0]]]
+        );
+    }
+
+    #[test]
+    fn a_contour_is_cut_at_a_convex_outline_either_way_round() {
+        let square = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        // A diamond that cuts each of the square's corners off.
+        let diamond = [[5.0, -2.0], [12.0, 5.0], [5.0, 12.0], [-2.0, 5.0]];
+        let cut = clip_to_convex(&square, &diamond);
+        let reversed: Vec<Point2> = diamond.iter().rev().copied().collect();
+        assert_eq!(cut.len(), clip_to_convex(&square, &reversed).len());
+        assert!(cut.iter().all(|&p| inside_outline(p, &diamond)), "{cut:?}");
+        assert_eq!(cut.len(), 8, "{cut:?}");
+    }
 
     #[test]
     fn a_line_through_the_box_is_cut_at_its_edges() {

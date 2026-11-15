@@ -69,13 +69,13 @@ use serde::{Deserialize, Serialize};
 use crate::model::block::{definition_text, Placement};
 use crate::model::leader::{arrowhead_shapes, trimmed};
 use crate::model::{
-    attribute_text, Arrowhead, Block, Dimension, Insert, LaidContent, Layer, Leader, Lettered,
-    MLeader, MLeaderStyle, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
-    Properties, Sheet, Table, TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
+    attribute_text, Arrowhead, Block, Clip, Dimension, Insert, LaidContent, Layer, Leader,
+    Lettered, MLeader, MLeaderStyle, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3,
+    Polyline, Properties, Sheet, Table, TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
 };
 use crate::text::placement::SheetFonts;
 
-pub(crate) use clip::clip_polygon;
+pub(crate) use clip::{clip_polygon, clip_to_convex, inside_outline};
 pub use color::Color;
 pub(crate) use hatch::{MOST_DASHES as MOST_HATCH_DASHES, MOST_LINES as MOST_HATCH_LINES};
 pub(crate) use pick::inside;
@@ -154,6 +154,11 @@ pub struct DisplayList {
     /// inside its band. Not written.
     #[serde(skip)]
     pub wide_arcs: Vec<(usize, Vec<Point2>)>,
+    /// The boundary of each clipped viewport the list draws through, on
+    /// the paper: a closed outline, its arcs as chords, which the items
+    /// seen through it name under `clip_boundary`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clip_boundaries: Vec<Vec<Point2>>,
 }
 
 /// A hatch whose pattern needed more lines or dashes than one hatch draws:
@@ -256,6 +261,13 @@ pub struct Item {
     /// whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip: Option<Bounds>,
+    /// When the viewport it shows through is clipped to a boundary, which
+    /// of the list's `clip_boundaries` its ink is cut at, within `clip`:
+    /// its place there, counted from 0. An output draws none of its ink
+    /// outside it, as AutoCAD 2026's plot cut a clipped viewport's
+    /// contents at its boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_boundary: Option<usize>,
     /// The AutoCAD colour index it draws in.
     pub color: Color,
     pub shape: Shape,
@@ -557,6 +569,10 @@ struct Drawer<'a> {
     /// through a viewport, one over its scale, so its dashes are as long
     /// on the paper as paper space's, as AutoCAD's PSLTSCALE 1 draws them.
     linetype_factor: f64,
+    /// The layers frozen where it draws besides those frozen everywhere:
+    /// for model space seen through a viewport, the layers frozen in it,
+    /// as AutoCAD's VPLAYER freezes them; none elsewhere.
+    frozen_here: &'a [String],
 }
 
 impl<'a> Drawer<'a> {
@@ -625,7 +641,12 @@ impl<'a> Drawer<'a> {
     /// that does not plot on paper, counts towards the extents only.
     fn shown(&self, name: &str) -> Shown {
         let layer = self.layer(name);
-        if layer.frozen {
+        if layer.frozen
+            || self
+                .frozen_here
+                .iter()
+                .any(|l| l.eq_ignore_ascii_case(name))
+        {
             Shown::Hidden
         } else if !layer.on || (self.purpose == Purpose::Plot && !layer.plot) {
             Shown::Counted
@@ -684,10 +705,13 @@ impl<'a> Drawer<'a> {
             return;
         }
         let mut pen = self.pen(object.layer(), object.properties(), None);
-        if let Object::Viewport(_) = object {
+        if let Object::Viewport(viewport) = object {
             // AutoCAD 2026 plotted a viewport's frame as its thinnest line,
-            // in its colour, whatever its own lineweight or its layer's.
-            pen.lineweight = 0.0;
+            // in its colour, whatever its own lineweight or its layer's; a
+            // clipped viewport's boundary it plotted with its pen.
+            if viewport.clip.is_none() {
+                pen.lineweight = 0.0;
+            }
         }
         let drawn = self.object(object, pen, tolerance, None);
         // Only a hatch that draws is reported as cut short.
@@ -940,12 +964,24 @@ impl<'a> Drawer<'a> {
             )),
             Object::Polyline(polyline) if polyline.is_flat() => flat_polyline(polyline),
             Object::Donut(donut) => flat_polyline(&donut.polyline()),
-            // A viewport's frame, on the paper.
-            Object::Viewport(viewport) => flat_polyline(&Polyline::through(
-                viewport.frame().to_vec(),
-                true,
-                viewport.layer.clone(),
-            )),
+            // A viewport's frame, on the paper: its rectangle, or the
+            // boundary it is clipped to.
+            Object::Viewport(viewport) => match &viewport.clip {
+                None => flat_polyline(&Polyline::through(
+                    viewport.frame().to_vec(),
+                    true,
+                    viewport.layer.clone(),
+                )),
+                Some(Clip::Polyline { points, bulges }) => flat_polyline(&Polyline {
+                    bulges: bulges.clone(),
+                    ..Polyline::through(points.clone(), true, viewport.layer.clone())
+                }),
+                Some(Clip::Circle { center, radius }) => stroke(linetype::along(
+                    &path(curves::circle(flat(*center), *radius, tolerance)),
+                    pattern,
+                    true,
+                )),
+            },
             Object::Solid(solid) => shapes(vec![Shape::Fill {
                 rule: FillRule::NonZero,
                 contours: vec![polyline::anticlockwise(
@@ -1390,6 +1426,7 @@ impl DisplayList {
             cell: None,
             viewport: None,
             clip: None,
+            clip_boundary: None,
             color,
             shape,
         }));
@@ -1428,6 +1465,7 @@ impl DisplayList {
                         cell: Some(cell),
                         viewport: None,
                         clip: None,
+                        clip_boundary: None,
                         color,
                         shape,
                     }));
@@ -1486,6 +1524,7 @@ pub(crate) fn draw_sheet_for(
         layer_zero: Layer::new(LAYER_ZERO),
         purpose,
         linetype_factor: 1.0,
+        frozen_here: &[],
     };
     let mut list = DisplayList::default();
     if sheet.layout.is_some() {
@@ -1518,6 +1557,7 @@ pub(crate) fn draw_objects(
         layer_zero: Layer::new(LAYER_ZERO),
         purpose: Purpose::Screen,
         linetype_factor: 1.0,
+        frozen_here: &[],
     };
     let mut list = DisplayList::default();
     for (index, object) in sheet.objects.iter().enumerate() {

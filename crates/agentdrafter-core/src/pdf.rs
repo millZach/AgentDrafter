@@ -90,17 +90,35 @@ pub(crate) struct About<'a> {
     pub stamp: &'a str,
 }
 
-/// The bytes of a one-page PDF of `list`, drawn through `style` on `page`.
-pub(crate) fn pdf(list: &DisplayList, page: &Page, style: &PlotStyle, about: &About) -> Vec<u8> {
+/// The bytes of a PDF of a page for each of `sheets`, a display list and
+/// the page it is drawn on, in order, drawn through `style`: one page for a
+/// sheet, and for a sheet drawn in several layouts, a page for each.
+pub(crate) fn pdf_pages(
+    sheets: &[(&DisplayList, Page)],
+    style: &PlotStyle,
+    about: &About,
+) -> Vec<u8> {
     let mut alloc = Ref::new(1);
     let mut next = || alloc.bump();
     let catalog = next();
     let pages = next();
-    let page_id = next();
-    let content_id = next();
+    // Each page and its content.
+    let ids: Vec<(Ref, Ref)> = sheets.iter().map(|_| (next(), next())).collect();
     let info = next();
 
-    let codes = Codes::of(&list.text);
+    // Every page's text shares the fonts.
+    let all_text: Vec<TextRun>;
+    let text: &[TextRun] = match sheets {
+        [(list, _)] => &list.text,
+        _ => {
+            all_text = sheets
+                .iter()
+                .flat_map(|(list, _)| list.text.iter().cloned())
+                .collect();
+            &all_text
+        }
+    };
+    let codes = Codes::of(text);
     // Each font of the invisible text: the font, its `ToUnicode` map and
     // one drawing per glyph.
     let fonts: Vec<(Ref, Ref, Vec<Ref>)> = (0..codes.fonts())
@@ -115,24 +133,29 @@ pub(crate) fn pdf(list: &DisplayList, page: &Page, style: &PlotStyle, about: &Ab
 
     let mut writer = Pdf::new();
     writer.catalog(catalog).pages(pages);
-    writer.pages(pages).kids([page_id]).count(1);
-    {
-        let mut sheet = writer.page(page_id);
-        sheet
-            .media_box(Rect::new(0.0, 0.0, page.width as f32, page.height as f32))
-            .parent(pages)
-            .contents(content_id);
-        let mut resources = sheet.resources();
-        let mut named = resources.fonts();
-        for (i, (font, _, _)) in fonts.iter().enumerate() {
-            named.pair(Name(font_name(i).as_bytes()), *font);
-        }
-    }
-
-    let content = drawing(list, page, style, &codes);
+    let count = i32::try_from(sheets.len()).expect("a PDF of few pages");
     writer
-        .stream(content_id, &pack(&content))
-        .filter(Filter::FlateDecode);
+        .pages(pages)
+        .kids(ids.iter().map(|(page_id, _)| *page_id))
+        .count(count);
+    for ((list, page), (page_id, content_id)) in sheets.iter().zip(&ids) {
+        {
+            let mut sheet = writer.page(*page_id);
+            sheet
+                .media_box(Rect::new(0.0, 0.0, page.width as f32, page.height as f32))
+                .parent(pages)
+                .contents(*content_id);
+            let mut resources = sheet.resources();
+            let mut named = resources.fonts();
+            for (i, (font, _, _)) in fonts.iter().enumerate() {
+                named.pair(Name(font_name(i).as_bytes()), *font);
+            }
+        }
+        let content = drawing(list, page, style, &codes);
+        writer
+            .stream(*content_id, &pack(&content))
+            .filter(Filter::FlateDecode);
+    }
 
     for (i, (font, map, drawings)) in fonts.iter().enumerate() {
         let glyphs = codes.of_font(i);
@@ -207,9 +230,12 @@ fn drawing(list: &DisplayList, page: &Page, style: &PlotStyle, codes: &Codes) ->
     // clipping path its items draw inside, as AutoCAD 2026's plot cuts a
     // viewport's contents. Items next to one another with one box share
     // one clipping path.
-    let mut clipped: Option<Bounds> = None;
+    // A clipped viewport's items are cut at its boundary instead, as
+    // AutoCAD 2026's plot cut them.
+    let mut clipped: Option<(Bounds, Option<usize>)> = None;
     for item in &list.items {
-        if item.clip != clipped {
+        let cut = item.clip.map(|clip| (clip, item.clip_boundary));
+        if cut != clipped {
             if clipped.is_some() {
                 // Restoring the state forgets the pen and the fill set
                 // inside it.
@@ -217,16 +243,32 @@ fn drawing(list: &DisplayList, page: &Page, style: &PlotStyle, codes: &Codes) ->
                 stroke = None;
                 fill = None;
             }
-            if let Some(clip) = item.clip {
-                let (x0, y0) = page.at(clip.min);
-                let (x1, y1) = page.at(clip.max);
-                content.save_state();
-                content
-                    .rect(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
-                    .clip_nonzero()
-                    .end_path();
+            match (
+                item.clip,
+                item.clip_boundary.and_then(|b| list.clip_boundaries.get(b)),
+            ) {
+                (Some(_), Some(outline)) if !outline.is_empty() => {
+                    content.save_state();
+                    let (x, y) = page.at(outline[0]);
+                    content.move_to(x, y);
+                    for &p in &outline[1..] {
+                        let (x, y) = page.at(p);
+                        content.line_to(x, y);
+                    }
+                    content.close_path().clip_even_odd().end_path();
+                }
+                (Some(clip), _) => {
+                    let (x0, y0) = page.at(clip.min);
+                    let (x1, y1) = page.at(clip.max);
+                    content.save_state();
+                    content
+                        .rect(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+                        .clip_nonzero()
+                        .end_path();
+                }
+                (None, _) => {}
             }
-            clipped = item.clip;
+            clipped = cut;
         }
         let rgb = style.color(item.color);
         match &item.shape {
@@ -1177,14 +1219,16 @@ pub(crate) mod tests {
     #[test]
     fn a_stamp_reads_back_as_it_was_written() {
         let stamp = r#"{"stamp":1,"produced_by":"agentdrafter 0.0.0","sources":[{"kind":"dwg","path":"a (1)\\b é.dwg","sha256":"00"}]}"#;
-        let bytes = pdf(
-            &DisplayList::default(),
-            &Page {
-                origin: [0.0, 0.0],
-                points_per_unit: 1.0,
-                width: 10.0,
-                height: 10.0,
-            },
+        let bytes = pdf_pages(
+            &[(
+                &DisplayList::default(),
+                Page {
+                    origin: [0.0, 0.0],
+                    points_per_unit: 1.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+            )],
             &PlotStyle::monochrome(),
             &About {
                 title: "a",

@@ -40,6 +40,8 @@ export interface AppProps {
   source: string;
   /** The sheet to show first; the set's first without one. */
   sheet: string | null;
+  /** The layout of that sheet to show first, when it is drawn in several; its first without one. */
+  layout: string | null;
 }
 
 type Status =
@@ -128,9 +130,11 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 const listed = (items: (string | number)[]) =>
   items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 
-export function App({ token, source, sheet }: AppProps) {
+export function App({ token, source, sheet, layout }: AppProps) {
   const wide = useWide();
   const [wanted, setWanted] = useState<string | null>(sheet);
+  // The layout asked for, of a sheet drawn in several; its first without one.
+  const [wantedLayout, setWantedLayout] = useState<string | null>(layout);
   const [at, setAt] = useState<number | null>(null);
   const [reply, setReply] = useState<Drawn | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -181,7 +185,8 @@ export function App({ token, source, sheet }: AppProps) {
   }, [toast]);
 
   const sheetKey = upper(wanted ?? '');
-  const cacheKey = `${at ?? 'live'}|${sheetKey}`;
+  const layoutKey = upper(wantedLayout ?? '');
+  const cacheKey = `${at ?? 'live'}|${sheetKey}|${layoutKey}`;
   const version = at === null ? (versions[sheetKey || ANY] ?? 0) : 0;
 
   /**
@@ -215,6 +220,7 @@ export function App({ token, source, sheet }: AppProps) {
     }
     const input: Record<string, string | number> = { source };
     if (wanted) input.sheet = wanted;
+    if (wantedLayout) input.layout = wantedLayout;
     if (at !== null) input.entry = at;
     const generation = generationOf(at, sheetKey);
     run('display-list', input, token).then(
@@ -250,15 +256,21 @@ export function App({ token, source, sheet }: AppProps) {
       setStatus({ kind: 'shown' });
       // Kept by its sheet's own name too, while it is still current.
       if (reply && generationOf(reply.at, reply.sheetKey) === reply.generation) {
-        replies.current.set(`${shown.entry ?? 'live'}|${upper(shown.sheet)}`, reply.text);
+        replies.current.set(
+          `${shown.entry ?? 'live'}|${upper(shown.sheet)}|${upper(shown.layout ?? '')}`,
+          reply.text,
+        );
       }
       if (!wanted) setWanted(shown.sheet);
-      // The address names the sheet shown, so a reload shows it again.
+      if (!wantedLayout && shown.layout) setWantedLayout(shown.layout);
+      // The address names the sheet and the layout shown, so a reload shows them again.
       const query = new URLSearchParams(window.location.search);
       query.set('sheet', shown.sheet);
+      if (shown.layout) query.set('layout', shown.layout);
+      else query.delete('layout');
       window.history.replaceState(null, '', `${window.location.pathname}?${query}`);
     },
-    [reply, wanted],
+    [reply, wanted, wantedLayout],
   );
   const failed = useCallback((message: string) => setStatus({ kind: 'failed', message }), []);
 
@@ -666,6 +678,7 @@ export function App({ token, source, sheet }: AppProps) {
                   setPicked(null);
                   setInspecting(false);
                   setWanted(s);
+                  setWantedLayout(null);
                 }}
               >
                 <b>{s}</b>
@@ -674,6 +687,27 @@ export function App({ token, source, sheet }: AppProps) {
             );
           })}
         </nav>
+        {(summary?.layouts.length ?? 0) > 1 && (
+          // A sheet drawn in several layouts shows each as a tab of its own,
+          // under the sheets', as AutoCAD's layout tabs are.
+          <nav className="va-tabs va-layouts" aria-label="Layouts">
+            {summary?.layouts.map((l) => (
+              <button
+                key={l}
+                type="button"
+                className={`tab${l === summary?.layout ? ' on' : ''}`}
+                aria-current={l === summary?.layout ? 'page' : undefined}
+                onClick={() => {
+                  setPicked(null);
+                  setInspecting(false);
+                  setWantedLayout(l);
+                }}
+              >
+                <b>{l}</b>
+              </button>
+            ))}
+          </nav>
+        )}
       </header>
       <div className="va-main">
         <div className={`va-vp${at !== null ? ' past' : ''}`}>

@@ -51,7 +51,10 @@ use std::collections::BTreeMap;
 use super::ink::Ink;
 use super::{BlockPart, CheckedObject, Finding, Rule, Sides};
 use crate::description::SheetRecord;
-use crate::draw::{clip_polygon, mtext_lines, Bounds, DisplayList, Item, Point2, TextRun};
+use crate::draw::{
+    clip_polygon, clip_to_convex, inside_outline, mtext_lines, Bounds, DisplayList, Item, Point2,
+    TextRun,
+};
 use crate::model::block::Placement;
 use crate::model::{Block, Insert, Object, Paper, Table, TableStyle, LINE_BOX, LINE_STEP};
 use crate::query::{measuring_drawing, measuring_objects, printing_drawing, written_at, Extents};
@@ -126,6 +129,7 @@ impl Sheet<'_> {
     fn finding(&self, rule: Rule, message: String) -> Finding {
         Finding {
             sheet: self.record.name.clone(),
+            layout: self.record.sheet.layout.as_ref().map(|l| l.name.clone()),
             rule,
             message,
             object: None,
@@ -474,7 +478,18 @@ impl Sheet<'_> {
         let window = |v: Option<usize>| match v.map(|v| &sheet.objects[v]) {
             Some(Object::Viewport(viewport)) => {
                 let [min, max] = viewport.corners();
-                Some(Bounds { min, max })
+                // A clipped viewport's boundary, as its contents are cut at it.
+                let boundary = self
+                    .list
+                    .items
+                    .iter()
+                    .find(|i| i.viewport == v)
+                    .and_then(|i| i.clip_boundary)
+                    .map(|b| self.list.clip_boundaries[b].as_slice());
+                Some(Window {
+                    box_: Bounds { min, max },
+                    boundary,
+                })
             }
             _ => None,
         };
@@ -727,7 +742,7 @@ impl Sheet<'_> {
     /// through no viewport, since it does not print.
     fn measured_in(&self, i: usize) -> Option<(&DisplayList, f64, Option<usize>)> {
         let sheet = &self.record.sheet;
-        let Some(own) = self.own.filter(|_| !sheet.in_paper_space(i)) else {
+        let Some(own) = self.own.filter(|_| sheet.in_model_space(i)) else {
             return Some((self.list, 1.0, None));
         };
         let largest = self
@@ -1017,7 +1032,7 @@ struct TextBox {
 impl TextBox {
     /// The box round what `run` draws, as the pipeline draws it; none when
     /// it draws nothing.
-    fn of(run: &TextRun, window: Option<Bounds>) -> Option<TextBox> {
+    fn of(run: &TextRun, window: Option<Window>) -> Option<TextBox> {
         let [lo, hi] = run.drawn?;
         let at = |u: f64, v: f64| {
             [
@@ -1037,7 +1052,17 @@ impl TextBox {
         };
         // A model-space text shows on the paper only within its viewport.
         let (corners, cut) = match window {
-            Some(w) if corners.iter().any(|p| !within(*p, &w)) => {
+            Some(Window {
+                boundary: Some(boundary),
+                ..
+            }) if corners.iter().any(|p| !inside_outline(*p, boundary)) => {
+                // What of the boundary's area lies in the text's box.
+                (clip_to_convex(boundary, &corners), true)
+            }
+            Some(Window {
+                box_: w,
+                boundary: None,
+            }) if corners.iter().any(|p| !within(*p, &w)) => {
                 (clip_polygon(&corners, w.min, w.max), true)
             }
             _ => (corners.to_vec(), false),
@@ -1087,6 +1112,14 @@ impl TextBox {
         }
         Some(if depth.is_finite() { depth } else { 0.0 })
     }
+}
+
+/// The window a viewport shows model space in: its box on the paper, and
+/// the boundary it is clipped to, when it is.
+#[derive(Clone, Copy)]
+struct Window<'a> {
+    box_: Bounds,
+    boundary: Option<&'a [Point2]>,
 }
 
 /// Whether `p` is inside `window`, its edge included.

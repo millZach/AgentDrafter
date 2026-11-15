@@ -120,6 +120,10 @@ pub struct CheckReport {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Finding {
     pub sheet: String,
+    /// On a sheet drawn in a layout, the layout the check was made on:
+    /// each layout of a sheet drawn in several is checked on its own paper.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
     pub rule: Rule,
     /// What is wrong, in words and numbers.
     pub message: String,
@@ -249,7 +253,21 @@ pub fn check_with(request: &CheckRequest, settings: &Settings) -> Result<CheckRe
                 substitutions.push(substitution);
             }
         }
-        findings.extend(rules::check_sheet(record, &fonts, units, tolerance));
+        // Each layout of a sheet drawn in several is checked on its own.
+        for page in record.sheet.pages() {
+            match page {
+                std::borrow::Cow::Borrowed(_) => {
+                    findings.extend(rules::check_sheet(record, &fonts, units, tolerance));
+                }
+                std::borrow::Cow::Owned(sheet) => {
+                    let on_layout = SheetRecord {
+                        sheet,
+                        ..record.clone()
+                    };
+                    findings.extend(rules::check_sheet(&on_layout, &fonts, units, tolerance));
+                }
+            }
+        }
     }
     let sheets: Vec<String> = records.iter().map(|r| r.name.clone()).collect();
     Ok(CheckReport {

@@ -99,11 +99,12 @@ cpSync(join(root, 'examples', 'demo-plant'), join(scratch, 'demo-plant'), {
   recursive: true,
   filter: (path) => !path.includes(`${join('demo-plant', 'dwg')}`),
 });
-for (const sheet of ['geometry.yaml', 'hatch.yaml', 'text.yaml', 'layout.yaml']) {
+for (const sheet of ['geometry.yaml', 'hatch.yaml', 'text.yaml', 'layout.yaml', 'layouts.yaml']) {
   cpSync(join(root, 'examples', sheet), join(scratch, sheet));
 }
 cpSync(join(viewer, 'e2e', 'overlap.yaml'), join(scratch, 'overlap.yaml'));
 cpSync(join(viewer, 'e2e', 'viewport-clip.yaml'), join(scratch, 'viewport-clip.yaml'));
+cpSync(join(viewer, 'e2e', 'viewport-boundary.yaml'), join(scratch, 'viewport-boundary.yaml'));
 
 /** Runs the command line in the scratch folder and gives its JSON reply. */
 function agentdrafter(...args) {
@@ -260,6 +261,11 @@ const checks = {
       // lines cut at a viewport's edge.
       { name: 'layout', source: 'layout.yaml', png: 'layout.yaml', dpi: 100 },
       { name: 'viewport-clip', source: 'viewport-clip.yaml', png: 'viewport-clip.yaml', dpi: 200 },
+      // Viewports clipped to a circle and to a notched polygon, cutting
+      // thick lines and a fill at their boundaries.
+      { name: 'viewport-boundary', source: 'viewport-boundary.yaml', png: 'viewport-boundary.yaml', dpi: 200 },
+      // The second of a sheet's two layouts, asked for by its name.
+      { name: 'layouts-Wiring', source: 'layouts.yaml', layout: 'Wiring', png: 'layouts.yaml', dpi: 100 },
     ];
     const server = await serve('127.0.0.1:0');
     const b = await browser();
@@ -267,9 +273,19 @@ const checks = {
     try {
       const context = await b.newContext(LAPTOP);
       for (const c of cases) {
-        const file = join(out, `png-${c.name}.png`);
-        const render = agentdrafter('render', c.png, '--output', file, '--overwrite', '--scale', '1', '--dpi', String(c.dpi));
-        const query = new URLSearchParams({ source: c.source, ...(c.sheet ? { sheet: c.sheet } : {}) });
+        const asked = join(out, `png-${c.name}.png`);
+        const rendered = agentdrafter('render', c.png, '--output', asked, '--overwrite', '--scale', '1', '--dpi', String(c.dpi));
+        // A sheet drawn in several layouts renders each to a PNG of its own.
+        const render = c.layout
+          ? [rendered, ...(rendered.other_layouts ?? [])].find((r) => r.layout === c.layout)
+          : rendered;
+        assert(render, `${c.name}: the render gives layout ${c.layout}`);
+        const file = render.png;
+        const query = new URLSearchParams({
+          source: c.source,
+          ...(c.sheet ? { sheet: c.sheet } : {}),
+          ...(c.layout ? { layout: c.layout } : {}),
+        });
         const { page, problems } = await open(context, `${server.base}/?${query}`, c.sheet);
         const base64 = await page.evaluate(
           (view) => window.agentdrafterViewer.capture(view),
@@ -303,6 +319,38 @@ const checks = {
       assert(r.mean_channel_difference < 2, `${r.case}: the mean difference is ${r.mean_channel_difference}`);
     }
     return { cases: results };
+  },
+
+  /**
+   * A sheet drawn in several layouts shows each as a tab under the sheet's,
+   * the first shown first; another is drawn when its tab is picked, and the
+   * address names it, so a reload shows it again.
+   */
+  async layouts() {
+    const server = await serve('127.0.0.1:0');
+    const b = await browser();
+    try {
+      const context = await b.newContext(PHONE);
+      const { page, problems } = await open(context, `${server.base}/?source=layouts.yaml`, null);
+      const layoutTabs = () => page.evaluate(() => [...document.querySelectorAll('.va-layouts .tab')].map((t) => [t.textContent, t.classList.contains('on')]));
+      const first = await layoutTabs();
+      assert(JSON.stringify(first) === JSON.stringify([['Assembly', true], ['Wiring', false]]), `the layout tabs: ${JSON.stringify(first)}`);
+      assert((await page.evaluate(() => window.agentdrafterViewer.summary.layout)) === 'Assembly', 'the first layout is shown first');
+      await page.click('.va-layouts .tab:has-text("Wiring")');
+      await page.waitForFunction(() => window.agentdrafterViewer?.summary?.layout === 'Wiring');
+      const second = await layoutTabs();
+      assert(JSON.stringify(second) === JSON.stringify([['Assembly', false], ['Wiring', true]]), `the layout tabs: ${JSON.stringify(second)}`);
+      assert(new URL(page.url()).searchParams.get('layout') === 'Wiring', `the address names the layout: ${page.url()}`);
+      await page.screenshot({ path: join(out, 'layouts-phone.png') });
+      // A sheet of one layout has no layout tabs.
+      const one = await open(context, `${server.base}/?source=layout.yaml`, null);
+      assert((await one.page.evaluate(() => document.querySelectorAll('.va-layouts').length)) === 0, 'one layout, no layout tabs');
+      assert(problems.length === 0 && one.problems.length === 0, [...problems, ...one.problems].join('; '));
+      return { first, second };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
   },
 
   /** Beyond the local machine: the page needs no token, commands do. */

@@ -30,15 +30,16 @@
 //! or clipping, and freezing no layer. Anything else is counted not read.
 
 use acadrust::entities::{
-    EntityType, GridFlags, Viewport as DwgViewport, ViewportRenderMode, ViewportStatusFlags,
+    Circle, EntityType, GridFlags, LwPolyline, Viewport as DwgViewport, ViewportRenderMode,
+    ViewportStatusFlags,
 };
 use acadrust::objects::{Layout as DwgLayout, ObjectType, PlotFlags};
-use acadrust::types::{Handle, Vector3};
+use acadrust::types::{Handle, Vector2, Vector3};
 use acadrust::CadDocument;
 
 use crate::description::paper::STANDARD_SIZES;
 use crate::error::{Error, ErrorCode};
-use crate::model::{Paper, Point3, Sheet, Viewport};
+use crate::model::{Clip, Paper, Point3, Sheet, Viewport};
 use crate::units::Unit;
 
 /// The layout every new drawing has, which a sheet with a layout takes.
@@ -68,6 +69,11 @@ const FLAGS_CUSTOM: i32 = 160;
 /// A viewport's status as AutoCAD 2026's MVIEW made it: on, its UCS icon
 /// shown at the origin, and front clipping not at the eye.
 const VIEWPORT_STATUS: i32 = 0x8070;
+
+/// A clipped viewport's status as AutoCAD 2026's VPCLIP and MVIEW's Object
+/// and Polygonal options made it: on, clipped to its boundary, its UCS
+/// icon at the origin but not shown, and front clipping not at the eye.
+const CLIPPED_STATUS: i32 = 0x18050;
 
 /// The overall viewport's status as AutoCAD 2026 made it: on, its UCS icon
 /// shown.
@@ -157,9 +163,12 @@ fn layout_mut<'a>(drawing: &'a mut CadDocument, name: &str) -> Option<&'a mut Dw
     })
 }
 
-/// Makes AutoCAD's `Layout1` the sheet's layout, when it has one: named
-/// after it, with its page setup and its overall viewport, the drawing
-/// opening on it. A sheet without a layout leaves the drawing as it is.
+/// Makes AutoCAD's `Layout1` the sheet's first layout, when it has one:
+/// named after it, with its page setup and its overall viewport, the
+/// drawing opening on it. Each of its other layouts is added after it, in
+/// order, with its own page setup and overall viewport, as AutoCAD 2026
+/// numbered made-up layouts' tabs in order. A sheet without a layout
+/// leaves the drawing as it is.
 pub(super) fn prepare(drawing: &mut CadDocument, sheet: &Sheet) -> Result<(), Error> {
     let Some(layout) = &sheet.layout else {
         return Ok(());
@@ -169,23 +178,65 @@ pub(super) fn prepare(drawing: &mut CadDocument, sheet: &Sheet) -> Result<(), Er
         .paper
         .as_ref()
         .ok_or_else(|| failed("a sheet drawn in a layout declares its paper".to_owned()))?;
-    let setup = paper
-        .name
-        .as_deref()
-        .and_then(PageSetup::of)
-        .ok_or_else(|| {
-            failed("a sheet drawn in a layout declares a standard paper by name".to_owned())
-        })?;
-    let (numerator, denominator) = setup.plot_scale(sheet.units);
-    // AutoCAD 2026 kept its standard 1:1 as the scale type of an inch
-    // drawing on millimetre paper, at 25.4:1, but not of a millimetre
-    // drawing on inch paper, at 1:25.4.
-    let standard = !(sheet.units == Unit::Mm && setup.unit == Unit::In);
     let dictionary = drawing.header.acad_layout_dict_handle;
     let dwg_layout = layout_mut(drawing, FIRST_LAYOUT)
         .ok_or_else(|| failed(format!("the drawing has no `{FIRST_LAYOUT}` to draw in")))?;
     let handle = dwg_layout.handle;
     layout.name.clone_into(&mut dwg_layout.name);
+    set_page_setup(dwg_layout, paper, sheet.units)?;
+    if let Some(ObjectType::Dictionary(entries)) = drawing.objects.get_mut(&dictionary) {
+        entries.remove_entry(FIRST_LAYOUT);
+        entries.add_entry(&layout.name, handle);
+    }
+    // The drawing opens on its layout, as AutoCAD saves one drawn there.
+    drawing.header.show_model_space = false;
+    let mut overall = DwgViewport::new();
+    overall.id = 1;
+    set_overall(&mut overall, paper);
+    drawing
+        .add_entity_to_layout(EntityType::Viewport(Box::new(overall)), &layout.name)
+        .map_err(|e| failed(format!("could not add the layout's own viewport: {e}")))?;
+    for other in &sheet.other_layouts {
+        let paper = other.paper.as_ref().ok_or_else(|| {
+            failed(format!(
+                "layout `{}` declares its paper, a standard paper by name",
+                other.name
+            ))
+        })?;
+        drawing
+            .add_layout(&other.name)
+            .map_err(|e| failed(format!("could not add layout `{}`: {e}", other.name)))?;
+        let dwg_layout = layout_mut(drawing, &other.name)
+            .ok_or_else(|| failed(format!("layout `{}` was not added", other.name)))?;
+        set_page_setup(dwg_layout, paper, sheet.units)?;
+        // acadrust adds the layout's overall viewport; it is set as the
+        // first layout's is.
+        let overall = dwg_layout.viewport;
+        if let Some(EntityType::Viewport(v)) = drawing.get_entity_mut(overall) {
+            set_overall(v, paper);
+        }
+    }
+    Ok(())
+}
+
+/// Sets `dwg_layout`'s page setup to plot `paper`, a standard paper by
+/// name, whole at full size, on a drawing in `units`.
+fn set_page_setup(dwg_layout: &mut DwgLayout, paper: &Paper, units: Unit) -> Result<(), Error> {
+    let setup = paper
+        .name
+        .as_deref()
+        .and_then(PageSetup::of)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::DwgWrite,
+                "a sheet drawn in a layout declares a standard paper by name",
+            )
+        })?;
+    let (numerator, denominator) = setup.plot_scale(units);
+    // AutoCAD 2026 kept its standard 1:1 as the scale type of an inch
+    // drawing on millimetre paper, at 25.4:1, but not of a millimetre
+    // drawing on inch paper, at 1:25.4.
+    let standard = !(units == Unit::Mm && setup.unit == Unit::In);
     PLOTTER.clone_into(&mut dwg_layout.plot_printer_name);
     dwg_layout.paper_size = setup.media.clone();
     (dwg_layout.paper_width, dwg_layout.paper_height) = setup.size_mm;
@@ -204,14 +255,13 @@ pub(super) fn prepare(drawing: &mut CadDocument, sheet: &Sheet) -> Result<(), Er
     // AutoCAD keeps an empty box as a layout's extents until it draws one.
     dwg_layout.min_extents = (1e20, 1e20, 1e20);
     dwg_layout.max_extents = (-1e20, -1e20, -1e20);
-    if let Some(ObjectType::Dictionary(entries)) = drawing.objects.get_mut(&dictionary) {
-        entries.remove_entry(FIRST_LAYOUT);
-        entries.add_entry(&layout.name, handle);
-    }
-    // The drawing opens on its layout, as AutoCAD saves one drawn there.
-    drawing.header.show_model_space = false;
-    let mut overall = DwgViewport::new();
-    overall.id = 1;
+    Ok(())
+}
+
+/// Sets a layout's own overall viewport, which shows paper space itself,
+/// as AutoCAD 2026 made it for a layout on `paper`: centred on the paper,
+/// zoomed out round it.
+fn set_overall(overall: &mut DwgViewport, paper: &Paper) {
     overall.center = Vector3::new(paper.width / 2.0, paper.height / 2.0, 0.0);
     overall.height = paper.height * OVERALL_ZOOM;
     overall.width = paper.width * OVERALL_ZOOM;
@@ -226,10 +276,6 @@ pub(super) fn prepare(drawing: &mut CadDocument, sheet: &Sheet) -> Result<(), Er
     overall.circle_sides = CIRCLE_ZOOM;
     overall.snap_spacing = Vector3::new(OVERALL_GRID, OVERALL_GRID, 0.0);
     overall.grid_spacing = Vector3::new(OVERALL_GRID, OVERALL_GRID, 0.0);
-    drawing
-        .add_entity_to_layout(EntityType::Viewport(Box::new(overall)), &layout.name)
-        .map_err(|e| failed(format!("could not add the layout's own viewport: {e}")))?;
-    Ok(())
 }
 
 /// The snap and grid spacing AutoCAD's MVIEW gives a viewport in a drawing
@@ -243,8 +289,15 @@ fn grid_of(units: Unit) -> (f64, f64) {
 }
 
 /// The DWG viewport for one of ours, as AutoCAD's MVIEW makes one, in a
-/// drawing in `units`.
-pub(super) fn dwg_viewport(viewport: &Viewport, units: Unit) -> EntityType {
+/// drawing in `units`: clipped to the boundary whose handle is `boundary`,
+/// when it is clipped, and freezing the layers whose handles are
+/// `frozen`, as VPLAYER freezes them.
+pub(super) fn dwg_viewport(
+    viewport: &Viewport,
+    units: Unit,
+    boundary: Option<Handle>,
+    frozen: Vec<Handle>,
+) -> EntityType {
     let mut dwg = DwgViewport::new();
     dwg.center = Vector3::new(viewport.center.x, viewport.center.y, viewport.center.z);
     dwg.width = viewport.width;
@@ -252,9 +305,17 @@ pub(super) fn dwg_viewport(viewport: &Viewport, units: Unit) -> EntityType {
     dwg.view_center = Vector3::new(viewport.view_center.x, viewport.view_center.y, 0.0);
     dwg.view_height = viewport.view_height();
     dwg.custom_scale = viewport.scale;
-    let mut status = ViewportStatusFlags::from_bits(VIEWPORT_STATUS);
+    let mut status = ViewportStatusFlags::from_bits(if boundary.is_some() {
+        CLIPPED_STATUS
+    } else {
+        VIEWPORT_STATUS
+    });
     status.locked = viewport.locked;
     dwg.status = status;
+    if let Some(boundary) = boundary {
+        dwg.clip_boundary_handle = boundary;
+    }
+    dwg.frozen_layers = frozen;
     dwg.grid_flags = GridFlags {
         adaptive: true,
         ..GridFlags::default()
@@ -264,6 +325,64 @@ pub(super) fn dwg_viewport(viewport: &Viewport, units: Unit) -> EntityType {
     dwg.snap_spacing = Vector3::new(snap, snap, 0.0);
     dwg.grid_spacing = Vector3::new(grid, grid, 0.0);
     EntityType::Viewport(Box::new(dwg))
+}
+
+/// The paper-space object a viewport's boundary is in the DWG, as
+/// AutoCAD's VPCLIP keeps one: a closed lightweight polyline, its bulges
+/// among it, or a circle.
+pub(super) fn dwg_boundary(clip: &Clip) -> EntityType {
+    match clip {
+        Clip::Polyline { points, .. } => {
+            let mut polyline = LwPolyline::new();
+            for (i, p) in points.iter().enumerate() {
+                polyline.add_point_with_bulge(Vector2::new(p.x, p.y), clip.bulge(i));
+            }
+            polyline.is_closed = true;
+            EntityType::LwPolyline(polyline)
+        }
+        Clip::Circle { center, radius } => EntityType::Circle(Circle::from_center_radius(
+            Vector3::new(center.x, center.y, 0.0),
+            *radius,
+        )),
+    }
+}
+
+/// The boundary a DWG object draws, if it is one a viewport can be clipped
+/// to as a build writes it: a closed, flat lightweight polyline with no
+/// width, seen from above, or a circle on the paper, seen from above.
+pub(super) fn read_boundary(object: &EntityType) -> Option<Clip> {
+    let up = |n: &Vector3| n.x == 0.0 && n.y == 0.0 && n.z == 1.0;
+    match object {
+        EntityType::LwPolyline(p)
+            if p.is_closed
+                && p.vertices.len() >= 3
+                && p.constant_width == 0.0
+                && p.elevation == 0.0
+                && p.thickness == 0.0
+                && up(&p.normal)
+                && p.vertices
+                    .iter()
+                    .all(|v| v.start_width == 0.0 && v.end_width == 0.0) =>
+        {
+            let points = p
+                .vertices
+                .iter()
+                .map(|v| Point3::new(v.location.x, v.location.y, 0.0))
+                .collect();
+            let mut bulges: Vec<f64> = p.vertices.iter().map(|v| v.bulge).collect();
+            if bulges.iter().all(|&b| b == 0.0) {
+                bulges.clear();
+            }
+            Some(Clip::Polyline { points, bulges })
+        }
+        EntityType::Circle(c) if c.center.z == 0.0 && c.thickness == 0.0 && up(&c.normal) => {
+            Some(Clip::Circle {
+                center: Point3::new(c.center.x, c.center.y, 0.0),
+                radius: c.radius,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// The layout a drawing opens on, when it opens on one: its name and the
@@ -281,27 +400,70 @@ pub(super) fn opened_on(drawing: &CadDocument) -> Option<(String, Handle)> {
     })
 }
 
-/// The drawing's layouts other than model space's and the one it opens
-/// on, `opened`, that hold anything but their own overall viewport: what
-/// the core does not read of them.
-pub(super) fn other_layouts(drawing: &CadDocument, opened: Option<Handle>) -> usize {
+/// A layout of a drawing the core reads: its name, the handle of its block
+/// of paper-space objects, and the paper its page setup plots, when the
+/// core can read it.
+pub(super) struct ReadLayout {
+    pub(super) name: String,
+    pub(super) block: Handle,
+    pub(super) paper: Option<Paper>,
+}
+
+/// The layouts of `drawing`, in `units`, the core reads, in the order of
+/// their tabs, and how many of them it reads no page setup of. A drawing
+/// that opens on the Model tab is read as model space alone, and each
+/// layout that holds anything but its own overall viewport is counted. One
+/// that opens on a layout is read with every layout: the one it opens on,
+/// one whose page setup the core reads, and one that holds anything,
+/// whose page setup it does not read and counts. AutoCAD's own empty
+/// layout, on its own page setup, is neither read nor counted.
+pub(super) fn read_layouts(drawing: &CadDocument, units: Unit) -> (Vec<ReadLayout>, usize) {
     let model = drawing.header.model_space_block_handle;
-    drawing
+    let mut all: Vec<&DwgLayout> = drawing
         .objects
         .values()
         .filter_map(|o| match o {
-            ObjectType::Layout(layout) => Some(layout.block_record),
+            ObjectType::Layout(layout)
+                if layout.block_record != model && !layout.block_record.is_null() =>
+            {
+                Some(layout)
+            }
             _ => None,
         })
-        .filter(|&block| block != model && Some(block) != opened && !block.is_null())
-        .filter(|&block| {
-            drawing
-                .block_records
-                .iter()
-                .find(|r| r.handle == block)
-                .is_some_and(|r| drawing.entities_in_block(&r.name).any(|e| !is_overall(e)))
-        })
-        .count()
+        .collect();
+    all.sort_by_key(|l| (l.tab_order, l.handle.value()));
+    let holds_anything = |block: Handle| {
+        drawing
+            .block_records
+            .iter()
+            .find(|r| r.handle == block)
+            .is_some_and(|r| drawing.entities_in_block(&r.name).any(|e| !is_overall(e)))
+    };
+    let Some((_, opened)) = opened_on(drawing) else {
+        let not_read = all
+            .iter()
+            .filter(|l| holds_anything(l.block_record))
+            .count();
+        return (Vec::new(), not_read);
+    };
+    let mut read = Vec::new();
+    let mut not_read = 0;
+    for layout in all {
+        let block = layout.block_record;
+        let paper = read_paper(drawing, block, units);
+        if paper.is_none() {
+            if block != opened && !holds_anything(block) {
+                continue;
+            }
+            not_read += 1;
+        }
+        read.push(ReadLayout {
+            name: layout.name.clone(),
+            block,
+            paper,
+        });
+    }
+    (read, not_read)
 }
 
 /// Whether `object` is a layout's own overall viewport, which shows paper
@@ -351,10 +513,16 @@ pub(super) fn read_paper(drawing: &CadDocument, block: Handle, units: Unit) -> O
     })
 }
 
-/// One of our viewports, if the DWG viewport is one the core draws:
-/// rectangular, on, seen from above with no twist, perspective or
-/// clipping, and freezing no layer.
-pub(super) fn read_viewport(dwg: &DwgViewport, layer: String) -> Option<Viewport> {
+/// One of our viewports, if the DWG viewport is one the core draws: on,
+/// seen from above with no twist, perspective or front or back clipping,
+/// rectangular or clipped to `clip`, the boundary its clip handle names,
+/// and freezing the layers `frozen` names.
+pub(super) fn read_viewport(
+    dwg: &DwgViewport,
+    layer: String,
+    clip: Option<Clip>,
+    frozen_layers: Vec<String>,
+) -> Option<Viewport> {
     let status = &dwg.status;
     let top = (dwg.view_direction.x.abs() <= TOLERANCE)
         && (dwg.view_direction.y.abs() <= TOLERANCE)
@@ -366,9 +534,8 @@ pub(super) fn read_viewport(dwg: &DwgViewport, layer: String) -> Option<Viewport
         && !status.perspective
         && !status.front_clipping
         && !status.back_clipping
-        && !status.non_rectangular_clipping
-        && dwg.clip_boundary_handle.is_null()
-        && dwg.frozen_layers.is_empty()
+        && status.non_rectangular_clipping == clip.is_some()
+        && dwg.clip_boundary_handle.is_null() == clip.is_none()
         && top
         && at_origin
         && dwg.twist_angle == 0.0
@@ -388,6 +555,8 @@ pub(super) fn read_viewport(dwg: &DwgViewport, layer: String) -> Option<Viewport
         view_center: Point3::new(dwg.view_center.x, dwg.view_center.y, 0.0),
         scale,
         locked: status.locked,
+        clip,
+        frozen_layers,
         layer,
         properties: Default::default(),
     };

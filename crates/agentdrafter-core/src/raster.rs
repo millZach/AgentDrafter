@@ -86,6 +86,29 @@ fn clip_mask(view: &View, clip: Bounds) -> Option<Mask> {
     Some(mask)
 }
 
+/// The mask that lets ink through only inside the closed outline
+/// `outline`, in drawing units, drawn through `view`: a clipped viewport's
+/// boundary. None when no pixel of the image is inside it.
+fn outline_mask(view: &View, outline: &[Point2]) -> Option<Mask> {
+    let mut path = PathBuilder::new();
+    let (first, rest) = outline.split_first()?;
+    let (x, y) = view.pixel(*first);
+    path.move_to(x, y);
+    for &p in rest {
+        let (x, y) = view.pixel(p);
+        path.line_to(x, y);
+    }
+    path.close();
+    let path = path.finish()?;
+    let mut mask = Mask::new(view.width, view.height)?;
+    mask.fill_path(&path, SkiaFillRule::EvenOdd, true, Transform::identity());
+    Some(mask)
+}
+
+/// What an item's ink is cut at: its box, and the boundary of a clipped
+/// viewport within it, by its place among the list's boundaries.
+type CutAt = (Bounds, Option<usize>);
+
 /// Draws a display list onto white paper. None when the image cannot be
 /// made, such as one with no pixels.
 /// Paints white everything in `pixmap`, drawn through `view`, that lies
@@ -112,14 +135,22 @@ pub(crate) fn blank_outside(pixmap: &mut Pixmap, view: &View, keep: Bounds) {
 pub(crate) fn rasterize(list: &DisplayList, view: &View) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(view.width, view.height)?;
     pixmap.fill(tiny_skia::Color::WHITE);
-    // A mask for each box an item's ink is cut at, made once.
-    let mut masks: Vec<(Bounds, Option<Mask>)> = Vec::new();
+    // A mask for each box or boundary an item's ink is cut at, made once.
+    let mut masks: Vec<(CutAt, Option<Mask>)> = Vec::new();
     for item in &list.items {
         let mask = item.clip.map(|clip| {
-            if let Some(i) = masks.iter().position(|(b, _)| *b == clip) {
+            let key = (clip, item.clip_boundary);
+            if let Some(i) = masks.iter().position(|(k, _)| *k == key) {
                 i
             } else {
-                masks.push((clip, clip_mask(view, clip)));
+                let mask = match item.clip_boundary {
+                    Some(b) => list
+                        .clip_boundaries
+                        .get(b)
+                        .and_then(|outline| outline_mask(view, outline)),
+                    None => clip_mask(view, clip),
+                };
+                masks.push((key, mask));
                 masks.len() - 1
             }
         });

@@ -1255,6 +1255,14 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
             }
             Some(set)
         }
+        // A clip_viewport's keys, worked out from the viewport as it
+        // stands, so that model space stays where it showed.
+        Body::Change {
+            clip: Some(clip), ..
+        } => match clipped_keys(at, op, &reach, &id, clip, units) {
+            Ok(set) => Some(set),
+            Err(e) => return fail(reach, e),
+        },
         _ => None,
     };
     let line_edit = match &op.body {
@@ -1752,10 +1760,31 @@ fn apply_table(
                     record.table_rename_values(Table::DimensionStyle.key(), "text_style", name, to);
                 }
                 let mut count = record.rename_values(ObjectList::Template, by, name, to, op.index);
+                // A layer frozen in a viewport stays frozen there.
+                if table == Table::Layer {
+                    count += record.rename_in_lists(
+                        ObjectList::Template,
+                        FROZEN_LAYERS,
+                        name,
+                        to,
+                        op.index,
+                    );
+                }
                 for &k in &sheets {
                     count += at
                         .rows
                         .rename_values(ObjectList::Row(k), by, name, to, op.index);
+                }
+                if table == Table::Layer {
+                    for &k in &sheets {
+                        count += at.rows.rename_in_lists(
+                            ObjectList::Row(k),
+                            FROZEN_LAYERS,
+                            name,
+                            to,
+                            op.index,
+                        );
+                    }
                 }
                 format!(
                     "renames the {word} `{name}` to `{to}` in the template `{written}`, and \
@@ -1768,6 +1797,15 @@ fn apply_table(
                     .into_iter()
                     .map(|id| format!("{}/{id}", files.name(sheets[0])))
                     .collect();
+                // A viewport that freezes the layer uses it too.
+                if table == Table::Layer {
+                    users.extend(
+                        record
+                            .list_users(ObjectList::Template, FROZEN_LAYERS, name)
+                            .into_iter()
+                            .map(|id| format!("{}/{id}", files.name(sheets[0]))),
+                    );
+                }
                 for &k in &sheets {
                     users.extend(
                         at.rows
@@ -1775,6 +1813,16 @@ fn apply_table(
                             .into_iter()
                             .map(|id| format!("{}/{id}", files.name(k))),
                     );
+                }
+                if table == Table::Layer {
+                    for &k in &sheets {
+                        users.extend(
+                            at.rows
+                                .list_users(ObjectList::Row(k), FROZEN_LAYERS, name)
+                                .into_iter()
+                                .map(|id| format!("{}/{id}", files.name(k))),
+                        );
+                    }
                 }
                 let template = at.template(t).expect("read above");
                 let layers = if table == Table::Linetype {
@@ -2900,6 +2948,86 @@ fn validate(
 
 /// Reads sheet `k` from the records in memory, adding what reading noticed
 /// to `notices`.
+/// The key a viewport lists the layers frozen in it under.
+const FROZEN_LAYERS: &str = "frozen_layers";
+
+/// The keys a clip_viewport sets on the viewport `id`, on the first of
+/// `sheets` it is on, as it stands, to clip it to `clip`, or with `clip`
+/// null to take its boundary away, as AutoCAD's VPCLIP does: clipped, its
+/// window becomes the box round the boundary and its view centre the model
+/// point there; unclipped, it keeps the box as its window.
+fn clipped_keys(
+    at: &Attempt,
+    op: &Operation,
+    sheets: &[usize],
+    id: &str,
+    clip: &Value,
+    units: Unit,
+) -> Result<serde_json::Map<String, Value>, Error> {
+    let fail =
+        |code: ErrorCode, message: String| op_error(op.index, op.spec.name, code, message, "clip");
+    let files = at.files;
+    let rows_text = at
+        .rows
+        .new_text()?
+        .unwrap_or_else(|| files.rows_text.clone());
+    let rows = rows_at(&rows_text, &files.rows_path)?;
+    let &k = sheets
+        .first()
+        .ok_or_else(|| fail(ErrorCode::BadValue, format!("`{id}` is on no sheet")))?;
+    let record = sheet_record(at, &rows, k, &mut Vec::new()).map_err(|e| {
+        fail(
+            e.code,
+            format!(
+                "sheet `{}` cannot be read to clip the viewport: {}",
+                files.name(k),
+                e.message
+            ),
+        )
+    })?;
+    let viewport = (0..record.sheet.objects.len())
+        .find(|&i| record.id(i) == id)
+        .and_then(|i| match &record.sheet.objects[i] {
+            crate::model::Object::Viewport(v) => Some(v.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            fail(
+                ErrorCode::BadValue,
+                format!("clip_viewport clips a viewport, and `{id}` is not one"),
+            )
+        })?;
+    let length = |v: f64| coordinates([v, 0.0, 0.0])[0].clone();
+    let mut set = serde_json::Map::new();
+    if clip.is_null() {
+        if viewport.clip.is_none() {
+            return Err(fail(
+                ErrorCode::BadValue,
+                format!(
+                    "viewport `{id}` is not clipped, so it has no boundary to take away, as \
+                     AutoCAD's VPCLIP has none to delete"
+                ),
+            ));
+        }
+        let c = viewport.center;
+        set.insert("clip".into(), Value::Null);
+        set.insert("center".into(), coordinates([c.x, c.y, 0.0]));
+        set.insert("width".into(), length(viewport.width));
+        set.insert("height".into(), length(viewport.height));
+        return Ok(set);
+    }
+    let boundary = crate::description::clip_from(clip, units)
+        .map_err(|e| op_error(op.index, op.spec.name, e.code, e.message, "clip"))?;
+    let clipped = viewport.clipped_to(boundary);
+    let v = clipped.view_center;
+    set.insert("clip".into(), clip.clone());
+    for key in ["center", "width", "height"] {
+        set.insert(key.into(), Value::Null);
+    }
+    set.insert("view_center".into(), coordinates([v.x, v.y, 0.0]));
+    Ok(set)
+}
+
 fn sheet_record(
     at: &Attempt,
     rows: &[Row],

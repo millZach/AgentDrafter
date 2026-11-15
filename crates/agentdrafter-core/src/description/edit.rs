@@ -508,6 +508,70 @@ impl RecordFile {
             .map(str::to_owned)
     }
 
+    /// The IDs in its file of each object of `list` whose list `key` holds
+    /// `value`, such as every viewport that freezes a layer.
+    pub(crate) fn list_users(&self, list: ObjectList, key: &str, value: &str) -> Vec<String> {
+        let listed = self.objects(list);
+        self.items(list)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                object_parts(item)
+                    .1
+                    .is_some_and(|keys| list_holds(keys, key, value))
+            })
+            .map(|(i, _)| listed[i].id.clone())
+            .collect()
+    }
+
+    /// Sets each item of the list `key` that is `from` to `to`, in every
+    /// object of `list` whose list holds it, such as a viewport's frozen
+    /// layers when a layer is renamed, as operation `operation`, and gives
+    /// how many objects it set.
+    pub(crate) fn rename_in_lists(
+        &mut self,
+        list: ObjectList,
+        key: &str,
+        from: &str,
+        to: &str,
+        operation: usize,
+    ) -> usize {
+        let users: Vec<usize> = self
+            .items(list)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                object_parts(item)
+                    .1
+                    .is_some_and(|keys| list_holds(keys, key, from))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if users.is_empty() {
+            return 0;
+        }
+        self.state(list);
+        for &index in &users {
+            if let Ok(items) = self.items_mut(list) {
+                if let Some(keys) = object_keys_mut(&mut items[index]) {
+                    for k in keys.iter_mut().filter(|k| k.key == key) {
+                        if let Kind::Sequence(names) = &mut k.value.kind {
+                            for name in names.iter_mut() {
+                                if matches!(&name.kind, Kind::Scalar(text) if text == from) {
+                                    *name = Node::scalar(to.to_owned());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            self.touch(list, index, operation, Touch::Keys(vec![key.to_owned()]));
+        }
+        users.len()
+    }
+
     /// Sets `key` to `to` in every object of `list` where it is `from`, as
     /// operation `operation`, and gives how many it set.
     pub(crate) fn rename_values(
@@ -1430,6 +1494,20 @@ impl RecordFile {
                 ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,
                 // A viewport moves on the paper; its view moves with it.
                 ("viewport", "center") => move_point(&mut entry.value, by, units, &field)?,
+                // A clipped viewport's boundary moves with it.
+                ("viewport", "clip") => {
+                    let Kind::Mapping(parts) = &mut entry.value.kind else {
+                        return Err(not_a_point(&field));
+                    };
+                    for part in parts.iter_mut() {
+                        let at = key_path(&field, &part.key);
+                        match part.key.as_str() {
+                            "points" => move_points(&mut part.value, by, units, &at)?,
+                            "center" => move_point(&mut part.value, by, units, &at)?,
+                            _ => {}
+                        }
+                    }
+                }
                 ("dimension", "center" | "point" | "location" | "feature") => {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
@@ -2478,7 +2556,16 @@ fn new_entry(key: &str, value: Node) -> Entry {
 /// for `null`, which the file's reader then reads as it reads its own
 /// (rule 8 of the YAML subset): an optional text or path field so written
 /// is left out, and a required one, or any other, is an error.
-fn node_of(value: &Value) -> Node {
+/// Whether the list `key` of an object's `keys` holds the text `value`.
+fn list_holds(keys: &[Entry], key: &str, value: &str) -> bool {
+    keys.iter().any(|k| {
+        k.key == key
+            && matches!(&k.value.kind, Kind::Sequence(items)
+                if items.iter().any(|i| matches!(&i.kind, Kind::Scalar(text) if text == value)))
+    })
+}
+
+pub(super) fn node_of(value: &Value) -> Node {
     match value {
         Value::String(text) => Node::scalar(text.clone()),
         Value::Number(number) => Node::scalar(number.to_string()),

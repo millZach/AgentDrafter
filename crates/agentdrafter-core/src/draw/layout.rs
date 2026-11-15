@@ -14,10 +14,19 @@
 //! drawing's own, draws them: model space is drawn for a viewport with its
 //! linetypes enlarged by one over its scale. Its curves are drawn as finely
 //! on the paper as paper space's.
+//!
+//! A viewport clipped to a boundary, as AutoCAD's VPCLIP clips one, cuts
+//! its lines at that boundary, as its chords on the paper, and leaves out
+//! a line along one of its straight edges that runs across or up the
+//! paper, as AutoCAD 2026 left one out, but not one along a slanting edge
+//! or an arc, which it drew; its fills are cut at the boundary's box,
+//! and each item names the boundary, so that an output cuts its ink there,
+//! as AutoCAD 2026 plotted made-up clipped viewports. A layer frozen in a
+//! viewport, as AutoCAD's VPLAYER freezes one, draws nothing through it.
 
-use super::clip::{clip_polygon, clip_run, ALONG_AN_EDGE};
-use super::{Bounds, DisplayList, Drawer, Item, Point2, Shape, TextRun};
-use crate::model::{Object, Viewport};
+use super::clip::{box_meets_outline, clip_polygon, clip_run, clip_run_to_outline, ALONG_AN_EDGE};
+use super::{curves, polyline, Bounds, DisplayList, Drawer, Item, Point2, Shape, TextRun};
+use crate::model::{Clip, Object, Viewport};
 
 /// Draws the layout of the sheet `drawer` draws into `list`, its curves
 /// within `tolerance` on the paper.
@@ -36,27 +45,83 @@ pub(super) fn draw(drawer: &Drawer, tolerance: f64, list: &mut DisplayList) {
             layer_zero: drawer.layer_zero.clone(),
             purpose: drawer.purpose,
             linetype_factor: drawer.linetype_factor / viewport.scale,
+            frozen_here: &viewport.frozen_layers,
         };
         let fine = tolerance / viewport.scale;
         let mut model = DisplayList::default();
         for (i, object) in sheet.objects.iter().enumerate() {
-            if !sheet.in_paper_space(i) {
+            if sheet.in_model_space(i) {
                 through.sheet_object(i, object, fine, &mut model);
             }
         }
-        list.add_view(index, viewport, model);
+        let outline = viewport.clip.as_ref().map(|clip| outline(clip, tolerance));
+        list.add_view(index, viewport, outline, fine, model);
         drawer.sheet_object(index, &sheet.objects[index], tolerance, list);
     }
+}
+
+/// The boundary `clip` on the paper as a closed outline, its arcs as
+/// chords within `tolerance` of them, as its frame draws them, with a mark
+/// for each edge, from point `i` to the next, that is one of the
+/// boundary's own straight segments running across or up the paper.
+pub(super) fn outline(clip: &Clip, tolerance: f64) -> (Vec<Point2>, Vec<bool>) {
+    let (mut out, mut square): (Vec<Point2>, Vec<bool>) = match clip {
+        Clip::Circle { center, radius } => {
+            let out = curves::circle([center.x, center.y], *radius, tolerance);
+            let square = vec![false; out.len()];
+            (out, square)
+        }
+        Clip::Polyline { points, .. } => {
+            let mut out = Vec::new();
+            let mut square = Vec::new();
+            for (i, a) in points.iter().enumerate() {
+                let b = &points[(i + 1) % points.len()];
+                let segment = polyline::segment([a.x, a.y], [b.x, b.y], clip.bulge(i), tolerance);
+                let straight = segment.len() == 2 && (a.x == b.x || a.y == b.y);
+                out.extend(&segment[..segment.len() - 1]);
+                square.extend(std::iter::repeat_n(straight, segment.len() - 1));
+            }
+            (out, square)
+        }
+    };
+    // Closed: its last point is not its first again.
+    if out.len() > 1 && out.first() == out.last() {
+        out.pop();
+        square.pop();
+    }
+    (out, square)
 }
 
 impl DisplayList {
     /// Adds what model space draws, `model`, as it shows through the
     /// sheet's viewport `viewport`, the sheet's object `index`: moved and
-    /// scaled onto the paper and cut at the viewport's edge, each shape and
-    /// line of text marked with the viewport.
-    fn add_view(&mut self, index: usize, viewport: &Viewport, model: DisplayList) {
+    /// scaled onto the paper and cut at the viewport's edge, or at
+    /// `outline`, its boundary on the paper when it is clipped to one, as
+    /// [`outline`] gives it, each shape and line of text marked with the
+    /// viewport. A line within `fine` of the boundary, model space's
+    /// drawing tolerance, lies on it.
+    fn add_view(
+        &mut self,
+        index: usize,
+        viewport: &Viewport,
+        outline: Option<(Vec<Point2>, Vec<bool>)>,
+        fine: f64,
+        model: DisplayList,
+    ) {
         let [min, max] = viewport.corners();
         let window = Bounds { min, max };
+        // The boundary in model space, where lines are cut at it.
+        let model_outline: Option<(Vec<Point2>, Vec<bool>)> =
+            outline.as_ref().map(|(o, square)| {
+                (
+                    o.iter().map(|&p| viewport.to_model(p)).collect(),
+                    square.clone(),
+                )
+            });
+        let boundary = outline.map(|(o, _)| {
+            self.clip_boundaries.push(o);
+            self.clip_boundaries.len() - 1
+        });
         // Model space is cut at the part of it the viewport shows, then
         // moved onto the paper, so that what lies far off it never
         // overflows on the way.
@@ -72,6 +137,10 @@ impl DisplayList {
                     let runs: Vec<Vec<Point2>> = runs
                         .into_iter()
                         .flat_map(|run| clip_run(&run, model_min, model_max, along))
+                        .flat_map(|run| match &model_outline {
+                            Some((o, square)) => clip_run_to_outline(&run, o, square, along, fine),
+                            None => vec![run],
+                        })
                         .map(placed)
                         .collect();
                     if runs.is_empty() {
@@ -95,6 +164,7 @@ impl DisplayList {
             self.items.push(Item {
                 viewport: Some(index),
                 clip: Some(window),
+                clip_boundary: boundary,
                 shape,
                 ..item
             });
@@ -112,7 +182,11 @@ impl DisplayList {
                 .iter()
                 .flatten()
                 .all(|v| v.is_finite());
-            if finite && shows(&run, &window) {
+            let seen = match boundary {
+                Some(b) => shows_in_outline(&run, &self.clip_boundaries[b]),
+                None => shows(&run, &window),
+            };
+            if finite && seen {
                 self.text.push(run);
             }
         }
@@ -158,6 +232,28 @@ impl DisplayList {
             {
                 self.hatches_cut_short.push(cut);
             }
+        }
+    }
+}
+
+/// Whether a line of text shows in the closed outline `outline` on the
+/// paper: what its characters draw reaches into it, or, when they draw
+/// nothing, its start is in it.
+fn shows_in_outline(run: &TextRun, outline: &[Point2]) -> bool {
+    let at = |[u, v]: Point2| {
+        [
+            run.origin[0] + u * run.across[0] + v * run.up[0],
+            run.origin[1] + u * run.across[1] + v * run.up[1],
+        ]
+    };
+    match run.drawn {
+        None => super::clip::inside_outline(run.origin, outline),
+        Some([lo, hi]) => {
+            let corners = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]].map(at);
+            let Some(b) = Bounds::of(corners.into_iter()) else {
+                return false;
+            };
+            box_meets_outline(b.min, b.max, outline)
         }
     }
 }

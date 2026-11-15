@@ -173,6 +173,12 @@ pub struct Selection {
     /// Objects whose geometry meets this object's, on each sheet it is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touching: Option<ObjectRef>,
+    /// Objects in this space, on a sheet drawn in a layout: `model`, or a
+    /// layout's paper space by its name, or `paper` on a sheet drawn in
+    /// one. A box looks at each object in its own space, so with several
+    /// layouts it names the one whose paper it is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
 }
 
 /// A box on the sheet, seen from above, by two opposite corners in the
@@ -404,6 +410,10 @@ pub struct FoundObject {
     pub id_written: bool,
     #[serde(flatten)]
     pub written_at: WrittenAt,
+    /// The space it is in, on a sheet drawn in a layout: `model`, or the
+    /// name of the layout whose paper space holds it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
     /// The object, as the sheet holds it, in the declared unit.
     pub object: Object,
     /// When an insert is found by text its block draws: each text or
@@ -669,6 +679,19 @@ impl Selection {
                 return None;
             }
         }
+        if let Some(space) = &self.space {
+            let sheet = &record.sheet;
+            let here = if space == crate::description::layout::MODEL {
+                sheet.in_model_space(index)
+            } else {
+                let names: Vec<String> = sheet.layouts().map(|l| l.name.clone()).collect();
+                crate::description::layout::layout_named(space, &names)
+                    .is_some_and(|k| sheet.layouts().nth(k).is_some_and(|l| l.holds(index)))
+            };
+            if !here {
+                return None;
+            }
+        }
         if let Some(name) = &self.name {
             match record.objects[index].name.as_deref() {
                 Some(have) if m.identifier(have, name) => {}
@@ -726,6 +749,13 @@ impl Selection {
         }
         if let Some(crossing) = &self.crossing {
             parts.push(format!("within or crossing the box {}", crossing.words()));
+        }
+        if let Some(space) = &self.space {
+            parts.push(if space == crate::description::layout::MODEL {
+                "in model space".to_owned()
+            } else {
+                format!("in the paper space of `{space}`")
+            });
         }
         if let Some(touching) = &self.touching {
             parts.push(match (&touching.id, &touching.name) {
@@ -792,6 +822,17 @@ impl Selection {
             joined
         })
     }
+}
+
+/// The space the sheet's object at `index` is in, on a sheet drawn in a
+/// layout: `model`, or the name of the layout whose paper space holds it.
+/// None on a sheet drawn in model space alone.
+pub(crate) fn space_of(sheet: &Sheet, index: usize) -> Option<String> {
+    sheet.layout.as_ref()?;
+    Some(sheet.layout_of(index).map_or_else(
+        || crate::description::layout::MODEL.to_owned(),
+        |l| l.name.clone(),
+    ))
 }
 
 /// The text and multiline text of `block`, as the block library of
@@ -1204,6 +1245,7 @@ fn find(
             id: m.record.id(m.index),
             id_written: m.record.objects[m.index].written(),
             written_at: written_at(m.record, m.index),
+            space: space_of(&m.record.sheet, m.index),
             object: m.record.sheet.objects[m.index].clone(),
             block_text: m.block_text,
             touches: m.touches,

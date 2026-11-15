@@ -149,7 +149,7 @@ pub use model::{
     LeaderAttachment, MLeader, MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, MTextBox,
     STANDARD_MLEADER_STYLE,
 };
-pub use model::{Cell, Layout, Paper, Viewport};
+pub use model::{Cell, Clip, Layout, Paper, Viewport};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use model::{RowKind, RowStyle, Table, TableCell, TableStyle, STANDARD_TABLE_STYLE};
 pub use plot::{

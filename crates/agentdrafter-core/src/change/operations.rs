@@ -33,6 +33,11 @@ pub(crate) enum Kind {
     Change,
     /// Sets a viewport's scale, view centre or display lock.
     ChangeViewport,
+    /// Clips a viewport to a boundary, or takes its boundary away:
+    /// AutoCAD's VPCLIP.
+    ClipViewport,
+    /// Sets the layers frozen in a viewport: AutoCAD's VPLAYER.
+    SetFrozenLayers,
     Move,
     Delete,
     SetAttribute,
@@ -193,7 +198,7 @@ pub(crate) struct Spec {
 }
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 57] = [
+pub(crate) const SPECS: [Spec; 59] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -240,6 +245,16 @@ pub(crate) const SPECS: [Spec; 57] = [
         name: "change_viewport",
         alias: "",
         kind: Kind::ChangeViewport,
+    },
+    Spec {
+        name: "clip_viewport",
+        alias: "VPCLIP",
+        kind: Kind::ClipViewport,
+    },
+    Spec {
+        name: "set_frozen_layers",
+        alias: "VPLAYER",
+        kind: Kind::SetFrozenLayers,
     },
     Spec {
         name: "move",
@@ -482,6 +497,26 @@ fn does(spec: &Spec) -> String {
                                  unless locked: false is sent with it, as AutoCAD keeps a locked \
                                  view from being zoomed or panned; move moves a viewport on the \
                                  paper, its view with it."
+            .to_owned(),
+        Kind::ClipViewport => "Clips a viewport to a boundary on the paper, clip, a closed \
+                               polyline's points or a circle's center and radius, as a \
+                               viewport's clip is written, or with clip: null takes its \
+                               boundary away, as AutoCAD's VPCLIP and its Delete option do. \
+                               Model space stays where it showed on the paper: the viewport's \
+                               window becomes the box round the boundary, and its view centre \
+                               the model point at the box's middle, its scale unchanged, so a \
+                               locked viewport may be clipped too. Taken away, the boundary \
+                               leaves the viewport rectangular, the box it was clipped to. A \
+                               viewport that is not clipped has no boundary to take away. A \
+                               viewport is named by target, by its ID or its name."
+            .to_owned(),
+        Kind::SetFrozenLayers => "Sets the layers frozen in one viewport, frozen_layers, as \
+                                  AutoCAD's VPLAYER freezes and thaws them: their objects \
+                                  neither draw nor plot through that viewport, and do through \
+                                  the others. The list replaces the viewport's own; an empty \
+                                  list thaws every layer in it. Each is layer 0 or one of the \
+                                  sheet's, named exactly as it is defined. A viewport is named \
+                                  by target, by its ID or its name."
             .to_owned(),
         Kind::Move => "Moves an object by by, [dx, dy, dz], or from a base point, from, to a \
                        second point, to, as AutoCAD's MOVE takes them, each a point or a \
@@ -1170,6 +1205,38 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                 },
             },
         }),
+        Kind::ClipViewport => json!({
+            "type": "object",
+            "required": ["target", "clip"],
+            "additionalProperties": false,
+            "properties": {
+                "target": target,
+                "clip": {
+                    "description": "The boundary to clip the viewport to, on the paper, or \
+                                    null to take its boundary away.",
+                    "anyOf": [
+                        { "$ref": "#/$defs/viewport_clip" },
+                        { "type": "null" },
+                    ],
+                },
+            },
+        }),
+        Kind::SetFrozenLayers => json!({
+            "type": "object",
+            "required": ["target", "frozen_layers"],
+            "additionalProperties": false,
+            "properties": {
+                "target": target,
+                "frozen_layers": {
+                    "description": "The layers frozen in the viewport, each layer 0 or one of \
+                                    the sheet's, named exactly as it is defined, and each once \
+                                    whatever its case: the viewport's new list, empty to thaw \
+                                    them all.",
+                    "type": "array",
+                    "items": { "type": "string" },
+                },
+            },
+        }),
         Kind::Move => json!({
             "type": "object",
             "required": ["target"],
@@ -1686,6 +1753,10 @@ pub(crate) enum Body {
         snaps: Vec<(String, PointSnap)>,
         /// Whether it is a change_viewport, which changes a viewport alone.
         viewport: bool,
+        /// For a clip_viewport, the boundary it clips the viewport to, or
+        /// null to take its boundary away: the keys it sets are worked out
+        /// from the viewport as it stands.
+        clip: Option<Value>,
     },
     Move {
         target: Target,
@@ -2324,6 +2395,7 @@ fn operation(
                 set,
                 snaps: Vec::new(),
                 viewport: false,
+                clip: None,
             }
         }
         Kind::ChangeViewport => {
@@ -2378,6 +2450,75 @@ fn operation(
                 set,
                 snaps,
                 viewport: true,
+                clip: None,
+            }
+        }
+        Kind::ClipViewport => {
+            keys(&["target", "clip"])?;
+            let target = target()?;
+            let clip =
+                    match map.get("clip") {
+                        Some(clip @ (Value::Object(_) | Value::Null)) => clip.clone(),
+                        Some(_) => return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected a boundary, `{points: [...]}` or `{center: [x, y, 0], radius: r}`, or \n                         null to take the viewport's boundary away"
+                                .to_owned(),
+                            "clip",
+                        )),
+                        None => return Err(fail(
+                            ErrorCode::MissingKey,
+                            "missing key `clip`, the boundary to clip the viewport to, or null to \
+                         take its boundary away"
+                                .to_owned(),
+                            "clip",
+                        )),
+                    };
+            Body::Change {
+                target,
+                set: Map::new(),
+                snaps: Vec::new(),
+                viewport: true,
+                clip: Some(clip),
+            }
+        }
+        Kind::SetFrozenLayers => {
+            keys(&["target", "frozen_layers"])?;
+            let target = target()?;
+            let layers = match map.get("frozen_layers") {
+                Some(Value::Array(items)) if items.iter().all(Value::is_string) => {
+                    Value::Array(items.clone())
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a list of layer names, such as [\"wiring\"], or [] to thaw \
+                         every layer in the viewport"
+                            .to_owned(),
+                        "frozen_layers",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `frozen_layers`, the layers to freeze in the viewport"
+                            .to_owned(),
+                        "frozen_layers",
+                    ))
+                }
+            };
+            let mut set = Map::new();
+            // An empty list thaws every layer: the key is taken away.
+            let empty = layers.as_array().is_some_and(Vec::is_empty);
+            set.insert(
+                "frozen_layers".into(),
+                if empty { Value::Null } else { layers },
+            );
+            Body::Change {
+                target,
+                set,
+                snaps: Vec::new(),
+                viewport: true,
+                clip: None,
             }
         }
         Kind::Move => {

@@ -362,6 +362,7 @@ fn the_pipeline_draws_a_dimensions_lines_and_its_text_as_its_part() {
             sheet: None,
             tolerance: None,
             entry: None,
+            layout: None,
         },
         &Settings::default(),
     )
@@ -749,6 +750,7 @@ fn drawn(source: &Path, index: usize) -> Vec<String> {
             sheet: None,
             tolerance: Some(0.001),
             entry: None,
+            layout: None,
         },
         &Settings::default(),
     )

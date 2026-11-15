@@ -144,6 +144,7 @@ mod tests {
             cell: None,
             viewport: None,
             clip: None,
+            clip_boundary: None,
             color: Color(7),
             shape: Shape::Stroke {
                 lineweight,
@@ -161,6 +162,7 @@ mod tests {
             cell: None,
             viewport: None,
             clip: None,
+            clip_boundary: None,
             color: Color(1),
             shape: Shape::Fill {
                 rule: FillRule::EvenOdd,

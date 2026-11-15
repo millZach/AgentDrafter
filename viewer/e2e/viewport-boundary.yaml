@@ -1,0 +1,17 @@
+# A made-up sheet for the viewer's browser tests (e2e/run.mjs): lines 2.11 mm
+# wide and a filled square seen at 1:1 through a viewport clipped to a
+# circle and one clipped to a notched polygon, so the canvas is held to the
+# PNG where a clipped viewport cuts its contents at its boundary, ink, round
+# ends and fills among it.
+units: mm
+paper: ISO A4 landscape
+layout: {name: Boundary}
+layers:
+  vp: {color: 8}
+objects:
+  - line: {from: [-40, 0, 0], to: [40, 0, 0], color: red, lineweight: 2.11}
+  - line: {from: [0, -40, 0], to: [0, 40, 0], color: blue, lineweight: 2.11}
+  - line: {from: [-40, -30, 0], to: [40, 30, 0], lineweight: 2.11}
+  - solid: {corners: [[-10, -10, 0], [10, -10, 0], [10, 10, 0], [-10, 10, 0]], color: green}
+  - viewport: {clip: {center: [80, 110, 0], radius: 25}, view_center: [0, 0, 0], scale: 1, layer: vp}
+  - viewport: {clip: {points: [[140, 85, 0], [190, 85, 0], [190, 135, 0], [165, 110, 0], [140, 135, 0]]}, view_center: [0, 0, 0], scale: 1, layer: vp}

@@ -94,7 +94,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key, layout_key] =
+    let [units_key, block_library_key, ltscale_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key, layout_key, layouts_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -131,7 +131,10 @@ pub fn sheet_description_schema() -> Value {
             },
             paper_key: super::paper::paper_property(),
             layout_key: super::layout::layout_property(),
+            layouts_key: super::layout::layouts_property(),
         },
+        // One layout under `layout`, or several under `layouts`.
+        "not": { "required": [layout_key, layouts_key] },
         // Engineering and architectural lengths count inches, so they are
         // for a sheet in inches, as the reader has it.
         "if": { "not": { "properties": { units_key: { "const": Unit::In.symbol() } } } },
@@ -179,13 +182,7 @@ fn sheet_defs() -> Map<String, Value> {
             }
             if name == "viewport" {
                 // A viewport is in paper space.
-                properties.insert(
-                    SPACE_KEY.into(),
-                    json!({
-                        "description": "A viewport is in paper space.",
-                        "const": super::layout::PAPER,
-                    }),
-                );
+                properties.insert(SPACE_KEY.into(), super::layout::viewport_space_property());
             }
         }
     }
@@ -914,6 +911,7 @@ fn defs() -> Map<String, Value> {
     leader_schema::leader_defs(&mut defs);
     dimension_schema::dimension_defs(&mut defs);
     defs.insert("viewport".into(), super::layout::viewport_def());
+    defs.insert("viewport_clip".into(), super::layout::clip_def());
     block_schema::add_defs(&mut defs);
     defs
 }

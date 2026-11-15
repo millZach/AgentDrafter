@@ -26,6 +26,11 @@
 //!   A segment of model space seen through a viewport carries the
 //!   viewport's window, and the shader draws none of its ink outside it,
 //!   as the PNG and the PDF cut it.
+//! - A viewport clipped to a boundary draws through the stencil: the
+//!   boundary's fan of triangles is drawn into it first, each inverting
+//!   it, which leaves it set inside the boundary by the even-odd rule, and
+//!   the viewport's strokes and fills then draw only where it is set, ink
+//!   and all, as the PNG's mask and the PDF's clipping path cut them.
 //! - Fills are drawn as one draw of their triangles, their edges smoothed
 //!   by the multisampling.
 //! - Over the ink, a halo marks each object a change set added or changed,
@@ -43,7 +48,7 @@ use web_sys::{
 
 use agentdrafter_core::{object_bounds, pick, Bounds, DisplayList};
 
-use crate::mesh::{read_reply, Kind, Mesh, Run};
+use crate::mesh::{read_reply, Kind, Mesh, Run, Span};
 
 const STROKE_VERTEX: &str = r#"#version 300 es
 precision highp float;
@@ -253,9 +258,11 @@ struct Loaded {
     millimetres_per_unit: f64,
     /// How many items the display list holds, which sets each one's depth.
     items: f32,
-    segments: u32,
-    triangles: u32,
     runs: Vec<Run>,
+    spans: Vec<Span>,
+    /// Each clipped viewport's boundary's fan: its first triangle and how
+    /// many.
+    stencils: Vec<(u32, u32)>,
     strokes: WebGlVertexArrayObject,
     fills: WebGlVertexArrayObject,
     buffers: Vec<WebGlBuffer>,
@@ -290,7 +297,7 @@ impl Viewer {
             ("antialias", true),
             ("alpha", false),
             ("depth", true),
-            ("stencil", false),
+            ("stencil", true),
             ("preserveDrawingBuffer", false),
         ] {
             js_sys::Reflect::set(&options, &key.into(), &value.into())
@@ -533,23 +540,62 @@ impl Viewer {
                 gl.disable(Gl::SAMPLE_ALPHA_TO_COVERAGE);
             }
         };
+        // Sets the stencil inside the clipped viewport's boundary `b`, and
+        // lets what is drawn next draw only there; none draws whole.
+        let cut_at = |b: Option<u32>| {
+            let Some(&(first, count)) = b.and_then(|b| sheet.stencils.get(b as usize)) else {
+                gl.disable(Gl::STENCIL_TEST);
+                return;
+            };
+            let depth = gl.is_enabled(Gl::DEPTH_TEST);
+            gl.enable(Gl::STENCIL_TEST);
+            gl.clear_stencil(0);
+            gl.clear(Gl::STENCIL_BUFFER_BIT);
+            gl.color_mask(false, false, false, false);
+            gl.depth_mask(false);
+            gl.disable(Gl::DEPTH_TEST);
+            gl.stencil_func(Gl::ALWAYS, 0, 0xff);
+            gl.stencil_op(Gl::KEEP, Gl::KEEP, Gl::INVERT);
+            draw(Kind::Fills, first, count);
+            gl.color_mask(true, true, true, true);
+            gl.depth_mask(true);
+            if depth {
+                gl.enable(Gl::DEPTH_TEST);
+            }
+            gl.stencil_func(Gl::EQUAL, 0xff, 0xff);
+            gl.stencil_op(Gl::KEEP, Gl::KEEP, Gl::KEEP);
+        };
         if sheet.runs.len() <= MOST_RUNS {
             // Run after run, as the display list orders them: what is drawn
             // later covers what was drawn before, within a draw call and
             // across them.
+            let mut cut: Option<u32> = None;
             for run in &sheet.runs {
+                if run.clip != cut {
+                    cut_at(run.clip);
+                    cut = run.clip;
+                }
                 draw(run.kind, run.first, run.count);
             }
         } else {
             // Too many runs to draw one by one: every fill, then every
             // stroke, each at its item's depth, so each sample keeps the
-            // colour of the latest item drawn on it, which is the nearest.
+            // colour of the latest item drawn on it, which is the nearest;
+            // span by span, each seen through one clipped viewport or none.
             gl.clear(Gl::DEPTH_BUFFER_BIT);
             gl.enable(Gl::DEPTH_TEST);
             gl.depth_func(Gl::LEQUAL);
-            draw(Kind::Fills, 0, sheet.triangles);
-            draw(Kind::Strokes, 0, sheet.segments);
+            for span in &sheet.spans {
+                cut_at(span.clip);
+                if span.triangles.1 > 0 {
+                    draw(Kind::Fills, span.triangles.0, span.triangles.1);
+                }
+                if span.segments.1 > 0 {
+                    draw(Kind::Strokes, span.segments.0, span.segments.1);
+                }
+            }
         }
+        gl.disable(Gl::STENCIL_TEST);
         gl.disable(Gl::DEPTH_TEST);
         gl.bind_vertex_array(None);
 
@@ -722,9 +768,9 @@ impl Viewer {
             paper: mesh.paper,
             millimetres_per_unit,
             items: mesh.items as f32,
-            segments: mesh.segments.len() as u32,
-            triangles: mesh.triangles.len() as u32,
             runs: mesh.runs.clone(),
+            spans: mesh.spans.clone(),
+            stencils: mesh.stencils.clone(),
             strokes,
             fills,
             buffers,
