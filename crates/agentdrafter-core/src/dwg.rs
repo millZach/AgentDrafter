@@ -41,6 +41,7 @@ use crate::text::{MText as MTextObject, Text as TextObject};
 use crate::units::Unit;
 
 mod block;
+mod dimension;
 mod hatch;
 mod ids;
 mod import;
@@ -163,6 +164,7 @@ pub(crate) fn write_new_sheet(
     if !sheet.objects.is_empty() {
         block::register_application(&mut drawing)?;
     }
+    dimension::prepare(&mut drawing, sheet)?;
     // Layers, linetypes, text styles and applications take their handles
     // before the blocks and objects take theirs.
     drawing.assign_table_entry_handles();
@@ -188,6 +190,8 @@ pub(crate) fn write_new_sheet(
     // After the sheet's blocks, so that a block of its library drawn as
     // AutoCAD's arrowhead block is the one a leader draws with.
     leader::add_leader_styles(&mut drawing, sheet)?;
+    dimension::add_dimension_styles(&mut drawing, sheet)?;
+    let mut dimensions = 0;
     for (object, written) in sheet.objects.iter().zip(&record.objects) {
         if let Object::Table(t) = object {
             let style = sheet.table_style(&t.table_style).ok_or_else(|| {
@@ -238,6 +242,37 @@ pub(crate) fn write_new_sheet(
                 Error::new(
                     ErrorCode::DwgWrite,
                     format!("could not add a multileader to the drawing: {e}"),
+                )
+            })?;
+            continue;
+        }
+        if let Object::Dimension(d) = object {
+            let style = sheet.dimension_style(&d.dimension_style).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!(
+                        "a dimension draws with dimension style `{}`, which the sheet does not define",
+                        d.dimension_style
+                    ),
+                )
+            })?;
+            dimensions += 1;
+            let mut dwg_dimension = dimension::dwg_dimension(
+                &mut drawing,
+                d,
+                &style,
+                measure,
+                dimensions,
+                sheet.units,
+            )?;
+            let common = dwg_dimension.common_mut();
+            d.layer.clone_into(&mut common.layer);
+            set_properties(common, &d.properties);
+            ids::write_id_and_name(common, &record.name, &written.id, written.name.as_deref());
+            drawing.add_entity(dwg_dimension).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add a dimension to the drawing: {e}"),
                 )
             })?;
             continue;
@@ -368,6 +403,12 @@ fn dwg_object(
             return Err(Error::new(
                 ErrorCode::DwgWrite,
                 "a leader belongs on a sheet, not in a block",
+            ))
+        }
+        Object::Dimension(_) => {
+            return Err(Error::new(
+                ErrorCode::DwgWrite,
+                "a dimension belongs on a sheet, not in a block",
             ))
         }
         Object::Insert(insert) => {
@@ -564,6 +605,10 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
     let mut layers = Vec::new();
     let mut layers_not_read = 0;
     for dwg_layer in drawing.layers.iter() {
+        // AutoCAD's own `Defpoints` is read with the dimensions.
+        if dimension::is_own_defpoints(dwg_layer) {
+            continue;
+        }
         match read_layer(dwg_layer) {
             Some(layer) => layers.push(layer),
             None => layers_not_read += 1,
@@ -572,8 +617,12 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
     let (text_styles, text_styles_not_read) = text::read_text_styles(&drawing);
     let (table_styles, table_styles_not_read) = table::read_table_styles(&drawing);
     let (mleader_styles, mleader_styles_not_read) = leader::read_mleader_styles(&drawing);
-    // A leader's arrowhead block is read with the leader.
-    let arrow_blocks = leader::arrow_blocks(&drawing);
+    let (dimension_styles, dimension_styles_not_read) = dimension::read_dimension_styles(&drawing);
+    // A leader's or a dimension style's arrowhead block is read with them.
+    let mut arrow_blocks = leader::arrow_blocks(&drawing);
+    arrow_blocks.extend(dimension::style_arrow_blocks(&drawing));
+    // A dimension's own block holds what it draws, and is read with it.
+    let dimension_blocks = dimension::dimension_blocks(&drawing);
     // A table's own block holds what it draws, and is read with the table.
     let table_blocks: Vec<(Option<acadrust::types::Handle>, String)> = drawing
         .model_space_entities()
@@ -597,6 +646,11 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
                 *handle == Some(r.handle) || (!name.is_empty() && *name == r.name)
             })
         })
+        .filter(|r| {
+            !dimension_blocks
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(&r.name))
+        })
         .collect();
     // An arrowhead block that only leaders draw is read with them, and is
     // neither a block of the drawing's nor counted; one an insert or a
@@ -605,9 +659,16 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
     let inserted: Vec<String> = drawing
         .model_space_entities()
         .chain(
+            // A dimension's own block places its arrowheads, which are
+            // read with it, not as inserts of the drawing's.
             drawing
                 .block_records
                 .iter()
+                .filter(|r| {
+                    !dimension_blocks
+                        .iter()
+                        .any(|n| n.eq_ignore_ascii_case(&r.name))
+                })
                 .flat_map(|r| drawing.entities_in_block(&r.name)),
         )
         .filter_map(|e| match e {
@@ -696,6 +757,17 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
                     read.properties = properties;
                     Some(Object::MLeader(read))
                 }),
+            EntityType::Dimension(d) => read_properties(&d.base().common)
+                .filter(|_| !d.base().common.invisible)
+                .and_then(|properties| {
+                    let mut read = dimension::read_dimension(
+                        d,
+                        &dimension_styles,
+                        layer_of(&d.base().common),
+                    )?;
+                    read.properties = properties;
+                    Some(Object::Dimension(read))
+                }),
             EntityType::Table(t) => read_properties(&t.common)
                 .filter(|_| !t.common.invisible)
                 .and_then(|properties| {
@@ -730,6 +802,8 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         table_styles_not_read,
         mleader_styles,
         mleader_styles_not_read,
+        dimension_styles,
+        dimension_styles_not_read,
         blocks,
         blocks_not_read,
         objects,
@@ -1195,6 +1269,7 @@ mod tests {
             text_styles: Vec::new(),
             table_styles: Vec::new(),
             mleader_styles: Vec::new(),
+            dimension_styles: Vec::new(),
             blocks: Vec::new(),
             objects: Vec::new(),
             paper: None,

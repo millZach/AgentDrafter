@@ -682,6 +682,15 @@ pub(super) fn geometry(
     let message = match objects.as_slice() {
         [one] => {
             let mut said = Vec::new();
+            if let Some(measured) = one.measures.measurement {
+                let shows = one
+                    .measures
+                    .text
+                    .as_deref()
+                    .map(|t| format!(" and shows `{t}`"))
+                    .unwrap_or_default();
+                said.push(format!("measures {measured} {units}{shows}"));
+            }
             if let Some(length) = one.measures.length {
                 said.push(format!("is {length} {units} long"));
             }

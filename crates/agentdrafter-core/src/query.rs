@@ -33,7 +33,7 @@ use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
 use crate::geometry::snap::{touches, SnapPoint, Touch};
 use crate::geometry::{ObjectRef, SnapRef};
-use crate::model::{Attribute, Layer, Object, Point3, Sheet, LAYER_ZERO};
+use crate::model::{Attribute, Layer, Measured, Object, Point3, Sheet, LAYER_ZERO};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -1583,6 +1583,18 @@ fn points_of(object: &Object) -> Vec<(String, Point3)> {
             .flat_map(|(i, points)| listed(&format!("leaders[{i}]"), points))
             .collect(),
         Object::Leader(leader) => listed("points", &leader.points),
+        Object::Dimension(dimension) => {
+            let mut points = match &dimension.measured {
+                Measured::Linear { points, .. } | Measured::Aligned { points } => {
+                    listed("points", points)
+                }
+                Measured::Radius { center, point } | Measured::Diameter { center, point } => {
+                    vec![("center".to_owned(), *center), ("point".to_owned(), *point)]
+                }
+            };
+            points.push(("location".to_owned(), dimension.location));
+            points
+        }
     }
 }
 

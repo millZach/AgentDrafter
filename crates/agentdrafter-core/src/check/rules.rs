@@ -589,10 +589,14 @@ impl Sheet<'_> {
             // A table's borders are lines; its cells' text, letters. A
             // leader's lines, landing and arrowhead are lines; its text,
             // drawn as its part 0, letters.
-            Object::Table(_) | Object::MLeader(_) | Object::Leader(_) if path.is_empty() => {
+            Object::Table(_) | Object::MLeader(_) | Object::Leader(_) | Object::Dimension(_)
+                if path.is_empty() =>
+            {
                 Drawn::Line
             }
-            Object::Table(_) | Object::MLeader(_) | Object::Leader(_) => Drawn::Letters,
+            Object::Table(_) | Object::MLeader(_) | Object::Leader(_) | Object::Dimension(_) => {
+                Drawn::Letters
+            }
         }
     }
 
@@ -688,7 +692,17 @@ impl Sheet<'_> {
                 };
                 (Some(part), inner.says())
             }
-            None => (None, says(object)),
+            None => match object {
+                // A dimension says what its style makes of its measurement.
+                Object::Dimension(d) => (
+                    None,
+                    record
+                        .sheet
+                        .dimension_style(&d.dimension_style)
+                        .map(|style| d.displayed_text(&style)),
+                ),
+                _ => (None, says(object)),
+            },
         };
         CheckedObject {
             id: record.id(i),
@@ -744,7 +758,13 @@ impl Sheet<'_> {
         let Some(inner) = self.in_block(i, path) else {
             return match (&self.record.sheet.objects[i], path) {
                 (Object::Text(t), _) => format!("{words} saying `{}`", t.contents),
-                (Object::MText(_) | Object::MLeader(_) | Object::Leader(_), _) => {
+                (
+                    Object::MText(_)
+                    | Object::MLeader(_)
+                    | Object::Leader(_)
+                    | Object::Dimension(_),
+                    _,
+                ) => {
                     format!("{words}{on_line}")
                 }
                 (Object::Table(table), &[row, column]) => {

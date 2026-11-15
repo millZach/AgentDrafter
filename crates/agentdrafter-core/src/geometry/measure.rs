@@ -55,6 +55,16 @@ pub struct Measures {
     /// The angle an arc sweeps, in degrees, AutoCAD's total angle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_angle: Option<f64>,
+    /// What a dimension measures, as AutoCAD keeps it in the dimension: a
+    /// linear dimension's distance along its angle, an aligned one's
+    /// between its points, a radius or a diameter, in the declared unit,
+    /// unrounded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<f64>,
+    /// What a dimension's text shows: its measured value as its style
+    /// formats it, or its own text with `<>` standing for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 impl Measures {
@@ -358,6 +368,14 @@ impl Reader<'_> {
                 let loops: Vec<Vec<Curve>> = hatch.boundary.iter().map(hatch_loop).collect();
                 m.extents = extents_of(loops.iter().flatten());
                 m.area = Some(hatch_area(&loops));
+            }
+            Object::Dimension(dimension) => {
+                m.extents = extents();
+                m.measurement = Some(dimension.measurement());
+                m.text = self
+                    .sheet
+                    .dimension_style(&dimension.dimension_style)
+                    .map(|style| dimension.displayed_text(&style));
             }
             _ => {}
         }

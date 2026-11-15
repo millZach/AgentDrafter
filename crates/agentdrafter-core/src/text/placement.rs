@@ -106,6 +106,9 @@ impl SheetFonts {
                     .annotation
                     .as_ref()
                     .is_some_and(|a| a.style == STANDARD),
+                Object::Dimension(dimension) => sheet
+                    .dimension_style(&dimension.dimension_style)
+                    .is_some_and(|style| style.text_style == STANDARD),
                 _ => false,
             });
         if standard_used && !styles.iter().any(|s| s.name == STANDARD) {

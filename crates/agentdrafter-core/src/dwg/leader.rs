@@ -177,7 +177,7 @@ fn style_handle(drawing: &CadDocument, name: &str) -> Option<Handle> {
 
 /// The handle of the block AutoCAD draws `arrowhead` from, which the
 /// drawing holds once it is added: none for closed filled.
-fn arrow_block(drawing: &CadDocument, arrowhead: Arrowhead) -> Option<Handle> {
+pub(super) fn arrow_block(drawing: &CadDocument, arrowhead: Arrowhead) -> Option<Handle> {
     let name = arrowhead.block()?;
     drawing
         .block_records
@@ -191,7 +191,10 @@ fn arrow_block(drawing: &CadDocument, arrowhead: Arrowhead) -> Option<Handle> {
 /// wide round a circle of radius 0.25, and a line from 0.5 to 1 behind the
 /// point; for `_Open`, the triangle's two sides and its axis; for `_None`,
 /// nothing. Each is on layer `0`, `ByBlock` in colour and linetype.
-fn add_arrow_block(drawing: &mut CadDocument, arrowhead: Arrowhead) -> Result<(), Error> {
+pub(super) fn add_arrow_block(
+    drawing: &mut CadDocument,
+    arrowhead: Arrowhead,
+) -> Result<(), Error> {
     let Some(name) = arrowhead.block() else {
         return Ok(());
     };
@@ -313,10 +316,13 @@ fn drawn_alike(objects: &[Object]) -> Vec<String> {
 }
 
 /// Refuses a block of the sheet's, from its block library, that has the
-/// name of an arrowhead block a leader of the sheet needs but is drawn
-/// otherwise than AutoCAD's: the drawing holds one block of a name. One
-/// drawn as AutoCAD's is written once and shared.
-fn check_library_arrowheads(sheet: &Sheet, arrowheads: &[Arrowhead]) -> Result<(), Error> {
+/// name of an arrowhead block a leader or a dimension of the sheet needs
+/// but is drawn otherwise than AutoCAD's: the drawing holds one block of a
+/// name. One drawn as AutoCAD's is written once and shared.
+pub(super) fn check_library_arrowheads(
+    sheet: &Sheet,
+    arrowheads: &[Arrowhead],
+) -> Result<(), Error> {
     for arrowhead in arrowheads {
         let Some(name) = arrowhead.block() else {
             continue;
@@ -342,7 +348,7 @@ fn check_library_arrowheads(sheet: &Sheet, arrowheads: &[Arrowhead]) -> Result<(
             return Err(Error::new(
                 ErrorCode::DuplicateName,
                 format!(
-                    "the block library's block `{}` differs from AutoCAD's arrowhead block that a leader needs, `{name}`, and a drawing holds one block of a name; rename the library's block, or draw it as AutoCAD's",
+                    "the block library's block `{}` differs from AutoCAD's arrowhead block that a leader or a dimension needs, `{name}`, and a drawing holds one block of a name; rename the library's block, or draw it as AutoCAD's",
                     block.name
                 ),
             ));
@@ -794,7 +800,7 @@ fn block_name(drawing: &CadDocument, handle: Handle) -> Option<&str> {
 }
 
 /// The arrowhead of the block `handle` names: closed filled for none.
-fn arrowhead_of(drawing: &CadDocument, handle: Option<Handle>) -> Option<Arrowhead> {
+pub(super) fn arrowhead_of(drawing: &CadDocument, handle: Option<Handle>) -> Option<Arrowhead> {
     match handle.filter(|h| !h.is_null()) {
         None => Some(Arrowhead::ClosedFilled),
         Some(handle) => Arrowhead::of_block(block_name(drawing, handle)?),

@@ -52,6 +52,7 @@ Keys are spelled as AutoCAD spells them: `color`, `center`.
 | `text_styles` | no | The sheet's text styles: a mapping from each style's name to its font and width factor. |
 | `table_styles` | no | The sheet's table styles: a mapping from each style's name to what its tables' cells draw with. See [Table styles](#table-styles). |
 | `mleader_styles` | no | The sheet's multileader styles: a mapping from each style's name to what its multileaders draw with. See [Multileader styles](#multileader-styles). |
+| `dimension_styles` | no | The sheet's dimension styles: a mapping from each style's name to what its dimensions draw with. See [Dimension styles](#dimension-styles). |
 | `objects` | yes | A list of objects, which may be empty, in drawing order. Each object is a mapping with one key, its type. |
 | `paper` | no | The paper the sheet is drawn on, which the checker holds it to. See [Paper](#paper). |
 
@@ -179,6 +180,45 @@ mleader_styles:
 
 A multileader style's content is multiline text and its leader lines are straight; its landing is horizontal and its text upright. A multileader may still take a block as its content ([Block content](#block-content)). AutoCAD's MLEADERSTYLE offers more, such as a block as the style's own content, spline leader lines, a frame round the text, text above or below a vertical landing, and annotative scaling; a DWG multileader style that uses them is counted as not read, and so is a multileader in it.
 
+### Dimension styles
+
+A dimension style is what a [dimension](#dimensions) draws with: AutoCAD's DIMSTYLE. A sheet has its unit's own without listing it, as AutoCAD 2026's templates have it: `ISO-25` on a metric sheet, of the `acadiso` template, and `Standard` on an imperial one, of the `acad` template. Listing it under `dimension_styles` sets what it draws with; AutoCAD's names are written exactly, as a text style's are. Every other style starts from the sheet's unit's own, and every key is optional: one left out is as that style has it.
+
+```yaml
+dimension_styles:
+  cutout:
+    arrowhead: open
+    arrow_size: 3
+    text_height: 3
+    suffix: ' mm'
+  reference:
+    placement: centered
+    precision: 1
+    suppress_trailing_zeros: true
+```
+
+| Key | AutoCAD's | What it is | `ISO-25` | `Standard` |
+|---|---|---|---|---|
+| `arrowhead` | DIMBLK | The arrowhead at each end of the dimension line, of those a [multileader style](#multileader-styles) names: `closed_filled`, `dot`, `open` or `none`. | `closed_filled` | `closed_filled` |
+| `arrow_size` | DIMASZ | How long an arrowhead is: a length more than 0. | 2.5 mm | 0.18 in |
+| `text_style` | DIMTXSTY | The text style its text draws with: `Standard` or a name under `text_styles`. | `Standard` | `Standard` |
+| `text_height` | DIMTXT | The height of its text's capitals: a length more than 0. | 2.5 mm | 0.18 in |
+| `gap` | DIMGAP | The space round its text: a length of 0 or more. | 0.625 mm | 0.09 in |
+| `extension_offset` | DIMEXO | How far an extension line starts from its point: a length of 0 or more. | 0.625 mm | 0.0625 in |
+| `extension_beyond` | DIMEXE | How far an extension line reaches past the dimension line: a length of 0 or more. | 1.25 mm | 0.18 in |
+| `line_extension` | DIMDLE | How far the dimension line reaches past the extension lines when its arrowhead is `none`: a length of 0 or more. | 0 | 0 |
+| `center_mark` | DIMCEN | How far the arms of the cross that marks a circle's centre reach, 0 for none. It is drawn when a radius or diameter dimension's text is centred and outside the circle. | 2.5 mm | 0.09 in |
+| `placement` | DIMTAD, DIMTIH, DIMTOH, DIMTOFL | Where its text sits, one of AutoCAD's two defaults: `above`, aligned with the dimension line and above it, which then runs between the extension lines even when the arrowheads are outside them; or `centered`, horizontal in the middle of the dimension line, which breaks for it. | `above` | `centered` |
+| `unit_format` | DIMLUNIT | How a value is written: `decimal`. Scientific, engineering, architectural and fractional wait. | `decimal` | `decimal` |
+| `precision` | DIMDEC | How many decimals a value shows: 0 to 8. | 2 | 4 |
+| `decimal_separator` | DIMDSEP | `period`, `comma` or `space`. | `comma` | `period` |
+| `suppress_leading_zeros` | DIMZIN 4 | Whether 0.5 shows as .5: `true` or `false`. | `false` | `false` |
+| `suppress_trailing_zeros` | DIMZIN 8 | Whether 2.50 shows as 2.5, and 2.00 as 2. | `true` | `false` |
+| `prefix`, `suffix` | DIMPOST | What comes before and after every value: one line, with no `<`, `>`, `\`, `{` or `}`. Either takes the place of a radius's R and a diameter's ∅, as in AutoCAD. | none | none |
+| `scale` | DIMSCALE | What every length of the style is multiplied by: a number more than 0. | 1 | 1 |
+
+The DWG writes a style as AutoCAD 2026's own of the sheet's unit with these set, and reads one back when every value is one of these: a style that draws tolerances, alternate units, ticks, fixed extension lines, a frame or fill round its text, or another placement or fit than AutoCAD's defaults is counted as not read, and so is a dimension drawn with it.
+
 ### Objects
 
 Every object takes a `layer` key: the name of the layer it sits on, `0` or one under `layers`. Without it, the object sits on layer `0`. An object draws with its layer's colour, linetype and lineweight unless it gives its own, under `color`, `linetype`, `lineweight` and `linetype_scale`; see [An object's own colour, linetype and lineweight](#an-objects-own-colour-linetype-and-lineweight). Every object may also take an `id` key, its ID in the record, and a `name` key, a name an agent selects it by; see [IDs and names](#ids-and-names).
@@ -200,6 +240,7 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 | `table` | `position`, `columns`, `rows`, `cells`; `title`, `header`, `table_style` | A grid of cells with text, as AutoCAD's TABLE draws it. See [Tables](#tables). |
 | `mleader` | `leaders`, `content`; `landing`, `arrowhead`, `arrow_size`, `mleader_style` | One or more leader lines from their arrows to a landing, and multiline text or a block beyond it, as AutoCAD's MLEADER draws it. See [Leaders](#leaders). |
 | `leader` | `points`; `arrowhead`, `arrow_size`, `gap`, `annotation` | One leader line, arrow first, with an optional multiline text annotation beyond its end, as AutoCAD's older LEADER draws it. See [Leaders](#leaders). |
+| `dimension` | `kind`, `location`; `points` and `angle`, or `center` and `point`; `text`, `dimension_style` | A dimension that measures a length and shows it, as AutoCAD's DIMLINEAR, DIMALIGNED, DIMRADIUS and DIMDIAMETER draw it. See [Dimensions](#dimensions). |
 
 Keys before the semicolon are required; keys after it are not. A `radius` is a length more than 0.
 
@@ -531,6 +572,42 @@ The DWG holds an AutoCAD MULTILEADER and its MLEADERSTYLE, and an AutoCAD LEADER
 Reading a DWG back gives the multileaders, their styles and the older leaders, each with its annotation and not as an `mtext` of its own, when they have a model in the core. A multileader whose block content the model does not place, or that does not sit where the model places it, or that is not upright, scaled the same along every axis and in the multileader's own colour, whose leader lines are splines or have breaks, with more than one landing, its own leader pen, any override of its style the model does not hold, such as its text's colour, or a landing on the other side from the one its leader line runs to, is counted as not read; so is an older leader with a spline path, an annotation that is not multiline text where the model puts it or that draws with a layer, colour, linetype, lineweight or visibility other than the leader's, its own pen from its dimension style, or text above its end, and its annotation is counted with it. An arrowhead block that only leaders draw with is read with them and not counted; one an insert places is read as a block like any other. In a [template](drawing-set.md#templates), a multileader's content's `text`, an attribute value of its block content, and an older leader's annotation's `text` may be a value from the row, `{row: NAME}`.
 
 A change set adds a multileader with `add_mleader` (AutoCAD's `MLEADER`) and an older leader with `add_leader` (`LEADER`), adds and deletes a multileader's leader lines with `add_leader_line` and `delete_leader_line` (`MLEADEREDIT`), and `move` moves every point of either; `change` sets a template leader's text from the row in that sheet's row ([Leaders in change sets](change-sets.md#leaders)). A query for text finds a leader by its text ([Queries](query.md)). The checker counts a leader's text as text and its lines, landing and arrowheads as lines, never against each other ([Checks](check.md)).
+
+### Dimensions
+
+A dimension measures a length on the sheet and shows it, drawn as AutoCAD 2026 draws its own: a panel's cut-outs, a back panel's drilling. It belongs on a sheet, not in a block. Its `kind` says what it measures:
+
+| `kind` | AutoCAD's | Keys | What it measures |
+|---|---|---|---|
+| `linear` | DIMLINEAR | `points`, `location`; `angle` | The distance between its two points along its angle, in degrees anticlockwise from the X axis: 0, horizontal, without it; 90, vertical. |
+| `aligned` | DIMALIGNED | `points`, `location` | The distance between its two points. |
+| `radius` | DIMRADIUS | `center`, `point`, `location` | The radius of the circle or arc round `center` through `point`. |
+| `diameter` | DIMDIAMETER | `center`, `point`, `location` | Its diameter. |
+
+Every dimension also takes `text`, its own text, where `<>` stands for the measured value, as in AutoCAD: `4X <>` shows `4X ∅8`. It is one line that shows something, with no `\`, `{`, `}` or `%%`; without it, the dimension shows the measured value. It takes `dimension_style`, the [dimension style](#dimension-styles) it draws with: its unit's own or a name under `dimension_styles`, and without it, its unit's own. Its points and location lie at one height.
+
+```yaml
+- dimension: {id: width, kind: linear, points: [[60, 50, 0], [360, 50, 0]], location: [210, 30, 0], layer: dims}
+- dimension: {id: chamfer, kind: aligned, points: [[360, 230, 0], [340, 250, 0]], location: [360, 250, 0]}
+- dimension: {id: slot-end, kind: radius, center: [150, 80, 0], point: [156, 80, 0], location: [168, 64, 0]}
+- dimension: {id: mounting-holes, kind: diameter, center: [75, 235, 0], point: [79, 235, 0], location: [95, 270, 0], text: 4X <>}
+```
+
+`location` is where the dimension line goes, as AutoCAD's commands ask for it, and a point of it may be a [snapped point](change-sets.md#snapped-points) in an operation, such as a polyline's endpoint or a circle's centre and a quadrant on it:
+
+- A linear or aligned dimension's `points` are where its extension lines start, the first and then the second, apart along its line; its `location` is a point its dimension line passes through, to one side of both. The reader keeps it where AutoCAD does, where the dimension line meets the second extension line.
+- A radius or diameter dimension's `location` is where its text goes, inside or outside the circle: its line runs from the centre through it, and its arrow points where that line meets the circle. The reader keeps `point` there, as AutoCAD's DIMRADIUS does; its distance from `center` is the radius.
+
+A dimension is laid out as AutoCAD 2026 laid out its own of made-up geometry in its `acad` and `acadiso` templates, measured across lengths, angles and style values, and laid out again unchanged:
+
+- An extension line starts its style's offset from its point and reaches its extension past the dimension line. The dimension line runs between them with an arrowhead at each end, the line starting an arrowhead's length behind each tip, as a leader's does.
+- Text and arrowheads sit between the extension lines when they fit, AutoCAD's best fit: the text needs its length along the line and a gap at each end, the arrowheads their two lengths and a gap each. Text above its line fits apart from the arrowheads; centred text, which breaks the line, needs room for both. When both fit, both are inside; when only the text fits, the arrowheads go outside, each with a tail as long as itself; when only the arrowheads fit, the text goes past the second extension line, an arrowhead's length and a gap beyond it; when neither fits, both go outside, the text past the second arrowhead's tail. No arrowheads always fit.
+- Text above its line is turned to read from the bottom or the right, a gap above the line. Centred text is horizontal; outside the extension lines it goes the way the line reads, and ends in a landing as long as an arrowhead when the line runs 15° or more from the horizontal.
+- A radius or diameter dimension's text outside the circle is no nearer than two arrowheads' lengths past it, and inside no nearer than two short of it: text placed nearer is moved, as AutoCAD moves it. Its leader runs from the text to the arrow, which points in from outside the circle or out from inside it. Above its line, the line runs on to the centre, or across the circle with an arrow at its far side, when the text is outside. Centred, the text lands as centred text does, and a centre mark crosses the circle's centre when the text is outside it.
+- A value is rounded to the style's precision and its zeros suppressed as it says, with its decimal separator; a radius's starts with R and a diameter's with ∅, unless the style gives a prefix or a suffix.
+- The lines and arrowheads draw in the dimension's own colour and lineweight and its layer's linetype, and the text in its own colour and its layer's lineweight, as AutoCAD's block of a dimension draws.
+
+The DWG holds AutoCAD's DIMENSION with its own block, `*D1` and on, holding what it draws as AutoCAD writes it, so AutoCAD shows it without laying it out again; the build adds AutoCAD's `Defpoints` layer for its definition points. A dimension reads back from a DWG when the model draws it: one of the four kinds, flat, with no override of its style but AutoCAD's own, and its text where AutoCAD keeps it. One that does otherwise, such as angular, ordinate and arc length dimensions, text moved off its line or rotated, or oblique extension lines, is counted as not read. Its block and `Defpoints` are read with it, never as a block or a layer of the sheet's. Angular, ordinate, baseline and continued dimensions wait (#75).
 
 ### IDs and names
 

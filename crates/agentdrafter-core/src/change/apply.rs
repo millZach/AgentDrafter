@@ -443,7 +443,7 @@ fn objects_changed(
         };
         let how = match (op.spec.kind, &op.body) {
             (Kind::Delete, _) => HowChanged::Deleted,
-            (Kind::Add(_), _) => HowChanged::Added,
+            (Kind::Add(..), _) => HowChanged::Added,
             _ => HowChanged::Changed,
         };
         if let Some(id) = &d.id {
@@ -935,7 +935,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
     };
 
     if let Body::Add { to, keys, snaps } = &op.body {
-        let Kind::Add(object) = op.spec.kind else {
+        let Kind::Add(object, _) = op.spec.kind else {
             unreachable!("an add is an add")
         };
         let (file, list, sheets, first) = match to {
@@ -1663,6 +1663,10 @@ fn apply_table(
                 if table == Table::Linetype {
                     record.table_rename_values(Table::Layer.key(), "linetype", name, to);
                 }
+                // A dimension style draws its text in a text style.
+                if table == Table::TextStyle {
+                    record.table_rename_values(Table::DimensionStyle.key(), "text_style", name, to);
+                }
                 let mut count = record.rename_values(ObjectList::Template, by, name, to, op.index);
                 for &k in &sheets {
                     count += at
@@ -1694,11 +1698,20 @@ fn apply_table(
                 } else {
                     Vec::new()
                 };
-                if !users.is_empty() || !layers.is_empty() {
+                let styles = if table == Table::TextStyle {
+                    template.table_users(Table::DimensionStyle.key(), "text_style", name)
+                } else {
+                    Vec::new()
+                };
+                if !users.is_empty() || !layers.is_empty() || !styles.is_empty() {
                     let mut what = Vec::new();
                     if !layers.is_empty() {
                         let s = if layers.len() == 1 { "" } else { "s" };
                         what.push(format!("the layer{s} {}", layers.join(", ")));
+                    }
+                    if !styles.is_empty() {
+                        let s = if styles.len() == 1 { "" } else { "s" };
+                        what.push(format!("the dimension style{s} {}", styles.join(", ")));
                     }
                     if !users.is_empty() {
                         let s = if users.len() == 1 { "" } else { "s" };

@@ -388,7 +388,10 @@ impl Outline {
                         "a spline, whose extents AutoCAD takes past its curve",
                     ))
                 }
-                Object::Table(_) | Object::MLeader(_) | Object::Leader(_) => {
+                Object::Table(_)
+                | Object::MLeader(_)
+                | Object::Leader(_)
+                | Object::Dimension(_) => {
                     return Err(refuse(index, "an object that belongs on a sheet"))
                 }
             }

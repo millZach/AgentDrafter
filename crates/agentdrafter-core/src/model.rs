@@ -16,12 +16,18 @@ use crate::text::{MText, Text, TextStyle};
 use crate::units::Unit;
 
 pub(crate) mod block;
+pub(crate) mod dimension;
 pub(crate) mod hatch;
 pub(crate) mod leader;
 pub(crate) mod leader_block;
 pub(crate) mod table;
 pub use block::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
+};
+pub use dimension::{
+    DecimalSeparator, Dimension, DimensionKind, DimensionPart, DimensionStyle, LaidDimension,
+    Measured, TextPlacement, DIAMETER_SIGN, ISO_DIMENSION_STYLE, MEASURED,
+    STANDARD_DIMENSION_STYLE,
 };
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use leader::{
@@ -322,6 +328,8 @@ pub enum Object {
     MLeader(MLeader),
     /// An older leader, which belongs on a sheet.
     Leader(Leader),
+    /// A dimension, which belongs on a sheet.
+    Dimension(Dimension),
 }
 
 impl Object {
@@ -344,6 +352,7 @@ impl Object {
             Object::Table(_) => "table",
             Object::MLeader(_) => "mleader",
             Object::Leader(_) => "leader",
+            Object::Dimension(_) => "dimension",
         }
     }
 
@@ -366,6 +375,7 @@ impl Object {
             Object::Table(o) => &o.layer,
             Object::MLeader(o) => &o.layer,
             Object::Leader(o) => &o.layer,
+            Object::Dimension(o) => &o.layer,
         }
     }
 
@@ -388,6 +398,7 @@ impl Object {
             Object::Table(o) => &o.properties,
             Object::MLeader(o) => &o.properties,
             Object::Leader(o) => &o.properties,
+            Object::Dimension(o) => &o.properties,
         }
     }
 
@@ -409,6 +420,7 @@ impl Object {
             Object::Table(o) => &mut o.properties,
             Object::MLeader(o) => &mut o.properties,
             Object::Leader(o) => &mut o.properties,
+            Object::Dimension(o) => &mut o.properties,
         }
     }
 }
@@ -811,6 +823,11 @@ pub struct Sheet {
     /// every drawing; listing it here sets what it draws with.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mleader_styles: Vec<MLeaderStyle>,
+    /// The dimension styles the sheet defines. Its unit's own, `ISO-25` on
+    /// a metric sheet and `Standard` on an imperial one, it has without
+    /// listing it; listing it here sets what it draws with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimension_styles: Vec<DimensionStyle>,
     /// The blocks the sheet's inserts place, as the block library defines
     /// them. The layers, linetypes and text styles their objects use are
     /// among the sheet's.
@@ -868,6 +885,18 @@ impl Sheet {
             .or_else(|| {
                 (name == STANDARD_MLEADER_STYLE).then(|| MLeaderStyle::standard(self.units))
             })
+    }
+
+    /// The dimension style named `name` a dimension draws with: one the
+    /// sheet lists, or its unit's own, `ISO-25` on a metric sheet and
+    /// `Standard` on an imperial one, when the sheet does not list it.
+    /// None for a name the sheet does not have.
+    pub fn dimension_style(&self, name: &str) -> Option<DimensionStyle> {
+        self.dimension_styles
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
+            .or_else(|| DimensionStyle::built_in(name, self.units))
     }
 }
 
@@ -944,6 +973,15 @@ pub struct DrawingContents {
     /// underline or frame their text.
     #[serde(default)]
     pub mleader_styles_not_read: usize,
+    /// The drawing's dimension styles the core has a model for, of those
+    /// its dimensions draw with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimension_styles: Vec<DimensionStyle>,
+    /// How many dimension styles its dimensions draw with that the core
+    /// has no model for yet, such as those that draw tolerances, alternate
+    /// units or architectural ticks.
+    #[serde(default)]
+    pub dimension_styles_not_read: usize,
     /// The drawing's block definitions the core has a model for, in table
     /// order, leaving out model space and the layouts.
     pub blocks: Vec<Block>,

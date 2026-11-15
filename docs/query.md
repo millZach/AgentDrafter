@@ -168,6 +168,7 @@ A point is named as its key in the sheet description. Without one, the object's 
 | `table` | `borders[i].from`, `borders[i].to` | `borders[i]` | | | its position | |
 | `leader` | `points[0]`, ..., and `hook`, where AutoCAD's hook starts | `segments[i]` of what it draws, its hook among them | | | its annotation's | |
 | `mleader` | `leaders[i][j]`, each point of each leader line as it is laid out, and `landing`, the landing's far end | | | | its content's | |
+| `dimension` | `lines[i].from`, `lines[i].to`, the ends of each line of its block as it is laid out | `lines[i]` | | | the middle of its text | `defpoints[i]`, its definition points, as AutoCAD's node snap finds them |
 | `hatch` | none: AutoCAD snaps to no hatch while `OSNAPHATCH` is 0, as it is unless set | | | | | |
 
 A table's `borders` are its lines as AutoCAD draws them: each row's boundary from left to right, top to bottom, then each column's from top to bottom, left to right, each running whole until a merged cell breaks it. A multileader is snapped to only at the ends of its lines and its content, as AutoCAD 2026 found no midpoint and no nearest point along it.
@@ -207,6 +208,7 @@ A table's `borders` are its lines as AutoCAD draws them: each row's boundary fro
 | `donut` | its middle circle's | its middle circle's | its outside circle's | |
 | `solid` | | yes | its corners | |
 | `hatch` | | what it fills: a loop inside an odd number of others is a hole | its boundary's | |
+| `dimension` | | | round its extension lines, dimension line, tails and landing | `measurement`, what it measures, unrounded, as AutoCAD keeps it in the dimension, and `text`, what its text shows |
 | anything else | | | | |
 
 Lengths and areas are measured along a polyline's middle, whatever its width, as AutoCAD's AREA measures a wide polyline, and a donut is the polyline AutoCAD draws it as. Extents are the box round the object's own geometry, `min` and `max` `[x, y, z]`, worked out exactly from its curves; text, inserts, tables and leaders have none here, as their extents are their fonts', which [`extents`](#extents) gives for the sheet. An ellipse's and a spline's lengths and areas are integrated to within a ten-billionth.

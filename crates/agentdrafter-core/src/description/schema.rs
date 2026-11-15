@@ -27,7 +27,9 @@ use super::layers::{
     LONGEST_NAME, LONGEST_PATTERN, PROPERTY_KEYS,
 };
 use super::objects::{FEWEST_FIT_POINTS, HIGHEST_DEGREE, OBJECT_TYPES};
-use super::{block_schema, hatch_schema, leader_schema, table_schema, SHEET_KEYS};
+use super::{
+    block_schema, dimension_schema, hatch_schema, leader_schema, table_schema, SHEET_KEYS,
+};
 use crate::model::{
     Lineweight, BY_BLOCK, BY_LAYER, CONTINUOUS, DEFAULT_LINEWEIGHT, FIT_DEGREE, LAYER_ZERO, WHITE,
 };
@@ -91,7 +93,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, objects_key, paper_key] =
+    let [units_key, block_library_key, ltscale_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -119,6 +121,7 @@ pub fn sheet_description_schema() -> Value {
             text_styles_key: text_styles,
             table_styles_key: table_schema::table_styles_property(),
             mleader_styles_key: leader_schema::mleader_styles_property(),
+            dimension_styles_key: dimension_schema::dimension_styles_property(),
             objects_key: {
                 "description": "The objects on the sheet, in drawing order. Each is a mapping \
                                 with one key, its type.",
@@ -873,6 +876,7 @@ fn defs() -> Map<String, Value> {
     text_defs(&mut defs);
     table_schema::table_defs(&mut defs);
     leader_schema::leader_defs(&mut defs);
+    dimension_schema::dimension_defs(&mut defs);
     block_schema::add_defs(&mut defs);
     defs
 }
@@ -1125,6 +1129,10 @@ mod tests {
         assert_eq!(
             keys(&defs["leader"]["properties"]["annotation"]["anyOf"][0]["properties"]),
             sorted(&ANNOTATION_KEYS)
+        );
+        assert_eq!(
+            keys(&defs["dimension_style"]["properties"]),
+            sorted(&super::super::dimension::DIMENSION_STYLE_KEYS)
         );
         let listed: Vec<String> = schema["properties"]["objects"]["items"]["oneOf"]
             .as_array()
