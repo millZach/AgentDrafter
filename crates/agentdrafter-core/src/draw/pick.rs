@@ -13,7 +13,7 @@
 //! ink there: a point outside it is no nearer to the item than to the
 //! window or the boundary, so a fill cut away there is not picked.
 
-use super::clip::{distance_to_outline, inside_outline};
+use super::clip::{clip_to_convex, distance_to_outline, inside_outline, is_convex, triangles};
 use super::{Bounds, DisplayList, FillRule, Item, Point2, Shape};
 
 /// The place in the sheet's objects of the object drawn nearest `at`,
@@ -27,6 +27,8 @@ pub fn pick(
     millimetres_per_unit: f64,
 ) -> Option<usize> {
     let mut best: Option<(f64, usize)> = None;
+    // Each clipped viewport's boundary as convex regions, made once.
+    let mut regions: Vec<Option<Vec<Vec<Point2>>>> = vec![None; list.clip_boundaries.len()];
     for item in &list.items {
         let distance = match &item.shape {
             Shape::Stroke { lineweight, runs } => {
@@ -37,16 +39,16 @@ pub fn pick(
                     .fold(f64::INFINITY, f64::min);
                 (nearest - half).max(0.0)
             }
-            Shape::Fill { rule, contours } => {
-                if inside(at, *rule, contours) {
-                    0.0
-                } else {
-                    contours
-                        .iter()
-                        .map(|c| to_ring(at, c))
-                        .fold(f64::INFINITY, f64::min)
+            Shape::Fill { rule, contours } => match item.clip_boundary {
+                // A fill seen through a clipped viewport is cut at its box
+                // alone; what shows of it is what lies inside the boundary.
+                Some(b) if b < list.clip_boundaries.len() => {
+                    let convex =
+                        regions[b].get_or_insert_with(|| convex_regions(&list.clip_boundaries[b]));
+                    to_visible_fill(at, *rule, contours, convex)
                 }
-            }
+                _ => to_fill(at, *rule, contours),
+            },
         };
         let distance = distance.max(outside_cut(list, item, at));
         // Later items lie on top, so they win a tie.
@@ -55,6 +57,55 @@ pub fn pick(
         }
     }
     best.map(|(_, object)| object)
+}
+
+/// How far `at` lies from the fill of `contours` by `rule`: 0 inside it.
+fn to_fill(at: Point2, rule: FillRule, contours: &[Vec<Point2>]) -> f64 {
+    if inside(at, rule, contours) {
+        0.0
+    } else {
+        contours
+            .iter()
+            .map(|c| to_ring(at, c))
+            .fold(f64::INFINITY, f64::min)
+    }
+}
+
+/// A closed outline as convex regions that cover it: itself when it is
+/// convex, or else the triangles it is cut into.
+fn convex_regions(outline: &[Point2]) -> Vec<Vec<Point2>> {
+    if is_convex(outline) {
+        vec![outline.to_vec()]
+    } else {
+        triangles(outline).iter().map(|t| t.to_vec()).collect()
+    }
+}
+
+/// How far `at` lies from what shows of the fill of `contours` by `rule`
+/// inside the convex regions `convex`, which cover a clipped viewport's
+/// boundary: the fill cut at each region, which keeps its rule there. When
+/// nothing of it shows, it is out of reach.
+fn to_visible_fill(
+    at: Point2,
+    rule: FillRule,
+    contours: &[Vec<Point2>],
+    convex: &[Vec<Point2>],
+) -> f64 {
+    convex
+        .iter()
+        .map(|region| {
+            let cut: Vec<Vec<Point2>> = contours
+                .iter()
+                .map(|c| clip_to_convex(c, region))
+                .filter(|c| !c.is_empty())
+                .collect();
+            if cut.is_empty() {
+                f64::INFINITY
+            } else {
+                to_fill(at, rule, &cut)
+            }
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// How far `at` lies outside what `item` is cut at, the window of the
@@ -206,6 +257,44 @@ mod tests {
             items,
             ..DisplayList::default()
         }
+    }
+
+    #[test]
+    fn a_fill_wholly_cut_away_is_not_picked_beside_the_boundary() {
+        // A small solid just outside a triangular boundary, within reach of
+        // both the solid and the boundary: nothing of it shows.
+        let mut solid = square(0, [70.0, 70.2], 0.4);
+        solid.viewport = Some(1);
+        solid.clip = Some(Bounds {
+            min: [20.0, 20.0],
+            max: [120.0, 120.0],
+        });
+        solid.clip_boundary = Some(0);
+        let mut sheet = list(vec![solid]);
+        sheet.clip_boundaries = vec![vec![[20.0, 20.0], [120.0, 20.0], [20.0, 120.0]]];
+        assert_eq!(pick(&sheet, [70.0, 69.8], 0.5, 1.0), None);
+        // Inside a notched boundary, the part that shows is picked; in the
+        // notch, beside it, what is cut away is not.
+        let mut wide = square(0, [0.0, 40.0], 100.0);
+        wide.viewport = Some(1);
+        wide.clip = Some(Bounds {
+            min: [0.0, 0.0],
+            max: [100.0, 100.0],
+        });
+        wide.clip_boundary = Some(0);
+        let mut sheet = list(vec![wide]);
+        sheet.clip_boundaries = vec![vec![
+            [0.0, 0.0],
+            [100.0, 0.0],
+            [100.0, 100.0],
+            [60.0, 100.0],
+            [60.0, 20.0],
+            [40.0, 20.0],
+            [40.0, 100.0],
+            [0.0, 100.0],
+        ]];
+        assert_eq!(pick(&sheet, [20.0, 60.0], 0.1, 1.0), Some(0));
+        assert_eq!(pick(&sheet, [50.0, 60.0], 0.1, 1.0), None);
     }
 
     #[test]
