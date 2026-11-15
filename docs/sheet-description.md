@@ -596,7 +596,7 @@ Every dimension also takes `text`, its own text, where `<>` stands for the measu
 `location` is where the dimension line goes, as AutoCAD's commands ask for it, and a point of it may be a [snapped point](change-sets.md#snapped-points) in an operation, such as a polyline's endpoint or a circle's centre and a quadrant on it:
 
 - A linear or aligned dimension's `points` are where its extension lines start, the first and then the second, apart along its line; its `location` is a point its dimension line passes through, to one side of both. The reader keeps it where AutoCAD does, where the dimension line meets the second extension line.
-- A radius or diameter dimension's `location` is where its text goes, inside or outside the circle: its line runs from the centre through it, and its arrow points where that line meets the circle. The reader keeps `point` there, as AutoCAD's DIMRADIUS does; its distance from `center` is the radius.
+- A radius or diameter dimension's `location` is where its text goes, inside or outside the circle: its line runs from the centre through it, and its arrow points where that line meets the circle. The reader keeps `point` there, as AutoCAD's DIMRADIUS does; its distance from `center` is the radius. Text too near the circle is moved clear of it, as AutoCAD moves it, and a DWG keeps only where it was moved to, so the reader gives back a `location` that draws the same: where the text went, or, when that lies past the centre, the point halfway from the centre to the arrow.
 
 A dimension is laid out as AutoCAD 2026 laid out its own of made-up geometry in its `acad` and `acadiso` templates, measured across lengths, angles and style values, and laid out again unchanged:
 
