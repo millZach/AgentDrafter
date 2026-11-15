@@ -104,6 +104,14 @@ _Avoid_: block leader, balloon (a balloon is one use of block content), insert (
 What a multileader draws with unless it gives its own, as AutoCAD's MLEADERSTYLE: the text style and height, the arrowhead and its size, the landing's length and its gap to the text, where the landing meets the text, and the leader lines' pen. Every drawing has the multileader style `Standard`.
 _Avoid_: leader style (an older leader takes its arrowhead and sizes from a dimension style), callout style
 
+**Dimension**:
+A measurement drawn on the sheet, as AutoCAD's DIMENSION draws it: extension lines from the points it measures, a dimension line with an arrowhead at each end, and text that shows the measured value as its dimension style formats it, or its own text with `<>` standing for the value. A linear dimension measures along an angle, an aligned one between its points, and a radius or diameter dimension a circle or an arc by its centre and a point on it. AutoCAD's commands for them are DIMLINEAR, DIMALIGNED, DIMRADIUS and DIMDIAMETER; it keeps what each draws in a block of its own, `*D1` and on, which it lays out again from the dimension.
+_Avoid_: dim alone in prose, measurement (the measurement is what a dimension shows), callout
+
+**Dimension style**:
+What a dimension draws with, as AutoCAD's DIMSTYLE: its arrowhead and their size, its text style and height, the gap round its text, how far its extension lines start from their points and reach past the dimension line, its centre mark, where its text sits, and how a value is written, its precision, decimal separator, zeros, prefix and suffix, all multiplied by its scale. A metric sheet has AutoCAD's `ISO-25` and an imperial one AutoCAD's `Standard` without listing it.
+_Avoid_: dimstyle alone in prose, dimension format
+
 **Hatch**:
 An object that fills an area solid or with a hatch pattern, inside a boundary of closed loops, as in AutoCAD. It draws no outline of its own.
 _Avoid_: fill, shading, region (a region is AutoCAD's 2D solid object)

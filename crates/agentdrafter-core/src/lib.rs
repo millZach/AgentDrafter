@@ -145,6 +145,10 @@ pub use model::{
     STANDARD_MLEADER_STYLE,
 };
 pub use model::{Cell, Paper};
+pub use model::{
+    DecimalSeparator, Dimension, DimensionKind, DimensionPart, DimensionStyle, LaidDimension,
+    Measured, TextPlacement, DIAMETER_SIGN, ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE,
+};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use model::{RowKind, RowStyle, Table, TableCell, TableStyle, STANDARD_TABLE_STYLE};
 pub use plot::{

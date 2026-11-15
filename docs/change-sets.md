@@ -37,7 +37,7 @@ A sheet's template is the file its row's path names, as the file system resolves
 
 ### Snapped points
 
-Wherever an operation takes a point, it may take a snapped point instead, `{"snap": {...}}`: one of AutoCAD's [object snaps](query.md#snap), written as `query snap` takes it, its object by `id` or `name`, its `snap`, and `which` of its points, with `with` or `from` where the snap takes them. An add takes one for each point of the object it adds, a line's `from` and `to`, a polyline's points, a centre, a text's or an insert's `position`, a hatch's boundary points, each point of a multileader's leader lines and an older leader's, and so does `add_leader_line` for each of its points and `move` for its `from` and `to`. A direction, such as an ellipse's `major_axis`, is not a point and takes none, and neither does a block's definition, whose points are in the block's own coordinates.
+Wherever an operation takes a point, it may take a snapped point instead, `{"snap": {...}}`: one of AutoCAD's [object snaps](query.md#snap), written as `query snap` takes it, its object by `id` or `name`, its `snap`, and `which` of its points, with `with` or `from` where the snap takes them. An add takes one for each point of the object it adds, a line's `from` and `to`, a polyline's points, a centre, a text's or an insert's `position`, a hatch's boundary points, each point of a multileader's leader lines and an older leader's, a dimension's points, centre, point and location, and so does `add_leader_line` for each of its points and `move` for its `from` and `to`. A direction, such as an ellipse's `major_axis`, is not a point and takes none, and neither does a block's definition, whose points are in the block's own coordinates.
 
 ```json
 {"op": "add_line", "sheet": "SNAP-001", "layer": "wires",
@@ -75,6 +75,10 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `add_table` | `TABLE` | Adds a table. |
 | `add_mleader` | `MLEADER` | Adds a multileader: leader lines from their arrows to a landing, and its text or block. |
 | `add_leader` | `LEADER` | Adds an older leader, with its annotation if it has one. |
+| `add_linear_dimension` | `DIMLINEAR` | Adds a linear dimension: written as a `dimension` with `kind: linear`, which the operation gives it. |
+| `add_aligned_dimension` | `DIMALIGNED` | Adds an aligned dimension. |
+| `add_radius_dimension` | `DIMRADIUS` | Adds a radius dimension. |
+| `add_diameter_dimension` | `DIMDIAMETER` | Adds a diameter dimension. |
 | `change` | `CHANGE` | Sets keys of an object. |
 | `move` | `MOVE` | Moves an object. |
 | `delete` | `ERASE` | Deletes an object. |
@@ -89,6 +93,7 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `add_layer`, `change_layer`, `rename_layer`, `delete_layer` | `LAYER`, none, `RENAME`, `LAYDEL` | Adds, changes, renames or deletes a layer of a template. |
 | `add_linetype`, `change_linetype`, `rename_linetype`, `delete_linetype` | `LINETYPE`, none, none, none | The same for a linetype. |
 | `add_text_style`, `change_text_style`, `rename_text_style`, `delete_text_style` | `STYLE`, none, none, none | The same for a text style. |
+| `add_dimension_style`, `change_dimension_style`, `rename_dimension_style`, `delete_dimension_style` | `DIMSTYLE`, none, none, none | The same for a dimension style. |
 | `add_block` | `BLOCK` | Adds a block to a block library. |
 | `redefine_block` | `BEDIT` | Replaces a block's whole definition, and brings its inserts into line. |
 | `attsync` | `ATTSYNC` | Brings the inserts of a block, or of every block of a library, into line with its definition. |
@@ -112,16 +117,16 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
  "to": {"snap": {"id": "SNAP-001/ring", "snap": "quadrant", "which": "0"}}}
 ```
 
-Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, the position of a text, an mtext, an insert or a table, every point of each of a multileader's leader lines, and an older leader's points; a leader's text moves with it, laid out again where its landing or end puts it. An arrow is placed at a point and does not follow an object it points at, and so is the arrow of a leader line `add_leader_line` adds; a [snapped point](#snapped-points) puts it on the object when the operation applies. A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
+Every point the object is drawn through moves: a line's ends, a polyline's points, a circle's, an arc's or an ellipse's centre, a spline's fit or control points, the points and edges of each loop of a hatch's boundary, the position of a text, an mtext, an insert or a table, every point of each of a multileader's leader lines, an older leader's points, and a dimension's points, centre, point and location; a leader's text moves with it, laid out again where its landing or end puts it. An arrow is placed at a point and does not follow an object it points at, and so is the arrow of a leader line `add_leader_line` adds; a [snapped point](#snapped-points) puts it on the object when the operation applies. A coordinate along an axis it does not move along is left as the record writes it; one it moves along is written in the declared unit.
 
 **`delete`** takes `target`.
 
 **Layers, linetypes and text styles.** Zach decided on 2026-11-13 how a change set edits a template's tables, which every sheet built from it shares. Each operation names its template by `template`, its path as the rows write it, or by `sheet`, a sheet built from it, and the entry by `name`, written exactly as the template writes it. Like any template edit it reaches every sheet built from the template, all or nothing, and the reply lists them. The block library's own layers, linetypes and text styles are not edited here, nor by the [block operations](#blocks).
 
-- **`add_layer`** (`LAYER`), **`add_linetype`** (`LINETYPE`) and **`add_text_style`** (`STYLE`) take `name` and the keys the entry takes in a [sheet description](sheet-description.md#layers), such as `color` and `plot` for a layer or `pattern` for a linetype. A name the template has already, in any case, or a drawing's own, is `duplicate_name`.
+- **`add_layer`** (`LAYER`), **`add_linetype`** (`LINETYPE`), **`add_text_style`** (`STYLE`) and **`add_dimension_style`** (`DIMSTYLE`) take `name` and the keys the entry takes in a [sheet description](sheet-description.md#layers), such as `color` and `plot` for a layer or `pattern` for a linetype. A name the template has already, in any case, or a drawing's own, is `duplicate_name`.
 - **`change_layer`**, **`change_linetype`** and **`change_text_style`** take `name` and `set`, each key to its new value; `null` takes a key away. Layer `0` and `Standard` can be changed even where the template does not write them; `Standard` written for the first time takes the drawing's own font, `txt.shx`, unless `set` gives one. `Continuous`, `ByLayer` and `ByBlock` are AutoCAD's own linetypes and are not changed.
 - **`rename_layer`** (`RENAME`), **`rename_linetype`** and **`rename_text_style`** take `name` and `to`, and rewrite everything that names the entry: every object's `layer`, `linetype` or `style`, in the template and in the rows of the sheets built from it, and, for a linetype, every layer's `linetype`. The reply counts the objects.
-- **`delete_layer`** (`LAYDEL`), **`delete_linetype`** and **`delete_text_style`** take `name`, and are refused with `in_use` while anything still uses the entry: the error lists the objects by ID, and the layers that use a linetype. Move them, or delete them, first.
+- **`delete_layer`** (`LAYDEL`), **`delete_linetype`**, **`delete_text_style`** and **`delete_dimension_style`** take `name`, and are refused with `in_use` while anything still uses the entry: the error lists the objects by ID, the layers that use a linetype and the dimension styles that use a text style. `ISO-25` and `Standard`, AutoCAD's own dimension styles, one of which every sheet draws its dimensions with unless they name another, are never renamed or deleted; `change_dimension_style` lists one in the template the first time it sets a key of it. Renaming a text style renames it in the dimension styles that draw with it, as renaming a linetype renames it in the layers. Move them, or delete them, first.
 - Layer `0`, `Continuous` and `Standard`, which every drawing has, are never renamed or deleted (`bad_value`).
 
 The table is written again whole, one entry to a line in braces, where the template wrote it; a table the template did not have goes just before its `objects`. A comment inside the table is lost; everything else in the file stays byte for byte. A table that only gains entries, written an entry to a line, keeps every line it had, comments among them, and takes each new entry after its last. A table written in braces with a comment among its entries is not written again: the operation fails `write_failed`, saying to write the table one entry to a line.

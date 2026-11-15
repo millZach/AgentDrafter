@@ -1425,7 +1425,10 @@ impl RecordFile {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
                 ("donut", "center") => move_point(&mut entry.value, by, units, &field)?,
-                ("polyline" | "leader", "points")
+                ("dimension", "center" | "point" | "location") => {
+                    move_point(&mut entry.value, by, units, &field)?;
+                }
+                ("polyline" | "leader" | "dimension", "points")
                 | ("spline", "fit_points" | "control_points")
                 | ("solid", "corners") => {
                     move_points(&mut entry.value, by, units, &field)?;

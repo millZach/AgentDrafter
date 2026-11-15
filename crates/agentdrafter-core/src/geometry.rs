@@ -19,7 +19,10 @@ use crate::draw::curves::{ellipse_parameter, spline_definition};
 use crate::draw::polyline::arc_of;
 use crate::draw::text::mtext_box;
 use crate::model::block::{definition_text, Placement};
-use crate::model::{attribute_text, Block, Insert, MLeaderStyle, Object, Point3, Polyline, Sheet};
+use crate::model::{
+    attribute_text, Block, Dimension, Insert, LaidDimension, MLeaderStyle, Object, Point3,
+    Polyline, Sheet,
+};
 use crate::text::placement::SheetFonts;
 use crate::text::Justify;
 use curve::{BSpline, Curve, P3};
@@ -272,6 +275,16 @@ impl<'a> Reader<'a> {
                 let path: Vec<P3> = leader.path().into_iter().map(p3).collect();
                 path_through(&path)
             }
+            Object::Dimension(dimension) => match self.laid_dimension(dimension) {
+                Some(laid) => laid
+                    .lines()
+                    .enumerate()
+                    .map(|(i, [a, b])| {
+                        (format!("lines[{i}]"), Curve::Segment { a: p3(a), b: p3(b) })
+                    })
+                    .collect(),
+                None => Vec::new(),
+            },
             Object::Hatch(_)
             | Object::Text(_)
             | Object::MText(_)
@@ -391,7 +404,7 @@ impl<'a> Reader<'a> {
     /// The snaps of an object other than an insert, in its own coordinates:
     /// each kind, the point's name in the object, and where it is.
     fn local_snaps(&self, object: &Object) -> Vec<(SnapKind, String, P3)> {
-        use SnapKind::{Center, Endpoint, Insertion, Midpoint, Quadrant};
+        use SnapKind::{Center, Endpoint, Insertion, Midpoint, Node, Quadrant};
         let mut out: Vec<(SnapKind, String, P3)> = Vec::new();
         let named = |key: &str, points: &[Point3]| -> Vec<(String, P3)> {
             points
@@ -594,9 +607,32 @@ impl<'a> Reader<'a> {
                 };
                 out.push((Insertion, String::new(), p3(content)));
             }
+            Object::Dimension(dimension) => {
+                for (place, curve) in self.curves(object) {
+                    out.push((Endpoint, join(&place, "from"), curve.start()));
+                    out.push((Endpoint, join(&place, "to"), curve.end()));
+                    out.push((Midpoint, place, curve.point(0.5)));
+                }
+                if let Some(laid) = self.laid_dimension(dimension) {
+                    // AutoCAD's node snap finds a dimension's definition
+                    // points, and its insertion snap the middle of its text.
+                    for (i, p) in laid.defpoints.iter().enumerate() {
+                        out.push((Node, format!("defpoints[{i}]"), p3(*p)));
+                    }
+                    out.push((Insertion, String::new(), p3(laid.text.position)));
+                }
+            }
             Object::Hatch(_) | Object::Insert(_) => {}
         }
         out
+    }
+
+    /// A dimension laid out with its style and the sheet's fonts; none for
+    /// a style the sheet does not have.
+    pub(crate) fn laid_dimension(&self, dimension: &Dimension) -> Option<LaidDimension> {
+        let style = self.sheet.dimension_style(&dimension.dimension_style)?;
+        let fonts = self.fonts;
+        Some(dimension.laid_out(&style, &|t| mtext_box(t, fonts)))
     }
 }
 

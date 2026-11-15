@@ -515,7 +515,12 @@ fn text_of(fields: &Fields) -> Result<String, Error> {
 
 /// The length under `key`, more than 0, if it is given. `what` names it in
 /// the error, such as "a text height".
-fn positive(fields: &Fields, key: &str, units: Unit, what: &str) -> Result<Option<f64>, Error> {
+pub(super) fn positive(
+    fields: &Fields,
+    key: &str,
+    units: Unit,
+    what: &str,
+) -> Result<Option<f64>, Error> {
     let Some(node) = fields.get(key) else {
         return Ok(None);
     };
@@ -529,7 +534,12 @@ fn positive(fields: &Fields, key: &str, units: Unit, what: &str) -> Result<Optio
 }
 
 /// The length under `key`, 0 or more, if it is given.
-fn not_negative(fields: &Fields, key: &str, units: Unit, what: &str) -> Result<Option<f64>, Error> {
+pub(super) fn not_negative(
+    fields: &Fields,
+    key: &str,
+    units: Unit,
+    what: &str,
+) -> Result<Option<f64>, Error> {
     let Some(node) = fields.get(key) else {
         return Ok(None);
     };
@@ -543,7 +553,7 @@ fn not_negative(fields: &Fields, key: &str, units: Unit, what: &str) -> Result<O
 }
 
 /// The arrowhead under `arrowhead`, if it is given.
-fn arrowhead(fields: &Fields) -> Result<Option<Arrowhead>, Error> {
+pub(super) fn arrowhead(fields: &Fields) -> Result<Option<Arrowhead>, Error> {
     let Some(node) = fields.get("arrowhead") else {
         return Ok(None);
     };

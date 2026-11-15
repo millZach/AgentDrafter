@@ -13,19 +13,21 @@ use serde_json::{json, Map, Value};
 
 use crate::description::schema::{block_library_schema, sheet_description_schema};
 use crate::description::{
-    article, objects_table, rows_schema, template_schema, Axis, LeaderLineEdit, TableEdit,
-    CELL_KEYS, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
+    article, kind_keys, objects_table, rows_schema, template_schema, Axis, LeaderLineEdit,
+    TableEdit, CELL_KEYS, DIMENSION_STYLE_KEYS, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
 };
 use crate::error::{Error, ErrorCode};
 use crate::geometry::{SnapKind, SnapRef};
+use crate::model::{DimensionKind, ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE};
 use crate::query::snap::{check_shape, no_kind};
 use crate::units::{parse_length, LengthError, Unit};
 
 /// What an operation does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    /// Adds an object of the type it names.
-    Add(&'static str),
+    /// Adds an object of the type it names; a dimension of the kind it
+    /// names, when it names one.
+    Add(&'static str, Option<&'static str>),
     Change,
     Move,
     Delete,
@@ -83,6 +85,7 @@ pub(crate) enum Table {
     Layer,
     Linetype,
     TextStyle,
+    DimensionStyle,
 }
 
 impl Table {
@@ -92,6 +95,7 @@ impl Table {
             Table::Layer => "layers",
             Table::Linetype => "linetypes",
             Table::TextStyle => "text_styles",
+            Table::DimensionStyle => "dimension_styles",
         }
     }
 
@@ -101,6 +105,7 @@ impl Table {
             Table::Layer => "layer",
             Table::Linetype => "linetype",
             Table::TextStyle => "text style",
+            Table::DimensionStyle => "dimension style",
         }
     }
 
@@ -110,6 +115,7 @@ impl Table {
             Table::Layer => "layer",
             Table::Linetype => "linetype",
             Table::TextStyle => "text_style",
+            Table::DimensionStyle => "dimension_style",
         }
     }
 
@@ -120,27 +126,32 @@ impl Table {
             Table::Layer => &LAYER_KEYS,
             Table::Linetype => &LINETYPE_KEYS,
             Table::TextStyle => &TEXT_STYLE_KEYS,
+            Table::DimensionStyle => &DIMENSION_STYLE_KEYS,
         }
     }
 
     /// The names every drawing has in the table, which are never renamed
     /// or deleted: layer `0`, `Continuous` (with AutoCAD's `ByLayer` and
-    /// `ByBlock`) and `Standard`.
+    /// `ByBlock`), `Standard`, and AutoCAD's two dimension styles,
+    /// `Standard` and `ISO-25`, one of which every sheet draws its
+    /// dimensions with unless they name another.
     pub(crate) fn built_in(self) -> &'static [&'static str] {
         match self {
             Table::Layer => &["0"],
             Table::Linetype => &["Continuous", "ByLayer", "ByBlock"],
             Table::TextStyle => &["Standard"],
+            Table::DimensionStyle => &[STANDARD_DIMENSION_STYLE, ISO_DIMENSION_STYLE],
         }
     }
 
     /// The key an object, or a layer, names an entry by: `layer`,
-    /// `linetype` or `style`.
+    /// `linetype`, `style` or `dimension_style`.
     pub(crate) fn named_by(self) -> &'static str {
         match self {
             Table::Layer => "layer",
             Table::Linetype => "linetype",
             Table::TextStyle => "style",
+            Table::DimensionStyle => "dimension_style",
         }
     }
 }
@@ -164,7 +175,7 @@ pub(crate) struct Spec {
 }
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 42] = [
+pub(crate) const SPECS: [Spec; 50] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -180,6 +191,10 @@ pub(crate) const SPECS: [Spec; 42] = [
     add("add_table", "TABLE", "table"),
     add("add_mleader", "MLEADER", "mleader"),
     add("add_leader", "LEADER", "leader"),
+    dimension("add_linear_dimension", "DIMLINEAR", "linear"),
+    dimension("add_aligned_dimension", "DIMALIGNED", "aligned"),
+    dimension("add_radius_dimension", "DIMRADIUS", "radius"),
+    dimension("add_diameter_dimension", "DIMDIAMETER", "diameter"),
     Spec {
         name: "change",
         alias: "CHANGE",
@@ -227,6 +242,30 @@ pub(crate) const SPECS: [Spec; 42] = [
     table("change_text_style", "", TableOp::Change, Table::TextStyle),
     table("rename_text_style", "", TableOp::Rename, Table::TextStyle),
     table("delete_text_style", "", TableOp::Delete, Table::TextStyle),
+    table(
+        "add_dimension_style",
+        "DIMSTYLE",
+        TableOp::Add,
+        Table::DimensionStyle,
+    ),
+    table(
+        "change_dimension_style",
+        "",
+        TableOp::Change,
+        Table::DimensionStyle,
+    ),
+    table(
+        "rename_dimension_style",
+        "",
+        TableOp::Rename,
+        Table::DimensionStyle,
+    ),
+    table(
+        "delete_dimension_style",
+        "",
+        TableOp::Delete,
+        Table::DimensionStyle,
+    ),
     block("add_block", "BLOCK", BlockOp::Add),
     block("redefine_block", "BEDIT", BlockOp::Redefine),
     block("attsync", "ATTSYNC", BlockOp::Sync),
@@ -261,8 +300,30 @@ const fn add(name: &'static str, alias: &'static str, object: &'static str) -> S
     Spec {
         name,
         alias,
-        kind: Kind::Add(object),
+        kind: Kind::Add(object, None),
     }
+}
+
+/// An operation that adds a dimension of one kind, which it gives the
+/// dimension's `kind` key.
+const fn dimension(name: &'static str, alias: &'static str, kind: &'static str) -> Spec {
+    Spec {
+        name,
+        alias,
+        kind: Kind::Add("dimension", Some(kind)),
+    }
+}
+
+/// The key a dimension names its kind by, which an operation that adds one
+/// of a kind sets.
+const DIMENSION_KIND_KEY: &str = "kind";
+
+/// The kind of dimension an operation that adds one names.
+fn dimension_kind(name: &str) -> DimensionKind {
+    DimensionKind::ALL
+        .into_iter()
+        .find(|k| k.name() == name)
+        .expect("an operation names a kind of dimension")
 }
 
 /// The keys of a change set.
@@ -336,19 +397,30 @@ const HOW: &str = "A change set is {\"operations\": [...]}: a list of operations
 /// What `spec` does, in words.
 fn does(spec: &Spec) -> String {
     match spec.kind {
-        Kind::Add(object) => format!(
-            "Adds {} {object}, written with the keys {} {object} takes in a sheet description, \
-             to one sheet's row with sheet, or to a template with template, so that it is on \
-             every sheet built from it. It is drawn after the objects already there. Without \
-             an id it is given one, {object}-1 or the next number free, so that its ID is \
-             fixed for its life. A key sent as null is read as a sheet description reads a \
-             bare null: it leaves an optional text key, such as layer, out. Any point may be a \
-             snapped point, {{\"snap\": {{...}}}}, which is written as the coordinates it \
-             names. AutoCAD's {}.",
-            article(object),
-            article(object),
-            spec.alias
-        ),
+        Kind::Add(object, kind) => {
+            let what = match kind {
+                Some(kind) => format!("{} {kind} {object}", article(kind)),
+                None => format!("{} {object}", article(object)),
+            };
+            let kind_key = match kind {
+                Some(kind) => format!(
+                    ", but its kind, which is {kind}: the operation writes it as `kind: {kind}`"
+                ),
+                None => String::new(),
+            };
+            format!(
+                "Adds {what}, written with the keys {} {object} takes in a sheet description{kind_key}, \
+                 to one sheet's row with sheet, or to a template with template, so that it is on \
+                 every sheet built from it. It is drawn after the objects already there. Without \
+                 an id it is given one, {object}-1 or the next number free, so that its ID is \
+                 fixed for its life. A key sent as null is read as a sheet description reads a \
+                 bare null: it leaves an optional text key, such as layer, out. Any point may be a \
+                 snapped point, {{\"snap\": {{...}}}}, which is written as the coordinates it \
+                 names. AutoCAD's {}.",
+                article(object),
+                spec.alias
+            )
+        }
         Kind::Change => "Sets keys of an object: each key under set takes its new value, as a \
                          sheet description writes it, and null takes a key away. It changes \
                          neither the object's type nor its id, which is fixed for its life; an \
@@ -760,7 +832,7 @@ fn add_snap_definitions(defs: &mut Map<String, Value>) {
     );
     let mut made: Map<String, Value> = Map::new();
     for spec in &SPECS {
-        if let Kind::Add(object) = spec.kind {
+        if let Kind::Add(object, _) = spec.kind {
             snapped_def(object, defs, &mut made);
         }
     }
@@ -913,11 +985,33 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
     };
     let target = json!({ "$ref": "#/$defs/target" });
     let mut schema = match spec.kind {
-        Kind::Add(object) => {
+        Kind::Add(object, kind) => {
             let mut schema = defs
                 .get(&format!("op_{object}"))
                 .unwrap_or(&defs[object])
                 .clone();
+            if let Some(kind) = kind {
+                // The operation gives the dimension its kind.
+                let own = schema.as_object_mut().expect("an object's definition");
+                own["description"] = json!(format!(
+                    "{} The operation adds one of kind {kind}, and takes no kind of its own.",
+                    own["description"].as_str().unwrap_or_default()
+                ));
+                // It lists exactly its kind's keys: those it requires, and
+                // none of another kind's.
+                let (needs, _, others) = kind_keys(dimension_kind(kind));
+                if let Some(required) = own.get_mut("required").and_then(Value::as_array_mut) {
+                    required.retain(|k| k != DIMENSION_KIND_KEY);
+                    required.extend(needs.iter().map(|k| json!(k)));
+                }
+                if let Some(properties) = own.get_mut("properties").and_then(Value::as_object_mut) {
+                    properties.remove(DIMENSION_KIND_KEY);
+                    for key in others {
+                        properties.remove(*key);
+                    }
+                }
+                own.remove("oneOf");
+            }
             let properties = schema["properties"]
                 .as_object_mut()
                 .expect("an object's definition has properties");
@@ -1948,12 +2042,36 @@ fn operation(
         read_target(value).map_err(|(code, message, field)| fail(code, message, &field))
     };
     let body = match spec.kind {
-        Kind::Add(object) => {
-            let own: Vec<&str> = objects_table(object);
+        Kind::Add(object, kind) => {
+            let others = kind.map_or(&[][..], |kind| kind_keys(dimension_kind(kind)).2);
+            let own: Vec<&str> = objects_table(object)
+                .into_iter()
+                .filter(|k| kind.is_none() || *k != DIMENSION_KIND_KEY)
+                .filter(|k| !others.contains(k))
+                .collect();
             let mut allowed = vec!["sheet", "template"];
             allowed.extend(&own);
             keys(&allowed)?;
-            if let Some(missing) = missing_required(&objects[object], map) {
+            let mut with_kind = map.clone();
+            if let Some(kind) = kind {
+                with_kind.insert(DIMENSION_KIND_KEY.into(), Value::String(kind.to_owned()));
+            }
+            // A dimension's kind requires its own keys.
+            if let Some(kind) = kind {
+                let (needs, _, _) = kind_keys(dimension_kind(kind));
+                if let Some(missing) = needs.iter().find(|k| !map.contains_key(**k)) {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        format!(
+                            "missing key `{missing}`; {} {kind} dimension needs {}",
+                            article(kind),
+                            needs.join(" and ")
+                        ),
+                        missing,
+                    ));
+                }
+            }
+            if let Some(missing) = missing_required(&objects[object], &with_kind) {
                 return Err(fail(
                     ErrorCode::MissingKey,
                     format!(
@@ -2004,11 +2122,16 @@ fn operation(
             // null, and the sheet's reader reads it as it reads one in any
             // file (rule 8 of the YAML subset), so it leaves an optional text
             // or path field out and is an error anywhere else.
-            let keys: Map<String, Value> = map
-                .iter()
-                .filter(|(k, _)| !matches!(k.as_str(), OP_KEY | "sheet" | "template"))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            let mut keys: Map<String, Value> = Map::new();
+            // A dimension's kind comes first, as a sheet description writes it.
+            if let Some(kind) = kind {
+                keys.insert(DIMENSION_KIND_KEY.into(), Value::String(kind.to_owned()));
+            }
+            keys.extend(
+                map.iter()
+                    .filter(|(k, _)| !matches!(k.as_str(), OP_KEY | "sheet" | "template"))
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
             let schema = defs.get(&format!("op_{object}")).unwrap_or(&defs[object]);
             let mut snaps = Vec::new();
             for (key, value) in &keys {
@@ -2823,13 +2946,15 @@ mod tests {
 
     #[test]
     fn every_object_a_sheet_holds_has_an_operation_that_adds_it() {
-        let added: Vec<&str> = SPECS
+        let mut added: Vec<&str> = SPECS
             .iter()
             .filter_map(|s| match s.kind {
-                Kind::Add(object) => Some(object),
+                Kind::Add(object, _) => Some(object),
                 _ => None,
             })
             .collect();
+        // A dimension is added by one operation of each kind.
+        added.dedup();
         assert_eq!(added, object_types());
     }
 

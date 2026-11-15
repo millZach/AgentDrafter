@@ -17,6 +17,8 @@
 
 mod block_schema;
 pub(crate) mod blocks;
+mod dimension;
+mod dimension_schema;
 pub(crate) mod edit;
 mod emit;
 mod hatch;
@@ -53,6 +55,7 @@ use crate::model::{BlockLibrary, Point3, Sheet};
 use crate::units::{parse_length, LengthError, Unit};
 
 pub use blocks::parse_block_library;
+pub(crate) use dimension::{kind_keys, DIMENSION_STYLE_KEYS};
 pub(crate) use edit::{
     AttributeSet, Axis, GivenValue, LeaderLineEdit, Listed, Matched, ObjectList, RecordFile,
     TableEdit,
@@ -72,7 +75,7 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 11] = [
+pub(crate) const SHEET_KEYS: [&str; 12] = [
     "units",
     "block_library",
     "ltscale",
@@ -82,6 +85,7 @@ pub(crate) const SHEET_KEYS: [&str; 11] = [
     "text_styles",
     "table_styles",
     "mleader_styles",
+    "dimension_styles",
     "objects",
     paper::PAPER_KEY,
 ];
@@ -377,6 +381,10 @@ fn sheet_and_records(
         Some(node) => leader::mleader_styles(node, units, &text_styles)?,
         None => Vec::new(),
     };
+    let dimension_styles = match fields.get("dimension_styles") {
+        Some(node) => dimension::dimension_styles(node, units, &text_styles)?,
+        None => Vec::new(),
+    };
     let ltscale = match fields.get("ltscale") {
         Some(node) => layers::linetype_scale(node, "ltscale")?,
         None => 1.0,
@@ -394,6 +402,7 @@ fn sheet_and_records(
         styles: &text_styles,
         table_styles: &table_styles,
         mleader_styles: &mleader_styles,
+        dimension_styles: &dimension_styles,
     };
     let mut place = Place::Sheet {
         library: library.as_ref(),
@@ -447,6 +456,7 @@ fn sheet_and_records(
         text_styles,
         table_styles,
         mleader_styles,
+        dimension_styles,
         blocks: Vec::new(),
         objects,
         paper,

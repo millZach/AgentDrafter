@@ -67,9 +67,9 @@ use serde::{Deserialize, Serialize};
 use crate::model::block::{definition_text, Placement};
 use crate::model::leader::{arrowhead_shapes, trimmed};
 use crate::model::{
-    attribute_text, Arrowhead, Block, Insert, LaidContent, Layer, Leader, MLeader, MLeaderStyle,
-    Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline, Properties, Sheet,
-    Table, TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
+    attribute_text, Arrowhead, Block, Dimension, Insert, LaidContent, Layer, Leader, MLeader,
+    MLeaderStyle, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
+    Properties, Sheet, Table, TableStyle, CONTINUOUS, LAYER_ZERO, WHITE,
 };
 use crate::text::placement::SheetFonts;
 
@@ -650,6 +650,10 @@ impl<'a> Drawer<'a> {
             self.leader(index, leader, tolerance, list);
             return;
         }
+        if let Object::Dimension(dimension) = object {
+            self.dimension(index, dimension, tolerance, list);
+            return;
+        }
         let shown = self.shown(object.layer());
         if shown == Shown::Hidden {
             return;
@@ -976,9 +980,11 @@ impl<'a> Drawer<'a> {
             )),
             // An insert, a table and a leader draw nothing here: their own
             // methods of [`Drawer`] draw them.
-            Object::Insert(_) | Object::Table(_) | Object::MLeader(_) | Object::Leader(_) => {
-                Drawn::default()
-            }
+            Object::Insert(_)
+            | Object::Table(_)
+            | Object::MLeader(_)
+            | Object::Leader(_)
+            | Object::Dimension(_) => Drawn::default(),
         }
     }
 
@@ -1070,6 +1076,89 @@ impl<'a> Drawer<'a> {
             };
             list.add_shown(shown, index, &[0], pen.color, drawn);
         }
+    }
+
+    /// Adds what a dimension draws to `list`, laid out with its style as
+    /// AutoCAD lays out its block: its extension lines, dimension line and
+    /// arrowheads, and its text, as its `part` 0. They draw as an insert's
+    /// objects on layer `0` draw, which is how AutoCAD writes them: the
+    /// lines `ByBlock` in colour and lineweight and `ByLayer` in linetype,
+    /// so in the dimension's own colour and lineweight and its layer's
+    /// linetype; the text `ByBlock` in colour and `ByLayer` in lineweight.
+    fn dimension(
+        &self,
+        index: usize,
+        dimension: &Dimension,
+        tolerance: f64,
+        list: &mut DisplayList,
+    ) {
+        let shown = self.shown(&dimension.layer);
+        if shown == Shown::Hidden {
+            return;
+        }
+        let Some(style) = self.sheet.dimension_style(&dimension.dimension_style) else {
+            return;
+        };
+        let own = self.pen(&dimension.layer, &dimension.properties, None);
+        let block = |lineweight: ObjectLineweight| Properties {
+            color: ObjectColor::ByBlock,
+            linetype: ObjectLinetype::ByLayer,
+            lineweight,
+            linetype_scale: 1.0,
+        };
+        let line_pen = self.pen(
+            &dimension.layer,
+            &block(ObjectLineweight::ByBlock),
+            Some(own),
+        );
+        let text_pen = self.pen(
+            &dimension.layer,
+            &block(ObjectLineweight::ByLayer),
+            Some(own),
+        );
+        let laid = dimension.laid_out(&style, &|t| text::mtext_box(t, self.fonts));
+        let dashes = line_pen.dashes();
+        let mut runs = Vec::new();
+        for [a, b] in laid.lines() {
+            runs.extend(linetype::along(
+                &[flat(a), flat(b)],
+                dashes.as_deref(),
+                false,
+            ));
+        }
+        let mut fills = Vec::new();
+        for (tip, base) in laid.arrows() {
+            let Some(arrow) =
+                arrowhead_shapes(laid.arrowhead, flat(tip), flat(base), laid.arrow_size)
+            else {
+                continue;
+            };
+            for triangle in arrow.fills {
+                fills.push(polyline::anticlockwise(triangle));
+            }
+            if let Some((center, radius)) = arrow.dot {
+                fills.push(curves::circle(center, radius, tolerance));
+            }
+            for line in arrow.lines {
+                runs.extend(linetype::along(&line, None, false));
+            }
+        }
+        let mut drawn = Drawn::default();
+        add_stroke(&mut drawn, line_pen.lineweight, runs);
+        if !fills.is_empty() {
+            drawn.shapes.push(Shape::Fill {
+                rule: FillRule::NonZero,
+                contours: fills,
+            });
+        }
+        list.add_shown(shown, index, &[], line_pen.color, drawn);
+        let lettering = text::draw_mtext(&laid.text, self.fonts, text_pen.lineweight, tolerance);
+        let drawn = Drawn {
+            shapes: lettering.shapes,
+            runs: lettering.runs,
+            ..Drawn::default()
+        };
+        list.add_shown(shown, index, &[0], text_pen.color, drawn);
     }
 
     /// Adds what a table draws to `list`, as AutoCAD 2026 laid out

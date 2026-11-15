@@ -1342,7 +1342,7 @@ fn object_value(object: &Object, names: &Names) -> Value {
     match object {
         // A block read from a DWG holds no table and no leader: a block
         // holding one is not read.
-        Object::Table(_) | Object::MLeader(_) | Object::Leader(_) => {}
+        Object::Table(_) | Object::MLeader(_) | Object::Leader(_) | Object::Dimension(_) => {}
         Object::Line(line) => {
             put("from", point_value(line.from));
             put("to", point_value(line.to));

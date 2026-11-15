@@ -638,9 +638,9 @@ fn a_library_block_named_like_an_arrowhead_but_drawn_otherwise_is_refused() {
     .unwrap_err();
     assert!(
         error.message.contains("`_Open`")
-            && error
-                .message
-                .contains("differs from AutoCAD's arrowhead block that a leader needs"),
+            && error.message.contains(
+                "differs from AutoCAD's arrowhead block that a leader or a dimension needs"
+            ),
         "{}",
         error.message
     );

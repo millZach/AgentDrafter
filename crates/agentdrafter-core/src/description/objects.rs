@@ -8,6 +8,7 @@
 use super::blocks::{
     attribute_definition, insert, Noticed, ATTDEF_KEYS, BLOCK_TEXT_KEYS, INSERT_KEYS,
 };
+use super::dimension::{dimension, DIMENSION_KEYS};
 use super::hatch::{self, HATCH_KEYS};
 use super::ids::{object_record, ObjectRecord, SHEET_OBJECT_KEYS};
 use super::layers::{layer_name, properties};
@@ -22,8 +23,8 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
-    Arc, BlockLibrary, Circle, Ellipse, HatchPattern, Layer, Line, Linetype, MLeaderStyle, Object,
-    Spline, TableStyle, FIT_DEGREE, LAYER_ZERO,
+    Arc, BlockLibrary, Circle, DimensionStyle, Ellipse, HatchPattern, Layer, Line, Linetype,
+    MLeaderStyle, Object, Spline, TableStyle, FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::TextStyle;
 use crate::units::Unit;
@@ -59,9 +60,9 @@ const fn drawn_and(last: ObjectType) -> [ObjectType; 12] {
 
 /// Every object type a sheet description can hold, and the keys each takes:
 /// the drawn objects, inserts, tables, multileaders and older leaders.
-pub(crate) const OBJECT_TYPES: [ObjectType; 15] = {
+pub(crate) const OBJECT_TYPES: [ObjectType; 16] = {
     let drawn = drawn_and(("insert", &INSERT_KEYS));
-    let mut types = [("table", &TABLE_KEYS as &[&str]); 15];
+    let mut types = [("table", &TABLE_KEYS as &[&str]); 16];
     let mut i = 0;
     while i < drawn.len() {
         types[i] = drawn[i];
@@ -69,6 +70,7 @@ pub(crate) const OBJECT_TYPES: [ObjectType; 15] = {
     }
     types[13] = ("mleader", &MLEADER_KEYS);
     types[14] = ("leader", &LEADER_KEYS);
+    types[15] = ("dimension", &DIMENSION_KEYS);
     types
 };
 
@@ -122,6 +124,8 @@ pub(super) struct Tables<'a> {
     /// The multileader styles a sheet's multileaders may name; none in a
     /// block.
     pub mleader_styles: &'a [MLeaderStyle],
+    /// The dimension styles a sheet's dimensions may name; none in a block.
+    pub dimension_styles: &'a [DimensionStyle],
 }
 
 /// Where an object is: on a sheet, which may insert blocks from its block
@@ -164,6 +168,9 @@ impl Place<'_> {
                 Some("a multileader belongs on a sheet, not in a block")
             }
             (Place::Block { .. }, "leader") => Some("a leader belongs on a sheet, not in a block"),
+            (Place::Block { .. }, "dimension") => {
+                Some("a dimension belongs on a sheet, not in a block")
+            }
             _ => None,
         }
     }
@@ -361,6 +368,9 @@ pub(super) fn object(
         .map(Object::MLeader),
         ("leader", Place::Sheet { .. }) => {
             leader(&fields, units, layer, tables.styles).map(Object::Leader)
+        }
+        ("dimension", Place::Sheet { .. }) => {
+            dimension(&fields, units, layer, tables.dimension_styles).map(Object::Dimension)
         }
         ("attdef", Place::Block { noticed, .. }) => {
             attribute_definition(&fields, tables, layer, noticed).map(Object::AttributeDefinition)
