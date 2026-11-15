@@ -491,6 +491,37 @@ fn the_checker_checks_each_layout_on_its_paper_and_names_it() {
     assert_eq!(off.paper.as_ref().unwrap().height, 420.0);
 }
 
+#[test]
+fn a_text_a_concave_boundary_cuts_away_counts_only_where_it_prints() {
+    // A model text seen through a U-shaped boundary, whose notch cuts its
+    // middle away, and a paper-space text in the empty notch.
+    let notch = |at: f64| {
+        format!(
+            "units: mm\npaper: ISO A4 landscape\nlayout: {{name: A}}\nobjects:\n  - text: {{id: model, contents: MMMMMMMM, position: [20, 50, 0], height: 10}}\n  - viewport: {{id: v, clip: {{points: [[0, 0, 0], [100, 0, 0], [100, 100, 0], [60, 100, 0], [60, 20, 0], [40, 20, 0], [40, 100, 0], [0, 100, 0]]}}, view_center: [50, 50, 0], scale: 1}}\n  - text: {{id: paper, space: paper, contents: I, position: [{at}, 50, 0], height: 5}}\n"
+        )
+    };
+    let on_text = |text: String| {
+        let dir = scratch("notch");
+        let report = check_with(
+            &CheckRequest {
+                source: sheet_at(&dir, &text),
+                sheets: Vec::new(),
+            },
+            &Settings::default(),
+        )
+        .unwrap();
+        report
+            .findings
+            .iter()
+            .filter(|f| format!("{:?}", f.rule) == "TextOnText")
+            .count()
+    };
+    // In the notch, where nothing of the model text prints: no finding.
+    assert_eq!(on_text(notch(48.0)), 0);
+    // On the letters that print beside the notch: found.
+    assert_eq!(on_text(notch(25.0)), 1);
+}
+
 fn query(path: &Path, query: Query) -> agentdrafter_core::QueryReport {
     query_with(
         &QueryRequest {

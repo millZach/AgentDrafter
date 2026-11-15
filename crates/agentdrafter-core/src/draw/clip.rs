@@ -207,7 +207,7 @@ pub(crate) fn inside_outline(p: Point2, outline: &[Point2]) -> bool {
 }
 
 /// How far `p` is from the nearest edge of the closed outline `outline`.
-fn distance_to_outline(p: Point2, outline: &[Point2]) -> f64 {
+pub(super) fn distance_to_outline(p: Point2, outline: &[Point2]) -> f64 {
     (0..outline.len())
         .map(|i| {
             let a = outline[i];
@@ -376,6 +376,75 @@ pub(crate) fn clip_to_convex(subject: &[Point2], convex: &[Point2]) -> Vec<Point
     out
 }
 
+/// Twice the area the closed outline `outline` encloses: more than 0 when
+/// it runs anticlockwise.
+fn twice_area(outline: &[Point2]) -> f64 {
+    (0..outline.len())
+        .map(|i| {
+            let (a, b) = (outline[i], outline[(i + 1) % outline.len()]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum()
+}
+
+/// How far `c` turns left of the line from `a` through `b`: more than 0 to
+/// the left, less to the right.
+fn turn(a: Point2, b: Point2, c: Point2) -> f64 {
+    (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+}
+
+/// Whether the closed outline `outline` is convex: every corner turns the
+/// same way, or not at all.
+pub(crate) fn is_convex(outline: &[Point2]) -> bool {
+    let n = outline.len();
+    let turns: Vec<f64> = (0..n)
+        .map(|i| turn(outline[i], outline[(i + 1) % n], outline[(i + 2) % n]))
+        .collect();
+    turns.iter().all(|&t| t >= 0.0) || turns.iter().all(|&t| t <= 0.0)
+}
+
+/// The closed outline `outline`, a simple polygon, cut into triangles that
+/// cover it, each anticlockwise, by clipping its ears off one by one.
+pub(crate) fn triangles(outline: &[Point2]) -> Vec<[Point2; 3]> {
+    let mut left: Vec<Point2> = outline.to_vec();
+    if twice_area(&left) < 0.0 {
+        left.reverse();
+    }
+    let inside = |p: Point2, [a, b, c]: [Point2; 3]| {
+        turn(a, b, p) >= 0.0 && turn(b, c, p) >= 0.0 && turn(c, a, p) >= 0.0
+    };
+    let mut out = Vec::new();
+    while left.len() > 3 {
+        let n = left.len();
+        let ear = (0..n).find(|&i| {
+            let t = [left[(i + n - 1) % n], left[i], left[(i + 1) % n]];
+            turn(t[0], t[1], t[2]) > 0.0
+                && !left
+                    .iter()
+                    .any(|&p| !t.contains(&p) && inside(p, t))
+        });
+        match ear {
+            Some(i) => {
+                out.push([left[(i + n - 1) % n], left[i], left[(i + 1) % n]]);
+                left.remove(i);
+            }
+            None => {
+                // A corner that does not turn encloses nothing: it goes.
+                let Some(i) = (0..n)
+                    .find(|&i| turn(left[(i + n - 1) % n], left[i], left[(i + 1) % n]) == 0.0)
+                else {
+                    break;
+                };
+                left.remove(i);
+            }
+        }
+    }
+    if left.len() == 3 && turn(left[0], left[1], left[2]) > 0.0 {
+        out.push([left[0], left[1], left[2]]);
+    }
+    out
+}
+
 /// Whether the box from `min` to `max` and the closed outline `outline`
 /// share any point.
 pub(super) fn box_meets_outline(min: Point2, max: Point2, outline: &[Point2]) -> bool {
@@ -442,6 +511,31 @@ mod tests {
             runs,
             vec![vec![[0.0, 8.0], [2.0, 8.0]], vec![[8.0, 8.0], [10.0, 8.0]]]
         );
+    }
+
+    #[test]
+    fn a_concave_outline_is_cut_into_triangles_that_cover_it() {
+        // A U, as a notched clipping boundary is.
+        let u = [
+            [0.0, 0.0],
+            [100.0, 0.0],
+            [100.0, 100.0],
+            [60.0, 100.0],
+            [60.0, 20.0],
+            [40.0, 20.0],
+            [40.0, 100.0],
+            [0.0, 100.0],
+        ];
+        assert!(!is_convex(&u));
+        let cut = triangles(&u);
+        assert_eq!(cut.len(), u.len() - 2);
+        let area: f64 = cut.iter().map(|t| twice_area(t) / 2.0).sum();
+        assert!((area - 10000.0 + 1600.0).abs() < 1e-9, "{area}");
+        // None reaches into the notch.
+        assert!(cut
+            .iter()
+            .all(|t| !inside_outline([50.0, 50.0], t) || t.contains(&[50.0, 50.0])));
+        assert!(is_convex(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]]));
     }
 
     #[test]

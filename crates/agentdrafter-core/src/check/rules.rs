@@ -52,8 +52,8 @@ use super::ink::Ink;
 use super::{BlockPart, CheckedObject, Finding, Rule, Sides};
 use crate::description::SheetRecord;
 use crate::draw::{
-    clip_polygon, clip_to_convex, inside_outline, mtext_lines, Bounds, DisplayList, Item, Point2,
-    TextRun,
+    clip_polygon, clip_to_convex, inside_outline, is_convex, mtext_lines, triangles, Bounds,
+    DisplayList, Item, Point2, TextRun,
 };
 use crate::model::block::Placement;
 use crate::model::{Block, Insert, Object, Paper, Table, TableStyle, LINE_BOX, LINE_STEP};
@@ -497,7 +497,7 @@ impl Sheet<'_> {
             .list
             .text
             .iter()
-            .filter_map(|run| TextBox::of(run, window(run.viewport)))
+            .flat_map(|run| TextBox::of(run, window(run.viewport)))
             .collect();
         // Sweep across: two boxes apart across by more than the tolerance
         // are apart.
@@ -1030,10 +1030,12 @@ struct TextBox {
 }
 
 impl TextBox {
-    /// The box round what `run` draws, as the pipeline draws it; none when
-    /// it draws nothing.
-    fn of(run: &TextRun, window: Option<Window>) -> Option<TextBox> {
-        let [lo, hi] = run.drawn?;
+    /// The box round what `run` draws, as the pipeline draws it, in the
+    /// pieces of it that print; none when it draws nothing.
+    fn of(run: &TextRun, window: Option<Window>) -> Vec<TextBox> {
+        let Some([lo, hi]) = run.drawn else {
+            return Vec::new();
+        };
         let at = |u: f64, v: f64| {
             [
                 run.origin[0] + u * run.across[0] + v * run.up[0],
@@ -1050,33 +1052,52 @@ impl TextBox {
             let length = v[0].hypot(v[1]);
             (length > 0.0).then(|| [v[0] / length, v[1] / length])
         };
-        // A model-space text shows on the paper only within its viewport.
-        let (corners, cut) = match window {
+        // A model-space text shows on the paper only within its viewport:
+        // a box cut at a clipped viewport's boundary is each convex piece of
+        // it that prints, so that a part the boundary cuts away, such as one
+        // in a concave boundary's notch, does not count.
+        let pieces: Vec<(Vec<Point2>, bool)> = match window {
             Some(Window {
                 boundary: Some(boundary),
                 ..
-            }) if corners.iter().any(|p| !inside_outline(*p, boundary)) => {
-                // What of the boundary's area lies in the text's box.
-                (clip_to_convex(boundary, &corners), true)
+            }) => {
+                let whole = corners.iter().all(|p| inside_outline(*p, boundary))
+                    && !boundary.iter().any(|p| inside_outline(*p, &corners));
+                if whole {
+                    vec![(corners.to_vec(), false)]
+                } else if is_convex(boundary) {
+                    vec![(clip_to_convex(&corners, boundary), true)]
+                } else {
+                    triangles(boundary)
+                        .iter()
+                        .map(|t| (clip_to_convex(&corners, t), true))
+                        .collect()
+                }
             }
             Some(Window {
                 box_: w,
                 boundary: None,
             }) if corners.iter().any(|p| !within(*p, &w)) => {
-                (clip_polygon(&corners, w.min, w.max), true)
+                vec![(clip_polygon(&corners, w.min, w.max), true)]
             }
-            _ => (corners.to_vec(), false),
+            _ => vec![(corners.to_vec(), false)],
         };
-        Some(TextBox {
-            key: (run.object, item_path(run.part, &run.nested, run.cell)),
-            viewport: run.viewport,
-            says: run.characters.iter().map(|&(c, _)| c).collect(),
-            along: unit(run.across)?,
-            up: unit(run.up)?,
-            seen: Bounds::of(corners.iter().copied())?,
-            corners,
-            cut,
-        })
+        let (along, up) = (unit(run.across), unit(run.up));
+        pieces
+            .into_iter()
+            .filter_map(|(corners, cut)| {
+                Some(TextBox {
+                    key: (run.object, item_path(run.part, &run.nested, run.cell)),
+                    viewport: run.viewport,
+                    says: run.characters.iter().map(|&(c, _)| c).collect(),
+                    along: along?,
+                    up: up?,
+                    seen: Bounds::of(corners.iter().copied())?,
+                    corners,
+                    cut,
+                })
+            })
+            .collect()
     }
 
     /// How far this box and `other` overlap, when they sit on each other:
