@@ -43,6 +43,7 @@ use crate::error::{Error, ErrorCode};
 use crate::model::{
     Arrowhead, DecimalSeparator, Dimension, DimensionPart, DimensionStyle, LaidDimension, MTextBox,
     Measured, Object, Point3, Sheet, TextPlacement, DIAMETER_SIGN, MEASURED,
+    STANDARD_DIMENSION_STYLE,
 };
 use crate::text::MText;
 use crate::units::Unit;
@@ -487,8 +488,10 @@ pub(super) fn is_own_defpoints(layer: &DwgLayer) -> bool {
         && layer.description.is_empty()
 }
 
-/// The dimension styles the drawing's dimensions draw with that the core
-/// has a model for, and how many it has not.
+/// The drawing's dimension styles the core has a model for, in table
+/// order, and how many it has not, a style a dimension names that the
+/// drawing lacks among them. The drawing's own `Standard` that no
+/// dimension draws with is counted only when the core can read it.
 pub(super) fn read_dimension_styles(drawing: &CadDocument) -> (Vec<DimensionStyle>, usize) {
     let mut used: Vec<String> = Vec::new();
     for entity in drawing.model_space_entities() {
@@ -501,16 +504,22 @@ pub(super) fn read_dimension_styles(drawing: &CadDocument) -> (Vec<DimensionStyl
     }
     let mut styles = Vec::new();
     let mut not_read = 0;
-    for name in used {
-        match drawing
-            .dim_styles
-            .get(&name)
-            .and_then(|s| read_style(drawing, s))
-        {
+    for written in drawing.dim_styles.iter() {
+        let drawn_with = used.iter().any(|u| u.eq_ignore_ascii_case(&written.name));
+        match read_style(drawing, written) {
             Some(style) => styles.push(style),
+            // Every drawing's own `Standard`, which the build writes as the
+            // DWG library makes it when no dimension draws with it and the
+            // sheet does not list it, is no style of the sheet's.
+            None if !drawn_with && written.name.eq_ignore_ascii_case(STANDARD_DIMENSION_STYLE) => {}
             None => not_read += 1,
         }
     }
+    // A style a dimension names that the drawing does not have.
+    not_read += used
+        .iter()
+        .filter(|name| drawing.dim_styles.get(name).is_none())
+        .count();
     (styles, not_read)
 }
 
@@ -573,7 +582,9 @@ fn read_style(drawing: &CadDocument, s: &DimStyle) -> Option<DimensionStyle> {
     } else {
         let (before, after) = s.dimpost.split_once(MEASURED)?;
         let codes = |t: &str| t.contains(['<', '>', '\\', '{', '}', '\n']);
-        if codes(before) || codes(after) {
+        // `%%` is a control code in DIMPOST, `%%c` a diameter sign, which
+        // the model does not hold.
+        if codes(before) || codes(after) || s.dimpost.contains("%%") {
             return None;
         }
         (before.to_owned(), after.to_owned())
@@ -839,9 +850,80 @@ fn radial_location(
     } else {
         text_point
     };
-    // On the line from the centre, on the arrow's side of it.
+    // On the line from the centre.
     let v = [location.x - center.x, location.y - center.y];
     let across = v[0] * u[1] - v[1] * u[0];
     let along = v[0] * u[0] + v[1] * u[1];
-    (across.abs() <= 1e-9 * reach && along > 0.0).then_some(location)
+    if across.abs() > 1e-9 * reach {
+        return None;
+    }
+    if along > 0.0 {
+        return Some(location);
+    }
+    // Text inside a circle too small to hold it, which AutoCAD puts past
+    // the centre, on the far side from the arrow: the location is on the
+    // arrow's side, as the line runs from the centre through it, and any
+    // point between the centre and the arrow puts the text there again.
+    Some(Point3::new(
+        center.x + u[0] * r / 2.0,
+        center.y + u[1] * r / 2.0,
+        center.z,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use acadrust::types::DxfVersion;
+
+    use super::*;
+
+    /// A drawing with the dimension style `style`, written as the build
+    /// writes it, beside the DWG library's own `Standard`.
+    fn drawing_with(style: &DimensionStyle) -> CadDocument {
+        let mut drawing = CadDocument::with_version(DxfVersion::AC1032);
+        drawing.assign_table_entry_handles();
+        let mut written = dwg_style(&drawing, style, Unit::Mm).unwrap();
+        written.set_handle(drawing.allocate_handle());
+        drawing.dim_styles.add(written).unwrap();
+        drawing
+    }
+
+    fn style(name: &str) -> DimensionStyle {
+        DimensionStyle {
+            name: name.to_owned(),
+            ..DimensionStyle::iso_25(Unit::Mm)
+        }
+    }
+
+    #[test]
+    fn a_style_no_dimension_draws_with_is_read_and_the_drawings_own_standard_is_not() {
+        let spare = DimensionStyle {
+            precision: 4,
+            ..style("spare")
+        };
+        let (read, not_read) = read_dimension_styles(&drawing_with(&spare));
+        assert_eq!(read, vec![spare]);
+        assert_eq!(not_read, 0);
+    }
+
+    #[test]
+    fn a_style_the_model_cannot_hold_is_counted_whether_or_not_a_dimension_draws_with_it() {
+        let mut drawing = drawing_with(&style("toleranced"));
+        drawing.dim_styles.get_mut("toleranced").unwrap().dimtol = true;
+        let (read, not_read) = read_dimension_styles(&drawing);
+        assert!(read.is_empty());
+        assert_eq!(not_read, 1);
+    }
+
+    #[test]
+    fn a_dimpost_holding_a_control_code_is_not_read() {
+        let mut drawing = drawing_with(&style("coded"));
+        let written = drawing.dim_styles.get("coded").unwrap().clone();
+        assert!(read_style(&drawing, &written).is_some());
+        for post in ["%%c<>", "<>%%d"] {
+            post.clone_into(&mut drawing.dim_styles.get_mut("coded").unwrap().dimpost);
+            let written = drawing.dim_styles.get("coded").unwrap().clone();
+            assert!(read_style(&drawing, &written).is_none(), "{post}");
+        }
+    }
 }

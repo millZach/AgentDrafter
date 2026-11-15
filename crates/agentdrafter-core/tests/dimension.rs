@@ -694,3 +694,258 @@ fn changing_autocads_own_style_lists_it_in_the_template() {
     let read = read_dwg(&set.join("dwg/PLATE-001.dwg")).unwrap();
     assert_eq!(read.objects_not_read, 0);
 }
+
+/// What the sheet's object `index` draws, each shape as JSON with its
+/// numbers rounded to a billionth, sorted.
+fn drawn(source: &Path, index: usize) -> Vec<String> {
+    fn rounded(value: Value) -> Value {
+        match value {
+            Value::Number(n) => json!((n.as_f64().unwrap() * 1e9).round() / 1e9),
+            Value::Array(items) => Value::Array(items.into_iter().map(rounded).collect()),
+            Value::Object(map) => {
+                Value::Object(map.into_iter().map(|(k, v)| (k, rounded(v))).collect())
+            }
+            other => other,
+        }
+    }
+    let report = display_list_with(
+        &DisplayListRequest {
+            source: source.to_owned(),
+            sheet: None,
+            tolerance: Some(0.001),
+            entry: None,
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let mut shapes: Vec<String> = report
+        .display_list
+        .items
+        .iter()
+        .filter(|item| item.object == index)
+        .map(|item| rounded(serde_json::to_value(&item.shape).unwrap()).to_string())
+        .collect();
+    shapes.sort();
+    shapes
+}
+
+/// A radius or diameter dimension's text inside a circle too small to hold
+/// it, which AutoCAD 2026 puts past the centre, on the far side from the
+/// arrow, in ISO-25 and in Standard, on a level line and a steep one:
+/// built, it reads back from its DWG and draws there as it drew from its
+/// description.
+#[test]
+fn text_inside_a_circle_too_small_to_hold_it_reads_back_and_draws_the_same() {
+    for (name, text) in [
+        (
+            "iso",
+            "units: mm
+objects:
+  - dimension: {kind: radius, center: [50, 50, 0], point: [51, 50, 0], location: [50.5, 50, 0]}
+  - dimension: {kind: diameter, center: [80, 50, 0], point: [81, 50, 0], location: [80.5, 50.3, 0]}
+  - dimension: {kind: radius, center: [20, 20, 0], point: [35, 20, 0], location: [34, 20, 0]}
+",
+        ),
+        (
+            "standard",
+            "units: in
+objects:
+  - dimension: {kind: radius, center: [5, 5, 0], point: [5.1, 5, 0], location: [5.05, 5, 0]}
+  - dimension: {kind: radius, center: [8, 5, 0], point: [8.3, 5, 0], location: [8.25, 5, 0]}
+  - dimension: {kind: diameter, center: [2, 2, 0], point: [2.1, 2, 0], location: [2.04, 2.025, 0]}
+",
+        ),
+    ] {
+        let dir = scratch(&format!("too-small-{name}"));
+        let dwg = built(&dir, text);
+        let read = read_dwg(&dwg).unwrap();
+        assert_eq!(read.objects_not_read, 0, "{name}: {read:?}");
+        let sheet = parse_sheet_description(text).unwrap();
+        assert_eq!(read.objects.len(), sheet.objects.len());
+        for i in 0..sheet.objects.len() {
+            let from_description = drawn(&dir.join("sheet.yaml"), i);
+            assert!(!from_description.is_empty());
+            assert_eq!(drawn(&dwg, i), from_description, "{name}: object {i}");
+        }
+    }
+}
+
+#[test]
+fn a_prefix_or_suffix_holding_a_control_code_is_refused() {
+    for key in ["prefix", "suffix"] {
+        let e = refused(&format!(
+            "units: mm\ndimension_styles:\n  s: {{{key}: '%%c'}}\nobjects: []\n"
+        ));
+        assert_eq!(
+            e.field.as_deref(),
+            Some(format!("dimension_styles.s.{key}").as_str())
+        );
+        assert!(e.message.contains("holds `%%`"), "{}", e.message);
+    }
+    let schema = agentdrafter_core::sheet_description_schema();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    for affix in ["%%c", "a{b", "a\\b"] {
+        let sheet =
+            json!({"units": "mm", "dimension_styles": {"s": {"prefix": affix}}, "objects": []});
+        assert!(!validator.is_valid(&sheet), "{affix}");
+    }
+    assert!(validator.is_valid(
+        &json!({"units": "mm", "dimension_styles": {"s": {"suffix": " %"}}, "objects": []})
+    ));
+}
+
+#[test]
+fn a_dimension_style_no_dimension_draws_with_reads_back() {
+    let dir = scratch("unused-style");
+    let text = "units: mm
+dimension_styles:
+  spare: {precision: 4}
+objects:
+  - line: {from: [0, 0, 0], to: [10, 0, 0]}
+";
+    let read = read_dwg(&built(&dir, text)).unwrap();
+    let sheet = parse_sheet_description(text).unwrap();
+    assert_eq!(read.dimension_styles, sheet.dimension_styles);
+    assert_eq!(read.dimension_styles_not_read, 0);
+}
+
+#[test]
+fn the_schema_requires_and_refuses_each_kinds_keys_as_the_reader_does() {
+    let schema = agentdrafter_core::sheet_description_schema();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let p = |x: f64, y: f64| json!([x, y, 0]);
+    let two = json!([[0, 0, 0], [10, 0, 0]]);
+    let cases = [
+        (json!({"kind": "linear", "location": p(0.0, 5.0)}), false),
+        (
+            json!({"kind": "linear", "points": two, "location": p(0.0, 5.0)}),
+            true,
+        ),
+        (
+            json!({"kind": "linear", "angle": 90, "points": [[0, 0, 0], [0, 10, 0]], "location": p(5.0, 5.0)}),
+            true,
+        ),
+        (
+            json!({"kind": "linear", "points": two, "center": p(0.0, 0.0), "location": p(0.0, 5.0)}),
+            false,
+        ),
+        (
+            json!({"kind": "aligned", "points": two, "location": p(0.0, 5.0)}),
+            true,
+        ),
+        (
+            json!({"kind": "aligned", "points": two, "location": p(0.0, 5.0), "angle": 30}),
+            false,
+        ),
+        (
+            json!({"kind": "radius", "points": two, "location": p(0.0, 5.0)}),
+            false,
+        ),
+        (
+            json!({"kind": "radius", "center": p(0.0, 0.0), "location": p(0.0, 5.0)}),
+            false,
+        ),
+        (
+            json!({"kind": "radius", "center": p(0.0, 0.0), "point": p(5.0, 0.0), "location": p(0.0, 15.0)}),
+            true,
+        ),
+        (
+            json!({"kind": "diameter", "center": p(0.0, 0.0), "point": p(5.0, 0.0), "angle": 0, "location": p(0.0, 15.0)}),
+            false,
+        ),
+        (
+            json!({"kind": "diameter", "center": p(0.0, 0.0), "point": p(5.0, 0.0), "location": p(0.0, 15.0)}),
+            true,
+        ),
+    ];
+    for (dimension, accepted) in cases {
+        let sheet = json!({"units": "mm", "objects": [{"dimension": dimension}]});
+        assert_eq!(validator.is_valid(&sheet), accepted, "{dimension}");
+        let yaml = serde_json::to_string(&sheet).unwrap();
+        assert_eq!(
+            parse_sheet_description(&yaml).is_ok(),
+            accepted,
+            "the reader: {dimension}"
+        );
+    }
+    // Each add operation is of one kind, and lists exactly its keys.
+    let listed = operations();
+    let schema_of = |name: &str| {
+        let info = listed.operations.iter().find(|o| o.name == name).unwrap();
+        jsonschema::validator_for(&info.schema).unwrap()
+    };
+    let snap = json!({"snap": {"id": "S/hole", "snap": "center"}});
+    let one = json!([[0, 0, 0], [1, 0, 0]]);
+    for (op, keys, accepted) in [
+        (
+            "add_linear_dimension",
+            json!({"location": p(0.0, 5.0)}),
+            false,
+        ),
+        (
+            "add_linear_dimension",
+            json!({"points": [p(0.0, 0.0), snap], "angle": 90, "location": p(0.0, 5.0)}),
+            true,
+        ),
+        (
+            "add_linear_dimension",
+            json!({"points": one, "center": p(0.0, 0.0), "location": p(0.0, 5.0)}),
+            false,
+        ),
+        (
+            "add_aligned_dimension",
+            json!({"points": one, "location": p(0.0, 5.0)}),
+            true,
+        ),
+        (
+            "add_aligned_dimension",
+            json!({"points": one, "angle": 30, "location": p(0.0, 5.0)}),
+            false,
+        ),
+        (
+            "add_radius_dimension",
+            json!({"points": one, "location": p(0.0, 5.0)}),
+            false,
+        ),
+        (
+            "add_radius_dimension",
+            json!({"center": snap, "location": p(0.0, 5.0)}),
+            false,
+        ),
+        (
+            "add_radius_dimension",
+            json!({"center": snap, "point": p(1.0, 0.0), "location": p(0.0, 5.0)}),
+            true,
+        ),
+        (
+            "add_diameter_dimension",
+            json!({"center": p(0.0, 0.0), "point": p(1.0, 0.0), "angle": 0, "location": p(0.0, 5.0)}),
+            false,
+        ),
+        (
+            "add_diameter_dimension",
+            json!({"center": p(0.0, 0.0), "point": p(1.0, 0.0), "location": p(0.0, 5.0)}),
+            true,
+        ),
+    ] {
+        let mut request = keys.as_object().unwrap().clone();
+        request.insert("op".into(), json!(op));
+        request.insert("sheet".into(), json!("S"));
+        let request = Value::Object(request);
+        assert_eq!(schema_of(op).is_valid(&request), accepted, "{request}");
+    }
+    // The operation's reader refuses a kind's missing key at that key.
+    let set = plate_set("missing-key");
+    let reply = apply(
+        &set,
+        json!([{"op": "add_radius_dimension", "sheet": "PLATE-001", "center": [60, 60, 0], "location": [80, 80, 0]}]),
+    );
+    let e = reply.error.unwrap();
+    assert_eq!(e.code, ErrorCode::MissingKey);
+    assert!(
+        e.message
+            .contains("missing key `point`; a radius dimension needs center and point"),
+        "{}",
+        e.message
+    );
+}

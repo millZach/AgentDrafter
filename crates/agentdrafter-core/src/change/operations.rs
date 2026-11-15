@@ -13,12 +13,12 @@ use serde_json::{json, Map, Value};
 
 use crate::description::schema::{block_library_schema, sheet_description_schema};
 use crate::description::{
-    article, objects_table, rows_schema, template_schema, Axis, LeaderLineEdit, TableEdit,
-    CELL_KEYS, DIMENSION_STYLE_KEYS, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
+    article, kind_keys, objects_table, rows_schema, template_schema, Axis, LeaderLineEdit,
+    TableEdit, CELL_KEYS, DIMENSION_STYLE_KEYS, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
 };
 use crate::error::{Error, ErrorCode};
 use crate::geometry::{SnapKind, SnapRef};
-use crate::model::{ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE};
+use crate::model::{DimensionKind, ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE};
 use crate::query::snap::{check_shape, no_kind};
 use crate::units::{parse_length, LengthError, Unit};
 
@@ -317,6 +317,14 @@ const fn dimension(name: &'static str, alias: &'static str, kind: &'static str) 
 /// The key a dimension names its kind by, which an operation that adds one
 /// of a kind sets.
 const DIMENSION_KIND_KEY: &str = "kind";
+
+/// The kind of dimension an operation that adds one names.
+fn dimension_kind(name: &str) -> DimensionKind {
+    DimensionKind::ALL
+        .into_iter()
+        .find(|k| k.name() == name)
+        .expect("an operation names a kind of dimension")
+}
 
 /// The keys of a change set.
 const CHANGE_SET_KEYS: [&str; 2] = ["operations", "fixes"];
@@ -989,12 +997,20 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                     "{} The operation adds one of kind {kind}, and takes no kind of its own.",
                     own["description"].as_str().unwrap_or_default()
                 ));
+                // It lists exactly its kind's keys: those it requires, and
+                // none of another kind's.
+                let (needs, _, others) = kind_keys(dimension_kind(kind));
                 if let Some(required) = own.get_mut("required").and_then(Value::as_array_mut) {
                     required.retain(|k| k != DIMENSION_KIND_KEY);
+                    required.extend(needs.iter().map(|k| json!(k)));
                 }
                 if let Some(properties) = own.get_mut("properties").and_then(Value::as_object_mut) {
                     properties.remove(DIMENSION_KIND_KEY);
+                    for key in others {
+                        properties.remove(*key);
+                    }
                 }
+                own.remove("oneOf");
             }
             let properties = schema["properties"]
                 .as_object_mut()
@@ -2027,9 +2043,11 @@ fn operation(
     };
     let body = match spec.kind {
         Kind::Add(object, kind) => {
+            let others = kind.map_or(&[][..], |kind| kind_keys(dimension_kind(kind)).2);
             let own: Vec<&str> = objects_table(object)
                 .into_iter()
                 .filter(|k| kind.is_none() || *k != DIMENSION_KIND_KEY)
+                .filter(|k| !others.contains(k))
                 .collect();
             let mut allowed = vec!["sheet", "template"];
             allowed.extend(&own);
@@ -2037,6 +2055,21 @@ fn operation(
             let mut with_kind = map.clone();
             if let Some(kind) = kind {
                 with_kind.insert(DIMENSION_KIND_KEY.into(), Value::String(kind.to_owned()));
+            }
+            // A dimension's kind requires its own keys.
+            if let Some(kind) = kind {
+                let (needs, _, _) = kind_keys(dimension_kind(kind));
+                if let Some(missing) = needs.iter().find(|k| !map.contains_key(**k)) {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        format!(
+                            "missing key `{missing}`; {} {kind} dimension needs {}",
+                            article(kind),
+                            needs.join(" and ")
+                        ),
+                        missing,
+                    ));
+                }
             }
             if let Some(missing) = missing_required(&objects[object], &with_kind) {
                 return Err(fail(

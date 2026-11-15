@@ -899,6 +899,15 @@ fn radial(
             text_point = center;
             parts.push(DimensionPart::Line([add(elbow, x, a), elbow]));
             parts.push(DimensionPart::Line([elbow, line_end]));
+        } else if level(d) && inside {
+            // Inside, on a level line, AutoCAD keeps the text's middle no
+            // nearer the arrow than two arrowheads, a gap and half the
+            // text, as text above its line, past the centre when the
+            // circle is too small, and runs the line from the text on.
+            let along = reach.min(r - 2.0 * a - g - w / 2.0);
+            center = add(c, d, along);
+            text_point = center;
+            parts.push(DimensionPart::Line([add(center, d, w / 2.0 + g), line_end]));
         } else if level(d) {
             center = elbow;
             text_point = elbow;
@@ -1078,6 +1087,56 @@ mod tests {
                 200.0 + 23.5417 * r45 - 1.875 * r45,
                 100.0 + 23.5417 * r45 + 1.875 * r45,
             ),
+        );
+    }
+
+    /// AutoCAD 2026's DIMRADIUS in Standard, inside circles 0.1 and 0.3 in
+    /// across: on a level line the text's middle is kept two arrowheads, a
+    /// gap and half the text short of the arrow, past the centre when the
+    /// circle is too small, the line running on from the text; on a steep
+    /// line the landing is kept two arrowheads short, past the centre too.
+    #[test]
+    fn a_standard_radius_inside_a_small_circle_is_laid_out_as_autocad_laid_it_out() {
+        let style = DimensionStyle::standard(Unit::In);
+        let measure = |t: &MText| MTextBox {
+            width: 0.96,
+            height: t.height,
+            last_descent: 0.0,
+        };
+        let inside = |r: f64, d: f64, degrees: f64| {
+            let u = direction(degrees);
+            Dimension {
+                measured: Measured::Radius {
+                    center: p(0.0, 0.0),
+                    point: p(r * u[0], r * u[1]),
+                },
+                location: p(d * u[0], d * u[1]),
+                dimension_style: STANDARD_DIMENSION_STYLE.to_owned(),
+                text: None,
+                layer: "0".to_owned(),
+                properties: Properties::default(),
+            }
+            .laid_out(&style, &measure)
+        };
+        for (r, d) in [(0.3, 0.05), (0.3, 0.1), (0.3, 0.25)] {
+            let level = inside(r, d, 0.0);
+            close(level.text.position, p(-0.63, 0.0));
+            close(level.text_point, p(-0.63, 0.0));
+            let l = lines(&level);
+            assert_eq!(l.len(), 1);
+            close(l[0][0], p(-0.06, 0.0));
+            close(l[0][1], p(0.12, 0.0));
+        }
+        let wide = inside(2.0, 0.3, 0.0);
+        close(wide.text.position, p(0.3, 0.0));
+        close(lines(&wide)[0][0], p(0.87, 0.0));
+        let steep = inside(0.1, 0.05, 30.0);
+        let u = direction(30.0);
+        let elbow = p(-0.26 * u[0], -0.26 * u[1]);
+        close(lines(&steep)[0][1], elbow);
+        close(
+            steep.text.position,
+            p(elbow.x - 0.18 - 0.09 - 0.48, elbow.y),
         );
     }
 

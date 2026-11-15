@@ -3,7 +3,7 @@
 
 use serde_json::{json, Map, Value};
 
-use super::dimension::{DECIMAL, MOST_DECIMALS};
+use super::dimension::{kind_keys, DECIMAL, MOST_DECIMALS};
 use super::schema::{object_def, optional_text, POSITIVE_NUMBER, TEXT_TYPES};
 use crate::model::{
     Arrowhead, DecimalSeparator, DimensionKind, TextPlacement, ISO_DIMENSION_STYLE,
@@ -41,7 +41,7 @@ fn plain_text(description: &str) -> Value {
     optional_text(json!({
         "description": description,
         "type": TEXT_TYPES,
-        "not": { "type": "string", "pattern": "[<>{}\\\\\\n]" },
+        "not": { "type": "string", "pattern": "[<>{}\\\\\\n]|%%" },
     }))
 }
 
@@ -113,8 +113,8 @@ pub(super) fn dimension_defs(defs: &mut Map<String, Value>) {
                     "description": "Whether 2.50 shows as 2.5, and 2.00 as 2: AutoCAD's DIMZIN 8.",
                     "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
                 },
-                "prefix": plain_text("What comes before every value the style shows: AutoCAD's DIMPOST before `<>`. One line, with no `<`, `>`, `\\`, `{` or `}`. A prefix or a suffix takes the place of a radius's R and a diameter's ∅, as in AutoCAD."),
-                "suffix": plain_text("What comes after every value the style shows, such as ` mm`: AutoCAD's DIMPOST after `<>`. One line, with no `<`, `>`, `\\`, `{` or `}`."),
+                "prefix": plain_text("What comes before every value the style shows: AutoCAD's DIMPOST before `<>`. One line, with no `<`, `>`, `\\`, `{`, `}` or `%%`. A prefix or a suffix takes the place of a radius's R and a diameter's ∅, as in AutoCAD."),
+                "suffix": plain_text("What comes after every value the style shows, such as ` mm`: AutoCAD's DIMPOST after `<>`. One line, with no `<`, `>`, `\\`, `{`, `}` or `%%`."),
                 "scale": {
                     "description": "What every length of the style is multiplied by: \
                                     AutoCAD's DIMSCALE, a number more than 0, with no unit. \
@@ -128,10 +128,8 @@ pub(super) fn dimension_defs(defs: &mut Map<String, Value>) {
         }),
     );
     let kinds = DimensionKind::ALL.map(DimensionKind::name);
-    defs.insert(
-        "dimension".into(),
-        object_def(
-            "A dimension, AutoCAD's DIMENSION, drawn as AutoCAD 2026 draws its dimension's \
+    let mut dimension = object_def(
+        "A dimension, AutoCAD's DIMENSION, drawn as AutoCAD 2026 draws its dimension's \
              block: of `kind` linear, the distance between two points along a line at an \
              angle (DIMLINEAR); aligned, the distance between two points (DIMALIGNED); \
              radius (DIMRADIUS) or diameter (DIMDIAMETER) of a circle or an arc, by its centre \
@@ -139,69 +137,83 @@ pub(super) fn dimension_defs(defs: &mut Map<String, Value>) {
              formats it, a radius's after R and a diameter's after ∅. Text and arrowheads sit \
              between the extension lines when they fit, as AutoCAD's best fit places them. A \
              dimension belongs on a sheet, not in a block.",
-            &["kind", "location"],
-            json!({
-                "kind": {
-                    "description": "What the dimension measures. Angular, ordinate, baseline \
-                                    and continued dimensions wait.",
-                    "enum": kinds,
-                },
-                "points": {
-                    "description": "A linear or aligned dimension's two points, where its \
-                                    extension lines start from: the first, then the second, \
-                                    beyond which text that does not fit goes. They lie apart \
-                                    along the dimension line.",
-                    "type": "array",
-                    "items": { "$ref": "#/$defs/point" },
-                    "minItems": 2,
-                    "maxItems": 2,
-                },
-                "angle": {
-                    "$ref": "#/$defs/angle",
-                    "description": "A linear dimension's angle: the direction it measures \
-                                    along, in degrees anticlockwise from the X axis; 0 \
-                                    measures horizontally and 90 vertically. Without it, 0.",
-                },
-                "center": {
-                    "$ref": "#/$defs/point",
-                    "description": "A radius or diameter dimension's circle's or arc's centre.",
-                },
-                "point": {
-                    "$ref": "#/$defs/point",
-                    "description": "A point on a radius or diameter dimension's circle or \
-                                    arc, apart from its centre: its distance from the centre \
-                                    is the radius. The arrow points where the line from the \
-                                    centre through the location meets the circle, as AutoCAD's \
-                                    DIMRADIUS puts it.",
-                },
-                "location": {
-                    "$ref": "#/$defs/point",
-                    "description": "Where the dimension line goes, as AutoCAD's command asks \
-                                    for it: for a linear or aligned dimension, a point the \
-                                    dimension line passes through, to one side of both points; \
-                                    for a radius or diameter dimension, where the text goes, \
-                                    inside or outside the circle, its line running from the \
-                                    centre through it. AutoCAD moves text nearer the circle \
-                                    than two arrowheads' lengths, and AgentDrafter as it does. \
-                                    The points and the location lie at one height.",
-                },
-                "dimension_style": optional_text(json!({
-                    "description": format!(
-                        "The dimension style it draws with: its unit's own, `{ISO_DIMENSION_STYLE}` \
-                         on a metric sheet and `{STANDARD_DIMENSION_STYLE}` on an imperial one, or \
-                         a name under `dimension_styles`. Without it, its unit's own."
-                    ),
-                    "type": TEXT_TYPES,
-                })),
-                "text": optional_text(json!({
-                    "description": "The dimension's own text, `<>` standing for the measured \
-                                    value, as in AutoCAD: `<> TYP` shows `25 TYP`. One line \
-                                    that shows something, with no `\\`, `{`, `}` or `%%`. \
-                                    Without it, the measured value.",
-                    "type": TEXT_TYPES,
-                    "not": { "type": "string", "pattern": "[{}\\\\\\n]|%%" },
-                })),
-            }),
-        ),
+        &["kind", "location"],
+        json!({
+            "kind": {
+                "description": "What the dimension measures. Angular, ordinate, baseline \
+                                and continued dimensions wait.",
+                "enum": kinds,
+            },
+            "points": {
+                "description": "A linear or aligned dimension's two points, where its \
+                                extension lines start from: the first, then the second, \
+                                beyond which text that does not fit goes. They lie apart \
+                                along the dimension line.",
+                "type": "array",
+                "items": { "$ref": "#/$defs/point" },
+                "minItems": 2,
+                "maxItems": 2,
+            },
+            "angle": {
+                "$ref": "#/$defs/angle",
+                "description": "A linear dimension's angle: the direction it measures \
+                                along, in degrees anticlockwise from the X axis; 0 \
+                                measures horizontally and 90 vertically. Without it, 0.",
+            },
+            "center": {
+                "$ref": "#/$defs/point",
+                "description": "A radius or diameter dimension's circle's or arc's centre.",
+            },
+            "point": {
+                "$ref": "#/$defs/point",
+                "description": "A point on a radius or diameter dimension's circle or \
+                                arc, apart from its centre: its distance from the centre \
+                                is the radius. The arrow points where the line from the \
+                                centre through the location meets the circle, as AutoCAD's \
+                                DIMRADIUS puts it.",
+            },
+            "location": {
+                "$ref": "#/$defs/point",
+                "description": "Where the dimension line goes, as AutoCAD's command asks \
+                                for it: for a linear or aligned dimension, a point the \
+                                dimension line passes through, to one side of both points; \
+                                for a radius or diameter dimension, where the text goes, \
+                                inside or outside the circle, its line running from the \
+                                centre through it. AutoCAD moves text nearer the circle \
+                                than two arrowheads' lengths, and AgentDrafter as it does. \
+                                The points and the location lie at one height.",
+            },
+            "dimension_style": optional_text(json!({
+                "description": format!(
+                    "The dimension style it draws with: its unit's own, `{ISO_DIMENSION_STYLE}` \
+                     on a metric sheet and `{STANDARD_DIMENSION_STYLE}` on an imperial one, or \
+                     a name under `dimension_styles`. Without it, its unit's own."
+                ),
+                "type": TEXT_TYPES,
+            })),
+            "text": optional_text(json!({
+                "description": "The dimension's own text, `<>` standing for the measured \
+                                value, as in AutoCAD: `<> TYP` shows `25 TYP`. One line \
+                                that shows something, with no `\\`, `{`, `}` or `%%`. \
+                                Without it, the measured value.",
+                "type": TEXT_TYPES,
+                "not": { "type": "string", "pattern": "[{}\\\\\\n]|%%" },
+            })),
+        }),
     );
+    // Each kind requires its own keys and takes no other kind's, as the
+    // reader does.
+    dimension["oneOf"] = DimensionKind::ALL
+        .iter()
+        .map(|&kind| {
+            let (required, _, others) = kind_keys(kind);
+            let not: Vec<Value> = others.iter().map(|k| json!({ "required": [k] })).collect();
+            json!({
+                "properties": { "kind": { "const": kind.name() } },
+                "required": required,
+                "not": { "anyOf": not },
+            })
+        })
+        .collect();
+    defs.insert("dimension".into(), dimension);
 }

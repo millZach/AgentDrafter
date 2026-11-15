@@ -64,6 +64,26 @@ pub(crate) const DIMENSION_KEYS: [&str; 13] = [
     "linetype_scale",
 ];
 
+/// The keys a dimension of `kind` takes of its own, besides `kind`,
+/// `location` and the keys every dimension takes: those it requires, then
+/// those it may give, then those it does not take, which another kind's
+/// are.
+pub(crate) fn kind_keys(
+    kind: DimensionKind,
+) -> (
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [&'static str],
+) {
+    match kind {
+        DimensionKind::Linear => (&["points"], &["angle"], &["center", "point"]),
+        DimensionKind::Aligned => (&["points"], &[], &["center", "point", "angle"]),
+        DimensionKind::Radius | DimensionKind::Diameter => {
+            (&["center", "point"], &[], &["points", "angle"])
+        }
+    }
+}
+
 /// The one unit format the pipeline draws: AutoCAD's decimal.
 pub(crate) const DECIMAL: &str = "decimal";
 
@@ -248,6 +268,12 @@ fn affix(fields: &Fields, key: &str) -> Result<String, Error> {
         Some(
             "holds `\\`, `{` or `}`, which AutoCAD reads as codes in a dimension's text".to_owned(),
         )
+    } else if text.contains("%%") {
+        Some(
+            "holds `%%`, which AutoCAD reads in DIMPOST as a control code, `%%c` as a diameter \
+             sign"
+                .to_owned(),
+        )
     } else {
         text.chars()
             .find(|c| c.is_control())
@@ -281,13 +307,8 @@ pub(super) fn dimension(
         ));
     };
     // Each kind takes its own points.
-    let (own, others): (&[&str], &[&str]) = match kind {
-        DimensionKind::Linear => (&["points", "angle"], &["center", "point"]),
-        DimensionKind::Aligned => (&["points"], &["center", "point", "angle"]),
-        DimensionKind::Radius | DimensionKind::Diameter => {
-            (&["center", "point"], &["points", "angle"])
-        }
-    };
+    let (required, optional, others) = kind_keys(kind);
+    let own: Vec<&str> = required.iter().chain(optional).copied().collect();
     if let Some(key) = others.iter().find(|k| fields.get(k).is_some()) {
         let node = fields.require(key)?;
         return Err(bad_value(

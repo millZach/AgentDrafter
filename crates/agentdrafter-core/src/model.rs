@@ -973,13 +973,15 @@ pub struct DrawingContents {
     /// underline or frame their text.
     #[serde(default)]
     pub mleader_styles_not_read: usize,
-    /// The drawing's dimension styles the core has a model for, of those
-    /// its dimensions draw with.
+    /// The drawing's dimension styles the core has a model for, in table
+    /// order. Its own `Standard`, which every drawing has, is among them
+    /// when the core can read it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimension_styles: Vec<DimensionStyle>,
-    /// How many dimension styles its dimensions draw with that the core
-    /// has no model for yet, such as those that draw tolerances, alternate
-    /// units or architectural ticks.
+    /// How many dimension styles the core has no model for yet, such as
+    /// those that draw tolerances, alternate units or architectural ticks,
+    /// and a style a dimension names that the drawing lacks. The drawing's
+    /// own `Standard` that no dimension draws with is not counted.
     #[serde(default)]
     pub dimension_styles_not_read: usize,
     /// The drawing's block definitions the core has a model for, in table
