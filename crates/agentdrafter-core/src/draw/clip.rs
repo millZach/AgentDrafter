@@ -4,14 +4,16 @@
 use super::Point2;
 
 /// How close to a side of the box a segment along it lies and is left out,
-/// as AutoCAD 2026 left out of a plot a line along a viewport's edge.
-const ALONG_AN_EDGE: f64 = 1e-9;
+/// on the paper, as AutoCAD 2026 left out of a plot a line along a
+/// viewport's edge. A box in model space takes it over the viewport's
+/// scale, so that it is as close on the paper at any scale.
+pub(super) const ALONG_AN_EDGE: f64 = 1e-9;
 
 /// The parts of the run of points `run` inside the box from `min` to `max`,
 /// each a run of its own: a line that leaves the box and comes back is two.
 /// A run of one point, a dot, is kept when it is inside. A segment that
-/// lies along a side of the box is left out.
-pub(super) fn clip_run(run: &[Point2], min: Point2, max: Point2) -> Vec<Vec<Point2>> {
+/// lies along a side of the box, within `along` of it, is left out.
+pub(super) fn clip_run(run: &[Point2], min: Point2, max: Point2, along: f64) -> Vec<Vec<Point2>> {
     if let [only] = run {
         return if inside(*only, min, max) {
             vec![vec![*only]]
@@ -23,7 +25,7 @@ pub(super) fn clip_run(run: &[Point2], min: Point2, max: Point2) -> Vec<Vec<Poin
     let mut current: Vec<Point2> = Vec::new();
     for pair in run.windows(2) {
         let (a, b) = (pair[0], pair[1]);
-        match clip_segment(a, b, min, max) {
+        match clip_segment(a, b, min, max, along) {
             Some((p, q, whole_start, whole_end)) => {
                 if current.is_empty() || !whole_start || current.last() != Some(&p) {
                     if current.len() > 1 {
@@ -58,6 +60,7 @@ fn clip_segment(
     b: Point2,
     min: Point2,
     max: Point2,
+    along: f64,
 ) -> Option<(Point2, Point2, bool, bool)> {
     let d = [b[0] - a[0], b[1] - a[1]];
     if !(d[0].is_finite() && d[1].is_finite()) {
@@ -69,7 +72,7 @@ fn clip_segment(
         if !(r[0] - q[0]).is_finite() || !(r[1] - q[1]).is_finite() {
             return None;
         }
-        return clip_segment(q, r, quarter(min), quarter(max))
+        return clip_segment(q, r, quarter(min), quarter(max), along / 4.0)
             .map(|(p, q, s, e)| (whole(p), whole(q), s, e));
     }
     let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
@@ -82,7 +85,7 @@ fn clip_segment(
         (d[1], max[1] - a[1], (1, max[1])),
     ] {
         if p == 0.0 {
-            if q <= ALONG_AN_EDGE {
+            if q <= along {
                 return None;
             }
         } else {
@@ -189,7 +192,12 @@ mod tests {
 
     #[test]
     fn a_line_through_the_box_is_cut_at_its_edges() {
-        let runs = clip_run(&[[-5.0, 5.0], [15.0, 5.0]], [0.0, 0.0], [10.0, 10.0]);
+        let runs = clip_run(
+            &[[-5.0, 5.0], [15.0, 5.0]],
+            [0.0, 0.0],
+            [10.0, 10.0],
+            ALONG_AN_EDGE,
+        );
         assert_eq!(runs, vec![vec![[0.0, 5.0], [10.0, 5.0]]]);
     }
 
@@ -199,6 +207,7 @@ mod tests {
             &[[2.0, 2.0], [2.0, 20.0], [8.0, 20.0], [8.0, 2.0]],
             [0.0, 0.0],
             [10.0, 10.0],
+            ALONG_AN_EDGE,
         );
         assert_eq!(
             runs,
@@ -212,13 +221,19 @@ mod tests {
             &[[0.0, 10.0], [10.0, 10.0], [10.0, 5.0], [5.0, 5.0]],
             [0.0, 0.0],
             [10.0, 10.0],
+            ALONG_AN_EDGE,
         );
         assert_eq!(runs, vec![vec![[10.0, 5.0], [5.0, 5.0]]]);
     }
 
     #[test]
     fn points_far_apart_are_cut_without_overflowing() {
-        let runs = clip_run(&[[-1e308, 5.0], [1e308, 5.0]], [0.0, 0.0], [10.0, 10.0]);
+        let runs = clip_run(
+            &[[-1e308, 5.0], [1e308, 5.0]],
+            [0.0, 0.0],
+            [10.0, 10.0],
+            ALONG_AN_EDGE,
+        );
         assert_eq!(runs, vec![vec![[0.0, 5.0], [10.0, 5.0]]]);
         let cut = clip_polygon(
             &[
@@ -237,9 +252,12 @@ mod tests {
     #[test]
     fn a_run_inside_is_kept_whole() {
         let run = vec![[1.0, 1.0], [2.0, 3.0], [4.0, 1.0]];
-        assert_eq!(clip_run(&run, [0.0, 0.0], [10.0, 10.0]), vec![run]);
         assert_eq!(
-            clip_run(&[[11.0, 1.0]], [0.0, 0.0], [10.0, 10.0]),
+            clip_run(&run, [0.0, 0.0], [10.0, 10.0], ALONG_AN_EDGE),
+            vec![run]
+        );
+        assert_eq!(
+            clip_run(&[[11.0, 1.0]], [0.0, 0.0], [10.0, 10.0], ALONG_AN_EDGE),
             Vec::<Vec<Point2>>::new()
         );
     }

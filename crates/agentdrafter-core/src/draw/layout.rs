@@ -15,7 +15,7 @@
 //! linetypes enlarged by one over its scale. Its curves are drawn as finely
 //! on the paper as paper space's.
 
-use super::clip::{clip_polygon, clip_run};
+use super::clip::{clip_polygon, clip_run, ALONG_AN_EDGE};
 use super::{Bounds, DisplayList, Drawer, Item, Point2, Shape, TextRun};
 use crate::model::{Object, Viewport};
 
@@ -61,6 +61,9 @@ impl DisplayList {
         // moved onto the paper, so that what lies far off it never
         // overflows on the way.
         let [model_min, model_max] = viewport.view();
+        // A line along the viewport's edge, as close on the paper at any
+        // scale.
+        let along = ALONG_AN_EDGE / viewport.scale;
         let on = |p: Point2| viewport.to_paper(p);
         let placed = |points: Vec<Point2>| points.into_iter().map(on).collect::<Vec<_>>();
         for item in model.items {
@@ -68,7 +71,7 @@ impl DisplayList {
                 Shape::Stroke { lineweight, runs } => {
                     let runs: Vec<Vec<Point2>> = runs
                         .into_iter()
-                        .flat_map(|run| clip_run(&run, model_min, model_max))
+                        .flat_map(|run| clip_run(&run, model_min, model_max, along))
                         .map(placed)
                         .collect();
                     if runs.is_empty() {

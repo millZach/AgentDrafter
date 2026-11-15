@@ -829,3 +829,30 @@ objects:
     assert_eq!((laid.min, laid.max), (alone.min, alone.max));
     assert_eq!((laid.min, laid.max), ([0.0, 10.0], [20.0, 20.0]));
 }
+
+#[test]
+fn a_line_along_no_edge_shows_at_any_enlargement() {
+    // A line 4e-10 long seen at 1e11 is 40 long on the paper, and runs
+    // right across the 20 wide window: the tolerance a line along an edge
+    // is left out within is a length on the paper, not in model space.
+    let dir = scratch("enlarged");
+    let path = sheet_at(
+        &dir,
+        "units: mm
+paper: ISO A4 landscape
+layout: {name: Small}
+objects:
+  - line: {from: [-2e-10, 0, 0], to: [2e-10, 0, 0], color: red, lineweight: 0.5}
+  - viewport: {center: [110, 110, 0], width: 20, height: 20, view_center: [0, 0, 0], scale: 1e11}
+",
+    );
+    let list = drawn(&path).display_list;
+    let line: Vec<&Item> = list.items.iter().filter(|i| i.object == 0).collect();
+    let points = points(&line);
+    assert_eq!(points.len(), 2, "{points:?}");
+    let close = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9;
+    assert!(
+        close(points[0], [100.0, 110.0]) && close(points[1], [120.0, 110.0]),
+        "{points:?}"
+    );
+}
