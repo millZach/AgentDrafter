@@ -690,6 +690,7 @@ pub(super) fn dimension(
             let feature = point(node, &path, units)?;
             let listed =
                 "an ordinate dimension measures a feature's `x` or its `y`, from the origin";
+            fields.require("axis")?;
             let axis = named(
                 fields,
                 "axis",
@@ -698,7 +699,7 @@ pub(super) fn dimension(
                 OrdinateAxis::name,
                 listed,
             )?
-            .expect("the kind requires its axis");
+            .expect("`axis` is given, as required just above");
             flat(&[feature, location], node, &path)?;
             if feature.x == location.x && feature.y == location.y {
                 return Err(refused(

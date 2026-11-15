@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use agentdrafter_core::{
     build, build_set_with, change_with, check_with, operations, parse_sheet_description,
     query_with, read_dwg, AngularUnit, Answer, BuildRequest, ChangeReport, ChangeRequest,
-    CheckRequest, Dimension, FractionFormat, Measured, Object, OrdinateAxis, Point3, Query,
-    QueryRequest, Reply, Rule, SetBuildRequest, Settings, SnapKind, SnapRef, UnitFormat,
+    CheckRequest, Dimension, ErrorCode, FractionFormat, Measured, Object, OrdinateAxis, Point3,
+    Query, QueryRequest, Reply, Rule, SetBuildRequest, Settings, SnapKind, SnapRef, UnitFormat,
 };
 use serde_json::{json, Value};
 
@@ -124,6 +124,24 @@ fn the_reader_takes_angular_and_ordinate_dimensions_and_the_styles_unit_formats(
         sheet.dimension_style("tight").unwrap().baseline_spacing,
         5.0
     );
+}
+
+#[test]
+fn an_ordinate_without_its_axis_is_a_missing_key() {
+    let e = parse_sheet_description(
+        "units: mm
+objects:
+  - dimension: {kind: ordinate, feature: [3, 4, 0], location: [3, 8, 0]}
+",
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::MissingKey, "{e:?}");
+    assert_eq!(
+        e.field.as_deref(),
+        Some("objects[0].dimension.axis"),
+        "{e:?}"
+    );
+    assert!(e.message.contains("`axis`"), "{}", e.message);
 }
 
 #[test]
@@ -510,4 +528,56 @@ fn a_change_set_adds_angles_ordinates_and_baseline_and_continued_dimensions() {
     );
     let e = refused.error.unwrap();
     assert!(e.message.contains("radius or diameter"), "{}", e.message);
+}
+
+#[test]
+fn a_dimension_from_a_half_turn_keeps_its_direction_round() {
+    let set = scratch("half-turn");
+    fs::create_dir_all(set.join("templates")).unwrap();
+    let write = |name: &str, text: &str| fs::write(set.join(name), text).unwrap();
+    write("set.yaml", "units: mm\noutput: dwg\nrows: rows.yaml\n");
+    write(
+        "rows.yaml",
+        "rows:\n  - sheet: S\n    template: templates/s.yaml\n",
+    );
+    // Its arc runs anticlockwise below the centre, from the point at
+    // [40, 50] to the one at [60, 50].
+    write(
+        "templates/s.yaml",
+        "units: mm
+objects:
+  - dimension: {id: base, kind: three_point_angular, center: [50, 50, 0], points: [[60, 50, 0], [40, 50, 0]], location: [50, 40, 0]}
+",
+    );
+    let built = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: false,
+        },
+        &Settings::default(),
+    );
+    assert!(built.ok, "{:#?}", built.error);
+    let reply = apply(
+        &set,
+        json!([
+            {"op": "add_baseline_dimension", "target": {"id": "S/base"}, "point": [50, 60, 0], "id": "out"},
+            {"op": "add_continued_dimension", "target": {"id": "S/base"}, "point": [50, 60, 0], "id": "on"}
+        ]),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    let read = read_dwg(&set.join("dwg/S.dwg")).unwrap();
+    let shown: Vec<String> = dimensions(&read.objects)
+        .iter()
+        .map(|d| {
+            let style = read
+                .dimension_styles
+                .iter()
+                .find(|s| s.name == d.dimension_style)
+                .unwrap();
+            d.displayed_text(style)
+        })
+        .collect();
+    // Anticlockwise as the base runs: from [60, 50] to [50, 60] round
+    // below is 270°, and from [40, 50] 90°.
+    assert_eq!(shown, ["180\u{b0}", "270\u{b0}", "90\u{b0}"]);
 }

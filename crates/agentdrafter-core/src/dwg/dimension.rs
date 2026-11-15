@@ -1126,6 +1126,69 @@ mod tests {
         assert_eq!(not_read, 1);
     }
 
+    /// A made-up right angle on an arc of radius 0.71, less across than an
+    /// arrowhead is long: AutoCAD 2026, laying it out again, drew each
+    /// arrowhead its full 2.5 from its tip through the vertex, which is
+    /// what the drawing draws and the DWG holds.
+    #[test]
+    fn an_arrowhead_longer_than_its_arcs_circle_is_across_keeps_its_length() {
+        let d = Dimension {
+            measured: Measured::ThreePointAngular {
+                center: Point3::new(50.0, 50.0, 0.0),
+                points: [Point3::new(60.0, 50.0, 0.0), Point3::new(50.0, 60.0, 0.0)],
+            },
+            location: Point3::new(50.5, 50.5, 0.0),
+            dimension_style: "ISO-25".to_owned(),
+            text: None,
+            continued: false,
+            layer: "0".to_owned(),
+            properties: Default::default(),
+        };
+        let measure = |t: &MText| MTextBox {
+            width: 3.0,
+            height: t.height,
+            ..MTextBox::default()
+        };
+        let laid = d.laid_out(&DimensionStyle::iso_25(Unit::Mm), Unit::Mm, &measure);
+        let solids: Vec<_> = block_entities(&laid, false)
+            .into_iter()
+            .filter_map(|e| match e {
+                EntityType::Solid(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(solids.len(), 2);
+        // AutoCAD's tips and bases, the middles of the SOLIDs' backs.
+        for (s, tip, base) in [
+            (&solids[0], [50.7071, 50.0], [48.2071, 50.0]),
+            (&solids[1], [50.0, 50.7071], [50.0, 48.2071]),
+        ] {
+            let back = [
+                (s.first_corner.x + s.second_corner.x) / 2.0,
+                (s.first_corner.y + s.second_corner.y) / 2.0,
+            ];
+            for (got, want) in [([s.third_corner.x, s.third_corner.y], tip), (back, base)] {
+                assert!(
+                    (got[0] - want[0]).abs() < 1e-4 && (got[1] - want[1]).abs() < 1e-4,
+                    "{got:?} is not {want:?}"
+                );
+            }
+            let drawn = crate::model::leader::arrowhead_shapes(
+                Arrowhead::ClosedFilled,
+                [s.third_corner.x, s.third_corner.y],
+                back,
+                laid.arrow_size,
+            )
+            .unwrap();
+            let fill = &drawn.fills[0];
+            let drawn_back = [
+                (fill[1][0] + fill[2][0]) / 2.0,
+                (fill[1][1] + fill[2][1]) / 2.0,
+            ];
+            assert!((drawn_back[0] - back[0]).hypot(drawn_back[1] - back[1]) < 1e-9);
+        }
+    }
+
     #[test]
     fn a_dimpost_holding_a_control_code_is_not_read() {
         let mut drawing = drawing_with(&style("coded"));

@@ -181,13 +181,24 @@ pub const DEGREE_SIGN: char = '\u{00B0}';
 /// as 135, which a slack of 1e-10 would push to 135.00000001.
 const ROUNDING_SLACK: f64 = 1e-12;
 
+/// The most a value may fall short of a half and still round up, in the
+/// last digit shown: a hair, so that a value far from a half, however
+/// large, rounds as it is.
+const MOST_SLACK: f64 = 1e-6;
+
 /// `value`, 0 or more, times `factor`, rounded half away from zero, a
 /// value a hair short of a half rounding up, as AutoCAD rounds it.
 fn scaled(value: f64, factor: f64) -> u128 {
     let x = value.abs() * factor;
+    let short = 0.5 - (x - x.floor());
+    let rounded = if short > 0.0 && short <= (x * ROUNDING_SLACK).min(MOST_SLACK) {
+        x.ceil()
+    } else {
+        x.round()
+    };
     // A float casts to an integer saturating, so a huge value shows as the
     // largest the integer holds rather than wrapping.
-    (x + x * ROUNDING_SLACK).round() as u128
+    rounded as u128
 }
 
 /// The number `n / 10^decimals` written out: its zeros suppressed as
@@ -573,6 +584,23 @@ mod tests {
         assert_eq!(coded(&win, 2380.4375), "2,380.438");
         assert_eq!(coded(&win, 1_234_567.0), "1,234,567");
         assert_eq!(coded(&win, 12.0), "12");
+    }
+
+    /// A value a hair short of a half rounds up, and only such a value: an
+    /// exact one, however many digits it shows, stays as it is.
+    #[test]
+    fn only_a_value_a_hair_short_of_a_half_rounds_up() {
+        let mut iso = DimensionStyle::iso_25(Unit::Mm);
+        iso.precision = 8;
+        assert_eq!(coded(&iso, 10000.0), "10000");
+        assert_eq!(coded(&iso, 10_000.000_000_003), "10000");
+        iso.angular_precision = 8;
+        iso.suppress_angular_trailing_zeros = true;
+        assert_eq!(iso.angle_text(135.0), "135\u{b0}");
+        assert_eq!(iso.angle_text(1f64.atan2(-1.0).to_degrees()), "135\u{b0}");
+        iso.precision = 2;
+        assert_eq!(coded(&iso, 6.374_999_999_999_991), "6,38");
+        assert_eq!(coded(&iso, 6.374), "6,37");
     }
 
     /// AutoCAD 2026's texts for the angles of its sweep.

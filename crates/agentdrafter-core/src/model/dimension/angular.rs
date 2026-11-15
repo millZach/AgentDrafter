@@ -20,8 +20,9 @@
 //!   tangent at the sector's middle, each with a gap, and an arrowhead's
 //!   length more, or three when the arrowheads are inside too. Each
 //!   arrowhead needs its length.
-//! - An arrowhead's point is on the ray, its body on the arc. Arrowheads
-//!   outside the sector have tails, arcs as long as themselves; the arc
+//! - An arrowhead's point is on the ray, its body on the arc, or, longer
+//!   than the arc's circle is across, through the vertex, its full length
+//!   still. Arrowheads outside the sector have tails, arcs as long as themselves; the arc
 //!   between the rays is drawn whole when the text above it is inside,
 //!   and not at all for centred text, as a linear dimension's line.
 //! - Text inside sits at the middle of the arc, above it along its tangent
@@ -87,10 +88,11 @@ impl Sector {
     /// first ray.
     pub fn first_point(&self, points: &[Point3; 2]) -> Point3 {
         let d = direction(self.start);
-        // How far a point's ray turns from the first ray, as a sine.
+        // How far a point's ray turns from the first ray, either way: an
+        // angle, which, unlike a sine, tells the ray opposite apart.
         let off = |p: Point3| {
             let v = sub(p, self.vertex);
-            cross(v, d).abs() / v[0].hypot(v[1])
+            cross(v, d).abs().atan2(dot(v, d))
         };
         if off(points[0]) <= off(points[1]) {
             points[0]
@@ -414,13 +416,22 @@ pub(super) fn angular(
     }
     if !bare {
         let inward = if arrows_in { 1.0 } else { -1.0 };
+        // An arrowhead longer than the arc's circle is across keeps its
+        // length, from its tip through the vertex, as AutoCAD draws it.
+        let base = |tip: f64, body: f64| {
+            if a < 2.0 * r {
+                sector.at(body, r)
+            } else {
+                sector.at(tip, r - a)
+            }
+        };
         parts.push(DimensionPart::Arrow {
             tip: sector.at(start, r),
-            base: sector.at(start + inward * alpha, r),
+            base: base(start, start + inward * alpha),
         });
         parts.push(DimensionPart::Arrow {
             tip: sector.at(end, r),
-            base: sector.at(end - inward * alpha, r),
+            base: base(end, end - inward * alpha),
         });
     }
     parts.push(DimensionPart::Text);
