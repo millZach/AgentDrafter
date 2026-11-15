@@ -7,8 +7,14 @@
 //! `reach` of its pen's edge, and a fill anywhere inside it, by its fill
 //! rule, or within `reach` of its edge. The object drawn nearest the point
 //! is picked; of two as near, the one drawn later, which lies on top.
+//!
+//! What model space draws through a viewport is cut at the viewport's
+//! window, or at the boundary it is clipped to, as every output cuts its
+//! ink there: a point outside it is no nearer to the item than to the
+//! window or the boundary, so a fill cut away there is not picked.
 
-use super::{Bounds, DisplayList, FillRule, Point2, Shape};
+use super::clip::{distance_to_outline, inside_outline};
+use super::{Bounds, DisplayList, FillRule, Item, Point2, Shape};
 
 /// The place in the sheet's objects of the object drawn nearest `at`,
 /// within `reach` drawing units, or none when nothing is drawn that near.
@@ -42,12 +48,31 @@ pub fn pick(
                 }
             }
         };
+        let distance = distance.max(outside_cut(list, item, at));
         // Later items lie on top, so they win a tie.
         if distance <= reach && best.is_none_or(|(d, _)| distance <= d) {
             best = Some((distance, item.object));
         }
     }
     best.map(|(_, object)| object)
+}
+
+/// How far `at` lies outside what `item` is cut at, the window of the
+/// viewport it shows through or the boundary that viewport is clipped to:
+/// 0 inside it, or for an item drawn whole.
+fn outside_cut(list: &DisplayList, item: &Item, at: Point2) -> f64 {
+    if let Some(outline) = item.clip_boundary.and_then(|b| list.clip_boundaries.get(b)) {
+        return if inside_outline(at, outline) {
+            0.0
+        } else {
+            distance_to_outline(at, outline)
+        };
+    }
+    item.clip.map_or(0.0, |b| {
+        let dx = (b.min[0] - at[0]).max(at[0] - b.max[0]).max(0.0);
+        let dy = (b.min[1] - at[1]).max(at[1] - b.max[1]).max(0.0);
+        dx.hypot(dy)
+    })
 }
 
 /// The box round everything the sheet's object at `object` draws, or none
@@ -181,6 +206,28 @@ mod tests {
             items,
             ..DisplayList::default()
         }
+    }
+
+    #[test]
+    fn what_a_viewport_cuts_away_is_not_picked() {
+        // A solid seen through a viewport clipped to a triangle: its fill
+        // is cut at the triangle's box, and its ink at the triangle.
+        let mut solid = square(0, [-100.0, -100.0], 300.0);
+        solid.viewport = Some(1);
+        solid.clip = Some(Bounds {
+            min: [20.0, 20.0],
+            max: [120.0, 120.0],
+        });
+        solid.clip_boundary = Some(0);
+        let mut sheet = list(vec![solid.clone()]);
+        sheet.clip_boundaries = vec![vec![[20.0, 20.0], [120.0, 20.0], [20.0, 120.0]]];
+        assert_eq!(pick(&sheet, [110.0, 110.0], 0.1, 1.0), None);
+        assert_eq!(pick(&sheet, [40.0, 40.0], 0.1, 1.0), Some(0));
+        // Through a rectangular viewport, outside its window.
+        solid.clip_boundary = None;
+        let sheet = list(vec![solid]);
+        assert_eq!(pick(&sheet, [130.0, 50.0], 0.1, 1.0), None);
+        assert_eq!(pick(&sheet, [110.0, 110.0], 0.1, 1.0), Some(0));
     }
 
     #[test]
