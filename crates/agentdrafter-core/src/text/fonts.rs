@@ -1,10 +1,11 @@
 //! Finding the font a text style names, or a look-alike when it is not there.
 //!
 //! Fonts are read from the font folders a setting names
-//! ([`crate::Settings`]): on a machine with AutoCAD, its `Fonts` folder for
-//! the SHX fonts and the system's fonts folder for TrueType ones. There is
-//! no default folder. A font is found by its file name, ignoring case, as
-//! Windows and AutoCAD do.
+//! ([`crate::Settings`]), such as AutoCAD's `Fonts` folder on a machine with
+//! AutoCAD. A TrueType font is then looked for in the system's own font
+//! folders, and the folders inside them, unless the settings leave them
+//! out; an SHX font never is. A font is found by its file name, ignoring
+//! case, as Windows and AutoCAD do.
 //!
 //! A font that is not in any folder, or cannot be read, is replaced by a
 //! look-alike, and whatever reports the measurement or the build says which
@@ -108,6 +109,14 @@ pub(crate) struct Glyph {
     pub ink: Option<Rect>,
 }
 
+/// Where a font was found, when it was not in a folder the settings name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FoundIn {
+    /// In one of the system's own font folders.
+    System,
+}
+
 /// The font a measurement used.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct FontUsed {
@@ -120,6 +129,11 @@ pub struct FontUsed {
     /// Why a look-alike was used; none when the font was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// `system` when the font used was found in one of the system's font
+    /// folders; left out when it was in a folder the settings name, or is
+    /// the built-in look-alike.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub found_in: Option<FoundIn>,
 }
 
 /// A text style whose font was not found, and the look-alike AgentDrafter
@@ -134,6 +148,10 @@ pub struct FontSubstitution {
     pub used: String,
     /// Why: the font is not in the font folders, or could not be read.
     pub why: String,
+    /// `system` when the look-alike was found in one of the system's font
+    /// folders; left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub found_in: Option<FoundIn>,
 }
 
 /// A font, read and ready to measure with.
@@ -223,13 +241,14 @@ pub(crate) struct Line {
 /// The font a style names, found in the font folders, or its look-alike,
 /// with a report of which was used.
 pub(crate) fn find(name: &str, settings: &Settings) -> (Font, FontUsed) {
-    let why = match read(name, &settings.font_folders) {
-        Ok(font) => {
+    let why = match read(name, settings) {
+        Ok((font, found_in)) => {
             let used = FontUsed {
                 requested: name.to_owned(),
                 used: name.to_owned(),
                 substituted: false,
                 why: None,
+                found_in,
             };
             return (font, used);
         }
@@ -240,12 +259,13 @@ pub(crate) fn find(name: &str, settings: &Settings) -> (Font, FontUsed) {
         .find(|(font, _)| font.eq_ignore_ascii_case(name))
         .map_or(&[][..], |(_, twins)| &twins[..]);
     for twin in twins {
-        if let Ok(font) = read(twin, &settings.font_folders) {
+        if let Ok((font, found_in)) = read(twin, settings) {
             let used = FontUsed {
                 requested: name.to_owned(),
                 used: (*twin).to_owned(),
                 substituted: true,
                 why: Some(why),
+                found_in,
             };
             return (font, used);
         }
@@ -255,18 +275,42 @@ pub(crate) fn find(name: &str, settings: &Settings) -> (Font, FontUsed) {
         used: hershey::NAME.to_owned(),
         substituted: true,
         why: Some(why),
+        found_in: None,
     };
     (Font::Hershey, used)
 }
 
-/// Reads the font file `name` from the first folder that holds it. The
+/// How deep below a system font folder a font is looked for: deep enough
+/// for any system's own layout, and a stop for a folder that links back to
+/// one above it.
+const SYSTEM_FOLDER_DEPTH: usize = 8;
+
+/// Reads the font file `name` from the first folder the settings name that
+/// holds it, or for a TrueType font then from the first of the system's
+/// font folders that holds it, and says when it was the system's. The
 /// error says why it could not be used.
-fn read(name: &str, folders: &[PathBuf]) -> Result<Font, String> {
+fn read(name: &str, settings: &Settings) -> Result<(Font, Option<FoundIn>), String> {
     let kind = FontKind::of(name).ok_or_else(|| {
         format!("`{name}` is neither an SHX font (.shx) nor a TrueType font (.ttf)")
     })?;
-    let Some(path) = folders.iter().find_map(|folder| file_in(folder, name)) else {
-        return Err(if folders.is_empty() {
+    let named = &settings.font_folders;
+    // AutoCAD's SHX fonts live only in its own folder, never the system's.
+    let system: &[PathBuf] = match kind {
+        FontKind::Shx => &[],
+        FontKind::TrueType => &settings.system_font_folders,
+    };
+    let found = named
+        .iter()
+        .find_map(|folder| file_in(folder, name))
+        .map(|path| (path, None))
+        .or_else(|| {
+            system
+                .iter()
+                .find_map(|folder| file_below(folder, name, SYSTEM_FOLDER_DEPTH))
+                .map(|path| (path, Some(FoundIn::System)))
+        });
+    let Some((path, found_in)) = found else {
+        return Err(if named.is_empty() && system.is_empty() {
             "no font folder is set".to_owned()
         } else {
             "it is not in the font folders".to_owned()
@@ -277,7 +321,31 @@ fn read(name: &str, folders: &[PathBuf]) -> Result<Font, String> {
         FontKind::Shx => ShxFont::parse(&bytes).map(Font::Shx),
         FontKind::TrueType => TrueTypeFont::parse(bytes).map(Font::TrueType),
     };
-    font.map_err(|e| format!("it could not be read: {e}"))
+    font.map(|font| (font, found_in))
+        .map_err(|e| format!("it could not be read: {e}"))
+}
+
+/// The file named `name`, ignoring case, in `folder` or the folders inside
+/// it, at most `depth` down: the folder's own first, then each folder
+/// inside it in the order of their names, so that the same font wins
+/// whatever order the system lists its folders in.
+fn file_below(folder: &Path, name: &str, depth: usize) -> Option<PathBuf> {
+    if let Some(path) = file_in(folder, name) {
+        return Some(path);
+    }
+    if depth == 0 {
+        return None;
+    }
+    let mut inside: Vec<PathBuf> = fs::read_dir(folder)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    inside.sort();
+    inside
+        .iter()
+        .find_map(|inner| file_below(inner, name, depth - 1))
 }
 
 /// The file in `folder` named `name`, ignoring case.
@@ -319,6 +387,119 @@ mod tests {
             font_folders: folders.iter().map(|f| f.to_path_buf()).collect(),
             ..Settings::default()
         }
+    }
+
+    fn with_system(folders: &[&Path], system: &[&Path]) -> Settings {
+        Settings {
+            system_font_folders: system.iter().map(|f| f.to_path_buf()).collect(),
+            ..settings(folders)
+        }
+    }
+
+    /// A made-up TrueType font whose `A` moves the pen `advance` units.
+    fn truetype(advance: u16) -> Vec<u8> {
+        made_up_font(&[('A', advance, [0, 0, 600, 700])])
+    }
+
+    fn advance(font: &Font) -> f64 {
+        font.glyphs("A")[0].advance.0
+    }
+
+    #[test]
+    fn a_truetype_font_in_no_folder_named_is_found_in_a_system_folder() {
+        let named = folder("system-named");
+        let system = folder("system-system");
+        let inner = system.join("truetype").join("made-up");
+        fs::create_dir_all(&inner).unwrap();
+        fs::write(inner.join("MadeUp.TTF"), truetype(700)).unwrap();
+        let (font, used) = find("madeup.ttf", &with_system(&[&named], &[&system]));
+        assert!(matches!(font, Font::TrueType(_)), "{font:?}");
+        assert!(!used.substituted);
+        assert_eq!(used.found_in, Some(FoundIn::System));
+        assert_eq!(
+            serde_json::to_value(&used).unwrap()["found_in"],
+            serde_json::json!("system")
+        );
+        // Without the system's folders it takes a look-alike, as before.
+        let (font, used) = find("madeup.ttf", &settings(&[&named]));
+        assert!(matches!(font, Font::Hershey));
+        assert_eq!(used.why.as_deref(), Some("it is not in the font folders"));
+        assert!(serde_json::to_value(&used)
+            .unwrap()
+            .get("found_in")
+            .is_none());
+        let _ = fs::remove_dir_all(&named);
+        let _ = fs::remove_dir_all(&system);
+    }
+
+    #[test]
+    fn the_folders_named_come_first_then_the_system_folders_in_order() {
+        let named = folder("order-named");
+        let first = folder("order-first");
+        let second = folder("order-second");
+        fs::write(first.join("a.ttf"), truetype(600)).unwrap();
+        fs::write(second.join("a.ttf"), truetype(500)).unwrap();
+        let all = with_system(&[&named], &[&first, &second]);
+        let (font, used) = find("a.ttf", &all);
+        assert_eq!(used.found_in, Some(FoundIn::System));
+        let (only_first, _) = find("a.ttf", &settings(&[&first]));
+        let (only_second, _) = find("a.ttf", &settings(&[&second]));
+        assert_eq!(advance(&font), advance(&only_first));
+        assert_ne!(advance(&font), advance(&only_second));
+        fs::write(named.join("A.ttf"), truetype(900)).unwrap();
+        let (font, used) = find("a.ttf", &all);
+        let (only_named, _) = find("a.ttf", &settings(&[&named]));
+        assert_eq!(used.found_in, None);
+        assert_eq!(advance(&font), advance(&only_named));
+        assert_ne!(advance(&font), advance(&only_first));
+        for dir in [&named, &first, &second] {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn the_folders_inside_a_system_folder_are_searched_in_the_order_of_their_names() {
+        let system = folder("inside");
+        for (inner, width) in [("b", 500), ("a", 600)] {
+            fs::create_dir_all(system.join(inner)).unwrap();
+            fs::write(system.join(inner).join("x.ttf"), truetype(width)).unwrap();
+        }
+        let (font, _) = find("x.ttf", &with_system(&[], &[&system]));
+        let (a, _) = find("x.ttf", &settings(&[&system.join("a")]));
+        assert_eq!(advance(&font), advance(&a));
+        let _ = fs::remove_dir_all(&system);
+    }
+
+    #[test]
+    fn an_shx_font_is_never_looked_for_in_the_system_folders() {
+        let system = folder("shx-system");
+        fs::write(
+            system.join("madeup.shx"),
+            unifont(10, &[(65, &[2, 8, 5, 0, 0])]),
+        )
+        .unwrap();
+        let (font, used) = find("madeup.shx", &with_system(&[], &[&system]));
+        assert!(matches!(font, Font::Hershey));
+        assert!(used.substituted);
+        assert_eq!(used.why.as_deref(), Some("no font folder is set"));
+        let _ = fs::remove_dir_all(&system);
+    }
+
+    #[test]
+    fn an_open_twin_in_a_system_folder_stands_in_and_says_where_it_was() {
+        let system = folder("twin-system");
+        fs::create_dir_all(system.join("liberation")).unwrap();
+        fs::write(
+            system.join("liberation").join("LiberationSans-Regular.ttf"),
+            truetype(700),
+        )
+        .unwrap();
+        let (font, used) = find("arial.ttf", &with_system(&[], &[&system]));
+        assert!(matches!(font, Font::TrueType(_)));
+        assert!(used.substituted);
+        assert_eq!(used.used, "LiberationSans-Regular.ttf");
+        assert_eq!(used.found_in, Some(FoundIn::System));
+        let _ = fs::remove_dir_all(&system);
     }
 
     #[test]

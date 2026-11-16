@@ -51,6 +51,29 @@ class Library(unittest.TestCase):
         with self.assertRaises(ValueError):
             agentdrafter.measure_text(contents="PUMP 101", font="romans.shx", height=math.nan)
 
+    def test_a_look_alike_is_warned_of_at_the_top_of_the_reply(self):
+        # A TrueType font no system has, with the system's folders left out,
+        # and the demo set's romans.shx with no font folder named.
+        font = "agentdrafter-made-up-sans.ttf"
+        measured = agentdrafter.measure_text(
+            contents="PUMP 101", font=font, height=2.5, no_system_fonts=True
+        )
+        self.assertTrue(measured["ok"], measured)
+        self.assertEqual(list(measured)[:2], ["ok", "warnings"])
+        self.assertEqual(
+            measured["warnings"],
+            [{"code": "font_look_alike", "font": font,
+              "look_alike": "Hershey Roman Simplex", "sheets": []}],
+        )
+        with contextlib.chdir(self.folder):
+            checked = agentdrafter.check(source="demo-set", sheets=["DEMO-001"], fonts=[])
+        self.assertTrue(checked["ok"], checked)
+        self.assertEqual(
+            checked["warnings"],
+            [{"code": "font_look_alike", "font": "romans.shx",
+              "look_alike": "Hershey Roman Simplex", "sheets": ["DEMO-001"]}],
+        )
+
     def test_a_command_s_error_is_its_reply(self):
         # A key the schema does not name is refused by the core, as through
         # every interface.

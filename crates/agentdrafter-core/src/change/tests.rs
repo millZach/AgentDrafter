@@ -346,6 +346,45 @@ fn command(name: &str, input: Value) -> JsonReply {
         .run(input, &Settings::default(), Interface::Cli)
 }
 
+#[test]
+fn a_change_and_an_accept_warn_of_a_look_alike_on_the_sheets_they_measured() {
+    // No font folder: the demo set's `romans.shx` takes its look-alike.
+    let set = demo_set("warned", true);
+    let reply = serde_json::to_value(command(
+        "change",
+        json!({"set": &set, "change_set": {"operations": [
+            {"op": "move", "target": {"id": "DEMO-002/border"}, "by": [0.1, 0, 0]}
+        ]}}),
+    ))
+    .unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    let warning = |sheets: Value| {
+        json!([{
+            "code": "font_look_alike",
+            "font": "romans.shx",
+            "look_alike": "Hershey Roman Simplex",
+            "sheets": sheets,
+        }])
+    };
+    // Every sheet the change set rebuilt and checked: the border is in the
+    // template all three are drawn from.
+    let rebuilt: Vec<&Value> = reply["result"]["sheets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|sheet| &sheet["sheet"])
+        .collect();
+    assert_eq!(rebuilt, ["DEMO-001", "DEMO-002", "DEMO-003"]);
+    assert_eq!(reply["warnings"], warning(json!(rebuilt)));
+    let reply =
+        serde_json::to_value(command("accept", json!({"set": &set, "dry_run": true}))).unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(
+        reply["warnings"],
+        warning(json!(["DEMO-001", "DEMO-002", "DEMO-003"]))
+    );
+}
+
 /// The command run after the commit stopped at `step`: each of those that
 /// read a set and write nothing to it in turn, so each is seen to roll back.
 /// `build` writes nothing only to a set built already, as `before` holds it.

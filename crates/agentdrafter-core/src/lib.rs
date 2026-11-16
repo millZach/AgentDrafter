@@ -91,6 +91,7 @@ mod settings;
 mod stamp;
 mod text;
 mod units;
+mod warning;
 
 use std::path::Path;
 
@@ -169,14 +170,16 @@ pub use set::{
     build_set, build_set_with, Notice, NoticeCode, SetBuildRequest, SetReport, SheetOutcome,
     SET_SETTINGS_FILE,
 };
-pub use settings::{Settings, FONTS_VARIABLE, PLOT_STYLES_VARIABLE};
+pub use settings::SYSTEM_FONTS_VARIABLE;
+pub use settings::{system_font_folders, Settings, FONTS_VARIABLE, PLOT_STYLES_VARIABLE};
 pub use stamp::{
     check_stale, SourceCheck, SourceKind, SourceStamp, StaleReport, StaleRequest, Stamp,
 };
-pub use text::fonts::{FontSubstitution, FontUsed};
+pub use text::fonts::{FontSubstitution, FontUsed, FoundIn};
 pub use text::measure::{measure_text, measure_text_with, MeasureTextRequest, TextMeasurement};
 pub use text::{Attachment, FontKind, Justify, MText, Text, TextStyle, STANDARD};
 pub use units::Unit;
+pub use warning::{Warning, WarningCode};
 
 /// Reads the linetypes, the layers, the text styles, the block definitions
 /// and the model-space objects of the DWG at `path`.

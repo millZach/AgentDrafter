@@ -30,6 +30,7 @@ use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
+use crate::warning::Warnings;
 
 /// How far past a limit counts, in millimetres on paper: a sheet is drawn
 /// at its paper's size, so a length on it is a length on paper. Within it,
@@ -113,6 +114,11 @@ pub struct CheckReport {
     /// records as they are.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inconsistent: Option<crate::change::Inconsistent>,
+    /// Each look-alike with the sheets it stood in on, for the warnings at
+    /// the top of the reply; `font_substitutions` lists them for the whole
+    /// check.
+    #[serde(skip)]
+    pub(crate) warnings: Warnings,
 }
 
 /// One failed check: the sheet, the rule, the object and what is wrong, in
@@ -246,8 +252,10 @@ pub fn check_with(request: &CheckRequest, settings: &Settings) -> Result<CheckRe
     let tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units);
     let mut findings = Vec::new();
     let mut substitutions: Vec<FontSubstitution> = Vec::new();
+    let mut warnings = Warnings::default();
     for record in &records {
         let fonts = SheetFonts::find(&record.sheet, settings);
+        warnings.sheet(&record.name, &fonts.substitutions());
         for substitution in fonts.substitutions() {
             if !substitutions.contains(&substitution) {
                 substitutions.push(substitution);
@@ -285,6 +293,7 @@ pub fn check_with(request: &CheckRequest, settings: &Settings) -> Result<CheckRe
         } else {
             None
         },
+        warnings,
     })
 }
 

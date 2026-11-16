@@ -14,7 +14,11 @@
 //! Paths in an input are taken as the command line takes them: relative to
 //! the folder the interface runs in, or absolute. Font and plot style
 //! folders an input names come before those the interface's settings name,
-//! as `--fonts` and `--plot-styles` come before the environment's.
+//! as `--fonts` and `--plot-styles` come before the environment's, and the
+//! system's font folders come last, for TrueType fonts, unless the input's
+//! `no_system_fonts` or the environment leaves them out. A command that
+//! measures or draws text, and in which a look-alike stood in for a font,
+//! says so under `warnings` at the top of its reply.
 //!
 //! Before a command reads a drawing set, the set its input names, it rolls
 //! back an entry of the set's journal a commit that never finished left
@@ -42,10 +46,11 @@ use crate::query::{query_with, QueryRequest};
 use crate::render::{render_with, RenderRequest};
 use crate::reply::Reply;
 use crate::set::{build_set_with, set_of_dwg, SetBuildRequest, SET_SETTINGS_FILE};
-use crate::settings::{Settings, FONTS_VARIABLE, PLOT_STYLES_VARIABLE};
+use crate::settings::{Settings, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE};
 use crate::stamp::{check_stale, SourceKind, StaleRequest};
 use crate::text::measure::{measure_text_with, MeasureTextRequest};
 use crate::units::Unit;
+use crate::warning::Warns;
 use crate::{block_library_schema, rows_schema, set_schema, sheet_description_schema};
 use crate::{template_schema, JOURNAL_FILE, KEPT_UNDO_STATES};
 
@@ -269,6 +274,7 @@ fn build_input() -> Value {
             "output": text("Where to write the DWG of one sheet description. Without it, beside the sheet description."),
             "overwrite": flag("Replace a DWG already there, which is allowed only when AgentDrafter built it."),
             "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
         }),
         &["source"],
     )
@@ -290,14 +296,14 @@ fn run_build(
             set: source,
             overwrite,
         };
-        return Ok(sent(build_set_with(&request, &settings)));
+        return Ok(sent_warned(build_set_with(&request, &settings)));
     }
     let request = BuildRequest {
         description: source,
         output,
         overwrite,
     };
-    Ok(done(build_with(&request, &settings)))
+    Ok(done_warned(build_with(&request, &settings)))
 }
 
 // schema
@@ -375,6 +381,7 @@ fn measure_input() -> Value {
             "height": number("The height of the capitals; the measurement is in the same unit."),
             "width_factor": number("How wide characters are drawn, as a share of their normal width. Without it, 1."),
             "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
         }),
         &["contents", "font", "height"],
     )
@@ -387,7 +394,7 @@ fn run_measure(
 ) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: MeasureTextRequest = parse("measure-text", input)?;
-    Ok(done(measure_text_with(&request, &settings)))
+    Ok(done_warned(measure_text_with(&request, &settings)))
 }
 
 // render
@@ -418,6 +425,7 @@ fn render_input() -> Value {
             "height": pixels("How many pixels high the image is, the drawing fitted inside it."),
             "margin": number("The margin round the drawing's extents, in millimetres of paper. Without it, 5."),
             "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
         }),
         &["source"],
     )
@@ -430,7 +438,7 @@ fn run_render(
 ) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: RenderRequest = parse("render", input)?;
-    Ok(done(render_with(&request, &settings)))
+    Ok(done_warned(render_with(&request, &settings)))
 }
 
 // display-list
@@ -466,6 +474,7 @@ fn display_list_input() -> Value {
                 "minimum": 1,
             },
             "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
         }),
         &["source"],
     )
@@ -478,7 +487,7 @@ fn run_display_list(
 ) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: DisplayListRequest = parse("display-list", input)?;
-    Ok(done(display_list_with(&request, &settings)))
+    Ok(done_warned(display_list_with(&request, &settings)))
 }
 
 // plot
@@ -524,6 +533,7 @@ fn plot_input() -> Value {
             "plot_style": text("The CTB plot style to plot through, by its file name, such as `monochrome.ctb`, found in the plot style folders. Without it, the built-in monochrome style."),
             "plot_styles": plot_styles(),
             "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
         }),
         &["source"],
     )
@@ -552,7 +562,7 @@ fn run_plot(
             overwrite,
             plot_style,
         };
-        return Ok(sent(plot_set_with(&request, &settings)));
+        return Ok(sent_warned(plot_set_with(&request, &settings)));
     }
     let request = PlotRequest {
         source,
@@ -560,7 +570,7 @@ fn run_plot(
         overwrite,
         plot_style,
     };
-    Ok(done(plot_with(&request, &settings)))
+    Ok(done_warned(plot_with(&request, &settings)))
 }
 
 // stale
@@ -620,6 +630,7 @@ fn query_input() -> Value {
             "sheet": text("Only the sheet of this name, of the set's sheets. Without it, every sheet."),
             "query": query_schema(),
             "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
         }),
         &["source", "query"],
     )
@@ -865,6 +876,7 @@ fn change_input() -> Value {
             "change_set": change_set,
             "dry_run": flag("Report what the change set would do, and write nothing."),
             "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
         }),
         &["set", "change_set"],
     );
@@ -879,7 +891,7 @@ fn run_change(
 ) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: ChangeRequest = parse("change", input)?;
-    Ok(sent(change_with(&request, &settings)))
+    Ok(sent_warned(change_with(&request, &settings)))
 }
 
 // journal
@@ -966,6 +978,7 @@ fn accept_input() -> Value {
             },
             "dry_run": flag("Report what the accept would do, and write nothing."),
             "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
         }),
         &["set"],
     )
@@ -978,7 +991,7 @@ fn run_accept(
 ) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: AcceptRequest = parse("accept", input)?;
-    Ok(sent(accept_with(&request, &settings, via)))
+    Ok(sent_warned(accept_with(&request, &settings, via)))
 }
 
 // check
@@ -1007,6 +1020,7 @@ fn check_input() -> Value {
                 "items": { "type": "string" },
             },
             "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
         }),
         &["source"],
     )
@@ -1019,7 +1033,7 @@ fn run_check(
 ) -> Result<JsonReply, Error> {
     let settings = take_settings(&mut input, base, false)?;
     let request: CheckRequest = parse("check", input)?;
-    Ok(done(check_with(&request, &settings)))
+    Ok(done_warned(check_with(&request, &settings)))
 }
 
 // What every command shares.
@@ -1119,9 +1133,10 @@ fn is_set(source: &Path, output: Option<&Path>, outputs: &str, one: &str) -> Res
 }
 
 /// The settings for one command: the font folders the input's `fonts`
-/// names, then those of `base`; and, when the command plots, the plot
-/// style folders its `plot_styles` names, then those of `base`. Both are
-/// taken out of the input.
+/// names, then those of `base`, then the system's font folders of `base`
+/// unless its `no_system_fonts` is true; and, when the command plots, the
+/// plot style folders its `plot_styles` names, then those of `base`. All
+/// are taken out of the input.
 fn take_settings(
     input: &mut Map<String, Value>,
     base: &Settings,
@@ -1131,6 +1146,15 @@ fn take_settings(
     settings
         .font_folders
         .splice(0..0, folders(input.remove("fonts"), "fonts")?);
+    match input.remove("no_system_fonts") {
+        None | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => settings = settings.without_system_fonts(),
+        Some(_) => {
+            return Err(
+                Error::usage("`no_system_fonts` is true or false").at_field("no_system_fonts")
+            )
+        }
+    }
     if plots {
         settings
             .plot_style_folders
@@ -1164,11 +1188,24 @@ fn done<T: Serialize>(outcome: Result<T, Error>) -> JsonReply {
     sent(Reply::from(outcome))
 }
 
+/// A command's reply from its core entry point's outcome, with the
+/// warnings its result holds at its top.
+fn done_warned<T: Serialize + Warns>(outcome: Result<T, Error>) -> JsonReply {
+    sent_warned(Reply::from(outcome))
+}
+
+/// A command's reply from its core entry point's reply, with the warnings
+/// its result holds at its top.
+fn sent_warned<T: Serialize + Warns>(reply: Reply<T>) -> JsonReply {
+    sent(reply.warned())
+}
+
 /// A command's reply from its core entry point's reply.
 fn sent<T: Serialize>(reply: Reply<T>) -> JsonReply {
     Reply {
         ok: reply.ok,
         rolled_back: reply.rolled_back,
+        warnings: reply.warnings,
         // A reply holds only strings, numbers, lists and string-keyed maps,
         // which always serialize.
         result: reply.result.map(|result| {
@@ -1210,11 +1247,20 @@ fn fonts() -> Value {
     json!({
         "description": format!(
             "Folders to read fonts from, searched before those the {FONTS_VARIABLE} environment \
-             variable lists on the machine the command runs on."
+             variable lists on the machine the command runs on, and before the system's own font \
+             folders, which are searched last, for TrueType fonts only."
         ),
         "type": "array",
         "items": { "type": "string" },
     })
+}
+
+fn no_system_fonts() -> Value {
+    flag(&format!(
+        "Leave the system's own font folders out, as {SYSTEM_FONTS_VARIABLE}=0 does, so that \
+         TrueType fonts are read only from the folders named and what is measured does not \
+         depend on the fonts the machine has installed."
+    ))
 }
 
 fn plot_styles() -> Value {

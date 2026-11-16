@@ -23,6 +23,7 @@ fn agentdrafter(args: &[&str], cwd: &Path) -> (i32, Value) {
         .args(args)
         .current_dir(cwd)
         .env_remove("AGENTDRAFTER_FONTS")
+        .env("AGENTDRAFTER_SYSTEM_FONTS", "0")
         .output()
         .unwrap();
     let stdout = String::from_utf8(out.stdout).unwrap();
@@ -118,6 +119,65 @@ fn measure_text_prints_the_measurement_and_the_font_used() {
     );
     assert_eq!(code, 0, "{json}");
     close(&json["result"]["width"], 11.0);
+}
+
+/// Measures `font`, in no folder of its own, with the environment's
+/// `AGENTDRAFTER_SYSTEM_FONTS` set to `system` or left out, and `extra`
+/// options, and gives the reply.
+fn measure_with_system(font: &str, system: Option<&str>, extra: &[&str]) -> Value {
+    let dir = scratch("system");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agentdrafter"));
+    command
+        .args(["measure-text", "HI", "--font", font, "--height", "21"])
+        .args(extra)
+        .current_dir(&dir)
+        .env_remove("AGENTDRAFTER_FONTS")
+        .env_remove("AGENTDRAFTER_SYSTEM_FONTS");
+    if let Some(system) = system {
+        command.env("AGENTDRAFTER_SYSTEM_FONTS", system);
+    }
+    let out = command.output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap()
+}
+
+#[test]
+fn the_system_font_folders_are_searched_for_truetype_unless_left_out() {
+    // A made-up font no system has: with the system's folders searched it
+    // is not in them; with them left out, no font folder is set at all.
+    let font = "agentdrafter-made-up-sans.ttf";
+    let searched = measure_with_system(font, None, &[]);
+    assert_eq!(
+        searched["result"]["font"]["why"], "it is not in the font folders",
+        "{searched}"
+    );
+    for (system, extra) in [
+        (None, &["--no-system-fonts"][..]),
+        (Some("0"), &[][..]),
+        (Some("off"), &[][..]),
+    ] {
+        let left_out = measure_with_system(font, system, extra);
+        assert_eq!(
+            left_out["result"]["font"]["why"], "no font folder is set",
+            "{system:?} {extra:?}: {left_out}"
+        );
+        // Either way a look-alike stood in, and the reply warns of it first.
+        assert_eq!(
+            left_out["warnings"],
+            serde_json::json!([{
+                "code": "font_look_alike",
+                "font": font,
+                "look_alike": "Hershey Roman Simplex",
+                "sheets": [],
+            }])
+        );
+    }
+    // An SHX font is never looked for in the system's folders.
+    let shx = measure_with_system("romans.shx", None, &[]);
+    assert_eq!(
+        shx["result"]["font"]["why"], "no font folder is set",
+        "{shx}"
+    );
 }
 
 #[test]
