@@ -41,7 +41,7 @@ Each check is held to one tolerance, **0.01 mm on paper**, given in the reply's 
 ## The reply
 
 ```json
-{"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-001","DEMO-002","DEMO-003"],"message":"every check passes on the 3 sheets checked","passed":true,"tolerance":0.00039370078740157485,"count":0,"findings":[],"font_substitutions":[{"style":"notes","font":"romans.shx","used":"Hershey Roman Simplex","why":"no font folder is set"},"..."]}}
+{"ok":true,"warnings":[{"code":"font_look_alike","font":"romans.shx","look_alike":"Hershey Roman Simplex","sheets":["DEMO-001","DEMO-002","DEMO-003"]}],"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-001","DEMO-002","DEMO-003"],"message":"every check passes on the 3 sheets checked","passed":true,"tolerance":0.00039370078740157485,"count":0,"findings":[],"font_substitutions":[{"style":"notes","font":"romans.shx","used":"Hershey Roman Simplex","why":"no font folder is set"},"..."]}}
 ```
 
 | Key | What it is |
@@ -54,7 +54,7 @@ Each check is held to one tolerance, **0.01 mm on paper**, given in the reply's 
 | `tolerance` | How far past a limit counts, 0.01 mm on paper, in the declared unit. |
 | `count` | How many checks failed. |
 | `findings` | Each failed check, sheet by sheet in the set's order, and on each sheet `paper_size`, `off_sheet`, `text_overflow`, `text_on_text`, then `text_on_line`. |
-| `font_substitutions` | Each text style whose font was not in a font folder, and the look-alike its text was measured with. |
+| `font_substitutions` | Each text style whose font was not in a font folder, and the look-alike its text was measured with. The reply also warns of each such font at its top, under `warnings`, naming the sheets it was used on ([fonts](sheet-description.md#fonts)). |
 | `inconsistent` | The set's [inconsistent mark](change-sets.md#an-inconsistent-set), while it is marked. |
 
 **A finding** names the sheet, the rule and the object, and says what is wrong in numbers in the declared unit:

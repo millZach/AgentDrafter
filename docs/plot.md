@@ -4,7 +4,7 @@
 
 ```
 agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite]
-                  [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]...
+                  [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]
 agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]
 ```
 
@@ -56,7 +56,7 @@ A NUL byte at the end of a CTB's text, which some writers such as ezdxf add, is 
 
 ## The text
 
-Text draws as the display list draws it, so it looks as AutoCAD plots it: an SHX font's strokes with the layer's pen and a TrueType font's outlines filled, from the fonts in the font folders or their look-alikes ([`render`](render.md#what-it-draws)). Each line of text is also written on top as invisible text, so a PDF reader can search it, select it and copy it, SHX text as much as TrueType text:
+Text draws as the display list draws it, so it looks as AutoCAD plots it: an SHX font's strokes with the layer's pen and a TrueType font's outlines filled, from the fonts in the font folders, a TrueType font then in the system's, or their look-alikes ([`render`](render.md#what-it-draws)), each look-alike warned of at the top of the reply. Each line of text is also written on top as invisible text, so a PDF reader can search it, select it and copy it, SHX text as much as TrueType text:
 
 - The display list carries each line of text it draws as a run of its characters along its baseline: where the line starts, the frame it is set in (one unit of the font's advances along the baseline, and the capitals' height up, turned, enlarged and mirrored with the text and any insert it is in), and how far the pen moves after each character. The run draws nothing, so the PNG is the same with it or without it.
 - The PDF sets each run in that frame as one string of invisible text (text rendering mode 3) in Type 3 fonts whose glyphs draw nothing. Each character the sheet uses, at each advance its fonts give it, is a glyph of its own, exactly as wide as the character moves the pen, so each character lands where its pen starts and its box reaches where the next one starts: a reader joins each word whole, parts words at the spaces the text holds, and highlights the text where it draws. Each font's `ToUnicode` map says which character each glyph is, so any character a font can draw can be searched for and copied.
