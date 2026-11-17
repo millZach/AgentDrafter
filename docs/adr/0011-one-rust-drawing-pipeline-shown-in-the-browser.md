@@ -14,5 +14,5 @@ The viewer opens in a browser on the laptop, on forge and on a phone, and the la
 - Text, linetypes and hatches are laid out once, in Rust, for every output.
 - The page carries a WebAssembly module, so its first download is larger than a plain web page. The module holds the renderer, not the whole engine.
 - WebGPU is not everywhere: Linux's system webview has none, and iPhones have it from iOS 26. The renderer needs a WebGL2 path.
-- Which desktop shell wraps the page for the drafting app is decided when that app is designed.
+- The desktop shell that wraps the page for the drafting app is Tauri. Zach decided this on 2026-11-17, when the app was designed ([`docs/drafting-app.md`](../drafting-app.md)): a Rust shell that runs the engine beside the page and shows the same page, which still opens in a browser and on a phone. Tauri is MIT or Apache-2.0 (ADR-0010). An all-Rust UI (egui) was put to him again then, for one language and no webview, and not chosen: the viewer's panels would be built again and the page would stop opening on a phone.
 - How the viewer looks is chosen from a prototype on a phone before it is built.

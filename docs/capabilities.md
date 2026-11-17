@@ -94,6 +94,6 @@ The ranking differs from the plan's order in one way: the real job generated eve
 
 - **Trade knowledge.** AutoCAD Electrical's wire numbering, terminal and PLC I/O reports and its symbol libraries belong in a generator, not the engine (ADR-0002).
 - **AutoCAD's programming interfaces.** AutoLISP, .NET and ObjectARX are replaced by operations and, later, sandboxed scripts (`docs/plan.md`).
-- **The drafting app for people**, its commands typed at a prompt, grips and tool palettes: a later phase on the same core.
+- **The drafting app for people**, its drawing tools, command bar and grips: designed in [`drafting-app.md`](drafting-app.md) and built beside this ranking ([`plan.md`](plan.md)).
 - **Rendering and visualisation**: materials, lights, cameras, walks and animation.
 - **Sheet Set Manager and cloud collaboration**: the drawing set and the journal stand in for them.

@@ -8,7 +8,7 @@ An open-source CAD engine built for agents first. An agent creates, revises and 
 
 It is a general engine: it knows lines, blocks, attributes, layers and sheets, and knows nothing about any trade (ADR-0002). Trade knowledge lives in generators that call it. Its first two callers are a private controls drawing generator, which will write loop sheets through it, and Vellum's drawing jobs, which will run on it in AutoCAD's place.
 
-The drafting app for people, where someone uses AgentDrafter the way they use AutoCAD, is a later phase on the same core.
+The drafting app for people, where someone uses AgentDrafter the way they use AutoCAD, is built on the same core. It is designed in [`docs/drafting-app.md`](drafting-app.md) and its place in the work is set below.
 
 ## The first usable version
 
@@ -43,7 +43,14 @@ In this order:
 
 Zach decided on 2026-11-13 that the work after the first usable version follows the ranking in [`docs/capabilities.md`](capabilities.md), which a real controls job's notes shaped: the gaps generating a plant's sheets cost first, then tables, leaders, dimensions and layouts, then revising a plant's DWG. The four steps above are all in it, in that order's places.
 
-Later, order not yet set: carrying part of an old sheet into a generated one; batch edit and query across existing sets; 3D solids in the AutoCAD style (boxes, extrudes, unions and cuts in the same file as the 2D work); the drafting app for people. Every coordinate is 3D from the start so that 3D is not a rewrite.
+Later, order not yet set: carrying part of an old sheet into a generated one; batch edit and query across existing sets; 3D solids in the AutoCAD style (boxes, extrudes, unions and cuts in the same file as the 2D work). Every coordinate is 3D from the start so that 3D is not a rewrite.
+
+**The drafting app.** Zach decided on 2026-11-17 that its design starts now and that its builds run beside the ranking: the first five builds of [`docs/drafting-app.md`](drafting-app.md), which give an app a person can draw in, come after #101, and after them the work alternates, one capability from the ranking, then one build of the app. He decided the same day, from a prototype and question cards:
+
+- **Its look:** AutoCAD's dark model space, ribbon and status bar, cut down for beginners, with a command bar that prompts in plain words and an assistant that drafts with the drafter. Three other directions were turned down first.
+- **Its stack:** ADR-0011's, the Rust pipeline in the page with React around it, in a Tauri desktop shell. An all-Rust UI was put to him again and not chosen.
+- **Its assistant** runs on the drafter's own agent first, such as Claude Code or Codex, started by the app and pointed at the MCP server. A built-in assistant on the drafter's own API key can follow.
+- **Every edit a drafter makes is a change set,** through the same command, journal, undo and accept as an agent's.
 
 ## Rules of the engine
 
@@ -144,7 +151,7 @@ Three open DWG libraries each read 53 drawings (made-up ones and real ones under
 | Question | Waits on |
 |---|---|
 | The language scripts are written in, and their sandbox | the comparison, when scripts are built |
-| Which desktop shell wraps the page for the drafting app | the drafting app's design |
 | Code signing for Windows and macOS | the drafting app shipping |
 | Real AutoCAD solids inside DWG | the 3D design |
-| The drafting app for people | its own grilling session and prototypes |
+| A built-in assistant for the drafting app, on the drafter's own API key | the assistant's panel on the drafter's own agent |
+| What the drafting app opens beyond a drawing set | reading and revising a plant's DWG (#70, #71) |
