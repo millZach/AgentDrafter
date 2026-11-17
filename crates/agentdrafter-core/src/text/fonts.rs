@@ -16,6 +16,7 @@
 //! font the sheet asked for: the substitution is only in what AgentDrafter
 //! measures.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -280,11 +281,6 @@ pub(crate) fn find(name: &str, settings: &Settings) -> (Font, FontUsed) {
     (Font::Hershey, used)
 }
 
-/// How deep below a system font folder a font is looked for: deep enough
-/// for any system's own layout, and a stop for a folder that links back to
-/// one above it.
-const SYSTEM_FOLDER_DEPTH: usize = 8;
-
 /// Reads the font file `name` from the first folder the settings name that
 /// holds it, or for a TrueType font then from the first of the system's
 /// font folders that holds it, and says when it was the system's. The
@@ -306,7 +302,7 @@ fn read(name: &str, settings: &Settings) -> Result<(Font, Option<FontSource>), S
         .or_else(|| {
             system
                 .iter()
-                .find_map(|folder| file_below(folder, name, SYSTEM_FOLDER_DEPTH))
+                .find_map(|folder| file_below(folder, name, &mut HashSet::new()))
                 .map(|path| (path, Some(FontSource::System)))
         });
     let Some((path, source)) = found else {
@@ -326,26 +322,42 @@ fn read(name: &str, settings: &Settings) -> Result<(Font, Option<FontSource>), S
 }
 
 /// The file named `name`, ignoring case, in `folder` or the folders inside
-/// it, at most `depth` down: the folder's own first, then each folder
-/// inside it in the order of their names, so that the same font wins
-/// whatever order the system lists its folders in.
-fn file_below(folder: &Path, name: &str, depth: usize) -> Option<PathBuf> {
-    if let Some(path) = file_in(folder, name) {
-        return Some(path);
-    }
-    if depth == 0 {
+/// it, however deep: the folder's own first, then each folder inside it in
+/// the order of their names. Among the folder's files named alike, one with
+/// the name's own case wins, then the first in the order of their names, so
+/// that the same font wins whatever order the system lists a folder in. A
+/// folder already searched, as through a link back to one above it, is not
+/// searched again; `visited` holds each searched folder's real path.
+fn file_below(folder: &Path, name: &str, visited: &mut HashSet<PathBuf>) -> Option<PathBuf> {
+    let real = fs::canonicalize(folder).ok()?;
+    if !visited.insert(real) {
         return None;
     }
-    let mut inside: Vec<PathBuf> = fs::read_dir(folder)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
+    let mut alike: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
+    let mut inside: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(folder).ok()?.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            inside.push(path);
+        } else if path.is_file()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        {
+            alike.push((entry.file_name(), path));
+        }
+    }
+    if let Some((_, path)) = alike
+        .into_iter()
+        .min_by(|(a, _), (b, _)| (a != name, a).cmp(&(b != name, b)))
+    {
+        return Some(path);
+    }
     inside.sort();
     inside
         .iter()
-        .find_map(|inner| file_below(inner, name, depth - 1))
+        .find_map(|inner| file_below(inner, name, visited))
 }
 
 /// The file in `folder` named `name`, ignoring case.
@@ -403,6 +415,13 @@ mod tests {
 
     fn advance(font: &Font) -> f64 {
         font.glyphs("A")[0].advance.0
+    }
+
+    /// The advance of `A` in the made-up font `truetype(units)` makes.
+    fn advance_of(units: u16) -> f64 {
+        advance(&Font::TrueType(
+            TrueTypeFont::parse(truetype(units)).unwrap(),
+        ))
     }
 
     #[test]
@@ -464,6 +483,82 @@ mod tests {
         let (font, _) = find("x.ttf", &with_system(&[], &[&system]));
         let (a, _) = find("x.ttf", &settings(&[&system.join("a")]));
         assert_eq!(advance(&font), advance(&a));
+        let _ = fs::remove_dir_all(&system);
+    }
+
+    #[test]
+    fn among_files_named_alike_in_a_system_folder_the_same_one_wins_whatever_order_they_were_made_in(
+    ) {
+        // Two made-up fonts whose names differ only in case, made in both
+        // orders. A file system that ignores case holds only one of them,
+        // so there is nothing to choose and the test has nothing to check.
+        let first = folder("case-first");
+        let second = folder("case-second");
+        let (upper, mixed) = (("ADREVIEW.TTF", 500), ("ADReview.ttf", 700));
+        for (dir, order) in [(&first, [upper, mixed]), (&second, [mixed, upper])] {
+            for (name, advance) in order {
+                fs::write(dir.join(name), truetype(advance)).unwrap();
+            }
+        }
+        if fs::read_dir(&first).unwrap().count() < 2 {
+            eprintln!("this file system ignores case in file names: nothing to choose between");
+            return;
+        }
+        for dir in [&first, &second] {
+            let system = with_system(&[], &[dir]);
+            // No file has the name's own case: the first in name order wins.
+            let (font, used) = find("adreview.ttf", &system);
+            assert_eq!(used.source, Some(FontSource::System));
+            assert_eq!(advance(&font), advance_of(500), "{}", dir.display());
+            // A file with the name's own case wins over the others.
+            let (font, _) = find("ADReview.ttf", &system);
+            assert_eq!(advance(&font), advance_of(700), "{}", dir.display());
+        }
+        let _ = fs::remove_dir_all(&first);
+        let _ = fs::remove_dir_all(&second);
+    }
+
+    #[test]
+    fn a_font_any_number_of_folders_below_a_system_folder_is_found() {
+        let system = folder("deep");
+        let deep = (0..12).fold(system.clone(), |path, level| {
+            path.join(format!("level-{level}"))
+        });
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("deep.ttf"), truetype(640)).unwrap();
+        let (font, used) = find("deep.ttf", &with_system(&[], &[&system]));
+        assert!(matches!(font, Font::TrueType(_)), "{font:?}");
+        assert_eq!(used.source, Some(FontSource::System));
+        assert_eq!(advance(&font), advance_of(640));
+        let _ = fs::remove_dir_all(&system);
+    }
+
+    #[test]
+    fn a_folder_that_links_back_above_itself_ends_the_search() {
+        // A link inside a system folder back to the folder itself, then a
+        // font in a folder after the link in name order. Making a link to a
+        // folder needs a privilege on Windows; without it there is no loop
+        // to make, and the test says so and checks nothing.
+        let system = folder("loop");
+        fs::create_dir_all(system.join("a")).unwrap();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&system, system.join("a").join("back"));
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&system, system.join("a").join("back"));
+        if let Err(e) = linked {
+            eprintln!("cannot make a link to a folder here ({e}): no loop to search");
+            let _ = fs::remove_dir_all(&system);
+            return;
+        }
+        fs::create_dir_all(system.join("z")).unwrap();
+        fs::write(system.join("z").join("after.ttf"), truetype(660)).unwrap();
+        let settings = with_system(&[], &[&system]);
+        let (font, used) = find("after.ttf", &settings);
+        assert_eq!(used.source, Some(FontSource::System));
+        assert_eq!(advance(&font), advance_of(660));
+        let (font, used) = find("nowhere.ttf", &settings);
+        assert!(matches!(font, Font::Hershey));
+        assert_eq!(used.why.as_deref(), Some("it is not in the font folders"));
         let _ = fs::remove_dir_all(&system);
     }
 

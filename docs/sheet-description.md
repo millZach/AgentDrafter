@@ -783,7 +783,7 @@ A viewport may be clipped to a boundary instead of its rectangle, as AutoCAD's V
 
 AutoCAD's SHX fonts are Autodesk's files and are never in this repository (ADR-0008). AgentDrafter reads fonts from the font folders a setting names: the folders `--fonts` gives, then those the environment variable `AGENTDRAFTER_FONTS` lists, separated as the system separates paths (`;` on Windows, `:` elsewhere). On a machine that has AutoCAD, name its `Fonts` folder for the SHX fonts. A font is found by its file name, ignoring case.
 
-A TrueType font in none of those folders is then looked for in the system's own font folders, as AutoCAD finds it, each with the folders inside it, the folder's own files first and then its folders in the order of their names:
+A TrueType font in none of those folders is then looked for in the system's own font folders, as AutoCAD finds it, each with the folders inside it however deep, the folder's own files first and then its folders in the order of their names. Where a folder holds files whose names differ only in case, the one in the name's own case wins, then the first in the order of their names, so the same font wins however the system lists the folder. A folder already searched, as through a link back to one above it, is not searched again:
 
 | System | Its font folders, in order |
 |---|---|
