@@ -424,10 +424,7 @@ mod tests {
         let (font, used) = find("madeup.ttf", &settings(&[&named]));
         assert!(matches!(font, Font::Hershey));
         assert_eq!(used.why.as_deref(), Some("it is not in the font folders"));
-        assert!(serde_json::to_value(&used)
-            .unwrap()
-            .get("source")
-            .is_none());
+        assert!(serde_json::to_value(&used).unwrap().get("source").is_none());
         let _ = fs::remove_dir_all(&named);
         let _ = fs::remove_dir_all(&system);
     }

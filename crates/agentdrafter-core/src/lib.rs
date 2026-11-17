@@ -175,7 +175,7 @@ pub use settings::{system_font_folders, Settings, FONTS_VARIABLE, PLOT_STYLES_VA
 pub use stamp::{
     check_stale, SourceCheck, SourceKind, SourceStamp, StaleReport, StaleRequest, Stamp,
 };
-pub use text::fonts::{FontSubstitution, FontUsed, FontSource};
+pub use text::fonts::{FontSource, FontSubstitution, FontUsed};
 pub use text::measure::{measure_text, measure_text_with, MeasureTextRequest, TextMeasurement};
 pub use text::{Attachment, FontKind, Justify, MText, Text, TextStyle, STANDARD};
 pub use units::Unit;
