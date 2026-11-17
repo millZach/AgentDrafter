@@ -319,7 +319,7 @@ mod tests {
             font: font.into(),
             used: used.into(),
             why: "it is not in the font folders".into(),
-            found_in: None,
+            source: None,
         }
     }
 

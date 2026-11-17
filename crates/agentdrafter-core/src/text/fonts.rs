@@ -112,7 +112,7 @@ pub(crate) struct Glyph {
 /// Where a font was found, when it was not in a folder the settings name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FoundIn {
+pub enum FontSource {
     /// In one of the system's own font folders.
     System,
 }
@@ -133,7 +133,7 @@ pub struct FontUsed {
     /// folders; left out when it was in a folder the settings name, or is
     /// the built-in look-alike.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub found_in: Option<FoundIn>,
+    pub source: Option<FontSource>,
 }
 
 /// A text style whose font was not found, and the look-alike AgentDrafter
@@ -151,7 +151,7 @@ pub struct FontSubstitution {
     /// `system` when the look-alike was found in one of the system's font
     /// folders; left out otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub found_in: Option<FoundIn>,
+    pub source: Option<FontSource>,
 }
 
 /// A font, read and ready to measure with.
@@ -242,13 +242,13 @@ pub(crate) struct Line {
 /// with a report of which was used.
 pub(crate) fn find(name: &str, settings: &Settings) -> (Font, FontUsed) {
     let why = match read(name, settings) {
-        Ok((font, found_in)) => {
+        Ok((font, source)) => {
             let used = FontUsed {
                 requested: name.to_owned(),
                 used: name.to_owned(),
                 substituted: false,
                 why: None,
-                found_in,
+                source,
             };
             return (font, used);
         }
@@ -259,13 +259,13 @@ pub(crate) fn find(name: &str, settings: &Settings) -> (Font, FontUsed) {
         .find(|(font, _)| font.eq_ignore_ascii_case(name))
         .map_or(&[][..], |(_, twins)| &twins[..]);
     for twin in twins {
-        if let Ok((font, found_in)) = read(twin, settings) {
+        if let Ok((font, source)) = read(twin, settings) {
             let used = FontUsed {
                 requested: name.to_owned(),
                 used: (*twin).to_owned(),
                 substituted: true,
                 why: Some(why),
-                found_in,
+                source,
             };
             return (font, used);
         }
@@ -275,7 +275,7 @@ pub(crate) fn find(name: &str, settings: &Settings) -> (Font, FontUsed) {
         used: hershey::NAME.to_owned(),
         substituted: true,
         why: Some(why),
-        found_in: None,
+        source: None,
     };
     (Font::Hershey, used)
 }
@@ -289,7 +289,7 @@ const SYSTEM_FOLDER_DEPTH: usize = 8;
 /// holds it, or for a TrueType font then from the first of the system's
 /// font folders that holds it, and says when it was the system's. The
 /// error says why it could not be used.
-fn read(name: &str, settings: &Settings) -> Result<(Font, Option<FoundIn>), String> {
+fn read(name: &str, settings: &Settings) -> Result<(Font, Option<FontSource>), String> {
     let kind = FontKind::of(name).ok_or_else(|| {
         format!("`{name}` is neither an SHX font (.shx) nor a TrueType font (.ttf)")
     })?;
@@ -307,9 +307,9 @@ fn read(name: &str, settings: &Settings) -> Result<(Font, Option<FoundIn>), Stri
             system
                 .iter()
                 .find_map(|folder| file_below(folder, name, SYSTEM_FOLDER_DEPTH))
-                .map(|path| (path, Some(FoundIn::System)))
+                .map(|path| (path, Some(FontSource::System)))
         });
-    let Some((path, found_in)) = found else {
+    let Some((path, source)) = found else {
         return Err(if named.is_empty() && system.is_empty() {
             "no font folder is set".to_owned()
         } else {
@@ -321,7 +321,7 @@ fn read(name: &str, settings: &Settings) -> Result<(Font, Option<FoundIn>), Stri
         FontKind::Shx => ShxFont::parse(&bytes).map(Font::Shx),
         FontKind::TrueType => TrueTypeFont::parse(bytes).map(Font::TrueType),
     };
-    font.map(|font| (font, found_in))
+    font.map(|font| (font, source))
         .map_err(|e| format!("it could not be read: {e}"))
 }
 
@@ -415,9 +415,9 @@ mod tests {
         let (font, used) = find("madeup.ttf", &with_system(&[&named], &[&system]));
         assert!(matches!(font, Font::TrueType(_)), "{font:?}");
         assert!(!used.substituted);
-        assert_eq!(used.found_in, Some(FoundIn::System));
+        assert_eq!(used.source, Some(FontSource::System));
         assert_eq!(
-            serde_json::to_value(&used).unwrap()["found_in"],
+            serde_json::to_value(&used).unwrap()["source"],
             serde_json::json!("system")
         );
         // Without the system's folders it takes a look-alike, as before.
@@ -426,7 +426,7 @@ mod tests {
         assert_eq!(used.why.as_deref(), Some("it is not in the font folders"));
         assert!(serde_json::to_value(&used)
             .unwrap()
-            .get("found_in")
+            .get("source")
             .is_none());
         let _ = fs::remove_dir_all(&named);
         let _ = fs::remove_dir_all(&system);
@@ -441,7 +441,7 @@ mod tests {
         fs::write(second.join("a.ttf"), truetype(500)).unwrap();
         let all = with_system(&[&named], &[&first, &second]);
         let (font, used) = find("a.ttf", &all);
-        assert_eq!(used.found_in, Some(FoundIn::System));
+        assert_eq!(used.source, Some(FontSource::System));
         let (only_first, _) = find("a.ttf", &settings(&[&first]));
         let (only_second, _) = find("a.ttf", &settings(&[&second]));
         assert_eq!(advance(&font), advance(&only_first));
@@ -449,7 +449,7 @@ mod tests {
         fs::write(named.join("A.ttf"), truetype(900)).unwrap();
         let (font, used) = find("a.ttf", &all);
         let (only_named, _) = find("a.ttf", &settings(&[&named]));
-        assert_eq!(used.found_in, None);
+        assert_eq!(used.source, None);
         assert_eq!(advance(&font), advance(&only_named));
         assert_ne!(advance(&font), advance(&only_first));
         for dir in [&named, &first, &second] {
@@ -498,7 +498,7 @@ mod tests {
         assert!(matches!(font, Font::TrueType(_)));
         assert!(used.substituted);
         assert_eq!(used.used, "LiberationSans-Regular.ttf");
-        assert_eq!(used.found_in, Some(FoundIn::System));
+        assert_eq!(used.source, Some(FontSource::System));
         let _ = fs::remove_dir_all(&system);
     }
 
