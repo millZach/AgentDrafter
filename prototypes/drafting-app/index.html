@@ -1,0 +1,704 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway. Issue #144: the drafting app for people. Round 2.
+  One design: AutoCAD's look (dark model space, ribbon, command line, status bar), cut down
+  for beginners, with an assistant that drafts with you. The engine and the assistant are
+  faked in this page; the sheet is made up. Nothing here is production code.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<link rel="icon" href="data:,">
+<title>AgentDrafter drafting app, prototype</title>
+<style>
+:root{--frame:#1e2530;--ribbon:#394150;--strip:#303845;--edge:#4b5464;--canvas:#212830;--text:#e6e9ee;--dim:#a3adba;--blue:#4aa3ff;--agent:#b79cff;
+  --ui:"Segoe UI",system-ui,-apple-system,sans-serif;--mono:Consolas,"Cascadia Mono",ui-monospace,Menlo,monospace}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0;overflow:hidden;overscroll-behavior:none;-webkit-text-size-adjust:100%}
+body{font:13px/1.35 var(--ui);color:var(--text);background:var(--frame);display:grid;grid-template:auto minmax(0,1fr) / minmax(0,1fr);height:100dvh;-webkit-tap-highlight-color:transparent}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer;touch-action:manipulation}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+svg{display:block}
+#proto{display:flex;align-items:center;gap:8px;padding:3px 8px;background:#000;color:#ffd84a;font-size:12px;white-space:nowrap;overflow:hidden}
+#proto button{background:#000;border:1px solid #ffd84a;color:#ffd84a;border-radius:3px;padding:1px 8px}
+#app{display:grid;grid-template:auto auto auto minmax(0,1fr) auto / minmax(0,1fr);min-height:0;min-width:0}
+
+/* title bar */
+#title{display:flex;align-items:center;gap:8px;height:34px;padding:0 8px;background:var(--frame);border-bottom:1px solid #121821;min-width:0}
+#title .mark{width:20px;height:20px;flex:none}
+#title .name{font-weight:600}
+#title .file{flex:1;text-align:center;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qa{background:none;border:1px solid transparent;border-radius:3px;padding:3px 6px;display:flex;align-items:center;gap:5px;color:var(--text)}
+.qa:hover{background:#333c49;border-color:var(--edge)}
+#state{color:var(--dim);white-space:nowrap}
+#accept{background:#1f6fc9;border:1px solid #3d8fe8;border-radius:3px;padding:3px 14px;font-weight:600}
+#accept:hover{background:#2a7fdc}
+#agentbtn{display:none}
+
+/* ribbon */
+#ribbon{display:flex;background:var(--ribbon);border-bottom:1px solid #151b24;padding:0 4px;overflow-x:auto;scrollbar-width:none}
+.panel{display:flex;flex-direction:column;border-right:1px solid var(--edge);flex:none}
+.panel .row{display:flex;gap:2px;flex:1;align-items:center;padding:5px 6px 3px}
+.panel h3{margin:0;padding:2px 0 3px;text-align:center;font-size:11px;font-weight:400;color:var(--dim);background:var(--strip)}
+.rb{display:grid;justify-items:center;gap:3px;min-width:60px;padding:6px 6px 4px;border:1px solid transparent;border-radius:3px;background:none;font-size:12px;color:var(--text)}
+.rb:hover{background:#4a5567;border-color:#627084}
+.rb[aria-pressed=true]{background:#274b76;border-color:var(--blue)}
+.rb svg{width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.rb .pt{fill:var(--blue);stroke:none}
+.rb.as{color:#e3d9ff}.rb.as svg{stroke:var(--agent)}
+.rb.pulse{outline:2px solid var(--agent);outline-offset:1px;animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{50%{outline-offset:5px;outline-color:rgba(183,156,255,.35)}}
+.layerbox{display:grid;gap:5px;min-width:190px}
+.layerbox label{display:flex;align-items:center;gap:6px;background:#2b323d;border:1px solid var(--edge);border-radius:3px;padding:2px 4px 2px 8px}
+.layerbox .sw{width:13px;height:13px;border:1px solid #111;flex:none}
+.layerbox select{flex:1;background:transparent;border:0;padding:4px 2px;outline:0}
+.layerbox select option{background:#2b323d}
+.layerbox small{color:var(--dim);font-size:11px}
+
+/* drawing tabs */
+#filetabs{display:flex;align-items:flex-end;gap:1px;background:#2a313c;padding:3px 6px 0;border-bottom:1px solid #151b24;overflow-x:auto;scrollbar-width:none}
+#filetabs button{background:#333b47;border:1px solid #454e5c;border-bottom:0;border-radius:3px 3px 0 0;padding:4px 14px;color:var(--dim);white-space:nowrap}
+#filetabs button.on{background:var(--canvas);color:#fff;border-color:#5a6577}
+
+/* work area */
+#work{display:grid;grid-template-columns:minmax(0,1fr) 340px;min-height:0}
+#stage{position:relative;min-width:0;min-height:0;overflow:hidden;background:var(--canvas)}
+#cv{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:none;-webkit-user-select:none;user-select:none}
+#zoom{position:absolute;right:10px;top:50%;transform:translateY(-50%);display:grid;gap:1px;z-index:3;background:#3a4250;border:1px solid #5a6577;border-radius:4px;overflow:hidden}
+#zoom button{width:34px;height:32px;background:none;border:0;font-size:17px;line-height:1}
+#zoom button:hover{background:#4a5567}
+#zoom .fit{font-size:11px}
+#toast{position:absolute;left:12px;top:66px;z-index:4;max-width:min(380px,calc(100% - 70px));padding:6px 12px;border-radius:4px;background:rgba(48,56,69,.96);border:1px solid #5a6577;border-left:3px solid var(--blue);pointer-events:none;transition:opacity .25s}
+#toast.agent{border-left-color:var(--agent)}
+#toast.off{opacity:0}
+
+/* the assistant's banner on the drawing: a guided step, or a proposal to keep or discard */
+#banner{position:absolute;left:50%;top:12px;transform:translateX(-50%);z-index:5;display:flex;align-items:center;gap:10px;max-width:min(640px,calc(100% - 24px));padding:8px 10px 8px 12px;border-radius:6px;background:#2f2a4d;border:1px solid var(--agent);box-shadow:0 6px 20px rgba(0,0,0,.45)}
+#banner .txt{flex:1;min-width:0}
+#banner .step{color:#cfc2ff;font-size:12px;white-space:nowrap}
+.avatar{width:22px;height:22px;border-radius:50%;background:var(--agent);flex:none;display:grid;place-items:center}
+.avatar svg{width:14px;height:14px;fill:#231d3d}
+.bbtn{background:none;border:1px solid #7f71b8;border-radius:4px;padding:3px 12px;white-space:nowrap}
+.bbtn:hover{background:#40386a}
+.bbtn.go{background:var(--agent);border-color:var(--agent);color:#1d1833;font-weight:600}
+.bbtn.go:hover{background:#c9b5ff}
+
+/* quick properties, beside what is selected */
+#qp{position:absolute;z-index:4;width:236px;background:rgba(48,56,69,.97);border:1px solid #5a6577;border-radius:4px;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+#qp h4{margin:0;padding:5px 10px;font-size:12px;font-weight:600;background:var(--strip);border-bottom:1px solid var(--edge);border-radius:4px 4px 0 0}
+#qp .rows{padding:6px 10px}
+.prow{display:grid;grid-template-columns:62px minmax(0,1fr);gap:8px;align-items:center;padding:2px 0}
+.prow span{color:var(--dim)}
+.prow input,.prow select{width:100%;min-width:0;padding:3px 5px;background:#232a34;border:1px solid var(--edge);border-radius:2px}
+.prow output{font-family:var(--mono);font-size:12px}
+#qp .acts{display:flex;gap:4px;padding:0 10px 8px;flex-wrap:wrap}
+#qp .acts button{background:#3a4250;border:1px solid #5a6577;border-radius:3px;padding:3px 9px}
+#qp .acts button:hover{background:#4a5567}
+#qp .acts .askit{border-color:#7f71b8;color:#e3d9ff}
+
+/* command line */
+#cmd{position:absolute;left:50%;transform:translateX(-50%);bottom:12px;width:min(760px,calc(100% - 24px));z-index:4;font:13px var(--mono)}
+#hist{padding:0 12px 4px;color:#aeb8c4;text-shadow:0 1px 3px #000,0 0 6px #212830;pointer-events:none}
+#hist div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#cmdbar{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;margin:0;background:rgba(58,66,80,.97);border:1px solid #6a7689;border-radius:4px;padding:5px 10px;box-shadow:0 4px 14px rgba(0,0,0,.45)}
+#cmdbar .chev{color:var(--dim)}
+#cmdname{font-weight:700;color:#fff}
+#cmdtext{white-space:nowrap}
+.opt{background:none;border:0;color:#7fc0ff;padding:0 1px;text-decoration:underline}
+.opt:hover{color:#fff}
+#cmdin{flex:1;min-width:120px;background:transparent;border:0;outline:0;color:#fff;font:14px var(--mono);padding:2px 0;caret-color:var(--blue)}
+#cmdin::placeholder{color:#8f9aa8}
+
+/* status bar */
+#status{display:flex;align-items:stretch;gap:2px;height:28px;padding:0 6px;background:var(--frame);border-top:1px solid #121821;font-size:12px;color:var(--dim);min-width:0}
+.ltab{background:none;border:0;padding:0 14px;color:var(--dim)}
+.ltab.on{background:var(--canvas);color:#fff;border-top:2px solid var(--blue)}
+#coords{font-family:var(--mono);align-self:center;min-width:140px;padding-left:12px;color:var(--text)}
+.tog{background:none;border:0;padding:0 9px;color:#7f8a98;white-space:nowrap}
+.tog[aria-pressed=true]{color:#7fc0ff}
+.tog:hover{background:#2c3440}
+.tog kbd{font:10px var(--mono);opacity:.7;margin-left:3px}
+.grow{flex:1}
+
+/* the assistant */
+#agent{display:flex;flex-direction:column;min-height:0;background:#2a313c;border-left:1px solid #121821}
+#agent header{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #3c4553}
+#agent header b{flex:1;font-size:14px}
+.atab{background:none;border:0;border-bottom:2px solid transparent;padding:3px 6px;color:var(--dim)}
+.atab.on{color:#fff;border-color:var(--agent)}
+#agentclose{display:none}
+#chat,#history{flex:1;min-height:0;overflow:auto;padding:12px}
+#chat{display:flex;flex-direction:column;gap:10px}
+.msg{max-width:94%;padding:8px 10px;border-radius:6px;line-height:1.42}
+.msg.agent{background:#353e4b;border-left:3px solid var(--agent);align-self:flex-start}
+.msg.you{background:#274b76;align-self:flex-end}
+.chips{display:grid;gap:5px;margin-top:8px}
+.chip{text-align:left;background:#2a313c;border:1px solid #7f71b8;border-radius:5px;padding:6px 10px}
+.chip:hover{background:#40386a}
+#askform{display:flex;gap:6px;padding:10px;margin:0;border-top:1px solid #3c4553}
+#askin{flex:1;min-width:0;background:#1e2530;border:1px solid var(--edge);border-radius:5px;padding:8px 10px;font-size:14px}
+#askform button{background:var(--agent);border:0;border-radius:5px;padding:0 14px;color:#1d1833;font-weight:600}
+#history ol{list-style:none;margin:0;padding:0}
+#history li{display:grid;grid-template-columns:24px minmax(0,1fr);gap:6px;padding:7px 0;border-bottom:1px solid #3c4553}
+#history .n{font-family:var(--mono);color:var(--dim)}
+#history .meta{font-size:12px;color:var(--dim)}
+#history .agent .who{color:var(--agent)}#history .you .who{color:#7fc0ff}
+#history .undo{background:#3a4250;border:1px solid #5a6577;border-radius:3px;padding:4px 12px;margin-bottom:8px}
+
+/* the tip that explains a tool */
+#tip{position:fixed;z-index:30;width:250px;padding:8px 10px;background:#f4f6f8;color:#1c232d;border-radius:3px;box-shadow:0 6px 20px rgba(0,0,0,.5);pointer-events:none;line-height:1.4}
+#tip b{display:block;margin-bottom:2px}
+#tip kbd{font:12px var(--mono);background:#dfe4ea;border-radius:2px;padding:0 4px;margin-left:4px}
+
+@media (max-width:860px){
+  #work{grid-template-columns:minmax(0,1fr)}
+  #title .name,#state,#title .file{display:none}
+  #title .grow2{flex:1}
+  #agentbtn{display:flex;border-color:#7f71b8;color:#e3d9ff}
+  #agent{position:fixed;left:0;right:0;bottom:0;height:62dvh;z-index:20;border-left:0;border-top:2px solid var(--agent);box-shadow:0 -14px 40px rgba(0,0,0,.6);transform:translateY(105%);transition:transform .2s}
+  body.agent-open #agent{transform:none}
+  #agentclose{display:block;background:none;border:1px solid var(--edge);border-radius:4px;padding:2px 10px}
+  .rb{min-width:54px;padding:5px 4px 3px}
+  .layerbox{min-width:150px}.layerbox small{display:none}
+  #askin,#cmdin{font-size:16px}
+  #cmd{bottom:8px;width:calc(100% - 16px)}
+  #cmdin{min-width:90px}
+  #zoom{top:auto;bottom:118px;transform:none}
+  #qp{left:8px!important;right:8px;top:auto!important;bottom:104px;width:auto}
+  #coords,.tog kbd{display:none}
+  #banner{flex-wrap:wrap;top:8px;width:calc(100% - 16px)}
+  #toast{top:auto;bottom:104px}
+}
+</style>
+</head>
+<body>
+<div id="proto"><span>Prototype, round 2</span><button id="preset">Start over</button><span style="opacity:.7">The engine and the assistant are faked in this page.</span></div>
+<div id="app">
+  <header id="title">
+    <svg class="mark" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 17V4l13 13z" fill="none" stroke="#4aa3ff" stroke-width="2" stroke-linejoin="round"/><path d="M7 14v-3l3 3z" fill="#4aa3ff"/></svg><span class="name">AgentDrafter</span>
+    <button class="qa" id="undo" title="Undo last (Ctrl+Z)"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h6.5a3.5 3.5 0 010 7H6M3 6l3-3M3 6l3 3"/></svg>Undo</button>
+    <span class="file">Demo plant / DP-LD-101.dwg</span><span class="grow2"></span>
+    <span id="state"></span>
+    <button class="qa" id="agentbtn">Assistant</button>
+    <button id="accept" title="Issue the working revision">Accept</button>
+  </header>
+  <nav id="ribbon" aria-label="Tools"></nav>
+  <div id="filetabs"><button class="on">DP-LD-101*</button><button data-stub>DP-LD-102</button><button data-stub>DP-LD-103</button></div>
+  <main id="work">
+    <div id="stage">
+      <canvas id="cv"></canvas>
+      <div id="toast" class="off"></div>
+      <div id="banner" hidden></div>
+      <div id="qp" hidden></div>
+      <div id="zoom"><button data-z="1.4" aria-label="Zoom in">+</button><button data-z="0.714" aria-label="Zoom out">&minus;</button><button class="fit" data-z="0" title="Show the whole sheet">Fit</button></div>
+      <div id="cmd"><div id="hist"></div>
+        <form id="cmdbar"><span class="chev">&gt;_</span><span id="cmdname"></span><span id="cmdtext"></span><span id="cmdopts"></span>
+          <input id="cmdin" aria-label="Command line" autocomplete="off" autocapitalize="off" spellcheck="false"></form></div>
+    </div>
+    <aside id="agent" aria-label="Assistant">
+      <header><span class="avatar"><svg viewBox="0 0 14 14"><path d="M7 0l1.8 5.2L14 7l-5.2 1.8L7 14l-1.8-5.2L0 7l5.2-1.8z"/></svg></span><b>Assistant</b>
+        <button class="atab on" data-tab="chat">Chat</button><button class="atab" data-tab="history">History</button><button id="agentclose">Close</button></header>
+      <div id="chat"></div>
+      <div id="history" hidden></div>
+      <form id="askform"><input id="askin" aria-label="Ask the assistant" placeholder="Ask, or say what to draw" autocomplete="off"><button>Send</button></form>
+    </aside>
+  </main>
+  <footer id="status">
+    <button class="ltab on">Model</button><button class="ltab" data-stub>Layout1</button>
+    <span id="coords">0.0, 0.0</span>
+    <button class="tog" id="tgrid">Grid<kbd>F7</kbd></button><button class="tog" id="tsnap" title="The cursor jumps to ends, middles and centres">Object snap<kbd>F3</kbd></button><button class="tog" id="tortho" title="Lines stay level or upright">Ortho<kbd>F8</kbd></button>
+    <span class="grow"></span>
+  </footer>
+</div>
+<div id="tip" hidden></div>
+<script>
+'use strict';
+/* ───────────── the faked engine: a made-up loop sheet, part drawn ───────────── */
+const W=431.8,H=279.4,TS=1.35,SHEET='DP-LD-101',AG='#b79cff';
+const font=px=>`300 ${px}px Bahnschrift,"DIN Alternate","Segoe UI",sans-serif`;
+const LAYERS={BORDER:'#e8ebee',TITLE:'#e8ebee',INST:'#35d6e8',WIRE:'#5fe05f',PROCESS:'#ef6bef',TEXT:'#f5e04a'};
+const I={
+ line:'<path d="M6 22L22 6"/><rect class="pt" x="3.5" y="19.5" width="5" height="5"/><rect class="pt" x="19.5" y="3.5" width="5" height="5"/>',
+ circle:'<circle cx="14" cy="14" r="10"/><path d="M12 14h4M14 12v4"/><rect class="pt" x="21.5" y="11.5" width="5" height="5"/>',
+ rect:'<rect x="4" y="7" width="20" height="14"/><rect class="pt" x="1.5" y="4.5" width="5" height="5"/><rect class="pt" x="21.5" y="18.5" width="5" height="5"/>',
+ text:'<path d="M6 23L14 4l8 19M9 16h10"/>',
+ move:'<path d="M14 3v22M3 14h22M14 3l-3.5 3.5M14 3l3.5 3.5M14 25l-3.5-3.5M14 25l3.5-3.5M3 14l3.5-3.5M3 14l3.5 3.5M25 14l-3.5-3.5M25 14l-3.5 3.5"/>',
+ copy:'<rect x="4" y="4" width="14" height="14"/><rect x="10" y="10" width="14" height="14" fill="#394150"/>',
+ erase:'<path d="M16 4l8 8-11 11H8l-4-4zM10 10l8 8M4 25h20"/>',
+ ask:'<path d="M4 5h20v14H13l-5 5v-5H4z"/><path d="M14 8.5l1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1z"/>',
+ guide:'<path d="M4 23c3-9 7-9 9-5s5 2 7-6" stroke-dasharray="2.5 3"/><path d="M20 4l5 9-4.5-1-1.5 4z"/>',
+ check:'<rect x="6" y="5" width="16" height="20" rx="1"/><path d="M10 4h8v4h-8zM10 16l3 3 5-6"/>'};
+const TOOLS={
+ line:{label:'Line',key:'L',name:'LINE',tip:'Draws straight lines. Click a start point, then keep clicking. Press Enter when you are done.'},
+ circle:{label:'Circle',key:'C',name:'CIRCLE',tip:'Click the centre, then click how big it is, or type a radius.'},
+ rect:{label:'Rectangle',key:'REC',name:'RECTANGLE',tip:'Click one corner, then the opposite corner.'},
+ text:{label:'Text',key:'T',name:'TEXT',tip:'Click where the text starts, type it, and press Enter.'},
+ move:{label:'Move',key:'M',name:'MOVE',tip:'Click an object, click a point to hold it by, then click where that point should go.'},
+ copy:{label:'Copy',key:'CO',name:'COPY',tip:'Works like Move, but the original stays where it is.'},
+ erase:{label:'Erase',key:'E',name:'ERASE',tip:'Click an object to remove it. Undo brings it back.'}};
+const ALIAS={L:'line',LINE:'line',C:'circle',CIRCLE:'circle',REC:'rect',RECTANGLE:'rect',T:'text',TEXT:'text',DT:'text',M:'move',MOVE:'move',CO:'copy',CP:'copy',COPY:'copy',E:'erase',ERASE:'erase',U:'undo',UNDO:'undo'};
+const $=id=>document.getElementById(id);
+function h(tag,props,...kids){
+  const e=document.createElement(tag);let val;
+  for(const k in (props||{})){const v=props[k];
+    if(k==='class')e.className=v;else if(k==='value')val=v;else if(k==='html')e.innerHTML=v;
+    else if(k.startsWith('on'))e.addEventListener(k.slice(2),v);
+    else if(v===true)e.setAttribute(k,'');else if(v!==false&&v!=null)e.setAttribute(k,v)}
+  for(const c of kids.flat(3)){if(c==null||c===false)continue;e.append(c.nodeType?c:document.createTextNode(String(c)))}
+  if(val!==undefined)e.value=val;return e}
+
+let seq=0,nextId=1;
+const S={objs:[],sel:null,cmd:null,last:'line',layer:'WIRE',grid:true,osnap:true,ortho:false,view:{x:0,y:H,k:1},cursor:null,raw:null,snap:null,journal:[],log:[],marks:new Map(),drag:null,mouse:false,chat:[],ghost:null,coach:null,tab:'chat'};
+const mk=o=>({id:nextId++,...o});
+const Ln=(x1,y1,x2,y2,layer)=>({t:'line',a:[x1,y1],b:[x2,y2],layer});
+const Rc=(x1,y1,x2,y2,layer)=>({t:'pl',pts:[[x1,y1],[x2,y1],[x2,y2],[x1,y2]],closed:true,layer});
+const Ci=(x,y,r,layer)=>({t:'circle',c:[x,y],r,layer});
+const Tx=(x,y,hh,s,layer,align='left')=>({t:'text',p:[x,y],h:hh,s,layer,align});
+function buildSheet(){
+  seq=0;nextId=1;
+  S.objs=[
+    Rc(10,10,421.8,269.4,'BORDER'),Ln(10,250,421.8,250,'BORDER'),Ln(150,50,150,269.4,'BORDER'),Ln(290,50,290,269.4,'BORDER'),
+    Tx(80,257,5,'Field','TITLE','center'),Tx(220,257,5,'Junction box JB-12','TITLE','center'),Tx(355,257,5,'Control room','TITLE','center'),
+    Ln(271.8,40,421.8,40,'TITLE'),Ln(271.8,10,271.8,40,'TITLE'),Ln(271.8,25,421.8,25,'TITLE'),Ln(381.8,10,381.8,25,'TITLE'),
+    Tx(276.8,30,4,'Flow loop, raw water to clarifier','TITLE'),Tx(276.8,15,5,'DP-LD-101','TITLE'),Tx(386.8,15,5,'Rev A','TITLE'),
+    Ln(20,130,130,130,'PROCESS'),Ln(60,130,60,158,'INST'),
+    Ci(60,170,12,'INST'),Tx(60,171.5,5,'FT','INST','center'),Tx(60,162.5,5,'101','INST','center'),
+    Ln(72,173,200,173,'WIRE'),Ln(72,167,200,167,'WIRE'),
+    Rc(200,170,214,176,'INST'),Rc(200,164,214,170,'INST'),Rc(200,158,214,164,'INST'),
+    Tx(207,171.6,3,'1','TEXT','center'),Tx(207,165.6,3,'2','TEXT','center'),Tx(207,159.6,3,'3','TEXT','center'),
+    Tx(207,180,3.5,'TB-3','INST','center'),
+    Rc(330,150,390,190,'INST'),Ci(330,173,1.3,'INST'),Ci(330,167,1.3,'INST'),Tx(360,193.5,4,'AI-03','INST','center'),
+    Tx(335,171.6,3,'Ch 4 +','TEXT'),Tx(335,165.6,3,'Ch 4 -','TEXT'),Tx(360,142,3.5,'PLC-1 rack 2','INST','center'),
+    Tx(20,90,4,'Notes','TEXT'),Tx(20,82,3,'1. Shield grounded at the control room end only.','TEXT'),Tx(20,76,3,'2. Calibrated range 0 to 250 m3/h.','TEXT'),
+  ].map(mk);
+  Object.assign(S,{sel:null,cmd:null,journal:[],log:[],snap:null,drag:null,chat:[],ghost:null,coach:null});S.marks.clear();
+  S.journal.push({n:++seq,who:'agent',title:`Sheet built from the loop template, ${S.objs.length} objects`,before:'[]',t:new Date(Date.now()-36e5),issued:true});
+  const before=JSON.stringify(S.objs);S.objs.push(mk(Tx(25,123,3.5,'Raw water 150 mm','PROCESS')));
+  S.journal.push({n:++seq,who:'agent',title:'Text "Raw water 150 mm" added on PROCESS',before,t:new Date(Date.now()-9e5)});
+  say('I am drafting DP-LD-101 with you. The transmitter, the terminals and the AI-03 card are placed. The wires from the terminals to the card are not drawn yet. I can draw them, or you can draw them while I guide you.',MAIN())}
+
+/* geometry */
+const mcv=document.createElement('canvas').getContext('2d');
+const get=id=>S.objs.find(o=>o.id===id);
+const selObj=()=>S.sel==null?null:get(S.sel);
+const cap=s=>s[0].toUpperCase()+s.slice(1);
+const fmt=p=>`${p[0].toFixed(1)}, ${p[1].toFixed(1)}`;
+const clip=s=>s.length>24?s.slice(0,22)+'…':s;
+const near=(p,q)=>!!p&&Math.hypot(p[0]-q[0],p[1]-q[1])<.5;
+const kind=o=>({line:'Line',pl:'Polyline',circle:'Circle',text:'Text'}[o.t]);
+function desc(o){return o.t==='text'?`text "${clip(o.s)}"`:`${kind(o).toLowerCase()} on ${o.layer}`}
+function textW(o){mcv.font=font(100);return mcv.measureText(o.s).width/100*o.h*TS}
+function textBox(o){const w=textW(o),x=o.align==='center'?o.p[0]-w/2:o.p[0];return [x,o.p[1]-o.h*.3,x+w,o.p[1]+o.h*1.05]}
+function segs(o){
+  if(o.t==='line')return [[o.a,o.b]];
+  if(o.t!=='pl')return [];
+  const r=[];for(let i=0;i<o.pts.length-1;i++)r.push([o.pts[i],o.pts[i+1]]);
+  if(o.closed)r.push([o.pts[o.pts.length-1],o.pts[0]]);return r}
+function dseg(p,a,b){const vx=b[0]-a[0],vy=b[1]-a[1],l=vx*vx+vy*vy;let t=l?((p[0]-a[0])*vx+(p[1]-a[1])*vy)/l:0;t=Math.max(0,Math.min(1,t));return Math.hypot(p[0]-a[0]-t*vx,p[1]-a[1]-t*vy)}
+function bbox(o){
+  if(o.t==='text')return textBox(o);
+  if(o.t==='circle')return [o.c[0]-o.r,o.c[1]-o.r,o.c[0]+o.r,o.c[1]+o.r];
+  const ps=o.t==='line'?[o.a,o.b]:o.pts,xs=ps.map(p=>p[0]),ys=ps.map(p=>p[1]);
+  return [Math.min(...xs),Math.min(...ys),Math.max(...xs),Math.max(...ys)]}
+function hit(p){
+  let best=null,bd=7/S.view.k;
+  for(let i=S.objs.length-1;i>=0;i--){const o=S.objs[i];let d;
+    if(o.t==='text'){const b=textBox(o);d=Math.hypot(Math.max(b[0]-p[0],0,p[0]-b[2]),Math.max(b[1]-p[1],0,p[1]-b[3]))}
+    else if(o.t==='circle')d=Math.abs(Math.hypot(p[0]-o.c[0],p[1]-o.c[1])-o.r);
+    else d=Math.min(...segs(o).map(s=>dseg(p,s[0],s[1])));
+    if(d<bd){bd=d;best=o}}
+  return best}
+function snapPts(o){
+  if(o.t==='text')return [{p:o.p,kind:'Insertion'}];
+  if(o.t==='circle'){const [x,y]=o.c,r=o.r,q=r<3?[]:[[x+r,y],[x-r,y],[x,y+r],[x,y-r]].map(p=>({p,kind:'Quadrant'}));return [{p:[x,y],kind:'Centre'},...q]}
+  const r=[];for(const [a,b] of segs(o)){r.push({p:a,kind:'Endpoint'},{p:b,kind:'Endpoint'},{p:[(a[0]+b[0])/2,(a[1]+b[1])/2],kind:'Midpoint'})}return r}
+function findSnap(p){
+  let best=null,bd=12/S.view.k;
+  for(const o of S.objs)for(const s of snapPts(o)){const d=Math.hypot(p[0]-s.p[0],p[1]-s.p[1]);if(d<bd){bd=d;best={p:[...s.p],kind:s.kind}}}
+  return best}
+function translate(o,d){const mv=p=>{p[0]+=d[0];p[1]+=d[1]};if(o.t==='line'){mv(o.a);mv(o.b)}else if(o.t==='pl')o.pts.forEach(mv);else if(o.t==='circle')mv(o.c);else mv(o.p)}
+const hasLine=(a,b)=>S.objs.some(o=>o.t==='line'&&((near(o.a,a)&&near(o.b,b))||(near(o.a,b)&&near(o.b,a))));
+const hasText=s=>S.objs.some(o=>o.t==='text'&&o.s===s);
+
+/* change sets, the journal, undo, accept */
+function log(s){S.log.push(s);if(S.log.length>60)S.log.shift()}
+function commit(title,fn,who='you',before){
+  before=before??JSON.stringify(S.objs);
+  const ids=fn()||[],e={n:++seq,who,title,before,t:new Date()};S.journal.push(e);
+  const now=performance.now();ids.forEach(id=>S.marks.set(id,{who,t:now}));
+  log(`Change set ${e.n} landed: ${title}`);toast(`${who==='agent'?'Assistant, change':'Change'} set ${e.n} landed: ${title}`,who);refresh();return e}
+function undoLast(){
+  const e=S.journal[S.journal.length-1];
+  if(!e||e.issued){toast('Nothing to undo. An issued change set cannot be undone.');return}
+  S.journal.pop();S.objs=JSON.parse(e.before);S.sel=null;S.cmd=null;S.snap=null;
+  log(`Undid change set ${e.n}: ${e.title}`);toast(`Undid change set ${e.n}: ${e.title}`);refresh()}
+function accept(){
+  const open=S.journal.filter(e=>!e.issued);
+  if(!open.length){toast('Nothing to accept. Every change set is already issued.');return}
+  open.forEach(e=>e.issued=true);
+  const msg=`Accepted. Change sets ${open[0].n} to ${open[open.length-1].n} are issued and can no longer be undone.`;log(msg);toast(msg);refresh()}
+function eraseSel(){const o=selObj();if(!o)return;S.sel=null;commit(`${cap(desc(o))} erased`,()=>{S.objs=S.objs.filter(x=>x.id!==o.id);return []})}
+function setText(id,v){const o=get(id);if(!o||!v||v===o.s)return;const old=o.s;commit(`Text changed from "${clip(old)}" to "${clip(v)}"`,()=>{o.s=v;return [id]})}
+function setLayer(id,v){const o=get(id);if(!o||v===o.layer)return;const d=cap(desc(o));commit(`${d} moved to layer ${v}`,()=>{o.layer=v;return [id]})}
+function setNum(id,key,v,label){const o=get(id);v=+v;if(!o||!(v>0)||v===o[key])return;commit(`${cap(desc(o))}: ${label} set to ${v}`,()=>{o[key]=v;return [id]})}
+
+/* commands: plain prompts, the same steps AutoCAD takes */
+function start(name){
+  if(name==='undo'){undoLast();return}
+  if(name==='erase'&&S.sel!=null){S.last='erase';eraseSel();return}
+  S.cmd={name};S.last=name;S.snap=null;
+  if(name!=='move'&&name!=='copy')S.sel=null;
+  log(`Command: ${TOOLS[name].name}`);refresh()}
+function cancel(){if(S.cmd)log('*Cancel*');S.cmd=null;S.snap=null;refresh()}
+function finish(){S.cmd=null;S.snap=null;refresh()}
+function prompt(){
+  const c=S.cmd;if(!c)return null;const n=c.name;let text,opts=[['Cancel',cancel]];
+  if(n==='line'){text=c.p1?'Click the next point':'Click the first point';if(c.p1)opts=[['Done',finish]]}
+  else if(n==='circle')text=c.c?'Click a point on the circle, or type its radius':'Click the centre';
+  else if(n==='rect')text=c.p1?'Click the opposite corner':'Click the first corner';
+  else if(n==='text')text=c.p?'Type the text and press Enter':'Click where the text starts';
+  else if(n==='erase')text='Click the object to erase';
+  else text=S.sel==null?`Click the object to ${n}`:!c.base?'Click a point to hold it by':'Click where that point should go';
+  return {text,opts}}
+const wantsPoint=()=>{const c=S.cmd;return !!c&&c.name!=='erase'&&!((c.name==='move'||c.name==='copy')&&S.sel==null)&&!(c.name==='text'&&c.p)};
+const fromPt=()=>{const c=S.cmd;return c?(c.p1||c.base||c.c||null):null};
+function aim(p,shift){
+  S.snap=null;if(!wantsPoint())return p;
+  if(S.osnap){const s=findSnap(p);if(s){S.snap=s;return s.p}}
+  const c=S.cmd,f=c.name==='circle'||c.name==='rect'?null:fromPt();
+  if(f&&(S.ortho||shift))return Math.abs(p[0]-f[0])>Math.abs(p[1]-f[1])?[p[0],f[1]]:[f[0],p[1]];
+  return p}
+function click(p,raw){
+  const c=S.cmd;
+  if(!c){const o=hit(raw);S.sel=o?o.id:null;refresh();return}
+  const L=S.layer;
+  if(c.name==='line'){
+    if(c.p1&&Math.hypot(p[0]-c.p1[0],p[1]-c.p1[1])>.01){const a=c.p1;c.p1=[...p];commit(`Line added on ${L}`,()=>{const o=mk({t:'line',a:[...a],b:[...p],layer:L});S.objs.push(o);return [o.id]});return}
+    c.p1=[...p]}
+  else if(c.name==='circle'){
+    if(!c.c)c.c=[...p];
+    else{const r=Math.hypot(p[0]-c.c[0],p[1]-c.c[1]);if(r>.01){const cc=c.c;c.c=null;commit(`Circle added on ${L}`,()=>{const o=mk(Ci(cc[0],cc[1],+r.toFixed(3),L));S.objs.push(o);return [o.id]});return}}}
+  else if(c.name==='rect'){
+    if(!c.p1)c.p1=[...p];
+    else if(Math.abs(p[0]-c.p1[0])>.01&&Math.abs(p[1]-c.p1[1])>.01){const a=c.p1;c.p1=null;commit(`Rectangle added on ${L}`,()=>{const o=mk(Rc(a[0],a[1],p[0],p[1],L));S.objs.push(o);return [o.id]});return}}
+  else if(c.name==='text'){if(!c.p){c.p=[...p];setTimeout(()=>$('cmdin').focus(),0)}}
+  else if(c.name==='move'||c.name==='copy'){
+    if(S.sel==null){const o=hit(raw);if(o)S.sel=o.id}
+    else if(!c.base)c.base=[...p];
+    else{const d=[p[0]-c.base[0],p[1]-c.base[1]],id=S.sel,o=get(id);S.cmd=null;S.snap=null;
+      if(c.name==='move')commit(`${cap(desc(o))} moved`,()=>{translate(o,d);return [id]});
+      else commit(`${cap(desc(o))} copied`,()=>{const g=JSON.parse(JSON.stringify(o));g.id=nextId++;translate(g,d);S.objs.push(g);S.sel=g.id;return [g.id]});return}}
+  else if(c.name==='erase'){const o=hit(raw);if(o){S.sel=o.id;S.cmd=null;eraseSel();return}}
+  refresh()}
+function typed(v){
+  const c=S.cmd;
+  if(c&&c.name==='text'&&c.p){const p=c.p,L=S.layer;S.cmd=null;commit(`Text "${clip(v)}" added on ${L}`,()=>{const o=mk(Tx(p[0],p[1],3.5,v,L));S.objs.push(o);return [o.id]});return true}
+  const m=/^(@)?(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/.exec(v);
+  if(m&&wantsPoint()){const f=fromPt();const p=m[1]&&f?[f[0]+ +m[2],f[1]+ +m[3]]:[+m[2],+m[3]];S.snap=null;click(p,p);return true}
+  if(c&&c.name==='circle'&&c.c&&+v>0){const p=[c.c[0]+ +v,c.c[1]];click(p,p);return true}
+  const name=ALIAS[v.toUpperCase()];if(name){start(name);return true}
+  return false}
+
+/* ───────────── the assistant: asks, proposes, guides, checks (all canned) ───────────── */
+const A1=[214,173],B1=[330,173],A2=[214,167],B2=[330,167];
+function MAIN(){const c=[];
+  if(!hasLine(A1,B1)||!hasLine(A2,B2)){c.push(['Draw the wiring for me',()=>propose('wiring')],['Guide me while I draw a wire',()=>teach('wire')])}
+  if(!hasText('101+'))c.push(['Add the wire numbers',()=>propose('numbers')]);
+  c.push(['Show me how to move something',()=>teach('move')],['Check the sheet',checkSheet]);return c}
+function say(text,chips){S.chat.push({who:'agent',text,chips:chips||[]});S.tab='chat';renderAgent()}
+function ask(text){S.chat.push({who:'you',text});renderAgent();setTimeout(()=>respond(text),450)}
+function respond(text){
+  const t=text.toLowerCase();
+  if(/check|review|wrong|problem|ready/.test(t))return checkSheet();
+  if(/how|show|teach|guide|help|learn/.test(t)){if(/mov/.test(t))return teach('move');if(/line|wire|draw/.test(t))return teach('wire')}
+  if(/number/.test(t))return propose('numbers');
+  if(/wir|connect|plc|card|terminal/.test(t))return propose('wiring');
+  say('In this prototype I only know a few things. Pick one of these:',MAIN())}
+function propose(what){
+  stopCoach();const objs=[];let title;
+  if(what==='wiring'){
+    if(!hasLine(A1,B1))objs.push(Ln(...A1,...B1,'WIRE'));if(!hasLine(A2,B2))objs.push(Ln(...A2,...B2,'WIRE'));
+    if(!hasText('C-1012, 1 pair 1.5 mm2'))objs.push(Tx(240,177,3,'C-1012, 1 pair 1.5 mm2','WIRE'));
+    title='Wiring from TB-3 to AI-03 added on WIRE'}
+  else{for(const [s,x,y] of [['101+',110,175],['101-',110,162.5]])if(!hasText(s))objs.push(Tx(x,y,3,s,'WIRE'));title='Wire numbers added on WIRE'}
+  if(!objs.length){say('That is already on the sheet.',MAIN());return}
+  const n=objs.length,what2=what==='wiring'?'the wires from TB-3 to the AI-03 card, with the cable tag':'the wire numbers on the field wires';
+  S.ghost={title,objs,t0:performance.now(),cur:null,done:false,text:`I would add ${what2}: ${n} object${n>1?'s':''}.`};
+  say(`Here is what I would draw: ${what2}. It is dashed on the sheet and nothing has changed yet. Keep it or discard it.`,[['Keep it',keep],['Discard it',discard]]);refresh()}
+function keep(){const g=S.ghost;if(!g)return;S.ghost=null;
+  const e=commit(g.title,()=>g.objs.map(o=>{const x=mk(o);S.objs.push(x);return x.id}),'agent');
+  say(`Kept. That is change set ${e.n}. Undo takes it back until you accept the revision.`,MAIN())}
+function discard(){if(!S.ghost)return;S.ghost=null;say('Discarded. Nothing changed.',MAIN());refresh()}
+function checkSheet(){
+  stopCoach();const f=[],c=[];
+  if(!hasLine(A1,B1)||!hasLine(A2,B2)){f.push('Terminals 1 and 2 are not wired to the AI-03 card.');c.push(['Draw the wiring for me',()=>propose('wiring')],['Guide me while I draw a wire',()=>teach('wire')])}
+  if(!hasText('101+')||!hasText('101-')){f.push('The field wires have no wire numbers.');c.push(['Add the wire numbers',()=>propose('numbers')])}
+  if(!f.length){say('I checked the sheet: nothing is off the paper, no text sits on other text and no line runs through a text. It is ready for you to accept.',[['Show me how to move something',()=>teach('move')]]);return}
+  say(`I checked the sheet. The paper size and the text checks pass. ${f.length===1?'One thing is':'Two things are'} missing: ${f.join(' ')}`,c)}
+function explain(o){
+  const more=o.t==='text'?`It is ${o.h} mm high. You can change what it says in the box beside it, or tell me what it should say.`
+    :o.t==='line'?`It is ${Math.hypot(o.b[0]-o.a[0],o.b[1]-o.a[1]).toFixed(1)} mm long. Lines on the WIRE layer print as wires.`
+    :o.t==='circle'?`Its radius is ${o.r} mm.`:'It is a closed outline with four corners.';
+  S.chat.push({who:'you',text:`What is this ${kind(o).toLowerCase()}?`});
+  say(`That is a ${desc(o)}, object ${SHEET}/${o.id}. ${more} Its colour comes from its layer, ${o.layer}.`,[['Show me how to move it',()=>teach('move')]]);openAgent()}
+function teach(what){
+  S.ghost=null;if(S.cmd){S.cmd=null}
+  let steps,end,need;
+  if(what==='wire'){
+    const second=hasLine(A1,B1),A=second?A2:A1,B=second?B2:B1,term=second?2:1,sign=second?'-':'+';
+    if(hasLine(A2,B2)&&second){say('Both wires are already drawn.',MAIN());return}
+    need='line';
+    steps=[
+      {say:'Click Line in the ribbon, or type L and press Enter.',hl:'line',done:()=>S.cmd&&S.cmd.name==='line'},
+      {say:`Click the middle of terminal ${term}'s right edge, at the ring. A green triangle shows when the cursor has caught it.`,pt:A,done:()=>near(S.cmd&&S.cmd.p1,A),
+        wrong:()=>{if(S.cmd&&S.cmd.p1&&!near(S.cmd.p1,A)){S.cmd.p1=null;return 'Not quite. Aim for the ring: the cursor jumps onto the edge when you are close.'}}},
+      {say:`Now click the small circle on the AI-03 card at Ch 4 ${sign}. A green circle shows when you have its centre.`,pt:B,done:()=>hasLine(A,B),
+        wrong:()=>{if(S.cmd&&S.cmd.p1&&!near(S.cmd.p1,A)&&!hasLine(A,B)){undoLast();return 'That one missed the circle, so I took it back. Start again from Line.'}}},
+      {say:'That is the wire. Press Enter, or click Done, to finish the line.',done:()=>!S.cmd}];
+    end=()=>{const more=!hasLine(A1,B1)||!hasLine(A2,B2);
+      say(`You drew the ${sign} wire, change set ${seq}. ${more?'Do you want to draw the other one, or shall I?':'Both wires are in.'}`,
+        more?[['I will draw the other one',()=>teach('wire')],['You draw it',()=>propose('wiring')]]:MAIN())}}
+  else{
+    const notes=S.objs.find(o=>o.t==='text'&&o.s==='Notes'),b=notes?textBox(notes):null,n0=S.journal.length;
+    need='move';S.sel=null;
+    steps=[
+      {say:'Click Move in the ribbon, or type M and press Enter.',hl:'move',done:()=>S.cmd&&S.cmd.name==='move'},
+      {say:notes?'Click the Notes heading to pick it.':'Click the object you want to move.',pt:b?[(b[0]+b[2])/2,(b[1]+b[3])/2]:null,done:()=>S.sel!=null},
+      {say:'Click a point to hold it by. Anywhere on it is fine.',done:()=>!!(S.cmd&&S.cmd.base)},
+      {say:'Move the cursor and click where it should go. Hold Shift to keep it level.',done:()=>!S.cmd}];
+    end=()=>say(S.journal.length>n0?`Moved. That was change set ${seq}, so Undo puts it back.`:'You cancelled the move. Nothing changed.',MAIN())}
+  S.coach={steps,i:0,end,need};say(steps[0].say);refresh()}
+function stopCoach(){S.coach=null}
+function checkCoach(){
+  for(let g=0;g<8&&S.coach;g++){const c=S.coach,st=c.steps[c.i];
+    if(st.done()){c.i++;if(c.i>=c.steps.length){S.coach=null;c.end();return}say(c.steps[c.i].say);continue}
+    const w=st.wrong&&st.wrong();if(w){say(w);continue}
+    if(c.i>0&&!(S.cmd&&S.cmd.name===c.need)){c.i=0;say('No problem. '+c.steps[0].say)}
+    return}}
+
+/* ───────────── drawing the canvas ───────────── */
+const stage=$('stage'),cv=$('cv'),ctx=cv.getContext('2d');
+let cw=0,ch=0,dpr=1,needFit=true,touched=false,raf=0;
+const sx=x=>(x-S.view.x)*S.view.k,sy=y=>(S.view.y-y)*S.view.k,wx=X=>X/S.view.k+S.view.x,wy=Y=>S.view.y-Y/S.view.k;
+const phone=()=>matchMedia('(max-width:860px)').matches;
+function fit(){const [t,r,b,l]=phone()?[56,14,96,14]:[64,58,84,30];const k=Math.min((cw-l-r)/W,(ch-t-b)/H);S.view.k=Math.max(k,.2);S.view.x=W/2-(l+(cw-l-r)/2)/S.view.k;S.view.y=H/2+(t+(ch-t-b)/2)/S.view.k}
+function resize(){const r=stage.getBoundingClientRect(),wide=Math.abs(r.width-cw)>1;cw=r.width;ch=r.height;dpr=window.devicePixelRatio||1;cv.width=Math.round(cw*dpr);cv.height=Math.round(ch*dpr);if((needFit||(!touched&&wide))&&cw>0&&ch>0){fit();needFit=false}draw()}
+function path(o){
+  ctx.beginPath();
+  if(o.t==='line'){ctx.moveTo(sx(o.a[0]),sy(o.a[1]));ctx.lineTo(sx(o.b[0]),sy(o.b[1]))}
+  else if(o.t==='pl'){o.pts.forEach((p,i)=>i?ctx.lineTo(sx(p[0]),sy(p[1])):ctx.moveTo(sx(p[0]),sy(p[1])));if(o.closed)ctx.closePath()}
+  else if(o.t==='circle')ctx.arc(sx(o.c[0]),sy(o.c[1]),o.r*S.view.k,0,Math.PI*2)}
+function drawObj(o,col,lw){
+  ctx.strokeStyle=ctx.fillStyle=col;ctx.lineWidth=lw;
+  if(o.t==='text'){const px=o.h*TS*S.view.k;if(px<2.2){const b=textBox(o);ctx.fillRect(sx(b[0]),sy(o.p[1])-1,(b[2]-b[0])*S.view.k,1);return}
+    ctx.font=font(px);ctx.textAlign=o.align;ctx.textBaseline='alphabetic';ctx.fillText(o.s,sx(o.p[0]),sy(o.p[1]));return}
+  path(o);ctx.stroke()}
+const weight=o=>o.layer==='PROCESS'?2.4:o.layer==='BORDER'?1.6:1.1;
+function label(text,x,y,bg,fg,border){ctx.font='12px "Segoe UI",system-ui,sans-serif';const w=ctx.measureText(text).width+12;x=Math.min(x,cw-w-4);
+  ctx.fillStyle=bg;ctx.strokeStyle=border;ctx.lineWidth=1;ctx.beginPath();ctx.rect(Math.round(x)+.5,Math.round(y)+.5,w,20);ctx.fill();ctx.stroke();
+  ctx.fillStyle=fg;ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText(text,x+6,y+11)}
+function marker(s){
+  const x=sx(s.p[0]),y=sy(s.p[1]),r=6;ctx.strokeStyle='#59e059';ctx.lineWidth=2;ctx.beginPath();
+  if(s.kind==='Endpoint')ctx.rect(x-r,y-r,2*r,2*r);
+  else if(s.kind==='Midpoint'){ctx.moveTo(x,y-r-1);ctx.lineTo(x+r+1,y+r);ctx.lineTo(x-r-1,y+r);ctx.closePath()}
+  else if(s.kind==='Centre')ctx.arc(x,y,r+1,0,Math.PI*2);
+  else if(s.kind==='Quadrant'){ctx.moveTo(x,y-r-1);ctx.lineTo(x+r+1,y);ctx.lineTo(x,y+r+1);ctx.lineTo(x-r-1,y);ctx.closePath()}
+  else{ctx.rect(x-r,y-r,2*r,2*r);ctx.moveTo(x-r,y-r);ctx.lineTo(x+r,y+r)}
+  ctx.stroke();label(s.kind,x+12,y+12,'#f4f6f8','#1c232d','#8894a3')}
+function pointer(p,name){
+  const x=sx(p[0]),y=sy(p[1]);ctx.fillStyle=AG;ctx.strokeStyle='#1d1833';ctx.lineWidth=1;ctx.beginPath();
+  ctx.moveTo(x,y);ctx.lineTo(x,y+17);ctx.lineTo(x+4.6,y+12.6);ctx.lineTo(x+7.8,y+19.4);ctx.lineTo(x+10.4,y+18.2);ctx.lineTo(x+7.2,y+11.6);ctx.lineTo(x+13,y+11.4);ctx.closePath();ctx.fill();ctx.stroke();
+  label(name,x+14,y+18,AG,'#1d1833',AG)}
+function draw(){
+  const k=S.view.k,now=performance.now();let live=false;
+  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.globalAlpha=1;ctx.setLineDash([]);ctx.shadowBlur=0;
+  ctx.fillStyle='#212830';ctx.fillRect(0,0,cw,ch);
+  if(S.grid){for(const [step,col] of [[10,'#272f39'],[50,'#313a46']]){if(step*k<6)continue;ctx.strokeStyle=col;ctx.lineWidth=1;ctx.beginPath();
+      for(let x=Math.floor(wx(0)/step)*step;x<wx(cw);x+=step){const X=Math.round(sx(x))+.5;ctx.moveTo(X,0);ctx.lineTo(X,ch)}
+      for(let y=Math.floor(wy(ch)/step)*step;y<wy(0);y+=step){const Y=Math.round(sy(y))+.5;ctx.moveTo(0,Y);ctx.lineTo(cw,Y)}ctx.stroke()}
+    ctx.lineWidth=1;ctx.strokeStyle='#6a2f33';ctx.beginPath();ctx.moveTo(0,Math.round(sy(0))+.5);ctx.lineTo(cw,Math.round(sy(0))+.5);ctx.stroke();
+    ctx.strokeStyle='#2c6a3a';ctx.beginPath();ctx.moveTo(Math.round(sx(0))+.5,0);ctx.lineTo(Math.round(sx(0))+.5,ch);ctx.stroke()}
+  for(const [id,m] of S.marks){const o=get(id),f=1-(now-m.t)/2600;if(!o||f<=0){S.marks.delete(id);continue}live=true;
+    ctx.globalAlpha=.45*f;const col=m.who==='agent'?AG:'#4aa3ff';
+    if(o.t==='text'){const b=textBox(o);ctx.fillStyle=col;ctx.fillRect(sx(b[0])-4,sy(b[3])-3,(b[2]-b[0])*k+8,(b[3]-b[1])*k+6)}else drawObj(o,col,9);ctx.globalAlpha=1}
+  for(const o of S.objs)drawObj(o,LAYERS[o.layer],weight(o));
+  const so=selObj();
+  if(so){
+    ctx.globalAlpha=.55;if(so.t==='text'){const b=textBox(so);ctx.strokeStyle='#4aa3ff';ctx.lineWidth=1.5;ctx.setLineDash([4,3]);ctx.strokeRect(sx(b[0])-3,sy(b[3])-2,(b[2]-b[0])*k+6,(b[3]-b[1])*k+4);ctx.setLineDash([])}else drawObj(so,'#4aa3ff',5);ctx.globalAlpha=1;
+    for(const s of snapPts(so)){if(s.kind==='Midpoint'&&so.t==='pl')continue;const x=sx(s.p[0]),y=sy(s.p[1]);ctx.fillStyle='#2f6fd0';ctx.strokeStyle='#cfe4ff';ctx.lineWidth=1;ctx.fillRect(x-4.5,y-4.5,9,9);ctx.strokeRect(x-4.5,y-4.5,9,9)}}
+  // what the assistant proposes: dashed, drawn as its pointer moves, not on the sheet until it is kept
+  if(S.ghost){const g=S.ghost,el=(now-g.t0)/620;let cur=null;ctx.save();ctx.setLineDash([7,5]);ctx.shadowColor=AG;ctx.shadowBlur=7;
+    g.objs.forEach((o,i)=>{const f=Math.max(0,Math.min(1,el-i));if(f<=0)return;
+      if(o.t==='line'){const b=[o.a[0]+(o.b[0]-o.a[0])*f,o.a[1]+(o.b[1]-o.a[1])*f];drawObj({...o,b},AG,1.8);if(f<1||i===g.objs.length-1)cur=b}
+      else{ctx.globalAlpha=f;drawObj(o,AG,1.8);ctx.globalAlpha=1;if(f<1||i===g.objs.length-1)cur=o.p||o.c}});
+    ctx.restore();if(cur)g.cur=cur;if(!g.cur){const o=g.objs[0];g.cur=o.a||o.p}
+    if(el<g.objs.length)live=true;else if(!g.done){g.done=true;setTimeout(updateUI,0)}
+    pointer(g.cur,'Assistant')}
+  const c=S.cmd,q=S.cursor;
+  if(c&&q){ctx.strokeStyle='#e8ebee';ctx.lineWidth=1;ctx.setLineDash([5,4]);const f=fromPt();
+    if(c.name==='line'&&c.p1){ctx.beginPath();ctx.moveTo(sx(c.p1[0]),sy(c.p1[1]));ctx.lineTo(sx(q[0]),sy(q[1]));ctx.stroke()}
+    if(c.name==='circle'&&c.c){ctx.beginPath();ctx.arc(sx(c.c[0]),sy(c.c[1]),Math.hypot(q[0]-c.c[0],q[1]-c.c[1])*k,0,Math.PI*2);ctx.stroke()}
+    if(c.name==='rect'&&c.p1)ctx.strokeRect(sx(c.p1[0]),sy(c.p1[1]),(q[0]-c.p1[0])*k,-(q[1]-c.p1[1])*k);
+    if((c.name==='move'||c.name==='copy')&&c.base&&so){ctx.beginPath();ctx.moveTo(sx(c.base[0]),sy(c.base[1]));ctx.lineTo(sx(q[0]),sy(q[1]));ctx.stroke();
+      const g=JSON.parse(JSON.stringify(so));translate(g,[q[0]-c.base[0],q[1]-c.base[1]]);ctx.setLineDash([]);ctx.globalAlpha=.6;drawObj(g,LAYERS[g.layer],1.4);ctx.globalAlpha=1}
+    ctx.setLineDash([]);
+    // dynamic input: the size of what is being drawn, at the cursor
+    if(S.mouse&&S.raw&&wantsPoint()){let t=fmt(q);
+      if(c.name==='rect'&&c.p1)t=`${Math.abs(q[0]-c.p1[0]).toFixed(1)} x ${Math.abs(q[1]-c.p1[1]).toFixed(1)} mm`;
+      else if(c.name==='circle'&&c.c)t=`Radius ${Math.hypot(q[0]-c.c[0],q[1]-c.c[1]).toFixed(1)} mm`;
+      else if(f){const dx=q[0]-f[0],dy=q[1]-f[1];t=`${Math.hypot(dx,dy).toFixed(1)} mm   ${((Math.atan2(dy,dx)*180/Math.PI+360)%360).toFixed(0)}°`}
+      label(t,S.raw[0]+18,S.raw[1]+(S.snap?40:18),'#2b3e58','#fff','#6f9bd0')}}
+  if(S.snap)marker(S.snap);
+  const st=S.coach&&S.coach.steps[S.coach.i];
+  if(st&&st.pt){live=true;const x=sx(st.pt[0]),y=sy(st.pt[1]),r=13+4*Math.sin(now/230);ctx.strokeStyle=AG;ctx.lineWidth=2.5;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();ctx.globalAlpha=.25;ctx.beginPath();ctx.arc(x,y,r+7,0,Math.PI*2);ctx.stroke();ctx.globalAlpha=1}
+  // the crosshair and its pick box
+  if(S.mouse&&S.raw){const x=Math.round(S.raw[0])+.5,y=Math.round(S.raw[1])+.5,n=46;ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x-n,y);ctx.lineTo(x+n,y);ctx.moveTo(x,y-n);ctx.lineTo(x,y+n);ctx.stroke();if(!wantsPoint())ctx.strokeRect(x-4,y-4,8,8)}
+  // the X and Y axes' icon
+  {const x=26.5,y=ch-(phone()?96.5:26.5);ctx.strokeStyle=ctx.fillStyle='#c5cdd7';ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(x,y-34);ctx.lineTo(x,y);ctx.lineTo(x+34,y);ctx.moveTo(x-3,y-29);ctx.lineTo(x,y-34);ctx.lineTo(x+3,y-29);ctx.moveTo(x+29,y-3);ctx.lineTo(x+34,y);ctx.lineTo(x+29,y+3);ctx.stroke();
+    ctx.font='11px "Segoe UI",sans-serif';ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('X',x+38,y);ctx.fillText('Y',x-3,y-42)}
+  placeQp();
+  if(live&&!raf)raf=requestAnimationFrame(()=>{raf=0;draw()})}
+
+/* pointer: pan, zoom, pick, place points, drag a selected object */
+const ptrs=new Map();let down=null,pinch=null;
+const loc=e=>{const r=cv.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]};
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+cv.addEventListener('pointerdown',e=>{
+  cv.setPointerCapture(e.pointerId);const p=loc(e);ptrs.set(e.pointerId,p);S.mouse=e.pointerType==='mouse';
+  if(ptrs.size===2){const [a,b]=[...ptrs.values()];pinch={d:Math.hypot(a[0]-b[0],a[1]-b[1]),c:[(a[0]+b[0])/2,(a[1]+b[1])/2]};down=null;endDrag(false);return}
+  const w=[wx(p[0]),wy(p[1])];
+  down={p,last:p,w,moved:false,pan:e.button===1||e.button===2,grab:null};
+  if(!S.cmd&&!down.pan){const o=hit(w);if(o&&o.id===S.sel)down.grab=o}});
+cv.addEventListener('pointermove',e=>{
+  const p=loc(e);S.mouse=e.pointerType==='mouse';
+  if(ptrs.has(e.pointerId))ptrs.set(e.pointerId,p);
+  if(pinch&&ptrs.size>=2){const [a,b]=[...ptrs.values()],d=Math.hypot(a[0]-b[0],a[1]-b[1]),c=[(a[0]+b[0])/2,(a[1]+b[1])/2];
+    touched=true;zoomAt(c,d/pinch.d);S.view.x-=(c[0]-pinch.c[0])/S.view.k;S.view.y+=(c[1]-pinch.c[1])/S.view.k;pinch={d,c};draw();return}
+  const w=[wx(p[0]),wy(p[1])];S.raw=p;
+  if(down){
+    if(!down.moved&&Math.hypot(p[0]-down.p[0],p[1]-down.p[1])>5)down.moved=true;
+    if(down.moved){
+      if(down.grab){
+        if(!S.drag){S.drag={id:down.grab.id,before:JSON.stringify(S.objs),done:[0,0]};$('qp').hidden=true}
+        let d=[w[0]-down.w[0],w[1]-down.w[1]];if(e.shiftKey||S.ortho)d=Math.abs(d[0])>Math.abs(d[1])?[d[0],0]:[0,d[1]];
+        translate(get(S.drag.id),[d[0]-S.drag.done[0],d[1]-S.drag.done[1]]);S.drag.done=d;draw();return}
+      touched=true;S.view.x-=(p[0]-down.last[0])/S.view.k;S.view.y+=(p[1]-down.last[1])/S.view.k;down.last=p;draw();return}}
+  S.cursor=aim(w,e.shiftKey);$('coords').textContent=fmt(S.cursor);draw()});
+function endDrag(keepIt){
+  if(!S.drag)return;const d=S.drag;S.drag=null;
+  if(keepIt&&Math.hypot(d.done[0],d.done[1])>.01)commit(`${cap(desc(get(d.id)))} moved`,()=>[d.id],'you',d.before);
+  else{S.objs=JSON.parse(d.before);refresh()}}
+function up(e){
+  const had=ptrs.has(e.pointerId);ptrs.delete(e.pointerId);
+  if(pinch){if(ptrs.size<2)pinch=null;down=null;return}
+  if(!had||!down)return;const d=down;down=null;
+  if(S.drag){endDrag(e.type==='pointerup');return}
+  if(d.moved||d.pan)return;
+  const w=[wx(d.p[0]),wy(d.p[1])];S.cursor=aim(w,e.shiftKey);click(S.cursor,w)}
+cv.addEventListener('pointerup',up);cv.addEventListener('pointercancel',up);
+cv.addEventListener('pointerleave',()=>{S.raw=null;draw()});
+function zoomAt(c,f){const k=Math.max(.15,Math.min(60,S.view.k*f)),X=wx(c[0]),Y=wy(c[1]);S.view.k=k;S.view.x=X-c[0]/k;S.view.y=Y+c[1]/k}
+cv.addEventListener('wheel',e=>{e.preventDefault();touched=true;zoomAt(loc(e),Math.exp(-e.deltaY*.0016));draw()},{passive:false});
+document.querySelectorAll('#zoom button').forEach(b=>b.onclick=()=>{const z=+b.dataset.z;if(z){touched=true;zoomAt([cw/2,ch/2],z)}else{touched=false;fit()}draw()});
+
+/* ───────────── the chrome ───────────── */
+const time=t=>t.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+let toastT=0;
+function toast(msg,w){const t=$('toast');t.textContent=msg;t.className=w==='agent'?'agent':'';clearTimeout(toastT);toastT=setTimeout(()=>t.className+=' off',3200)}
+function layerSelect(value,on){return h('select',{value,'aria-label':'Layer',onchange:e=>on(e.target.value)},Object.keys(LAYERS).map(l=>h('option',{value:l},l)))}
+const svg=n=>`<svg viewBox="0 0 28 28" aria-hidden="true">${I[n]}</svg>`;
+const rbtns={};
+function buildRibbon(){
+  const tool=n=>rbtns[n]=h('button',{class:'rb','data-tool':n,html:svg(n)+`<span>${TOOLS[n].label}</span>`,onclick:()=>start(n)});
+  const as=(n,label,tip,run)=>h('button',{class:'rb as','data-tip':tip,'data-label':label,html:svg(n)+`<span>${label}</span>`,onclick:run});
+  const panel=(title,...kids)=>h('section',{class:'panel'},h('div',{class:'row'},kids),h('h3',{},title));
+  const lay=layerSelect(S.layer,v=>{S.layer=v;refresh()});lay.id='layer';
+  $('ribbon').replaceChildren(
+    panel('Draw',tool('line'),tool('circle'),tool('rect'),tool('text')),
+    panel('Modify',tool('move'),tool('copy'),tool('erase')),
+    panel('Layer',h('div',{class:'layerbox'},h('label',{},h('span',{class:'sw',id:'laysw'}),lay),h('small',{},'New objects go on this layer'))),
+    panel('Assistant',
+      as('ask','Ask','Ask a question, or say what you want drawn. The assistant shows its work dashed on the sheet first.',()=>{openAgent();$('askin').focus()}),
+      as('guide','Guide me','The assistant walks you through a task one step at a time, on your own drawing.',()=>{openAgent();say('What would you like to learn?',[['Draw a wire',()=>teach('wire')],['Move something',()=>teach('move')]])}),
+      as('check','Check sheet','The assistant checks the sheet and says what is missing or wrong.',()=>{openAgent();S.chat.push({who:'you',text:'Check the sheet'});checkSheet()})));
+  // a tip that explains each tool in plain words
+  const tip=$('tip');
+  $('ribbon').querySelectorAll('.rb').forEach(b=>{
+    b.addEventListener('pointerenter',e=>{if(e.pointerType!=='mouse')return;const t=TOOLS[b.dataset.tool],r=b.getBoundingClientRect();
+      tip.replaceChildren(h('b',{},t?t.label:b.dataset.label,t&&h('kbd',{},t.key)),t?t.tip:b.dataset.tip);tip.hidden=false;
+      tip.style.left=Math.min(r.left,innerWidth-260)+'px';tip.style.top=(r.bottom+8)+'px'});
+    b.addEventListener('pointerleave',()=>tip.hidden=true);b.addEventListener('click',()=>tip.hidden=true)})}
+function openAgent(){document.body.classList.add('agent-open')}
+function renderAgent(){
+  document.querySelectorAll('.atab').forEach(b=>b.classList.toggle('on',b.dataset.tab===S.tab));
+  $('chat').hidden=S.tab!=='chat';$('history').hidden=S.tab!=='history';$('askform').hidden=S.tab!=='chat';
+  const last=S.chat.length-1,chat=$('chat');
+  chat.replaceChildren(...S.chat.map((m,i)=>h('div',{class:'msg '+m.who},m.text,
+    i===last&&m.chips&&m.chips.length?h('div',{class:'chips'},m.chips.map(([l,run])=>h('button',{class:'chip',onclick:()=>{if(run!==keep&&run!==discard)S.chat.push({who:'you',text:l});run()}},l))):null)));
+  chat.scrollTop=chat.scrollHeight;
+  const top=S.journal[S.journal.length-1];
+  $('history').replaceChildren(h('button',{class:'undo',onclick:undoLast,disabled:!top||top.issued},'Undo last'),
+    h('ol',{},[...S.journal].reverse().map(e=>h('li',{class:e.who},h('span',{class:'n'},e.n),h('div',{},h('div',{},e.title),
+      h('div',{class:'meta'},h('span',{class:'who'},e.who==='agent'?'Assistant':'You'),`, ${time(e.t)}${e.issued?', issued':''}`))))))}
+function placeQp(){
+  const q=$('qp');if(q.hidden||phone())return;const o=selObj();if(!o)return;
+  const b=bbox(o);let x=sx(b[2])+18,y=sy(b[3])-10;
+  if(x+240>cw-50)x=sx(b[0])-254;x=Math.max(8,x);y=Math.max(60,Math.min(ch-q.offsetHeight-70,y));
+  q.style.left=x+'px';q.style.top=y+'px'}
+function fillQp(){
+  const q=$('qp'),o=S.cmd||S.drag?null:selObj();q.hidden=!o;if(!o)return;
+  const row=(l,c)=>h('label',{class:'prow'},h('span',{},l),c),ro=v=>h('output',{},v);
+  const edit=(v,on,num)=>h('input',{value:v,type:num?'number':'text',step:'any',onchange:e=>on(e.target.value),onkeydown:e=>{if(e.key==='Enter')e.target.blur()}});
+  const rows=[row('Layer',layerSelect(o.layer,v=>setLayer(o.id,v)))];
+  if(o.t==='text')rows.push(row('Text',edit(o.s,v=>setText(o.id,v))),row('Height',edit(o.h,v=>setNum(o.id,'h',v,'height'),true)));
+  if(o.t==='line')rows.push(row('Length',ro(Math.hypot(o.b[0]-o.a[0],o.b[1]-o.a[1]).toFixed(2)+' mm')));
+  if(o.t==='circle')rows.push(row('Radius',edit(o.r,v=>setNum(o.id,'r',v,'radius'),true)));
+  q.replaceChildren(h('h4',{},`${kind(o)}, ${SHEET}/${o.id}`),h('div',{class:'rows'},rows),
+    h('div',{class:'acts'},h('button',{onclick:()=>start('move')},'Move'),h('button',{onclick:()=>start('copy')},'Copy'),h('button',{onclick:eraseSel},'Erase'),h('button',{class:'askit',onclick:()=>explain(o)},'Ask about this')))}
+function updateUI(){
+  const act=S.cmd?S.cmd.name:null,st=S.coach&&S.coach.steps[S.coach.i];
+  for(const n in rbtns){rbtns[n].setAttribute('aria-pressed',n===act);rbtns[n].classList.toggle('pulse',!!st&&st.hl===n)}
+  $('layer').value=S.layer;$('laysw').style.background=LAYERS[S.layer];
+  $('hist').replaceChildren(...S.log.slice(-2).map(l=>h('div',{},l)));
+  const p=prompt();$('cmdname').textContent=p?TOOLS[S.cmd.name].name:'';$('cmdtext').textContent=p?p.text:'';
+  $('cmdopts').replaceChildren(...(p?p.opts.flatMap(([l,run],i)=>[i?' ':'[ ',h('button',{type:'button',class:'opt',onclick:run},l),i===p.opts.length-1?' ]':'']):[]));
+  $('cmdin').placeholder=p?(S.cmd.name==='text'&&S.cmd.p?'the text':'or type it: 120,80  or  @40,0'):(phone()?'Type a command, or ask':'Type a command (L line, C circle, M move), or ask the assistant');
+  $('tgrid').setAttribute('aria-pressed',S.grid);$('tsnap').setAttribute('aria-pressed',S.osnap);$('tortho').setAttribute('aria-pressed',S.ortho);
+  const open=S.journal.filter(e=>!e.issued).length;$('state').textContent=open?`Working revision, ${open} change set${open>1?'s':''} not issued`:'Issued';
+  fillQp();
+  const b=$('banner'),g=S.ghost,av=()=>h('span',{class:'avatar',html:'<svg viewBox="0 0 14 14"><path d="M7 0l1.8 5.2L14 7l-5.2 1.8L7 14l-1.8-5.2L0 7l5.2-1.8z"/></svg>'});
+  b.hidden=!(st||g);
+  if(st)b.replaceChildren(av(),h('span',{class:'txt'},st.say),h('span',{class:'step'},`Step ${S.coach.i+1} of ${S.coach.steps.length}`),h('button',{class:'bbtn',onclick:()=>{stopCoach();say('Stopped. Ask whenever you want to pick it up again.',MAIN());refresh()}},'Stop'));
+  else if(g)b.replaceChildren(av(),h('span',{class:'txt'},g.done?g.text+' Nothing has changed yet.':'Drawing a proposal…'),h('button',{class:'bbtn go',onclick:keep,disabled:!g.done},'Keep'),h('button',{class:'bbtn',onclick:discard},'Discard'));
+  renderAgent()}
+function refresh(){checkCoach();updateUI();draw()}
+
+$('undo').onclick=undoLast;$('accept').onclick=accept;
+$('agentbtn').onclick=()=>document.body.classList.toggle('agent-open');$('agentclose').onclick=()=>document.body.classList.remove('agent-open');
+$('tgrid').onclick=()=>{S.grid=!S.grid;refresh()};$('tsnap').onclick=()=>{S.osnap=!S.osnap;refresh()};$('tortho').onclick=()=>{S.ortho=!S.ortho;refresh()};
+document.querySelectorAll('[data-stub]').forEach(b=>b.onclick=()=>toast('Only DP-LD-101, in model space, is drawn in this prototype.'));
+document.querySelectorAll('.atab').forEach(b=>b.onclick=()=>{S.tab=b.dataset.tab;renderAgent()});
+$('askform').onsubmit=e=>{e.preventDefault();const v=$('askin').value.trim();$('askin').value='';if(v)ask(v)};
+function enter(){const inp=$('cmdin'),v=inp.value.trim();inp.value='';
+  if(!v){if(S.cmd)finish();else start(S.last);return}
+  if(!typed(v)){openAgent();ask(v)}}
+$('cmdbar').onsubmit=e=>{e.preventDefault();enter()};
+$('preset').onclick=()=>{buildSheet();touched=false;needFit=true;resize();refresh();toast('Started over.')};
+addEventListener('keydown',e=>{
+  const el=e.target,inField=el&&/^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
+  if(e.key==='F3'||e.key==='F7'||e.key==='F8'){e.preventDefault();const k=e.key==='F3'?'osnap':e.key==='F7'?'grid':'ortho';S[k]=!S[k];refresh();return}
+  if(e.key==='Escape'){if(S.cmd)cancel();else{S.sel=null;refresh()}if(inField)el.blur();return}
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undoLast();return}
+  if(inField)return;
+  if(e.key==='Delete'||e.key==='Backspace'){if(S.sel!=null){e.preventDefault();eraseSel()}return}
+  if(e.key==='Enter'){e.preventDefault();enter();return}
+  if(e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)$('cmdin').focus()});
+new ResizeObserver(resize).observe(stage);
+buildRibbon();buildSheet();resize();refresh();
+window.__proto={S,start,click,typed,undoLast,sx,sy,propose,teach,keep,hasLine};
+</script>
+</body>
+</html>
