@@ -330,6 +330,8 @@ export function Drawing({
     limits: () => bounds.current,
     touched: () => {
       followFit.current = false;
+      // The drafter takes the view: the page's own glide is theirs to end.
+      revealing.current = null;
     },
     tapped: ([sx, sy], pointerType) => {
       const v = viewer.current;
@@ -659,6 +661,9 @@ export function Drawing({
   // or the command bar grows or shrinks, the view moves only if that newly
   // hides the object: never to pull back an object the drafter panned away.
   const revealed = useRef<{ picked: number | null; compact: boolean; free: Box } | null>(null);
+  // The page's own glide to reveal the selection, while it runs: the view
+  // it is heading for, and when it ends. A drafter's touch ends it.
+  const revealing = useRef<{ target: View; until: number } | null>(null);
   useEffect(() => {
     const c = canvas.current;
     const el = card?.current;
@@ -672,16 +677,21 @@ export function Drawing({
     const free = freeBeside([qr.left - cr.left, qr.top - cr.top, qr.right - cr.left, qr.bottom - cr.top], cr.width, cr.height);
     const before = revealed.current;
     revealed.current = { picked, compact, free };
-    const v = view.current;
+    // While the page's own glide runs, the drafter has not moved the view:
+    // the object is judged where that glide takes it, and a new glide may
+    // take its place.
+    const own = revealing.current && performance.now() < revealing.current.until ? revealing.current.target : null;
+    const v = own ?? view.current;
     const [l, t] = toScreen(v, b[0] as number, b[3] as number);
     const [r, bottom] = toScreen(v, b[2] as number, b[1] as number);
     const sameSelection = before !== null && before.picked === picked && before.compact === compact;
-    if (sameSelection && !newlyHidden([l, t, r, bottom], before.free, free, cr.width, cr.height)) return;
+    if (sameSelection && !own && !newlyHidden([l, t, r, bottom], before.free, free, cr.width, cr.height)) return;
     const m = 12;
     if (l >= free[0] + m && r <= free[2] - m && t >= free[1] + m && bottom <= free[3] - m) return;
     followFit.current = false;
     const [fx, fy] = [(free[0] + free[2]) / 2, (free[1] + free[3]) / 2];
     const target = { ...v, left: v.left + ((l + r) / 2 - fx) / v.scale, top: v.top - ((t + bottom) / 2 - fy) / v.scale };
+    revealing.current = { target, until: performance.now() + 300 };
     glide.current?.to(target, 300, [fx, fy]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [picked, compact, space]);
