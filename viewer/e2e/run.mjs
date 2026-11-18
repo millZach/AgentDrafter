@@ -1593,14 +1593,20 @@ const checks = {
           lose.loseContext();
           const notLost = await within(lost, 'webglcontextlost');
           if (notLost) return notLost;
+          // WebGL allows a restore only on a later task than the loss.
+          await new Promise((done) => setTimeout(done, 0));
           const back = new Promise((done) => canvas.addEventListener('webglcontextrestored', done, { once: true }));
-          lose.restoreContext();
+          try {
+            lose.restoreContext();
+          } catch (e) {
+            return `restoreContext threw: ${e}`;
+          }
           const notBack = await within(back, 'webglcontextrestored');
           if (notBack) return notBack;
           await new Promise((done) => setTimeout(done, 300));
           return null;
         });
-        let contextRestored = 'not offered by this browser';
+        let contextRestored = `not restored by this browser: ${restore}`;
         if (restore === null) {
           const afterRestore = await gridPixels();
           assert(afterRestore === 0, `after a lost context the grid stays off: ${afterRestore}`);
@@ -1651,6 +1657,7 @@ const checks = {
         await page.tap('[aria-label="Fit the sheet"]');
         await sleep(600);
         assert(await page.isVisible('.qp'), 'Fit leaves the selection');
+        const covered = (box, qp) => box[0] < qp[2] && box[2] > qp[0] && box[1] < qp[3] && box[3] > qp[1];
         // The journal raised to half: quick properties sit above it, not behind.
         const grab = await page.evaluate(() => {
           const r = document.querySelector('.va-grab').getBoundingClientRect();
@@ -1666,8 +1673,42 @@ const checks = {
         });
         await page.screenshot({ path: join(out, 'frame-phone-journal-raised.png') });
         assert(raised.qp[1] <= raised.sheetTop + 0.5 && raised.qp[0] >= raised.stageTop - 0.5 && raised.qp[1] - raised.qp[0] > 40, `quick properties sit above the raised journal: ${JSON.stringify(raised)}`);
+        // The raised card has less room: the device is brought out from under it again.
+        const raisedCard = await page.evaluate(() => {
+          const r = document.querySelector('.qp').getBoundingClientRect();
+          return [r.left, r.top, r.right, r.bottom];
+        });
+        const deviceRaised = (await at(page, 'DP-LD-101/device')).box;
+        assert(!covered(deviceRaised, raisedCard), `the device is not under the raised card: ${JSON.stringify({ device: deviceRaised, card: raisedCard })}`);
+        raised.device = deviceRaised;
         assert(problems.length === 0, problems.join('; '));
         seen.phone = { toggles, placed, raised };
+        await context.close();
+      }
+      // A small phone, 320 by 568: a tool's prompt wraps the command bar, and
+      // quick properties stay above it, at its real height.
+      {
+        const context = await b.newContext({ ...PHONE, viewport: { width: 320, height: 568 } });
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        const device = await at(page, 'DP-LD-101/device');
+        await page.touchscreen.tap(...middle(device.box));
+        await page.waitForSelector('.qp');
+        await page.tap('.toolsbtn');
+        await page.tap('.rb[data-tool="rectangle"]', { force: true });
+        await sleep(600);
+        const small = await page.evaluate(() => {
+          const qp = document.querySelector('.qp').getBoundingClientRect();
+          const cmd = document.querySelector('.cmdbar').getBoundingClientRect();
+          return { qp: [qp.left, qp.top, qp.right, qp.bottom], cmd: [cmd.top, cmd.bottom] };
+        });
+        const deviceSmall = (await at(page, 'DP-LD-101/device')).box;
+        await page.screenshot({ path: join(out, 'frame-phone-320-prompt-wrapped.png') });
+        assert(small.cmd[1] - small.cmd[0] > 40, `the prompt wraps: ${JSON.stringify(small)}`);
+        assert(small.qp[3] <= small.cmd[0] + 0.5, `quick properties stay above the wrapped command bar: ${JSON.stringify(small)}`);
+        const [l, t, r, bt] = deviceSmall;
+        assert(!(l < small.qp[2] && r > small.qp[0] && t < small.qp[3] && bt > small.qp[1]), `the device is not under the card: ${JSON.stringify({ device: deviceSmall, ...small })}`);
+        assert(problems.length === 0, problems.join('; '));
+        seen.small = { ...small, device: deviceSmall };
         await context.close();
       }
       // A phone held on its side: the card does not cover the selected object.
@@ -1693,7 +1734,7 @@ const checks = {
       }
       return {
         ...seen,
-        screenshots: ['frame-laptop-selected.png', 'frame-phone-tools.png', 'frame-phone-selected.png', 'frame-phone-journal-raised.png', 'frame-phone-landscape-selected.png'],
+        screenshots: ['frame-laptop-selected.png', 'frame-phone-tools.png', 'frame-phone-selected.png', 'frame-phone-journal-raised.png', 'frame-phone-320-prompt-wrapped.png', 'frame-phone-landscape-selected.png'],
       };
     } finally {
       await b.close();

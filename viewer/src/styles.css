@@ -381,9 +381,10 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   .zoombtns { top: auto; transform: none; bottom: calc(var(--peek, 0px) + 8px); right: 8px; }
   .cmd { bottom: calc(var(--peek, 0px) + 8px); width: calc(100% - 64px); left: 8px; transform: none; }
   .cmdnote, .hist { display: none; }
-  /* Above the command bar, and above the journal however far it is raised (--sheet, which the sheet sets). */
+  /* Above the command bar at its real height (--cmd, which the page measures, a wrapped prompt's among
+     it), and above the journal however far it is raised (--sheet, which the sheet sets). */
   .qp {
-    --qp-bottom: max(calc(var(--peek, 0px) + 48px), calc(var(--sheet, 0px) + 8px));
+    --qp-bottom: max(calc(var(--peek, 0px) + var(--cmd, 32px) + 16px), calc(var(--sheet, 0px) + 8px));
     left: 8px; right: 8px; top: auto; bottom: var(--qp-bottom); width: auto;
     max-height: min(44%, calc(100% - var(--qp-bottom) - 8px)); visibility: visible;
   }

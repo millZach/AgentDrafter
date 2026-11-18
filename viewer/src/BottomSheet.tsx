@@ -20,17 +20,26 @@ export interface BottomSheetProps {
   body: ReactNode;
   /** A new value raises a peeking sheet to half the screen, to show what the body now holds. */
   raise: number;
+  /**
+   * The sheet came to rest covering this many pixels of the drawing from
+   * the bottom, at a snap or after a change of size, not at each move of a
+   * drag: what quick properties may use has changed.
+   */
+  onSettled?(pixels: number): void;
 }
 
 const clamp = (v: number, low: number, high: number) => Math.min(high, Math.max(low, v));
 
-export function BottomSheet({ wide, onCovers, peek, body, raise }: BottomSheetProps) {
+export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled }: BottomSheetProps) {
   const sheet = useRef<HTMLElement>(null);
   const grab = useRef<HTMLDivElement>(null);
   const peekBox = useRef<HTMLDivElement>(null);
   const [snap, setSnap] = useState<Snap>('peek');
   const drag = useRef<{ y0: number; s0: number; t: number; last: number; v: number; moved: boolean } | null>(null);
   const y = useRef(0);
+  const settled = useRef<number | null>(null);
+  const settle = useRef(onSettled);
+  settle.current = onSettled;
 
   const room = () => sheet.current?.parentElement?.clientHeight ?? 0;
   const peekHeight = () => (grab.current?.offsetHeight ?? 0) + (peekBox.current?.offsetHeight ?? 0);
@@ -44,7 +53,14 @@ export function BottomSheet({ wide, onCovers, peek, body, raise }: BottomSheetPr
     // How much of the drawing the sheet covers from the bottom, at
     // whatever height it is, as a variable its neighbours read: quick
     // properties sit above it.
-    const covers = (pixels: number) => el.parentElement?.style.setProperty('--sheet', `${Math.max(0, pixels)}px`);
+    const covers = (pixels: number) => {
+      const px = Math.max(0, Math.round(pixels));
+      el.parentElement?.style.setProperty('--sheet', `${px}px`);
+      if (!drag.current && settled.current !== px) {
+        settled.current = px;
+        settle.current?.(px);
+      }
+    };
     if (wide) {
       el.style.transform = '';
       el.style.height = '';

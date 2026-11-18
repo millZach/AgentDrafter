@@ -90,12 +90,14 @@ const UNITS: Record<string, { name: string; short: string }> = {
 };
 
 /**
- * A drawing unit in words, as the core names it (`in`, `mm`, ...). A
- * drawing that states none, such as a DWG whose INSUNITS is 0, is unitless:
- * its scale is not a unit, so none is shown.
+ * A drawing unit in words, as the core names it (`in`, `mm`, ...). With
+ * none, the page cannot tell a drawing that states no unit (a DWG whose
+ * INSUNITS is 0) from one whose unit the core does not carry (miles, say),
+ * so it says nothing of the unit: no word and no suffix, and never one
+ * guessed from the scale.
  */
 export function unitWords(units: string | null | undefined): { name: string; short: string } {
-  return (units && UNITS[units]) || { name: 'unitless', short: '' };
+  return (units && UNITS[units]) || { name: '', short: '' };
 }
 
 /** What the status bar says of the paper. */
@@ -117,12 +119,13 @@ const size = (v: number) => String(Number(v.toFixed(3)));
  */
 export function paperWords(s: PaperOf): string {
   const { name, short } = unitWords(s.units);
-  if (s.paper_declared && s.paper_name) return `${s.paper_name}, ${name}`;
+  const unit = name ? `, ${name}` : '';
+  if (s.paper_declared && s.paper_name) return `${s.paper_name}${unit}`;
   if (s.paper_declared) {
     const [left, bottom, right, top] = s.paper;
     return `${size(right - left)} × ${size(top - bottom)}${short ? ` ${short}` : ''}`;
   }
-  return `Extents, ${name}`;
+  return `Extents${unit}`;
 }
 
 /** The cursor's place on the drawing, as the status bar shows it. */

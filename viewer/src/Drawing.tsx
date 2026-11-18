@@ -74,6 +74,12 @@ export interface DrawingProps {
   onUnavailable(message: string): void;
   /** A tap or a click picked the object at this place, or nothing. */
   onPick(place: number | null): void;
+  /**
+   * What quick properties on a phone have to sit in: a new value, as the
+   * journal comes to rest at another height or the command bar grows,
+   * brings the selected object out from under the card again.
+   */
+  space?: string;
   /** Where the mouse is on the drawing, in drawing units, or null once it has left. */
   onCursor?(at: [number, number] | null): void;
   /** The colour the picked object shows in, `#rrggbb`, as the renderer says; empty for none. */
@@ -106,6 +112,7 @@ export function Drawing({
   onPick,
   onCursor,
   onPickedColor,
+  space,
 }: DrawingProps) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -433,7 +440,8 @@ export function Drawing({
   // On a phone, an object picked where quick properties open over it is
   // brought into the drawing's free part: above the card, as a phone held
   // upright has it, or left of it, as one held on its side has it. Where
-  // the card begins is measured, not assumed.
+  // the card begins is measured, not assumed, and measured again when the
+  // room it has changes (`space`).
   useEffect(() => {
     const c = canvas.current;
     const el = card?.current;
@@ -452,7 +460,7 @@ export function Drawing({
     const target = { ...v, left: v.left + ((l + r) / 2 - fx) / v.scale, top: v.top - ((t + bottom) / 2 - fy) / v.scale };
     glide.current?.to(target, 300, [fx, fy]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [picked, compact]);
+  }, [picked, compact, space]);
 
   // The grid on or off.
   useEffect(() => {

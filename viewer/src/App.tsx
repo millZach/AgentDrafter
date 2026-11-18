@@ -184,6 +184,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const [side, setSide] = useState<'journal' | 'assistant'>('journal');
   const [history, setHistory] = useState<string[]>([]);
   const [peekHeight, setPeekHeight] = useState(0);
+  // The room quick properties have on a phone changes with how far the
+  // journal is raised and how tall the command bar is: the selected object
+  // is brought out from under the card again when it does.
+  const [sheetCovers, setSheetCovers] = useState(0);
+  const [barHeight, setBarHeight] = useState(0);
   const viewport = useRef<HTMLDivElement>(null);
   const bar = useRef<HTMLDivElement>(null);
   const card = useRef<HTMLElement>(null);
@@ -671,6 +676,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const measure = () => {
       const covered = vp.getBoundingClientRect().bottom - b.getBoundingClientRect().bottom + BAR_LINE;
       setCovered(Math.max(0, Math.round(covered)));
+      // The bar's real height, a wrapped prompt's among it, which quick
+      // properties on a phone keep clear of.
+      vp.style.setProperty('--cmd', `${b.offsetHeight}px`);
+      setBarHeight(b.offsetHeight);
     };
     measure();
     const resized = new ResizeObserver(measure);
@@ -949,6 +958,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             onUnavailable={setUnavailable}
             onPick={pick}
             onCursor={cursorAt}
+            space={`${sheetCovers}:${barHeight}`}
             onPickedColor={setPickedColor}
           />
           <div className="va-overlays">
@@ -1009,7 +1019,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             )
           )}
         </div>
-        <BottomSheet wide={wide} onCovers={setPeekHeight} peek={peek} body={body} raise={raise} />
+        <BottomSheet wide={wide} onCovers={setPeekHeight} onSettled={setSheetCovers} peek={peek} body={body} raise={raise} />
       </div>
       {wide && (
         <StatusBar

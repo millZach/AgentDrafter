@@ -85,8 +85,9 @@ test('units, the paper and the cursor in words', () => {
   assert.deepEqual(unitWords('in'), { name: 'inches', short: 'in' });
   assert.deepEqual(unitWords('mm'), { name: 'millimetres', short: 'mm' });
   assert.deepEqual(unitWords('ft'), { name: 'feet', short: 'ft' });
-  // A drawing that states no unit, such as a DWG whose INSUNITS is 0, shows none: its scale is not a unit.
-  assert.deepEqual(unitWords(null), { name: 'unitless', short: '' });
+  // No unit from the core, whether stated none (INSUNITS 0) or one it does not carry (miles):
+  // no word, no suffix, and none guessed from the scale.
+  assert.deepEqual(unitWords(null), { name: '', short: '' });
   const sheet = { paper_declared: true, paper_name: 'ANSI B landscape', paper: [0, 0, 17, 11] as const, units: 'in' };
   assert.equal(paperWords(sheet), 'ANSI B landscape, inches');
   // Paper declared by its size alone is not the extents: its size says it.
@@ -95,7 +96,8 @@ test('units, the paper and the cursor in words', () => {
   assert.equal(paperWords({ ...sheet, paper_name: null, paper: [0, 0, 8.5, 11], units: null }), '8.5 × 11');
   // No paper: the sheet sits on its extents.
   assert.equal(paperWords({ ...sheet, paper_declared: false, paper_name: null, paper: [-5, -5, 105, 55] }), 'Extents, inches');
-  assert.equal(paperWords({ paper_declared: false, paper_name: null, paper: [0, 0, 1, 1], units: null }), 'Extents, unitless');
+  assert.equal(paperWords({ paper_declared: false, paper_name: null, paper: [0, 0, 1, 1], units: null }), 'Extents');
+  assert.equal(paperWords({ ...sheet, units: null }), 'ANSI B landscape');
   assert.equal(coordinates(1.72, 6.5, 'in'), '1.720, 6.500 in');
   assert.equal(coordinates(-3, 0, null), '-3.000, 0.000');
 });
