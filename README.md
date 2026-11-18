@@ -30,6 +30,7 @@ The engine is written in Rust and reads and writes DWG through [acadrust](https:
 - [The checker](docs/check.md): the default checks each sheet is held to after every change.
 - [The HTTP API and the MCP server](docs/servers.md): every command, served locally over HTTP and to an agent's MCP client.
 - [The viewer](docs/viewer.md): a drawing set's sheets in the browser, drawn by the same pipeline compiled to WebAssembly, with change sets shown as they land, the journal, undo and accept.
+- [The drafting app](docs/drafting-app.md): the design of the app a person drafts in, with an assistant, which the viewer grows into. Not built yet.
 - [The Python library and the pip package](docs/python.md): every command as a Python function, bound to the core, and the package that carries the command and the library.
 - [The glossary](CONTEXT.md): the words this project uses.
 - [The decisions](docs/adr/): what was decided and why.

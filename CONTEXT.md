@@ -8,11 +8,19 @@ AgentDrafter is an open-source CAD engine built for agents first: an agent creat
 
 **Agent**:
 An AI coding agent, such as Claude Code or Codex, that calls AgentDrafter to make or change drawings.
-_Avoid_: bot, AI, assistant
+_Avoid_: bot, AI
 
 **Reviewer**:
 The person who looks at what an agent did and accepts or undoes it.
 _Avoid_: user, operator
+
+**Drafter**:
+A person who draws and edits in the drafting app. The same person is the reviewer when they accept or undo.
+_Avoid_: user, operator, designer
+
+**Assistant**:
+The agent that drafts with a drafter in the drafting app: it answers in the app's panel, proposes, guides and checks. It is an agent like any other and reaches the core through an interface.
+_Avoid_: copilot, bot, AI
 
 **Generator**:
 A program outside AgentDrafter that knows a trade, such as controls, and turns project data into sheet descriptions. AgentDrafter knows drawings; a generator knows the trade.
@@ -424,6 +432,26 @@ _Avoid_: password, API key
 **Viewer**:
 The browser window where the reviewer watches a drawing set change, steps through its journal, and accepts or undoes. It learns of every change set from the set's journal, whichever interface sent it.
 _Avoid_: app, editor, UI
+
+**Drafting app**:
+The viewer with drawing tools and an assistant, in a browser or in its desktop shell, where a drafter draws and edits the way they use AutoCAD. Every edit made in it is a change set. It is designed and not yet built ([`docs/drafting-app.md`](docs/drafting-app.md)).
+_Avoid_: editor, CAD program, GUI
+
+**Drawing tool**:
+What a drafter picks in the drafting app to make one operation by clicking and typing, such as Line or Move. It gathers the operation's input on the drawing and sends it as a change set.
+_Avoid_: command (a command is the core's), tool on its own (the MCP server's word for a command), button
+
+**Command bar**:
+The line at the bottom of the drafting app's drawing where a drafter types a drawing tool's alias, a coordinate or words for the assistant, and reads the tool's prompt.
+_Avoid_: command line (that is an interface), prompt, console
+
+**Proposal**:
+A change set that waits to be kept or discarded. It is shown on the sheet before it lands, changes nothing until it is kept, and lands as a change set when it is.
+_Avoid_: suggestion, draft, preview (a preview is the drawing of it), pending change
+
+**Guide**:
+A list of steps an assistant gives the drafting app to walk a drafter through a task on their own drawing: what to say, which drawing tool, where to click, and the operation that completes each step.
+_Avoid_: tutorial, wizard, walkthrough
 
 ### Measuring
 
