@@ -486,6 +486,75 @@ fn every_command_of_the_registry_is_reachable_through_every_interface_with_the_s
 }
 
 #[test]
+fn a_look_alike_is_warned_of_at_the_top_of_the_reply_through_every_interface() {
+    let (cli_dir, http_dir, mcp_dir) = (
+        interface_folder("look-alike", "cli"),
+        interface_folder("look-alike", "http"),
+        interface_folder("look-alike", "mcp"),
+    );
+    let http = Http::start(&http_dir, &["--listen", "127.0.0.1:0"]);
+    let mut mcp = Mcp::start(&mcp_dir);
+    mcp.initialize();
+    // No font folder is named: the demo set's `romans.shx` and a TrueType
+    // font no system has, with the system's folders left out, take their
+    // look-alikes.
+    let warning = |font: &str, sheets: Value| {
+        json!([{
+            "code": "font_look_alike",
+            "font": font,
+            "look_alike": "Hershey Roman Simplex",
+            "sheets": sheets,
+        }])
+    };
+    let calls = [
+        (
+            "build",
+            vec!["build", "demo-set"],
+            json!({"source": "demo-set"}),
+            warning("romans.shx", json!(["DEMO-001", "DEMO-002", "DEMO-003"])),
+        ),
+        (
+            "check",
+            vec!["check", "demo-set", "--sheet", "DEMO-002"],
+            json!({"source": "demo-set", "sheets": ["DEMO-002"]}),
+            warning("romans.shx", json!(["DEMO-002"])),
+        ),
+        (
+            "measure-text",
+            vec![
+                "measure-text",
+                "PUMP 101",
+                "--font",
+                "agentdrafter-made-up-sans.ttf",
+                "--height",
+                "2.5",
+                "--no-system-fonts",
+            ],
+            json!({"contents": "PUMP 101", "font": "agentdrafter-made-up-sans.ttf", "height": 2.5, "no_system_fonts": true}),
+            warning("agentdrafter-made-up-sans.ttf", json!([])),
+        ),
+    ];
+    for (name, args, input, warnings) in &calls {
+        let (code, by_cli) = cli(args, &cli_dir);
+        let (status, by_http) = http.run(name, input);
+        let by_mcp = mcp.call(name, input)["structuredContent"].clone();
+        assert_eq!((code, status), (0, 200), "{name}: {by_cli}");
+        assert_eq!(&by_cli["warnings"], warnings, "{name}: {by_cli}");
+        assert_eq!(
+            without_times(&by_http),
+            without_times(&by_cli),
+            "`{name}` through the HTTP API and the command line"
+        );
+        assert_eq!(
+            without_times(&by_mcp),
+            without_times(&by_cli),
+            "`{name}` through the MCP server and the command line"
+        );
+    }
+    assert!(mcp.finish().success());
+}
+
+#[test]
 fn the_same_change_set_gives_the_same_reply_and_journal_entry_through_every_interface() {
     let (cli_dir, http_dir, mcp_dir) = (
         interface_folder("same-change-set", "cli"),

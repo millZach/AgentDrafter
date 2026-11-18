@@ -134,6 +134,7 @@ impl SheetFonts {
                 font: style.font.clone(),
                 used: used.used.clone(),
                 why: used.why.clone().unwrap_or_default(),
+                source: used.source,
             })
             .collect()
     }
@@ -216,6 +217,7 @@ mod tests {
                     used: hershey::NAME.into(),
                     substituted: true,
                     why: None,
+                    source: None,
                 }
             })],
         }

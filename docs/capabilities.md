@@ -45,7 +45,7 @@ A second real controls job, 25 sheets on 2026-11-13, met the same gaps in nearly
 | 11 | Object snaps and geometric queries | OSNAP, LIST, AREA, MEASUREGEOM, DIST | [#74](https://github.com/millZach/AgentDrafter/issues/74) |
 | 12 | Dimensions and dimension styles | DIMLINEAR and the rest, DIMSTYLE | [#75](https://github.com/millZach/AgentDrafter/issues/75) |
 | 13 | Paper-space layouts and viewports (built: one or more layouts in a DWG, viewports rectangular or clipped, layers frozen in one viewport) | LAYOUT, MVIEW, VPCLIP, VPLAYER | [#77](https://github.com/millZach/AgentDrafter/issues/77) |
-| 14 | Font folders: the system's fonts, and a warning when a look-alike stands in | FONTALT | [#101](https://github.com/millZach/AgentDrafter/issues/101) |
+| 14 | Font folders: the system's fonts, and a warning when a look-alike stands in (built: TrueType fonts found in the system's font folders by default, `--no-system-fonts` to leave them out, and a `font_look_alike` warning at the top of every reply that measures or draws text) | FONTALT | [#101](https://github.com/millZach/AgentDrafter/issues/101) |
 | 15 | A row's value inside other text | none: drawing sets | [#102](https://github.com/millZach/AgentDrafter/issues/102) |
 | 16 | More than one rows file in a drawing set | none: drawing sets | [#103](https://github.com/millZach/AgentDrafter/issues/103) |
 | 17 | Render through a plot style, to show what prints | PLOT preview | [#104](https://github.com/millZach/AgentDrafter/issues/104) |

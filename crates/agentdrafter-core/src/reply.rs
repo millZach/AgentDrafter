@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::change::RolledBack;
 use crate::error::Error;
+use crate::warning::{Warning, Warns};
 
 /// One request's outcome, ready to send. In JSON it is
 /// `{"ok": true, "result": {...}}` or `{"ok": false, "error": {...}}`, or,
@@ -13,11 +14,18 @@ use crate::error::Error;
 /// A command that first rolled back an entry of its drawing set's journal,
 /// left pending by a commit that never finished, says so under
 /// `rolled_back`, after `ok`, whatever came of the command itself.
+///
+/// A reply in which a look-alike stood in for a font says so under
+/// `warnings`, after `ok` and `rolled_back` and before `result`: one entry
+/// per font, naming every sheet it was used on ([`Warning`]). A reply with
+/// nothing to warn of leaves `warnings` out.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Reply<T> {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rolled_back: Option<RolledBack>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Warning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -32,9 +40,21 @@ impl<T> Reply<T> {
         Self {
             ok: false,
             rolled_back: None,
+            warnings: Vec::new(),
             result: Some(result),
             error: Some(error),
         }
+    }
+
+    /// The reply with the warnings its result holds at its top.
+    pub(crate) fn warned(mut self) -> Self
+    where
+        T: Warns,
+    {
+        if let Some(result) = &self.result {
+            self.warnings = result.warnings();
+        }
+        self
     }
 
     /// The reply of a request that first rolled back `rolled_back`, when it
@@ -53,12 +73,14 @@ impl<T> From<Result<T, Error>> for Reply<T> {
             Ok(result) => Self {
                 ok: true,
                 rolled_back: None,
+                warnings: Vec::new(),
                 result: Some(result),
                 error: None,
             },
             Err(error) => Self {
                 ok: false,
                 rolled_back: None,
+                warnings: Vec::new(),
                 result: None,
                 error: Some(error),
             },

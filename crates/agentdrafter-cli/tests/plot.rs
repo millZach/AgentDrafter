@@ -24,6 +24,7 @@ fn agentdrafter(args: &[&str], cwd: &Path) -> (i32, Value) {
         .args(args)
         .current_dir(cwd)
         .env_remove("AGENTDRAFTER_FONTS")
+        .env("AGENTDRAFTER_SYSTEM_FONTS", "0")
         .env_remove("AGENTDRAFTER_PLOT_STYLES")
         .output()
         .unwrap();

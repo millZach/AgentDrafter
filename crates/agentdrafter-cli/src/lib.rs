@@ -30,7 +30,7 @@ use agentdrafter_core::{commands, find_command, Error, ErrorCode, Interface, Rep
 use agentdrafter_core::{
     AcceptRequest, ChangeRequest, CheckRequest, DisplayListRequest, ImportBlocksRequest,
     JournalRequest, MeasureTextRequest, RenderRequest, StaleRequest, UndoRequest, Unit,
-    FONTS_VARIABLE, PLOT_STYLES_VARIABLE,
+    FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE,
 };
 use agentdrafter_core::{
     End, Matching, Measure, ObjectRef, Query, QueryRequest, Selection, SelectionBox, SnapKind,
@@ -40,23 +40,23 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 const BUILD_USAGE: &str =
-    "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg>] [--overwrite] [--fonts <folder>]...";
+    "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg>] [--overwrite] [--fonts <folder>]... [--no-system-fonts]";
 const SCHEMA_USAGE: &str =
     "agentdrafter schema [sheet-description | block-library | template | set | rows | change-set]";
 const OPERATIONS_USAGE: &str = "agentdrafter operations";
-const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder> <change-set.json | -> [--dry-run] [--fonts <folder>]...";
+const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder> <change-set.json | -> [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
 const JOURNAL_USAGE: &str = "agentdrafter journal <drawing-set-folder>";
 const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [--dry-run]";
-const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]...";
-const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...";
-const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]...";
-const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--fonts <folder>]...";
-const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]...";
+const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
+const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]";
+const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]... [--no-system-fonts]";
+const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--fonts <folder>]... [--no-system-fonts]";
+const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
-const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...";
+const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]";
 const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
-const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --space <space> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...]";
+const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --space <space> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...] [--no-system-fonts]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
 /// name, as the binary does: it prints the reply on standard output, or
@@ -149,18 +149,35 @@ fn run(args: Vec<OsString>) -> (String, ExitCode) {
     }
 }
 
+/// The font options a command takes: the folders `--fonts` names, and
+/// whether `--no-system-fonts` leaves the system's font folders out.
+#[derive(Default)]
+struct FontOptions {
+    folders: Vec<PathBuf>,
+    no_system: bool,
+}
+
+impl FontOptions {
+    fn push(&mut self, folder: PathBuf) {
+        self.folders.push(folder);
+    }
+}
+
 /// The input a core request gives as plain data, with the font folders
-/// `--fonts` names. A path that is not valid text cannot be sent as JSON,
-/// through any interface.
-fn input_of(request: impl Serialize, fonts: Vec<PathBuf>) -> Result<Value, Error> {
+/// `--fonts` names and `--no-system-fonts`. A path that is not valid text
+/// cannot be sent as JSON, through any interface.
+fn input_of(request: impl Serialize, fonts: FontOptions) -> Result<Value, Error> {
     let not_text = |e: serde_json::Error| {
         Error::usage(format!(
             "every interface takes paths and values as text (UTF-8), and one given is not: {e}"
         ))
     };
     let mut input = serde_json::to_value(request).map_err(not_text)?;
-    if !fonts.is_empty() {
-        input["fonts"] = serde_json::to_value(fonts).map_err(not_text)?;
+    if !fonts.folders.is_empty() {
+        input["fonts"] = serde_json::to_value(fonts.folders).map_err(not_text)?;
+    }
+    if fonts.no_system {
+        input["no_system_fonts"] = Value::Bool(true);
     }
     Ok(input)
 }
@@ -211,7 +228,7 @@ fn parse_operations(mut args: Args) -> Result<Value, Error> {
 fn parse_render(mut args: Args) -> Result<Value, Error> {
     let mut source: Option<PathBuf> = None;
     let mut request = RenderRequest::new(PathBuf::new());
-    let mut fonts = Vec::new();
+    let mut fonts = FontOptions::default();
     let value = |flag: &str, value: Option<OsString>| -> Result<OsString, Error> {
         value.ok_or_else(|| Error::usage(format!("{flag} needs a value; usage: {RENDER_USAGE}")))
     };
@@ -235,6 +252,7 @@ fn parse_render(mut args: Args) -> Result<Value, Error> {
                 }
             }
             Some("--overwrite") => request.overwrite = true,
+            Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
             Some("--dpi") => {
                 if dpi
@@ -299,7 +317,7 @@ fn parse_render(mut args: Args) -> Result<Value, Error> {
 fn parse_display_list(mut args: Args) -> Result<Value, Error> {
     let mut request = DisplayListRequest::new(PathBuf::new());
     let mut source: Option<PathBuf> = None;
-    let mut fonts = Vec::new();
+    let mut fonts = FontOptions::default();
     let value = |flag: &str, value: Option<OsString>| -> Result<OsString, Error> {
         value.ok_or_else(|| {
             Error::usage(format!("{flag} needs a value; usage: {DISPLAY_LIST_USAGE}"))
@@ -352,6 +370,7 @@ fn parse_display_list(mut args: Args) -> Result<Value, Error> {
                     return Err(Error::usage("--entry is given twice"));
                 }
             }
+            Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
             Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
                 return Err(Error::usage(format!(
@@ -396,7 +415,7 @@ fn parse_plot(mut args: Args) -> Result<Value, Error> {
     let mut output: Option<PathBuf> = None;
     let mut overwrite = false;
     let mut plot_style: Option<String> = None;
-    let mut fonts = Vec::new();
+    let mut fonts = FontOptions::default();
     let mut plot_styles = Vec::new();
     let value = |flag: &str, value: Option<OsString>| -> Result<OsString, Error> {
         value.ok_or_else(|| Error::usage(format!("{flag} needs a value; usage: {PLOT_USAGE}")))
@@ -419,6 +438,7 @@ fn parse_plot(mut args: Args) -> Result<Value, Error> {
                 }
             }
             Some("--plot-styles") => plot_styles.push(value("--plot-styles", args.next())?.into()),
+            Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
             Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
                 return Err(Error::usage(format!(
@@ -481,7 +501,7 @@ fn parse_stale(mut args: Args) -> Result<Value, Error> {
             "stale needs the output to check; usage: {STALE_USAGE}"
         ))
     })?;
-    input_of(StaleRequest { output, source }, Vec::new())
+    input_of(StaleRequest { output, source }, FontOptions::default())
 }
 
 /// Reads `change`'s arguments: the set's folder, the change set's JSON file
@@ -490,10 +510,11 @@ fn parse_change(mut args: Args) -> Result<Value, Error> {
     let usage = |message: String| Error::usage(format!("{message}; usage: {CHANGE_USAGE}"));
     let mut given: Vec<OsString> = Vec::new();
     let mut dry_run = false;
-    let mut fonts = Vec::new();
+    let mut fonts = FontOptions::default();
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--dry-run") => dry_run = true,
+            Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => match args.next() {
                 Some(folder) => fonts.push(PathBuf::from(folder)),
                 None => return Err(usage("--fonts needs a value".to_owned())),
@@ -563,7 +584,7 @@ fn parse_journal(args: Args) -> Result<Value, Error> {
     let request = JournalRequest {
         set: PathBuf::from(set),
     };
-    input_of(request, Vec::new())
+    input_of(request, FontOptions::default())
 }
 
 /// Reads `undo`'s arguments: the set's folder, the change set's entry in
@@ -602,7 +623,7 @@ fn parse_undo(args: Args) -> Result<Value, Error> {
         change_set,
         dry_run,
     };
-    input_of(request, Vec::new())
+    input_of(request, FontOptions::default())
 }
 
 /// A journal entry's number, as an argument gives it.
@@ -619,7 +640,7 @@ fn parse_accept(mut args: Args) -> Result<Value, Error> {
         newest_seen: None,
         dry_run: false,
     };
-    let mut fonts = Vec::new();
+    let mut fonts = FontOptions::default();
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--dry-run") => request.dry_run = true,
@@ -639,6 +660,7 @@ fn parse_accept(mut args: Args) -> Result<Value, Error> {
                     return Err(usage("--newest-seen is given twice".into()));
                 }
             }
+            Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(PathBuf::from(
                 args.next()
                     .ok_or_else(|| usage("--fonts needs a folder".into()))?,
@@ -685,7 +707,7 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
     // The other object of a `from` that is itself an intersection.
     let mut from_with = ObjectRef::default();
     let (mut snap_kind, mut from_kind): (Option<String>, Option<String>) = (None, None);
-    let mut fonts = Vec::new();
+    let mut fonts = FontOptions::default();
     let value = |flag: &str, value: Option<OsString>| -> Result<String, Error> {
         value
             .and_then(|v| v.into_string().ok())
@@ -698,6 +720,7 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--sheet") => once(&mut sheet, "--sheet", value("--sheet", args.next())?)?,
+            Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
             Some("--contains") if selecting => selection.matching = Matching::Contains,
             Some(flag @ ("--window" | "--crossing")) if selecting => {
@@ -846,9 +869,10 @@ fn parse_check(mut args: Args) -> Result<Value, Error> {
     let usage = |message: String| Error::usage(format!("{message}; usage: {CHECK_USAGE}"));
     let mut source: Option<PathBuf> = None;
     let mut sheets = Vec::new();
-    let mut fonts = Vec::new();
+    let mut fonts = FontOptions::default();
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--no-system-fonts") => fonts.no_system = true,
             Some(flag @ ("--sheet" | "--fonts")) => {
                 let Some(value) = args.next() else {
                     return Err(usage(format!("{flag} needs a value")));
@@ -937,7 +961,7 @@ fn parse_import_blocks(mut args: Args) -> Result<Value, Error> {
             units,
             dry_run,
         },
-        Vec::new(),
+        FontOptions::default(),
     )
 }
 
@@ -945,9 +969,10 @@ fn parse_build(mut args: Args) -> Result<Value, Error> {
     let mut description: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut overwrite = false;
-    let mut fonts = Vec::new();
+    let mut fonts = FontOptions::default();
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(
                 args.next()
                     .ok_or_else(|| {
@@ -998,7 +1023,7 @@ fn parse_measure(mut args: Args) -> Result<Value, Error> {
     let mut font: Option<String> = None;
     let mut height: Option<f64> = None;
     let mut width_factor: Option<f64> = None;
-    let mut fonts = Vec::new();
+    let mut fonts = FontOptions::default();
     let value = |flag: &str, value: Option<OsString>| -> Result<String, Error> {
         value
             .and_then(|v| v.into_string().ok())
@@ -1032,6 +1057,7 @@ fn parse_measure(mut args: Args) -> Result<Value, Error> {
                     return Err(once("--width-factor"));
                 }
             }
+            Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
             Some(flag) if flag.starts_with("--") => {
                 return Err(Error::usage(format!(
@@ -1091,9 +1117,10 @@ fn help() -> Value {
                     /commands and by `agentdrafter mcp` as each tool's input schema.",
         "fonts": format!(
             "Fonts are read from the folders --fonts names, then from those the {FONTS_VARIABLE} \
-             environment variable lists (separated as the system separates paths). There is no \
-             default folder. A font in none of them is replaced by a look-alike, and the reply \
-             says which."
+             environment variable lists (separated as the system separates paths), then, for a \
+             TrueType font, from the system's own font folders, unless --no-system-fonts or \
+             {SYSTEM_FONTS_VARIABLE}=0 leaves them out. A font in none of them is replaced by a \
+             look-alike: the reply says which, and warns of it under `warnings` at its top."
         ),
         "plot_styles": format!(
             "CTB plot styles are read from the folders --plot-styles names, then from those the \
