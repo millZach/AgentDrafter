@@ -1,0 +1,963 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway. Issue #151: object snaps, the crosshair and snap markers (build 3 of 10),
+  with a labelled preview of how build 4's Line will use them. It starts from the frame Zach picked
+  (prototype/drafting-app-frame-150), restyled where the real build changed it.
+  The drawings are the demo plant's real display lists and its real snap points from `query snap`
+  (demo-plant.js). Perpendicular, Tangent, Nearest and the snaps of lines drawn in the preview are
+  worked out in this page. The journal is faked. Nothing here is production code.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<link rel="icon" href="data:,">
+<title>AgentDrafter, object snaps (prototype)</title>
+<style>
+:root{--frame:#1e2530;--ribbon:#394150;--strip:#303845;--edge:#4b5464;--canvas:#212830;--text:#e6e9ee;--dim:#a3adba;--blue:#4aa3ff;
+  --ok:#3ddc84;--warn:#ffb020;--bad:#ff5d5d;--past:#e0a85a;--snap:#f2e24b;
+  --ui:"Segoe UI",system-ui,-apple-system,sans-serif;--mono:Consolas,"Cascadia Mono",ui-monospace,Menlo,monospace;--peek:0px}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0;overflow:hidden;overscroll-behavior:none;-webkit-text-size-adjust:100%}
+body{font:13px/1.35 var(--ui);color:var(--text);background:var(--frame);display:grid;grid-template:auto minmax(0,1fr) / minmax(0,1fr);height:100dvh;-webkit-tap-highlight-color:transparent}
+button,select{font:inherit;color:inherit}
+button{cursor:pointer;touch-action:manipulation}
+button:disabled{cursor:default}
+button:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+svg{display:block}
+
+/* the prototype's own strip: which demo, outside the product */
+#proto{display:flex;align-items:center;gap:8px;padding:3px 8px;background:#000;color:#ffd84a;font-size:12px;white-space:nowrap;overflow-x:auto;scrollbar-width:none}
+#proto button{background:#000;border:1px solid #ffd84a;color:#ffd84a;border-radius:3px;padding:1px 8px;font-size:12px}
+#proto .mode[aria-pressed=true]{background:#ffd84a;color:#000;font-weight:600}
+#app{display:grid;grid-template:auto auto auto minmax(0,1fr) auto / minmax(0,1fr);min-height:0;min-width:0;position:relative}
+#title{grid-row:1}#ribbon{grid-row:2}#tabs{grid-row:3}#work{grid-row:4}#status{grid-row:5}
+
+/* title bar */
+#title{display:flex;align-items:center;gap:8px;height:36px;padding:0 8px;background:var(--frame);border-bottom:1px solid #121821;min-width:0}
+#title .mark{width:20px;height:20px;flex:none}
+#title .name{font-weight:600}
+#title .file{flex:1;text-align:center;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.qa{background:none;border:1px solid transparent;border-radius:3px;padding:3px 7px;display:flex;align-items:center;gap:5px;color:var(--text);white-space:nowrap}
+.qa:hover:not(:disabled){background:#333c49;border-color:var(--edge)}
+.qa:disabled{opacity:.42}
+#toolsbtn{display:none}
+.pills{display:flex;gap:6px;align-items:center;min-width:0;overflow:hidden}
+.pill{border:1px solid #4f5a6a;background:#2a323e;border-radius:11px;padding:1px 9px;white-space:nowrap;color:var(--dim);font-size:12px}
+.pill.past{border-color:var(--past);background:#4a3a22;color:#ffe2b8;font-weight:600}
+.btn{background:#3a4250;border:1px solid #5a6577;border-radius:3px;padding:4px 12px;white-space:nowrap}
+.btn:hover:not(:disabled){background:#4a5567}
+.btn:disabled{opacity:.42}
+.btn.primary{background:#1f6fc9;border-color:#3d8fe8;font-weight:600}
+.btn.primary:hover:not(:disabled){background:#2a7fdc}
+.btn.primary.blocked{background:#2b4566;border-color:#3f5f86;color:#c8d6e8}
+.btn.sm{padding:2px 9px;font-size:12px}
+.btn.danger{border-color:#8a3434;color:#ffc4c4}
+
+/* ribbon */
+#ribbon{display:flex;background:var(--ribbon);border-bottom:1px solid #151b24;padding:0 4px;overflow-x:auto;scrollbar-width:none}
+.panel{display:flex;flex-direction:column;border-right:1px solid var(--edge);flex:none}
+.panel .row{display:flex;gap:2px;flex:1;align-items:center;padding:5px 6px 3px}
+.panel h3{margin:0;padding:2px 8px 3px;text-align:center;font-size:11px;font-weight:400;color:var(--dim);background:var(--strip);display:flex;justify-content:center;align-items:center;gap:6px}
+.soon{font-size:10px;line-height:1;padding:2px 5px;border-radius:7px;background:#4b5464;color:#dfe5ec;letter-spacing:.02em}
+.rb{display:grid;justify-items:center;gap:3px;min-width:60px;padding:6px 6px 4px;border:1px solid transparent;border-radius:3px;background:none;font-size:12px;color:#c2cad4;position:relative}
+.rb svg{width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;opacity:.5}
+.rb .pt{fill:var(--blue);stroke:none}
+.rb:hover{background:#414a5a;border-color:#56627a}
+.rb.flash{border-color:var(--blue);background:#2d3d55}
+.rb.on{background:#274b76;border-color:var(--blue);color:#fff}
+.rb.on svg{opacity:1}
+.rb .pv{position:absolute;top:-1px;right:-2px;font-size:9px;line-height:1;padding:2px 4px;border-radius:6px;background:#ffd84a;color:#000;font-weight:700}
+.layerbox{display:grid;gap:5px;min-width:200px}
+.layerbox .lay{display:flex;align-items:center;gap:6px;background:#2b323d;border:1px solid var(--edge);border-radius:3px;padding:4px 8px;cursor:default}
+.layerbox .sw{width:13px;height:13px;border:1px solid #111;flex:none}
+.layerbox .ln{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.layerbox .ln.muted{color:var(--dim)}
+.layerbox .caret{opacity:.35}
+.layerbox small{color:var(--dim);font-size:11px}
+.panel.foldonly{display:none}
+.tog2{background:#2b323d;border:1px solid var(--edge);border-radius:3px;padding:6px 10px;color:#7f8a98}
+.tog2[aria-pressed=true]{color:#7fc0ff;border-color:#3d6c9e}
+
+/* a tab for each sheet */
+#tabs{display:flex;align-items:flex-end;gap:1px;background:#2a313c;padding:3px 6px 0;border-bottom:1px solid #151b24;overflow-x:auto;scrollbar-width:none}
+.tab{background:#333b47;border:1px solid #454e5c;border-bottom:0;border-radius:3px 3px 0 0;padding:4px 12px;color:var(--dim);white-space:nowrap;display:flex;align-items:center;gap:6px}
+.tab:hover{color:#fff}
+.tab.on{background:var(--canvas);color:#fff;border-color:#5a6577}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+.dot.info{background:var(--blue)}.dot.bad{background:var(--bad)}.dot.ok{background:var(--ok)}
+
+/* the work area */
+#work{display:grid;grid-template-columns:minmax(0,1fr) 340px;min-height:0;position:relative}
+#stage{position:relative;min-width:0;min-height:0;overflow:hidden;background:var(--canvas)}
+#cv{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;-webkit-user-select:none;user-select:none;cursor:none}
+#cv.grabbing{cursor:grabbing}
+#zoom{position:absolute;right:10px;top:50%;transform:translateY(-50%);display:grid;gap:1px;z-index:3;background:#3a4250;border:1px solid #5a6577;border-radius:4px;overflow:hidden}
+#zoom button{width:34px;height:32px;background:none;border:0;font-size:17px;line-height:1}
+#zoom button:hover{background:#4a5567}
+#zoom .fit{font-size:11px}
+#toast{position:absolute;left:12px;top:12px;z-index:6;display:flex;gap:10px;align-items:flex-start;max-width:min(470px,calc(100% - 70px));padding:8px 10px 8px 12px;border-radius:4px;background:rgba(48,56,69,.97);border:1px solid #5a6577;border-left:3px solid var(--blue);box-shadow:0 6px 18px rgba(0,0,0,.4);animation:tin .2s ease-out}
+#toast.ok{border-left-color:var(--ok)}#toast.bad{border-left-color:var(--bad)}#toast.warn{border-left-color:var(--warn)}
+#toast b{display:block}#toast small{display:block;color:var(--dim);font-size:12px;margin-top:2px}
+#toast .tx{flex:1;min-width:0}
+@keyframes tin{from{opacity:0;transform:translateY(-6px)}}
+#note{position:absolute;left:50%;top:40%;transform:translate(-50%,-50%);z-index:5;max-width:min(440px,calc(100% - 32px));padding:12px 14px;border-radius:5px;background:#3a2a24;border:1px solid #8a5a3a;color:#ffd9c2}
+
+/* quick properties */
+#qp{position:absolute;z-index:4;width:268px;max-height:calc(100% - 90px);display:flex;flex-direction:column;background:rgba(48,56,69,.97);border:1px solid #5a6577;border-radius:4px;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+#qp header{display:flex;align-items:center;gap:6px;padding:5px 6px 5px 10px;background:var(--strip);border-bottom:1px solid var(--edge);border-radius:4px 4px 0 0}
+#qp header b{flex:1;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#qp header button{background:none;border:0;color:var(--dim);font-size:15px;line-height:1;padding:2px 6px}
+#qp header button:hover{color:#fff}
+#qp .body{padding:6px 10px 8px;overflow:auto}
+.prow{display:grid;grid-template-columns:70px minmax(0,1fr);gap:8px;padding:2px 0}
+.prow span{color:var(--dim)}
+.prow output{font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
+#qp h5{margin:8px 0 3px;font-size:11px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chip{background:#2a313c;border:1px solid #5a6577;border-radius:10px;padding:1px 8px;font-size:12px;text-align:left}
+.chip:hover{border-color:var(--blue)}
+.muted{color:var(--dim)}
+
+/* the command bar */
+#cmd{position:absolute;left:50%;transform:translateX(-50%);bottom:12px;width:min(780px,calc(100% - 24px));z-index:4;font:13px var(--mono)}
+#hist{padding:0 12px 4px;color:#aeb8c4;text-shadow:0 1px 3px #000,0 0 6px #212830;pointer-events:none}
+#hist div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#cmdbar{display:flex;align-items:center;gap:4px 8px;background:rgba(58,66,80,.97);border:1px solid #6a7689;border-radius:4px;padding:6px 10px;box-shadow:0 4px 14px rgba(0,0,0,.45);min-height:32px}
+#cmdbar .chev{color:var(--dim);flex:none}
+#cmdline{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#cmdname{font-weight:700;color:#fff;margin-right:6px}
+.snapw{color:var(--snap);font-weight:600}
+.opt{background:none;border:0;color:#7fc0ff;padding:0 1px;text-decoration:underline;font:inherit}
+.opt:hover{color:#fff}
+#cmdnote{color:#7f8a98;font:11px var(--ui);white-space:nowrap;flex:none}
+
+/* status bar */
+#status{display:flex;align-items:stretch;gap:2px;height:28px;padding:0 6px;background:var(--frame);border-top:1px solid #121821;font-size:12px;color:var(--dim);min-width:0}
+#coords{font-family:var(--mono);align-self:center;min-width:250px;padding-left:10px;color:var(--text);white-space:nowrap}
+#coords .snapw{font-family:var(--ui);font-weight:400;margin-left:8px}
+#paperlabel{align-self:center;padding:0 10px;white-space:nowrap}
+.tog{background:none;border:0;padding:0 9px;color:#7f8a98;white-space:nowrap}
+.tog[aria-pressed=true]{color:#7fc0ff}
+.tog:hover{background:#2c3440}
+.tog kbd{font:10px var(--mono);opacity:.7;margin-left:3px}
+.osgroup{display:flex;align-items:stretch}
+.osgroup .tog[data-tog=osnap]{padding-right:4px}
+#osmenubtn{background:none;border:0;padding:0 7px;color:#7f8a98;font-size:10px}
+#osmenubtn:hover,#osmenubtn[aria-expanded=true]{background:#2c3440;color:#fff}
+.grow{flex:1}
+.live{display:flex;align-items:center;gap:6px;white-space:nowrap;padding:0 8px}
+.live i{width:8px;height:8px;border-radius:50%;background:#6b7584;flex:none}
+.live.open i{background:var(--ok);box-shadow:0 0 0 3px rgba(61,220,132,.18)}
+.live.past i{background:var(--past)}
+
+/* the object snap menu: which snaps run */
+#osmenu{position:fixed;z-index:35;width:330px;background:#2f3743;border:1px solid #5a6577;border-radius:6px;box-shadow:0 14px 40px rgba(0,0,0,.6);padding:8px 0 6px;font-size:13px}
+#osmenu header{display:flex;align-items:center;gap:8px;padding:0 12px 6px;border-bottom:1px solid #3c4553}
+#osmenu header b{flex:1}
+#osmenu .sw2{display:flex;align-items:center;gap:6px;background:none;border:1px solid var(--edge);border-radius:12px;padding:1px 9px 1px 4px;font-size:12px;color:var(--dim)}
+#osmenu .sw2 i{width:22px;height:12px;border-radius:6px;background:#4b5464;position:relative}
+#osmenu .sw2 i::after{content:"";position:absolute;left:2px;top:2px;width:8px;height:8px;border-radius:50%;background:#c8d0da;transition:left .15s}
+#osmenu .sw2[aria-checked=true]{color:#7fc0ff;border-color:#3d6c9e}
+#osmenu .sw2[aria-checked=true] i{background:#1f6fc9}
+#osmenu .sw2[aria-checked=true] i::after{left:12px;background:#fff}
+#osmenu ul{list-style:none;margin:0;padding:4px 0}
+#osmenu li.grp{padding:8px 12px 2px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+.osrow{display:grid;grid-template-columns:18px 22px minmax(0,1fr);gap:8px;align-items:center;width:100%;text-align:left;background:none;border:0;padding:4px 12px}
+.osrow:hover{background:#3a4352}
+.osrow .ck{width:15px;height:15px;border:1px solid #6a7689;border-radius:3px;display:grid;place-items:center;font-size:11px;line-height:1;color:#fff}
+.osrow[aria-checked=true] .ck{background:#1f6fc9;border-color:#3d8fe8}
+.osrow svg{width:22px;height:22px;fill:none;stroke:var(--snap);stroke-width:1.6}
+.osrow small{display:block;color:var(--dim);font-size:11px;line-height:1.25}
+#osmenu.off .osrow svg{stroke:#7f8a98}
+#osmenu footer{display:flex;gap:6px;padding:6px 12px 0;border-top:1px solid #3c4553;align-items:center}
+#osmenu footer small{flex:1;color:var(--dim);font-size:11px}
+
+/* the side panel */
+#side{display:flex;flex-direction:column;min-height:0;background:#2a313c;border-left:1px solid #121821}
+#grab{display:none}
+#peek{display:none}
+#sidetabs{display:flex;align-items:center;gap:4px;padding:6px 10px 0;border-bottom:1px solid #3c4553}
+.stab{background:none;border:0;border-bottom:2px solid transparent;padding:4px 8px 6px;color:var(--dim);display:flex;gap:6px;align-items:center}
+.stab.on{color:#fff;border-color:var(--blue)}
+#sidebody{flex:1;min-height:0;overflow:auto;padding:8px 10px 14px}
+.jhead{display:flex;align-items:center;gap:8px;margin:2px 0 8px}
+.jhead b{font-size:14px}
+.stepper{margin-left:auto;display:flex;align-items:center;gap:2px;font-family:var(--mono);font-size:12px}
+.stepper button{background:#3a4250;border:1px solid #5a6577;border-radius:3px;width:28px;height:26px;font-size:16px;line-height:1}
+.stepper span{min-width:46px;text-align:center}
+.err{color:#ffb0b0}
+.jlist{list-style:none;margin:0;padding:0}
+.je{border:1px solid transparent;border-radius:4px;margin-bottom:2px}
+.je.on{border-color:#4f5a6a;background:#303845}
+.je.at{border-color:var(--past);background:#3a3326}
+.je-head{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:6px;align-items:start;width:100%;text-align:left;background:none;border:0;padding:6px 6px}
+.je-n{font-family:var(--mono);color:var(--dim)}
+.je-t{display:block}
+.je-m{display:flex;flex-wrap:wrap;gap:4px 8px;font-size:12px;margin-top:2px}
+.sh-landed{color:#9fe6bd}.sh-failed{color:#ffb0b0}
+.badge{font-size:11px;padding:1px 7px;border-radius:9px;white-space:nowrap;border:1px solid #4f5a6a;color:var(--dim)}
+.b-landed{border-color:#2c6a46;color:#9fe6bd}.b-issued{border-color:#3d6c9e;color:#a9cdf5}
+.b-failed{border-color:#8a3434;color:#ffb0b0}
+.b-undone{color:#8f99a6;text-decoration:line-through}.b-undo,.b-accept{color:#c8d0da}
+.je-det{padding:0 8px 8px 36px;font-size:12px}
+.je-det p{margin:4px 0}
+.ops{list-style:none;margin:4px 0;padding:0}
+.ops li{display:flex;gap:8px}.ops code{font-family:var(--mono);color:#cfd6df}
+.revsep{color:#7f8a98;font-size:11px;text-align:center;padding:8px 0;border-top:1px dashed #3c4553;margin-top:6px}
+.assist{padding:14px 6px;color:var(--dim);line-height:1.5}
+.assist h4{color:var(--text);margin:0 0 6px;font-size:14px}
+.assist .ghost{margin-top:14px;border:1px dashed #4f5a6a;border-radius:6px;padding:10px;color:#7f8a98}
+
+/* the tip that explains a tool */
+#tip{position:fixed;z-index:30;width:260px;padding:8px 10px;background:#f4f6f8;color:#1c232d;border-radius:3px;box-shadow:0 6px 20px rgba(0,0,0,.5);pointer-events:none;line-height:1.4}
+#tip b{display:block;margin-bottom:2px}
+#tip kbd{font:12px var(--mono);background:#dfe4ea;border-radius:2px;padding:0 4px;margin-left:4px}
+#tip .soonline{display:block;margin-top:5px;color:#5a6472;font-size:12px}
+
+#modal{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.55);display:grid;place-items:center;padding:16px}
+.dialog{width:min(460px,100%);background:#2f3743;border:1px solid #5a6577;border-radius:6px;padding:16px 18px;box-shadow:0 14px 40px rgba(0,0,0,.6)}
+.dialog h3{margin:0 0 8px;font-size:16px}
+.dialog .ok{color:#9fe6bd}
+.dialog-acts{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+#stage.past{background:#29251f}
+
+/* a phone */
+@media (max-width:860px){
+  #title{height:44px;gap:6px}
+  #title .name,#title .file,#undo,#accept{display:none}
+  #toolsbtn{display:flex;border-color:var(--edge);background:#2a323e}
+  body.tools-open #toolsbtn{background:#274b76;border-color:var(--blue)}
+  .pills{flex:1;justify-content:flex-end}
+  #ribbon{display:none;position:absolute;left:0;right:0;top:44px;z-index:25;flex-wrap:wrap;padding:4px;gap:4px 0;box-shadow:0 14px 30px rgba(0,0,0,.55);border-bottom:2px solid var(--blue)}
+  body.tools-open #ribbon{display:flex}
+  .panel{border-right:0;flex:1 1 100%}
+  .panel .row{flex-wrap:wrap}
+  .panel.foldonly{display:flex}
+  .rb{min-width:56px;padding:6px 4px 4px}
+  .layerbox{min-width:0;flex:1}
+  .tab{padding:6px 12px}
+  #work{grid-template-columns:minmax(0,1fr)}
+  #side{position:absolute;left:0;right:0;bottom:0;top:0;z-index:12;border-left:0;border-top:1px solid #5a6577;border-radius:12px 12px 0 0;box-shadow:0 -10px 30px rgba(0,0,0,.5);will-change:transform}
+  #grab{display:block;padding:7px 0 3px;touch-action:none;cursor:grab}
+  #grab span{display:block;margin:0 auto;width:40px;height:4px;border-radius:2px;background:#6a7689}
+  #peek{display:grid;gap:6px;padding:2px 10px 8px;touch-action:none}
+  .peekline{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px}
+  .peeklast{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:6px;align-items:center;text-align:left;background:#303845;border:1px solid #3c4553;border-radius:4px;padding:6px}
+  .peeklast .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .peekacts{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .peekacts .btn{padding:8px 10px}
+  #status{display:none}
+  /* Fit sits beside the command bar, as the real frame has it */
+  #zoom{top:auto;transform:none;bottom:calc(var(--peek) + 8px);right:8px}
+  #zoom .zi{display:none}
+  #zoom .fit{height:34px;width:44px}
+  #cmd{bottom:calc(var(--peek) + 8px);width:calc(100% - 68px);left:8px;transform:none}
+  #cmdbar{min-height:36px}
+  #cmdline{white-space:normal;overflow:visible}
+  #cmdnote{display:none}
+  #hist{display:none}
+  #qp{left:8px!important;right:8px;top:auto!important;bottom:calc(var(--peek) + 56px);width:auto;max-height:44%}
+  #toast{left:8px;right:8px;max-width:none}
+  #osmenu{left:8px!important;right:8px;width:auto;top:auto!important;bottom:8px}
+  .osrow{padding:7px 12px}
+  #proto .long{display:none}
+}
+</style>
+</head>
+<body>
+<div id="proto"><span>Prototype: snaps, build 3 of 10</span>
+  <button class="mode" data-mode="snaps" aria-pressed="true">Build 3: snaps, no tool</button>
+  <button class="mode" data-mode="line" aria-pressed="false">Preview of build 4: Line</button>
+  <button id="reset">Start over</button>
+  <span class="long" style="opacity:.75">Snap points are the demo plant's own, from <code>query snap</code>; Perpendicular, Tangent, Nearest and the drawn lines' snaps are worked out in this page.</span></div>
+<div id="app">
+  <header id="title">
+    <svg class="mark" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 17V4l13 13z" fill="none" stroke="#4aa3ff" stroke-width="2" stroke-linejoin="round"/><path d="M7 14v-3l3 3z" fill="#4aa3ff"/></svg><span class="name">AgentDrafter</span>
+    <button class="qa" id="toolsbtn" aria-expanded="false" aria-controls="ribbon">Tools &#9662;</button>
+    <button class="qa" id="undo" data-act="undo"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h6.5a3.5 3.5 0 010 7H6M3 6l3-3M3 6l3 3"/></svg><span id="undolabel">Undo last</span></button>
+    <span class="file" id="file"></span>
+    <div class="pills" id="pills"></div>
+    <button class="btn primary" id="accept" data-act="accept">Accept&hellip;</button>
+  </header>
+  <nav id="ribbon" aria-label="Tools"></nav>
+  <nav id="tabs" aria-label="Sheets"></nav>
+  <main id="work">
+    <div id="stage">
+      <canvas id="cv" aria-label="The drawing"></canvas>
+      <div id="toast" role="status" hidden></div>
+      <div id="note" role="alert" hidden></div>
+      <div id="qp" hidden aria-label="Quick properties"></div>
+      <div id="zoom"><button class="zi" data-z="1.5" aria-label="Zoom in">+</button><button class="zi" data-z="0.667" aria-label="Zoom out">&minus;</button><button class="fit" data-z="0" title="Show the whole sheet">Fit</button></div>
+      <div id="cmd"><div id="hist"></div>
+        <div id="cmdbar" role="status" aria-label="Command bar"><span class="chev">&gt;_</span><span id="cmdline"></span><span id="cmdnote"></span></div></div>
+    </div>
+    <aside id="side" aria-label="Journal">
+      <div id="grab"><span></span></div>
+      <div id="peek"></div>
+      <div id="sidetabs">
+        <button class="stab on" data-side="journal">Journal</button>
+        <button class="stab" data-side="assistant">Assistant <span class="soon">Soon</span></button>
+      </div>
+      <div id="sidebody"></div>
+    </aside>
+  </main>
+  <footer id="status">
+    <span id="coords">&nbsp;</span><span id="paperlabel"></span>
+    <button class="tog" data-tog="grid" title="The grid behind the drawing">Grid<kbd>F7</kbd></button>
+    <span class="osgroup"><button class="tog" data-tog="osnap" title="Object snap: the cursor catches ends, middles, centres and crossings. Right-click or ▴ to choose which.">Object snap<kbd>F3</kbd></button><button id="osmenubtn" aria-haspopup="menu" aria-expanded="false" aria-label="Choose the object snaps">&#9650;</button></span>
+    <button class="tog" data-tog="ortho" title="Ortho: lines you draw stay level or upright">Ortho<kbd>F8</kbd></button>
+    <span class="grow"></span>
+    <span class="live" id="live"><i></i><span></span></span>
+  </footer>
+</div>
+<div id="osmenu" role="menu" aria-label="Object snaps" hidden></div>
+<div id="tip" hidden></div>
+<div id="modal" hidden></div>
+<script src="demo-plant.js"></script>
+<script>
+'use strict';
+const DP=window.DEMO_PLANT, $=id=>document.getElementById(id);
+function h(tag,props,...kids){
+  const e=document.createElement(tag);
+  for(const k in (props||{})){const v=props[k];
+    if(k==='class')e.className=v;else if(k==='html')e.innerHTML=v;
+    else if(k.startsWith('on'))e.addEventListener(k.slice(2),v);
+    else if(v===true)e.setAttribute(k,'');else if(v!==false&&v!=null)e.setAttribute(k,v)}
+  for(const c of kids.flat(3)){if(c==null||c===false)continue;e.append(c.nodeType?c:document.createTextNode(String(c)))}
+  return e}
+const put=(el,...k)=>el.replaceChildren(...k.flat(3).filter(x=>x!=null&&x!==false).map(x=>x.nodeType?x:document.createTextNode(String(x))));
+const up=s=>s.toUpperCase();
+const plural=(n,one,many=one+'s')=>`${n} ${n===1?one:many}`;
+const listed=a=>a.length<=1?a.join(''):`${a.slice(0,-1).join(', ')} and ${a.at(-1)}`;
+const clock=t=>t.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+const phone=()=>matchMedia('(max-width:860px)').matches;
+const f4=v=>(Math.abs(v)<5e-5?0:v).toFixed(4);
+
+/* ───────────── object snaps: which there are, their AutoCAD marker, and which run by default ───────────── */
+// Marker shapes are AutoCAD's AutoSnap markers, as SVG paths round 0,0 with a half size s,
+// so the same shape draws on the drawing (Path2D) and in the menu (SVG).
+const C=(r,cx=0,cy=0)=>`M${cx+r} ${cy}A${r} ${r} 0 1 0 ${cx-r} ${cy}A${r} ${r} 0 1 0 ${cx+r} ${cy}Z`;
+const SNAPS=[
+ {k:'endpoint',label:'Endpoint',hint:'The ends of lines, arcs and polyline corners',path:s=>`M${-s} ${-s}H${s}V${s}H${-s}Z`},
+ {k:'midpoint',label:'Midpoint',hint:'The middle of a line, an arc or a polyline side',path:s=>`M0 ${-s}L${s} ${s*.8}H${-s}Z`},
+ {k:'center',label:'Centre',hint:'The centre of a circle or an arc',path:s=>C(s)},
+ {k:'quadrant',label:'Quadrant',hint:'A circle’s 0°, 90°, 180° and 270° points',path:s=>`M0 ${-s}L${s} 0L0 ${s}L${-s} 0Z`},
+ {k:'intersection',label:'Intersection',hint:'Where two objects cross',path:s=>`M${-s} ${-s}L${s} ${s}M${s} ${-s}L${-s} ${s}`},
+ {k:'insertion',label:'Insertion',hint:'Where a block or a text is placed',path:s=>`M${-s} ${-s*.2}H${s*.2}V${s}H${-s}ZM${-s*.2} ${-s*.2}V${-s}H${s}V${s*.2}H${s*.2}`},
+ {k:'node',label:'Node',hint:'Where a text’s baseline starts, and points',path:s=>C(s)+`M${-s*.7} ${-s*.7}L${s*.7} ${s*.7}M${s*.7} ${-s*.7}L${-s*.7} ${s*.7}`},
+ {k:'nearest',label:'Nearest',hint:'The nearest point on any object',path:s=>`M${-s} ${-s}H${s}L${-s} ${s}H${s}Z`},
+ {k:'perpendicular',label:'Perpendicular',hint:'Square to an object, from the last point',tool:true,path:s=>`M${-s} ${-s}V${s}H${s}M${-s} 0H0V${s}`},
+ {k:'tangent',label:'Tangent',hint:'Touching a circle, from the last point',tool:true,path:s=>C(s*.7,0,s*.3)+`M${-s} ${-s*.4}H${s}`}];
+const SN=Object.fromEntries(SNAPS.map(x=>[x.k,x]));
+// AutoCAD's default running snaps are Endpoint, Centre, Intersection and Extension (OSMODE 4133);
+// the core has no Extension, and Midpoint is added: a beginner reaches for the middle of a line first.
+const DEFAULT_SNAPS=['endpoint','midpoint','center','intersection'];
+// When two snaps are as near, AutoCAD-like order decides.
+const PRIO=['endpoint','intersection','midpoint','center','quadrant','insertion','node','perpendicular','tangent','nearest'];
+const markerSvg=(k,sz=22)=>`<svg viewBox="-11 -11 22 22" width="${sz}" height="${sz}" aria-hidden="true"><path d="${SN[k].path(7)}"/></svg>`;
+
+/* ───────────── the faked journal (the frame's), so the frame reads as it is ───────────── */
+let J=[],jver=0,S;
+function seed(){
+  const t=m=>new Date(Date.now()-m*60e3);
+  J=[
+    {n:1,kind:'change_set',via:'command line',at:t(190),landed:['DP-LD-101'],failed:[],ops:[{op:'move',sheet:'DP-LD-101',target:'signal',by:[0,-0.12]}]},
+    {n:2,kind:'accept',via:'viewer',at:t(150),issued:[1]},
+    {n:3,kind:'change_set',via:'MCP server',at:t(42),landed:['DP-LD-101','DP-LD-102'],failed:[],ops:[
+      {op:'add_line',sheet:'DP-LD-101',id:'drain-1',layer:'wire',from:[8.6,5.75],to:[11,5.75]},
+      {op:'add_line',sheet:'DP-LD-102',id:'drain-1',layer:'wire',from:[8.6,5.75],to:[11,5.75]}]}];
+  J[0].issuedBy=2;
+  jver++;
+  const mode=new URLSearchParams(location.search).get('mode')==='line'?'line':'snaps';
+  S={sheet:'DP-LD-101',at:null,sel:null,focused:null,pulseT:0,grid:true,osnap:true,ortho:false,stream:'open',
+     side:'journal',open:new Set(),log:['Journal read: 3 entries. Live: changes show as they land.'],prompt:null,
+     snap:'peek',cannot:null,
+     // snaps
+     kinds:new Set(DEFAULT_SNAPS),mode,cursor:null,hover:null,cands:[],candI:0,taken:null,loupe:null,flash:null,
+     line:{pts:[]},drawn:{},menu:false};
+}
+const entry=n=>J.find(e=>e.n===n);
+const newest=()=>J.at(-1)?.n??0;
+const canUndo=()=>J.filter(e=>e.kind==='change_set'&&e.landed.length&&!e.undoneBy&&!e.issuedBy).map(e=>e.n);
+const lastUndoable=()=>canUndo().at(-1)??null;
+const pending=()=>J.filter(e=>e.kind==='change_set'&&e.landed.length&&!e.undoneBy&&!e.issuedBy);
+const lastAccept=()=>[...J].reverse().find(e=>e.kind==='accept');
+function sheetsTouched(e){if(e.kind==='change_set')return e.landed;if(e.kind==='undo')return [...new Set(e.undid.flatMap(n=>entry(n).landed))];return []}
+function changedOn(e,sheet){if(!e||e.kind!=='change_set')return [];return e.ops.filter(o=>o.sheet===sheet&&e.landed.includes(sheet)).map(o=>({id:`${sheet}/${o.op==='add_line'?o.id:o.target}`,how:o.op==='add_line'?'added':'changed'}))}
+const viaWords=v=>v==='viewer'?'the viewer':v==='command line'?'the command line':v==='MCP server'?'the MCP server':v==='Python library'?'the Python library':'the HTTP API';
+function opWords(o){return o.op==='move'?`move ${o.target} by ${o.by[0]}, ${o.by[1]}`:o.op==='add_line'?`add_line ${o.id} on ${o.layer??'?'}`:o.op}
+function entryTitle(e){
+  if(e.kind==='undo')return `Undo of change set${e.undid.length>1?'s':''} ${e.undid.join(', ')}`;
+  if(e.kind==='accept')return e.issued.length?`Accept: issued change set${e.issued.length>1?'s':''} ${e.issued.join(', ')}`:'Accept: issued the set as it stood';
+  const ops=e.ops,first=ops.slice(0,2).map(opWords).join(', ');return first+(ops.length>2?` and ${ops.length-2} more`:'')}
+function entryState(e){
+  if(e.kind==='undo')return ['undo','Undo'];
+  if(e.kind==='accept')return ['accept',`Accept, ${viaWords(e.via)}`];
+  if(e.undoneBy)return ['undone','Undone'];
+  if(e.issuedBy)return ['issued','Issued'];
+  return ['landed','Landed']}
+
+/* ───────────── the drawing, and its snaps ───────────── */
+const cache=new Map();
+function sheetAt(sheet,limit){
+  const key=`${sheet}|${limit??'live'}|${jver}`;if(cache.has(key))return cache.get(key);
+  const base=DP.data[sheet];
+  let items=base.items.map(([o,c,w,r])=>({o,c,w,r}));const objects=base.objects.slice();
+  // the real snap points: [snap, x, y, object, which, with]
+  let snaps=base.snaps.map(([k,x,y,o,which,w])=>({k,x,y,o,which,w}));
+  const index=id=>objects.findIndex(o=>o.id===`${sheet}/${id}`);
+  for(const e of J){
+    if(limit!=null&&e.n>limit)break;
+    if(e.kind!=='change_set'||!e.landed.includes(sheet))continue;
+    if(e.undoneBy&&(limit==null||e.undoneBy<=limit))continue;
+    for(const op of e.ops){if(op.sheet!==sheet)continue;
+      if(op.op==='move'){const i=index(op.target),[dx,dy]=op.by;
+        items=items.map(it=>it.o!==i?it:{...it,r:it.r.map(run=>run.map(([x,y])=>[x+dx,y+dy]))});
+        // a faked move: its own snaps go with it; its crossings are dropped (the core would work them out again)
+        snaps=snaps.filter(s=>!(s.k==='intersection'&&(s.o===i||s.w===i))).map(s=>s.o!==i?s:{...s,x:s.x+dx,y:s.y+dy})}
+      if(op.op==='add_line'){objects.push({id:`${sheet}/${op.id}`,type:'line',layer:op.layer});const o=objects.length-1;
+        items.push({o,c:7,w:.35,r:[[op.from,op.to]]});
+        snaps.push({k:'endpoint',x:op.from[0],y:op.from[1],o,which:'from'},{k:'endpoint',x:op.to[0],y:op.to[1],o,which:'to'},{k:'midpoint',x:(op.from[0]+op.to[0])/2,y:(op.from[1]+op.to[1])/2,o,which:''})}}}
+  for(const it of items){let a=1e9,b=1e9,c=-1e9,d=-1e9;for(const run of it.r)for(const [x,y] of run){if(x<a)a=x;if(y<b)b=y;if(x>c)c=x;if(y>d)d=y}it.bb=[a,b,c,d]}
+  // circles, for Tangent: a centre whose four quadrants are as far from it (an ellipse's are not)
+  const circles=[];
+  for(const c of snaps)if(c.k==='center'){const pre=c.which?c.which+'.':'';
+    const q=['0','90','180','270'].map(a=>snaps.find(s=>s.k==='quadrant'&&s.o===c.o&&s.which===pre+a)).filter(Boolean);
+    if(q.length===4){const rs=q.map(s=>Math.hypot(s.x-c.x,s.y-c.y));if(Math.max(...rs)-Math.min(...rs)<1e-6)circles.push({x:c.x,y:c.y,r:rs[0],o:c.o,which:c.which})}}
+  const v={sheet,paper:base.paper,units:base.units,items,objects,snaps,circles};cache.set(key,v);return v}
+function objBox(sh,idx){let a=1e9,b=1e9,c=-1e9,d=-1e9;for(const it of sh.items)if(it.o===idx){a=Math.min(a,it.bb[0]);b=Math.min(b,it.bb[1]);c=Math.max(c,it.bb[2]);d=Math.max(d,it.bb[3])}return a>c?null:[a,b,c,d]}
+const ACI={1:'#ff4a4a',2:'#ffff3a',3:'#3aff3a',4:'#3affff',5:'#4f7cff',6:'#ff4aff',7:'#eef1f4',8:'#8a8f96',9:'#c0c0c0'};
+
+const stage=$('stage'),cv=$('cv'),ctx=cv.getContext('2d');
+let cw=0,ch=0,dpr=1,touched=false,fitK=1,raf=0;
+const V={k:60,x:0,y:11};
+const sx=x=>(x-V.x)*V.k,sy=y=>(V.y-y)*V.k,wx=X=>X/V.k+V.x,wy=Y=>V.y-Y/V.k;
+function covered(){const c=$('cmdbar').getBoundingClientRect().height+18;return phone()?S_peek()+c+6:c}
+function S_peek(){return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--peek'))||0}
+function fitTo(box,maxK,bottom){
+  const [t,r,b,l]=[10,phone()?10:56,bottom??covered(),10];
+  const W=box[2]-box[0],H=box[3]-box[1],aw=Math.max(40,cw-l-r),ah=Math.max(40,ch-t-b);
+  let k=Math.min(aw/W,ah/H);if(maxK)k=Math.min(k,maxK);V.k=k;
+  V.x=(box[0]+box[2])/2-(l+aw/2)/k;V.y=(box[1]+box[3])/2+(t+ah/2)/k}
+function fit(){const p=current().paper;fitTo([0,0,p.width,p.height]);fitK=V.k}
+function current(){return sheetAt(S.sheet,S.at)}
+function resize(){
+  const r=stage.getBoundingClientRect(),mid=[wx(cw/2),wy(ch/2)];cw=r.width;ch=r.height;dpr=window.devicePixelRatio||1;
+  cv.width=Math.round(cw*dpr);cv.height=Math.round(ch*dpr);
+  if(!touched)fit();else{V.x=mid[0]-cw/2/V.k;V.y=mid[1]+ch/2/V.k}
+  draw()}
+function zoomAt(c,f){
+  const k=Math.max(fitK*.5,Math.min(fitK*32,V.k*f)),X=wx(c[0]),Y=wy(c[1]);V.k=k;V.x=X-c[0]/k;V.y=Y+c[1]/k;keepInSight()}
+function keepInSight(){const p=current().paper,m=60;
+  V.x=Math.min(Math.max(V.x,-(cw-m)/V.k),p.width-m/V.k);
+  V.y=Math.min(Math.max(V.y,m/V.k),p.height+(ch-m)/V.k)}
+
+/* ── finding the snap nearest the cursor, within reach (the app does this in the renderer, with no round trip) ── */
+const REACH_MOUSE=12,REACH_TOUCH=22; // CSS pixels: AutoCAD's aperture is 10; a finger needs more
+function segs(sh){ // every straight piece the sheet draws, and the lines the preview drew
+  const out=[];for(const it of sh.items)for(const run of it.r)for(let i=1;i<run.length;i++)out.push([run[i-1],run[i],it.o,it.bb]);
+  for(const [a,b] of drawnSegs())out.push([a,b,-1,[Math.min(a[0],b[0]),Math.min(a[1],b[1]),Math.max(a[0],b[0]),Math.max(a[1],b[1])]]);
+  return out}
+function drawnSegs(){const d=S.drawn[S.sheet]||[];const out=d.slice();const p=S.line.pts;for(let i=1;i<p.length;i++)out.push([[p[i-1].x,p[i-1].y],[p[i].x,p[i].y]]);return out}
+function foot(px,py,a,b){const vx=b[0]-a[0],vy=b[1]-a[1],l=vx*vx+vy*vy;const t=l?((px-a[0])*vx+(py-a[1])*vy)/l:0;return [a[0]+t*vx,a[1]+t*vy,t]}
+function findSnaps(X,Y,reach){
+  if(!S.osnap||S.at!==null)return [];
+  const sh=current(),x=wx(X),y=wy(Y),r=reach/V.k,c=[],on=S.kinds;
+  const add=(s)=>{const d=Math.hypot(s.x-x,s.y-y);if(d<=r)c.push({...s,d})};
+  for(const s of sh.snaps)if(on.has(s.k)&&Math.abs(s.x-x)<=r&&Math.abs(s.y-y)<=r)add(s);
+  // the lines drawn in the preview snap too (worked out in this page)
+  for(const [a,b] of drawnSegs()){if(on.has('endpoint')){add({k:'endpoint',x:a[0],y:a[1],o:-1});add({k:'endpoint',x:b[0],y:b[1],o:-1})}
+    if(on.has('midpoint'))add({k:'midpoint',x:(a[0]+b[0])/2,y:(a[1]+b[1])/2,o:-1})}
+  const from=S.mode==='line'&&S.line.pts.length?S.line.pts.at(-1):null;
+  // Perpendicular and Tangent mean something only from a point: inside a tool (worked out in this page)
+  if(from&&on.has('perpendicular'))for(const [a,b,o,bb] of segs(sh)){
+    if(x<bb[0]-r*4||x>bb[2]+r*4||y<bb[1]-r*4||y>bb[3]+r*4)continue;
+    const [fx,fy,t]=foot(from.x,from.y,a,b);if(t<-1e-9||t>1+1e-9)continue;if(Math.hypot(fx-from.x,fy-from.y)<1e-6)continue;
+    if(Math.hypot(b[0]-a[0],b[1]-a[1])<.05)continue; // a curve's short chords: AutoCAD's would be on the curve; left out here
+    add({k:'perpendicular',x:fx,y:fy,o})}
+  if(from&&on.has('tangent'))for(const ci of sh.circles){const dx=from.x-ci.x,dy=from.y-ci.y,d=Math.hypot(dx,dy);if(d<=ci.r)continue;
+    const a=Math.atan2(dy,dx),b=Math.acos(ci.r/d);for(const s of [1,-1])add({k:'tangent',x:ci.x+ci.r*Math.cos(a+s*b),y:ci.y+ci.r*Math.sin(a+s*b),o:ci.o})}
+  // Nearest is taken only when nothing else is in reach, as it is everywhere on every object
+  if(on.has('nearest')&&!c.length){let best=null;for(const [a,b,o,bb] of segs(sh)){if(x<bb[0]-r||x>bb[2]+r||y<bb[1]-r||y>bb[3]+r)continue;
+      let [fx,fy,t]=foot(x,y,a,b);if(t<0){fx=a[0];fy=a[1]}else if(t>1){fx=b[0];fy=b[1]}const d=Math.hypot(fx-x,fy-y);if(d<=r&&(!best||d<best.d))best={k:'nearest',x:fx,y:fy,o,d}}
+    if(best)c.push(best)}
+  const tie=2/V.k;
+  c.sort((p,q)=>Math.abs(p.d-q.d)>tie?p.d-q.d:PRIO.indexOf(p.k)-PRIO.indexOf(q.k));
+  // one candidate per place: the same point found twice (an end that is also a crossing) is offered once
+  const out=[];for(const s of c)if(!out.some(o=>Math.hypot(o.x-s.x,o.y-s.y)<1e-6&&o.k===s.k))out.push(s);
+  return out}
+function hoverAt(X,Y,reach){S.cands=findSnaps(X,Y,reach);S.candI=0;S.hover=S.cands[0]||null}
+const objName=o=>o<0?'your line':(()=>{const ob=current().objects[o];if(!ob)return '?';const tail=ob.id.split('/').slice(1).join('/');return ob.name??(/^objects\[/.test(tail)?ob.block??ob.type:tail)})();
+function snapWords(s){if(!s)return '';const n=SN[s.k].label;
+  return s.k==='intersection'&&s.w!=null?`${n} of ${objName(s.o)} and ${objName(s.w)}`:`${n} of ${objName(s.o)}`}
+// the snapped point an operation would take (docs/change-sets.md, Snapped points)
+function snappedPoint(s){const o=current().objects[s.o];if(!o||!['endpoint','midpoint','center','quadrant','insertion','node','intersection'].includes(s.k))return null;
+  const p={id:o.id,snap:s.k};if(s.which)p.which=s.which;if(s.k==='intersection'&&s.w!=null)p.with={id:current().objects[s.w].id};return {snap:p}}
+
+/* ── drawing ── */
+function marks(){
+  const e=entry(S.focused);if(!e)return [];
+  const sh=current();
+  return changedOn(e,S.sheet).map(m=>({idx:sh.objects.findIndex(o=>up(o.id)===up(m.id)),added:m.how==='added'})).filter(m=>m.idx>=0)}
+function selIndex(){if(!S.sel)return -1;const sh=current();return sh.objects.findIndex(o=>o.id===S.sel)}
+function strokeItem(it){ctx.beginPath();for(const run of it.r){run.forEach(([x,y],i)=>i?ctx.lineTo(sx(x),sy(y)):ctx.moveTo(sx(x),sy(y)))}ctx.stroke()}
+function scene(){ // the drawing itself, in the view V: the main view, or the magnifier's
+  const past=S.at!==null,sh=current(),p=sh.paper,k=V.k,W=cw,H=ch;
+  if(S.grid){for(const [step,col] of [[.25,past?'#302b23':'#272f39'],[1,past?'#3b342a':'#313a46']]){if(step*k<7)continue;ctx.strokeStyle=col;ctx.lineWidth=1;ctx.beginPath();
+      for(let x=Math.floor(wx(0)/step)*step;x<wx(W);x+=step){const X=Math.round(sx(x))+.5;ctx.moveTo(X,0);ctx.lineTo(X,H)}
+      for(let y=Math.floor(wy(H)/step)*step;y<wy(0);y+=step){const Y=Math.round(sy(y))+.5;ctx.moveTo(0,Y);ctx.lineTo(W,Y)}ctx.stroke()}}
+  ctx.strokeStyle=past?'#6a5a44':'#56606e';ctx.lineWidth=1;ctx.setLineDash([6,4]);ctx.strokeRect(Math.round(sx(0))+.5,Math.round(sy(p.height))+.5,Math.round(p.width*k),Math.round(p.height*k));ctx.setLineDash([]);
+  const ms=marks();
+  if(ms.length){const t=performance.now()-S.pulseT,pulsing=S.pulseT&&t<1800;const a=pulsing?.28+.42*Math.abs(Math.sin(Math.PI*t/600)):.32;
+    for(const m of ms){ctx.globalAlpha=a;ctx.strokeStyle=m.added?'#3ddc84':'#ffb020';
+      for(const it of sh.items)if(it.o===m.idx){ctx.lineWidth=Math.max(1,it.w/25.4*k)+12;strokeItem(it)}}
+    ctx.globalAlpha=1}
+  const si=selIndex();
+  if(si>=0){ctx.globalAlpha=.5;ctx.strokeStyle='#4aa3ff';for(const it of sh.items)if(it.o===si){ctx.lineWidth=Math.max(1,it.w/25.4*k)+9;strokeItem(it)}ctx.globalAlpha=1}
+  for(const it of sh.items){if(it.bb[2]<wx(0)||it.bb[0]>wx(W)||it.bb[3]<wy(H)||it.bb[1]>wy(0))continue;
+    ctx.strokeStyle=ACI[it.c]||'#eef1f4';ctx.lineWidth=Math.max(1,it.w/25.4*k);strokeItem(it)}
+  // the preview's lines: what a Line drew, and the rubber band to where the next point would go
+  const lw=Math.max(1,.35/25.4*k);ctx.strokeStyle='#eef1f4';ctx.lineWidth=lw;ctx.beginPath();
+  for(const [a,b] of drawnSegs()){ctx.moveTo(sx(a[0]),sy(a[1]));ctx.lineTo(sx(b[0]),sy(b[1]))}ctx.stroke();
+  const rb=rubber();if(rb){ctx.strokeStyle='#eef1f4';ctx.lineWidth=lw;ctx.beginPath();ctx.moveTo(sx(rb.a.x),sy(rb.a.y));ctx.lineTo(sx(rb.b.x),sy(rb.b.y));ctx.stroke()}}
+function markerAt(kind,X,Y,s=7,lw=2){
+  ctx.save();ctx.translate(Math.round(X)+.5,Math.round(Y)+.5);const p=new Path2D(SN[kind].path(s));
+  ctx.lineJoin='miter';ctx.strokeStyle='rgba(0,0,0,.75)';ctx.lineWidth=lw+2.5;ctx.stroke(p);
+  ctx.strokeStyle='#f2e24b';ctx.lineWidth=lw;ctx.stroke(p);ctx.restore()}
+function tagAt(X,Y,main,sub,anchor='tl'){ // a snap's name, beside its marker
+  ctx.save();ctx.font='600 12px "Segoe UI",sans-serif';const w1=ctx.measureText(main).width;ctx.font='12px "Segoe UI",sans-serif';const w2=sub?ctx.measureText(' · '+sub).width:0;
+  const w=Math.min(w1+w2+14,cw-8),hh=22;let x=anchor==='c'?X-w/2:X,y=anchor==='c'?Y:Y;
+  x=Math.max(4,Math.min(cw-w-4,x));y=Math.max(4,Math.min(ch-hh-4,y));
+  ctx.fillStyle='rgba(20,24,30,.92)';ctx.strokeStyle='#6a7689';ctx.lineWidth=1;ctx.beginPath();ctx.roundRect(x+.5,y+.5,w,hh,3);ctx.fill();ctx.stroke();
+  ctx.textBaseline='middle';ctx.textAlign='left';ctx.font='600 12px "Segoe UI",sans-serif';ctx.fillStyle='#f2e24b';ctx.fillText(main,x+7,y+hh/2+.5);
+  if(sub){ctx.font='12px "Segoe UI",sans-serif';ctx.fillStyle='#c8d0da';ctx.fillText(' · '+sub,x+7+w1,y+hh/2+.5,w-w1-14)}
+  ctx.restore();return [x,y,w,hh]}
+function tagSub(s){return s.k==='intersection'&&s.w!=null?`${objName(s.o)} × ${objName(s.w)}`:objName(s.o)}
+// where the next point would go: the snap, else the cursor, held level or upright by Ortho
+function aim(){
+  if(S.mode!=='line')return null;const P=S.loupe||S.cursor;if(!P||g&&g.moved)return null;
+  if(S.hover)return {x:S.hover.x,y:S.hover.y,snap:S.hover};
+  let x=wx(P[0]),y=wy(P[1]);const last=S.line.pts.at(-1);
+  if(S.ortho&&last){if(Math.abs(x-last.x)>=Math.abs(y-last.y))y=last.y;else x=last.x}
+  return {x,y,snap:null}}
+function rubber(){const last=S.line.pts.at(-1);if(S.mode!=='line'||!last)return null;const b=aim();return b?{a:last,b}:null}
+function lenAng(a,b){const L=Math.hypot(b.x-a.x,b.y-a.y);let A=Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI;if(A<0)A+=360;return [L,A]}
+function dynInput(X,Y){ // the length and the angle at the cursor, as AutoCAD's dynamic input shows them
+  const rb=rubber();if(!rb)return;const [L,A]=lenAng(rb.a,rb.b);
+  const t1=`${L.toFixed(3)} in`,t2=`${(Math.round(A*10)/10).toString()}°`;S.dyn=[t1,t2];
+  ctx.save();ctx.font='12px Consolas,"Cascadia Mono",monospace';const w1=ctx.measureText(t1).width+14,w2=ctx.measureText(t2).width+14,hh=20;
+  let x=X+18,y=Y+18;if(x+w1+w2+6>cw)x=X-18-w1-w2-6;if(y+hh>ch-covered())y=Y-18-hh;
+  ctx.fillStyle='#1d4f86';ctx.strokeStyle='#4aa3ff';ctx.lineWidth=1;ctx.beginPath();ctx.roundRect(x+.5,y+.5,w1,hh,2);ctx.fill();ctx.stroke();
+  ctx.fillStyle='#2b323d';ctx.strokeStyle='#6a7689';ctx.beginPath();ctx.roundRect(x+w1+6.5,y+.5,w2,hh,2);ctx.fill();ctx.stroke();
+  ctx.fillStyle='#fff';ctx.textBaseline='middle';ctx.fillText(t1,x+7,y+hh/2+.5);ctx.fillStyle='#dfe5ec';ctx.fillText(t2,x+w1+13,y+hh/2+.5);
+  ctx.restore()}
+function crosshair(X,Y,box){ // AutoCAD's model-space crosshair; the pick box when no tool asks for a point
+  const a=40;X=Math.round(X)+.5;Y=Math.round(Y)+.5;ctx.save();ctx.strokeStyle='rgba(238,241,244,.92)';ctx.lineWidth=1;ctx.beginPath();
+  const gap=box?5:0;ctx.moveTo(X-a,Y);ctx.lineTo(X-gap,Y);ctx.moveTo(X+gap,Y);ctx.lineTo(X+a,Y);ctx.moveTo(X,Y-a);ctx.lineTo(X,Y-gap);ctx.moveTo(X,Y+gap);ctx.lineTo(X,Y+a);ctx.stroke();
+  if(box)ctx.strokeRect(X-5,Y-5,10,10);ctx.restore()}
+function draw(){
+  const now=performance.now();let live=false;
+  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.globalAlpha=1;ctx.lineCap='round';ctx.lineJoin='round';
+  const past=S.at!==null;S.dyn=null;
+  ctx.fillStyle=past?'#29251f':'#212830';ctx.fillRect(0,0,cw,ch);
+  if(S.cannot){placeQp();return}
+  scene();
+  if(S.pulseT&&now-S.pulseT<1800)live=true;
+  {const x=22.5,y=ch-(phone()?covered()+8:covered()+4)+.5;ctx.strokeStyle=ctx.fillStyle='#c5cdd7';ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(x,y-30);ctx.lineTo(x,y);ctx.lineTo(x+30,y);ctx.moveTo(x-3,y-25);ctx.lineTo(x,y-30);ctx.lineTo(x+3,y-25);ctx.moveTo(x+25,y-3);ctx.lineTo(x+30,y);ctx.lineTo(x+25,y+3);ctx.stroke();
+    ctx.font='11px "Segoe UI",sans-serif';ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText('X',x+34,y);ctx.fillText('Y',x-3,y-38)}
+  // the line's points so far, small, so a finger sees where it was
+  if(S.mode==='line')for(const p of S.line.pts){ctx.fillStyle='#4aa3ff';ctx.fillRect(Math.round(sx(p.x))-2,Math.round(sy(p.y))-2,4,4)}
+  // a snap just taken by a tap: its marker stays a moment
+  if(S.flash&&now-S.flash.t<900){live=true;ctx.globalAlpha=1-(now-S.flash.t)/900;markerAt(S.flash.k,sx(S.flash.x),sy(S.flash.y),8,2.2);ctx.globalAlpha=1}
+  if(S.cursor&&!S.loupe&&!(g&&g.moved)){
+    const [X,Y]=S.cursor,hv=S.hover;
+    if(hv){const MX=sx(hv.x),MY=sy(hv.y);markerAt(hv.k,MX,MY);
+      tagAt(MX+12,rubber()?MY-34:MY+12,SN[hv.k].label,tagSub(hv)+(S.cands.length>1?`  (${S.candI+1} of ${S.cands.length}, Tab)`:''))}
+    crosshair(X,Y,S.mode!=='line');
+    dynInput(X,Y)}
+  if(S.loupe)drawLoupe();
+  placeQp();
+  if((live||glide)&&!raf)raf=requestAnimationFrame(()=>{raf=0;stepGlide();draw()})}
+// the magnifier a finger holds up: the drawing under it, three times larger, above the finger
+function drawLoupe(){
+  const [FX,FY]=S.loupe,R=Math.min(70,cw/4),M=3;let cx=FX,cy=FY-R-52;if(cy<R+8)cy=FY+R+52;cx=Math.max(R+6,Math.min(cw-R-6,cx));
+  const fx=wx(FX),fy=wy(FY),saved={k:V.k,x:V.x,y:V.y};
+  ctx.save();ctx.beginPath();ctx.arc(cx,cy,R,0,Math.PI*2);ctx.clip();ctx.fillStyle=S.at!==null?'#29251f':'#212830';ctx.fillRect(cx-R,cy-R,2*R,2*R);
+  V.k=saved.k*M;V.x=fx-cx/V.k;V.y=fy+cy/V.k;
+  scene();
+  const hv=S.hover;if(hv)markerAt(hv.k,sx(hv.x),sy(hv.y),8,2.2);
+  crosshair(cx,cy,false);
+  V.k=saved.k;V.x=saved.x;V.y=saved.y;ctx.restore();
+  ctx.save();ctx.strokeStyle='#c8d0da';ctx.lineWidth=2;ctx.beginPath();ctx.arc(cx,cy,R,0,Math.PI*2);ctx.stroke();ctx.restore();
+  // the finger's own point, and what it will take
+  const above=cy<FY,ty=above?cy+R+6:cy-R-28;
+  if(hv)tagAt(cx,ty,SN[hv.k].label,tagSub(hv),'c');else tagAt(cx,ty,S.osnap?'No snap here':'Object snap is off',S.mode==='line'?'lift to take this point':'',  'c');
+  const rb=rubber();if(rb){const [L,A]=lenAng(rb.a,rb.b);S.dyn=[`${L.toFixed(3)} in`,`${Math.round(A*10)/10}°`];tagAt(cx,above?cy-R-28:cy+R+6,`${L.toFixed(3)} in`,`${(Math.round(A*10)/10)}°`,'c')}}
+
+/* picking: the object drawn nearest the tap, within 16 CSS pixels (the app asks the renderer's pick) */
+function dseg(px,py,ax,ay,bx,by){const vx=bx-ax,vy=by-ay,l=vx*vx+vy*vy;let t=l?((px-ax)*vx+(py-ay)*vy)/l:0;t=Math.max(0,Math.min(1,t));return Math.hypot(px-ax-t*vx,py-ay-t*vy)}
+function pickAt(X,Y){
+  const sh=current(),x=wx(X),y=wy(Y),tol=16/V.k;let best=-1,bd=tol;
+  for(const it of sh.items){if(x<it.bb[0]-tol||x>it.bb[2]+tol||y<it.bb[1]-tol||y>it.bb[3]+tol)continue;
+    for(const run of it.r)for(let i=1;i<run.length;i++){const d=dseg(x,y,run[i-1][0],run[i-1][1],run[i][0],run[i][1]);if(d<=bd){bd=d;best=it.o}}}
+  return best}
+function pick(idx,quiet){
+  const sh=current();S.sel=idx>=0?sh.objects[idx].id:null;if(!S.sel)S.taken=null;
+  if(S.sel&&!quiet){const o=sh.objects[idx];log(`Selected: ${typeWords(o)}${o.name?' '+o.name:''} (${o.id})`)}
+  if(S.sel&&phone())bringIntoView(idx);
+  refresh()}
+function bringIntoView(idx){
+  const b=objBox(current(),idx);if(!b)return;const cy=sy((b[1]+b[3])/2),cx=sx((b[0]+b[2])/2),room=ch*.42;
+  if(cy>room||cy<10||cx<0||cx>cw){V.x+=(cx-cw/2)/V.k;V.y-=(cy-room/2-10)/V.k;touched=true}}
+const typeWords=o=>o.block?`Insert of ${o.block}`:o.type[0].toUpperCase()+o.type.slice(1);
+
+/* ── what taking a snap does ── */
+// Build 3, no tool: the snap's point is read out, as AutoCAD's ID command does, and its object is selected.
+function takeSnap(s){
+  S.taken=s;S.flash={...s,t:performance.now()};
+  log(`${snapWords(s)}: ${f4(s.x)}, ${f4(s.y)} in`);
+  if(s.o>=0)pick(s.o,true);else refresh()}
+// The Line preview: a point goes into the line.
+function placePoint(p){
+  if(p.snap)S.flash={...p.snap,t:performance.now()};
+  const pts=S.line.pts,last=pts.at(-1);
+  if(last&&Math.hypot(p.x-last.x,p.y-last.y)<1e-9)return;
+  pts.push({x:p.x,y:p.y,snap:p.snap||null});
+  const how=p.snap?`${snapWords(p.snap)}, ${f4(p.x)}, ${f4(p.y)}`:`${f4(p.x)}, ${f4(p.y)}${S.ortho&&last?' (Ortho)':''}`;
+  if(!last)log(`LINE first point: ${how}`);else{const [L,A]=lenAng(last,p);log(`LINE to ${how}: ${L.toFixed(3)} in at ${Math.round(A*10)/10}°`)}
+  refresh()}
+function lineUndo(){if(S.line.pts.length){S.line.pts.pop();log('LINE: last point taken back')}refresh()}
+function lineClose(){const p=S.line.pts;if(p.length<3)return;placePoint({x:p[0].x,y:p[0].y,snap:p[0].snap});lineDone()}
+function lineDone(){
+  const p=S.line.pts,n=p.length-1;
+  if(n>0){(S.drawn[S.sheet]=S.drawn[S.sheet]||[]).push(...p.slice(1).map((q,i)=>[[p[i].x,p[i].y],[q.x,q.y]]));
+    const snapped=p.filter(q=>q.snap&&snappedPoint(q.snap)).length;
+    log(`LINE: ${plural(n,'line')} drawn (preview), ${snapped} of ${p.length} points snapped`);
+    toast('ok',`${plural(n,'line')} drawn: preview only`,`In build 4 they go to the core as one change set of ${plural(n,'add_line')}, each snapped end sent as a snapped point so the core works out the exact place, and land in the journal.`)}
+  S.line={pts:[]};refresh()}
+
+/* pan and zoom: mouse, trackpad and touch; and the hold that brings the magnifier */
+const ptrs=new Map();let g=null,glide=null,lastTap=null,holdT=0;
+const HOLD_MS=350;
+const loc=e=>{const r=cv.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]};
+function stopGlide(){glide=null}
+function stepGlide(){if(!glide)return;const dt=16;V.x-=glide.vx*dt/V.k;V.y+=glide.vy*dt/V.k;glide.vx*=.93;glide.vy*=.93;keepInSight();if(Math.hypot(glide.vx,glide.vy)<.02)glide=null}
+function showCoords(){
+  const c=$('coords');
+  if(S.hover&&S.cursor)put(c,`${f4(S.hover.x)}, ${f4(S.hover.y)} in`,h('span',{class:'snapw'},SN[S.hover.k].label));
+  else if(S.cursor)put(c,`${f4(wx(S.cursor[0]))}, ${f4(wy(S.cursor[1]))} in`);else put(c,' ')}
+cv.addEventListener('contextmenu',e=>{e.preventDefault();if(S.mode==='line'&&S.line.pts.length)lineDone()}); // right-click ends the line, as Enter does
+cv.addEventListener('pointerdown',e=>{
+  if(e.button===2)return;
+  cv.setPointerCapture(e.pointerId);stopGlide();const p=loc(e);ptrs.set(e.pointerId,p);clearTimeout(holdT);
+  if(ptrs.size===2){S.loupe=null;const [a,b]=[...ptrs.values()];g={kind:'pinch',d:Math.hypot(a[0]-b[0],a[1]-b[1]),c:[(a[0]+b[0])/2,(a[1]+b[1])/2]};draw();return}
+  if(ptrs.size===1){g={kind:'drag',p0:p,last:p,t:performance.now(),moved:false,vx:0,vy:0,type:e.pointerType};
+    if(e.pointerType!=='mouse')holdT=setTimeout(()=>{if(g&&g.kind==='drag'&&!g.moved&&ptrs.size===1){g.kind='loupe';S.loupe=g.last;hoverAt(g.last[0],g.last[1],REACH_TOUCH);if(navigator.vibrate)navigator.vibrate(8);refresh()}},HOLD_MS)}});
+cv.addEventListener('pointermove',e=>{
+  const p=loc(e);
+  if(e.pointerType==='mouse'&&!(g&&g.moved)){S.cursor=p;hoverAt(p[0],p[1],REACH_MOUSE);showCoords();if(!ptrs.size){draw();return}}
+  if(!ptrs.has(e.pointerId))return;ptrs.set(e.pointerId,p);
+  if(g&&g.kind==='loupe'){S.loupe=p;g.last=p;hoverAt(p[0],p[1],REACH_TOUCH);draw();return}
+  if(g&&g.kind==='pinch'&&ptrs.size>=2){const [a,b]=[...ptrs.values()],d=Math.hypot(a[0]-b[0],a[1]-b[1]),c=[(a[0]+b[0])/2,(a[1]+b[1])/2];
+    touched=true;zoomAt(c,d/g.d);V.x-=(c[0]-g.c[0])/V.k;V.y+=(c[1]-g.c[1])/V.k;g.d=d;g.c=c;draw();return}
+  if(g&&g.kind==='drag'){
+    if(!g.moved&&Math.hypot(p[0]-g.p0[0],p[1]-g.p0[1])>6){g.moved=true;clearTimeout(holdT);cv.classList.add('grabbing');S.hover=null}
+    if(g.moved){const now=performance.now(),dt=Math.max(1,now-g.t);g.vx=(p[0]-g.last[0])/dt;g.vy=(p[1]-g.last[1])/dt;g.t=now;
+      touched=true;V.x-=(p[0]-g.last[0])/V.k;V.y+=(p[1]-g.last[1])/V.k;g.last=p;keepInSight();draw()}}});
+function release(e){
+  clearTimeout(holdT);
+  const had=ptrs.delete(e.pointerId);cv.classList.remove('grabbing');
+  if(!had||!g)return;
+  if(g.kind==='pinch'){if(ptrs.size===0)g=null;return}
+  const d=g;g=null;
+  if(e.type==='pointercancel'){S.loupe=null;draw();return}
+  if(d.kind==='loupe'){ // lifting the finger takes what the magnifier shows
+    const p=d.last;hoverAt(p[0],p[1],REACH_TOUCH);const s=S.hover;S.loupe=null;
+    if(S.mode==='line'){const a=aimAt(p);S.hover=null;placePoint(a)}
+    else if(s){S.hover=null;takeSnap(s)}
+    else{S.hover=null;log(`No snap under your finger: ${f4(wx(p[0]))}, ${f4(wy(p[1]))} in`);refresh()}
+    return}
+  if(d.moved){if(e.pointerType==='mouse'){const p=loc(e);S.cursor=p;hoverAt(p[0],p[1],REACH_MOUSE)}
+    if(d.type!=='mouse'&&Math.hypot(d.vx,d.vy)>.25&&performance.now()-d.t<60){glide={vx:d.vx,vy:d.vy}}draw();return}
+  const p=loc(e),now=performance.now();
+  if(S.mode==='line'){ // a click or a tap gives the line its next point
+    if(d.type==='mouse'){hoverAt(p[0],p[1],REACH_MOUSE);S.cursor=p;placePoint(aim())}
+    else{hoverAt(p[0],p[1],REACH_TOUCH);const a=aimAt(p);S.hover=null;placePoint(a)}
+    return}
+  if(d.type!=='mouse'&&lastTap&&now-lastTap.t<320&&Math.hypot(p[0]-lastTap.p[0],p[1]-lastTap.p[1])<30){lastTap=null;touched=true;zoomAt(p,2);draw();return}
+  lastTap={t:now,p};
+  if(d.type==='mouse'&&S.hover){takeSnap(S.hover);return}
+  pick(pickAt(p[0],p[1]))}
+function aimAt(p){const was=S.cursor,wasL=S.loupe;S.loupe=null;S.cursor=p;const a=aim();S.cursor=was;S.loupe=wasL;return a}
+cv.addEventListener('pointerup',release);cv.addEventListener('pointercancel',release);
+cv.addEventListener('pointerleave',e=>{if(e.pointerType==='mouse'&&!ptrs.size){S.cursor=null;S.hover=null;showCoords();draw()}});
+cv.addEventListener('dblclick',e=>{if(S.mode==='line')return;touched=true;zoomAt(loc(e),2);draw()});
+cv.addEventListener('wheel',e=>{e.preventDefault();touched=true;zoomAt(loc(e),Math.exp(-e.deltaY*(e.ctrlKey?.012:.0016)));if(S.cursor)hoverAt(S.cursor[0],S.cursor[1],REACH_MOUSE);showCoords();draw()},{passive:false});
+document.querySelectorAll('#zoom button').forEach(b=>b.onclick=()=>{const z=+b.dataset.z;stopGlide();if(z){touched=true;zoomAt([cw/2,ch/2],z)}else{touched=false;fit()}draw()});
+
+/* ───────────── the journal (the frame's) ───────────── */
+function log(s){S.log.push(s);if(S.log.length>40)S.log.shift()}
+let toastT=0;
+function toast(tone,title,detail,n){
+  const t=$('toast');clearTimeout(toastT);
+  const show=n!=null&&entry(n)?.kind==='change_set'?h('button',{class:'btn sm',onclick:()=>{t.hidden=true;showEntry(n,!!entry(n).undoneBy)}},'Show'):null;
+  t.className=tone;put(t,h('span',{class:`dot ${tone==='info'?'info':tone}`,style:'margin-top:5px'}),h('div',{class:'tx'},h('b',{},title),detail?h('small',{},detail):null),show);
+  t.hidden=false;toastT=setTimeout(()=>t.hidden=true,7000)}
+function undo(n,via='viewer'){
+  if(!n)return;const undid=canUndo().filter(m=>m>=n);if(!undid.length)return;
+  const e={n:newest()+1,kind:'undo',via,at:new Date(),undid};
+  for(const m of undid)entry(m).undoneBy=e.n;
+  J.push(e);jver++;toast('info',`Undid change set${undid.length>1?'s':''} ${listed(undid)}`,`The working revision is back to how it was before change set ${undid[0]}.`);log(`Undo of ${listed(undid.map(x=>'#'+x))}`);refresh()}
+function askAccept(){
+  if(S.at!==null)return;
+  const open=pending(),la=lastAccept();
+  if(!open.length&&la){toast('warn','Can’t accept yet',`Nothing has landed since the accept in entry ${la.n}: there is nothing to issue.`);return}
+  const sheets=[...new Set(open.flatMap(e=>e.landed))],m=$('modal');
+  put(m,h('div',{class:'dialog',role:'dialog','aria-modal':'true','aria-label':'Accept the working revision'},
+    h('h3',{},'Accept the working revision?'),
+    h('p',{},`This issues ${plural(open.length,'change set')} (${listed(open.map(e=>'#'+e.n))}) on ${listed(sheets)}. An issued change set cannot be undone.`),
+    h('p',{class:'ok'},'All checks pass.'),
+    h('div',{class:'dialog-acts'},h('button',{class:'btn',onclick:()=>m.hidden=true},'Cancel'),
+      h('button',{class:'btn primary','data-ok':true,onclick:()=>{m.hidden=true;accept()}},'Accept and issue'))));
+  m.hidden=false}
+function accept(){const open=pending(),e={n:newest()+1,kind:'accept',via:'viewer',at:new Date(),issued:open.map(x=>x.n)};
+  for(const x of open)x.issuedBy=e.n;J.push(e);jver++;toast('ok','Accepted',`Issued change set${open.length>1?'s':''} ${listed(open.map(x=>x.n))}.`);refresh()}
+function showEntry(n,asItWas=true){
+  const e=entry(n);if(!e)return;
+  const ts=[...sheetsTouched(e),...(e.ops||[]).map(o=>o.sheet)];
+  const target=ts.some(s=>up(s)===up(S.sheet))?S.sheet:(ts[0]??S.sheet);
+  if(S.mode==='line')setMode('snaps');
+  S.at=asItWas?n:null;S.focused=n;S.pulseT=0;S.sel=null;S.taken=null;S.sheet=target;S.open.add(n);S.hover=null;
+  S.cannot=asItWas&&e.kind==='change_set'&&e.undoneBy?`Change set ${n} was undone by entry ${e.undoneBy}, and the files it wrote went with it.`:null;
+  if(asItWas)log(`Showing entry ${n} as it was: read-only, no snaps`);
+  const sh=current(),ids=changedOn(e,target).map(m=>sh.objects.findIndex(o=>up(o.id)===up(m.id))).filter(i=>i>=0);
+  if(phone()&&S.snap==='peek')setSnap('half');
+  const boxes=ids.map(i=>objBox(sh,i)).filter(Boolean);
+  if(boxes.length&&!S.cannot){const b=boxes.reduce((a,c)=>[Math.min(a[0],c[0]),Math.min(a[1],c[1]),Math.max(a[2],c[2]),Math.max(a[3],c[3])]);
+    const pad=1.2;fit();fitTo([b[0]-pad,b[1]-pad,b[2]+pad,b[3]+pad],fitK*4,phone()?room()-snapY(S.snap)+12:undefined);touched=true}
+  else{touched=false;fit()}
+  refresh()}
+function step(by){if(!J.length)return;const i=S.focused==null?-1:J.findIndex(e=>e.n===S.focused),start=i<0?J.length:i;
+  showEntry(J[Math.min(J.length-1,Math.max(0,start+by))].n)}
+function backToLive(){S.at=null;S.cannot=null;S.pulseT=0;S.sel=null;log('Back to live');touched=false;fit();refresh()}
+function showSheet(s){if(s===S.sheet)return;
+  if(S.line.pts.length)lineDone();
+  S.sheet=s;S.sel=null;S.taken=null;S.cannot=null;S.hover=null;
+  if(S.at!==null&&!S.focused)S.at=null;touched=false;stopGlide();fit();
+  const q=new URLSearchParams(location.search);q.set('sheet',s);history.replaceState(null,'',`${location.pathname}?${q}`);refresh()}
+
+/* ───────────── the frame ───────────── */
+const I={
+ line:'<path d="M6 22L22 6"/><rect class="pt" x="3.5" y="19.5" width="5" height="5"/><rect class="pt" x="19.5" y="3.5" width="5" height="5"/>',
+ circle:'<circle cx="14" cy="14" r="10"/><path d="M12 14h4M14 12v4"/><rect class="pt" x="21.5" y="11.5" width="5" height="5"/>',
+ rectangle:'<rect x="4" y="7" width="20" height="14"/><rect class="pt" x="1.5" y="4.5" width="5" height="5"/><rect class="pt" x="21.5" y="18.5" width="5" height="5"/>',
+ text:'<path d="M6 23L14 4l8 19M9 16h10"/>',
+ move:'<path d="M14 3v22M3 14h22M14 3l-3.5 3.5M14 3l3.5 3.5M14 25l-3.5-3.5M14 25l3.5-3.5M3 14l3.5-3.5M3 14l3.5 3.5M25 14l-3.5-3.5M25 14l-3.5 3.5"/>',
+ erase:'<path d="M16 4l8 8-11 11H8l-4-4zM10 10l8 8M4 25h20"/>'};
+const TOOLS={
+ line:{label:'Line',key:'L',name:'LINE',tip:'Draws straight lines. Click a start point, then keep clicking.'},
+ circle:{label:'Circle',key:'C',name:'CIRCLE',tip:'Click the centre, then click how big it is, or type a radius.'},
+ rectangle:{label:'Rectangle',key:'REC',name:'RECTANG',tip:'Click one corner, then the opposite corner.'},
+ text:{label:'Text',key:'T',name:'TEXT',tip:'Click where the text starts, type it, and press Enter.'},
+ move:{label:'Move',key:'M',name:'MOVE',tip:'Pick an object, a point to hold it by, then where that point goes.'},
+ erase:{label:'Erase',key:'E',name:'ERASE',tip:'Click an object to remove it. Undo brings it back.'}};
+const SOON='Coming soon. For now an agent draws, through change sets.';
+function buildRibbon(){
+  const tool=n=>h('button',{class:'rb','data-tool':n,'aria-disabled':'true','aria-label':`${TOOLS[n].label}, coming soon`,html:`<svg viewBox="0 0 28 28" aria-hidden="true">${I[n]}</svg><span>${TOOLS[n].label}</span>`,onclick:e=>toolClick(n,e.currentTarget)});
+  const panel=(title,soon,...kids)=>h('section',{class:'panel'},h('div',{class:'row'},kids),h('h3',{},title,soon?h('span',{class:'soon'},'Soon'):null));
+  put($('ribbon'),
+    panel('Draw',true,tool('line'),tool('circle'),tool('rectangle'),tool('text')),
+    panel('Modify',true,tool('move'),tool('erase')),
+    panel('Layer',false,h('div',{class:'layerbox'},h('div',{class:'lay',id:'layer',title:'Choosing the layer new objects go on comes with the drawing tools'},h('span',{class:'sw',id:'laysw'}),h('span',{class:'ln',id:'layname'}),h('span',{class:'caret'},'▾')),h('small',{id:'layhint'}))),
+    h('section',{class:'panel foldonly'},h('div',{class:'row'},
+      ['grid','osnap','ortho'].map(t=>h('button',{class:'tog2','data-tog':t,onclick:()=>toggle(t)},{grid:'Grid',osnap:'Object snap',ortho:'Ortho'}[t])),
+      h('button',{class:'tog2',id:'snapsbtn',onclick:e=>{closeTools();openMenu(e.currentTarget)}},'Snaps…')),h('h3',{},'Status')));
+  const tip=$('tip');
+  $('ribbon').querySelectorAll('.rb').forEach(b=>{
+    b.addEventListener('pointerenter',e=>{if(e.pointerType!=='mouse')return;const n=b.dataset.tool,t=TOOLS[n],r=b.getBoundingClientRect();
+      const pv=n==='line'&&S.mode==='line';
+      put(tip,h('b',{},t.label,h('kbd',{},t.key)),t.tip,h('span',{class:'soonline'},pv?'Preview of build 4: shows how snaps are used.':SOON));tip.hidden=false;
+      tip.style.left=Math.min(r.left,innerWidth-270)+'px';tip.style.top=(r.bottom+8)+'px'});
+    b.addEventListener('pointerleave',()=>tip.hidden=true)})}
+function closeTools(){document.body.classList.remove('tools-open');$('toolsbtn').setAttribute('aria-expanded','false')}
+let promptT=0;
+function toolClick(n,btn){
+  $('tip').hidden=true;closeTools();
+  if(n==='line'&&S.mode==='line'){if(S.line.pts.length)lineDone();log('LINE');refresh();return}
+  btn.classList.add('flash');setTimeout(()=>btn.classList.remove('flash'),700);
+  S.prompt={name:TOOLS[n].name,text:`(${TOOLS[n].key}) ${SOON}`};clearTimeout(promptT);promptT=setTimeout(()=>{S.prompt=null;updateUI()},6000);updateUI()}
+function toggle(t){S[t]=!S[t];
+  log(`${{grid:'Grid',osnap:'Object snap',ortho:'Ortho'}[t]} ${S[t]?'on':'off'}${t==='ortho'&&S.mode!=='line'?': it holds lines level or upright once Line comes':''}`);
+  if(t==='osnap'&&S.cursor)hoverAt(S.cursor[0],S.cursor[1],REACH_MOUSE);if(t==='osnap'&&!S.osnap)S.hover=null;
+  refresh();showCoords()}
+function setMode(m){
+  if(S.line.pts.length)lineDone();
+  S.mode=m;S.line={pts:[]};S.sel=null;S.taken=null;S.prompt=null;S.hover=null;
+  if(m==='line'&&S.at!==null){S.at=null;S.cannot=null;touched=false;fit()}
+  log(m==='line'?'LINE (preview of build 4)':'Line preview ended');
+  const q=new URLSearchParams(location.search);if(m==='line')q.set('mode','line');else q.delete('mode');history.replaceState(null,'',`${location.pathname}${q.size?'?'+q:''}`);
+  refresh()}
+
+/* the object snap menu */
+function openMenu(anchor){
+  S.menu=true;const m=$('osmenu');fillMenu();m.hidden=false;
+  if(!phone()){const r=anchor.getBoundingClientRect();m.style.left=Math.max(8,Math.min(innerWidth-m.offsetWidth-8,r.left-120))+'px';m.style.top=(r.top-m.offsetHeight-6)+'px'}
+  $('osmenubtn').setAttribute('aria-expanded','true')}
+function closeMenu(){S.menu=false;$('osmenu').hidden=true;$('osmenubtn').setAttribute('aria-expanded','false')}
+function fillMenu(){
+  const m=$('osmenu'),row=x=>h('li',{},h('button',{class:'osrow',role:'menuitemcheckbox','aria-checked':String(S.kinds.has(x.k)),'data-snap':x.k,onclick:()=>{
+      if(S.kinds.has(x.k))S.kinds.delete(x.k);else{S.kinds.add(x.k);if(!S.osnap){S.osnap=true;log('Object snap on')}}
+      log(`${x.label} ${S.kinds.has(x.k)?'on':'off'}`);fillMenu();refresh()}},
+    h('span',{class:'ck'},S.kinds.has(x.k)?'✓':''),h('span',{html:markerSvg(x.k)}),h('span',{},x.label,h('small',{},x.hint))));
+  m.classList.toggle('off',!S.osnap);
+  put(m,h('header',{},h('b',{},'Object snaps'),h('button',{class:'sw2',role:'switch','aria-checked':String(S.osnap),onclick:()=>{toggle('osnap');fillMenu()}},h('i'),S.osnap?'On · F3':'Off · F3')),
+    h('ul',{},SNAPS.filter(x=>!x.tool).map(row),h('li',{class:'grp'},'Inside a drawing tool, from the last point'),SNAPS.filter(x=>x.tool).map(row)),
+    h('footer',{},h('small',{},'The cursor catches the ticked ones.'),h('button',{class:'btn sm',onclick:()=>{S.kinds=new Set(DEFAULT_SNAPS);log('Object snaps back to the defaults');fillMenu();refresh()}},'Defaults'),h('button',{class:'btn sm',onclick:()=>{S.kinds.clear();log('No object snaps ticked');fillMenu();refresh()}},'Clear all')))}
+$('osmenubtn').onclick=e=>{S.menu?closeMenu():openMenu(e.currentTarget)};
+document.querySelector('#status [data-tog=osnap]').addEventListener('contextmenu',e=>{e.preventDefault();openMenu(e.currentTarget)});
+addEventListener('pointerdown',e=>{if(S.menu&&!e.target.closest('#osmenu,#osmenubtn,#snapsbtn'))closeMenu()},true);
+
+function placeQp(){
+  const q=$('qp');if(q.hidden||phone())return;const i=selIndex();if(i<0)return;const b=objBox(current(),i);if(!b)return;
+  const w=q.offsetWidth,hh=q.offsetHeight;let x=sx(b[2])+16,y=sy(b[3]);
+  if(x+w>cw-56)x=sx(b[0])-w-16;x=Math.max(8,Math.min(cw-w-56,x));y=Math.max(8,Math.min(ch-hh-covered()-4,y));
+  q.style.left=x+'px';q.style.top=y+'px'}
+function fillQp(){
+  const q=$('qp'),i=selIndex();q.hidden=i<0||S.mode==='line';if(q.hidden)return;
+  const sh=current(),o=sh.objects[i],row=(l,v)=>h('div',{class:'prow'},h('span',{},l),h('output',{},v));
+  const history=J.filter(e=>e.kind==='change_set'&&e.ops.some(op=>`${op.sheet}/${op.target??op.id}`.toUpperCase()===up(o.id)&&e.landed.includes(op.sheet)));
+  const sw=sh.items.find(it=>it.o===i);
+  put(q,
+    h('header',{},h('span',{class:'sw',style:`width:11px;height:11px;border:1px solid #111;background:${ACI[sw?.c]||'#eee'}`}),h('b',{},o.name??o.id.split('/').slice(1).join('/')),h('button',{'aria-label':'Clear the selection',onclick:()=>pick(-1)},'×')),
+    h('div',{class:'body'},
+      row('Type',typeWords(o)),row('Layer',o.layer),row('ID',o.id),row('Name',o.name??'(none)'),o.block?row('Block',o.block):null,
+      o.attributes?.length?[h('h5',{},'Attributes'),o.attributes.map(a=>row(a.tag,a.value===''?'(empty)':a.value))]:null,
+      h('h5',{},'Changed by'),history.length?h('div',{class:'chips'},history.map(e=>h('button',{class:'chip',onclick:()=>showEntry(e.n)},`#${e.n} ${entryTitle(e)}`))):h('div',{class:'muted'},'No change set in the journal changed it.')));
+  placeQp()}
+
+function pills(){
+  const box=$('pills');
+  if(S.at!==null){put(box,h('button',{class:'pill past','data-act':'live',onclick:backToLive},`Entry ${S.at} of ${newest()} · Live ›`));return}
+  const p=pending(),la=lastAccept();
+  put(box,h('span',{class:'pill'},p.length?[phone()?'':'Working revision · ',`${p.length} not issued`]:la?`Issued (entry ${la.n})`:'Working revision, not issued'))}
+function tabs(){
+  const changed=new Set(pending().flatMap(e=>e.landed).map(up));
+  put($('tabs'),...DP.sheets.map(s=>h('button',{class:`tab${s===S.sheet?' on':''}`,'aria-current':s===S.sheet?'page':null,onclick:()=>showSheet(s)},h('b',{},s),changed.has(up(s))?h('i',{class:'dot info',title:'Has change sets not issued'}):null)));
+  $('tabs').querySelector('.tab.on')?.scrollIntoView({block:'nearest',inline:'nearest'})}
+function streamLine(){return S.at!==null?['past',`Showing entry ${S.at} as it was: read-only`]:['open','Live: changes show as they land']}
+function journalBody(){
+  if(S.side==='assistant')return h('div',{class:'assist'},h('h4',{},'The assistant'),
+    'Your own agent will draft with you here: ask it what something is, have it draw, and keep or discard what it proposes.',
+    h('div',{class:'ghost'},'Not here yet. Agents already draft through change sets from the command line, MCP, Python or HTTP; their work lands in the Journal and on the drawing.'));
+  const i=S.focused==null?-1:J.findIndex(e=>e.n===S.focused);
+  return [h('div',{class:'jhead'},h('b',{},'Journal'),h('span',{class:'muted'},plural(J.length,'entry','entries')),
+      h('div',{class:'stepper'},h('button',{'aria-label':'Older',onclick:()=>step(-1)},'‹'),h('span',{},`${i>=0?i+1:'-'} / ${J.length}`),h('button',{'aria-label':'Newer',onclick:()=>step(1)},'›'))),
+    h('ol',{class:'jlist'},[...J].reverse().map(e=>{
+      const [cls,label]=entryState(e),shown=S.open.has(e.n),later=canUndo().filter(m=>m>e.n).length;
+      return h('li',{class:`je je-${cls}${S.focused===e.n?' on':''}${S.at===e.n?' at':''}`,'data-entry':e.n},
+        h('button',{class:'je-head',onclick:()=>{if(S.focused===e.n&&shown){S.open.delete(e.n);refresh()}else showEntry(e.n)}},
+          h('span',{class:'je-n'},e.n),h('span',{},h('span',{class:'je-t'},entryTitle(e)),h('span',{class:'je-m'},(e.landed||[]).map(s=>h('span',{class:'sh-landed'},`${s} ✓`)),h('span',{class:'muted'},clock(e.at)))),
+          h('span',{class:`badge b-${cls}`},label)),
+        shown?h('div',{class:'je-det'},
+          e.kind!=='accept'&&e.kind!=='undo'?h('p',{class:'muted'},`Through ${viaWords(e.via)}.`):null,
+          e.issuedBy?h('p',{},`Issued by the accept in entry ${e.issuedBy}: it cannot be undone.`):null,
+          e.undoneBy?h('p',{class:'muted'},`Undone by entry ${e.undoneBy}.`):null,
+          e.ops?.length?h('ul',{class:'ops'},e.ops.map(o=>h('li',{},h('span',{},o.sheet),h('code',{},opWords(o))))):null,
+          canUndo().includes(e.n)?h('div',{},h('button',{class:'btn sm danger',disabled:S.at!==null,onclick:()=>undo(e.n)},`Undo${later?` this and ${later} later`:''}`)):null):null)}),
+      h('li',{class:'revsep'},'The start of the journal'))]}
+function peek(){
+  const [cls,line]=streamLine(),last=J.at(-1),u=lastUndoable(),stepping=S.at!==null,blocked=!!lastAccept()&&!pending().length;
+  put($('peek'),
+    h('div',{class:`peekline live ${cls}`},h('i'),h('span',{},line)),
+    last?h('button',{class:'peeklast',onclick:()=>showEntry(last.n)},h('span',{class:'je-n'},last.n),h('span',{class:'t'},entryTitle(last)),h('span',{class:`badge b-${entryState(last)[0]}`},entryState(last)[1])):null,
+    h('div',{class:'peekacts'},
+      h('button',{class:'btn','data-act':'undo',disabled:!u||stepping,onclick:()=>undo(u)},`↶ Undo last${u?` (#${u})`:''}`),
+      h('button',{class:`btn primary${blocked?' blocked':''}`,'data-act':'accept',disabled:stepping,onclick:askAccept},'Accept…')))}
+function copyPoint(s){const p=snappedPoint(s);if(!p)return;const txt=JSON.stringify(p);
+  log(`Copied: ${txt}`);refresh();
+  try{navigator.clipboard?.writeText(txt).catch(()=>{})}catch(e){}}
+function cmdbar(){
+  const line=$('cmdline'),opt=(l,run,act)=>h('button',{class:'opt',type:'button','data-opt':act||l,onclick:run},l),br=(...o)=>['[ ',o.filter(Boolean).flatMap((x,i)=>i?[' ',x]:[x]),' ]'];
+  let kids;const touch=phone();
+  if(S.prompt)kids=[h('span',{id:'cmdname'},S.prompt.name),S.prompt.text,' ',br(opt('OK',()=>{S.prompt=null;updateUI()}))];
+  else if(S.mode==='line'){const n=S.line.pts.length;
+    kids=[h('span',{id:'cmdname'},'LINE'),n===0?(touch?'Tap the first point, or touch and hold to snap ':'Specify first point: '):(touch?'Tap the next point, or hold to snap ':'Specify next point or '),
+      n===0?br(opt('Exit',()=>setMode('snaps'))):br(n>=3?opt('Close',lineClose):null,opt('Undo',lineUndo),opt('Done',lineDone))]}
+  else if(S.cannot)kids=[`Entry ${S.at} cannot be shown `,br(opt('Older',()=>step(-1)),opt('Newer',()=>step(1)),opt('Live',backToLive))];
+  else if(S.at!==null)kids=[`Showing entry ${S.at} as it was, read-only `,br(opt('Older',()=>step(-1)),opt('Newer',()=>step(1)),opt('Live',backToLive))];
+  else if(S.taken){const s=S.taken;kids=[h('span',{class:'snapw'},SN[s.k].label),` of ${objName(s.o)}${s.k==='intersection'&&s.w!=null?' and '+objName(s.w):''}: `,h('b',{},`${f4(s.x)}, ${f4(s.y)} in `),
+      br(snappedPoint(s)?opt('Copy as snapped point',()=>copyPoint(s),'copy'):null,opt('Clear',()=>pick(-1)))]}
+  else if(selIndex()>=0){const o=current().objects[selIndex()];kids=[`${o.name??o.id.split('/').slice(1).join('/')} selected `,br(opt('Clear',()=>pick(-1)))]}
+  else kids=[touch?'Tap an object to see it, or touch and hold to read a point':'Select an object, or click a snap to read its point'];
+  put(line,...kids.flat(3));
+  $('cmdnote').textContent=S.mode==='line'?'Enter or right-click: done · Esc: cancel · F8: Ortho':'F3: snaps on/off · Tab: the next snap here';
+  put($('hist'),...S.log.slice(-2).map(l=>h('div',{},l)))}
+function updateUI(){
+  const u=lastUndoable(),stepping=S.at!==null;
+  $('file').textContent=`${DP.name} / ${S.sheet}`;
+  $('undo').disabled=!u||stepping;$('undolabel').textContent=`Undo last${u?` (#${u})`:''}`;
+  $('accept').disabled=stepping;$('accept').classList.toggle('blocked',!!lastAccept()&&!pending().length);
+  pills();tabs();
+  const [cls,line]=streamLine();$('live').className=`live ${cls}`;$('live').querySelector('span').textContent=line;
+  document.querySelectorAll('[data-tog]').forEach(b=>b.setAttribute('aria-pressed',S[b.dataset.tog]));
+  document.querySelectorAll('#proto .mode').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===S.mode)));
+  const lb=document.querySelector('.rb[data-tool=line]');lb.classList.toggle('on',S.mode==='line');lb.setAttribute('aria-pressed',String(S.mode==='line'));
+  lb.querySelector('.pv')?.remove();if(S.mode==='line')lb.append(h('span',{class:'pv'},'Preview'));
+  lb.setAttribute('aria-label',S.mode==='line'?'Line, preview of build 4':'Line, coming soon');
+  const i=selIndex(),sh=current(),o=i>=0?sh.objects[i]:null,it=o?sh.items.find(x=>x.o===i):null;
+  $('layname').textContent=o?o.layer:'No object selected';$('layname').classList.toggle('muted',!o);$('laysw').style.background=it?ACI[it.c]:'transparent';
+  $('layhint').textContent=o?'The selected object’s layer':'Select an object to see its layer';
+  $('paperlabel').textContent=`${sh.paper.name}, inches`;
+  stage.classList.toggle('past',stepping);
+  const note=$('note');note.hidden=!S.cannot;if(S.cannot)put(note,h('b',{},`Entry ${S.at} cannot be shown. `),S.cannot);
+  document.querySelectorAll('.stab').forEach(b=>b.classList.toggle('on',b.dataset.side===S.side));
+  const body=$('sidebody'),top=body.scrollTop;put(body,...[journalBody()].flat());body.scrollTop=top;
+  peek();cmdbar();fillQp();placeSheet(false);if(S.menu)fillMenu()}
+function refresh(){if(S.sel&&selIndex()<0)S.sel=null;if(!S.sel)S.taken=null;if(S.prompt&&(S.at!==null||S.sel)){S.prompt=null;clearTimeout(promptT)}updateUI();draw()}
+
+/* a phone's bottom sheet */
+function room(){return $('work').clientHeight}
+function peekH(){return $('grab').offsetHeight+$('peek').offsetHeight}
+function snapY(n){return n==='peek'?room()-peekH():n==='half'?Math.round(room()*.45):Math.round(room()*.06)}
+function placeSheet(animate,top){
+  const el=$('side');
+  if(!phone()){el.style.transform='';document.documentElement.style.setProperty('--peek','0px');return}
+  const y=top??snapY(S.snap);el.style.transition=animate?'transform .28s cubic-bezier(.2,.8,.2,1)':'none';el.style.transform=`translateY(${y}px)`;
+  const p=peekH();if(Math.abs(S_peek()-p)>.5){document.documentElement.style.setProperty('--peek',p+'px');if(!touched)fit()}}
+function setSnap(n){S.snap=n;placeSheet(true)}
+{let d=null;const el=$('side');
+  el.addEventListener('pointerdown',e=>{if(!phone()||!e.target.closest('#grab,#peek')||e.target.closest('button'))return;
+    d={y0:e.clientY,s0:snapY(S.snap),moved:false,v:0,t:performance.now(),last:e.clientY,y:snapY(S.snap)};el.setPointerCapture(e.pointerId)});
+  el.addEventListener('pointermove',e=>{if(!d)return;const now=performance.now();d.v=(e.clientY-d.last)/Math.max(1,now-d.t);d.t=now;d.last=e.clientY;
+    if(Math.abs(e.clientY-d.y0)>6)d.moved=true;d.y=Math.max(snapY('full'),Math.min(snapY('peek'),d.s0+e.clientY-d.y0));placeSheet(false,d.y)});
+  const end=()=>{if(!d)return;const x=d;d=null;
+    if(!x.moved){setSnap(S.snap==='peek'?'half':'peek');return}
+    const order=['full','half','peek'];let best=order.reduce((b,n)=>Math.abs(snapY(n)-x.y)<Math.abs(snapY(b)-x.y)?n:b,'peek');
+    if(Math.abs(x.v)>.5)best=order[Math.max(0,Math.min(2,order.indexOf(S.snap)+(x.v>0?1:-1)))];setSnap(best)};
+  el.addEventListener('pointerup',end);el.addEventListener('pointercancel',end)}
+
+/* wiring */
+$('undo').onclick=()=>undo(lastUndoable());$('accept').onclick=askAccept;
+$('toolsbtn').onclick=()=>{const o=document.body.classList.toggle('tools-open');$('toolsbtn').setAttribute('aria-expanded',o)};
+document.querySelectorAll('#status [data-tog]').forEach(b=>b.onclick=()=>toggle(b.dataset.tog));
+document.querySelectorAll('.stab').forEach(b=>b.onclick=()=>{S.side=b.dataset.side;if(phone()&&S.snap==='peek')setSnap('half');updateUI()});
+document.querySelectorAll('#proto .mode').forEach(b=>b.onclick=()=>{if(S.mode!==b.dataset.mode)setMode(b.dataset.mode)});
+$('reset').onclick=()=>{const m=S.mode;seed();S.mode=m;cache.clear();touched=false;$('toast').hidden=true;$('modal').hidden=true;closeMenu();fit();setSnap('peek');refresh()};
+stage.addEventListener('pointerdown',()=>{if(document.body.classList.contains('tools-open'))closeTools()},true);
+addEventListener('keydown',e=>{
+  if(e.key==='F3'||e.key==='F7'||e.key==='F8'){e.preventDefault();toggle(e.key==='F3'?'osnap':e.key==='F7'?'grid':'ortho');return}
+  if(e.key==='Tab'&&S.cursor&&S.cands.length>1){e.preventDefault();S.candI=(S.candI+1)%S.cands.length;S.hover=S.cands[S.candI];showCoords();draw();return}
+  if(e.key==='Enter'&&S.mode==='line'&&!e.target.closest('button')){e.preventDefault();lineDone();return}
+  if(e.key==='Escape'){if(S.menu){closeMenu();return}if(!$('modal').hidden){$('modal').hidden=true;return}
+    if(S.mode==='line'){if(S.line.pts.length){S.line={pts:[]};log('LINE: cancelled');refresh()}else setMode('snaps');return}
+    if(S.prompt){S.prompt=null;updateUI();return}if(S.sel){pick(-1);return}if(S.at!==null)backToLive()}});
+new ResizeObserver(resize).observe(stage);
+seed();
+{const q=new URLSearchParams(location.search).get('sheet');if(q&&DP.sheets.includes(q))S.sheet=q}
+buildRibbon();resize();refresh();
+window.__proto={get S(){return S},V,draw,sx,sy,wx,wy,current,objBox,findSnaps,setMode,showEntry,backToLive};
+</script>
+</body>
+</html>
