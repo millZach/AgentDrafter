@@ -26,7 +26,13 @@
 //            each entry, read-only; an entry whose undo state is pruned
 //            says it cannot be shown; back to live returns;
 // - pick:    a tap on an insert, at phone size, shows its ID, name, layer
-//            and attributes in the inspector;
+//            and attributes in quick properties;
+// - frame:   the drafting app's frame at laptop and phone sizes: the ribbon's
+//            tools still to come, the command bar's prompts, quick
+//            properties beside the selected object, the Layer box, the
+//            status bar's coordinates, paper and toggles, Grid (F7) drawing
+//            and taking away the grid, the side panel's tabs, and on a
+//            phone the ribbon folded behind Tools;
 // - undo:    Undo last undoes the newest change set, as one;
 // - accept:  refused while the set is inconsistent; warns of failed checks
 //            and lists them; then issues the change sets, which can no
@@ -161,7 +167,7 @@ async function objectOf(page, id) {
 
 /** Waits until the page's live stream is open. */
 async function live(page) {
-  await page.waitForSelector('.va-agent.working', { timeout: 30000 });
+  await page.waitForSelector('.live.open', { timeout: 30000 });
 }
 
 /** `agentdrafter serve` in the scratch folder, or `cwd`, with every line it printed. */
@@ -345,8 +351,15 @@ const checks = {
       // A sheet of one layout has no layout tabs.
       const one = await open(context, `${server.base}/?source=layout.yaml`, null);
       assert((await one.page.evaluate(() => document.querySelectorAll('.va-layouts').length)) === 0, 'one layout, no layout tabs');
-      assert(problems.length === 0 && one.problems.length === 0, [...problems, ...one.problems].join('; '));
-      return { first, second };
+      // On a laptop they sit at the left of the status bar, as AutoCAD's do.
+      const laptop = await open(await b.newContext(LAPTOP), `${server.base}/?source=layouts.yaml`, null);
+      const inStatus = await laptop.page.evaluate(() => [...document.querySelectorAll('.status .va-layouts .tab')].map((t) => t.textContent));
+      assert(JSON.stringify(inStatus) === JSON.stringify(['Assembly', 'Wiring']), `the layout tabs in the status bar: ${JSON.stringify(inStatus)}`);
+      await laptop.page.click('.status .va-layouts .tab:has-text("Wiring")');
+      await laptop.page.waitForFunction(() => window.agentdrafterViewer?.summary?.layout === 'Wiring');
+      await laptop.page.screenshot({ path: join(out, 'layouts-laptop.png') });
+      assert(problems.length === 0 && one.problems.length === 0 && laptop.problems.length === 0, [...problems, ...one.problems, ...laptop.problems].join('; '));
+      return { first, second, laptop_status_bar: inStatus };
     } finally {
       await b.close();
       await server.stop();
@@ -684,11 +697,16 @@ const checks = {
         const v = probe.view();
         const canvas = document.querySelector('.stage');
         const c = canvas.getBoundingClientRect();
-        const sheet = document.querySelector('.va-sheet').getBoundingClientRect();
-        const below = sheet.top > c.top + 10 && sheet.left < c.right - 10 ? c.bottom - sheet.top : 0;
+        // The command bar under the drawing, taken one line tall, with a
+        // phone's peek under it; and on a laptop the zoom buttons at the
+        // right, beside the middle of the drawing.
+        const bar = document.querySelector('.cmdbar').getBoundingClientRect();
+        const below = c.bottom - (bar.bottom - 32);
+        const zoom = document.querySelector('.zoombtns').getBoundingClientRect();
+        const beside = zoom.top < c.top + c.height / 2 && zoom.bottom > c.top + c.height / 2;
         return {
           paper: [(left - v.left) * v.scale, (v.top - top) * v.scale, (right - v.left) * v.scale, (v.top - bottom) * v.scale],
-          room: [c.width, c.height - below],
+          room: [beside ? zoom.left - c.left : c.width, c.height - below],
           backing: [canvas.width, canvas.height],
           ratio: window.devicePixelRatio,
           scale: v.scale,
@@ -990,7 +1008,7 @@ const checks = {
     }
   },
 
-  /** A tap on an insert, at phone size, shows its ID, name, layer and attributes. */
+  /** A tap on an insert, at phone size, shows its ID, name, layer and attributes in quick properties. */
   async pick() {
     const folder = freshPlant('pick');
     const server = await serve('127.0.0.1:0', folder);
@@ -1009,16 +1027,16 @@ const checks = {
         [(x0 + x1) / 2, (y0 + y1) / 2],
       );
       await page.touchscreen.tap(at[0], at[1]);
-      await page.waitForSelector('.va-inspect', { timeout: 15000 });
+      await page.waitForSelector('.qp', { timeout: 15000 });
       const shown = await page.evaluate(() => {
         const rows = {};
-        for (const tr of document.querySelectorAll('.va-inspect .kv tr')) {
+        for (const tr of document.querySelectorAll('.qp .kv tr')) {
           const th = tr.querySelector('th')?.textContent;
           if (th) rows[th] = tr.querySelector('td')?.textContent;
         }
         return rows;
       });
-      assert(shown.ID === 'DP-LD-101/device', `the inspector shows its ID: ${JSON.stringify(shown)}`);
+      assert(shown.ID === 'DP-LD-101/device', `quick properties show its ID: ${JSON.stringify(shown)}`);
       assert(shown.Name === 'FT-101', 'its name');
       assert(shown.Layer === '0', 'its layer');
       assert(shown.Type === 'Insert of TRANSMITTER', 'its block');
@@ -1027,15 +1045,23 @@ const checks = {
       assert(marked.picked === device.place, 'the picked object is marked');
       await sleep(300);
       await page.screenshot({ path: join(out, 'pick-phone.png') });
+      // On a phone, the device is brought up above the card.
+      const placed = await page.evaluate((place) => {
+        const v = window.agentdrafterViewer.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        const [, y0, , y1] = window.agentdrafterViewer.bounds([place]);
+        return { device: r.top + (v.top - (y0 + y1) / 2) * v.scale, card: document.querySelector('.qp').getBoundingClientRect().top };
+      }, device.place);
+      assert(placed.device < placed.card, `the device is above quick properties: ${JSON.stringify(placed)}`);
       // A tap where nothing is drawn, above the paper, picks nothing, and
-      // the journal comes back.
+      // quick properties close.
       const bare = await page.evaluate(() => {
         const v = window.agentdrafterViewer.view();
         const r = document.querySelector('.stage').getBoundingClientRect();
-        return [r.left + (8.5 - v.left) * v.scale, r.top + (v.top - 11) * v.scale - 40];
+        return [r.left + 20, Math.max(r.top + 12, r.top + (v.top - 11) * v.scale - 40)];
       });
       await page.touchscreen.tap(bare[0], bare[1]);
-      await page.waitForFunction(() => !document.querySelector('.va-inspect'));
+      await page.waitForFunction(() => !document.querySelector('.qp'));
       assert(problems.length === 0, problems.join('; '));
       return { picked: shown, screenshot: 'pick-phone.png' };
     } finally {
@@ -1309,10 +1335,10 @@ const checks = {
         [(x0 + x1) / 2, (y0 + y1) / 2],
       );
       await page.touchscreen.tap(tapAt[0], tapAt[1]);
-      await page.waitForSelector('.va-inspect');
+      await page.waitForSelector('.qp');
       const shownId = () =>
         page.evaluate(() => {
-          for (const tr of document.querySelectorAll('.va-inspect .kv tr')) {
+          for (const tr of document.querySelectorAll('.qp .kv tr')) {
             if (tr.querySelector('th')?.textContent === 'ID') return tr.querySelector('td')?.textContent;
           }
           return null;
@@ -1330,9 +1356,185 @@ const checks = {
 
       // Y deleted: the pick clears.
       assert(sendChange(folder, { operations: [{ op: 'delete', target: { id: 'DP-LD-101/io-channel' } }] }).ok, 'Y is deleted');
-      await page.waitForFunction(() => !document.querySelector('.va-inspect') && window.agentdrafterViewer.marked?.picked === null, null, { timeout: 15000 });
+      await page.waitForFunction(() => !document.querySelector('.qp') && window.agentdrafterViewer.marked?.picked === null, null, { timeout: 15000 });
       assert(problems.length === 0, problems.join('; '));
       return { followed: 'DP-LD-101/io-channel', cleared: true };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * The drafting app's frame, at laptop and phone sizes: what each part
+   * shows and does before anything edits.
+   */
+  async frame() {
+    const server = await serve('127.0.0.1:0');
+    const b = await browser();
+    const seen = {};
+    // Where an object of the sheet shown is on the page.
+    const at = (page, id) =>
+      page.evaluate((wanted) => {
+        const probe = window.agentdrafterViewer;
+        const place = probe.summary.objects.findIndex((o) => o.id === wanted);
+        const [x0, y0, x1, y1] = probe.bounds([place]);
+        const v = probe.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        return {
+          place,
+          box: [r.left + (x0 - v.left) * v.scale, r.top + (v.top - y1) * v.scale, r.left + (x1 - v.left) * v.scale, r.top + (v.top - y0) * v.scale],
+        };
+      }, id);
+    const middle = (box) => [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2];
+    const bar = (page) => page.evaluate(() => document.querySelector('.cmdbar').textContent);
+    try {
+      // A laptop.
+      {
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        const ribbon = await page.evaluate(() =>
+          [...document.querySelectorAll('.ribbon .panel')].map((p) => [p.querySelector('h3').textContent.trim(), [...p.querySelectorAll('.rb')].map((t) => t.textContent)]),
+        );
+        assert(
+          JSON.stringify(ribbon) === JSON.stringify([['Draw Soon', ['Line', 'Circle', 'Rectangle', 'Text']], ['Modify Soon', ['Move', 'Erase']], ['Layer', []]]),
+          `the ribbon: ${JSON.stringify(ribbon)}`,
+        );
+        assert((await bar(page)).includes('Select an object to see its properties'), `the command bar prompts: ${await bar(page)}`);
+        // A tool still to come: its tip on hover, and a note in the command bar when clicked.
+        await page.hover('.rb[data-tool="rectangle"]');
+        await page.waitForSelector('.tip');
+        const tip = await page.textContent('.tip');
+        assert(tip.includes('REC') && tip.includes('Coming soon'), `the tip names the alias and says it is coming: ${tip}`);
+        await page.click('.rb[data-tool="rectangle"]', { force: true });
+        assert((await bar(page)).includes('RECTANG(REC) Coming soon'), `the command bar says the tool is coming: ${await bar(page)}`);
+        await page.click('.opt[data-opt="ok"]');
+        assert(!(await bar(page)).includes('Coming soon'), 'OK clears it');
+        // The status bar: the cursor's place, the paper, and the toggles.
+        const stage = await page.evaluate(() => {
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          return [r.left + 300, r.top + 200];
+        });
+        await page.mouse.move(stage[0], stage[1]);
+        const coords = await page.textContent('.coords');
+        const expected = await page.evaluate(([x, y]) => {
+          const v = window.agentdrafterViewer.view();
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          return `${(v.left + (x - r.left) / v.scale).toFixed(3)}, ${(v.top - (y - r.top) / v.scale).toFixed(3)} in`;
+        }, stage);
+        assert(coords === expected, `the status bar says where the cursor is: ${coords}, not ${expected}`);
+        assert((await page.textContent('.paperlabel')) === 'ANSI B landscape, inches', 'the paper and its units');
+        const pressed = (k) => page.getAttribute(`.status [data-toggle="${k}"]`, 'aria-pressed');
+        assert((await pressed('grid')) === 'true' && (await pressed('osnap')) === 'true' && (await pressed('ortho')) === 'false', 'Grid and Object snap start on, Ortho off');
+        // Grid: F7 takes the grid away from the drawing, and puts it back.
+        const gridPixels = () =>
+          page.evaluate(() => {
+            const p = window.agentdrafterViewer;
+            const s = p.summary;
+            const raw = atob(p.capture({ left: s.paper[0] - 1, top: s.paper[3] + 1, scale: 40, width: 400, height: 300, white: false }));
+            let grid = 0;
+            for (let i = 0; i < raw.length; i += 4) {
+              const rgb = [raw.charCodeAt(i), raw.charCodeAt(i + 1), raw.charCodeAt(i + 2)].join();
+              if (rgb === '39,47,57' || rgb === '49,58,70') grid++;
+            }
+            return grid;
+          });
+        const gridOn = await gridPixels();
+        await page.keyboard.press('F7');
+        const gridOff = await gridPixels();
+        assert(gridOn > 5000 && gridOff === 0 && (await pressed('grid')) === 'false', `F7 takes the grid away: ${gridOn} then ${gridOff}`);
+        await page.click('.status [data-toggle="grid"]');
+        assert((await gridPixels()) === gridOn && (await pressed('grid')) === 'true', 'Grid puts it back');
+        await page.keyboard.press('F3');
+        await page.keyboard.press('F8');
+        assert((await pressed('osnap')) === 'false' && (await pressed('ortho')) === 'true', 'F3 and F8 turn Object snap and Ortho');
+        // Model space is dark, and colour 7 draws white on it, the paper's edge a dashed outline.
+        const screen = await page.evaluate(() => {
+          const p = window.agentdrafterViewer;
+          const s = p.summary;
+          const width = 600;
+          const scale = width / (s.paper[2] - s.paper[0] + 2);
+          const height = Math.round((s.paper[3] - s.paper[1] + 2) * scale);
+          const raw = atob(p.capture({ left: s.paper[0] - 1, top: s.paper[3] + 1, scale, width, height, white: false }));
+          let white = 0;
+          let black = 0;
+          for (let i = 0; i < raw.length; i += 4) {
+            const [r, g, bl] = [raw.charCodeAt(i), raw.charCodeAt(i + 1), raw.charCodeAt(i + 2)];
+            if (r > 240 && g > 240 && bl > 240) white++;
+            if (r < 16 && g < 16 && bl < 16) black++;
+          }
+          const corner = [raw.charCodeAt(0), raw.charCodeAt(1), raw.charCodeAt(2)];
+          return { white, black, corner };
+        });
+        assert(screen.white > 2000 && screen.black === 0, `colour 7 draws white on dark model space: ${JSON.stringify(screen)}`);
+        // Selecting: quick properties beside the object, the Layer box, the command bar.
+        const device = await at(page, 'DP-LD-101/device');
+        await page.mouse.click(...middle(device.box));
+        await page.waitForSelector('.qp');
+        await page.waitForFunction(() => getComputedStyle(document.querySelector('.qp')).visibility === 'visible');
+        const card = await page.evaluate(() => {
+          const r = document.querySelector('.qp').getBoundingClientRect();
+          return [r.left, r.top, r.right, r.bottom];
+        });
+        const apart = card[0] >= device.box[2] || card[2] <= device.box[0];
+        assert(apart && card[1] < device.box[3] + 1, `quick properties sit beside the device: ${JSON.stringify({ card, device: device.box })}`);
+        assert((await page.textContent('[data-layer]')) === '0', 'the Layer box shows its layer');
+        assert((await bar(page)).includes('FT-101 selected [ Clear ]'), `the command bar names it: ${await bar(page)}`);
+        await page.screenshot({ path: join(out, 'frame-laptop-selected.png') });
+        // They follow it as the view moves.
+        await page.click('[aria-label="Zoom in"]');
+        await sleep(500);
+        const moved = await at(page, 'DP-LD-101/device');
+        const card2 = await page.evaluate(() => {
+          const r = document.querySelector('.qp').getBoundingClientRect();
+          return [r.left, r.top, r.right, r.bottom];
+        });
+        assert(card2[0] >= moved.box[2] - 1 || card2[2] <= moved.box[0] + 1, `quick properties follow the device: ${JSON.stringify({ card2, device: moved.box })}`);
+        await page.click('.opt[data-opt="clear"]');
+        await page.waitForFunction(() => !document.querySelector('.qp'));
+        assert((await page.textContent('[data-layer]')) === 'No object selected', 'nothing selected');
+        // The side panel: the journal, and the assistant's place.
+        await page.click('.stab:has-text("Assistant")');
+        assert((await page.textContent('.sidebody')).includes('Not here yet'), 'the assistant is coming');
+        await page.click('.stab:has-text("Journal")');
+        await page.waitForSelector('.va-jhead');
+        assert(await page.isVisible('.titlebar button[data-act="undo"]') && await page.isVisible('.titlebar button[data-act="accept"]'), 'Undo last and Accept are in the title bar');
+        assert(problems.length === 0, problems.join('; '));
+        seen.laptop = { ribbon, coords, grid_pixels: [gridOn, gridOff], screen, card };
+        await context.close();
+      }
+      // A phone.
+      {
+        const context = await b.newContext(PHONE);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        assert(!(await page.isVisible('.ribbon')) && !(await page.$('.status')), 'the ribbon is folded and there is no status bar');
+        await page.tap('.toolsbtn');
+        assert(await page.isVisible('.ribbon'), 'Tools opens the ribbon');
+        const toggles = await page.evaluate(() => [...document.querySelectorAll('.ribbon .tog2')].map((t) => t.textContent));
+        assert(JSON.stringify(toggles) === JSON.stringify(['Grid', 'Object snap', 'Ortho']), `Tools holds the toggles: ${toggles}`);
+        await page.screenshot({ path: join(out, 'frame-phone-tools.png') });
+        await page.tap('.rb[data-tool="erase"]', { force: true });
+        assert(!(await page.isVisible('.ribbon')), 'a tool tapped folds the ribbon');
+        assert((await bar(page)).includes('ERASE(E) Coming soon'), `the command bar says Erase is coming: ${await bar(page)}`);
+        await page.tap('.opt[data-opt="ok"]');
+        const device = await at(page, 'DP-LD-101/device');
+        await page.touchscreen.tap(...middle(device.box));
+        await page.waitForSelector('.qp');
+        await sleep(500);
+        const placed = await page.evaluate(() => {
+          const qp = document.querySelector('.qp').getBoundingClientRect();
+          const cmd = document.querySelector('.cmdbar').getBoundingClientRect();
+          const peek = document.querySelector('.va-peek').getBoundingClientRect();
+          return { qp: [qp.left, qp.top, qp.right, qp.bottom], cmd: [cmd.top, cmd.bottom], peek: peek.top, width: innerWidth };
+        });
+        assert(placed.qp[3] <= placed.cmd[0] && placed.cmd[1] <= placed.peek && placed.qp[0] >= 0 && placed.qp[2] <= placed.width, `on a phone the card sits above the command bar, above the peek: ${JSON.stringify(placed)}`);
+        await page.screenshot({ path: join(out, 'frame-phone-selected.png') });
+        assert(await page.isVisible('.va-peek button[data-act="undo"]') && await page.isVisible('.va-peek button[data-act="accept"]'), 'Undo last and Accept are in the peek');
+        assert(problems.length === 0, problems.join('; '));
+        seen.phone = { toggles, placed };
+        await context.close();
+      }
+      return { ...seen, screenshots: ['frame-laptop-selected.png', 'frame-phone-tools.png', 'frame-phone-selected.png'] };
     } finally {
       await b.close();
       await server.stop();

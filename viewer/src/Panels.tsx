@@ -1,8 +1,8 @@
-// What the bottom sheet holds, in the picked look (variant A): the peek,
-// always in reach, with the stream's state, the newest entry, Undo last and
-// Accept; the journal, which steps through the set's entries; and the
-// inspector, which shows the object the reviewer picked. Plain components:
-// what they do is the page's (App.tsx).
+// What the side panel and the cards hold: the peek, which a phone always
+// shows, with the stream's state, the newest entry, Undo last and Accept;
+// the journal, which steps through the set's entries; quick properties,
+// which show the object the drafter selected; and the assistant's place.
+// Plain components: what they do is the page's (App.tsx).
 
 import { useState } from 'react';
 
@@ -17,13 +17,14 @@ import {
   type Entry,
   type JournalReport,
 } from './journal.ts';
+import { nameOf, typeWords, type LiveState } from './frame.ts';
 import type { SheetObject } from './probe.ts';
 
 export interface PeekProps {
   /** What the page is watching, in a few words. */
   line: string;
-  /** Whether the line's dot shows the stream open. */
-  live: boolean;
+  /** What the line's dot shows: the stream open, reaching the server, the set as it was, or nothing to watch. */
+  live: LiveState;
   journal: JournalReport | null;
   failing: ReadonlySet<string>;
   /** The change set Undo last would undo. */
@@ -43,9 +44,9 @@ export function Peek({ line, live, journal, failing, undoable, blocked, busy, st
   const state = last && journal ? entryState(last, journal, failing) : null;
   return (
     <>
-      <div className={`va-agent${live ? ' working' : ''}`}>
+      <div className={`live ${live}`}>
         <i />
-        {line}
+        <span>{line}</span>
       </div>
       {last && state ? (
         <button type="button" className="va-last" onClick={() => onShow(last.entry)}>
@@ -212,80 +213,100 @@ export function JournalList({ journal, failing, at, focused, busy, onStep, onSho
   );
 }
 
-export interface InspectorProps {
+export interface QuickPropertiesProps {
   object: SheetObject;
-  sheet: string;
+  /** The colour it shows in on screen, `#rrggbb`, for its swatch; empty when it draws nothing. */
+  color: string;
   journal: JournalReport | null;
   /** The failed checks the object fails, in words. */
   fails: string[];
-  onBack(): void;
+  onClose(): void;
   onShow(entry: number): void;
 }
 
-export function Inspector({ object, sheet, journal, fails, onBack, onShow }: InspectorProps) {
+/**
+ * Quick properties: what the selected object is, beside it on a laptop and
+ * as a card above the command bar on a phone. They only show, until
+ * editing comes (build 5).
+ */
+export function QuickProperties({ object, color, journal, fails, onClose, onShow }: QuickPropertiesProps) {
   const rows: [string, string][] = [
-    ['Type', object.block ? `Insert of ${object.block}` : object.type],
+    ['Type', typeWords(object)],
+    ['Layer', object.layer],
     ['ID', object.id ?? '(none)'],
     ['Name', object.name ?? '(none)'],
-    ['Layer', object.layer],
-    ['Sheet', sheet],
+    ...(object.block ? [['Block', object.block] as [string, string]] : []),
   ];
   const attributes = object.attributes ?? [];
   const history = journal && object.id ? changedBy(journal, object.id) : [];
   return (
-    <div className="va-inspect">
-      <div className="va-ihead">
-        <button type="button" className="btn sm" data-back onClick={onBack}>
-          &lsaquo; Journal
+    <>
+      <header>
+        <span className="sw" style={color ? { background: color } : undefined} />
+        <b>{nameOf(object)}</b>
+        <button type="button" aria-label="Clear the selection" data-close onClick={onClose}>
+          &times;
         </button>
-        <span className="muted">Picked object</span>
-      </div>
-      <h3 className="insp-title">{object.name ?? object.id ?? object.type}</h3>
-      {fails.map((f) => (
-        <p key={f} className="err">
-          &#x2715; {f}
-        </p>
-      ))}
-      <table className="kv">
-        <tbody>
-          {rows.map(([k, v]) => (
-            <tr key={k}>
-              <th>{k}</th>
-              <td>{v}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <h4>Attributes</h4>
-      <table className="kv attrs">
-        <tbody>
-          {attributes.length ? (
-            attributes.map((a, i) => (
-              // A block may define a tag more than once, so the place keys it.
-              <tr key={i}>
-                <th>{a.tag}</th>
-                <td>{a.value}</td>
+      </header>
+      <div className="qp-body">
+        {fails.map((f) => (
+          <p key={f} className="err">
+            &#x2715; {f}
+          </p>
+        ))}
+        <table className="kv">
+          <tbody>
+            {rows.map(([k, v]) => (
+              <tr key={k}>
+                <th>{k}</th>
+                <td>{v}</td>
               </tr>
-            ))
-          ) : (
-            <tr>
-              <td className="muted">None</td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-      <h4>Changed by</h4>
-      {history.length ? (
-        <div className="chips">
-          {history.map((e) => (
-            <button type="button" key={e.entry} className="chip" onClick={() => onShow(e.entry)}>
-              #{e.entry} {entryTitle(e)}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <p className="muted">No change set in the journal changed it.</p>
-      )}
+            ))}
+          </tbody>
+        </table>
+        {attributes.length > 0 && (
+          <>
+            <h5>Attributes</h5>
+            <table className="kv attrs">
+              <tbody>
+                {attributes.map((a, i) => (
+                  // A block may define a tag more than once, so the place keys it.
+                  <tr key={i}>
+                    <th>{a.tag}</th>
+                    <td>{a.value === '' ? '(empty)' : a.value}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+        <h5>Changed by</h5>
+        {history.length ? (
+          <div className="chips">
+            {history.map((e) => (
+              <button type="button" key={e.entry} className="chip" onClick={() => onShow(e.entry)}>
+                #{e.entry} {entryTitle(e)}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">No change set in the journal changed it.</p>
+        )}
+      </div>
+    </>
+  );
+}
+
+/** The assistant's place in the side panel, which build 8 fills. */
+export function Assistant() {
+  return (
+    <div className="assist">
+      <h4>The assistant</h4>
+      <p>Your own agent will draft with you here: ask it what something is, have it draw, and keep or discard what it proposes.</p>
+      <div className="ghost">
+        Not here yet. Agents already draft through change sets from the command line, MCP, Python or HTTP; their work
+        lands in the Journal and on the drawing.
+      </div>
     </div>
   );
 }

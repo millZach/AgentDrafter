@@ -20,6 +20,8 @@ export interface Summary {
   layouts: string[];
   millimetres_per_unit: number;
   paper: Paper;
+  /** The paper's name, when the sheet declares it by name; null for a sheet drawn on its extents. */
+  paper_name: string | null;
   segments: number;
   triangles: number;
   fills_not_drawn: number;
@@ -59,7 +61,7 @@ export interface Capture {
   scale: number;
   width: number;
   height: number;
-  /** Draw white round the paper, as a PNG's paper is everywhere. */
+  /** Draw as the PNG plots the sheet: white all round, each colour in the colour it plots in. Without it, as the screen shows it. */
   white?: boolean;
 }
 
@@ -112,10 +114,10 @@ export function installProbe(parts: Parts): () => void {
       const kept = { width: c.width, height: c.height };
       c.width = width;
       c.height = height;
-      viewer.set_white_surround(white);
+      viewer.set_paper_look(white);
       viewer.draw(left, top, scale, 1);
       const pixels = viewer.pixels();
-      viewer.set_white_surround(false);
+      viewer.set_paper_look(false);
       c.width = kept.width;
       c.height = kept.height;
       parts.redraw();

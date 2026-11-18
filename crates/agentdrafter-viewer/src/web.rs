@@ -33,6 +33,12 @@
 //!   and all, as the PNG's mask and the PDF's clipping path cut them.
 //! - Fills are drawn as one draw of their triangles, their edges smoothed
 //!   by the multisampling.
+//! - Under the ink, as AutoCAD's model space looks on screen: a dark
+//!   background, the grid when the page turns it on, and the paper as a
+//!   dashed outline, all from one draw of a quad over the canvas whose
+//!   shader works out each pixel. Each colour index shows in its screen
+//!   colour, index 7 white. A capture for a test draws instead as the PNG
+//!   does: white all round, and each index in the colour it plots in.
 //! - Over the ink, a halo marks each object a change set added or changed,
 //!   green or amber, and the object the reviewer picked, blue, as the
 //!   picked prototype marks them; the page fades the change set's halos in
@@ -48,7 +54,8 @@ use web_sys::{
 
 use agentdrafter_core::{object_bounds, pick, Bounds, DisplayList};
 
-use crate::mesh::{read_reply, Kind, Mesh, Run, Span};
+use crate::grid::{first_line, grid};
+use crate::mesh::{read_reply, screen_rgba, Kind, Mesh, Run, Span};
 
 const STROKE_VERTEX: &str = r#"#version 300 es
 precision highp float;
@@ -179,23 +186,81 @@ void main() {
 }
 "#;
 
-/// The viewer's background round the paper, as the page's: `#15171a`.
-const SURROUND: [f32; 3] = [
-    0x15 as f32 / 255.0,
-    0x17 as f32 / 255.0,
-    0x1a as f32 / 255.0,
-];
+const BACKDROP_FRAGMENT: &str = r#"#version 300 es
+precision highp float;
+uniform vec2 u_size;
+uniform vec3 u_background;
+// The grid: where the first line falls from the canvas's left and top
+// edges and the device pixels between lines, for the minor lines and the
+// major; a step of 0 draws none.
+uniform vec4 u_minor;
+uniform vec4 u_major;
+// How wide a line is, in device pixels.
+uniform float u_line;
+uniform vec3 u_minor_color;
+uniform vec3 u_major_color;
+// The paper's edge, [left, top, right, bottom] in device pixels, dashed.
+uniform vec4 u_paper;
+uniform vec3 u_edge_color;
+out vec4 o_color;
+bool on_line(float at, float first, float step) {
+  return step > 0.0 && mod(at - first + 0.5 * u_line, step) < u_line;
+}
+bool on_dash(float along) {
+  return mod(along, u_line * 10.0) < u_line * 6.0;
+}
+void main() {
+  vec2 p = vec2(gl_FragCoord.x, u_size.y - gl_FragCoord.y);
+  vec3 color = u_background;
+  if (on_line(p.x, u_minor.x, u_minor.z) || on_line(p.y, u_minor.y, u_minor.w)) color = u_minor_color;
+  if (on_line(p.x, u_major.x, u_major.z) || on_line(p.y, u_major.y, u_major.w)) color = u_major_color;
+  float l = u_paper.x;
+  float t = u_paper.y;
+  float r = u_paper.z;
+  float b = u_paper.w;
+  bool across = p.x >= l - u_line && p.x <= r + u_line;
+  bool down = p.y >= t - u_line && p.y <= b + u_line;
+  bool edge = (across && (abs(p.y - t) < u_line || abs(p.y - b) < u_line) && on_dash(p.x - l))
+           || (down && (abs(p.x - l) < u_line || abs(p.x - r) < u_line) && on_dash(p.y - t));
+  if (edge) color = u_edge_color;
+  o_color = vec4(color, 1.0);
+}
+"#;
 
-/// The paper's shadow on the background.
-const SHADOW: [f32; 3] = [0.04, 0.045, 0.05];
+/// A colour as the shaders take it, from `0xrrggbb`.
+const fn rgb(hex: u32) -> [f32; 3] {
+    [
+        ((hex >> 16) & 0xff) as f32 / 255.0,
+        ((hex >> 8) & 0xff) as f32 / 255.0,
+        (hex & 0xff) as f32 / 255.0,
+    ]
+}
+
+/// Model space on the dark screen, the frame's canvas colour.
+const MODEL_SPACE: [f32; 3] = rgb(0x21_28_30);
+
+/// The grid's minor lines, and its major ones, a little stronger.
+const GRID_MINOR: [f32; 3] = rgb(0x27_2f_39);
+const GRID_MAJOR: [f32; 3] = rgb(0x31_3a_46);
+
+/// The paper's dashed edge on model space.
+const PAPER_EDGE: [f32; 3] = rgb(0x56_60_6e);
+
+/// How the canvas looks: as the drafter sees model space on screen, or as
+/// the PNG plots the sheet, for a test to compare.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Look {
+    /// Dark model space, the grid when it is on, the paper a dashed
+    /// outline, each colour index in its screen colour.
+    Screen,
+    /// White all round, each colour index in the colour it plots in.
+    Paper,
+}
 
 /// The most runs of strokes and fills a sheet is drawn in one by one, in
 /// order; a sheet whose strokes and fills alternate more often is drawn in
 /// two draws, in order by depth.
 const MOST_RUNS: usize = 64;
-
-/// How far the paper's shadow falls, in CSS pixels.
-const SHADOW_OFFSET: f64 = 6.0;
 
 /// How far a halo reaches past what its object draws, in CSS pixels.
 const HALO_PAD: f64 = 6.0;
@@ -265,6 +330,10 @@ struct Loaded {
     stencils: Vec<(u32, u32)>,
     strokes: WebGlVertexArrayObject,
     fills: WebGlVertexArrayObject,
+    /// The segments' colours and the fills' corners', on paper and on
+    /// screen: the look picks which the vertex arrays read.
+    stroke_colors: [WebGlBuffer; 2],
+    fill_colors: [WebGlBuffer; 2],
     buffers: Vec<WebGlBuffer>,
 }
 
@@ -275,9 +344,12 @@ pub struct Viewer {
     stroke: Program,
     fill: Program,
     rect: Program,
+    backdrop: Program,
     /// Whether the canvas has samples to share a pixel's coverage out in.
     multisampled: bool,
-    surround: [f32; 3],
+    look: Look,
+    /// Whether the grid is drawn behind the drawing, on screen.
+    grid: bool,
     sheet: Option<Loaded>,
     /// The halos over the ink.
     marks: Vec<Mark>,
@@ -337,6 +409,23 @@ impl Viewer {
             RECT_FRAGMENT,
             &["u_rect", "u_size", "u_color"],
         )?;
+        let backdrop = Program::new(
+            &gl,
+            RECT_VERTEX,
+            BACKDROP_FRAGMENT,
+            &[
+                "u_rect",
+                "u_size",
+                "u_background",
+                "u_minor",
+                "u_major",
+                "u_line",
+                "u_minor_color",
+                "u_major_color",
+                "u_paper",
+                "u_edge_color",
+            ],
+        )?;
         let multisampled = gl
             .get_parameter(Gl::SAMPLES)
             .ok()
@@ -347,8 +436,10 @@ impl Viewer {
             stroke,
             fill,
             rect,
+            backdrop,
             multisampled,
-            surround: SURROUND,
+            look: Look::Screen,
+            grid: true,
             sheet: None,
             marks: Vec::new(),
             pulse: 1.0,
@@ -365,8 +456,36 @@ impl Viewer {
             .map_err(|e| JsError::new(&e.to_string()))?;
         self.unload();
         self.marks.clear();
-        self.sheet = Some(self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?);
+        let loaded = self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?;
+        self.bind_colors(&loaded);
+        self.sheet = Some(loaded);
         Ok(summary)
+    }
+
+    /// The colour the object at `object`, a place in the sheet's objects,
+    /// shows in on screen, as `#rrggbb`: the colour of the first thing it
+    /// draws. Empty when it draws nothing.
+    pub fn object_color(&self, object: u32) -> String {
+        self.sheet
+            .as_ref()
+            .and_then(|sheet| {
+                sheet
+                    .list
+                    .items
+                    .iter()
+                    .find(|item| item.object == object as usize)
+            })
+            .map(|item| {
+                let [r, g, b, _] = screen_rgba(item.color);
+                format!("#{r:02x}{g:02x}{b:02x}")
+            })
+            .unwrap_or_default()
+    }
+
+    /// Draws the grid behind the drawing, or not, as the drafter's Grid
+    /// (F7) says.
+    pub fn set_grid(&mut self, on: bool) {
+        self.grid = on;
     }
 
     /// The place in the sheet's objects of the object drawn nearest the
@@ -436,11 +555,14 @@ impl Viewer {
         vec![all.min[0], all.min[1], all.max[0], all.max[1]]
     }
 
-    /// Draws white round the paper, as a PNG's paper is everywhere, or,
-    /// as the page does, its background. A test draws white, to compare the
-    /// canvas with a PNG.
-    pub fn set_white_surround(&mut self, white: bool) {
-        self.surround = if white { [1.0; 3] } else { SURROUND };
+    /// Draws as the PNG plots the sheet, white all round and each colour
+    /// index in the colour it plots in, or, as the page shows it, as dark
+    /// model space. A test draws as the PNG, to compare the canvas with one.
+    pub fn set_paper_look(&mut self, paper: bool) {
+        self.look = if paper { Look::Paper } else { Look::Screen };
+        if let Some(sheet) = &self.sheet {
+            self.bind_colors(sheet);
+        }
     }
 
     /// Draws the sheet with the drawing point `(left, top)` at the canvas's
@@ -457,7 +579,10 @@ impl Viewer {
         };
         let (width, height) = (canvas.width() as i32, canvas.height() as i32);
         gl.viewport(0, 0, width, height);
-        let [r, g, b] = self.surround;
+        let [r, g, b] = match self.look {
+            Look::Screen => MODEL_SPACE,
+            Look::Paper => [1.0; 3],
+        };
         gl.clear_color(r, g, b, 1.0);
         gl.clear_depth(1.0);
         gl.clear(Gl::COLOR_BUFFER_BIT);
@@ -468,31 +593,27 @@ impl Viewer {
         let pixels = scale * ratio;
         let device = |x: f64, y: f64| ((x - left) * pixels, (top - y) * pixels);
 
-        // The paper and its shadow, opaque, under everything.
+        // Under everything, opaque: on screen, model space with its grid
+        // and the paper's dashed edge; as the PNG, white paper.
         gl.disable(Gl::BLEND);
         gl.disable(Gl::DEPTH_TEST);
         gl.disable(Gl::SAMPLE_ALPHA_TO_COVERAGE);
         let [x0, y0, x1, y1] = sheet.paper;
         let (left_px, top_px) = device(x0, y1);
         let (right_px, bottom_px) = device(x1, y0);
-        let shadow = SHADOW_OFFSET * ratio;
-        if self.surround == SURROUND {
-            self.rect(
-                [
-                    left_px + shadow,
-                    top_px + shadow,
-                    right_px + shadow,
-                    bottom_px + shadow,
-                ],
-                [SHADOW[0], SHADOW[1], SHADOW[2], 1.0],
+        match self.look {
+            Look::Paper => self.rect(
+                [left_px, top_px, right_px, bottom_px],
+                [1.0, 1.0, 1.0, 1.0],
                 size,
-            );
+            ),
+            Look::Screen => self.backdrop(
+                sheet,
+                (left, top, scale, ratio),
+                [left_px, top_px, right_px, bottom_px],
+                size,
+            ),
         }
-        self.rect(
-            [left_px, top_px, right_px, bottom_px],
-            [1.0, 1.0, 1.0, 1.0],
-            size,
-        );
 
         // The ink, in the display list's order.
         let scale_xy = (pixels as f32, -pixels as f32);
@@ -657,6 +778,80 @@ impl Viewer {
 }
 
 impl Viewer {
+    /// Model space under the drawing: its colour, the grid when it is on,
+    /// and the paper's dashed edge at `paper`, `[left, top, right, bottom]`
+    /// in device pixels; one quad over the canvas.
+    fn backdrop(
+        &self,
+        sheet: &Loaded,
+        (left, top, scale, ratio): (f64, f64, f64, f64),
+        paper: [f64; 4],
+        size: (f32, f32),
+    ) {
+        let gl = &self.gl;
+        let p = &self.backdrop;
+        gl.use_program(Some(&p.program));
+        gl.uniform4f(p.at("u_rect"), 0.0, 0.0, size.0, size.1);
+        gl.uniform2f(p.at("u_size"), size.0, size.1);
+        let [r, g, b] = MODEL_SPACE;
+        gl.uniform3f(p.at("u_background"), r, g, b);
+        // A grid line, and the paper's edge, one CSS pixel wide.
+        gl.uniform1f(p.at("u_line"), ratio.max(1.0) as f32);
+        let pixels = scale * ratio;
+        let lines = |step: f64| -> [f32; 4] {
+            [
+                first_line(left, step, pixels, false) as f32,
+                first_line(top, step, pixels, true) as f32,
+                (step * pixels) as f32,
+                (step * pixels) as f32,
+            ]
+        };
+        let shown = if self.grid {
+            grid(sheet.millimetres_per_unit, scale)
+        } else {
+            None
+        };
+        let none = [0.0f32; 4];
+        let (minor, major) = shown.map_or((none, none), |g| {
+            (
+                if g.minor_shown { lines(g.minor) } else { none },
+                lines(g.major),
+            )
+        });
+        gl.uniform4f(p.at("u_minor"), minor[0], minor[1], minor[2], minor[3]);
+        gl.uniform4f(p.at("u_major"), major[0], major[1], major[2], major[3]);
+        let [r, g, b] = GRID_MINOR;
+        gl.uniform3f(p.at("u_minor_color"), r, g, b);
+        let [r, g, b] = GRID_MAJOR;
+        gl.uniform3f(p.at("u_major_color"), r, g, b);
+        // Rounded to the pixel, so the edge is crisp.
+        let at = |v: f64| v.round() as f32;
+        gl.uniform4f(
+            p.at("u_paper"),
+            at(paper[0]),
+            at(paper[1]),
+            at(paper[2]),
+            at(paper[3]),
+        );
+        let [r, g, b] = PAPER_EDGE;
+        gl.uniform3f(p.at("u_edge_color"), r, g, b);
+        gl.draw_arrays(Gl::TRIANGLE_STRIP, 0, 4);
+    }
+
+    /// Points the vertex arrays at the colours of the look: on paper or on
+    /// screen.
+    fn bind_colors(&self, sheet: &Loaded) {
+        let gl = &self.gl;
+        let which = usize::from(self.look == Look::Screen);
+        gl.bind_vertex_array(Some(&sheet.strokes));
+        gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&sheet.stroke_colors[which]));
+        gl.vertex_attrib_pointer_with_i32(2, 4, Gl::UNSIGNED_BYTE, true, 0, 0);
+        gl.bind_vertex_array(Some(&sheet.fills));
+        gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&sheet.fill_colors[which]));
+        gl.vertex_attrib_pointer_with_i32(1, 4, Gl::UNSIGNED_BYTE, true, 0, 0);
+        gl.bind_vertex_array(None);
+    }
+
     fn rect(&self, rect: [f64; 4], color: [f32; 4], size: (f32, f32)) {
         let gl = &self.gl;
         gl.use_program(Some(&self.rect.program));
@@ -687,14 +882,14 @@ impl Viewer {
     ) -> Result<Loaded, JsError> {
         let gl = &self.gl;
         let mut buffers = Vec::new();
-        let mut buffer = |target: u32, bytes: &[u8]| -> Result<(), JsError> {
+        let mut buffer = |target: u32, bytes: &[u8]| -> Result<WebGlBuffer, JsError> {
             let buffer = gl
                 .create_buffer()
                 .ok_or_else(|| JsError::new("the GPU gave no buffer"))?;
             gl.bind_buffer(target, Some(&buffer));
             gl.buffer_data_with_u8_array(target, bytes, Gl::STATIC_DRAW);
-            buffers.push(buffer);
-            Ok(())
+            buffers.push(buffer.clone());
+            Ok(buffer)
         };
         let vertex_array = || {
             gl.create_vertex_array()
@@ -721,7 +916,12 @@ impl Viewer {
         buffer(Gl::ARRAY_BUFFER, &four(&floats(&mesh.widths), 4))?;
         gl.enable_vertex_attrib_array(1);
         gl.vertex_attrib_pointer_with_i32(1, 1, Gl::FLOAT, false, 0, 0);
-        buffer(
+        // Both looks' colours; `bind_colors` points the array at one.
+        let stroke_screen = buffer(
+            Gl::ARRAY_BUFFER,
+            &four(mesh.segment_screen_colors.as_flattened(), 4),
+        )?;
+        let stroke_paper = buffer(
             Gl::ARRAY_BUFFER,
             &four(mesh.segment_colors.as_flattened(), 4),
         )?;
@@ -747,7 +947,8 @@ impl Viewer {
         buffer(Gl::ARRAY_BUFFER, &floats(mesh.fill_points.as_flattened()))?;
         gl.enable_vertex_attrib_array(0);
         gl.vertex_attrib_pointer_with_i32(0, 2, Gl::FLOAT, false, 0, 0);
-        buffer(Gl::ARRAY_BUFFER, mesh.fill_colors.as_flattened())?;
+        let fill_screen = buffer(Gl::ARRAY_BUFFER, mesh.fill_screen_colors.as_flattened())?;
+        let fill_paper = buffer(Gl::ARRAY_BUFFER, mesh.fill_colors.as_flattened())?;
         gl.enable_vertex_attrib_array(1);
         gl.vertex_attrib_pointer_with_i32(1, 4, Gl::UNSIGNED_BYTE, true, 0, 0);
         buffer(Gl::ARRAY_BUFFER, &places(&mesh.fill_items))?;
@@ -773,6 +974,8 @@ impl Viewer {
             stencils: mesh.stencils.clone(),
             strokes,
             fills,
+            stroke_colors: [stroke_paper, stroke_screen],
+            fill_colors: [fill_paper, fill_screen],
             buffers,
         })
     }

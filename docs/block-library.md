@@ -99,7 +99,7 @@ Zach decided on 2026-11-13 how a constant attribute behaves:
 - Its value is its `default`, the same on every insert, as AutoCAD's ATTDEF relabels its Default box Value for one. No new key holds it.
 - An insert carries no value for it, as an AutoCAD insert carries none. An insert that gives one is an error saying where its value is set, and so is a change set's `set_attribute` on it. This holds through a [nested block](#nested-blocks) too.
 - It draws its value on every insert, unless it is invisible too.
-- `query` and the viewer's inspector list only the attributes an insert carries, as AutoCAD's Properties palette shows them. A query for text finds a constant attribute's value as it finds a block's own text ([query.md](query.md)).
+- `query` and the viewer's quick properties list only the attributes an insert carries, as AutoCAD's Properties palette shows them. A query for text finds a constant attribute's value as it finds a block's own text ([query.md](query.md)).
 - It takes no `verify` or `preset`, which AutoCAD's ATTDEF turns off for a constant attribute, since nobody is asked for its value.
 
 `verify`, `preset` and `lock_position` change only what AutoCAD does when a person inserts the block or edits it: nothing draws differently. Each insert's attribute carries its definition's Invisible, Verify, Preset and Lock position, as AutoCAD 2026 gave an insert of the same block it made itself.

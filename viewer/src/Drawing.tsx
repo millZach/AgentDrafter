@@ -1,11 +1,15 @@
 // The drawing: a canvas the Rust renderer draws on with WebGL2, from the
-// display list the server sent. This component only says where the sheet
-// sits (the view) and when to draw; what is drawn, and how, is the
-// renderer's (crates/agentdrafter-viewer), and so is what a tap picks: the
-// core finds the object drawn nearest the point in the display list, so the
-// page holds no hit-test of its own.
+// display list the server sent, as dark model space with its grid. This
+// component only says where the sheet sits (the view) and when to draw;
+// what is drawn, and how, is the renderer's (crates/agentdrafter-viewer),
+// and so is what a tap picks: the core finds the object drawn nearest the
+// point in the display list, so the page holds no hit-test of its own. It
+// also keeps quick properties beside the picked object as the view moves,
+// and says where the cursor is on the drawing.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
+
+import { placeBeside } from './frame.ts';
 
 import { Viewer } from './wasm/agentdrafter_viewer.js';
 import { attachGestures, Glide, type Surface } from './gestures.ts';
@@ -17,6 +21,7 @@ import {
   PULSE_MS,
   pulseStrength,
   toDrawing,
+  toScreen,
   zoomAt,
   type Area,
   type Limits,
@@ -42,10 +47,18 @@ export interface Focus {
 export interface DrawingProps {
   /** The text of the `display-list` reply to draw; null before one comes. */
   reply: string | null;
-  /** Pixels at the bottom of the drawing the bottom sheet covers. */
+  /** Pixels at the bottom of the drawing the command bar, and a phone's bottom sheet, cover. */
   coveredBelow: number;
   /** Only the fit button, as on a phone, where fingers zoom. */
   compact: boolean;
+  /** Whether the grid is drawn behind the drawing. */
+  grid: boolean;
+  /**
+   * Quick properties, which a laptop shows beside the picked object: placed
+   * at each draw, so they follow it as the view moves. A phone's sit above
+   * the command bar, where its styles put them.
+   */
+  card?: RefObject<HTMLElement | null>;
   /** The objects a change set touched, marked with halos. */
   marks: Mark[];
   /** The object the reviewer picked, marked blue; null for none. */
@@ -61,10 +74,17 @@ export interface DrawingProps {
   onUnavailable(message: string): void;
   /** A tap or a click picked the object at this place, or nothing. */
   onPick(place: number | null): void;
+  /** Where the mouse is on the drawing, in drawing units, or null once it has left. */
+  onCursor?(at: [number, number] | null): void;
+  /** The colour the picked object shows in, `#rrggbb`, as the renderer says; empty for none. */
+  onPickedColor?(color: string): void;
 }
 
 /** How near a tap must come to an object to pick it, in CSS pixels. */
 const PICK_REACH = 16;
+
+/** On a laptop, the room at the right the zoom buttons take, which a fitted sheet stays clear of. */
+const ZOOM_COLUMN = 46;
 
 /** Device pixels to a CSS pixel: the canvas's backing size over its size. */
 const ratioOf = (canvas: HTMLCanvasElement): number =>
@@ -74,6 +94,8 @@ export function Drawing({
   reply,
   coveredBelow,
   compact,
+  grid,
+  card,
   marks,
   picked,
   pulseSince,
@@ -82,6 +104,8 @@ export function Drawing({
   onError,
   onUnavailable,
   onPick,
+  onCursor,
+  onPickedColor,
 }: DrawingProps) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -101,10 +125,49 @@ export function Drawing({
   const shownMarks = useRef({ marks, picked });
   const pendingFocus = useRef<Focus | null>(null);
   const pick = useRef(onPick);
+  const cursor = useRef(onCursor);
+  const colorOf = useRef(onPickedColor);
+  const narrow = useRef(compact);
+  // The picked object's box in drawing units, which quick properties sit beside.
+  const pickedBox = useRef<number[]>([]);
   const [, setReady] = useState(false);
   covered.current = coveredBelow;
   shownMarks.current = { marks, picked };
   pick.current = onPick;
+  cursor.current = onCursor;
+  colorOf.current = onPickedColor;
+  narrow.current = compact;
+
+  // Quick properties beside the picked object, on a laptop.
+  const placeCard = () => {
+    const el = card?.current;
+    const c = canvas.current;
+    if (!el || !c) return;
+    if (narrow.current) {
+      el.style.left = '';
+      el.style.top = '';
+      el.style.visibility = '';
+      return;
+    }
+    const b = pickedBox.current;
+    if (b.length !== 4) {
+      el.style.visibility = 'hidden';
+      return;
+    }
+    const v = view.current;
+    const [l, t] = toScreen(v, b[0] as number, b[3] as number);
+    const [r, bottom] = toScreen(v, b[2] as number, b[1] as number);
+    const a = area();
+    const [x, y] = placeBeside([l, t, r, bottom], { width: el.offsetWidth, height: el.offsetHeight }, [
+      a.x,
+      a.y,
+      a.x + a.width,
+      a.y + a.height,
+    ]);
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+    el.style.visibility = 'visible';
+  };
 
   const draw = () => {
     frame.current = 0;
@@ -116,6 +179,7 @@ export function Drawing({
     const kept = draws.current;
     kept.push({ at: began, ms: performance.now() - began });
     if (kept.length > 2000) kept.splice(0, kept.length - 2000);
+    placeCard();
   };
   const redraw = () => {
     if (!frame.current) frame.current = requestAnimationFrame(draw);
@@ -124,7 +188,12 @@ export function Drawing({
     const c = canvas.current;
     const width = c?.clientWidth ?? 0;
     const height = c?.clientHeight ?? 0;
-    return { x: 0, y: 0, width, height: Math.max(120, height - covered.current) };
+    return {
+      x: 0,
+      y: 0,
+      width: narrow.current ? width : Math.max(120, width - ZOOM_COLUMN),
+      height: Math.max(120, height - covered.current),
+    };
   };
   const fitted = (): View | null => {
     const a = area();
@@ -183,6 +252,8 @@ export function Drawing({
     const places = m.map((mark) => mark.place);
     const added = m.map((mark) => mark.added);
     v.set_marks(Uint32Array.from(places), Uint8Array.from(added.map((a) => (a ? 1 : 0))), p ?? -1);
+    pickedBox.current = p === null ? [] : [...v.bounds_of(Uint32Array.from([p]))];
+    colorOf.current?.(p === null ? '' : v.object_color(p));
     const probe = window.agentdrafterViewer;
     if (probe) probe.marked = { places, added, picked: p };
     redraw();
@@ -290,6 +361,15 @@ export function Drawing({
     size();
     glide.current = new Glide(surface);
     const detach = attachGestures(b, surface, glide.current);
+    // The cursor's place on the drawing, for the status bar.
+    const hover = (e: PointerEvent) => {
+      if (e.pointerType !== 'mouse') return;
+      const r = c.getBoundingClientRect();
+      cursor.current?.(toDrawing(view.current, e.clientX - r.left, e.clientY - r.top));
+    };
+    const away = () => cursor.current?.(null);
+    b.addEventListener('pointermove', hover);
+    b.addEventListener('pointerleave', away);
     const lost = (e: Event) => e.preventDefault();
     const restored = () => {
       if (start() && loadedReply.current) load(loadedReply.current);
@@ -308,6 +388,8 @@ export function Drawing({
     return () => {
       probe();
       detach();
+      b.removeEventListener('pointermove', hover);
+      b.removeEventListener('pointerleave', away);
       resized.disconnect();
       resolution?.removeEventListener('change', onResolution);
       c.removeEventListener('webglcontextlost', lost);
@@ -332,6 +414,40 @@ export function Drawing({
     applyMarks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marks, picked]);
+
+  // On a phone, an object picked low on the screen is brought up, above
+  // the quick properties that open over the bottom of the drawing.
+  useEffect(() => {
+    const c = canvas.current;
+    const b = pickedBox.current;
+    if (!compact || picked === null || !c || b.length !== 4) return;
+    const v = view.current;
+    const [cx, cy] = toScreen(v, ((b[0] as number) + (b[2] as number)) / 2, ((b[1] as number) + (b[3] as number)) / 2);
+    const above = c.clientHeight * 0.36;
+    if (cy >= 12 && cy <= above && cx >= 0 && cx <= c.clientWidth) return;
+    followFit.current = false;
+    const target = { ...v, left: v.left + (cx - c.clientWidth / 2) / v.scale, top: v.top - (cy - above / 2 - 12) / v.scale };
+    glide.current?.to(target, 300, [c.clientWidth / 2, above / 2]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [picked, compact]);
+
+  // The grid on or off.
+  useEffect(() => {
+    viewer.current?.set_grid(grid);
+    redraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grid]);
+
+  // A card that changes size, or a laptop that becomes a phone, places it again.
+  useEffect(() => {
+    const el = card?.current;
+    if (!el) return;
+    placeCard();
+    const resized = new ResizeObserver(() => placeCard());
+    resized.observe(el);
+    return () => resized.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [card, compact, picked]);
 
   // A change set that just landed pulses its halos, then holds them.
   useEffect(() => {
@@ -374,7 +490,7 @@ export function Drawing({
 
   return (
     <div className="viewport" ref={box}>
-      <canvas className="stage" ref={canvas} aria-label="The sheet" />
+      <canvas className="stage" ref={canvas} aria-label="The drawing" />
       <div className="zoombtns">
         {!compact && (
           <>
@@ -386,8 +502,8 @@ export function Drawing({
             </button>
           </>
         )}
-        <button type="button" aria-label="Fit the sheet" onClick={() => fitSheet(450)}>
-          &#x2922;
+        <button type="button" className="fit" aria-label="Fit the sheet" title="Show the whole sheet" onClick={() => fitSheet(450)}>
+          Fit
         </button>
       </div>
     </div>

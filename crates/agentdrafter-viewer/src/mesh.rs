@@ -5,10 +5,13 @@
 //! clipped viewport is cut into a fan of triangles too, which the GPU marks
 //! the stencil with, so that the viewport's items draw only inside it.
 //!
-//! This is plain computation, tested natively. The colours are the core's
-//! own, [`Color::on_paper`], so the screen draws each colour index as the
-//! PNG does; the widths stay in millimetres of paper, so the GPU draws them
-//! at any zoom as the PNG draws them at its dots per inch.
+//! This is plain computation, tested natively. Each segment and corner has
+//! two colours: the one it plots in on paper, the core's own
+//! [`Color::on_paper`], so a capture draws each colour index as the PNG
+//! does; and the one it shows in on the dark model space, index 7 white,
+//! which the page draws with ([`screen_rgba`]). The widths stay
+//! in millimetres of paper, so the GPU draws them at any zoom as the PNG
+//! draws them at its dots per inch.
 
 use agentdrafter_core::{Bounds, Color, DisplayList, FillRule, Paper, Shape};
 use lyon_tessellation::geom::point;
@@ -115,6 +118,8 @@ pub struct Mesh {
     pub widths: Vec<f32>,
     /// Each segment's colour on paper, opaque RGBA.
     pub segment_colors: Vec<[u8; 4]>,
+    /// Each segment's colour on a dark screen, opaque RGBA.
+    pub segment_screen_colors: Vec<[u8; 4]>,
     /// Each segment's item: its place in the display list, counted from 0.
     pub segment_items: Vec<u32>,
     /// The box each segment's ink is cut at, `[left, bottom, right, top]`
@@ -125,6 +130,8 @@ pub struct Mesh {
     pub fill_points: Vec<[f32; 2]>,
     /// Each corner's colour on paper, opaque RGBA.
     pub fill_colors: Vec<[u8; 4]>,
+    /// Each corner's colour on a dark screen, opaque RGBA.
+    pub fill_screen_colors: Vec<[u8; 4]>,
     /// Each corner's item: its place in the display list, counted from 0.
     pub fill_items: Vec<u32>,
     /// Three corners to each triangle.
@@ -163,6 +170,9 @@ pub struct Summary {
     pub millimetres_per_unit: f64,
     /// `[left, bottom, right, top]` in drawing units.
     pub paper: [f64; 4],
+    /// The paper's name, when the sheet declares it by name, such as
+    /// `ANSI B landscape`; none for a sheet drawn on its extents.
+    pub paper_name: Option<String>,
     pub segments: usize,
     pub triangles: usize,
     pub fills_not_drawn: usize,
@@ -201,10 +211,12 @@ impl Mesh {
             segments: Vec::new(),
             widths: Vec::new(),
             segment_colors: Vec::new(),
+            segment_screen_colors: Vec::new(),
             segment_items: Vec::new(),
             segment_clips: Vec::new(),
             fill_points: Vec::new(),
             fill_colors: Vec::new(),
+            fill_screen_colors: Vec::new(),
             fill_items: Vec::new(),
             triangles: Vec::new(),
             fills_not_drawn: 0,
@@ -218,6 +230,7 @@ impl Mesh {
         for (place, item) in sheet.display_list.items.iter().enumerate() {
             let place = place as u32;
             let color = rgba(item.color);
+            let screen = screen_rgba(item.color);
             // Cut at a clipped viewport's boundary, by the stencil.
             let cut = item
                 .clip_boundary
@@ -236,6 +249,7 @@ impl Mesh {
                             mesh.segments.push([a[0], a[1], b[0], b[1]]);
                             mesh.widths.push(*lineweight as f32);
                             mesh.segment_colors.push(color);
+                            mesh.segment_screen_colors.push(screen);
                             mesh.segment_items.push(place);
                             mesh.segment_clips.push(clip);
                         };
@@ -285,6 +299,8 @@ impl Mesh {
                     let base = mesh.fill_points.len() as u32;
                     mesh.fill_colors
                         .extend(std::iter::repeat_n(color, buffers.vertices.len()));
+                    mesh.fill_screen_colors
+                        .extend(std::iter::repeat_n(screen, buffers.vertices.len()));
                     mesh.fill_items
                         .extend(std::iter::repeat_n(place, buffers.vertices.len()));
                     mesh.fill_points.extend(buffers.vertices);
@@ -328,6 +344,8 @@ impl Mesh {
             mesh.fill_points.extend(outline.iter().map(|&p| at(p)));
             mesh.fill_colors
                 .extend(std::iter::repeat_n([0, 0, 0, 0], outline.len()));
+            mesh.fill_screen_colors
+                .extend(std::iter::repeat_n([0, 0, 0, 0], outline.len()));
             mesh.fill_items
                 .extend(std::iter::repeat_n(0, outline.len()));
             let corners = outline.len() as u32;
@@ -367,6 +385,11 @@ impl Mesh {
             layouts: sheet.layouts.clone(),
             millimetres_per_unit: sheet.millimetres_per_unit,
             paper: self.paper,
+            paper_name: sheet
+                .paper
+                .as_ref()
+                .filter(|p| p.width > 0.0 && p.height > 0.0)
+                .and_then(|p| p.name.clone()),
             segments: self.segments.len(),
             triangles: self.triangles.len(),
             fills_not_drawn: self.fills_not_drawn,
@@ -379,6 +402,27 @@ impl Mesh {
 /// A colour index as it draws on paper, opaque.
 fn rgba(color: Color) -> [u8; 4] {
     let [r, g, b] = color.on_paper();
+    [r, g, b, 255]
+}
+
+/// A colour index as the dark model space shows it, opaque: index 7 white,
+/// and the other standard colours, 1 to 9, as the picked look of the frame
+/// (#150) shows them, lifted where AutoCAD's own would be hard to read on
+/// the dark ground, its pure blue above all; every other index in its own
+/// colour.
+pub fn screen_rgba(color: Color) -> [u8; 4] {
+    let [r, g, b] = match color.0 {
+        1 => [0xff, 0x4a, 0x4a],
+        2 => [0xff, 0xff, 0x3a],
+        3 => [0x3a, 0xff, 0x3a],
+        4 => [0x3a, 0xff, 0xff],
+        5 => [0x4f, 0x7c, 0xff],
+        6 => [0xff, 0x4a, 0xff],
+        7 => [0xff, 0xff, 0xff],
+        8 => [0x8a, 0x8f, 0x96],
+        9 => [0xc0, 0xc0, 0xc0],
+        _ => color.rgb(),
+    };
     [r, g, b, 255]
 }
 
@@ -577,6 +621,17 @@ mod tests {
             ]
         );
         assert_eq!(mesh.widths, vec![0.5, 0.5, 0.5, 0.0]);
+        // On paper index 7 plots black; on the dark screen it shows white.
+        assert_eq!(mesh.segment_colors[0], [0, 0, 0, 255]);
+        assert_eq!(mesh.segment_screen_colors[0], [255, 255, 255, 255]);
+        assert_eq!(mesh.segment_colors[3], [255, 0, 0, 255]);
+        assert_eq!(mesh.segment_screen_colors[3], [0xff, 0x4a, 0x4a, 255]);
+        // The pure blue the PNG plots is lifted on the dark screen, and an
+        // index past the standard nine shows in its own colour.
+        assert_eq!(screen_rgba(Color(5)), [0x4f, 0x7c, 0xff, 255]);
+        assert_eq!(rgba(Color(5)), [0, 0, 255, 255]);
+        assert_eq!(screen_rgba(Color(30)), [255, 127, 0, 255]);
+        assert_eq!(mesh.segment_screen_colors.len(), mesh.segments.len());
         // Each segment knows its item's place, so the later item draws over
         // the earlier.
         assert_eq!(mesh.segment_items, vec![0, 0, 0, 1]);
@@ -713,5 +768,6 @@ mod tests {
         let summary = mesh.summary(&sheet);
         assert_eq!(summary.segments, expected);
         assert_eq!(summary.millimetres_per_unit, 25.4);
+        assert_eq!(summary.paper_name.as_deref(), Some("ANSI B landscape"));
     }
 }

@@ -1,8 +1,9 @@
-// The bottom sheet of the picked look (variant A): on a phone it peeks up
-// from the bottom with Undo last and Accept always in reach, and drags up
-// to half or nearly all of the screen for the journal or the inspector; on
-// a laptop it is a panel on the right. What it holds is the page's: the
-// peek and the body come in as they are.
+// The side panel of the frame: on a phone a sheet that peeks up from the
+// bottom with Undo last and Accept always in reach, and drags up to half or
+// nearly all of the screen for the journal or the assistant's place; on a
+// laptop a panel on the right, with no peek, since the title bar holds Undo
+// last and Accept. What it holds is the page's: the peek and the body come
+// in as they are.
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
@@ -13,9 +14,9 @@ export interface BottomSheetProps {
   wide: boolean;
   /** Says how many pixels at the bottom of the drawing the peek covers. */
   onCovers(pixels: number): void;
-  /** What is always in reach: the status, the newest entry, Undo last and Accept. */
+  /** What a phone always has in reach: the connection, the newest entry, Undo last and Accept; none on a laptop. */
   peek: ReactNode;
-  /** The journal, or the inspector. */
+  /** The side panel's tabs, and the journal or the assistant's place. */
   body: ReactNode;
   /** A new value raises a peeking sheet to half the screen, to show what the body now holds. */
   raise: number;

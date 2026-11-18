@@ -1,16 +1,20 @@
-// The viewer, in the look the reviewer picked (variant A): the drawing
-// fills the screen and follows the working revision live, the drawing
-// set's sheets are tabs across the top, and the journal's sheet peeks up
-// from the bottom, a panel on the right on a laptop. A toast names each
-// change set as it lands and its objects are marked; the journal steps back
-// through the set as it was; a tap picks an object for the inspector; and
-// Undo last and Accept are always in reach.
+// The viewer, in the drafting app's frame (#150, the look Zach picked): a
+// title bar with Undo last and Accept, a ribbon whose drawing tools are
+// shown before they work, a tab for each of the drawing set's sheets, the
+// drawing as dark model space following the working revision live, the
+// command bar under it, a status bar, and the journal in a panel on the
+// right beside the assistant's place. On a phone the ribbon folds behind
+// Tools, the status bar goes, and the journal is a sheet that peeks up from
+// the bottom with Undo last and Accept. A toast names each change set as it
+// lands and its objects are marked; the journal steps back through the set
+// as it was; a tap selects an object, whose quick properties open beside
+// it. Nothing edits yet.
 //
 // The page learns of every change from the server's event stream, which
 // sends the journal each time it changes on disk, whichever process or
 // interface changed it, and draws again the sheets the new entries touched.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { call, CommandError, run, watch, type StreamState } from './api.ts';
 import { BottomSheet } from './BottomSheet.tsx';
@@ -31,7 +35,21 @@ import {
   type Entry,
   type JournalReport,
 } from './journal.ts';
-import { Inspector, JournalList, Peek } from './Panels.tsx';
+import {
+  coordinates,
+  liveLine,
+  paperWords,
+  promptFor,
+  toggleFor,
+  toggledWords,
+  typeWords,
+  nameOf,
+  type Act,
+  type Tool,
+  type Toggle,
+} from './frame.ts';
+import { CommandBar, Ribbon, StatusBar } from './Frame.tsx';
+import { Assistant, JournalList, Peek, QuickProperties } from './Panels.tsx';
 import type { Summary } from './probe.ts';
 
 export interface AppProps {
@@ -100,6 +118,12 @@ interface Asking {
 }
 
 const WIDE = '(min-width: 900px)';
+
+/** The command bar's height with a prompt of one line, in CSS pixels, which the fitted sheet stays above. */
+const BAR_LINE = 32;
+
+/** How many lines of what happened the command bar keeps; a laptop shows the last two over the drawing. */
+const HISTORY = 40;
 const upper = (s: string) => s.toUpperCase();
 
 /** The version that counts every change that touched a sheet, for a sheet not yet named. */
@@ -150,8 +174,20 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const [focus, setFocus] = useState<Focus | null>(null);
   const [focusWanted, setFocusWanted] = useState<{ key: number; sheet: string; ids: string[] } | null>(null);
   const [picked, setPicked] = useState<Picked | null>(null);
-  const [inspecting, setInspecting] = useState(false);
+  const [pickedColor, setPickedColor] = useState('');
   const [raise, setRaise] = useState(0);
+  // The frame's own: the status bar's toggles, a phone's folded ribbon, a
+  // tool still to come just tapped, the side panel's tab, and what happened.
+  const [toggles, setToggles] = useState<Record<Toggle, boolean>>({ grid: true, osnap: true, ortho: false });
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [soon, setSoon] = useState<Tool | null>(null);
+  const [side, setSide] = useState<'journal' | 'assistant'>('journal');
+  const [history, setHistory] = useState<string[]>([]);
+  const [peekHeight, setPeekHeight] = useState(0);
+  const viewport = useRef<HTMLDivElement>(null);
+  const bar = useRef<HTMLDivElement>(null);
+  const card = useRef<HTMLElement>(null);
+  const coords = useRef<HTMLSpanElement>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   const [asking, setAsking] = useState<Asking | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -174,10 +210,18 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const tabs = useRef<HTMLElement>(null);
   atNow.current = at;
 
-  const say = useCallback((tone: Tone, title: string, detail: string, entry?: number) => {
-    keys.current += 1;
-    setToast({ key: keys.current, tone, title, detail, entry });
+  // A line of what happened, for the command bar's history.
+  const log = useCallback((line: string) => {
+    setHistory((h) => [...h.slice(-(HISTORY - 1)), line]);
   }, []);
+  const say = useCallback(
+    (tone: Tone, title: string, detail: string, entry?: number) => {
+      keys.current += 1;
+      setToast({ key: keys.current, tone, title, detail, entry });
+      log(title);
+    },
+    [log],
+  );
   // A toast goes after a while.
   useEffect(() => {
     if (!toast) return;
@@ -368,6 +412,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
         const replaced = before !== null && journalReplaced(seenEntries.current, report);
         seen.current = newest(report);
         seenEntries.current = recordedEntries(report);
+        if (before === null) {
+          const n = report.entries.length;
+          log(`Journal read: ${n} entr${n === 1 ? 'y' : 'ies'}.`);
+        }
         if (before === null || replaced) {
           if (replaced) {
             replies.current.clear();
@@ -409,7 +457,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       stop();
       seen.current = null;
     };
-  }, [source, token, check, toastFor]);
+  }, [source, token, check, toastFor, log]);
 
   // The objects the focused entry changed on the sheet shown, marked.
   const focusedEntry = journal?.entries.find((e) => e.entry === focused);
@@ -439,7 +487,6 @@ export function App({ token, source, sheet, layout }: AppProps) {
   useEffect(() => {
     if (picked !== null && summary && pickedPlace === null) {
       setPicked(null);
-      setInspecting(false);
     }
   }, [picked, summary, pickedPlace]);
 
@@ -472,8 +519,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setFocused(number);
     setPulseSince(null);
     setPicked(null);
-    setInspecting(false);
+    setSoon(null);
+    setSide('journal');
     setWanted(target);
+    if (asItWas) log(`Showing entry ${number} as it was: read-only`);
     keys.current += 1;
     setFocusWanted({ key: keys.current, sheet: target, ids: changedOn(entry, target).map((o) => o.id) });
     setRaise((r) => r + 1);
@@ -491,6 +540,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setAt(null);
     setPulseSince(null);
     setPicked(null);
+    log('Back to live');
   };
 
   const undo = async (changeSet: number | null) => {
@@ -546,11 +596,88 @@ export function App({ token, source, sheet, layout }: AppProps) {
     }
   };
 
+  // A tap selects the object the renderer picked, or nothing; its quick
+  // properties open beside it.
   const pick = (place: number | null) => {
-    setPicked(place === null || !summary ? null : { id: summary.objects[place]?.id ?? null, place, summary });
-    setInspecting(place !== null);
-    if (place !== null) setRaise((r) => r + 1);
+    const o = place === null || !summary ? undefined : summary.objects[place];
+    setPicked(place === null || !summary ? null : { id: o?.id ?? null, place, summary });
+    if (o) {
+      setSoon(null);
+      log(`Selected: ${typeWords(o)}${o.name ? ` ${o.name}` : ''}${o.id ? ` (${o.id})` : ''}`);
+    }
   };
+
+  const toggle = useCallback(
+    (which: Toggle) => {
+      setToggles((t) => {
+        const next = { ...t, [which]: !t[which] };
+        log(toggledWords(which, next[which]));
+        return next;
+      });
+    },
+    [log],
+  );
+
+  // A tool still to come, tapped: it says so in the command bar, for a while.
+  const soonTool = (tool: Tool) => {
+    setToolsOpen(false);
+    setSoon(tool);
+  };
+  useEffect(() => {
+    if (!soon) return;
+    const gone = setTimeout(() => setSoon(null), 6000);
+    return () => clearTimeout(gone);
+  }, [soon]);
+
+  // AutoCAD's keys: F3 Object snap, F7 Grid, F8 Ortho; Escape steps back
+  // out of whatever is open, one thing at a time.
+  const escape = useRef<() => void>(() => {});
+  escape.current = () => {
+    if (asking) setAsking(null);
+    else if (toolsOpen) setToolsOpen(false);
+    else if (soon) setSoon(null);
+    else if (picked) pick(null);
+    else if (at !== null) backToLive();
+  };
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      const which = toggleFor(e.key);
+      if (which) {
+        e.preventDefault();
+        toggle(which);
+      } else if (e.key === 'Escape') {
+        escape.current();
+      }
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [toggle]);
+
+  // The cursor's place, written straight into the status bar, so a moving
+  // mouse redraws nothing else.
+  const unitsNow = useRef(25.4);
+  unitsNow.current = summary?.millimetres_per_unit ?? 25.4;
+  const cursorAt = useCallback((p: [number, number] | null) => {
+    if (coords.current) coords.current.textContent = p ? coordinates(p[0], p[1], unitsNow.current) : '\u00a0';
+  }, []);
+
+  // What the command bar and a phone's peek cover of the drawing: from the
+  // command bar's top down, the bar taken as one line tall, so a prompt
+  // that wraps grows over the drawing without moving the fitted sheet.
+  useLayoutEffect(() => {
+    const vp = viewport.current;
+    const b = bar.current;
+    if (!vp || !b) return;
+    const measure = () => {
+      const covered = vp.getBoundingClientRect().bottom - b.getBoundingClientRect().bottom + BAR_LINE;
+      setCovered(Math.max(0, Math.round(covered)));
+    };
+    measure();
+    const resized = new ResizeObserver(measure);
+    resized.observe(vp);
+    resized.observe(b);
+    return () => resized.disconnect();
+  }, [peekHeight, wide]);
 
   // What the header and the tabs say.
   const pending = journal ? notIssued(journal) : [];
@@ -565,21 +692,28 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const sheets = summary?.sheets ?? [];
   const name = summary?.name ?? '';
   const object = pickedPlace !== null ? summary?.objects[pickedPlace] : undefined;
-  const line =
-    at !== null
-      ? `Showing entry ${at} as it was: read-only`
-      : noJournal
-        ? 'Not a drawing set: there is no journal to watch'
-        : stream === 'open'
-          ? 'Live: changes show as they land'
-          : stream === 'refused'
-            ? 'The server refused the live stream: open the viewer from the address serve printed'
-            : 'Reaching the server…';
+  const { state: liveState, line } = liveLine(at, !!noJournal, stream);
+  const prompt = promptFor({
+    soon,
+    at,
+    cannot: status.kind === 'cannot',
+    reaching: !noJournal && stream !== 'open',
+    selected: object ?? null,
+  });
+  const act = (a: Act) => {
+    if (a === 'clear') pick(null);
+    else if (a === 'older') step(-1);
+    else if (a === 'newer') step(1);
+    else if (a === 'live') backToLive();
+    else if (a === 'ok') setSoon(null);
+  };
 
-  const peek = (
+  const undoLabel = `Undo last${undoable ? ` (#${undoable})` : ''}`;
+  const acceptLabel = busy === 'accept' ? 'Checking…' : 'Accept…';
+  const peek = wide ? null : (
     <Peek
       line={line}
-      live={stream === 'open' && at === null && !noJournal}
+      live={liveState}
       journal={journal}
       failing={failing}
       undoable={undoable}
@@ -591,132 +725,218 @@ export function App({ token, source, sheet, layout }: AppProps) {
       onAccept={() => void askAccept()}
     />
   );
-  const body =
-    inspecting && object && summary ? (
-      <Inspector
-        object={object}
-        sheet={summary.sheet}
-        journal={journal}
-        fails={(findings.get(upper(summary.sheet)) ?? [])
-          .filter((f) => object.id && f.object?.id && upper(f.object.id) === upper(object.id))
-          .map((f) => f.message)}
-        onBack={() => pick(null)}
-        onShow={(n) => showEntry(n)}
-      />
-    ) : journal ? (
-      <JournalList
-        journal={journal}
-        failing={failing}
-        at={at}
-        focused={focused}
-        busy={busy}
-        onStep={step}
-        onShow={(n) => showEntry(n)}
-        onUndo={(n) => void undo(n)}
-      />
+  const journalBody = journal ? (
+    <JournalList
+      journal={journal}
+      failing={failing}
+      at={at}
+      focused={focused}
+      busy={busy}
+      onStep={step}
+      onShow={(n) => showEntry(n)}
+      onUndo={(n) => void undo(n)}
+    />
+  ) : (
+    <>
+      <div className="va-jhead">
+        <b>Journal</b>
+      </div>
+      <p className="muted">{noJournal ? `There is no journal here: ${noJournal}.` : 'Reading the journal…'}</p>
+    </>
+  );
+  // The journal now, and beside it the assistant's place, which build 8 fills.
+  const body = (
+    <>
+      <div className="sidetabs" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          className={`stab${side === 'journal' ? ' on' : ''}`}
+          aria-selected={side === 'journal'}
+          onClick={() => setSide('journal')}
+        >
+          Journal
+        </button>
+        <button
+          type="button"
+          role="tab"
+          className={`stab${side === 'assistant' ? ' on' : ''}`}
+          aria-selected={side === 'assistant'}
+          onClick={() => {
+            setSide('assistant');
+            setRaise((r) => r + 1);
+          }}
+        >
+          Assistant <span className="soon">Soon</span>
+        </button>
+      </div>
+      <div className="sidebody">{side === 'journal' ? journalBody : <Assistant />}</div>
+    </>
+  );
+
+  const layoutTabs =
+    (summary?.layouts.length ?? 0) > 1 ? (
+      // A sheet drawn in several layouts shows each as a tab of its own, as
+      // AutoCAD's layout tabs are: at the left of the status bar on a
+      // laptop, under the sheets' tabs on a phone, which has no status bar.
+      <nav className="va-tabs va-layouts" aria-label="Layouts">
+        {summary?.layouts.map((l) => (
+          <button
+            key={l}
+            type="button"
+            className={`tab${l === summary?.layout ? ' on' : ''}`}
+            aria-current={l === summary?.layout ? 'page' : undefined}
+            onClick={() => {
+              setPicked(null);
+              setWantedLayout(l);
+            }}
+          >
+            <b>{l}</b>
+          </button>
+        ))}
+      </nav>
+    ) : null;
+
+  const pills =
+    journal && at !== null ? (
+      // Stepping back: the chip says which entry is shown, and goes back to live.
+      <button type="button" className="pill past" data-act="live" onClick={backToLive}>
+        Entry {at} of {newest(journal)} &middot; Live &rsaquo;
+      </button>
     ) : (
-      <>
-        <div className="va-jhead">
-          <b>Journal</b>
-        </div>
-        <p className="muted">{noJournal ? `There is no journal here: ${noJournal}.` : 'Reading the journal…'}</p>
-      </>
+      journal && (
+        <>
+          <span className="pill">
+            {pending.length ? (
+              <>
+                <span className="long">{'Working revision · '}</span>
+                {pending.length} not issued
+              </>
+            ) : lastAccept ? (
+              `Issued (entry ${lastAccept.entry})`
+            ) : (
+              'Working revision, not issued'
+            )}
+          </span>
+          {journal.inconsistent && (
+            <span className="pill warn">
+              Inconsistent<span className="long"> set</span>
+            </span>
+          )}
+          {failCount > 0 && <span className="pill bad">{plural(failCount, 'failed check')}</span>}
+        </>
+      )
     );
 
   const issuedSheets = asking?.report.sheets ?? [];
   const askedFindings = asking?.report.checks.findings ?? [];
   return (
-    <div className="va">
-      <header className="va-top">
-        <div className="va-row">
-          <div className="va-set">
-            <b>{name}</b>
-            {summary && <span>{plural(sheets.length, 'sheet')}</span>}
-          </div>
-          {journal && at !== null ? (
-            <div className="va-status">
-              {/* Stepping back: the chip says which entry is shown, and goes back to live. */}
-              <button type="button" className="pill past" data-act="live" onClick={backToLive}>
-                Entry {at} of {newest(journal)} &middot; Live &rsaquo;
-              </button>
-            </div>
-          ) : (
-            journal && (
-            <div className="va-status">
-              <span className="pill">
-                {pending.length ? (
-                  <>
-                    <span className="long">{'Working revision \u00b7 '}</span>
-                    {pending.length} not issued
-                  </>
-                ) : lastAccept ? (
-                  `Issued (entry ${lastAccept.entry})`
-                ) : (
-                  'Working revision, not issued'
-                )}
-              </span>
-              {journal.inconsistent && <span className="pill warn">Inconsistent set</span>}
-              {failCount > 0 && <span className="pill bad">{plural(failCount, 'failed check')}</span>}
-            </div>
-            )
-          )}
-        </div>
-        <nav className="va-tabs" ref={tabs} aria-label="Sheets">
-          {sheets.map((s) => {
-            const dot = marked.has(upper(s)) ? (
-              <i className="dot warn">!</i>
-            ) : failing.has(upper(s)) ? (
-              <i className="dot bad" />
-            ) : changedSheets.has(upper(s)) ? (
-              <i className="dot info" />
-            ) : null;
-            return (
-              <button
-                key={s}
-                type="button"
-                className={`tab${s === summary?.sheet ? ' on' : ''}`}
-                aria-current={s === summary?.sheet ? 'page' : undefined}
-                onClick={() => {
-                  setPicked(null);
-                  setInspecting(false);
-                  setWanted(s);
-                  setWantedLayout(null);
-                }}
-              >
-                <b>{s}</b>
-                {dot}
-              </button>
-            );
-          })}
-        </nav>
-        {(summary?.layouts.length ?? 0) > 1 && (
-          // A sheet drawn in several layouts shows each as a tab of its own,
-          // under the sheets', as AutoCAD's layout tabs are.
-          <nav className="va-tabs va-layouts" aria-label="Layouts">
-            {summary?.layouts.map((l) => (
-              <button
-                key={l}
-                type="button"
-                className={`tab${l === summary?.layout ? ' on' : ''}`}
-                aria-current={l === summary?.layout ? 'page' : undefined}
-                onClick={() => {
-                  setPicked(null);
-                  setInspecting(false);
-                  setWantedLayout(l);
-                }}
-              >
-                <b>{l}</b>
-              </button>
-            ))}
-          </nav>
+    <div
+      className={`va${toolsOpen ? ' tools-open' : ''}`}
+      style={{ ['--peek' as string]: `${peekHeight}px` }}
+    >
+      <header className="titlebar">
+        <svg className="mark" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M3 17V4l13 13z" fill="none" stroke="#4aa3ff" strokeWidth="2" strokeLinejoin="round" />
+          <path d="M7 14v-3l3 3z" fill="#4aa3ff" />
+        </svg>
+        {wide ? (
+          <>
+            <span className="appname">AgentDrafter</span>
+            <button
+              type="button"
+              className="qa"
+              data-act="undo"
+              disabled={!undoable || busy !== null || at !== null}
+              title={at !== null ? 'Off while you look back at an entry' : undoable ? `Undo change set ${undoable}` : 'Nothing an undo can take'}
+              onClick={() => void undo(undoable)}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 6h6.5a3.5 3.5 0 010 7H6M3 6l3-3M3 6l3 3" />
+              </svg>
+              {undoLabel}
+            </button>
+            <span className="file">
+              {name}
+              {summary ? ` / ${summary.sheet}` : ''}
+            </span>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="qa toolsbtn"
+            aria-expanded={toolsOpen}
+            aria-controls="ribbon"
+            onClick={() => setToolsOpen((o) => !o)}
+          >
+            Tools &#9662;
+          </button>
+        )}
+        <div className="va-status">{pills}</div>
+        {wide && (
+          <button
+            type="button"
+            className={`btn primary${blocked ? ' blocked' : ''}`}
+            data-act="accept"
+            disabled={!journal || busy !== null || at !== null}
+            onClick={() => void askAccept()}
+          >
+            {acceptLabel}
+          </button>
         )}
       </header>
+      <div id="ribbon" className={`ribbonwrap${wide || toolsOpen ? ' open' : ''}`}>
+        <Ribbon
+          folded={!wide}
+          toggles={toggles}
+          onToggle={toggle}
+          onSoon={soonTool}
+          layer={object ? { name: object.layer, color: pickedColor } : null}
+          flashing={soon?.key ?? null}
+        />
+      </div>
+      <nav className="va-tabs sheettabs" ref={tabs} aria-label="Sheets">
+        {sheets.map((s) => {
+          const dot = marked.has(upper(s)) ? (
+            <i className="dot warn" title="Inconsistent: a change set failed here">
+              !
+            </i>
+          ) : failing.has(upper(s)) ? (
+            <i className="dot bad" title="Fails a check" />
+          ) : changedSheets.has(upper(s)) ? (
+            <i className="dot info" title="Has change sets not issued" />
+          ) : null;
+          return (
+            <button
+              key={s}
+              type="button"
+              className={`tab${s === summary?.sheet ? ' on' : ''}`}
+              aria-current={s === summary?.sheet ? 'page' : undefined}
+              onClick={() => {
+                setPicked(null);
+                setWanted(s);
+                setWantedLayout(null);
+              }}
+            >
+              <b>{s}</b>
+              {dot}
+            </button>
+          );
+        })}
+      </nav>
+      {!wide && layoutTabs}
       <div className="va-main">
-        <div className={`va-vp${at !== null ? ' past' : ''}`}>
+        <div
+          className={`va-vp${at !== null ? ' past' : ''}`}
+          ref={viewport}
+          onPointerDownCapture={() => toolsOpen && setToolsOpen(false)}
+        >
           <Drawing
             reply={reply?.text ?? null}
             coveredBelow={covered}
             compact={!wide}
+            grid={toggles.grid}
+            card={card}
             marks={marks}
             picked={pickedPlace}
             pulseSince={pulseSince}
@@ -725,6 +945,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
             onError={failed}
             onUnavailable={setUnavailable}
             onPick={pick}
+            onCursor={cursorAt}
+            onPickedColor={setPickedColor}
           />
           <div className="va-overlays">
             {toast && (
@@ -751,6 +973,21 @@ export function App({ token, source, sheet, layout }: AppProps) {
               </div>
             )}
           </div>
+          {object && summary && (
+            <section className="qp" ref={card} data-ui aria-label={`Quick properties of ${nameOf(object)}`}>
+              <QuickProperties
+                object={object}
+                color={pickedColor}
+                journal={journal}
+                fails={(findings.get(upper(summary.sheet)) ?? [])
+                  .filter((f) => object.id && f.object?.id && upper(f.object.id) === upper(object.id))
+                  .map((f) => f.message)}
+                onClose={() => pick(null)}
+                onShow={(n) => showEntry(n)}
+              />
+            </section>
+          )}
+          <CommandBar prompt={prompt} history={wide ? history.slice(-2) : []} onAct={act} bar={bar} />
           {unavailable ? (
             <div className="va-note failed" role="alert">
               The viewer cannot draw here: {unavailable}.
@@ -769,8 +1006,19 @@ export function App({ token, source, sheet, layout }: AppProps) {
             )
           )}
         </div>
-        <BottomSheet wide={wide} onCovers={setCovered} peek={peek} body={body} raise={raise} />
+        <BottomSheet wide={wide} onCovers={setPeekHeight} peek={peek} body={body} raise={raise} />
       </div>
+      {wide && (
+        <StatusBar
+          layouts={layoutTabs}
+          coords={coords}
+          paper={summary ? paperWords(summary.paper_name, summary.millimetres_per_unit) : ''}
+          toggles={toggles}
+          onToggle={toggle}
+          live={liveState}
+          line={line}
+        />
+      )}
       {asking && (
         <div className="va-modal" role="dialog" aria-modal="true" aria-label="Accept the working revision">
           <div className="dialog">
