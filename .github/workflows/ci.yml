@@ -60,9 +60,12 @@ jobs:
 
       # The demo plant (examples/demo-plant): every sheet built to DWG and plotted to PDF, and the
       # checker run on it; a failed check fails the job. Each system's SHA-256 of every DWG and PDF
-      # goes to the `demo-plant` job below, which holds the three systems to the same bytes.
+      # goes to the `demo-plant` job below, which holds the three systems to the same bytes. The
+      # system's own font folders are left out, so the bytes do not depend on a runner's fonts.
       - name: The demo plant builds, plots and passes the checker
         shell: bash
+        env:
+          AGENTDRAFTER_SYSTEM_FONTS: "0"
         run: |
           agentdrafter() { cargo run --quiet -p agentdrafter-cli --locked -- "$@"; }
           agentdrafter build examples/demo-plant
@@ -187,6 +190,8 @@ jobs:
       # checked through the library, on the oldest Python. The two builds' DWGs are the same bytes.
       - name: The installed command and the library build the demo plant and it passes the checker
         shell: bash
+        env:
+          AGENTDRAFTER_SYSTEM_FONTS: "0"
         run: |
           venv="$TRY/venv-3.11"
           cp -R examples/demo-plant "$TRY/by-command"

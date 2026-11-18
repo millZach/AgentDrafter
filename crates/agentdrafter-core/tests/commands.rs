@@ -33,24 +33,24 @@ fn samples() -> Vec<(&'static str, Value)> {
     vec![
         (
             "build",
-            json!({"source": "missing.yaml", "output": "x.dwg", "overwrite": true, "fonts": ["f"]}),
+            json!({"source": "missing.yaml", "output": "x.dwg", "overwrite": true, "fonts": ["f"], "no_system_fonts": true}),
         ),
         ("schema", json!({"kind": "change-set"})),
         (
             "measure-text",
-            json!({"contents": "PUMP 101", "font": "missing.ttf", "height": 2.5, "width_factor": 0.8, "fonts": []}),
+            json!({"contents": "PUMP 101", "font": "missing.ttf", "height": 2.5, "width_factor": 0.8, "fonts": [], "no_system_fonts": false}),
         ),
         (
             "render",
-            json!({"source": "missing.yaml", "output": "x.png", "overwrite": false, "dpi": 96, "width": 320, "height": 200, "margin": 2, "fonts": ["f"]}),
+            json!({"source": "missing.yaml", "output": "x.png", "overwrite": false, "dpi": 96, "width": 320, "height": 200, "margin": 2, "fonts": ["f"], "no_system_fonts": true}),
         ),
         (
             "display-list",
-            json!({"source": "missing", "sheet": "DEMO-001", "tolerance": 0.01, "entry": 2, "fonts": ["f"]}),
+            json!({"source": "missing", "sheet": "DEMO-001", "tolerance": 0.01, "entry": 2, "fonts": ["f"], "no_system_fonts": true}),
         ),
         (
             "plot",
-            json!({"source": "missing.yaml", "output": "x.pdf", "plot_style": "monochrome.ctb", "plot_styles": ["p"], "fonts": ["f"]}),
+            json!({"source": "missing.yaml", "output": "x.pdf", "plot_style": "monochrome.ctb", "plot_styles": ["p"], "fonts": ["f"], "no_system_fonts": true}),
         ),
         (
             "stale",
@@ -58,12 +58,12 @@ fn samples() -> Vec<(&'static str, Value)> {
         ),
         (
             "query",
-            json!({"source": "missing", "sheet": "DEMO-001", "query": {"kind": "measure", "from": {"id": "DEMO-001/a"}, "to": {"name": "b", "point": "center"}}, "fonts": ["f"]}),
+            json!({"source": "missing", "sheet": "DEMO-001", "query": {"kind": "measure", "from": {"id": "DEMO-001/a"}, "to": {"name": "b", "point": "center"}}, "fonts": ["f"], "no_system_fonts": true}),
         ),
         ("operations", json!({})),
         (
             "change",
-            json!({"set": "missing", "change_set": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [1, 0, 0]}], "fixes": ["DEMO-002"]}, "dry_run": true, "fonts": ["f"]}),
+            json!({"set": "missing", "change_set": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [1, 0, 0]}], "fixes": ["DEMO-002"]}, "dry_run": true, "fonts": ["f"], "no_system_fonts": true}),
         ),
         ("journal", json!({"set": "missing"})),
         (
@@ -72,11 +72,11 @@ fn samples() -> Vec<(&'static str, Value)> {
         ),
         (
             "accept",
-            json!({"set": "missing", "despite_failed_checks": true, "newest_seen": 4, "dry_run": true, "fonts": ["f"]}),
+            json!({"set": "missing", "despite_failed_checks": true, "newest_seen": 4, "dry_run": true, "fonts": ["f"], "no_system_fonts": true}),
         ),
         (
             "check",
-            json!({"source": "missing", "sheets": ["DEMO-001"], "fonts": ["f"]}),
+            json!({"source": "missing", "sheets": ["DEMO-001"], "fonts": ["f"], "no_system_fonts": true}),
         ),
         (
             "import-blocks",
@@ -277,7 +277,7 @@ fn a_command_gives_what_the_core_entry_point_gives() {
     assert_eq!(reply["result"], serde_json::to_value(operations()).unwrap());
 
     // The reply keeps the order the core gives its fields, not the
-    // alphabet's.
+    // alphabet's: a look-alike's warning at the top, then the result.
     let reply = find_command("measure-text").unwrap().run(
         json!({"contents": "PUMP 101", "font": "missing.ttf", "height": 2.5}),
         &Settings::default(),
@@ -285,7 +285,9 @@ fn a_command_gives_what_the_core_entry_point_gives() {
     );
     let text = serde_json::to_string(&reply).unwrap();
     assert!(
-        text.starts_with(r#"{"ok":true,"result":{"width":"#),
+        text.starts_with(
+            r#"{"ok":true,"warnings":[{"code":"font_look_alike","font":"missing.ttf","look_alike":"Hershey Roman Simplex","sheets":[]}],"result":{"width":"#
+        ),
         "{text}"
     );
 

@@ -395,7 +395,7 @@ A `text` is justified as AutoCAD's TEXT command justifies it: `left`, `center` o
 
 Contents show as written. AutoCAD reads some characters in text as codes, so AgentDrafter writes them so that they show as themselves: a run of `%` in a `text`, which AutoCAD would read as a code such as `%%d`, and a `\`, `{` or `}` in `mtext`, which AutoCAD would read as formatting. Formatting codes are not read: an `mtext` that wants bold or a second font waits for a later ticket. A `text` cannot hold `\U+` and four hexadecimal digits, or `\M+` and five, which AutoCAD reads as a character code; write the character itself. An `mtext`'s `width_factor` is written as AutoCAD's text editor writes it, as a `\W` code at the start of its contents.
 
-A justified `text` records in the DWG where its baseline starts as well as where it is justified, as AutoCAD does. AutoCAD draws the text from the start, so a build works the start out from the font's widths, by AutoCAD's own rules; when the font is not in a font folder, the start comes from its look-alike and may sit a little away from where AutoCAD would put it, until the text is edited in AutoCAD. The build's result names every such font.
+A justified `text` records in the DWG where its baseline starts as well as where it is justified, as AutoCAD does. AutoCAD draws the text from the start, so a build works the start out from the font's widths, by AutoCAD's own rules; when the font is not in a font folder, the start comes from its look-alike and may sit a little away from where AutoCAD would put it, until the text is edited in AutoCAD. The build's result names every such font, and its reply warns of each at its top.
 
 ### Inserts
 
@@ -781,9 +781,25 @@ A viewport may be clipped to a boundary instead of its rectangle, as AutoCAD's V
 
 ### Fonts
 
-AutoCAD's SHX fonts are Autodesk's files and are never in this repository (ADR-0008). AgentDrafter reads fonts from the font folders a setting names: the folders `--fonts` gives, then those the environment variable `AGENTDRAFTER_FONTS` lists, separated as the system separates paths (`;` on Windows, `:` elsewhere). On a machine that has AutoCAD, name its `Fonts` folder for the SHX fonts and the system's fonts folder for the TrueType ones. There is no default folder. A font is found by its file name, ignoring case.
+AutoCAD's SHX fonts are Autodesk's files and are never in this repository (ADR-0008). AgentDrafter reads fonts from the font folders a setting names: the folders `--fonts` gives, then those the environment variable `AGENTDRAFTER_FONTS` lists, separated as the system separates paths (`;` on Windows, `:` elsewhere). On a machine that has AutoCAD, name its `Fonts` folder for the SHX fonts. A font is found by its file name, ignoring case.
+
+A TrueType font in none of those folders is then looked for in the system's own font folders, as AutoCAD finds it, each with the folders inside it however deep, the folder's own files first and then its folders in the order of their names. Where a folder holds files whose names differ only in case, the one in the name's own case wins, then the first in the order of their names, so the same font wins however the system lists the folder. A folder already searched, as through a link back to one above it, is not searched again:
+
+| System | Its font folders, in order |
+|---|---|
+| Windows | `%WINDIR%\Fonts`, then the user's own, `%LOCALAPPDATA%\Microsoft\Windows\Fonts` |
+| macOS | `/System/Library/Fonts`, `/Library/Fonts`, `~/Library/Fonts` |
+| Linux and other Unix systems | `/usr/share/fonts`, `/usr/local/share/fonts`, `~/.local/share/fonts`, `~/.fonts` |
+
+An SHX font is never looked for there: AutoCAD's SHX fonts live only in its own folder. A font found in a system folder says so: `source` is `system` in `measure-text`'s `font`, and in a substitution whose look-alike was found there. `--no-system-fonts` on a command, `no_system_fonts: true` in its input, or `AGENTDRAFTER_SYSTEM_FONTS=0` in the environment (or `false`, `no`, `off`) leaves the system's folders out, so what is measured does not depend on the fonts a machine has installed. CI's demo plant, the speed bench and every test that holds output to its bytes leave them out.
 
 A font that is in no font folder, or cannot be read, is replaced by a look-alike for measuring. A TrueType font with an open twin of the same widths takes the twin when a font folder holds it: Liberation Sans or Arimo for Arial (`arial.ttf`, `arialbd.ttf`), Liberation Serif or Tinos for Times New Roman (`times.ttf`, `timesbd.ttf`), Liberation Mono or Cousine for Courier New (`cour.ttf`, `courbd.ttf`). Every other font takes Hershey's Roman Simplex, which is built in and in the public domain, and whose letters and digits have the same advances as AutoCAD's `romans.shx`. The DWG still names the style's own font. A build's result lists each substitution under `font_substitutions`: the style, its font, the look-alike used and why.
+
+A reply in which a look-alike stood in also warns of it at its top, under `warnings`, after `ok` and before `result`, so an agent reads it without looking inside each sheet's result. There is one warning per font, naming every sheet it was used on; `measure-text`, which measures no sheet, names none. Every command that measures or draws text does so, through every interface: `build`, `render`, `plot`, `display-list`, `check`, `change` for the sheets it rebuilt and checked, `accept` for the sheets it checked, and `measure-text`. A reply in which no look-alike stood in has no `warnings`.
+
+```json
+{"ok":true,"warnings":[{"code":"font_look_alike","font":"romans.shx","look_alike":"Hershey Roman Simplex","sheets":["DEMO-001","DEMO-002","DEMO-003"]}],"result":{...}}
+```
 
 AgentDrafter reads SHX fonts in the `AutoCAD-86 shapes` and `AutoCAD-86 unifont` layouts, which AutoCAD's own text fonts use, and TrueType fonts through ttf-parser (MIT or Apache-2.0). Big fonts, for Asian scripts, are not read.
 
@@ -791,7 +807,7 @@ A TrueType font encoded as a Windows symbol font, whose character map has a Wind
 
 ### Measuring text
 
-`agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]...` measures one line of text as AutoCAD measures a text object (AutoLISP's `textbox`): `width` is from the left edge of what the text draws to the right edge, and `left`, `right`, `bottom` and `top` say where that is from the start of the line, in the unit of the height. `advance` is how far the pen moves. `--font` names a font as a text style does, by its file name alone, and is read only from the font folders. `font` says which font was used and, when it was a look-alike, why. A space at either end draws nothing, so it adds nothing to the width.
+`agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]` measures one line of text as AutoCAD measures a text object (AutoLISP's `textbox`): `width` is from the left edge of what the text draws to the right edge, and `left`, `right`, `bottom` and `top` say where that is from the start of the line, in the unit of the height. `advance` is how far the pen moves. `--font` names a font as a text style does, by its file name alone, and is read only from the font folders, and for a TrueType font the system's. `font` says which font was used and, when it was a look-alike, why; `source` is `system` when it was found in a system folder. A space at either end draws nothing, so it adds nothing to the width.
 
 Measured against AutoCAD 2026 with its own fonts, on the machine that has them: the widths of 139 made-up strings in `romans.shx`, `simplex.shx`, `txt.shx`, `isocp.shx`, Arial and Times New Roman, 0.1 to 7 units high, match AutoCAD's to within 1e-12 of the unit, and the box of each of the 1,151 characters of the four SHX fonts, 100 high, matches to the eight decimal places AutoCAD printed. AutoCAD does not kern.
 

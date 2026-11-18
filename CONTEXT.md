@@ -165,12 +165,16 @@ A named font that text draws with, and how wide its characters are, as in AutoCA
 _Avoid_: font style, text format
 
 **Font folder**:
-A folder AgentDrafter reads fonts from when it measures text, named by a setting, such as AutoCAD's `Fonts` folder on a machine that has AutoCAD. There is no default.
+A folder AgentDrafter reads fonts from when it measures text, named by a setting, such as AutoCAD's `Fonts` folder on a machine that has AutoCAD. A TrueType font is then looked for in the system's own font folders, such as `C:\Windows\Fonts`, as AutoCAD finds it, unless they are left out; an SHX font is read only from the folders named.
 _Avoid_: font path, font directory
 
 **Look-alike**:
-An open font AgentDrafter measures text with when a text style's font is not in any font folder, such as Hershey's Roman Simplex in place of `romans.shx`. The drawing still names the style's own font, and the build says which look-alike it used.
+An open font AgentDrafter measures text with when a text style's font is not in any font folder, such as Hershey's Roman Simplex in place of `romans.shx`. The drawing still names the style's own font, and the build says which look-alike it used, in each sheet's result and in a warning at the top of the reply.
 _Avoid_: fallback font, substitute font
+
+**Warning**:
+What a reply says at its top, beside `ok`, that an agent must not miss: so far, that a look-alike stood in for a font, naming the font, the look-alike and every sheet it was used on. Unlike a notice, which a sheet's own result carries about the files it was read from, a warning is about the whole reply.
+_Avoid_: alert
 
 **Block**:
 A named group of objects defined once and inserted many times, as in AutoCAD.

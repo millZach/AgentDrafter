@@ -71,7 +71,8 @@ def summary(values: list[float]) -> dict:
 
 class Agentdrafter:
     """The agentdrafter measured: a binary, or the pip package's command. Font and plot style
-    folders are not passed on, so every machine draws with the same look-alikes, in monochrome."""
+    folders are not passed on and the system's font folders are left out, so every machine draws
+    with the same look-alikes, in monochrome."""
 
     def __init__(self, path: str):
         p = Path(path)
@@ -81,6 +82,7 @@ class Agentdrafter:
             raise BenchError("no agentdrafter at --bin; build it (cargo build --release -p agentdrafter-cli) or name it")
         self.path = str(p.resolve())
         self.env = {k: v for k, v in os.environ.items() if k not in ("AGENTDRAFTER_FONTS", "AGENTDRAFTER_PLOT_STYLES")}
+        self.env["AGENTDRAFTER_SYSTEM_FONTS"] = "0"
 
     def run(self, cwd: Path, *args: str) -> tuple[float, dict]:
         """Runs one command in a fresh process; gives the milliseconds it took and its reply."""
