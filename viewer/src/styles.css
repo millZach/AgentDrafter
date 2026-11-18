@@ -54,7 +54,8 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 .qa:disabled { opacity: .42; }
 .va-status { display: flex; gap: 6px; align-items: center; min-width: 0; overflow: hidden; }
 .pill {
-  display: inline-flex; align-items: center; border: 1px solid #4f5a6a; background: #2a323e; border-radius: 11px;
+  /* Inline, not a flex box, so the space at the end of its words is kept. */
+  display: inline-block; border: 1px solid #4f5a6a; background: #2a323e; border-radius: 11px;
   padding: 1px 9px; white-space: nowrap; color: var(--dim); font-size: 12px;
 }
 .pill.warn { border-color: #8a6420; background: #3a3020; color: #ffd08a; }
