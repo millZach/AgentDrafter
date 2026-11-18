@@ -41,15 +41,21 @@ export function BottomSheet({ wide, onCovers, peek, body, raise }: BottomSheetPr
   const place = (top: number, animate: boolean) => {
     const el = sheet.current;
     if (!el) return;
+    // How much of the drawing the sheet covers from the bottom, at
+    // whatever height it is, as a variable its neighbours read: quick
+    // properties sit above it.
+    const covers = (pixels: number) => el.parentElement?.style.setProperty('--sheet', `${Math.max(0, pixels)}px`);
     if (wide) {
       el.style.transform = '';
       el.style.height = '';
+      covers(0);
       return;
     }
     y.current = top;
     el.style.transition = animate ? 'transform .28s cubic-bezier(.2,.8,.2,1)' : 'none';
     el.style.transform = `translateY(${top}px)`;
     el.style.height = `${room() - top}px`;
+    covers(room() - top);
   };
   const snapTo = (name: Snap, animate = true) => {
     setSnap(name);

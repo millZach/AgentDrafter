@@ -655,8 +655,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
 
   // The cursor's place, written straight into the status bar, so a moving
   // mouse redraws nothing else.
-  const unitsNow = useRef(25.4);
-  unitsNow.current = summary?.millimetres_per_unit ?? 25.4;
+  const unitsNow = useRef<string | null>(null);
+  unitsNow.current = summary?.units ?? null;
   const cursorAt = useCallback((p: [number, number] | null) => {
     if (coords.current) coords.current.textContent = p ? coordinates(p[0], p[1], unitsNow.current) : '\u00a0';
   }, []);
@@ -835,6 +835,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
       className={`va${toolsOpen ? ' tools-open' : ''}`}
       style={{ ['--peek' as string]: `${peekHeight}px` }}
     >
+      {/* The title bar, and under it the ribbon, which a phone folds behind Tools and opens over the drawing, under the title bar however tall its chips make it. */}
+      <div className="topbar">
       <header className="titlebar">
         <svg className="mark" viewBox="0 0 20 20" aria-hidden="true">
           <path d="M3 17V4l13 13z" fill="none" stroke="#4aa3ff" strokeWidth="2" strokeLinejoin="round" />
@@ -894,6 +896,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
           layer={object ? { name: object.layer, color: pickedColor } : null}
           flashing={soon?.key ?? null}
         />
+      </div>
       </div>
       <nav className="va-tabs sheettabs" ref={tabs} aria-label="Sheets">
         {sheets.map((s) => {
@@ -1012,7 +1015,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
         <StatusBar
           layouts={layoutTabs}
           coords={coords}
-          paper={summary ? paperWords(summary.paper_name, summary.millimetres_per_unit) : ''}
+          paper={summary ? paperWords(summary) : ''}
           toggles={toggles}
           onToggle={toggle}
           live={liveState}

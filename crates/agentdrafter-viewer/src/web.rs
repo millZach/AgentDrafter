@@ -199,7 +199,8 @@ uniform vec4 u_major;
 uniform float u_line;
 uniform vec3 u_minor_color;
 uniform vec3 u_major_color;
-// The paper's edge, [left, top, right, bottom] in device pixels, dashed.
+// The paper's edge, [left, top, right, bottom] in device pixels, whole
+// pixels, dashed: a line u_line wide just inside each side.
 uniform vec4 u_paper;
 uniform vec3 u_edge_color;
 out vec4 o_color;
@@ -218,10 +219,14 @@ void main() {
   float t = u_paper.y;
   float r = u_paper.z;
   float b = u_paper.w;
-  bool across = p.x >= l - u_line && p.x <= r + u_line;
-  bool down = p.y >= t - u_line && p.y <= b + u_line;
-  bool edge = (across && (abs(p.y - t) < u_line || abs(p.y - b) < u_line) && on_dash(p.x - l))
-           || (down && (abs(p.x - l) < u_line || abs(p.x - r) < u_line) && on_dash(p.y - t));
+  // Pixel centres sit at half pixels: each side takes the u_line rows or
+  // columns that begin on its edge and run inwards, so the line is u_line
+  // wide, one CSS pixel, not a pixel either side of the edge.
+  bool across = p.x >= l && p.x < r;
+  bool down = p.y >= t && p.y < b;
+  bool top_or_bottom = (p.y >= t && p.y < t + u_line) || (p.y >= b - u_line && p.y < b);
+  bool left_or_right = (p.x >= l && p.x < l + u_line) || (p.x >= r - u_line && p.x < r);
+  bool edge = (across && top_or_bottom && on_dash(p.x - l)) || (down && left_or_right && on_dash(p.y - t));
   if (edge) color = u_edge_color;
   o_color = vec4(color, 1.0);
 }
@@ -795,8 +800,9 @@ impl Viewer {
         gl.uniform2f(p.at("u_size"), size.0, size.1);
         let [r, g, b] = MODEL_SPACE;
         gl.uniform3f(p.at("u_background"), r, g, b);
-        // A grid line, and the paper's edge, one CSS pixel wide.
-        gl.uniform1f(p.at("u_line"), ratio.max(1.0) as f32);
+        // A grid line, and the paper's edge, one CSS pixel wide, in whole
+        // device pixels.
+        gl.uniform1f(p.at("u_line"), ratio.max(1.0).round() as f32);
         let pixels = scale * ratio;
         let lines = |step: f64| -> [f32; 4] {
             [

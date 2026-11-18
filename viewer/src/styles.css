@@ -38,6 +38,9 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 /* the frame, top to bottom */
 .va { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; }
 
+/* the title bar, and the ribbon under it */
+.topbar { flex: none; position: relative; z-index: 25; }
+
 /* the title bar: Undo last and Accept, as AutoCAD's quick access bar holds its own */
 .titlebar {
   flex: none; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 8px; min-width: 0;
@@ -211,7 +214,8 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 /* the command bar, under the drawing: prompts, with options to click */
 .cmd {
   position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; width: min(760px, calc(100% - 24px));
-  z-index: 4; font: 13px var(--mono); pointer-events: none;
+  /* Over the overlay that says an entry cannot be shown, whose way out is the bar's Older, Newer and Live. */
+  z-index: 7; font: 13px var(--mono); pointer-events: none;
 }
 .cmd .cmdbar { pointer-events: auto; }
 .hist { padding: 0 12px 4px; color: #aeb8c4; text-shadow: 0 1px 3px #000, 0 0 6px #212830; }
@@ -233,7 +237,12 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
   flex: none; display: flex; align-items: stretch; gap: 2px; height: 28px; padding: 0 6px; background: var(--frame);
   border-top: 1px solid #121821; font-size: 12px; color: var(--dim); min-width: 0;
 }
-.status .va-layouts { background: none; border: 0; padding: 0; align-items: stretch; gap: 0; }
+.status .va-layouts {
+  background: none; border: 0; padding: 0; align-items: stretch; gap: 0;
+  /* Many layouts scroll in their strip; the status controls after it keep their room. */
+  flex: 0 1 auto; min-width: 80px; overflow-x: auto;
+}
+.status > :not(.va-layouts):not(.grow):not(.live) { flex: none; }
 .status .va-layouts .tab { background: none; border: 0; border-radius: 0; padding: 0 12px; color: var(--dim); }
 .status .va-layouts .tab.on { background: var(--canvas); color: #fff; border-top: 2px solid var(--blue); }
 .coords { font-family: var(--mono); align-self: center; min-width: 170px; padding-left: 10px; color: var(--text); white-space: nowrap; }
@@ -244,6 +253,7 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 .tog kbd { font: 10px var(--mono); opacity: .7; margin-left: 3px; }
 .grow { flex: 1; }
 .live { display: flex; align-items: center; gap: 6px; white-space: nowrap; padding: 0 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.status .live { flex: 0 1 auto; min-width: 120px; }
 .live span { overflow: hidden; text-overflow: ellipsis; }
 .live i { width: 8px; height: 8px; border-radius: 50%; background: #6b7584; flex: none; }
 .live.open i { background: var(--ok); box-shadow: 0 0 0 3px rgba(61, 220, 132, .18); }
@@ -348,11 +358,14 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
 
 /* a phone: the ribbon and the panels fold, the drawing keeps the screen */
 @media (max-width: 899px) {
-  .titlebar { height: 44px; gap: 6px; padding-top: env(safe-area-inset-top); box-sizing: content-box; }
+  .titlebar {
+    height: auto; min-height: 44px; gap: 6px; padding-top: env(safe-area-inset-top); box-sizing: content-box;
+  }
   .toolsbtn { border-color: var(--edge); background: #2a323e; }
   .tools-open .toolsbtn { background: #274b76; border-color: var(--blue); }
-  .va-status { flex: 1; justify-content: flex-end; }
-  .ribbonwrap { display: none; position: absolute; left: 0; right: 0; top: calc(45px + env(safe-area-inset-top)); z-index: 25; }
+  /* Chips that do not fit on one line wrap onto another; none is clipped. */
+  .va-status { flex: 1; justify-content: flex-end; flex-wrap: wrap; overflow: visible; padding: 4px 0; }
+  .ribbonwrap { display: none; position: absolute; left: 0; right: 0; top: 100%; }
   .ribbonwrap.open { display: block; }
   .ribbon { flex-wrap: wrap; padding: 4px; gap: 4px 0; box-shadow: 0 14px 30px rgba(0, 0, 0, .55); border-bottom: 2px solid var(--blue); }
   .panel { border-right: 0; flex: 1 1 100%; }
@@ -364,13 +377,23 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   .va-sheet {
     border-top: 1px solid #5a6577; border-radius: 12px 12px 0 0; box-shadow: 0 -10px 30px rgba(0, 0, 0, .5); height: 100%;
   }
-  .zoombtns { top: auto; transform: none; bottom: calc(var(--peek, 0px) + 58px); right: 8px; }
-  .cmd { bottom: calc(var(--peek, 0px) + 8px); width: calc(100% - 16px); left: 8px; transform: none; }
+  /* Fit beside the command bar, which quick properties stay above, so it is always in reach. */
+  .zoombtns { top: auto; transform: none; bottom: calc(var(--peek, 0px) + 8px); right: 8px; }
+  .cmd { bottom: calc(var(--peek, 0px) + 8px); width: calc(100% - 64px); left: 8px; transform: none; }
   .cmdnote, .hist { display: none; }
+  /* Above the command bar, and above the journal however far it is raised (--sheet, which the sheet sets). */
   .qp {
-    left: 8px; right: 8px; top: auto; bottom: calc(var(--peek, 0px) + 56px); width: auto; max-height: 44%;
-    visibility: visible;
+    --qp-bottom: max(calc(var(--peek, 0px) + 48px), calc(var(--sheet, 0px) + 8px));
+    left: 8px; right: 8px; top: auto; bottom: var(--qp-bottom); width: auto;
+    max-height: min(44%, calc(100% - var(--qp-bottom) - 8px)); visibility: visible;
   }
   .va-overlays { left: 8px; right: 8px; max-width: none; }
   .long { display: none; }
+}
+
+/* A phone held on its side: too short for a card above the command bar, so
+   quick properties sit at the right, from the top down to above the bar,
+   and the selected object is brought into the drawing left of them. */
+@media (max-width: 899px) and (orientation: landscape) {
+  .qp { left: auto; right: 8px; top: 8px; width: min(268px, 45%); max-height: none; }
 }

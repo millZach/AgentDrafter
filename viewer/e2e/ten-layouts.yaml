@@ -1,0 +1,17 @@
+# A made-up sheet for the viewer's browser tests (e2e/run.mjs): one model
+# space line, sheeted in ten layouts, so a laptop's status bar has more
+# layout tabs than its width holds beside its controls.
+units: mm
+layouts:
+  - {name: Layout 1, paper: ISO A4 landscape}
+  - {name: Layout 2, paper: ISO A4 landscape}
+  - {name: Layout 3, paper: ISO A4 landscape}
+  - {name: Layout 4, paper: ISO A4 landscape}
+  - {name: Layout 5, paper: ISO A4 landscape}
+  - {name: Layout 6, paper: ISO A4 landscape}
+  - {name: Layout 7, paper: ISO A4 landscape}
+  - {name: Layout 8, paper: ISO A4 landscape}
+  - {name: Layout 9, paper: ISO A4 landscape}
+  - {name: Layout 10, paper: ISO A4 landscape}
+objects:
+  - line: {from: [20, 20, 0], to: [200, 120, 0]}

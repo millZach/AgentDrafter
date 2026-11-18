@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import {
   coordinates,
+  freeBeside,
   liveLine,
   nameOf,
   PANELS,
@@ -43,12 +44,16 @@ test('the command bar prompts to select, and names what is selected with Clear',
   );
 });
 
-test('a tool still to come names its command and says it is coming, until OK', () => {
+test('a tool still to come names its command, says what it does in plain words and that it is coming, until OK', () => {
   const line = PANELS[0]?.tools[0];
   assert.ok(line);
   const p = promptFor({ ...none, soon: line, selected: { type: 'line' } });
   assert.equal(p.command, 'LINE');
-  assert.equal(words(p.parts), `(L) ${SOON} [ <OK> ]`);
+  assert.equal(words(p.parts), `(L) Draws straight lines. Click a start point, then keep clicking. ${SOON} [ <OK> ]`);
+  // A tap or a key has no hover to show the tip: the command bar says it.
+  const rectangle = PANELS[0]?.tools[2];
+  assert.ok(rectangle);
+  assert.match(words(promptFor({ ...none, soon: rectangle }).parts), /^\(REC\) Click one corner, then the opposite corner\. Coming soon/);
 });
 
 test('stepping back offers Older, Newer and Live, and says when the entry cannot be shown', () => {
@@ -77,14 +82,22 @@ test('F3, F7 and F8 turn Object snap, Grid and Ortho, as in AutoCAD', () => {
 });
 
 test('units, the paper and the cursor in words', () => {
-  assert.deepEqual(unitWords(25.4), { name: 'inches', short: 'in' });
-  assert.deepEqual(unitWords(1), { name: 'millimetres', short: 'mm' });
-  assert.deepEqual(unitWords(304.8), { name: 'feet', short: 'ft' });
-  assert.deepEqual(unitWords(3.7), { name: 'drawing units', short: '' });
-  assert.equal(paperWords('ANSI B landscape', 25.4), 'ANSI B landscape, inches');
-  assert.equal(paperWords(null, 1), 'Extents, millimetres');
-  assert.equal(coordinates(1.72, 6.5, 25.4), '1.720, 6.500 in');
-  assert.equal(coordinates(-3, 0, 3.7), '-3.000, 0.000');
+  assert.deepEqual(unitWords('in'), { name: 'inches', short: 'in' });
+  assert.deepEqual(unitWords('mm'), { name: 'millimetres', short: 'mm' });
+  assert.deepEqual(unitWords('ft'), { name: 'feet', short: 'ft' });
+  // A drawing that states no unit, such as a DWG whose INSUNITS is 0, shows none: its scale is not a unit.
+  assert.deepEqual(unitWords(null), { name: 'unitless', short: '' });
+  const sheet = { paper_declared: true, paper_name: 'ANSI B landscape', paper: [0, 0, 17, 11] as const, units: 'in' };
+  assert.equal(paperWords(sheet), 'ANSI B landscape, inches');
+  // Paper declared by its size alone is not the extents: its size says it.
+  assert.equal(paperWords({ ...sheet, paper_name: null }), '17 × 11 in');
+  assert.equal(paperWords({ ...sheet, paper_name: null, paper: [0, 0, 420, 297], units: 'mm' }), '420 × 297 mm');
+  assert.equal(paperWords({ ...sheet, paper_name: null, paper: [0, 0, 8.5, 11], units: null }), '8.5 × 11');
+  // No paper: the sheet sits on its extents.
+  assert.equal(paperWords({ ...sheet, paper_declared: false, paper_name: null, paper: [-5, -5, 105, 55] }), 'Extents, inches');
+  assert.equal(paperWords({ paper_declared: false, paper_name: null, paper: [0, 0, 1, 1], units: null }), 'Extents, unitless');
+  assert.equal(coordinates(1.72, 6.5, 'in'), '1.720, 6.500 in');
+  assert.equal(coordinates(-3, 0, null), '-3.000, 0.000');
 });
 
 test('an object is called by its name, its ID without the sheet, or its type', () => {
@@ -93,6 +106,13 @@ test('an object is called by its name, its ID without the sheet, or its type', (
   assert.equal(nameOf({ type: 'line' }), 'line');
   assert.equal(typeWords({ type: 'insert', block: 'TRANSMITTER' }), 'Insert of TRANSMITTER');
   assert.equal(typeWords({ type: 'circle' }), 'Circle');
+});
+
+test('on a phone the drawing left free is above quick properties, or left of them on a phone held on its side', () => {
+  // Upright: the card spans the drawing, from 400 down.
+  assert.deepEqual(freeBeside([8, 400, 382, 680], 390, 700), [0, 0, 390, 400]);
+  // On its side: the card at the right, from the top down to 200.
+  assert.deepEqual(freeBeside([568, 8, 836, 200], 844, 300), [0, 0, 568, 200]);
 });
 
 test('quick properties sit to the right of the object, or to its left, kept in the room', () => {

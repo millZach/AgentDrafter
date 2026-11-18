@@ -81,25 +81,53 @@ export function liveLine(
   return { state: 'down', line: 'Reaching the server…' };
 }
 
-/** A drawing unit in words, by how many millimetres of paper it spans. */
-export function unitWords(millimetresPerUnit: number): { name: string; short: string } {
-  const near = (v: number) => Math.abs(millimetresPerUnit - v) < 1e-9 * Math.max(1, v);
-  if (near(25.4)) return { name: 'inches', short: 'in' };
-  if (near(304.8)) return { name: 'feet', short: 'ft' };
-  if (near(1)) return { name: 'millimetres', short: 'mm' };
-  if (near(10)) return { name: 'centimetres', short: 'cm' };
-  if (near(1000)) return { name: 'metres', short: 'm' };
-  return { name: 'drawing units', short: '' };
+const UNITS: Record<string, { name: string; short: string }> = {
+  in: { name: 'inches', short: 'in' },
+  ft: { name: 'feet', short: 'ft' },
+  mm: { name: 'millimetres', short: 'mm' },
+  cm: { name: 'centimetres', short: 'cm' },
+  m: { name: 'metres', short: 'm' },
+};
+
+/**
+ * A drawing unit in words, as the core names it (`in`, `mm`, ...). A
+ * drawing that states none, such as a DWG whose INSUNITS is 0, is unitless:
+ * its scale is not a unit, so none is shown.
+ */
+export function unitWords(units: string | null | undefined): { name: string; short: string } {
+  return (units && UNITS[units]) || { name: 'unitless', short: '' };
 }
 
-/** The status bar's paper: its name, or that the sheet sits on its extents, and its units. */
-export function paperWords(paperName: string | null | undefined, millimetresPerUnit: number): string {
-  return `${paperName ?? 'Extents'}, ${unitWords(millimetresPerUnit).name}`;
+/** What the status bar says of the paper. */
+export interface PaperOf {
+  /** Whether the sheet declares its paper, by name or by size. */
+  paper_declared: boolean;
+  paper_name: string | null;
+  /** Left, bottom, right, top, in drawing units. */
+  paper: readonly [number, number, number, number];
+  units: string | null;
+}
+
+const size = (v: number) => String(Number(v.toFixed(3)));
+
+/**
+ * The status bar's paper: its name and its units; its size, when it is
+ * declared by size alone, such as `17 × 11 in`; or that the sheet sits on
+ * its extents.
+ */
+export function paperWords(s: PaperOf): string {
+  const { name, short } = unitWords(s.units);
+  if (s.paper_declared && s.paper_name) return `${s.paper_name}, ${name}`;
+  if (s.paper_declared) {
+    const [left, bottom, right, top] = s.paper;
+    return `${size(right - left)} × ${size(top - bottom)}${short ? ` ${short}` : ''}`;
+  }
+  return `Extents, ${name}`;
 }
 
 /** The cursor's place on the drawing, as the status bar shows it. */
-export function coordinates(x: number, y: number, millimetresPerUnit: number): string {
-  const { short } = unitWords(millimetresPerUnit);
+export function coordinates(x: number, y: number, units: string | null | undefined): string {
+  const { short } = unitWords(units);
   return `${x.toFixed(3)}, ${y.toFixed(3)}${short ? ` ${short}` : ''}`;
 }
 
@@ -154,7 +182,12 @@ const options = (...acts: [string, Act][]): Part[] => [
 /** What the command bar says now: prompts only, until drawing tools come. */
 export function promptFor(s: PromptState): Prompt {
   if (s.soon) {
-    return { command: s.soon.command, parts: [{ text: `(${s.soon.alias}) ${SOON} ` }, ...options(['OK', 'ok'])] };
+    // What it will do, in plain words, as its tip says on hover, for a tap
+    // or a key that has no hover.
+    return {
+      command: s.soon.command,
+      parts: [{ text: `(${s.soon.alias}) ${s.soon.tip} ${SOON} ` }, ...options(['OK', 'ok'])],
+    };
   }
   const stepping = options(['Older', 'older'], ['Newer', 'newer'], ['Live', 'live']);
   if (s.at !== null && s.cannot) return { command: null, parts: [{ text: `Entry ${s.at} cannot be shown ` }, ...stepping] };
@@ -166,6 +199,19 @@ export function promptFor(s: PromptState): Prompt {
 
 /** A box on the screen, in CSS pixels: left, top, right, bottom. */
 export type Box = readonly [number, number, number, number];
+
+/**
+ * The part of a phone's drawing, `width` by `height`, that quick
+ * properties at `card` (in the drawing's pixels) leave free: above the
+ * card when it spans the drawing, as on a phone held upright; left of it,
+ * down to its bottom, when it sits at the right, as on one held on its
+ * side.
+ */
+export function freeBeside(card: Box, width: number, height: number): Box {
+  const [left, top, , bottom] = card;
+  if (left > width / 2) return [0, 0, left, Math.min(height, bottom)];
+  return [0, 0, width, Math.max(0, top)];
+}
 
 /**
  * Where quick properties go beside the selected object, whose box on the

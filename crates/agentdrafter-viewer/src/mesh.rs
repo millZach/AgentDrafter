@@ -51,6 +51,10 @@ pub struct SheetReply {
     /// On a sheet drawn in several layouts, every one of them, in order.
     #[serde(default)]
     pub layouts: Vec<String>,
+    /// The drawing's unit, such as `in` or `mm`; none for a drawing that
+    /// states none, such as a DWG whose INSUNITS is 0.
+    #[serde(default)]
+    pub units: Option<String>,
     pub millimetres_per_unit: f64,
     #[serde(default)]
     pub paper: Option<Paper>,
@@ -167,11 +171,16 @@ pub struct Summary {
     pub layout: Option<String>,
     /// On a sheet drawn in several layouts, every one of them, in order.
     pub layouts: Vec<String>,
+    /// The drawing's unit, such as `in` or `mm`; none when it states none.
+    pub units: Option<String>,
     pub millimetres_per_unit: f64,
     /// `[left, bottom, right, top]` in drawing units.
     pub paper: [f64; 4],
+    /// Whether the sheet declares its paper, by name or by size; a sheet
+    /// that does not is drawn on its extents.
+    pub paper_declared: bool,
     /// The paper's name, when the sheet declares it by name, such as
-    /// `ANSI B landscape`; none for a sheet drawn on its extents.
+    /// `ANSI B landscape`; none for paper declared by size alone, or none.
     pub paper_name: Option<String>,
     pub segments: usize,
     pub triangles: usize,
@@ -376,6 +385,11 @@ impl Mesh {
 
     /// What the sheet is, for the page.
     pub fn summary(&self, sheet: &SheetReply) -> Summary {
+        // The paper the sheet declares, as `paper` draws it.
+        let declared = sheet
+            .paper
+            .as_ref()
+            .filter(|p| p.width > 0.0 && p.height > 0.0);
         Summary {
             source: sheet.source.clone(),
             name: sheet.name.clone(),
@@ -383,13 +397,11 @@ impl Mesh {
             sheets: sheet.sheets.clone(),
             layout: sheet.layout.clone(),
             layouts: sheet.layouts.clone(),
+            units: sheet.units.clone(),
             millimetres_per_unit: sheet.millimetres_per_unit,
             paper: self.paper,
-            paper_name: sheet
-                .paper
-                .as_ref()
-                .filter(|p| p.width > 0.0 && p.height > 0.0)
-                .and_then(|p| p.name.clone()),
+            paper_declared: declared.is_some(),
+            paper_name: declared.and_then(|p| p.name.clone()),
             segments: self.segments.len(),
             triangles: self.triangles.len(),
             fills_not_drawn: self.fills_not_drawn,
@@ -469,6 +481,7 @@ mod tests {
             sheets: vec!["made-up".to_owned()],
             layout: None,
             layouts: Vec::new(),
+            units: None,
             millimetres_per_unit: 1.0,
             paper,
             extents: display_list.extents(),
@@ -724,6 +737,37 @@ mod tests {
     }
 
     #[test]
+    fn paper_declared_by_size_alone_is_told_from_none_and_no_unit_is_carried_when_none_is() {
+        let line = || {
+            item(
+                7,
+                Shape::Stroke {
+                    lineweight: 0.0,
+                    runs: vec![vec![[0.0, 0.0], [10.0, 5.0]]],
+                },
+            )
+        };
+        // Paper declared by its size alone: declared, with no name.
+        let sized = sheet(
+            vec![line()],
+            Some(Paper {
+                name: None,
+                width: 17.0,
+                height: 11.0,
+            }),
+        );
+        let summary = Mesh::of(&sized).summary(&sized);
+        assert!(summary.paper_declared);
+        assert_eq!(summary.paper_name, None);
+        assert_eq!(summary.paper, [0.0, 0.0, 17.0, 11.0]);
+        // No paper: drawn on its extents, not declared; and no unit stated.
+        let bare = sheet(vec![line()], None);
+        let summary = Mesh::of(&bare).summary(&bare);
+        assert!(!summary.paper_declared);
+        assert_eq!(summary.units, None);
+    }
+
+    #[test]
     fn a_reply_that_is_not_ok_gives_its_message() {
         let refused = r#"{"ok":false,"error":{"code":"unknown_name","message":"there is no sheet `X` to draw"}}"#;
         assert_eq!(
@@ -769,5 +813,7 @@ mod tests {
         assert_eq!(summary.segments, expected);
         assert_eq!(summary.millimetres_per_unit, 25.4);
         assert_eq!(summary.paper_name.as_deref(), Some("ANSI B landscape"));
+        assert!(summary.paper_declared);
+        assert_eq!(summary.units.as_deref(), Some("in"));
     }
 }

@@ -18,9 +18,13 @@ export interface Summary {
   layout: string | null;
   /** On a sheet drawn in several layouts, every one of them, in order; empty otherwise. */
   layouts: string[];
+  /** The drawing's unit, such as `in` or `mm`; null for a drawing that states none. */
+  units: string | null;
   millimetres_per_unit: number;
   paper: Paper;
-  /** The paper's name, when the sheet declares it by name; null for a sheet drawn on its extents. */
+  /** Whether the sheet declares its paper, by name or by size; one that does not is drawn on its extents. */
+  paper_declared: boolean;
+  /** The paper's name, when the sheet declares it by name; null for paper declared by size alone, or none. */
   paper_name: string | null;
   segments: number;
   triangles: number;

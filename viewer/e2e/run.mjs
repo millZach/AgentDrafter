@@ -111,6 +111,7 @@ for (const sheet of ['geometry.yaml', 'hatch.yaml', 'text.yaml', 'layout.yaml', 
 cpSync(join(viewer, 'e2e', 'overlap.yaml'), join(scratch, 'overlap.yaml'));
 cpSync(join(viewer, 'e2e', 'viewport-clip.yaml'), join(scratch, 'viewport-clip.yaml'));
 cpSync(join(viewer, 'e2e', 'viewport-boundary.yaml'), join(scratch, 'viewport-boundary.yaml'));
+cpSync(join(viewer, 'e2e', 'ten-layouts.yaml'), join(scratch, 'ten-layouts.yaml'));
 
 /** Runs the command line in the scratch folder and gives its JSON reply. */
 function agentdrafter(...args) {
@@ -358,8 +359,27 @@ const checks = {
       await laptop.page.click('.status .va-layouts .tab:has-text("Wiring")');
       await laptop.page.waitForFunction(() => window.agentdrafterViewer?.summary?.layout === 'Wiring');
       await laptop.page.screenshot({ path: join(out, 'layouts-laptop.png') });
+      // Ten layouts at 900 CSS pixels: the strip scrolls; Grid, Object snap,
+      // Ortho and the connection stay on the screen.
+      const narrow = await open(await b.newContext({ viewport: { width: 900, height: 700 }, deviceScaleFactor: 1 }), `${server.base}/?source=ten-layouts.yaml`, null);
+      const strip = await narrow.page.evaluate(() => {
+        const s = document.querySelector('.status .va-layouts');
+        const inSight = (sel) => {
+          const r = document.querySelector(sel).getBoundingClientRect();
+          return r.left >= 0 && r.right <= innerWidth + 0.5 && r.width > 0;
+        };
+        return {
+          tabs: s.querySelectorAll('.tab').length,
+          scrolls: s.scrollWidth > s.clientWidth,
+          controls: ['[data-toggle="grid"]', '[data-toggle="osnap"]', '[data-toggle="ortho"]', '.status .live'].map((sel) => [sel, inSight(`.status ${sel.startsWith('.status') ? sel.slice(8) : sel}`)]),
+        };
+      });
+      await narrow.page.screenshot({ path: join(out, 'layouts-ten-at-900.png') });
+      assert(strip.tabs === 10 && strip.scrolls, `ten layout tabs, scrolling in their strip: ${JSON.stringify(strip)}`);
+      assert(strip.controls.every(([, ok]) => ok), `the status controls stay on the screen: ${JSON.stringify(strip)}`);
+      assert(narrow.problems.length === 0, narrow.problems.join('; '));
       assert(problems.length === 0 && one.problems.length === 0 && laptop.problems.length === 0, [...problems, ...one.problems, ...laptop.problems].join('; '));
-      return { first, second, laptop_status_bar: inStatus };
+      return { first, second, laptop_status_bar: inStatus, ten_at_900: strip };
     } finally {
       await b.close();
       await server.stop();
@@ -986,6 +1006,10 @@ const checks = {
       const said = await page.textContent('.va-cannot');
       assert(said.includes('Entry 1 cannot be shown') && said.includes('pruned'), `the pruned entry says so: ${said}`);
       await page.screenshot({ path: join(out, 'journal-pruned.png') });
+      // The command bar's way out works over the overlay: Newer, here to
+      // entry 2, pruned too.
+      await page.click('.opt[data-opt="newer"]', { timeout: 5000 });
+      await page.waitForFunction(() => document.querySelector('.pill.past')?.textContent?.startsWith('Entry 2 of 53'), null, { timeout: 15000 });
       // Back to live, from the chip.
       await page.click('.pill.past');
       await page.waitForFunction(() => window.agentdrafterViewer.summary.entry === null && !document.querySelector('.va-cannot') && !document.querySelector('.pill.past'));
@@ -1141,6 +1165,18 @@ const checks = {
       assert((await page.textContent('.va-toast')).includes('inconsistent'), 'the refusal says why');
       assert(!(await page.$('.va-modal')), 'no dialog: nothing to confirm');
       await page.screenshot({ path: join(out, 'accept-refused.png') });
+      // At 320 CSS pixels the chips wrap: none is clipped.
+      await page.setViewportSize({ width: 320, height: 700 });
+      await sleep(300);
+      const chips = await page.evaluate(() =>
+        [...document.querySelectorAll('.va-status .pill')].map((c) => {
+          const r = c.getBoundingClientRect();
+          return { text: c.textContent, left: r.left, right: r.right, fits: c.scrollWidth <= c.clientWidth + 1 };
+        }),
+      );
+      await page.screenshot({ path: join(out, 'chips-at-320.png') });
+      assert(chips.length >= 2 && chips.every((c) => c.left >= 0 && c.right <= 320.5 && c.fits), `no chip is clipped at 320: ${JSON.stringify(chips)}`);
+      await page.setViewportSize({ width: 390, height: 844 });
 
       // Undone from the page, then a change set that fails a check.
       await page.click('button[data-act="undo"]');
@@ -1407,9 +1443,17 @@ const checks = {
         const tip = await page.textContent('.tip');
         assert(tip.includes('REC') && tip.includes('Coming soon'), `the tip names the alias and says it is coming: ${tip}`);
         await page.click('.rb[data-tool="rectangle"]', { force: true });
-        assert((await bar(page)).includes('RECTANG(REC) Coming soon'), `the command bar says the tool is coming: ${await bar(page)}`);
+        assert(
+          (await bar(page)).includes('RECTANG(REC) Click one corner, then the opposite corner. Coming soon'),
+          `the command bar says what the tool does and that it is coming: ${await bar(page)}`,
+        );
         await page.click('.opt[data-opt="ok"]');
         assert(!(await bar(page)).includes('Coming soon'), 'OK clears it');
+        // From the keyboard, with no hover: the same words.
+        await page.focus('.rb[data-tool="circle"]');
+        await page.keyboard.press('Enter');
+        assert((await bar(page)).includes('CIRCLE(C) Click the centre, then click how big it is'), `Enter on a tool says what it does: ${await bar(page)}`);
+        await page.click('.opt[data-opt="ok"]');
         // The status bar: the cursor's place, the paper, and the toggles.
         const stage = await page.evaluate(() => {
           const r = document.querySelector('.stage').getBoundingClientRect();
@@ -1423,6 +1467,19 @@ const checks = {
           return `${(v.left + (x - r.left) / v.scale).toFixed(3)}, ${(v.top - (y - r.top) / v.scale).toFixed(3)} in`;
         }, stage);
         assert(coords === expected, `the status bar says where the cursor is: ${coords}, not ${expected}`);
+        // The view moves under a still pointer, as a fling does: the coordinates follow.
+        await page.evaluate(() => {
+          const v = window.agentdrafterViewer.view();
+          window.agentdrafterViewer.show({ ...v, left: v.left - 1.5 });
+        });
+        await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+        const followed = await page.textContent('.coords');
+        const underPointer = await page.evaluate(([x, y]) => {
+          const v = window.agentdrafterViewer.view();
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          return `${(v.left + (x - r.left) / v.scale).toFixed(3)}, ${(v.top - (y - r.top) / v.scale).toFixed(3)} in`;
+        }, stage);
+        assert(followed === underPointer && followed !== coords, `the coordinates follow a view moved under the pointer: ${followed}, not ${underPointer}`);
         assert((await page.textContent('.paperlabel')) === 'ANSI B landscape, inches', 'the paper and its units');
         const pressed = (k) => page.getAttribute(`.status [data-toggle="${k}"]`, 'aria-pressed');
         assert((await pressed('grid')) === 'true' && (await pressed('osnap')) === 'true' && (await pressed('ortho')) === 'false', 'Grid and Object snap start on, Ortho off');
@@ -1445,6 +1502,28 @@ const checks = {
         assert(gridOn > 5000 && gridOff === 0 && (await pressed('grid')) === 'false', `F7 takes the grid away: ${gridOn} then ${gridOff}`);
         await page.click('.status [data-toggle="grid"]');
         assert((await gridPixels()) === gridOn && (await pressed('grid')) === 'true', 'Grid puts it back');
+        // The paper's dashed edge is one CSS pixel wide: one row on top, one
+        // column at the left. On a made-up sheet drawn on its extents, where
+        // no ink lies on the edge, as the demo plant's own does.
+        const bare = await open(context, `${server.base}/?source=overlap.yaml`, null);
+        const edge = await bare.page.evaluate(() => {
+          const p = window.agentdrafterViewer;
+          const s = p.summary;
+          const scale = 40;
+          const raw = atob(p.capture({ left: s.paper[0] - 20 / scale, top: s.paper[3] + 20 / scale, scale, width: 60, height: 60, white: false }));
+          const isEdge = (x, y) => {
+            const i = (y * 60 + x) * 4;
+            return [raw.charCodeAt(i), raw.charCodeAt(i + 1), raw.charCodeAt(i + 2)].join() === '86,96,110';
+          };
+          let rows = 0;
+          let columns = 0;
+          for (let y = 10; y < 30; y++) if (isEdge(22, y)) rows++;
+          for (let x = 10; x < 30; x++) if (isEdge(x, 22)) columns++;
+          return { rows, columns, top: isEdge(22, 20), left: isEdge(20, 22) };
+        });
+        assert(edge.rows === 1 && edge.columns === 1 && edge.top && edge.left, `the paper's edge is one pixel wide, on the paper's edge: ${JSON.stringify(edge)}`);
+        assert(bare.problems.length === 0, bare.problems.join('; '));
+        await bare.page.close();
         await page.keyboard.press('F3');
         await page.keyboard.press('F8');
         assert((await pressed('osnap')) === 'false' && (await pressed('ortho')) === 'true', 'F3 and F8 turn Object snap and Ortho');
@@ -1499,8 +1578,38 @@ const checks = {
         await page.click('.stab:has-text("Journal")');
         await page.waitForSelector('.va-jhead');
         assert(await page.isVisible('.titlebar button[data-act="undo"]') && await page.isVisible('.titlebar button[data-act="accept"]'), 'Undo last and Accept are in the title bar');
+        // Last, as it may leave no renderer: a lost WebGL context, restored,
+        // with Grid off. The renderer made anew draws with Grid off, as the
+        // page has it. A browser that never restores a lost context, as
+        // headless Chromium with SwiftShader does not, is recorded, not failed.
+        await page.keyboard.press('F7');
+        const restore = await page.evaluate(async () => {
+          const within = (promise, what) =>
+            Promise.race([promise.then(() => null), new Promise((done) => setTimeout(() => done(`no ${what} within 5 s`), 5000))]);
+          const canvas = document.querySelector('.stage');
+          const lose = canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context');
+          if (!lose) return 'no WEBGL_lose_context';
+          const lost = new Promise((done) => canvas.addEventListener('webglcontextlost', done, { once: true }));
+          lose.loseContext();
+          const notLost = await within(lost, 'webglcontextlost');
+          if (notLost) return notLost;
+          const back = new Promise((done) => canvas.addEventListener('webglcontextrestored', done, { once: true }));
+          lose.restoreContext();
+          const notBack = await within(back, 'webglcontextrestored');
+          if (notBack) return notBack;
+          await new Promise((done) => setTimeout(done, 300));
+          return null;
+        });
+        let contextRestored = 'not offered by this browser';
+        if (restore === null) {
+          const afterRestore = await gridPixels();
+          assert(afterRestore === 0, `after a lost context the grid stays off: ${afterRestore}`);
+          contextRestored = 'restored, the grid still off';
+        } else {
+          assert(restore === 'no webglcontextrestored within 5 s', `the context is lost: ${restore}`);
+        }
         assert(problems.length === 0, problems.join('; '));
-        seen.laptop = { ribbon, coords, grid_pixels: [gridOn, gridOff], screen, card };
+        seen.laptop = { ribbon, coords, grid_pixels: [gridOn, gridOff], screen, card, context_restored: contextRestored };
         await context.close();
       }
       // A phone.
@@ -1515,7 +1624,7 @@ const checks = {
         await page.screenshot({ path: join(out, 'frame-phone-tools.png') });
         await page.tap('.rb[data-tool="erase"]', { force: true });
         assert(!(await page.isVisible('.ribbon')), 'a tool tapped folds the ribbon');
-        assert((await bar(page)).includes('ERASE(E) Coming soon'), `the command bar says Erase is coming: ${await bar(page)}`);
+        assert((await bar(page)).includes('ERASE(E) Click an object to remove it. Undo brings it back. Coming soon'), `the command bar says what Erase does and that it is coming: ${await bar(page)}`);
         await page.tap('.opt[data-opt="ok"]');
         const device = await at(page, 'DP-LD-101/device');
         await page.touchscreen.tap(...middle(device.box));
@@ -1530,11 +1639,62 @@ const checks = {
         assert(placed.qp[3] <= placed.cmd[0] && placed.cmd[1] <= placed.peek && placed.qp[0] >= 0 && placed.qp[2] <= placed.width, `on a phone the card sits above the command bar, above the peek: ${JSON.stringify(placed)}`);
         await page.screenshot({ path: join(out, 'frame-phone-selected.png') });
         assert(await page.isVisible('.va-peek button[data-act="undo"]') && await page.isVisible('.va-peek button[data-act="accept"]'), 'Undo last and Accept are in the peek');
+        // Fit stays in reach while something is selected: nothing covers it, and it fits.
+        const fitButton = await page.evaluate(() => {
+          const b = document.querySelector('[aria-label="Fit the sheet"]');
+          const r = b.getBoundingClientRect();
+          const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          const qp = document.querySelector('.qp').getBoundingClientRect();
+          return { reached: top === b || b.contains(top), apart: r.top >= qp.bottom || r.bottom <= qp.top || r.left >= qp.right || r.right <= qp.left };
+        });
+        assert(fitButton.reached && fitButton.apart, `Fit is reachable with quick properties open: ${JSON.stringify(fitButton)}`);
+        await page.tap('[aria-label="Fit the sheet"]');
+        await sleep(600);
+        assert(await page.isVisible('.qp'), 'Fit leaves the selection');
+        // The journal raised to half: quick properties sit above it, not behind.
+        const grab = await page.evaluate(() => {
+          const r = document.querySelector('.va-grab').getBoundingClientRect();
+          return [r.left + r.width / 2, r.top + r.height / 2];
+        });
+        await page.touchscreen.tap(grab[0], grab[1]);
+        await sleep(600);
+        const raised = await page.evaluate(() => {
+          const qp = document.querySelector('.qp').getBoundingClientRect();
+          const sheet = document.querySelector('.va-sheet').getBoundingClientRect();
+          const stage = document.querySelector('.stage').getBoundingClientRect();
+          return { qp: [qp.top, qp.bottom], sheetTop: sheet.top, stageTop: stage.top };
+        });
+        await page.screenshot({ path: join(out, 'frame-phone-journal-raised.png') });
+        assert(raised.qp[1] <= raised.sheetTop + 0.5 && raised.qp[0] >= raised.stageTop - 0.5 && raised.qp[1] - raised.qp[0] > 40, `quick properties sit above the raised journal: ${JSON.stringify(raised)}`);
         assert(problems.length === 0, problems.join('; '));
-        seen.phone = { toggles, placed };
+        seen.phone = { toggles, placed, raised };
         await context.close();
       }
-      return { ...seen, screenshots: ['frame-laptop-selected.png', 'frame-phone-tools.png', 'frame-phone-selected.png'] };
+      // A phone held on its side: the card does not cover the selected object.
+      {
+        const context = await b.newContext({ ...PHONE, viewport: { width: 844, height: 390 } });
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        const device = await at(page, 'DP-LD-101/device');
+        await page.touchscreen.tap(...middle(device.box));
+        await page.waitForSelector('.qp');
+        await sleep(700);
+        const after = await at(page, 'DP-LD-101/device');
+        const qp = await page.evaluate(() => {
+          const r = document.querySelector('.qp').getBoundingClientRect();
+          return [r.left, r.top, r.right, r.bottom];
+        });
+        const [l, t, r, bt] = after.box;
+        const overlaps = l < qp[2] && r > qp[0] && t < qp[3] && bt > qp[1];
+        await page.screenshot({ path: join(out, 'frame-phone-landscape-selected.png') });
+        assert(!overlaps, `on its side, quick properties do not cover the device: ${JSON.stringify({ device: after.box, qp })}`);
+        assert(problems.length === 0, problems.join('; '));
+        seen.landscape = { device: after.box, qp };
+        await context.close();
+      }
+      return {
+        ...seen,
+        screenshots: ['frame-laptop-selected.png', 'frame-phone-tools.png', 'frame-phone-selected.png', 'frame-phone-journal-raised.png', 'frame-phone-landscape-selected.png'],
+      };
     } finally {
       await b.close();
       await server.stop();

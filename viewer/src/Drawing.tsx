@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 
-import { placeBeside } from './frame.ts';
+import { freeBeside, placeBeside } from './frame.ts';
 
 import { Viewer } from './wasm/agentdrafter_viewer.js';
 import { attachGestures, Glide, type Surface } from './gestures.ts';
@@ -128,6 +128,12 @@ export function Drawing({
   const cursor = useRef(onCursor);
   const colorOf = useRef(onPickedColor);
   const narrow = useRef(compact);
+  // The grid as the page has it, for a renderer made anew.
+  const gridNow = useRef(grid);
+  gridNow.current = grid;
+  // Where a mouse rests on the canvas, in CSS pixels from its top left, so
+  // the status bar's coordinates follow a view that moves under it.
+  const pointer = useRef<[number, number] | null>(null);
   // The picked object's box in drawing units, which quick properties sit beside.
   const pickedBox = useRef<number[]>([]);
   const [, setReady] = useState(false);
@@ -180,6 +186,8 @@ export function Drawing({
     kept.push({ at: began, ms: performance.now() - began });
     if (kept.length > 2000) kept.splice(0, kept.length - 2000);
     placeCard();
+    const at = pointer.current;
+    if (at) cursor.current?.(toDrawing(view.current, at[0], at[1]));
   };
   const redraw = () => {
     if (!frame.current) frame.current = requestAnimationFrame(draw);
@@ -311,6 +319,9 @@ export function Drawing({
       try {
         viewer.current?.free();
         viewer.current = new Viewer(c);
+        // What the page holds that the renderer draws by: a renderer made
+        // anew, as after a lost context, starts from it, not its defaults.
+        viewer.current.set_grid(gridNow.current);
         return true;
       } catch (e) {
         viewer.current = null;
@@ -365,9 +376,13 @@ export function Drawing({
     const hover = (e: PointerEvent) => {
       if (e.pointerType !== 'mouse') return;
       const r = c.getBoundingClientRect();
-      cursor.current?.(toDrawing(view.current, e.clientX - r.left, e.clientY - r.top));
+      pointer.current = [e.clientX - r.left, e.clientY - r.top];
+      cursor.current?.(toDrawing(view.current, pointer.current[0], pointer.current[1]));
     };
-    const away = () => cursor.current?.(null);
+    const away = () => {
+      pointer.current = null;
+      cursor.current?.(null);
+    };
     b.addEventListener('pointermove', hover);
     b.addEventListener('pointerleave', away);
     const lost = (e: Event) => e.preventDefault();
@@ -415,19 +430,27 @@ export function Drawing({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marks, picked]);
 
-  // On a phone, an object picked low on the screen is brought up, above
-  // the quick properties that open over the bottom of the drawing.
+  // On a phone, an object picked where quick properties open over it is
+  // brought into the drawing's free part: above the card, as a phone held
+  // upright has it, or left of it, as one held on its side has it. Where
+  // the card begins is measured, not assumed.
   useEffect(() => {
     const c = canvas.current;
+    const el = card?.current;
     const b = pickedBox.current;
-    if (!compact || picked === null || !c || b.length !== 4) return;
+    if (!compact || picked === null || !c || !el || b.length !== 4) return;
+    const cr = c.getBoundingClientRect();
+    const qr = el.getBoundingClientRect();
+    const free = freeBeside([qr.left - cr.left, qr.top - cr.top, qr.right - cr.left, qr.bottom - cr.top], cr.width, cr.height);
     const v = view.current;
-    const [cx, cy] = toScreen(v, ((b[0] as number) + (b[2] as number)) / 2, ((b[1] as number) + (b[3] as number)) / 2);
-    const above = c.clientHeight * 0.36;
-    if (cy >= 12 && cy <= above && cx >= 0 && cx <= c.clientWidth) return;
+    const [l, t] = toScreen(v, b[0] as number, b[3] as number);
+    const [r, bottom] = toScreen(v, b[2] as number, b[1] as number);
+    const m = 12;
+    if (l >= free[0] + m && r <= free[2] - m && t >= free[1] + m && bottom <= free[3] - m) return;
     followFit.current = false;
-    const target = { ...v, left: v.left + (cx - c.clientWidth / 2) / v.scale, top: v.top - (cy - above / 2 - 12) / v.scale };
-    glide.current?.to(target, 300, [c.clientWidth / 2, above / 2]);
+    const [fx, fy] = [(free[0] + free[2]) / 2, (free[1] + free[3]) / 2];
+    const target = { ...v, left: v.left + ((l + r) / 2 - fx) / v.scale, top: v.top - ((t + bottom) / 2 - fy) / v.scale };
+    glide.current?.to(target, 300, [fx, fy]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [picked, compact]);
 
