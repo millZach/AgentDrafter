@@ -3,7 +3,10 @@
 // and pan at once; a double tap or double click zooms in where it lands;
 // the wheel zooms where the pointer is, a trackpad's pinch (a wheel with
 // ctrlKey) faster. Every change goes through the surface, which draws it on
-// the next frame.
+// the next frame. A finger held still for HOLD_MS brings the magnifier,
+// and moves it until it lifts, which takes the snap it shows; a finger
+// pans only once it has moved SLOP pixels, so a hold is not lost to a
+// tremor.
 
 import { between, ease, pinch, panBy, zoomAt, type Limits, type PinchStart, type View } from './view.ts';
 
@@ -14,11 +17,23 @@ export interface Surface {
   limits(): Limits;
   /** The reviewer took the view in hand: it no longer follows the fit. */
   touched(): void;
-  /** A tap or a click, not a drag, at a point of the element: a pick. */
-  tapped?(at: [number, number]): void;
+  /** A tap or a click, not a drag, at a point of the element, and the pointer that made it: a pick, or a click on a snap. */
+  tapped?(at: [number, number], pointer: string): void;
+  /** A finger held still: the magnifier comes up there. */
+  held?(at: [number, number]): void;
+  /** The held finger moves. */
+  holdMoved?(at: [number, number]): void;
+  /** The held finger lifts, `taken` when it lifted rather than was cancelled. */
+  holdEnded?(at: [number, number], taken: boolean): void;
 }
 
 type Point = [number, number];
+
+/** How long a finger is held still before the magnifier comes, in milliseconds. */
+export const HOLD_MS = 350;
+
+/** How far a finger moves, in CSS pixels, before it pans rather than holds. */
+export const SLOP = 6;
 
 /** Moves the surface's view to `to` over `ms` milliseconds; stops on a new gesture. */
 export class Glide {
@@ -74,6 +89,15 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
   let lastTap: { p: Point; t: number } | null = null;
   let multi = false;
   const moves: { t: number; dx: number; dy: number }[] = [];
+  // A finger held: its timer, whether the magnifier is up, and whether the
+  // finger has moved far enough to pan.
+  let holdTimer = 0;
+  let holding = false;
+  let panning = false;
+  const stopHold = () => {
+    if (holdTimer) clearTimeout(holdTimer);
+    holdTimer = 0;
+  };
 
   const local = (e: PointerEvent | WheelEvent): Point => {
     const r = element.getBoundingClientRect();
@@ -97,11 +121,22 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     }
     const p = local(e);
     pointers.set(e.pointerId, p);
+    stopHold();
     if (pointers.size === 1) {
       last = p;
       downAt = { p, t: performance.now() };
       multi = false;
+      panning = e.pointerType === 'mouse';
       moves.length = 0;
+      if (e.pointerType !== 'mouse' && surface.held) {
+        holdTimer = window.setTimeout(() => {
+          holdTimer = 0;
+          if (pointers.size === 1 && !panning && last) {
+            holding = true;
+            surface.held?.(last);
+          }
+        }, HOLD_MS);
+      }
     } else if (pointers.size === 2) {
       const [a, b] = twoFingers();
       pinchStart = { view: surface.view(), a, b };
@@ -113,6 +148,16 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     if (!pointers.has(e.pointerId)) return;
     const p = local(e);
     pointers.set(e.pointerId, p);
+    if (holding) {
+      surface.holdMoved?.(p);
+      return;
+    }
+    if (pointers.size === 1 && last && !panning) {
+      // A finger pans once it has moved far enough; until then it may hold.
+      if (!downAt || distance(p, downAt.p) < SLOP) return;
+      panning = true;
+      stopHold();
+    }
     if (pointers.size === 1 && last) {
       const dx = p[0] - last[0];
       const dy = p[1] - last[1];
@@ -130,6 +175,15 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     if (!pointers.has(e.pointerId)) return;
     const p = local(e);
     pointers.delete(e.pointerId);
+    stopHold();
+    if (holding) {
+      holding = false;
+      pointers.clear();
+      last = null;
+      downAt = null;
+      surface.holdEnded?.(p, e.type === 'pointerup');
+      return;
+    }
     if (pointers.size === 1) {
       // One finger lifted from a pinch: the other pans on from where it is.
       last = [...pointers.values()][0] ?? null;
@@ -156,7 +210,7 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
         glide.to(zoomAt(view, p[0], p[1], view.scale * 2.2, surface.limits()), 260, p);
       } else {
         lastTap = { p, t: now };
-        surface.tapped?.(p);
+        surface.tapped?.(p, e.pointerType);
       }
       return;
     }

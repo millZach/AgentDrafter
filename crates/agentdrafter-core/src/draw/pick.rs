@@ -216,6 +216,47 @@ fn to_ring(p: Point2, ring: &[Point2]) -> f64 {
     nearest
 }
 
+/// The point of a stroke drawn on the page itself nearest `at`, within
+/// `reach` drawing units, and the place in the sheet's objects of the
+/// object that draws it: AutoCAD's nearest snap as the cursor finds it,
+/// on what the display list draws, its curves within its tolerance. Model
+/// space seen through a viewport, and fills, are not looked at. Of two as
+/// near, the one drawn later, which lies on top.
+pub fn nearest(list: &DisplayList, at: Point2, reach: f64) -> Option<(usize, Point2)> {
+    let mut best: Option<(f64, usize, Point2)> = None;
+    for item in list.items.iter().filter(|item| item.viewport.is_none()) {
+        let Shape::Stroke { runs, .. } = &item.shape else {
+            continue;
+        };
+        for run in runs {
+            let pieces: Vec<(Point2, Point2)> = match run.as_slice() {
+                [] => Vec::new(),
+                [dot] => vec![(*dot, *dot)],
+                points => points.windows(2).map(|w| (w[0], w[1])).collect(),
+            };
+            for (a, b) in pieces {
+                let p = foot(at, a, b);
+                let d = distance(at, p);
+                if d <= reach && best.is_none_or(|(e, _, _)| d <= e) {
+                    best = Some((d, item.object, p));
+                }
+            }
+        }
+    }
+    best.map(|(_, object, p)| (object, p))
+}
+
+/// The point of the segment from `a` to `b` nearest `p`.
+fn foot(p: Point2, a: Point2, b: Point2) -> Point2 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let length2 = dx * dx + dy * dy;
+    if length2 <= 0.0 {
+        return a;
+    }
+    let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2).clamp(0.0, 1.0);
+    [a[0] + t * dx, a[1] + t * dy]
+}
+
 fn to_segment(p: Point2, a: Point2, b: Point2) -> f64 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let length2 = dx * dx + dy * dy;
@@ -257,6 +298,23 @@ pub(crate) fn inside(p: Point2, rule: FillRule, contours: &[Vec<Point2>]) -> boo
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_nearest_point_is_on_the_stroke_drawn_nearest() {
+        let list = DisplayList {
+            items: vec![
+                stroke(0, &[[0.0, 0.0], [10.0, 0.0]], 0.25),
+                stroke(1, &[[0.0, 2.0], [10.0, 2.0]], 0.25),
+            ],
+            ..DisplayList::default()
+        };
+        assert_eq!(nearest(&list, [4.0, 0.5], 1.0), Some((0, [4.0, 0.0])));
+        assert_eq!(nearest(&list, [4.0, 1.6], 1.0), Some((1, [4.0, 2.0])));
+        // Past the end, the end; out of reach, none.
+        assert_eq!(nearest(&list, [11.0, 0.0], 2.0), Some((0, [10.0, 0.0])));
+        assert_eq!(nearest(&list, [4.0, 5.0], 1.0), None);
+    }
+
     use super::super::{Color, Item};
     use super::*;
 

@@ -456,8 +456,11 @@ fn display_list_does() -> String {
      side. With `entry`, a drawing set is drawn as it was just after that entry of its journal, \
      rebuilt in memory from the undo states, or the reply says why it cannot be. A sheet drawn \
      in several layouts draws the one `layout` names, its first without it, and the reply lists \
-     them all under `layouts`. A loop sheet's display list runs to megabytes: it is for the \
-     viewer to draw, not to read."
+     them all under `layouts`. With `snaps`, the reply also gives `snaps`: every point \
+     AutoCAD's object snaps find on the objects the page draws itself, each with its `object` \
+     by its place, its `snap`, `which` of the object's points and, for an intersection, the \
+     other object by its place under `with`, as `query snap` names them, and `at`. A loop \
+     sheet's display list runs to megabytes: it is for the viewer to draw, not to read."
         .to_owned()
 }
 
@@ -472,6 +475,10 @@ fn display_list_input() -> Value {
                 "description": "Draw the drawing set as it was just after this entry of its journal, by its number, rebuilt in memory from the undo states; nothing is written. Without it, as it is now.",
                 "type": "integer",
                 "minimum": 1,
+            },
+            "snaps": {
+                "description": "Give each object's object snaps with the display list: every point its own snaps find (endpoint, midpoint, center, quadrant, insertion and node) and every intersection with another object, on the objects the page draws itself. Without it, none.",
+                "type": "boolean",
             },
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),

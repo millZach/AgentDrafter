@@ -27,6 +27,13 @@
 //            says it cannot be shown; back to live returns;
 // - pick:    a tap on an insert, at phone size, shows its ID, name, layer
 //            and attributes in quick properties;
+// - snaps:   object snaps: the marker and tag at a real snap point, as
+//            `query snap` gives it, the status bar's exact point, Tab, a
+//            click's read-out and Copy as snapped point, which a change set
+//            takes, the Object snap menu and F3 changing the running snaps,
+//            remembered across a reload, the search's time per pointer
+//            move, and on a phone the magnifier a held finger brings up
+//            and the snap it takes when lifted;
 // - frame:   the drafting app's frame at laptop and phone sizes: the ribbon's
 //            tools still to come, the command bar's prompts, quick
 //            properties beside the selected object, the Layer box, the
@@ -172,8 +179,23 @@ async function live(page) {
 }
 
 /** `agentdrafter serve` in the scratch folder, or `cwd`, with every line it printed. */
+/** Every server a check started, stopped when the run ends however it ends. */
+const servers = new Set();
+const stopAll = () => {
+  for (const child of servers) if (child.exitCode === null) child.kill();
+};
+process.on('exit', stopAll);
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    stopAll();
+    process.exit(1);
+  });
+}
+
 async function serve(listen, cwd = scratch) {
   const child = spawn(bin, ['serve', '--listen', listen], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  servers.add(child);
+  child.on('exit', () => servers.delete(child));
   const lines = [];
   const errors = [];
   child.stderr.on('data', (d) => errors.push(String(d)));
@@ -1436,7 +1458,7 @@ const checks = {
           JSON.stringify(ribbon) === JSON.stringify([['Draw Soon', ['Line', 'Circle', 'Rectangle', 'Text']], ['Modify Soon', ['Move', 'Erase']], ['Layer', []]]),
           `the ribbon: ${JSON.stringify(ribbon)}`,
         );
-        assert((await bar(page)).includes('Select an object to see its properties'), `the command bar prompts: ${await bar(page)}`);
+        assert((await bar(page)).includes('Select an object, or click a snap to read its point'), `the command bar prompts: ${await bar(page)}`);
         // A tool still to come: its tip on hover, and a note in the command bar when clicked.
         await page.hover('.rb[data-tool="rectangle"]');
         await page.waitForSelector('.tip');
@@ -1459,12 +1481,15 @@ const checks = {
           const r = document.querySelector('.stage').getBoundingClientRect();
           return [r.left + 300, r.top + 200];
         });
+        // Snapping off, so the cursor's own place is read, not a snap's.
+        await page.keyboard.press('F3');
         await page.mouse.move(stage[0], stage[1]);
+        await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
         const coords = await page.textContent('.coords');
         const expected = await page.evaluate(([x, y]) => {
           const v = window.agentdrafterViewer.view();
           const r = document.querySelector('.stage').getBoundingClientRect();
-          return `${(v.left + (x - r.left) / v.scale).toFixed(3)}, ${(v.top - (y - r.top) / v.scale).toFixed(3)} in`;
+          return `${(v.left + (x - r.left) / v.scale).toFixed(4)}, ${(v.top - (y - r.top) / v.scale).toFixed(4)} in`;
         }, stage);
         assert(coords === expected, `the status bar says where the cursor is: ${coords}, not ${expected}`);
         // The view moves under a still pointer, as a fling does: the coordinates follow.
@@ -1477,9 +1502,10 @@ const checks = {
         const underPointer = await page.evaluate(([x, y]) => {
           const v = window.agentdrafterViewer.view();
           const r = document.querySelector('.stage').getBoundingClientRect();
-          return `${(v.left + (x - r.left) / v.scale).toFixed(3)}, ${(v.top - (y - r.top) / v.scale).toFixed(3)} in`;
+          return `${(v.left + (x - r.left) / v.scale).toFixed(4)}, ${(v.top - (y - r.top) / v.scale).toFixed(4)} in`;
         }, stage);
         assert(followed === underPointer && followed !== coords, `the coordinates follow a view moved under the pointer: ${followed}, not ${underPointer}`);
+        await page.keyboard.press('F3');
         assert((await page.textContent('.paperlabel')) === 'ANSI B landscape, inches', 'the paper and its units');
         const pressed = (k) => page.getAttribute(`.status [data-toggle="${k}"]`, 'aria-pressed');
         assert((await pressed('grid')) === 'true' && (await pressed('osnap')) === 'true' && (await pressed('ortho')) === 'false', 'Grid and Object snap start on, Ortho off');
@@ -1626,7 +1652,7 @@ const checks = {
         await page.tap('.toolsbtn');
         assert(await page.isVisible('.ribbon'), 'Tools opens the ribbon');
         const toggles = await page.evaluate(() => [...document.querySelectorAll('.ribbon .tog2')].map((t) => t.textContent));
-        assert(JSON.stringify(toggles) === JSON.stringify(['Grid', 'Object snap', 'Ortho']), `Tools holds the toggles: ${toggles}`);
+        assert(JSON.stringify(toggles) === JSON.stringify(['Grid', 'Object snap', 'Ortho', 'Snaps…']), `Tools holds the toggles and the snaps' menu: ${toggles}`);
         await page.screenshot({ path: join(out, 'frame-phone-tools.png') });
         await page.tap('.rb[data-tool="erase"]', { force: true });
         assert(!(await page.isVisible('.ribbon')), 'a tool tapped folds the ribbon');
@@ -1779,6 +1805,207 @@ const checks = {
         ...seen,
         screenshots: ['frame-laptop-selected.png', 'frame-phone-tools.png', 'frame-phone-selected.png', 'frame-phone-journal-raised.png', 'frame-phone-320-prompt-wrapped.png', 'frame-phone-landscape-selected.png'],
       };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * Object snaps: the cursor catches the demo plant's own, as `query snap`
+   * gives them, with no round trip; a click reads the point out and Copy
+   * gives the snapped point a change set takes; the menu and F3 change the
+   * running snaps, kept across a reload; a phone's held finger brings up
+   * the magnifier and lifting takes the snap.
+   */
+  async snaps() {
+    const folder = freshPlant('snaps');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    const seen = {};
+    // FT-101's endpoint `objects[3].from`, as `query snap` gives it.
+    const asked = agentIn(folder, 'query', 'snap', 'demo-plant', '--id', 'DP-LD-101/device', '--snap', 'endpoint', '--which', 'objects[3].from');
+    assert(asked.ok && asked.result.points.length === 1, `query snap: ${JSON.stringify(asked)}`);
+    const end = asked.result.points[0].at;
+    // The two snaps of the running kinds nearest each other, from the display list's own, for Tab.
+    const listed = agentIn(folder, 'display-list', 'demo-plant', '--sheet', 'DP-LD-101', '--snaps').result.snaps;
+    const runs = (k) => ['endpoint', 'midpoint', 'center', 'intersection'].includes(k);
+    let pair = null;
+    for (let i = 0; i < listed.length; i++) {
+      for (let j = i + 1; j < listed.length; j++) {
+        const [a, c] = [listed[i], listed[j]];
+        const d = Math.hypot(a.at[0] - c.at[0], a.at[1] - c.at[1]);
+        if (d > 1e-6 && runs(a.snap) && runs(c.snap) && (!pair || d < pair[2])) pair = [a, c, d];
+      }
+    }
+    // Shows `at`, drawing units, at the middle of the drawing, `zoom` times the fitted scale.
+    const centre = (page, at, zoom) =>
+      page.evaluate(
+        ([x, y, zoom]) => {
+          const p = window.agentdrafterViewer;
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          const scale = p.view().scale * zoom;
+          p.show({ left: x - r.width / 2 / scale, top: y + r.height / 3 / scale, scale });
+        },
+        [at[0], at[1], zoom],
+      );
+    const onPage = (page, at) =>
+      page.evaluate(([x, y]) => {
+        const v = window.agentdrafterViewer.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+      }, at);
+    const frames = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    const hovered = (page) => page.evaluate(() => window.agentdrafterViewer.hovered());
+    try {
+      // A laptop, with a mouse.
+      {
+        const context = await b.newContext({ ...LAPTOP, permissions: ['clipboard-read', 'clipboard-write'] });
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        const count = await page.evaluate(() => window.agentdrafterViewer.summary.snaps);
+        assert(count === listed.length && count > 100, `the sheet came with its snaps: ${count}`);
+        await centre(page, end, 6);
+        await frames(page);
+        const [x, y] = await onPage(page, end);
+        await page.mouse.move(x + 5, y + 4);
+        await frames(page);
+        const h = await hovered(page);
+        assert(
+          h && h.snap === 'endpoint' && h.which === 'objects[3].from' && JSON.stringify(h.at) === JSON.stringify(end),
+          `the cursor catches FT-101's endpoint where query snap puts it: ${JSON.stringify({ h, end })}`,
+        );
+        const tag = await page.textContent('.snaptag');
+        const coords = await page.textContent('.coords');
+        assert(tag === 'Endpoint · FT-101', `the tag names it: ${tag}`);
+        assert(coords === `${end[0].toFixed(4)}, ${end[1].toFixed(4)} inEndpoint`, `the status bar shows the snapped point exactly: ${coords}`);
+        // The marker is drawn: AutoSnap yellow round the point, on the screen.
+        const shot = decodePng(await page.screenshot({ clip: { x: x - 12, y: y - 12, width: 24, height: 24 } }));
+        let yellow = 0;
+        for (let i = 0; i < shot.rgba.length; i += 4) {
+          const [r, g, bl] = [shot.rgba[i], shot.rgba[i + 1], shot.rgba[i + 2]];
+          if (Math.abs(r - 0xf2) < 24 && Math.abs(g - 0xe2) < 24 && Math.abs(bl - 0x4b) < 40) yellow++;
+        }
+        assert(yellow > 20, `the marker is drawn at the point: ${yellow} yellow pixels`);
+        await page.screenshot({ path: join(out, 'snaps-laptop-endpoint.png') });
+        // A click reads the point out and selects its object; Copy gives the snapped point.
+        await page.mouse.click(x + 5, y + 4);
+        await page.waitForSelector('.qp');
+        const bar = await page.textContent('.cmdbar');
+        assert(bar.includes(`Endpoint of FT-101: ${end[0].toFixed(4)}, ${end[1].toFixed(4)} in [ Copy as snapped point Clear ]`), `the read-out: ${bar}`);
+        await page.click('.opt[data-opt="copy"]');
+        const copied = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
+        assert(
+          JSON.stringify(copied) === JSON.stringify({ snap: { id: 'DP-LD-101/device', snap: 'endpoint', which: 'objects[3].from' } }),
+          `Copy gives the snapped point: ${JSON.stringify(copied)}`,
+        );
+        // A change set takes it as it is.
+        writeFileSync(join(folder, 'from-snap.json'), JSON.stringify({ operations: [{ op: 'add_line', sheet: 'DP-LD-101', layer: '0', from: copied, to: [5, 5, 0] }] }));
+        const dry = agentIn(folder, 'change', 'demo-plant', 'from-snap.json', '--dry-run');
+        const snapped = dry.result?.operations?.[0]?.snapped?.[0];
+        assert(dry.ok && JSON.stringify(snapped?.at) === JSON.stringify(end), `a change set takes the copied point: ${JSON.stringify(dry.error ?? snapped)}`);
+        await page.screenshot({ path: join(out, 'snaps-laptop-taken.png') });
+        await page.click('.opt[data-opt="clear"]');
+        // Tab steps to the next snap in reach.
+        assert(pair, 'two snaps lie near each other');
+        {
+          const between = [(pair[0].at[0] + pair[1].at[0]) / 2, (pair[0].at[1] + pair[1].at[1]) / 2];
+          // Shown so the two are 10 CSS pixels apart: both in reach of the point between them.
+          await page.evaluate(
+            ([x, y, scale]) => {
+              const r = document.querySelector('.stage').getBoundingClientRect();
+              window.agentdrafterViewer.show({ left: x - r.width / 2 / scale, top: y + r.height / 3 / scale, scale });
+            },
+            [between[0], between[1], 10 / pair[2]],
+          );
+          await frames(page);
+          const [tx, ty] = await onPage(page, between);
+          await page.mouse.move(tx, ty);
+          await frames(page);
+          const first = await hovered(page);
+          await page.keyboard.press('Tab');
+          await frames(page);
+          const second = await hovered(page);
+          assert(first?.count >= 2 && second?.place === 1 && second.count === first.count, `Tab steps to the next: ${JSON.stringify({ first, second })}`);
+          seen.tab = { count: first.count, first: first.snap, second: second.snap };
+        }
+        // The menu: Endpoint unticked, and the cursor no longer catches it; kept across a reload.
+        await page.mouse.move(x + 5, y + 4);
+        await page.click('.osmenubtn');
+        await page.waitForSelector('.osmenu');
+        await page.screenshot({ path: join(out, 'snaps-laptop-menu.png') });
+        await page.click('.osrow[data-snap="endpoint"]');
+        assert((await page.getAttribute('.osrow[data-snap="endpoint"]', 'aria-checked')) === 'false', 'Endpoint is unticked');
+        await page.keyboard.press('Escape');
+        await page.mouse.move(x + 6, y + 4);
+        await frames(page);
+        const without = await hovered(page);
+        assert(!without || without.snap !== 'endpoint', `with Endpoint off, it is not caught: ${JSON.stringify(without)}`);
+        await page.reload();
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.snaps > 0);
+        await page.click('.osmenubtn');
+        const kept = await page.evaluate(() => [...document.querySelectorAll('.osrow[aria-checked="true"]')].map((r) => r.dataset.snap));
+        assert(JSON.stringify(kept) === JSON.stringify(['midpoint', 'center', 'intersection']), `the running snaps are kept: ${JSON.stringify(kept)}`);
+        await page.click('.osmenu [data-defaults]');
+        await page.keyboard.press('Escape');
+        // F3 turns snapping off, and on.
+        await centre(page, end, 6);
+        await frames(page);
+        const [fx, fy] = await onPage(page, end);
+        await page.mouse.move(fx + 5, fy + 4);
+        await frames(page);
+        assert((await hovered(page))?.snap === 'endpoint', 'Defaults puts Endpoint back');
+        await page.keyboard.press('F3');
+        await page.mouse.move(fx + 5, fy + 5);
+        await frames(page);
+        assert((await hovered(page)) === null && (await page.getAttribute('.status [data-toggle="osnap"]', 'aria-pressed')) === 'false', 'F3 turns snapping off');
+        await page.keyboard.press('F3');
+        // The search for the snaps in reach, per pointer move, over the paper.
+        const each = await page.evaluate(() => {
+          const p = window.agentdrafterViewer;
+          const [l, bt, r, t] = p.summary.paper;
+          const at = Array.from({ length: 5000 }, (_, i) => [l + (((i * 7919) % 1000) / 1000) * (r - l), bt + (((i * 104729) % 1000) / 1000) * (t - bt)]);
+          return p.timeSnapSearch(at, 12);
+        });
+        assert(each < 0.5, `the search takes ${each} ms a move`);
+        seen.laptop = { snaps: count, endpoint: end, copied, search_ms_per_move: each };
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      // A phone: a finger held brings up the magnifier; lifting takes the snap.
+      {
+        const context = await b.newContext(PHONE);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await centre(page, end, 4);
+        await frames(page);
+        const [x, y] = await onPage(page, end);
+        const cdp = await context.newCDPSession(page);
+        const touch = (type, points) =>
+          cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([px, py], id) => ({ x: px, y: py, id, radiusX: 2, radiusY: 2, force: 1 })) });
+        await touch('touchStart', [[x + 4, y + 3]]);
+        await sleep(500);
+        const loupe = await page.evaluate(() => {
+          const el = document.querySelector('.loupe');
+          const r = el.getBoundingClientRect();
+          return { display: getComputedStyle(el).display, box: [r.left, r.top, r.right, r.bottom] };
+        });
+        const tag = await page.textContent('.snaptag');
+        await page.screenshot({ path: join(out, 'snaps-phone-magnifier.png') });
+        assert(loupe.display === 'block' && loupe.box[3] < y, `the magnifier comes up above the finger: ${JSON.stringify({ loupe, y })}`);
+        assert(tag === 'Endpoint · FT-101', `it shows the snap the finger is on: ${tag}`);
+        await touch('touchEnd', []);
+        await page.waitForFunction(() => document.querySelector('.cmdbar').textContent.includes('Endpoint of FT-101'));
+        assert((await page.evaluate(() => getComputedStyle(document.querySelector('.loupe')).display)) === 'none', 'lifting puts the magnifier away');
+        await page.screenshot({ path: join(out, 'snaps-phone-taken.png') });
+        // The menu is in Tools, under Status.
+        await page.tap('.toolsbtn');
+        await page.tap('[data-snaps]');
+        await page.waitForSelector('.osmenu.card');
+        await page.screenshot({ path: join(out, 'snaps-phone-menu.png') });
+        seen.phone = { magnifier: loupe.box, tag };
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      return { ...seen, screenshots: ['snaps-laptop-endpoint.png', 'snaps-laptop-taken.png', 'snaps-laptop-menu.png', 'snaps-phone-magnifier.png', 'snaps-phone-taken.png', 'snaps-phone-menu.png'] };
     } finally {
       await b.close();
       await server.stop();

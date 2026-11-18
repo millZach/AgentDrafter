@@ -5,11 +5,17 @@
 // and so is what a tap picks: the core finds the object drawn nearest the
 // point in the display list, so the page holds no hit-test of its own. It
 // also keeps quick properties beside the picked object as the view moves,
-// and says where the cursor is on the drawing.
+// and says where the cursor is on the drawing. The renderer finds the
+// object snap nearest the cursor among the running ones and draws the
+// crosshair and the snap's marker; this component says where the cursor
+// is, keeps the snap's tag beside its marker, takes a snap clicked, steps
+// to the next with Tab, and on a phone brings up the magnifier, a second
+// renderer drawing the same sheet three times larger, while a finger is
+// held still.
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 
-import { freeBeside, newlyHidden, placeBeside, type Box } from './frame.ts';
+import { freeBeside, newlyHidden, placeBeside, snapTag, type Box, type Hovered, type Named } from './frame.ts';
 
 import { Viewer } from './wasm/agentdrafter_viewer.js';
 import { attachGestures, Glide, type Surface } from './gestures.ts';
@@ -80,8 +86,14 @@ export interface DrawingProps {
    * brings the selected object out from under the card again.
    */
   space?: string;
-  /** Where the mouse is on the drawing, in drawing units, or null once it has left. */
-  onCursor?(at: [number, number] | null): void;
+  /** Where the cursor is on the drawing, in drawing units, and the snap it holds; null once it has left. */
+  onCursor?(at: [number, number] | null, snapped: Hovered | null): void;
+  /** The object snaps the cursor catches, as the renderer's bits; 0 when Object snap is off. */
+  snapMask?: number;
+  /** A snap clicked, or lifted from under a held finger, with no tool running. */
+  onTakeSnap?(snap: Hovered): void;
+  /** A held finger lifted where no snap was, at this drawing point. */
+  onNoSnap?(at: [number, number]): void;
   /** The colour the picked object shows in, `#rrggbb`, as the renderer says; empty for none. */
   onPickedColor?(color: string): void;
 }
@@ -91,6 +103,23 @@ const PICK_REACH = 16;
 
 /** On a laptop, the room at the right the zoom buttons take, which a fitted sheet stays clear of. */
 const ZOOM_COLUMN = 46;
+
+/** How near the cursor a snap is caught, in CSS pixels: AutoCAD's aperture is 10; a finger needs more. */
+const REACH_MOUSE = 12;
+const REACH_TOUCH = 22;
+
+/** Two snaps whose distances differ by less than this, in CSS pixels, are as near: AutoCAD's order picks. */
+const TIE = 2;
+
+/** The magnifier: how much larger, its largest radius, and how far above the finger, in CSS pixels. */
+const LOUPE_ZOOM = 3;
+const LOUPE_RADIUS = 70;
+const LOUPE_LIFT = 52;
+
+const hoveredOf = (v: Viewer | null): Hovered | null => {
+  const text = v?.hovered();
+  return text ? (JSON.parse(text) as Hovered) : null;
+};
 
 /** Device pixels to a CSS pixel: the canvas's backing size over its size. */
 const ratioOf = (canvas: HTMLCanvasElement): number =>
@@ -113,6 +142,9 @@ export function Drawing({
   onCursor,
   onPickedColor,
   space,
+  snapMask = 0,
+  onTakeSnap,
+  onNoSnap,
 }: DrawingProps) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -143,6 +175,23 @@ export function Drawing({
   const pointer = useRef<[number, number] | null>(null);
   // The picked object's box in drawing units, which quick properties sit beside.
   const pickedBox = useRef<number[]>([]);
+  // Snapping: the running snaps, the snap the cursor holds, the drawing
+  // point it was found at (so Tab's choice holds until the cursor moves),
+  // what each object is called, the tag beside the marker, and the
+  // magnifier: its canvas, its renderer, and the finger held.
+  const mask = useRef(snapMask);
+  const hovered = useRef<Hovered | null>(null);
+  const hoverKey = useRef('');
+  const objects = useRef<Named[]>([]);
+  const tag = useRef<HTMLDivElement>(null);
+  const loupe = useRef<HTMLCanvasElement>(null);
+  const loupeViewer = useRef<Viewer | null>(null);
+  const loupeReply = useRef<string | null>(null);
+  const held = useRef<[number, number] | null>(null);
+  const take = useRef(onTakeSnap);
+  const noSnap = useRef(onNoSnap);
+  take.current = onTakeSnap;
+  noSnap.current = onNoSnap;
   const [, setReady] = useState(false);
   covered.current = coveredBelow;
   shownMarks.current = { marks, picked };
@@ -182,11 +231,56 @@ export function Drawing({
     el.style.visibility = 'visible';
   };
 
+  // The crosshair and the snap the cursor holds, in step with the view:
+  // found again only when the drawing point under the cursor moves.
+  const hoverNow = () => {
+    const v = viewer.current;
+    if (!v) return;
+    const at = pointer.current;
+    if (!at || held.current) {
+      v.hide_crosshair();
+      v.clear_hover();
+      hovered.current = null;
+      hoverKey.current = '';
+      return;
+    }
+    const scale = view.current.scale;
+    const [x, y] = toDrawing(view.current, at[0], at[1]);
+    v.set_crosshair(x, y, true);
+    const key = `${x},${y},${scale},${mask.current}`;
+    if (key === hoverKey.current) return;
+    hoverKey.current = key;
+    v.hover(x, y, REACH_MOUSE / scale, TIE / scale);
+    hovered.current = hoveredOf(v);
+  };
+  // The snap's name and its object, beside its marker.
+  const placeTag = (h: Hovered | null, x: number, y: number, centred: boolean) => {
+    const el = tag.current;
+    if (!el) return;
+    if (!h) {
+      el.style.display = 'none';
+      return;
+    }
+    // A finger has no Tab to step with.
+    const { main, sub } = snapTag(h, objects.current, !centred);
+    const b = document.createElement('b');
+    b.textContent = main;
+    el.replaceChildren(b, ` · ${sub}`);
+    el.style.display = 'block';
+    const c = canvas.current;
+    const w = el.offsetWidth;
+    const width = c?.clientWidth ?? 0;
+    const left = centred ? x - w / 2 : x;
+    el.style.left = `${Math.max(4, Math.min(width - w - 4, left))}px`;
+    el.style.top = `${Math.max(4, y)}px`;
+  };
+
   const draw = () => {
     frame.current = 0;
     const v = viewer.current;
     const c = canvas.current;
     if (!v || !c) return;
+    hoverNow();
     const began = performance.now();
     v.draw(view.current.left, view.current.top, view.current.scale, ratioOf(c));
     const kept = draws.current;
@@ -194,7 +288,15 @@ export function Drawing({
     if (kept.length > 2000) kept.splice(0, kept.length - 2000);
     placeCard();
     const at = pointer.current;
-    if (at) cursor.current?.(toDrawing(view.current, at[0], at[1]));
+    if (held.current) return;
+    const h = hovered.current;
+    if (h) {
+      const [mx, my] = toScreen(view.current, h.at[0], h.at[1]);
+      placeTag(h, mx + 12, my + 12, false);
+    } else {
+      placeTag(null, 0, 0, false);
+    }
+    if (at) cursor.current?.(toDrawing(view.current, at[0], at[1]), h);
   };
   const redraw = () => {
     if (!frame.current) frame.current = requestAnimationFrame(draw);
@@ -229,14 +331,102 @@ export function Drawing({
     touched: () => {
       followFit.current = false;
     },
-    tapped: ([sx, sy]) => {
+    tapped: ([sx, sy], pointerType) => {
       const v = viewer.current;
       if (!v || !loadedReply.current) return;
+      // A click on a snap reads its point out; anything else picks.
+      const h = hovered.current;
+      if (pointerType === 'mouse' && h) {
+        take.current?.(h);
+        return;
+      }
       const [x, y] = toDrawing(view.current, sx, sy);
       const place = v.pick(x, y, PICK_REACH / view.current.scale);
       pick.current(place >= 0 ? place : null);
     },
+    held: (p) => {
+      held.current = p;
+      showLoupe(p);
+      redraw();
+    },
+    holdMoved: (p) => {
+      held.current = p;
+      showLoupe(p);
+    },
+    holdEnded: (p, taken) => {
+      const h = hoveredOf(loupeViewer.current);
+      held.current = null;
+      hideLoupe();
+      redraw();
+      if (!taken) return;
+      if (h) take.current?.(h);
+      else noSnap.current?.(toDrawing(view.current, p[0], p[1]));
+    },
   };
+  // The magnifier a finger holds up: the drawing under the finger three
+  // times larger, above it, with the crosshair and the snap it would take.
+  const showLoupe = (p: [number, number]) => {
+    const el = loupe.current;
+    const c = canvas.current;
+    if (!el || !c || !loadedReply.current) return;
+    if (!loupeViewer.current) {
+      try {
+        loupeViewer.current = new Viewer(el);
+      } catch {
+        return;
+      }
+      loupeReply.current = null;
+    }
+    const lv = loupeViewer.current;
+    if (loupeReply.current !== loadedReply.current) {
+      lv.load(loadedReply.current);
+      loupeReply.current = loadedReply.current;
+    }
+    lv.set_grid(gridNow.current);
+    lv.set_running(mask.current);
+    const width = c.clientWidth;
+    const radius = Math.min(LOUPE_RADIUS, width / 4);
+    const ratio = window.devicePixelRatio || 1;
+    const side = Math.round(radius * 2 * ratio);
+    if (el.width !== side) {
+      el.width = side;
+      el.height = side;
+    }
+    el.style.width = `${radius * 2}px`;
+    el.style.height = `${radius * 2}px`;
+    const cx = Math.max(radius + 6, Math.min(width - radius - 6, p[0]));
+    let cy = p[1] - radius - LOUPE_LIFT;
+    if (cy < radius + 8) cy = p[1] + radius + LOUPE_LIFT;
+    el.style.left = `${cx - radius}px`;
+    el.style.top = `${cy - radius}px`;
+    el.style.display = 'block';
+    const scale = view.current.scale;
+    const [fx, fy] = toDrawing(view.current, p[0], p[1]);
+    lv.hover(fx, fy, REACH_TOUCH / scale, TIE / scale);
+    lv.set_crosshair(fx, fy, false);
+    const zoomed = scale * LOUPE_ZOOM;
+    lv.draw(fx - radius / zoomed, fy + radius / zoomed, zoomed, ratio);
+    const h = hoveredOf(lv);
+    // Its tag under the magnifier, or above it when it sits below the finger.
+    const below = cy < p[1];
+    placeTag(
+      h ?? { snap: 'endpoint', object: -1, which: null, with: null, at: [fx, fy, 0], place: 0, count: 1 },
+      cx,
+      below ? cy + radius + 6 : cy - radius - 28,
+      true,
+    );
+    if (!h && tag.current) {
+      tag.current.replaceChildren(
+        Object.assign(document.createElement('b'), { textContent: mask.current ? 'No snap here' : 'Object snap is off' }),
+      );
+    }
+    cursor.current?.([fx, fy], h);
+  };
+  const hideLoupe = () => {
+    if (loupe.current) loupe.current.style.display = 'none';
+    placeTag(null, 0, 0, false);
+  };
+
   const middle = (): [number, number] => {
     const a = area();
     return [a.x + a.width / 2, a.y + a.height / 2];
@@ -297,6 +487,9 @@ export function Drawing({
     if (!v) return false;
     try {
       const summary = JSON.parse(v.load(text)) as Summary;
+      objects.current = summary.objects;
+      v.set_running(mask.current);
+      hoverKey.current = '';
       const sameSheet = loadedSheet.current?.toUpperCase() === summary.sheet.toUpperCase();
       loadedReply.current = text;
       loadedSheet.current = summary.sheet;
@@ -329,6 +522,8 @@ export function Drawing({
         // What the page holds that the renderer draws by: a renderer made
         // anew, as after a lost context, starts from it, not its defaults.
         viewer.current.set_grid(gridNow.current);
+        viewer.current.set_running(mask.current);
+        hoverKey.current = '';
         return true;
       } catch (e) {
         viewer.current = null;
@@ -384,12 +579,23 @@ export function Drawing({
       if (e.pointerType !== 'mouse') return;
       const r = c.getBoundingClientRect();
       pointer.current = [e.clientX - r.left, e.clientY - r.top];
-      cursor.current?.(toDrawing(view.current, pointer.current[0], pointer.current[1]));
+      redraw();
     };
     const away = () => {
       pointer.current = null;
-      cursor.current?.(null);
+      redraw();
+      cursor.current?.(null, null);
     };
+    // Tab steps to the next snap in reach, as AutoCAD's does.
+    const tab = (e: KeyboardEvent) => {
+      const h = hovered.current;
+      if (e.key !== 'Tab' || !pointer.current || !h || h.count < 2 || held.current) return;
+      e.preventDefault();
+      viewer.current?.next_snap();
+      hovered.current = hoveredOf(viewer.current);
+      redraw();
+    };
+    window.addEventListener('keydown', tab);
     b.addEventListener('pointermove', hover);
     b.addEventListener('pointerleave', away);
     const lost = (e: Event) => e.preventDefault();
@@ -401,6 +607,11 @@ export function Drawing({
     c.addEventListener('webglcontextrestored', restored);
     const probe = installProbe({
       viewer: () => viewer.current,
+      hovered: () => hovered.current,
+      rehover: () => {
+        hoverKey.current = '';
+        redraw();
+      },
       canvas: c,
       view: () => view.current,
       show,
@@ -412,6 +623,9 @@ export function Drawing({
       detach();
       b.removeEventListener('pointermove', hover);
       b.removeEventListener('pointerleave', away);
+      window.removeEventListener('keydown', tab);
+      loupeViewer.current?.free();
+      loupeViewer.current = null;
       resized.disconnect();
       resolution?.removeEventListener('change', onResolution);
       c.removeEventListener('webglcontextlost', lost);
@@ -472,6 +686,15 @@ export function Drawing({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [picked, compact, space]);
 
+  // The running snaps: none while Object snap is off.
+  useEffect(() => {
+    mask.current = snapMask;
+    viewer.current?.set_running(snapMask);
+    hoverKey.current = '';
+    redraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapMask]);
+
   // The grid on or off.
   useEffect(() => {
     viewer.current?.set_grid(grid);
@@ -531,7 +754,9 @@ export function Drawing({
 
   return (
     <div className="viewport" ref={box}>
-      <canvas className="stage" ref={canvas} aria-label="The drawing" />
+      <canvas className={`stage${compact ? '' : ' crosshair'}`} ref={canvas} aria-label="The drawing" />
+      <canvas className="loupe" ref={loupe} aria-hidden="true" />
+      <div className="snaptag" ref={tag} aria-live="polite" />
       <div className="zoombtns">
         {!compact && (
           <>

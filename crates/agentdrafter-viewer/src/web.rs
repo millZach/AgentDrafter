@@ -39,6 +39,12 @@
 //!   shader works out each pixel. Each colour index shows in its screen
 //!   colour, index 7 white. A capture for a test draws instead as the PNG
 //!   does: white all round, and each index in the colour it plots in.
+//! - Over everything, for the drafter's cursor: AutoCAD's crosshair and
+//!   pick box where the page puts the cursor, and the AutoSnap marker of
+//!   the object snap it caught, which this module finds among the snaps
+//!   the display list came with, the running ones, with no round trip
+//!   ([`crate::snapping`]); Tab steps to the next in reach. They are
+//!   triangles in device pixels, made anew each frame ([`crate::overlay`]).
 //! - Over the ink, a halo marks each object a change set added or changed,
 //!   green or amber, and the object the reviewer picked, blue, as the
 //!   picked prototype marks them; the page fades the change set's halos in
@@ -52,10 +58,12 @@ use web_sys::{
     WebGlUniformLocation, WebGlVertexArrayObject,
 };
 
-use agentdrafter_core::{object_bounds, pick, Bounds, DisplayList};
+use agentdrafter_core::{object_bounds, pick, Bounds, DisplayList, DisplaySnap};
 
 use crate::grid::{first_line, grid};
 use crate::mesh::{read_reply, screen_rgba, Kind, Mesh, Run, Span};
+use crate::overlay::{crosshair, marker, triangles, Segment};
+use crate::snapping::{candidates, Candidate};
 
 const STROKE_VERTEX: &str = r#"#version 300 es
 precision highp float;
@@ -176,6 +184,29 @@ void main() {
   gl_Position = vec4(p.x / u_size.x * 2.0 - 1.0, 1.0 - p.y / u_size.y * 2.0, 0.0, 1.0);
 }
 "#;
+
+const OVERLAY_VERTEX: &str = r#"#version 300 es
+precision highp float;
+layout(location = 0) in vec2 a_point;
+uniform vec2 u_size;
+void main() {
+  gl_Position = vec4(a_point.x / u_size.x * 2.0 - 1.0, 1.0 - a_point.y / u_size.y * 2.0, 0.0, 1.0);
+}
+"#;
+
+/// AutoSnap's yellow, the markers' colour.
+const SNAP_YELLOW: [f32; 4] = [
+    0xf2 as f32 / 255.0,
+    0xe2 as f32 / 255.0,
+    0x4b as f32 / 255.0,
+    1.0,
+];
+
+/// The dark edge round a marker, so it reads on any ink.
+const MARKER_EDGE: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
+
+/// The crosshair's colour on model space.
+const CROSSHAIR: [f32; 4] = [238.0 / 255.0, 241.0 / 255.0, 244.0 / 255.0, 0.92];
 
 const RECT_FRAGMENT: &str = r#"#version 300 es
 precision highp float;
@@ -323,6 +354,8 @@ impl Program {
 struct Loaded {
     /// The display list, which picks and halos are found in.
     list: DisplayList,
+    /// The object snaps the sheet came with.
+    snaps: Vec<DisplaySnap>,
     origin: [f64; 2],
     paper: [f64; 4],
     millimetres_per_unit: f64,
@@ -350,6 +383,22 @@ pub struct Viewer {
     fill: Program,
     rect: Program,
     backdrop: Program,
+    overlay: Program,
+    /// The crosshair's and the marker's triangles, made anew each frame.
+    overlay_points: WebGlBuffer,
+    overlay_array: WebGlVertexArrayObject,
+    /// The object snaps the cursor catches, by their bits
+    /// ([`crate::snapping::bit`]); 0 when snapping is off.
+    running: u32,
+    /// The snaps in reach of the cursor, in the order it takes them, and
+    /// which of them it holds now.
+    caught: Vec<Candidate>,
+    chosen: usize,
+    /// Where the crosshair is, in drawing units, and whether it has the pick
+    /// box; none off the drawing.
+    cursor: Option<([f64; 2], bool)>,
+    /// Whether the crosshair and the marker are drawn: not in a capture.
+    overlays: bool,
     /// Whether the canvas has samples to share a pixel's coverage out in.
     multisampled: bool,
     look: Look,
@@ -431,6 +480,18 @@ impl Viewer {
                 "u_edge_color",
             ],
         )?;
+        let overlay = Program::new(&gl, OVERLAY_VERTEX, RECT_FRAGMENT, &["u_size", "u_color"])?;
+        let overlay_points = gl
+            .create_buffer()
+            .ok_or_else(|| JsError::new("the GPU gave no buffer"))?;
+        let overlay_array = gl
+            .create_vertex_array()
+            .ok_or_else(|| JsError::new("the GPU gave no vertex array"))?;
+        gl.bind_vertex_array(Some(&overlay_array));
+        gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&overlay_points));
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_with_i32(0, 2, Gl::FLOAT, false, 0, 0);
+        gl.bind_vertex_array(None);
         let multisampled = gl
             .get_parameter(Gl::SAMPLES)
             .ok()
@@ -442,6 +503,14 @@ impl Viewer {
             fill,
             rect,
             backdrop,
+            overlay,
+            overlay_points,
+            overlay_array,
+            running: 0,
+            caught: Vec::new(),
+            chosen: 0,
+            cursor: None,
+            overlays: true,
             multisampled,
             look: Look::Screen,
             grid: true,
@@ -455,13 +524,16 @@ impl Viewer {
     /// one held, and gives what it is as JSON: its sheet, the set's sheets,
     /// its paper and how many segments and triangles it draws.
     pub fn load(&mut self, reply: &str) -> Result<String, JsError> {
-        let sheet = read_reply(reply).map_err(|message| JsError::new(&message))?;
+        let mut sheet = read_reply(reply).map_err(|message| JsError::new(&message))?;
         let mesh = Mesh::of(&sheet);
         let summary = serde_json::to_string(&mesh.summary(&sheet))
             .map_err(|e| JsError::new(&e.to_string()))?;
         self.unload();
         self.marks.clear();
-        let loaded = self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?;
+        self.caught.clear();
+        let snaps = std::mem::take(&mut sheet.snaps);
+        let mut loaded = self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?;
+        loaded.snaps = snaps;
         self.bind_colors(&loaded);
         self.sheet = Some(loaded);
         Ok(summary)
@@ -485,6 +557,87 @@ impl Viewer {
                 format!("#{r:02x}{g:02x}{b:02x}")
             })
             .unwrap_or_default()
+    }
+
+    /// Which object snaps the cursor catches, by their bits: bit `i` for the
+    /// `i`th of `SnapKind::ALL`, in the order `endpoint`, `midpoint`,
+    /// `center`, `quadrant`, `insertion`, `node`, `intersection`,
+    /// `apparent_intersection`, `perpendicular`, `tangent`, `nearest`; 0
+    /// when Object snap (F3) is off.
+    pub fn set_running(&mut self, running: u32) {
+        self.running = running;
+        if running == 0 {
+            self.caught.clear();
+        }
+    }
+
+    /// How many object snaps the sheet came with.
+    pub fn snap_count(&self) -> u32 {
+        self.sheet.as_ref().map_or(0, |s| s.snaps.len() as u32)
+    }
+
+    /// Finds the running snaps within `reach` drawing units of the drawing
+    /// point `(x, y)`, nearest first, two within `tie` of each other in
+    /// AutoCAD's order, and holds the first; gives how many there are.
+    pub fn hover(&mut self, x: f64, y: f64, reach: f64, tie: f64) -> u32 {
+        self.chosen = 0;
+        self.caught = match &self.sheet {
+            Some(sheet) => candidates(&sheet.snaps, &sheet.list, self.running, [x, y], reach, tie),
+            None => Vec::new(),
+        };
+        self.caught.len() as u32
+    }
+
+    /// Holds the next snap in reach, as Tab does, round to the first; gives
+    /// its place among them.
+    pub fn next_snap(&mut self) -> u32 {
+        if !self.caught.is_empty() {
+            self.chosen = (self.chosen + 1) % self.caught.len();
+        }
+        self.chosen as u32
+    }
+
+    /// Lets go of the snaps in reach: no marker.
+    pub fn clear_hover(&mut self) {
+        self.caught.clear();
+        self.chosen = 0;
+    }
+
+    /// The snap the cursor holds, as JSON: its `snap`, its `object` by its
+    /// place, `which` and `with` as `query snap` names them, `at` in drawing
+    /// units, its `place` among those in reach and their `count`; empty
+    /// when it holds none.
+    pub fn hovered(&self) -> String {
+        let Some(c) = self.caught.get(self.chosen) else {
+            return String::new();
+        };
+        serde_json::json!({
+            "snap": c.snap,
+            "object": c.object,
+            "which": c.which,
+            "with": c.with,
+            "at": c.at,
+            "place": self.chosen,
+            "count": self.caught.len(),
+        })
+        .to_string()
+    }
+
+    /// Puts the crosshair at the drawing point `(x, y)`, with the pick box
+    /// in its middle when `pick_box`.
+    pub fn set_crosshair(&mut self, x: f64, y: f64, pick_box: bool) {
+        self.cursor = Some(([x, y], pick_box));
+    }
+
+    /// Takes the crosshair away, as when the mouse leaves the drawing.
+    pub fn hide_crosshair(&mut self) {
+        self.cursor = None;
+    }
+
+    /// Draws the crosshair and the marker over the drawing, or not, as for
+    /// a capture.
+    pub fn set_overlays(&mut self, on: bool) {
+        self.overlays = on;
     }
 
     /// Draws the grid behind the drawing, or not, as the drafter's Grid
@@ -754,6 +907,28 @@ impl Viewer {
             }
             gl.disable(Gl::BLEND);
         }
+
+        // The crosshair and the snap's marker, over everything, on screen.
+        if self.overlays && self.look == Look::Screen {
+            gl.enable(Gl::BLEND);
+            gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
+            if let Some(c) = self.caught.get(self.chosen) {
+                let (x, y) = device(c.at[0], c.at[1]);
+                let shape = marker(c.snap, x, y, ratio);
+                self.lines(&shape, (2.0 + 2.5) * ratio, MARKER_EDGE, size);
+                self.lines(&shape, 2.0 * ratio, SNAP_YELLOW, size);
+            }
+            if let Some((at, pick_box)) = self.cursor {
+                let (x, y) = device(at[0], at[1]);
+                self.lines(
+                    &crosshair(x, y, ratio, pick_box),
+                    ratio.max(1.0).round(),
+                    CROSSHAIR,
+                    size,
+                );
+            }
+            gl.disable(Gl::BLEND);
+        }
     }
 
     /// The canvas's pixels as drawn last, RGBA, rows from the top. Read it
@@ -783,6 +958,29 @@ impl Viewer {
 }
 
 impl Viewer {
+    /// Draws `segments`, device pixels, `width` device pixels wide in `color`.
+    fn lines(&self, segments: &[Segment], width: f64, color: [f32; 4], size: (f32, f32)) {
+        if segments.is_empty() {
+            return;
+        }
+        let gl = &self.gl;
+        let points = triangles(segments, width);
+        gl.use_program(Some(&self.overlay.program));
+        gl.uniform2f(self.overlay.at("u_size"), size.0, size.1);
+        gl.uniform4f(
+            self.overlay.at("u_color"),
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+        );
+        gl.bind_vertex_array(Some(&self.overlay_array));
+        gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&self.overlay_points));
+        gl.buffer_data_with_u8_array(Gl::ARRAY_BUFFER, &floats(&points), Gl::DYNAMIC_DRAW);
+        gl.draw_arrays(Gl::TRIANGLES, 0, (points.len() / 2) as i32);
+        gl.bind_vertex_array(None);
+    }
+
     /// Model space under the drawing: its colour, the grid when it is on,
     /// and the paper's dashed edge at `paper`, `[left, top, right, bottom]`
     /// in device pixels; one quad over the canvas.
@@ -971,6 +1169,7 @@ impl Viewer {
 
         Ok(Loaded {
             list,
+            snaps: Vec::new(),
             origin: mesh.origin,
             paper: mesh.paper,
             millimetres_per_unit,

@@ -1,6 +1,6 @@
 # The drafting app
 
-**Status: builds 1 and 2 are done.** The records are written, and the [viewer](viewer.md) is in the frame (#150): the ribbon, a tab for each sheet, the command bar, the status bar and quick properties, round dark model space, with nothing that edits. The drawing tools and the assistant are not built. This page sets out the drafting app the viewer grows into (issue [#144](https://github.com/millZach/AgentDrafter/issues/144)), in the order it will be built. Its terms are in [`CONTEXT.md`](../CONTEXT.md): drafting app, drafter, drawing tool, command bar, assistant, proposal and guide.
+**Status: builds 1 to 3 are done.** The records are written, the [viewer](viewer.md) is in the frame (#150), the ribbon, a tab for each sheet, the command bar, the status bar and quick properties, round dark model space, and the cursor catches [object snaps](viewer.md#object-snaps) (#151), with nothing that edits. The drawing tools and the assistant are not built. This page sets out the drafting app the viewer grows into (issue [#144](https://github.com/millZach/AgentDrafter/issues/144)), in the order it will be built. Its terms are in [`CONTEXT.md`](../CONTEXT.md): drafting app, drafter, drawing tool, command bar, assistant, proposal and guide.
 
 ## What it is
 
@@ -51,7 +51,7 @@ Each addition is a command, or an option of one, in the registry. So every inter
 
 | # | Addition | Why | Today |
 |---|---|---|---|
-| 1 | **Object snaps with the display list.** `display-list` can give each object's snaps: the snap, which of the object's points it is, and where it is. | The cursor jumps to ends, middles and centres on every move of the mouse, with no round trip. The page finds the nearest snap in reach. The operation is still sent with a [snapped point](change-sets.md#snapped-points), so the core works out the exact place. | The snap code is in the core and reads no files. The page holds a display list, not a sheet. |
+| 1 | **Object snaps with the display list.** *Built (#151).* `display-list` can give each object's snaps: the snap, which of the object's points it is, and where it is. | The cursor jumps to ends, middles and centres on every move of the mouse, with no round trip. The page finds the nearest snap in reach. The operation is still sent with a [snapped point](change-sets.md#snapped-points), so the core works out the exact place. | The snap code is in the core and reads no files. The page holds a display list, not a sheet. |
 | 2 | **A change set drawn before it lands.** `display-list` takes a change set, applies it in memory, and gives the sheet as it would be, with the objects it adds and changes. Nothing is written. | A proposal shown dashed, and the template warning above. | `change --dry-run` applies in memory and builds, and its reply holds no drawing. |
 | 3 | **Proposals.** A proposal is a change set that waits. It is made with `propose`, listed with `proposals`, and ended with `keep` or `discard`. `keep` lands it as a change set, and the journal says who proposed it and who kept it. The event stream reports a proposal as it reports a change set. | An agent that wants its work looked at first calls `propose` where it would call `change`. It works for any agent, through any interface. | A change set lands or it does not. |
 | 4 | **What the drafter is looking at.** A command gives the open sheet and the selected objects. | An agent can answer "what is this?" and act on "move this". | The page knows. The core does not. |
@@ -80,7 +80,7 @@ Each is one ticket, proven as [`AGENTS.md`](../AGENTS.md) asks.
 
 1. **The records:** this page, the plan, ADR-0011 and the glossary. *Done (#145).*
 2. **The frame** in the viewer, with selecting and quick properties that only show. *Done (#150): [the viewer](viewer.md#the-frame) sets out what was built. The prototype Zach picked on 2026-11-18 is kept as the tag [`prototype/drafting-app-frame-150`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-frame-150/prototypes/drafting-app-frame).*
-3. **Object snaps with the display list**, and the crosshair and snap markers.
+3. **Object snaps with the display list**, and the crosshair and snap markers. *Done (#151): [the viewer](viewer.md#object-snaps) sets out what was built. The prototype Zach picked on 2026-11-18 is kept as the tag [`prototype/drafting-app-snaps-151`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-snaps-151/prototypes/drafting-app-snaps). The intersections are listed by the core in the reply; the length and angle at the cursor wait for build 4 (#152).*
 4. **The first drawing tools:** Line, Circle, Rectangle, Text, Move and Erase, with the command bar, typed coordinates and the template warning.
 5. **Editing in quick properties:** layer, text, attribute values and radius.
 6. **A change set drawn before it lands.**

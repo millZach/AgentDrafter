@@ -199,6 +199,8 @@ A table's `borders` are its lines as AutoCAD draws them: each row's boundary fro
 {"ok":true,"result":{"source":"examples/snaps/lugs.yaml","units":"mm","sheets":["lugs"],"message":"the nearest point of the line `lugs/wire`, on sheet `lugs`: [38.04979253112033, 55.18672199170125, 0]","kind":"snap","count":1,"object":{"sheet":"lugs","id":"lugs/wire","type":"line"},"from":{"sheet":"lugs","id":"lugs/strip","type":"insert","snap":"center","which":"objects[1].objects[0]","at":[34.0,40.0,0.0]},"points":[{"snap":"nearest","at":[38.04979253112033,55.18672199170125,0.0]}]}}
 ```
 
+**A whole sheet's snaps at once.** `display-list --snaps` gives every snap of the objects a sheet draws itself, its own and each intersection between two of them, named as `query snap` names them, for the viewer to find the one nearest the cursor ([viewer.md](viewer.md#object-snaps)).
+
 **A snap that finds nothing is not an error.** An object, a `with` or a `from` that no object on the sheets looked at has the ID or name of, and a snap the object has none of, such as a line's centre, answer `ok`, with `count` 0 and a `message` saying so. The two objects of a snap are on one sheet.
 
 ## Geometry

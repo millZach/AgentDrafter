@@ -4,6 +4,7 @@
 // render` draws of the same sheet. It reads; it changes nothing the
 // reviewer sees, beyond one frame drawn and drawn again.
 
+import type { Hovered } from './frame.ts';
 import type { Viewer } from './wasm/agentdrafter_viewer.js';
 import type { Paper, View } from './view.ts';
 
@@ -33,6 +34,8 @@ export interface Summary {
   entry: number | null;
   /** What each of the sheet's objects is, by its place. */
   objects: SheetObject[];
+  /** How many object snaps the sheet came with. */
+  snaps: number;
 }
 
 /** One of the sheet's objects, as the core says what it is. */
@@ -82,6 +85,14 @@ export interface Probe {
   takeDraws(): Draw[];
   /** The canvas drawn at `capture`, one CSS pixel to a pixel: RGBA, base64. */
   capture(capture: Capture): string;
+  /** The object snap the cursor holds, as the renderer says it; null for none. */
+  hovered(): Hovered | null;
+  /**
+   * How long the renderer's search for the snaps in reach takes, in
+   * milliseconds each, over the drawing points `at`, `reach` CSS pixels
+   * round each at the view shown.
+   */
+  timeSnapSearch(at: [number, number][], reach: number): number;
 }
 
 declare global {
@@ -97,6 +108,9 @@ interface Parts {
   show(view: View): void;
   draws: Draw[];
   redraw(): void;
+  hovered(): Hovered | null;
+  /** Finds the snap under the cursor again on the next frame. */
+  rehover(): void;
 }
 
 /** Installs the probe; gives back what takes it off. */
@@ -119,9 +133,11 @@ export function installProbe(parts: Parts): () => void {
       c.width = width;
       c.height = height;
       viewer.set_paper_look(white);
+      viewer.set_overlays(false);
       viewer.draw(left, top, scale, 1);
       const pixels = viewer.pixels();
       viewer.set_paper_look(false);
+      viewer.set_overlays(true);
       c.width = kept.width;
       c.height = kept.height;
       parts.redraw();
@@ -130,6 +146,17 @@ export function installProbe(parts: Parts): () => void {
         text += String.fromCharCode(...pixels.subarray(i, i + 0x8000));
       }
       return btoa(text);
+    },
+    hovered: parts.hovered,
+    timeSnapSearch(at, reach) {
+      const viewer = parts.viewer();
+      if (!viewer || !at.length) return 0;
+      const scale = parts.view().scale;
+      const began = performance.now();
+      for (const [x, y] of at) viewer.hover(x, y, reach / scale, 2 / scale);
+      const each = (performance.now() - began) / at.length;
+      parts.rehover();
+      return each;
     },
   };
   window.agentdrafterViewer = probe;

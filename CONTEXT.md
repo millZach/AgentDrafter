@@ -339,6 +339,10 @@ _Avoid_: search, lookup, select
 A point AutoCAD's object snaps find on an object, an endpoint, a midpoint, a centre, a quadrant, an insertion point or a node, or between two objects, an intersection, an apparent intersection, or a perpendicular, a tangent or a nearest point from a snap of another, named by the object's ID or name, the snap and which of its points (`which`), so that it can be asked for again. An insert's snaps are those of its block's own geometry, where the insert places it, each named by its place in the block, such as `objects[3].to`.
 _Avoid_: snap point by coordinates, pick point, osnap (AutoCAD's setting of which snaps are on)
 
+**Running snaps**:
+The object snaps the drafting app's cursor catches, which the drafter ticks in the Object snap menu and turns on and off together with Object snap (F3), as AutoCAD's OSMODE holds them: by default Endpoint, Midpoint, Centre and Intersection. The page remembers them in the browser.
+_Avoid_: osnap modes, snap settings
+
 **Snapped point**:
 An object snap given where an operation takes a point, `{"snap": {...}}`, written as `query snap` takes it and naming one point. It is worked out when the operation applies, on the sheet as it stands then, and the record is written with the coordinates it names: a sheet description holds points, never snaps. A move takes one as its base point or its second point, as AutoCAD's MOVE does.
 _Avoid_: reference point, linked point (it does not follow the object afterwards)

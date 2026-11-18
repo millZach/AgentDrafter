@@ -37,18 +37,28 @@ import {
 } from './journal.ts';
 import {
   coordinates,
+  DEFAULT_RUNNING,
   liveLine,
   paperWords,
   promptFor,
+  readSnapSettings,
+  runningMask,
+  snapLabel,
+  snappedPoint,
+  takenOf,
   toggleFor,
   toggledWords,
   typeWords,
   nameOf,
+  writeSnapSettings,
   type Act,
+  type Hovered,
+  type SnapKind,
+  type Taken,
   type Tool,
   type Toggle,
 } from './frame.ts';
-import { CommandBar, Ribbon, StatusBar } from './Frame.tsx';
+import { CommandBar, Ribbon, SnapMenu, StatusBar } from './Frame.tsx';
 import { Assistant, JournalList, Peek, QuickProperties } from './Panels.tsx';
 import type { Summary } from './probe.ts';
 
@@ -178,7 +188,25 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const [raise, setRaise] = useState(0);
   // The frame's own: the status bar's toggles, a phone's folded ribbon, a
   // tool still to come just tapped, the side panel's tab, and what happened.
-  const [toggles, setToggles] = useState<Record<Toggle, boolean>>({ grid: true, osnap: true, ortho: false });
+  // Object snap (F3) and the running snaps are remembered in this browser
+  // (localStorage), as AutoCAD keeps OSMODE; Grid and Ortho start as the
+  // frame starts them.
+  const keeps = useMemo(() => {
+    try {
+      return window.localStorage;
+    } catch {
+      return null;
+    }
+  }, []);
+  const [snapsKept] = useState(() => readSnapSettings(keeps));
+  const [toggles, setToggles] = useState<Record<Toggle, boolean>>({ grid: true, osnap: snapsKept.on, ortho: false });
+  const [running, setRunning] = useState<ReadonlySet<SnapKind>>(() => new Set(snapsKept.running));
+  useEffect(() => writeSnapSettings(keeps, { on: toggles.osnap, running: [...running] }), [keeps, toggles.osnap, running]);
+  // The Object snap menu: above the status bar's Object snap on a laptop
+  // (its place), a card on a phone ('card'), or shut.
+  const [snapMenu, setSnapMenu] = useState<{ left: number; bottom: number } | 'card' | null>(null);
+  // A snap taken with no tool running: its point read out, and its snapped point.
+  const [taken, setTaken] = useState<{ taken: Taken; point: { snap: Record<string, unknown> } | null } | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [soon, setSoon] = useState<Tool | null>(null);
   const [side, setSide] = useState<'journal' | 'assistant'>('journal');
@@ -268,10 +296,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (at === null || !summary) {
       setStatus({ kind: 'loading', message: wanted ? `Drawing ${wanted}…` : 'Drawing the sheet…' });
     }
-    const input: Record<string, string | number> = { source };
+    const input: Record<string, string | number | boolean> = { source };
     if (wanted) input.sheet = wanted;
     if (wantedLayout) input.layout = wantedLayout;
     if (at !== null) input.entry = at;
+    // The set as it is comes with its object snaps, for the cursor to
+    // catch; the set as it was, read-only, without.
+    else input.snaps = true;
     const generation = generationOf(at, sheetKey);
     run('display-list', input, token).then(
       (text) => {
@@ -605,6 +636,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // properties open beside it.
   const pick = (place: number | null) => {
     const o = place === null || !summary ? undefined : summary.objects[place];
+    setTaken(null);
     setPicked(place === null || !summary ? null : { id: o?.id ?? null, place, summary });
     if (o) {
       setSoon(null);
@@ -623,6 +655,90 @@ export function App({ token, source, sheet, layout }: AppProps) {
     [log],
   );
 
+  // A snap clicked, or lifted from under a held finger, with no tool
+  // running: its point read out, as AutoCAD's ID command does, and its
+  // object selected.
+  const takeSnap = (h: Hovered) => {
+    if (!summary) return;
+    const o = summary.objects[h.object];
+    const read = takenOf(h, summary.objects, summary.units);
+    setSoon(null);
+    setPicked(o ? { id: o.id ?? null, place: h.object, summary } : null);
+    setTaken({ taken: read, point: snappedPoint(h, summary.objects) });
+    log(`${read.label}${read.rest}`);
+  };
+  const noSnap = (p: [number, number]) => {
+    log(`No snap under your finger: ${coordinates(p[0], p[1], summary?.units ?? null)}`);
+  };
+  const copySnap = async () => {
+    const point = taken?.point;
+    if (!point) return;
+    const text = JSON.stringify(point);
+    // The Clipboard API needs a secure context: a page opened over the
+    // tailnet by its address, plain http, has none, so the older copy of a
+    // selected field is tried there, which a click still allows.
+    const older = () => {
+      const field = document.createElement('textarea');
+      field.value = text;
+      field.setAttribute('readonly', '');
+      field.style.position = 'fixed';
+      field.style.opacity = '0';
+      document.body.append(field);
+      field.select();
+      const done = document.execCommand('copy');
+      field.remove();
+      return done;
+    };
+    try {
+      if (navigator.clipboard) await navigator.clipboard.writeText(text);
+      else if (!older()) throw new Error('no clipboard');
+      log(`Copied ${text}`);
+    } catch {
+      log(`Could not copy; the snapped point: ${text}`);
+    }
+  };
+
+  // The Object snap menu's choices.
+  const snapOn = (on: boolean) => {
+    setToggles((t) => (t.osnap === on ? t : { ...t, osnap: on }));
+  };
+  const flipSnap = (k: SnapKind) => {
+    setRunning((before) => {
+      const next = new Set(before);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      log(`${snapLabel(k)} ${next.has(k) ? 'on' : 'off'}`);
+      return next;
+    });
+    // Ticking a snap while snapping is off turns it on.
+    if (!running.has(k) && !toggles.osnap) {
+      snapOn(true);
+      log('Object snap on');
+    }
+  };
+  const openSnapMenu = (anchor: HTMLElement | null) => {
+    if (!anchor || !wide) {
+      setToolsOpen(false);
+      setSnapMenu('card');
+      return;
+    }
+    if (snapMenu) {
+      setSnapMenu(null);
+      return;
+    }
+    const r = anchor.getBoundingClientRect();
+    setSnapMenu({ left: Math.max(8, Math.min(window.innerWidth - 338, r.left - 120)), bottom: window.innerHeight - r.top + 6 });
+  };
+  // The menu shuts on a press anywhere else.
+  useEffect(() => {
+    if (!snapMenu) return;
+    const away = (e: PointerEvent) => {
+      if (!(e.target as Element | null)?.closest?.('.osmenu, .osmenubtn, [data-snaps]')) setSnapMenu(null);
+    };
+    window.addEventListener('pointerdown', away, true);
+    return () => window.removeEventListener('pointerdown', away, true);
+  }, [snapMenu]);
+
   // A tool still to come, tapped: it says so in the command bar, for a while.
   const soonTool = (tool: Tool) => {
     setToolsOpen(false);
@@ -639,6 +755,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const escape = useRef<() => void>(() => {});
   escape.current = () => {
     if (asking) setAsking(null);
+    else if (snapMenu) setSnapMenu(null);
     else if (toolsOpen) setToolsOpen(false);
     else if (soon) setSoon(null);
     else if (picked) pick(null);
@@ -662,8 +779,22 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // mouse redraws nothing else.
   const unitsNow = useRef<string | null>(null);
   unitsNow.current = summary?.units ?? null;
-  const cursorAt = useCallback((p: [number, number] | null) => {
-    if (coords.current) coords.current.textContent = p ? coordinates(p[0], p[1], unitsNow.current) : '\u00a0';
+  // A snap held shows its point exactly, with its name.
+  const cursorAt = useCallback((p: [number, number] | null, snapped: Hovered | null) => {
+    const el = coords.current;
+    if (!el) return;
+    if (!p) {
+      el.textContent = '\u00a0';
+      return;
+    }
+    if (!snapped) {
+      el.textContent = coordinates(p[0], p[1], unitsNow.current);
+      return;
+    }
+    const label = document.createElement('span');
+    label.className = 'snapw';
+    label.textContent = snapLabel(snapped.snap);
+    el.replaceChildren(coordinates(snapped.at[0], snapped.at[1], unitsNow.current), label);
   }, []);
 
   // What the command bar and a phone's peek cover of the drawing: from the
@@ -708,9 +839,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
     cannot: status.kind === 'cannot',
     reaching: !noJournal && stream !== 'open',
     selected: object ?? null,
+    taken: taken?.taken ?? null,
+    touch: !wide,
   });
   const act = (a: Act) => {
     if (a === 'clear') pick(null);
+    else if (a === 'copy') void copySnap();
     else if (a === 'older') step(-1);
     else if (a === 'newer') step(1);
     else if (a === 'live') backToLive();
@@ -904,6 +1038,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
           onSoon={soonTool}
           layer={object ? { name: object.layer, color: pickedColor } : null}
           flashing={soon?.key ?? null}
+          onSnaps={() => openSnapMenu(null)}
         />
       </div>
       </div>
@@ -958,6 +1093,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
             onUnavailable={setUnavailable}
             onPick={pick}
             onCursor={cursorAt}
+            snapMask={runningMask(toggles.osnap && at === null, running)}
+            onTakeSnap={takeSnap}
+            onNoSnap={noSnap}
             space={`${sheetCovers}:${barHeight}`}
             onPickedColor={setPickedColor}
           />
@@ -1030,6 +1168,25 @@ export function App({ token, source, sheet, layout }: AppProps) {
           onToggle={toggle}
           live={liveState}
           line={line}
+          onSnapMenu={openSnapMenu}
+          snapMenuOpen={snapMenu !== null}
+        />
+      )}
+      {snapMenu && (
+        <SnapMenu
+          on={toggles.osnap}
+          running={running}
+          place={snapMenu === 'card' ? null : snapMenu}
+          onToggle={() => toggle('osnap')}
+          onSnap={flipSnap}
+          onDefaults={() => {
+            setRunning(new Set(DEFAULT_RUNNING));
+            log('Object snaps back to the defaults');
+          }}
+          onClear={() => {
+            setRunning(new Set());
+            log('No object snaps ticked');
+          }}
         />
       )}
       {asking && (

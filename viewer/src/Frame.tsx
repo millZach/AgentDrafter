@@ -7,7 +7,20 @@
 
 import { useState, type ReactNode, type RefObject } from 'react';
 
-import { PANELS, SOON, TOGGLES, type Act, type LiveState, type Prompt, type Tool, type Toggle, type ToolKey } from './frame.ts';
+import {
+  PANELS,
+  SNAPS,
+  SOON,
+  TOGGLES,
+  type Act,
+  type LiveState,
+  type Prompt,
+  type SnapEntry,
+  type SnapKind,
+  type Tool,
+  type Toggle,
+  type ToolKey,
+} from './frame.ts';
 
 /** Each tool's icon, drawn on a 28-unit square. */
 const ICONS: Record<ToolKey, ReactNode> = {
@@ -50,9 +63,11 @@ export interface RibbonProps {
   layer: { name: string; color: string } | null;
   /** The tool just tapped, which flashes. */
   flashing: ToolKey | null;
+  /** Opens the Object snap menu, from a phone's Status panel. */
+  onSnaps(): void;
 }
 
-export function Ribbon({ folded, toggles, onToggle, onSoon, layer, flashing }: RibbonProps) {
+export function Ribbon({ folded, toggles, onToggle, onSoon, layer, flashing, onSnaps }: RibbonProps) {
   const [tip, setTip] = useState<{ tool: Tool; left: number; top: number } | null>(null);
   return (
     <nav className="ribbon" aria-label="Tools">
@@ -120,6 +135,9 @@ export function Ribbon({ folded, toggles, onToggle, onSoon, layer, flashing }: R
                 {t.label}
               </button>
             ))}
+            <button type="button" className="tog2" data-snaps onClick={onSnaps}>
+              Snaps…
+            </button>
           </div>
           <h3>Status</h3>
         </section>
@@ -162,6 +180,10 @@ export function CommandBar({ prompt, history, onAct, bar }: CommandBarProps) {
           {prompt.parts.map((part, i) =>
             'text' in part ? (
               <span key={i}>{part.text}</span>
+            ) : 'snap' in part ? (
+              <span key={i} className="snapw">
+                {part.snap}
+              </span>
             ) : (
               <button key={i} type="button" className="opt" data-opt={part.act} onClick={() => onAct(part.act)}>
                 {part.option}
@@ -169,7 +191,7 @@ export function CommandBar({ prompt, history, onAct, bar }: CommandBarProps) {
             ),
           )}
         </span>
-        <span className="cmdnote">Typing commands comes with the drawing tools</span>
+        <span className="cmdnote">F3: snaps on/off · Tab: the next snap here</span>
       </div>
     </div>
   );
@@ -184,9 +206,12 @@ export interface StatusBarProps {
   onToggle(toggle: Toggle): void;
   live: LiveState;
   line: string;
+  /** Opens the Object snap menu above `anchor`, as its ▴ or a right-click on it does. */
+  onSnapMenu(anchor: HTMLElement): void;
+  snapMenuOpen: boolean;
 }
 
-export function StatusBar({ layouts, coords, paper, toggles, onToggle, live, line }: StatusBarProps) {
+export function StatusBar({ layouts, coords, paper, toggles, onToggle, live, line, onSnapMenu, snapMenuOpen }: StatusBarProps) {
   return (
     <footer className="status">
       {layouts}
@@ -194,25 +219,130 @@ export function StatusBar({ layouts, coords, paper, toggles, onToggle, live, lin
         &nbsp;
       </span>
       <span className="paperlabel">{paper}</span>
-      {TOGGLES.map((t) => (
-        <button
-          key={t.key}
-          type="button"
-          className="tog"
-          data-toggle={t.key}
-          aria-pressed={toggles[t.key]}
-          title={t.title}
-          onClick={() => onToggle(t.key)}
-        >
-          {t.label}
-          <kbd>{t.fkey}</kbd>
-        </button>
-      ))}
+      {TOGGLES.map((t) => {
+        const toggle = (
+          <button
+            key={t.key}
+            type="button"
+            className="tog"
+            data-toggle={t.key}
+            aria-pressed={toggles[t.key]}
+            title={t.key === 'osnap' ? 'Object snap: the cursor catches ends, middles, centres and crossings. Right-click or ▴ to choose which.' : t.title}
+            onClick={() => onToggle(t.key)}
+            onContextMenu={
+              t.key === 'osnap'
+                ? (e) => {
+                    e.preventDefault();
+                    onSnapMenu(e.currentTarget);
+                  }
+                : undefined
+            }
+          >
+            {t.label}
+            <kbd>{t.fkey}</kbd>
+          </button>
+        );
+        if (t.key !== 'osnap') return toggle;
+        return (
+          <span key={t.key} className="osgroup">
+            {toggle}
+            <button
+              type="button"
+              className="osmenubtn"
+              aria-haspopup="menu"
+              aria-expanded={snapMenuOpen}
+              aria-label="Choose the object snaps"
+              onClick={(e) => onSnapMenu(e.currentTarget)}
+            >
+              &#9650;
+            </button>
+          </span>
+        );
+      })}
       <span className="grow" />
       <span className={`live ${live}`}>
         <i />
         <span>{line}</span>
       </span>
     </footer>
+  );
+}
+
+/** A snap's AutoSnap marker, as the menu shows it beside its name. */
+export function SnapMarker({ entry, size = 22 }: { entry: SnapEntry; size?: number }) {
+  return (
+    <svg viewBox="-11 -11 22 22" width={size} height={size} aria-hidden="true">
+      <path d={entry.path(7)} />
+    </svg>
+  );
+}
+
+export interface SnapMenuProps {
+  on: boolean;
+  running: ReadonlySet<SnapKind>;
+  /** Where it opens: above the status bar's Object snap on a laptop, a card on a phone. */
+  place: { left: number; bottom: number } | null;
+  onToggle(): void;
+  onSnap(kind: SnapKind): void;
+  onDefaults(): void;
+  onClear(): void;
+}
+
+/**
+ * The Object snap menu: snapping on and off (F3), each snap with its
+ * marker and a line on what it means, ticked when it runs, Defaults and
+ * Clear all. Perpendicular and Tangent act only inside a drawing tool,
+ * from its last point, from build 4.
+ */
+export function SnapMenu({ on, running, place, onToggle, onSnap, onDefaults, onClear }: SnapMenuProps) {
+  const row = (x: SnapEntry) => (
+    <li key={x.k}>
+      <button
+        type="button"
+        className="osrow"
+        role="menuitemcheckbox"
+        aria-checked={running.has(x.k)}
+        data-snap={x.k}
+        onClick={() => onSnap(x.k)}
+      >
+        <span className="ck">{running.has(x.k) ? '✓' : ''}</span>
+        <SnapMarker entry={x} />
+        <span>
+          {x.label}
+          <small>{x.hint}</small>
+        </span>
+      </button>
+    </li>
+  );
+  return (
+    <div
+      className={`osmenu${on ? '' : ' off'}${place ? '' : ' card'}`}
+      role="menu"
+      aria-label="Object snaps"
+      data-ui
+      style={place ? { left: place.left, bottom: place.bottom } : undefined}
+    >
+      <header>
+        <b>Object snaps</b>
+        <button type="button" className="sw2" role="switch" aria-checked={on} onClick={onToggle}>
+          <i />
+          {on ? 'On · F3' : 'Off · F3'}
+        </button>
+      </header>
+      <ul>
+        {SNAPS.filter((x) => !x.tool).map(row)}
+        <li className="grp">Inside a drawing tool, from the last point</li>
+        {SNAPS.filter((x) => x.tool).map(row)}
+      </ul>
+      <footer>
+        <small>The cursor catches the ticked ones.</small>
+        <button type="button" className="btn sm" data-defaults onClick={onDefaults}>
+          Defaults
+        </button>
+        <button type="button" className="btn sm" data-clear onClick={onClear}>
+          Clear all
+        </button>
+      </footer>
+    </div>
   );
 }

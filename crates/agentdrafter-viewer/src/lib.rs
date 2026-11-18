@@ -10,6 +10,9 @@
 //!   stroke's segments with its pen and its colour on paper, every fill cut
 //!   into triangles by its rule.
 //! - [`grid`] spaces the grid drawn behind the drawing, in plain Rust.
+//! - [`snapping`] finds the object snaps in reach of the cursor, among the
+//!   running ones, from those the display list gives; [`overlay`] lays out
+//!   the crosshair and the snap markers drawn over the drawing.
 //! - `web` (built for `wasm32` only) is the module the page loads: it draws
 //!   the mesh with WebGL2 at the view the page asks for, on dark model
 //!   space in AutoCAD's screen colours, index 7 white, the paper a dashed
@@ -24,6 +27,8 @@
 
 pub mod grid;
 pub mod mesh;
+pub mod overlay;
+pub mod snapping;
 
 #[cfg(target_arch = "wasm32")]
 mod web;
