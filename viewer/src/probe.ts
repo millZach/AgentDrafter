@@ -18,8 +18,14 @@ export interface Summary {
   layout: string | null;
   /** On a sheet drawn in several layouts, every one of them, in order; empty otherwise. */
   layouts: string[];
+  /** The drawing's unit, such as `in` or `mm`; null for a drawing that states none. */
+  units: string | null;
   millimetres_per_unit: number;
   paper: Paper;
+  /** Whether the sheet declares its paper, by name or by size; one that does not is drawn on its extents. */
+  paper_declared: boolean;
+  /** The paper's name, when the sheet declares it by name; null for paper declared by size alone, or none. */
+  paper_name: string | null;
   segments: number;
   triangles: number;
   fills_not_drawn: number;
@@ -59,7 +65,7 @@ export interface Capture {
   scale: number;
   width: number;
   height: number;
-  /** Draw white round the paper, as a PNG's paper is everywhere. */
+  /** Draw as the PNG plots the sheet: white all round, each colour in the colour it plots in. Without it, as the screen shows it. */
   white?: boolean;
 }
 
@@ -112,10 +118,10 @@ export function installProbe(parts: Parts): () => void {
       const kept = { width: c.width, height: c.height };
       c.width = width;
       c.height = height;
-      viewer.set_white_surround(white);
+      viewer.set_paper_look(white);
       viewer.draw(left, top, scale, 1);
       const pixels = viewer.pixels();
-      viewer.set_white_surround(false);
+      viewer.set_paper_look(false);
       c.width = kept.width;
       c.height = kept.height;
       parts.redraw();

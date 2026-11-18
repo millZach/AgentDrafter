@@ -1,8 +1,9 @@
-// The bottom sheet of the picked look (variant A): on a phone it peeks up
-// from the bottom with Undo last and Accept always in reach, and drags up
-// to half or nearly all of the screen for the journal or the inspector; on
-// a laptop it is a panel on the right. What it holds is the page's: the
-// peek and the body come in as they are.
+// The side panel of the frame: on a phone a sheet that peeks up from the
+// bottom with Undo last and Accept always in reach, and drags up to half or
+// nearly all of the screen for the journal or the assistant's place; on a
+// laptop a panel on the right, with no peek, since the title bar holds Undo
+// last and Accept. What it holds is the page's: the peek and the body come
+// in as they are.
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
@@ -13,23 +14,32 @@ export interface BottomSheetProps {
   wide: boolean;
   /** Says how many pixels at the bottom of the drawing the peek covers. */
   onCovers(pixels: number): void;
-  /** What is always in reach: the status, the newest entry, Undo last and Accept. */
+  /** What a phone always has in reach: the connection, the newest entry, Undo last and Accept; none on a laptop. */
   peek: ReactNode;
-  /** The journal, or the inspector. */
+  /** The side panel's tabs, and the journal or the assistant's place. */
   body: ReactNode;
   /** A new value raises a peeking sheet to half the screen, to show what the body now holds. */
   raise: number;
+  /**
+   * The sheet came to rest covering this many pixels of the drawing from
+   * the bottom, at a snap or after a change of size, not at each move of a
+   * drag: what quick properties may use has changed.
+   */
+  onSettled?(pixels: number): void;
 }
 
 const clamp = (v: number, low: number, high: number) => Math.min(high, Math.max(low, v));
 
-export function BottomSheet({ wide, onCovers, peek, body, raise }: BottomSheetProps) {
+export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled }: BottomSheetProps) {
   const sheet = useRef<HTMLElement>(null);
   const grab = useRef<HTMLDivElement>(null);
   const peekBox = useRef<HTMLDivElement>(null);
   const [snap, setSnap] = useState<Snap>('peek');
   const drag = useRef<{ y0: number; s0: number; t: number; last: number; v: number; moved: boolean } | null>(null);
   const y = useRef(0);
+  const settled = useRef<number | null>(null);
+  const settle = useRef(onSettled);
+  settle.current = onSettled;
 
   const room = () => sheet.current?.parentElement?.clientHeight ?? 0;
   const peekHeight = () => (grab.current?.offsetHeight ?? 0) + (peekBox.current?.offsetHeight ?? 0);
@@ -40,15 +50,28 @@ export function BottomSheet({ wide, onCovers, peek, body, raise }: BottomSheetPr
   const place = (top: number, animate: boolean) => {
     const el = sheet.current;
     if (!el) return;
+    // How much of the drawing the sheet covers from the bottom, at
+    // whatever height it is, as a variable its neighbours read: quick
+    // properties sit above it.
+    const covers = (pixels: number) => {
+      const px = Math.max(0, Math.round(pixels));
+      el.parentElement?.style.setProperty('--sheet', `${px}px`);
+      if (!drag.current && settled.current !== px) {
+        settled.current = px;
+        settle.current?.(px);
+      }
+    };
     if (wide) {
       el.style.transform = '';
       el.style.height = '';
+      covers(0);
       return;
     }
     y.current = top;
     el.style.transition = animate ? 'transform .28s cubic-bezier(.2,.8,.2,1)' : 'none';
     el.style.transform = `translateY(${top}px)`;
     el.style.height = `${room() - top}px`;
+    covers(room() - top);
   };
   const snapTo = (name: Snap, animate = true) => {
     setSnap(name);

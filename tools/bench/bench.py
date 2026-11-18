@@ -512,7 +512,7 @@ def measure_viewer(tool: Agentdrafter, plant: Path, work: Path, browser_path: st
         browser = Browser(browser_path, work / "browser-profile", gl, log)
         page = browser.page()
         page.call("Page.navigate", {"url": "%s/?source=demo-plant&sheet=%s" % (server.base, SHEET)})
-        page.wait_for("window.agentdrafterViewer?.summary?.sheet === %r && !!document.querySelector('.va-agent.working')"
+        page.wait_for("window.agentdrafterViewer?.summary?.sheet === %r && !!document.querySelector('.live.open')"
                       % SHEET, "draw the sheet and open its live stream")
         # The browser's own name for its version; a user agent string hides all but the first number.
         about = {"name": Path(browser_path).stem, "product": browser.version.get("Browser", ""),

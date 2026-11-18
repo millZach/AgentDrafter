@@ -9,8 +9,11 @@
 //! - [`mesh`] makes the list ready for the GPU, in plain Rust: every
 //!   stroke's segments with its pen and its colour on paper, every fill cut
 //!   into triangles by its rule.
+//! - [`grid`] spaces the grid drawn behind the drawing, in plain Rust.
 //! - `web` (built for `wasm32` only) is the module the page loads: it draws
-//!   the mesh with WebGL2 at the view the page asks for, on white paper.
+//!   the mesh with WebGL2 at the view the page asks for, on dark model
+//!   space in AutoCAD's screen colours, index 7 white, the paper a dashed
+//!   outline; or, for a test, on white paper in the colours the PNG plots.
 //!   Pens are widths on paper, as in the PNG, never thinner than one CSS
 //!   pixel; ends and corners are round. Items paint in the display list's
 //!   order, a later one over an earlier one, as the PNG paints them.
@@ -19,6 +22,7 @@
 //!
 //! It needs WebGL2 and nothing newer: no WebGPU.
 
+pub mod grid;
 pub mod mesh;
 
 #[cfg(target_arch = "wasm32")]

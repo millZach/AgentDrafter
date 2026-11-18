@@ -1,0 +1,147 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import {
+  coordinates,
+  freeBeside,
+  newlyHidden,
+  liveLine,
+  nameOf,
+  PANELS,
+  paperWords,
+  placeBeside,
+  promptFor,
+  SOON,
+  toggledWords,
+  toggleFor,
+  typeWords,
+  unitWords,
+  type Part,
+  type PromptState,
+} from '../src/frame.ts';
+
+const words = (parts: Part[]) => parts.map((p) => ('text' in p ? p.text : `<${p.option}>`)).join('');
+const none: PromptState = { soon: null, at: null, cannot: false, reaching: false, selected: null };
+
+test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move and Erase in Modify, with AutoCAD aliases', () => {
+  assert.deepEqual(
+    PANELS.map((p) => [p.title, p.tools.map((t) => `${t.label} ${t.command} ${t.alias}`)]),
+    [
+      ['Draw', ['Line LINE L', 'Circle CIRCLE C', 'Rectangle RECTANG REC', 'Text TEXT T']],
+      ['Modify', ['Move MOVE M', 'Erase ERASE E']],
+    ],
+  );
+  for (const tool of PANELS.flatMap((p) => p.tools)) assert.ok(tool.tip.length > 20, `${tool.label} has a tip in plain words`);
+});
+
+test('the command bar prompts to select, and names what is selected with Clear', () => {
+  assert.equal(words(promptFor(none).parts), 'Select an object to see its properties');
+  const selected = promptFor({ ...none, selected: { id: 'DP-LD-101/device', name: 'FT-101', type: 'insert', block: 'TRANSMITTER' } });
+  assert.equal(selected.command, null);
+  assert.equal(words(selected.parts), 'FT-101 selected [ <Clear> ]');
+  assert.deepEqual(
+    selected.parts.filter((p) => 'act' in p).map((p) => ('act' in p ? p.act : '')),
+    ['clear'],
+  );
+});
+
+test('a tool still to come names its command, says what it does in plain words and that it is coming, until OK', () => {
+  const line = PANELS[0]?.tools[0];
+  assert.ok(line);
+  const p = promptFor({ ...none, soon: line, selected: { type: 'line' } });
+  assert.equal(p.command, 'LINE');
+  assert.equal(words(p.parts), `(L) Draws straight lines. Click a start point, then keep clicking. ${SOON} [ <OK> ]`);
+  // A tap or a key has no hover to show the tip: the command bar says it.
+  const rectangle = PANELS[0]?.tools[2];
+  assert.ok(rectangle);
+  assert.match(words(promptFor({ ...none, soon: rectangle }).parts), /^\(REC\) Click one corner, then the opposite corner\. Coming soon/);
+});
+
+test('stepping back offers Older, Newer and Live, and says when the entry cannot be shown', () => {
+  assert.equal(words(promptFor({ ...none, at: 6 }).parts), 'Showing entry 6 as it was, read-only [ <Older> <Newer> <Live> ]');
+  assert.equal(words(promptFor({ ...none, at: 1, cannot: true }).parts), 'Entry 1 cannot be shown [ <Older> <Newer> <Live> ]');
+  // Stepping back comes before a selection, and reaching the server before it too.
+  assert.match(words(promptFor({ ...none, at: 2, selected: { type: 'line' } }).parts), /^Showing entry 2/);
+  assert.match(words(promptFor({ ...none, reaching: true, selected: { type: 'line' } }).parts), /^Reaching the server/);
+});
+
+test('the connection says live, reaching, looking back, or no journal', () => {
+  assert.deepEqual(liveLine(null, false, 'open'), { state: 'open', line: 'Live: changes show as they land' });
+  assert.equal(liveLine(null, false, 'reconnecting').state, 'down');
+  assert.match(liveLine(null, false, 'refused').line, /refused the live stream/);
+  assert.deepEqual(liveLine(3, false, 'open'), { state: 'past', line: 'Showing entry 3 as it was: read-only' });
+  assert.equal(liveLine(null, true, 'open').state, 'none');
+});
+
+test('F3, F7 and F8 turn Object snap, Grid and Ortho, as in AutoCAD', () => {
+  assert.equal(toggleFor('F3'), 'osnap');
+  assert.equal(toggleFor('F7'), 'grid');
+  assert.equal(toggleFor('F8'), 'ortho');
+  assert.equal(toggleFor('F9'), null);
+  assert.equal(toggledWords('grid', false), 'Grid off');
+  assert.equal(toggledWords('ortho', true), 'Ortho on: it acts once drawing tools come');
+});
+
+test('units, the paper and the cursor in words', () => {
+  assert.deepEqual(unitWords('in'), { name: 'inches', short: 'in' });
+  assert.deepEqual(unitWords('mm'), { name: 'millimetres', short: 'mm' });
+  assert.deepEqual(unitWords('ft'), { name: 'feet', short: 'ft' });
+  // No unit from the core, whether stated none (INSUNITS 0) or one it does not carry (miles):
+  // no word, no suffix, and none guessed from the scale.
+  assert.deepEqual(unitWords(null), { name: '', short: '' });
+  const sheet = { paper_declared: true, paper_name: 'ANSI B landscape', paper: [0, 0, 17, 11] as const, units: 'in' };
+  assert.equal(paperWords(sheet), 'ANSI B landscape, inches');
+  // Paper declared by its size alone is not the extents: its size says it.
+  assert.equal(paperWords({ ...sheet, paper_name: null }), '17 × 11 in');
+  assert.equal(paperWords({ ...sheet, paper_name: null, paper: [0, 0, 420, 297], units: 'mm' }), '420 × 297 mm');
+  assert.equal(paperWords({ ...sheet, paper_name: null, paper: [0, 0, 8.5, 11], units: null }), '8.5 × 11');
+  // No paper: the sheet sits on its extents.
+  assert.equal(paperWords({ ...sheet, paper_declared: false, paper_name: null, paper: [-5, -5, 105, 55] }), 'Extents, inches');
+  assert.equal(paperWords({ paper_declared: false, paper_name: null, paper: [0, 0, 1, 1], units: null }), 'Extents');
+  assert.equal(paperWords({ ...sheet, units: null }), 'ANSI B landscape');
+  assert.equal(coordinates(1.72, 6.5, 'in'), '1.720, 6.500 in');
+  assert.equal(coordinates(-3, 0, null), '-3.000, 0.000');
+});
+
+test('an object is called by its name, its ID without the sheet, or its type', () => {
+  assert.equal(nameOf({ id: 'DP-LD-101/device', name: 'FT-101', type: 'insert' }), 'FT-101');
+  assert.equal(nameOf({ id: 'DP-LD-101/border', type: 'polyline' }), 'border');
+  assert.equal(nameOf({ type: 'line' }), 'line');
+  assert.equal(typeWords({ type: 'insert', block: 'TRANSMITTER' }), 'Insert of TRANSMITTER');
+  assert.equal(typeWords({ type: 'circle' }), 'Circle');
+});
+
+test('on a phone the drawing left free is above quick properties, or left of them on a phone held on its side', () => {
+  // Upright: the card spans the drawing, from 400 down.
+  assert.deepEqual(freeBeside([8, 400, 382, 680], 390, 700), [0, 0, 390, 400]);
+  // On its side: the card at the right, from the top down to 200.
+  assert.deepEqual(freeBeside([568, 8, 836, 200], 844, 300), [0, 0, 568, 200]);
+});
+
+test('a change in the room quick properties leave moves the view only when it newly hides the object', () => {
+  const peek = [0, 0, 390, 323] as const;
+  const raised = [0, 0, 390, 62] as const;
+  // On the screen, clear of the card before, under it now: newly hidden.
+  assert.equal(newlyHidden([150, 270, 190, 290], peek, raised, 390, 700), true);
+  // Panned off the screen by the drafter: left there.
+  assert.equal(newlyHidden([-300, 270, -260, 290], peek, raised, 390, 700), false);
+  // Already under the card before: not newly hidden.
+  assert.equal(newlyHidden([150, 400, 190, 420], peek, raised, 390, 700), false);
+  // The room grows, as when a wrapped prompt goes: nothing is hidden.
+  assert.equal(newlyHidden([150, 270, 190, 290], raised, peek, 390, 700), false);
+  assert.equal(newlyHidden([150, 20, 190, 40], raised, peek, 390, 700), false);
+});
+
+test('quick properties sit to the right of the object, or to its left, kept in the room', () => {
+  const room = [0, 0, 1000, 700] as const;
+  const card = { width: 268, height: 300 };
+  // Room to the right: 16 px past its right edge, level with its top.
+  assert.deepEqual(placeBeside([100, 200, 160, 260], card, room), [176, 200]);
+  // None to the right: to its left.
+  assert.deepEqual(placeBeside([800, 200, 900, 260], card, room), [800 - 16 - 268, 200]);
+  // Low on the screen: lifted so it stays in the room.
+  assert.deepEqual(placeBeside([100, 600, 160, 650], card, room), [176, 700 - 8 - 300]);
+  // Wider than the room either side: kept inside it.
+  const [x] = placeBeside([10, 10, 990, 50], card, room);
+  assert.ok(x >= 8 && x + 268 <= 992, `kept inside: ${x}`);
+});

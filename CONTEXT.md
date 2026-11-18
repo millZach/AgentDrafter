@@ -434,7 +434,7 @@ The browser window where the reviewer watches a drawing set change, steps throug
 _Avoid_: app, editor, UI
 
 **Drafting app**:
-The viewer with drawing tools and an assistant, in a browser or in its desktop shell, where a drafter draws and edits the way they use AutoCAD. Every edit made in it is a change set. It is designed and not yet built ([`docs/drafting-app.md`](docs/drafting-app.md)).
+The viewer with drawing tools and an assistant, in a browser or in its desktop shell, where a drafter draws and edits the way they use AutoCAD. Every edit made in it is a change set. Its frame is built round the viewer; its drawing tools and its assistant are not yet ([`docs/drafting-app.md`](docs/drafting-app.md)).
 _Avoid_: editor, CAD program, GUI
 
 **Drawing tool**:
@@ -444,6 +444,18 @@ _Avoid_: command (a command is the core's), tool on its own (the MCP server's wo
 **Command bar**:
 The line at the bottom of the drafting app's drawing where a drafter types a drawing tool's alias, a coordinate or words for the assistant, and reads the tool's prompt.
 _Avoid_: command line (that is an interface), prompt, console
+
+**Ribbon**:
+The strip of the drafting app above the drawing that holds its drawing tools in panels, Draw, Modify and Layer, as AutoCAD's ribbon does, cut down to a few labelled tools. A tool still to come is shown dimmed, and says so.
+_Avoid_: toolbar, menu
+
+**Quick properties**:
+What the selected object is, shown beside it in the drafting app: its type, layer, ID, name, block and attributes, the checks it fails and the change sets that changed it, as AutoCAD's Quick Properties palette shows an object's. They only show until editing in them is built.
+_Avoid_: inspector, properties panel, tooltip
+
+**Screen colours**:
+The colours a sheet shows in on the drafting app's dark model space, where colour index 7 is white, as on AutoCAD's dark screen; the PNG and the PDF plot it black on white paper.
+_Avoid_: theme, dark mode
 
 **Proposal**:
 A change set that waits to be kept or discarded. It is shown on the sheet before it lands, changes nothing until it is kept, and lands as a change set when it is.

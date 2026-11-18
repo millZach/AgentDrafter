@@ -1,6 +1,6 @@
 # The drafting app
 
-**Status: design. Nothing on this page is built.** The [viewer](viewer.md) is what exists today, and it has no drawing tools. This page sets out the drafting app the viewer grows into (issue [#144](https://github.com/millZach/AgentDrafter/issues/144)), in the order it will be built. Its terms are in [`CONTEXT.md`](../CONTEXT.md): drafting app, drafter, drawing tool, command bar, assistant, proposal and guide.
+**Status: builds 1 and 2 are done.** The records are written, and the [viewer](viewer.md) is in the frame (#150): the ribbon, a tab for each sheet, the command bar, the status bar and quick properties, round dark model space, with nothing that edits. The drawing tools and the assistant are not built. This page sets out the drafting app the viewer grows into (issue [#144](https://github.com/millZach/AgentDrafter/issues/144)), in the order it will be built. Its terms are in [`CONTEXT.md`](../CONTEXT.md): drafting app, drafter, drawing tool, command bar, assistant, proposal and guide.
 
 ## What it is
 
@@ -78,8 +78,8 @@ The assistant is an agent, and it reaches the core through the registry as any a
 
 Each is one ticket, proven as [`AGENTS.md`](../AGENTS.md) asks.
 
-1. **The records:** this page, the plan, ADR-0011 and the glossary.
-2. **The frame** in the viewer, with selecting and quick properties that only show.
+1. **The records:** this page, the plan, ADR-0011 and the glossary. *Done (#145).*
+2. **The frame** in the viewer, with selecting and quick properties that only show. *Done (#150): [the viewer](viewer.md#the-frame) sets out what was built. The prototype Zach picked on 2026-11-18 is kept as the tag [`prototype/drafting-app-frame-150`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-frame-150/prototypes/drafting-app-frame).*
 3. **Object snaps with the display list**, and the crosshair and snap markers.
 4. **The first drawing tools:** Line, Circle, Rectangle, Text, Move and Erase, with the command bar, typed coordinates and the template warning.
 5. **Editing in quick properties:** layer, text, attribute values and radius.
