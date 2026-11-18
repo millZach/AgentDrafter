@@ -1711,6 +1711,49 @@ const checks = {
         seen.small = { ...small, device: deviceSmall };
         await context.close();
       }
+      // The drafter pans the selected object away while a tool's prompt is
+      // up; when the prompt goes and the command bar shrinks, the view stays
+      // where the drafter put it.
+      {
+        const context = await b.newContext(PHONE);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        const device = await at(page, 'DP-LD-101/device');
+        await page.touchscreen.tap(...middle(device.box));
+        await page.waitForSelector('.qp');
+        await sleep(500);
+        await page.tap('.toolsbtn');
+        await page.tap('.rb[data-tool="rectangle"]', { force: true });
+        const tapped = Date.now();
+        await sleep(400);
+        const stage = await page.evaluate(() => {
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          return [r.left, r.top, r.width];
+        });
+        // Drag the drawing to the left until FT-101 is off the screen.
+        const y = stage[1] + 60;
+        await page.mouse.move(stage[0] + stage[2] - 20, y);
+        await page.mouse.down();
+        await page.mouse.move(stage[0] + 20, y, { steps: 6 });
+        await sleep(30);
+        await page.mouse.move(stage[0] + 10, y, { steps: 2 });
+        await page.mouse.up();
+        await sleep(1200);
+        const away = await at(page, 'DP-LD-101/device');
+        assert(away.box[2] < stage[0], `FT-101 is panned off the screen: ${JSON.stringify(away.box)}`);
+        const panned = await page.evaluate(() => window.agentdrafterViewer.view());
+        assert((await bar(page)).includes('Coming soon'), 'the prompt is still up');
+        // The prompt goes after six seconds; the bar shrinks.
+        await sleep(Math.max(0, 6000 - (Date.now() - tapped)) + 800);
+        assert(!(await bar(page)).includes('Coming soon'), `the prompt has gone: ${await bar(page)}`);
+        const after = await page.evaluate(() => window.agentdrafterViewer.view());
+        assert(
+          Math.abs(after.left - panned.left) < 1e-9 && Math.abs(after.top - panned.top) < 1e-9 && after.scale === panned.scale,
+          `the view stays where the drafter panned it: ${JSON.stringify({ panned, after })}`,
+        );
+        assert(problems.length === 0, problems.join('; '));
+        seen.panned_away = { device: away.box, view_kept: true };
+        await context.close();
+      }
       // A phone held on its side: the card does not cover the selected object.
       {
         const context = await b.newContext({ ...PHONE, viewport: { width: 844, height: 390 } });

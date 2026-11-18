@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   coordinates,
   freeBeside,
+  newlyHidden,
   liveLine,
   nameOf,
   PANELS,
@@ -115,6 +116,20 @@ test('on a phone the drawing left free is above quick properties, or left of the
   assert.deepEqual(freeBeside([8, 400, 382, 680], 390, 700), [0, 0, 390, 400]);
   // On its side: the card at the right, from the top down to 200.
   assert.deepEqual(freeBeside([568, 8, 836, 200], 844, 300), [0, 0, 568, 200]);
+});
+
+test('a change in the room quick properties leave moves the view only when it newly hides the object', () => {
+  const peek = [0, 0, 390, 323] as const;
+  const raised = [0, 0, 390, 62] as const;
+  // On the screen, clear of the card before, under it now: newly hidden.
+  assert.equal(newlyHidden([150, 270, 190, 290], peek, raised, 390, 700), true);
+  // Panned off the screen by the drafter: left there.
+  assert.equal(newlyHidden([-300, 270, -260, 290], peek, raised, 390, 700), false);
+  // Already under the card before: not newly hidden.
+  assert.equal(newlyHidden([150, 400, 190, 420], peek, raised, 390, 700), false);
+  // The room grows, as when a wrapped prompt goes: nothing is hidden.
+  assert.equal(newlyHidden([150, 270, 190, 290], raised, peek, 390, 700), false);
+  assert.equal(newlyHidden([150, 20, 190, 40], raised, peek, 390, 700), false);
 });
 
 test('quick properties sit to the right of the object, or to its left, kept in the room', () => {

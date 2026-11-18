@@ -216,6 +216,23 @@ export function freeBeside(card: Box, width: number, height: number): Box {
   return [0, 0, width, Math.max(0, top)];
 }
 
+/** Whether `box` lies wholly inside `room`. */
+const inside = (box: Box, room: Box): boolean =>
+  box[0] >= room[0] && box[2] <= room[2] && box[1] >= room[1] && box[3] <= room[3];
+
+/**
+ * Whether a change in the room quick properties leave, from `before` to
+ * `now`, newly hides the selected object at `box`, on a drawing `width` by
+ * `height`: it is on the screen, was clear of the card before, and is not
+ * now. Only then is the view moved for it. An object the drafter panned
+ * away, or one already under the card, is left where it is, and room that
+ * grows hides nothing.
+ */
+export function newlyHidden(box: Box, before: Box, now: Box, width: number, height: number): boolean {
+  const onScreen = box[2] > 0 && box[0] < width && box[3] > 0 && box[1] < height;
+  return onScreen && inside(box, before) && !inside(box, now);
+}
+
 /**
  * Where quick properties go beside the selected object, whose box on the
  * screen is `object`: to its right, or to its left when there is no room

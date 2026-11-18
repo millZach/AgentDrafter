@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 
-import { freeBeside, placeBeside } from './frame.ts';
+import { freeBeside, newlyHidden, placeBeside, type Box } from './frame.ts';
 
 import { Viewer } from './wasm/agentdrafter_viewer.js';
 import { attachGestures, Glide, type Surface } from './gestures.ts';
@@ -440,19 +440,29 @@ export function Drawing({
   // On a phone, an object picked where quick properties open over it is
   // brought into the drawing's free part: above the card, as a phone held
   // upright has it, or left of it, as one held on its side has it. Where
-  // the card begins is measured, not assumed, and measured again when the
-  // room it has changes (`space`).
+  // the card begins is measured, not assumed. When only the room the card
+  // has changes (`space`), as the journal comes to rest at another height
+  // or the command bar grows or shrinks, the view moves only if that newly
+  // hides the object: never to pull back an object the drafter panned away.
+  const revealed = useRef<{ picked: number | null; compact: boolean; free: Box } | null>(null);
   useEffect(() => {
     const c = canvas.current;
     const el = card?.current;
     const b = pickedBox.current;
-    if (!compact || picked === null || !c || !el || b.length !== 4) return;
+    if (!compact || picked === null || !c || !el || b.length !== 4) {
+      revealed.current = null;
+      return;
+    }
     const cr = c.getBoundingClientRect();
     const qr = el.getBoundingClientRect();
     const free = freeBeside([qr.left - cr.left, qr.top - cr.top, qr.right - cr.left, qr.bottom - cr.top], cr.width, cr.height);
+    const before = revealed.current;
+    revealed.current = { picked, compact, free };
     const v = view.current;
     const [l, t] = toScreen(v, b[0] as number, b[3] as number);
     const [r, bottom] = toScreen(v, b[2] as number, b[1] as number);
+    const sameSelection = before !== null && before.picked === picked && before.compact === compact;
+    if (sameSelection && !newlyHidden([l, t, r, bottom], before.free, free, cr.width, cr.height)) return;
     const m = 12;
     if (l >= free[0] + m && r <= free[2] - m && t >= free[1] + m && bottom <= free[3] - m) return;
     followFit.current = false;
