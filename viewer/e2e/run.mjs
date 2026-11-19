@@ -2504,6 +2504,16 @@ const checks = {
         // What is typed on one circle does not follow the selection to
         // another whose radius shows the same: leaving the first lands it,
         // and the second shows its own.
+        // The sheet's drawing is held back meanwhile, so the second is
+        // picked before the first's new radius is drawn.
+        let releaseFirst;
+        const firstHeld = new Promise((done) => {
+          releaseFirst = done;
+        });
+        await context.route('**/commands/display-list', async (route) => {
+          await firstHeld;
+          await route.continue().catch(() => {});
+        });
         before = journal().length;
         await page.click('.qp [data-prop="radius"]');
         await page.fill('.qp [data-prop="radius"]', '0.45');
@@ -2516,6 +2526,9 @@ const checks = {
         await page.click('.qp [data-prop="radius"]');
         await page.click('.qp header b');
         await nothingLands(before, 'Focusing and leaving the second circle');
+        releaseFirst();
+        await sleep(300);
+        await context.unroute('**/commands/display-list');
         seen.laptop.draft_stays = entry.entry;
 
         // A field landed with Enter, focused again and left before the
