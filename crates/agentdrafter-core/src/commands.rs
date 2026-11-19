@@ -464,8 +464,15 @@ fn display_list_does() -> String {
      where a change set writes an edit to it, and the reply gives `template`: the sheet's \
      template, its `path` as the rows write it, and every sheet built from it under `sheets`, \
      which an edit to one of the template's objects reaches, and on a sheet drawn in a layout \
-     `space`, the space an object drawn on the page goes in, as an add names it. A loop \
-     sheet's display list runs to megabytes: it is for the viewer to draw, not to read."
+     `space`, the space an object drawn on the page goes in, as an add names it. With \
+     `values`, each object also gives `values`, what quick properties edit: a text's or an \
+     mtext's `contents`, a circle's or an arc's `radius`, and an insert's `attributes`, each \
+     with its `tag` and, for a tag its block defines more than once, its `occurrence`; and on a \
+     drawing set's sheet each text value says where it is `written`: `own`, by the object \
+     itself; `row_value`, by the sheet's row, naming the `row_value` and how many places on the \
+     sheet it `fills`; or `unset`, an attribute the insert gives no value for, which shows its \
+     default. A loop sheet's display list runs to megabytes: it is for the viewer to draw, not \
+     to read."
         .to_owned()
 }
 
@@ -487,6 +494,10 @@ fn display_list_input() -> Value {
             },
             "origins": {
                 "description": "On a drawing set's sheet, say where each object is written, `from` its sheet's `template` or its `row`, and give `template`: the template's path and every sheet built from it, which an edit to a template's object reaches; and on a sheet drawn in a layout, `space`: the space an object drawn on the page goes in, `paper` or the layout's name. Without it, none of them.",
+                "type": "boolean",
+            },
+            "values": {
+                "description": "Give each object's `values`, what quick properties edit: a text's or an mtext's contents, a circle's or an arc's radius, and an insert's attribute values; and on a drawing set's sheet where each text value is `written`: by the object itself (`own`), by the sheet's row (`row_value`, with the value's name and how many places on the sheet it `fills`), or nowhere (`unset`, an attribute that shows its default). Without it, none.",
                 "type": "boolean",
             },
             "fonts": fonts(),

@@ -44,6 +44,8 @@ mod table_schema;
 mod template;
 mod text;
 pub(crate) use text::TEXT_STYLE_KEYS;
+mod written;
+pub(crate) use written::{ObjectSources, SheetSources, Source};
 
 use std::fs;
 use std::path::{Path, PathBuf};

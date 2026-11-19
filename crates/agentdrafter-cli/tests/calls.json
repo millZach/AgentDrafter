@@ -78,6 +78,11 @@
       "input": {"source": "demo-set", "sheet": "demo-002", "origins": true}
     },
     {
+      "command": "display-list",
+      "args": ["display-list", "demo-set", "--sheet", "demo-002", "--values"],
+      "input": {"source": "demo-set", "sheet": "demo-002", "values": true}
+    },
+    {
       "command": "query",
       "args": ["query", "snap", "demo-set", "--id", "DEMO-001/objects[2]", "--snap", "perpendicular", "--from", "DEMO-001/border", "--from-snap", "endpoint", "--from-which", "points[2]"],
       "input": {"source": "demo-set", "query": {"kind": "snap", "id": "DEMO-001/objects[2]", "snap": "perpendicular", "from": {"id": "DEMO-001/border", "snap": "endpoint", "which": "points[2]"}}}
