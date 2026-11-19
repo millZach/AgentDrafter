@@ -232,6 +232,10 @@ _Avoid_: prototype, master
 One sheet's data in a drawing set: the sheet's name, the template it is drawn from, the values that template takes from it, and any objects of the sheet's own, which are on that sheet alone. A sheet can be a template plus one row.
 _Avoid_: record (a record is the file that is the truth for a sheet), entry, line
 
+**Row value**:
+One of a row's values: the text its template's `{row: NAME}` stands for, on that row's sheet. It may fill several places on the sheet, such as a wire number written four times; an edit to any of them sets the row value, on that sheet alone, and every place it fills changes.
+_Avoid_: field, variable, placeholder (the template's `{row: NAME}` is where a row value goes, not the value)
+
 **Set settings**:
 The file at the top of a drawing set's folder, `set.yaml`, that declares the set's unit, where its outputs go and where its rows are.
 _Avoid_: project file, config
@@ -466,7 +470,7 @@ The strip of the drafting app above the drawing that holds its drawing tools in 
 _Avoid_: toolbar, menu
 
 **Quick properties**:
-What the selected object is, shown beside it in the drafting app: its type, layer, ID, name, block and attributes, the checks it fails and the change sets that changed it, as AutoCAD's Quick Properties palette shows an object's. They only show until editing in them is built.
+What the selected object is, shown beside it in the drafting app: its type, layer, ID, name, block and attributes, the checks it fails and the change sets that changed it, as AutoCAD's Quick Properties palette shows an object's. Its layer, a text's contents, an insert's attribute values and a circle's radius or diameter, an arc's radius, are edited in them, each edit one change set, and each says before it is edited where its value is written: the template, a row value, or unset.
 _Avoid_: inspector, properties panel, tooltip
 
 **Screen colours**:

@@ -1119,10 +1119,7 @@ impl Viewer {
     /// in the sheet's objects, as JSON: each with its value, whether it can
     /// be edited, and what it says of where its value is written.
     pub fn props_fields(&self, place: u32) -> String {
-        to_json(&crate::props::fields(
-            self.tools.context(),
-            place as usize,
-        ))
+        to_json(&crate::props::fields(self.tools.context(), place as usize))
     }
 
     /// What an edit of the field `key` of the object at `place` to `typed`

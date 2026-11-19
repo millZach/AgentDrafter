@@ -191,7 +191,11 @@ fn a_rows_own_object_changes_this_sheet_alone() {
     assert_eq!(sent(&edited).sheets, ["DP-LD-101"]);
     assert_eq!(sent(&edited).template, None);
     let fields = fields(&context, WASHER);
-    assert_eq!(field(&fields, "layer").chip, None, "the row's own, as Comes from says");
+    assert_eq!(
+        field(&fields, "layer").chip,
+        None,
+        "the row's own, as Comes from says"
+    );
     assert_eq!(field(&fields, "layer").note, None);
 }
 
@@ -269,8 +273,14 @@ fn attributes_say_where_each_is_written_and_set_attribute_sets_them() {
         .map(|f| f.label.as_str())
         .collect();
     assert_eq!(labels, ["REV", "DRAWN", "CHECKED", "NOTE (1)", "NOTE (2)"]);
-    assert_eq!(field(&fields, "attribute:0").chip.as_ref().unwrap().words, "2 places");
-    assert_eq!(field(&fields, "attribute:1").chip.as_ref().unwrap().words, "3 sheets");
+    assert_eq!(
+        field(&fields, "attribute:0").chip.as_ref().unwrap().words,
+        "2 places"
+    );
+    assert_eq!(
+        field(&fields, "attribute:1").chip.as_ref().unwrap().words,
+        "3 sheets"
+    );
     let checked = field(&fields, "attribute:2");
     assert_eq!(
         checked.chip,
@@ -295,7 +305,10 @@ fn attributes_say_where_each_is_written_and_set_attribute_sets_them() {
     );
     assert_eq!(sent(&edited).sheets, ["DP-LD-101"]);
     assert_eq!(sent(&edited).template, None);
-    assert_eq!(sent(&edited).what, "title-block REV set to \u{201c}A\u{201d}");
+    assert_eq!(
+        sent(&edited).what,
+        "title-block REV set to \u{201c}A\u{201d}"
+    );
 
     // The template's own value: asked first.
     let edited = edit(&context, TITLE_BLOCK, "attribute:1", "ZM");
@@ -331,7 +344,9 @@ fn attributes_say_where_each_is_written_and_set_attribute_sets_them() {
         Edited::default()
     );
     assert_eq!(
-        edit(&context, TITLE_BLOCK, "attribute:9", "X").error.as_deref(),
+        edit(&context, TITLE_BLOCK, "attribute:9", "X")
+            .error
+            .as_deref(),
         Some("There is no such field to edit.")
     );
 
@@ -351,12 +366,18 @@ fn contents_are_one_line_for_a_text_and_more_for_an_mtext() {
     let context = context();
     assert!(field(&fields(&context, NOTE), "contents").multiline);
     let edited = edit(&context, NOTE, "contents", "ONE\r\nTWO\nTHREE");
-    assert_eq!(operation(&edited)["set"], json!({"contents": "ONE\nTWO\nTHREE"}));
+    assert_eq!(
+        operation(&edited)["set"],
+        json!({"contents": "ONE\nTWO\nTHREE"})
+    );
     assert_eq!(
         sent(&edited).what,
         "note text set to \u{201c}ONE\u{2026}\u{201d}"
     );
-    assert_eq!(edit(&context, NOTE, "contents", "ONE\nTWO"), Edited::default());
+    assert_eq!(
+        edit(&context, NOTE, "contents", "ONE\nTWO"),
+        Edited::default()
+    );
     assert_eq!(
         edit(&context, TITLE, "contents", "A\nB").error.as_deref(),
         Some("A text is one line.")
@@ -365,14 +386,19 @@ fn contents_are_one_line_for_a_text_and_more_for_an_mtext() {
         edit(&context, TITLE, "contents", "  ").error.as_deref(),
         Some("A text needs something to show.")
     );
-    assert_eq!(edit(&context, TITLE, "contents", "FIELD"), Edited::default());
+    assert_eq!(
+        edit(&context, TITLE, "contents", "FIELD"),
+        Edited::default()
+    );
 }
 
 #[test]
 fn an_object_that_cannot_be_edited_shows_its_fields_read_only() {
     let context = context();
     // No ID.
-    assert!(fields(&context, NO_ID).iter().all(|f| !f.editable && f.note.is_none()));
+    assert!(fields(&context, NO_ID)
+        .iter()
+        .all(|f| !f.editable && f.note.is_none()));
     assert_eq!(
         edit(&context, NO_ID, "radius", "2").error.as_deref(),
         Some("It has no ID, so a change set cannot name it.")
@@ -395,7 +421,10 @@ fn an_object_that_cannot_be_edited_shows_its_fields_read_only() {
     assert!(fields_alone.iter().all(|f| !f.editable && f.chip.is_none()));
     assert!(edit(&alone, WASHER, "radius", "2").error.is_some());
     // An object with nothing but its layer to edit.
-    let keys: Vec<String> = fields(&context, BORDER).into_iter().map(|f| f.key).collect();
+    let keys: Vec<String> = fields(&context, BORDER)
+        .into_iter()
+        .map(|f| f.key)
+        .collect();
     assert_eq!(keys, ["layer"]);
     // Nothing there.
     assert!(fields(&context, 99).is_empty());

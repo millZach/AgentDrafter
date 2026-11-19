@@ -160,7 +160,10 @@ fn chip_and_note(lands: &Lands, tag: Option<&str>) -> (Option<Chip>, Option<Stri
                     file_of(reach)
                 )
             };
-            (chip(plural(n, "sheet", "sheets"), Tone::Template), Some(note))
+            (
+                chip(plural(n, "sheet", "sheets"), Tone::Template),
+                Some(note),
+            )
         }
         // The default: "Comes from" says it, and a chip on each row would
         // crowd a phone's card.
