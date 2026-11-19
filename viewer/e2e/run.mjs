@@ -2633,7 +2633,8 @@ const checks = {
         assert(op.set.layer === 'notes', `the layer by touch: ${JSON.stringify(op)}`);
         seen.phone.layer = entry.entry;
         // The Layer box, in Tools, moves it again.
-        await page.waitForFunction(() => document.querySelector('.qp [data-prop="layer"]')?.value === 'notes', null, { timeout: 15000 });
+        // The sheet drawn again with it, not only the field, which holds what was sent until then.
+        await page.waitForFunction(() => window.agentdrafterViewer.summary.objects.find((o) => o.id === 'DP-LD-101/device')?.layer === 'notes', null, { timeout: 15000 });
         before = journal().length;
         await page.tap('.toolsbtn');
         await page.selectOption('select[data-layer]', 'wire');
