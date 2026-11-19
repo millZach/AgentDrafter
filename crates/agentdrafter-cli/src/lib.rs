@@ -50,7 +50,7 @@ const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [-
 const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]... [--no-system-fonts]";
-const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--fonts <folder>]... [--no-system-fonts]";
+const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--fonts <folder>]... [--no-system-fonts]";
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
@@ -375,6 +375,12 @@ fn parse_display_list(mut args: Args) -> Result<Value, Error> {
                     return Err(Error::usage("--snaps is given twice"));
                 }
                 request.snaps = true;
+            }
+            Some("--origins") => {
+                if request.origins {
+                    return Err(Error::usage("--origins is given twice"));
+                }
+                request.origins = true;
             }
             Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),

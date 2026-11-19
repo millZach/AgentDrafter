@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, display_list_with, DisplayListReport, DisplayListRequest, ErrorCode,
+    build_set_with, display_list_with, DisplayListReport, DisplayListRequest, ErrorCode, Origin,
     SetBuildRequest, Settings, Shape,
 };
 
@@ -166,4 +166,124 @@ fn a_sheet_description_is_drawn_with_its_curves_as_fine_as_asked() {
         points(&coarse).len() < points(&report).len(),
         "finer curves draw through more points"
     );
+}
+
+#[test]
+fn with_origins_each_object_says_whether_its_template_or_its_row_writes_it() {
+    let plant = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/demo-plant");
+    let before = snapshot::snapshot(&plant);
+    let mut request = DisplayListRequest::new(&plant);
+    request.sheet = Some("DP-LD-101".to_owned());
+
+    // Without the option, nothing is said, and the reply is as it was.
+    let plain = display_list_with(&request, &Settings::default()).unwrap();
+    assert!(plain.template.is_none());
+    assert!(plain.objects.iter().all(|o| o.from.is_none()));
+    let text = serde_json::to_string(&plain).unwrap();
+    assert!(!text.contains("\"from\"") && !text.contains("\"template\""));
+
+    request.origins = true;
+    let told = display_list_with(&request, &Settings::default()).unwrap();
+    let reach = told
+        .template
+        .as_ref()
+        .expect("a set's sheet names its template");
+    assert_eq!(reach.path, "templates/loop-2-wire.yaml");
+    assert_eq!(
+        reach.sheets,
+        [
+            "DP-LD-101",
+            "DP-LD-102",
+            "DP-LD-104",
+            "DP-LD-201",
+            "DP-LD-202",
+            "DP-LD-301",
+            "DP-LD-302"
+        ],
+        "every sheet built from the template, in the set's order, DP-LD-103 not among them"
+    );
+    // The row's own two objects, the device and the I/O channel, come last.
+    let rows: Vec<&str> = told
+        .objects
+        .iter()
+        .filter(|o| o.from == Some(Origin::Row))
+        .filter_map(|o| o.id.as_deref())
+        .collect();
+    assert_eq!(rows, ["DP-LD-101/device", "DP-LD-101/io-channel"]);
+    let border = told
+        .objects
+        .iter()
+        .find(|o| o.id.as_deref() == Some("DP-LD-101/border"))
+        .unwrap();
+    assert_eq!(border.from, Some(Origin::Template));
+    assert!(told.objects.iter().all(|o| o.from.is_some()));
+    assert_eq!(
+        told.display_list, plain.display_list,
+        "what is drawn is the same"
+    );
+
+    // The other template's one sheet.
+    request.sheet = Some("DP-LD-103".to_owned());
+    let other = display_list_with(&request, &Settings::default()).unwrap();
+    let reach = other.template.unwrap();
+    assert_eq!(reach.path, "templates/loop-3-wire.yaml");
+    assert_eq!(reach.sheets, ["DP-LD-103"]);
+
+    // A sheet description on its own has no template and no row.
+    let mut alone = DisplayListRequest::new(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/one-line.yaml"),
+    );
+    alone.origins = true;
+    let alone = display_list_with(&alone, &Settings::default()).unwrap();
+    assert!(alone.template.is_none());
+    assert!(alone.objects.iter().all(|o| o.from.is_none()));
+
+    assert_eq!(snapshot::snapshot(&plant), before, "nothing is written");
+}
+
+#[test]
+fn with_origins_a_sheet_drawn_in_a_layout_names_the_space_an_add_goes_in() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    // A made-up set of one sheet, its template one of the layout examples.
+    let set_of = |name: &str, example: &str, units: &str| -> PathBuf {
+        let set = scratch(name);
+        fs::create_dir_all(set.join("templates")).unwrap();
+        fs::copy(examples.join(example), set.join("templates").join(example)).unwrap();
+        fs::write(
+            set.join("set.yaml"),
+            format!("units: {units}\noutput: dwg\nrows: rows.yaml\n"),
+        )
+        .unwrap();
+        fs::write(
+            set.join("rows.yaml"),
+            format!("rows:\n  - sheet: LAY-001\n    template: templates/{example}\n"),
+        )
+        .unwrap();
+        set
+    };
+    let space = |set: &Path, layout: Option<&str>, origins: bool| {
+        let mut request = DisplayListRequest::new(set);
+        request.layout = layout.map(str::to_owned);
+        request.origins = origins;
+        display_list_with(&request, &Settings::default())
+            .unwrap()
+            .space
+    };
+
+    // One layout: an add drawn on its page goes in paper space.
+    let one = set_of("layout-space-one", "layout.yaml", "mm");
+    assert_eq!(space(&one, None, true).as_deref(), Some("paper"));
+    assert_eq!(space(&one, None, false), None, "without origins, nothing");
+
+    // Several: an add names the layout drawn.
+    let several = set_of("layout-space-several", "layouts.yaml", "mm");
+    assert_eq!(space(&several, None, true).as_deref(), Some("Assembly"));
+    assert_eq!(
+        space(&several, Some("wiring"), true).as_deref(),
+        Some("Wiring")
+    );
+
+    // A sheet drawn in model space names none.
+    let plant = examples.join("demo-plant");
+    assert_eq!(space(&plant, None, true), None);
 }

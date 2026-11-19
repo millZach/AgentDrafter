@@ -459,7 +459,12 @@ fn display_list_does() -> String {
      them all under `layouts`. With `snaps`, the reply also gives `snaps`: every point \
      AutoCAD's object snaps find on the objects the page draws itself, each with its `object` \
      by its place, its `snap`, `which` of the object's points and, for an intersection, the \
-     other object by its place under `with`, as `query snap` names them, and `at`. A loop \
+     other object by its place under `with`, as `query snap` names them, and `at`. With \
+     `origins`, on a drawing set's sheet, each object also gives `from`, `template` or `row`, \
+     where a change set writes an edit to it, and the reply gives `template`: the sheet's \
+     template, its `path` as the rows write it, and every sheet built from it under `sheets`, \
+     which an edit to one of the template's objects reaches, and on a sheet drawn in a layout \
+     `space`, the space an object drawn on the page goes in, as an add names it. A loop \
      sheet's display list runs to megabytes: it is for the viewer to draw, not to read."
         .to_owned()
 }
@@ -478,6 +483,10 @@ fn display_list_input() -> Value {
             },
             "snaps": {
                 "description": "Give each object's object snaps with the display list: every point its own snaps find (endpoint, midpoint, center, quadrant, insertion and node) and every intersection with another object, on the objects the page draws itself. Without it, none.",
+                "type": "boolean",
+            },
+            "origins": {
+                "description": "On a drawing set's sheet, say where each object is written, `from` its sheet's `template` or its `row`, and give `template`: the template's path and every sheet built from it, which an edit to a template's object reaches; and on a sheet drawn in a layout, `space`: the space an object drawn on the page goes in, `paper` or the layout's name. Without it, none of them.",
                 "type": "boolean",
             },
             "fonts": fonts(),

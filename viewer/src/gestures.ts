@@ -36,6 +36,8 @@ export interface Surface {
   holdEnded?(at: [number, number], taken: boolean): void;
   /** What looked like a hold was a finger moving, or a quick tap, all along: the magnifier goes, and nothing is taken. */
   holdTakenBack?(): void;
+  /** Whether every tap is a tap, as while a drawing tool takes points: two quick ones do not zoom. */
+  tapsOnly?(): boolean;
 }
 
 type Point = [number, number];
@@ -275,7 +277,7 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     // A gesture that panned was a drag, never also a tap.
     const tap = !multi && !panning && distance(p, start.p) < 10 && now - start.t < 450;
     if (tap) {
-      if (lastTap && now - lastTap.t < 320 && distance(p, lastTap.p) < 30) {
+      if (!surface.tapsOnly?.() && lastTap && now - lastTap.t < 320 && distance(p, lastTap.p) < 30) {
         lastTap = null;
         const view = surface.view();
         glide.to(zoomAt(view, p[0], p[1], view.scale * 2.2, surface.limits()), 260, p);

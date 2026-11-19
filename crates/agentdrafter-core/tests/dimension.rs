@@ -364,6 +364,7 @@ fn the_pipeline_draws_a_dimensions_lines_and_its_text_as_its_part() {
             entry: None,
             layout: None,
             snaps: false,
+            origins: false,
         },
         &Settings::default(),
     )
@@ -753,6 +754,7 @@ fn drawn(source: &Path, index: usize) -> Vec<String> {
             entry: None,
             layout: None,
             snaps: false,
+            origins: false,
         },
         &Settings::default(),
     )

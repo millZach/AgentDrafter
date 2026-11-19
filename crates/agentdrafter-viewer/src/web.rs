@@ -45,6 +45,12 @@
 //!   the display list came with, the running ones, with no round trip
 //!   ([`crate::snapping`]); Tab steps to the next in reach. They are
 //!   triangles in device pixels, made anew each frame ([`crate::overlay`]).
+//! - The drafter's drawing tool, while one runs ([`crate::tools`]): it takes
+//!   the clicks, taps and typing the page passes on, says what it wants,
+//!   and gives the change set to send; this module draws its rubber band
+//!   in the current layer's colour, its guides dashed, the objects a move
+//!   would move where they would go, the points it has taken, and a halo
+//!   round each object it has picked.
 //! - Over the ink, a halo marks each object a change set added or changed,
 //!   green or amber, and the object the reviewer picked, blue, as the
 //!   picked prototype marks them; the page fades the change set's halos in
@@ -58,12 +64,15 @@ use web_sys::{
     WebGlUniformLocation, WebGlVertexArrayObject,
 };
 
-use agentdrafter_core::{object_bounds, outlines, pick, Bounds, DisplayList, DisplaySnap, Outline};
+use agentdrafter_core::{
+    object_bounds, outlines, pick, Bounds, Color, DisplayList, DisplaySnap, Outline, Shape,
+};
 
 use crate::grid::{first_line, grid};
 use crate::mesh::{read_reply, screen_rgba, Kind, Mesh, Run, Span};
 use crate::overlay::{crosshair, marker, triangles, Segment};
 use crate::snapping::{candidates, Candidate};
+use crate::tools::{tool_for, Context, ObjectInfo, SnapRef, Taken, Tools};
 
 const STROKE_VERTEX: &str = r#"#version 300 es
 precision highp float;
@@ -207,6 +216,24 @@ const MARKER_EDGE: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
 
 /// The crosshair's colour on model space.
 const CROSSHAIR: [f32; 4] = [238.0 / 255.0, 241.0 / 255.0, 244.0 / 255.0, 0.92];
+
+/// What a move would move, drawn where it would go, pale blue, as the
+/// picked prototype draws it.
+const MOVING: [f32; 4] = [0xd6 as f32 / 255.0, 0xec as f32 / 255.0, 1.0, 0.85];
+
+/// A tool's guides, dashed: from a circle's centre, or a move's base point.
+const GUIDE: [f32; 4] = [
+    0xc8 as f32 / 255.0,
+    0xd0 as f32 / 255.0,
+    0xda as f32 / 255.0,
+    0.9,
+];
+
+/// The points a tool has taken, small squares in the frame's blue.
+const TAKEN: [f32; 4] = [0x4a as f32 / 255.0, 0xa3 as f32 / 255.0, 1.0, 1.0];
+
+/// The most segments of the objects a move would move drawn at once.
+const MOST_MOVED: usize = 50_000;
 
 const RECT_FRAGMENT: &str = r#"#version 300 es
 precision highp float;
@@ -412,6 +439,13 @@ pub struct Viewer {
     /// How strongly a change set's halos show, from 0 to 1, as the page
     /// fades them.
     pulse: f32,
+    /// The drafter's drawing tools.
+    tools: Tools,
+    /// The current layer's colour on screen, which a rubber band is drawn in.
+    layer_color: [f32; 4],
+    /// Where a held finger is, in drawing units, which a tool aims at on a
+    /// phone, where there is no crosshair.
+    tool_pointer: Option<[f64; 2]>,
 }
 
 #[wasm_bindgen]
@@ -519,6 +553,9 @@ impl Viewer {
             sheet: None,
             marks: Vec::new(),
             pulse: 1.0,
+            tools: Tools::default(),
+            layer_color: CROSSHAIR,
+            tool_pointer: None,
         })
     }
 
@@ -535,6 +572,25 @@ impl Viewer {
         self.caught.clear();
         let snaps = std::mem::take(&mut sheet.snaps);
         let edges = std::mem::take(&mut sheet.edges);
+        // An object whose drawing on the page is cut at a viewport's window
+        // is model space seen through it: its points there are not its own.
+        let mut objects: Vec<ObjectInfo> = sheet.objects.iter().map(ObjectInfo::of).collect();
+        for item in &sheet.display_list.items {
+            if item.clip.is_some() {
+                if let Some(o) = objects.get_mut(item.object) {
+                    o.through_viewport = true;
+                }
+            }
+        }
+        self.tools.load(Context {
+            sheet: sheet.sheet.clone(),
+            units: sheet.units.clone(),
+            objects,
+            template: sheet.template.clone(),
+            past: sheet.entry.is_some(),
+            space: sheet.space.clone(),
+            layout: sheet.layout.clone(),
+        });
         let mut loaded = self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?;
         loaded.snaps = snaps;
         loaded.outlines = outlines(&loaded.list, &edges);
@@ -585,6 +641,11 @@ impl Viewer {
     /// AutoCAD's order, and holds the first; gives how many there are.
     pub fn hover(&mut self, x: f64, y: f64, reach: f64, tie: f64) -> u32 {
         self.chosen = 0;
+        // A tool picking objects catches no snaps: a click picks.
+        if self.tools.selecting() {
+            self.caught.clear();
+            return 0;
+        }
         self.caught = match &self.sheet {
             Some(sheet) => candidates(
                 &sheet.snaps,
@@ -920,6 +981,11 @@ impl Viewer {
             gl.disable(Gl::BLEND);
         }
 
+        // The tool's picks, rubber band and points, over the ink.
+        if self.overlays && self.look == Look::Screen && self.tools.running().is_some() {
+            self.draw_tool(sheet, &device, ratio, size);
+        }
+
         // The crosshair and the snap's marker, over everything, on screen.
         if self.overlays && self.look == Look::Screen {
             gl.enable(Gl::BLEND);
@@ -932,6 +998,8 @@ impl Viewer {
             }
             if let Some((at, pick_box)) = self.cursor {
                 let (x, y) = device(at[0], at[1]);
+                // A tool taking points has no pick box, as AutoCAD's.
+                let pick_box = pick_box && !self.tools.takes_points();
                 self.lines(
                     &crosshair(x, y, ratio, pick_box),
                     ratio.max(1.0).round(),
@@ -941,6 +1009,138 @@ impl Viewer {
             }
             gl.disable(Gl::BLEND);
         }
+    }
+
+    /// Starts the drawing tool `word` names, an alias such as `L` or the
+    /// page's name such as `line`, with the objects at `picked` selected
+    /// first, which Move and Erase take. Gives what came of it as JSON:
+    /// lines for the command bar's history under `log`, and under `send`
+    /// a change set to send, with what it does, the sheets it changes and,
+    /// for an edit to a template's object, what to ask first.
+    pub fn tool_start(&mut self, word: &str, picked: &[u32]) -> String {
+        let picked: Vec<usize> = picked.iter().map(|&p| p as usize).collect();
+        let outcome = match tool_for(word) {
+            Some(kind) => self.tools.start(kind, &picked),
+            None => self.tools.input(word, None),
+        };
+        to_json(&outcome)
+    }
+
+    /// A click or a tap at the drawing point `(x, y)`: a tool picking
+    /// objects picks the one drawn nearest, within `reach` drawing units; a
+    /// tool taking points takes the snap the cursor holds, found by
+    /// [`Viewer::hover`] at this point, or the point itself, held by Ortho.
+    /// Gives what came of it, as [`Viewer::tool_start`] does.
+    pub fn tool_click(&mut self, x: f64, y: f64, reach: f64) -> String {
+        let outcome = if self.tools.selecting() {
+            let place = self
+                .sheet
+                .as_ref()
+                .and_then(|sheet| pick(&sheet.list, [x, y], reach, sheet.millimetres_per_unit));
+            self.tools.pick(place)
+        } else if self.tools.takes_points() {
+            let aim = self.aim_at([x, y]);
+            self.tools.point(aim)
+        } else {
+            Default::default()
+        };
+        to_json(&outcome)
+    }
+
+    /// What was typed in the command bar and entered; empty for Enter,
+    /// Space or a right-click. Gives what came of it.
+    pub fn tool_input(&mut self, text: &str) -> String {
+        let aim = self.pointer().map(|p| self.aim_at(p).at);
+        to_json(&self.tools.input(text, aim))
+    }
+
+    /// An option of the prompt clicked, by its act.
+    pub fn tool_option(&mut self, act: &str) -> String {
+        to_json(&self.tools.option(act))
+    }
+
+    /// Esc: ends the tool running, keeping what it has drawn.
+    pub fn tool_escape(&mut self) -> String {
+        to_json(&self.tools.escape())
+    }
+
+    /// The line of text being typed, as it is typed.
+    pub fn tool_typing(&mut self, text: &str) {
+        self.tools.typing(text);
+    }
+
+    /// Text typed in a phone's box, at `height` (not a number for the one
+    /// it has): added at once.
+    pub fn tool_text_box(&mut self, text: &str, height: f64) -> String {
+        to_json(
+            &self
+                .tools
+                .text_box(text, Some(height).filter(|h| h.is_finite())),
+        )
+    }
+
+    /// What the command bar shows of the tool running, as JSON, in a
+    /// phone's words when `touch`.
+    pub fn tool_state(&self, touch: bool) -> String {
+        to_json(&self.tools.state(touch))
+    }
+
+    /// Whether the tool running takes the drawing's clicks and taps now: it
+    /// takes points, or picks objects.
+    pub fn tool_wants_clicks(&self) -> bool {
+        self.tools.takes_points() || self.tools.selecting()
+    }
+
+    /// Whether the tool running is typing a text's words.
+    pub fn tool_typing_text(&self) -> bool {
+        self.tools.state(false).typing_text
+    }
+
+    /// The text height a Text tool draws at.
+    pub fn tool_text_height(&self) -> f64 {
+        self.tools.text_height()
+    }
+
+    /// What shows at the cursor while a tool runs, `[words, more]` as JSON:
+    /// the length and angle from the last point, a radius or a size; empty
+    /// when there is nothing to measure.
+    pub fn tool_cursor_words(&self) -> String {
+        let Some(p) = self.pointer() else {
+            return String::new();
+        };
+        let aim = self.aim_at(p);
+        self.tools
+            .cursor_words(&aim)
+            .map(|words| to_json(&words))
+            .unwrap_or_default()
+    }
+
+    /// Ortho (F8): Line and Move held level or upright.
+    pub fn set_ortho(&mut self, on: bool) {
+        self.tools.ortho = on;
+    }
+
+    /// The current layer, which new objects go on, and the colour index it
+    /// shows in, which a rubber band is drawn in.
+    pub fn set_layer(&mut self, name: &str, color: u8) {
+        self.tools.layer = name.to_owned();
+        let [r, g, b, _] = screen_rgba(Color(color));
+        self.layer_color = [
+            f32::from(r) / 255.0,
+            f32::from(g) / 255.0,
+            f32::from(b) / 255.0,
+            1.0,
+        ];
+    }
+
+    /// Where a held finger is, in drawing units, for a tool to aim at.
+    pub fn set_tool_pointer(&mut self, x: f64, y: f64) {
+        self.tool_pointer = Some([x, y]);
+    }
+
+    /// The finger has lifted.
+    pub fn clear_tool_pointer(&mut self) {
+        self.tool_pointer = None;
     }
 
     /// The canvas's pixels as drawn last, RGBA, rows from the top. Read it
@@ -970,6 +1170,125 @@ impl Viewer {
 }
 
 impl Viewer {
+    /// Where the tool aims from: a held finger, or the crosshair.
+    fn pointer(&self) -> Option<[f64; 2]> {
+        self.tool_pointer.or(self.cursor.map(|(at, _)| at))
+    }
+
+    /// The point a click at `at` gives the tool running: the snap the cursor
+    /// holds, or `at`, held by Ortho.
+    fn aim_at(&self, at: [f64; 2]) -> Taken {
+        let snap = self.caught.get(self.chosen).map(|c| {
+            (
+                SnapRef {
+                    snap: c.snap,
+                    object: c.object,
+                    which: c.which.clone(),
+                    with: c.with,
+                },
+                [c.at[0], c.at[1], c.at[2]],
+            )
+        });
+        self.tools.aim(at, snap)
+    }
+
+    /// The tool's picks, each with a halo, its rubber band in the current
+    /// layer's colour, its guides dashed, the objects a move would move
+    /// where they would go, and the points it has taken.
+    fn draw_tool(
+        &self,
+        sheet: &Loaded,
+        device: &dyn Fn(f64, f64) -> (f64, f64),
+        ratio: f64,
+        size: (f32, f32),
+    ) {
+        let gl = &self.gl;
+        gl.enable(Gl::BLEND);
+        gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
+        let state = self.tools.state(false);
+        let pad = HALO_PAD * ratio;
+        let edge = (HALO_EDGE * ratio).max(1.0);
+        let (fill, line) = HALOS[Halo::Picked as usize];
+        for &place in &state.picked {
+            let Some(b) = object_bounds(&sheet.list, place) else {
+                continue;
+            };
+            let (l, t) = device(b.min[0], b.max[1]);
+            let (r, bottom) = device(b.max[0], b.min[1]);
+            let [l, t, r, bottom] = [l - pad, t - pad, r + pad, bottom + pad];
+            self.rect(
+                [l, t, r, bottom],
+                [fill[0], fill[1], fill[2], fill[3] * 2.0],
+                size,
+            );
+            for side in [
+                [l, t, r, t + edge],
+                [l, bottom - edge, r, bottom],
+                [l, t, l + edge, bottom],
+                [r - edge, t, r, bottom],
+            ] {
+                self.rect(side, line, size);
+            }
+        }
+        let aim = self.pointer().map(|p| self.aim_at(p));
+        let band = self.tools.band(aim.as_ref());
+        let seg = |[a, b]: [[f64; 2]; 2]| -> Segment {
+            let (x0, y0) = device(a[0], a[1]);
+            let (x1, y1) = device(b[0], b[1]);
+            [x0, y0, x1, y1]
+        };
+        // What a move would move, where it would go.
+        if let Some((picked, [dx, dy])) = &band.moving {
+            let mut moved: Vec<Segment> = Vec::new();
+            for item in sheet
+                .list
+                .items
+                .iter()
+                .filter(|i| picked.contains(&i.object))
+            {
+                let runs = match &item.shape {
+                    Shape::Stroke { runs, .. } => runs,
+                    Shape::Fill { contours, .. } => contours,
+                };
+                for run in runs {
+                    for pair in run.windows(2) {
+                        moved.push(seg([
+                            [pair[0][0] + dx, pair[0][1] + dy],
+                            [pair[1][0] + dx, pair[1][1] + dy],
+                        ]));
+                    }
+                }
+                if moved.len() > MOST_MOVED {
+                    break;
+                }
+            }
+            self.lines(&moved, ratio.max(1.0), MOVING, size);
+        }
+        let lines: Vec<Segment> = band.lines.iter().copied().map(seg).collect();
+        self.lines(&lines, (1.5 * ratio).max(1.0), self.layer_color, size);
+        let dash = 5.0 * ratio;
+        let mut dashes: Vec<Segment> = Vec::new();
+        for guide in &band.guides {
+            let [x0, y0, x1, y1] = seg(*guide);
+            let length = (x1 - x0).hypot(y1 - y0);
+            let at = |d: f64| (x0 + (x1 - x0) * d / length, y0 + (y1 - y0) * d / length);
+            let mut t = 0.0;
+            while t < length {
+                let (ax, ay) = at(t);
+                let (bx, by) = at((t + dash).min(length));
+                dashes.push([ax, ay, bx, by]);
+                t += dash * 1.8;
+            }
+        }
+        self.lines(&dashes, ratio.max(1.0), GUIDE, size);
+        let half = 2.0 * ratio;
+        for p in &band.points {
+            let (x, y) = device(p[0], p[1]);
+            self.rect([x - half, y - half, x + half, y + half], TAKEN, size);
+        }
+        gl.disable(Gl::BLEND);
+    }
+
     /// Draws `segments`, device pixels, `width` device pixels wide in `color`.
     fn lines(&self, segments: &[Segment], width: f64, color: [f32; 4], size: (f32, f32)) {
         if segments.is_empty() {
@@ -1211,6 +1530,11 @@ impl Viewer {
     }
 }
 
+/// A reply to the page, as JSON.
+fn to_json(value: &impl serde::Serialize) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
 /// Little-endian bytes of `values`, as WebAssembly and the GPU read them.
 fn floats(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
@@ -1260,4 +1584,12 @@ fn link(gl: &Gl, vertex: &str, fragment: &str) -> Result<WebGlProgram, JsError> 
     }
     let log = gl.get_program_info_log(&program).unwrap_or_default();
     Err(JsError::new(&format!("a program did not link: {log}")))
+}
+
+/// The colour the colour index `index` shows in on the dark model space,
+/// as `#rrggbb`, for the Layer box's swatches.
+#[wasm_bindgen]
+pub fn screen_color(index: u8) -> String {
+    let [r, g, b, _] = screen_rgba(Color(index));
+    format!("#{r:02x}{g:02x}{b:02x}")
 }

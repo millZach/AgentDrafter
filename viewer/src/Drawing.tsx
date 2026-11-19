@@ -11,13 +11,16 @@
 // is, keeps the snap's tag beside its marker, takes a snap clicked, steps
 // to the next with Tab, and on a phone brings up the magnifier, a second
 // renderer drawing the same sheet three times larger, while a finger is
-// held still.
+// held still. While a drawing tool runs, which the renderer holds, a click,
+// a tap or a lifted finger goes to the tool, a right-click is Enter, and
+// this component shows what the renderer says at the cursor and the text a
+// Text tool is typing where it will go.
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 
-import { freeBeside, newlyHidden, placeBeside, snapTag, type Box, type Hovered, type Named } from './frame.ts';
+import { freeBeside, newlyHidden, placeBeside, snapTag, type Box, type Hovered, type Named, type ToolState } from './frame.ts';
 
-import { Viewer } from './wasm/agentdrafter_viewer.js';
+import { screen_color, Viewer } from './wasm/agentdrafter_viewer.js';
 import { attachGestures, Glide, type Surface } from './gestures.ts';
 import {
   fit,
@@ -96,6 +99,25 @@ export interface DrawingProps {
   onNoSnap?(at: [number, number]): void;
   /** The colour the picked object shows in, `#rrggbb`, as the renderer says; empty for none. */
   onPickedColor?(color: string): void;
+  /** The drawing tool running, as the renderer says it; null with none. */
+  tool?: ToolState | null;
+  /** What came of a click, a tap or a lifted finger given to the tool running, as the renderer says it. */
+  onToolOutcome?(outcome: string): void;
+  /** A right-click on the drawing while a tool runs: Enter. */
+  onToolEnter?(): void;
+  /** Ortho (F8), which the renderer holds Line and Move level or upright by. */
+  ortho?: boolean;
+  /** The current layer and its colour index, which new objects go on and a rubber band is drawn in. */
+  layer?: { name: string; color: number };
+  /** Filled in with what lets the page reach the renderer: the tools run in it. */
+  handle?: RefObject<DrawingHandle | null>;
+}
+
+/** What the page reaches the renderer by. */
+export interface DrawingHandle {
+  viewer(): Viewer | null;
+  /** Draws again on the next frame, as after a tool's step. */
+  redraw(): void;
 }
 
 /** How near a tap must come to an object to pick it, in CSS pixels. */
@@ -145,6 +167,12 @@ export function Drawing({
   snapMask = 0,
   onTakeSnap,
   onNoSnap,
+  tool = null,
+  onToolOutcome,
+  onToolEnter,
+  ortho = false,
+  layer,
+  handle,
 }: DrawingProps) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -192,6 +220,24 @@ export function Drawing({
   const noSnap = useRef(onNoSnap);
   take.current = onTakeSnap;
   noSnap.current = onNoSnap;
+  // The tool running, and where what it says at the cursor and the text it
+  // is typing are shown.
+  const toolNow = useRef(tool);
+  toolNow.current = tool;
+  const toolOutcome = useRef(onToolOutcome);
+  toolOutcome.current = onToolOutcome;
+  const toolEnter = useRef(onToolEnter);
+  toolEnter.current = onToolEnter;
+  const orthoNow = useRef(ortho);
+  orthoNow.current = ortho;
+  const layerNow = useRef(layer);
+  layerNow.current = layer;
+  const dyn = useRef<HTMLDivElement>(null);
+  const typed = useRef<HTMLDivElement>(null);
+  /** Whether a tool runs that takes the drawing's clicks and taps. */
+  // Asked of the renderer, which holds the tool, so a tap made before the
+  // page has drawn the tool's new step still goes to it.
+  const toolActive = () => !!viewer.current?.tool_wants_clicks();
   const [, setReady] = useState(false);
   covered.current = coveredBelow;
   shownMarks.current = { marks, picked };
@@ -237,6 +283,17 @@ export function Drawing({
     const v = viewer.current;
     if (!v) return;
     const at = pointer.current;
+    if (held.current && toolActive()) {
+      // A held finger aims the tool: its rubber band follows the finger,
+      // to the snap the magnifier shows.
+      v.hide_crosshair();
+      const [fx, fy] = toDrawing(view.current, held.current[0], held.current[1]);
+      v.set_tool_pointer(fx, fy);
+      v.hover(fx, fy, REACH_TOUCH / view.current.scale, TIE / view.current.scale);
+      hovered.current = null;
+      hoverKey.current = '';
+      return;
+    }
     if (!at || held.current) {
       v.hide_crosshair();
       v.clear_hover();
@@ -292,6 +349,7 @@ export function Drawing({
     kept.push({ at: began, ms: performance.now() - began });
     if (kept.length > 2000) kept.splice(0, kept.length - 2000);
     placeCard();
+    placeToolWords();
     const at = pointer.current;
     if (held.current) return;
     const h = hovered.current;
@@ -306,6 +364,69 @@ export function Drawing({
   const redraw = () => {
     if (!frame.current) frame.current = requestAnimationFrame(draw);
   };
+  // What the renderer says at the cursor while a tool runs, as AutoCAD's
+  // dynamic input shows the length and angle; and the text a Text tool is
+  // typing, where it will go, at its height.
+  const placeToolWords = () => {
+    const v = viewer.current;
+    const el = dyn.current;
+    if (el) {
+      const words = v && toolActive() ? v.tool_cursor_words() : '';
+      const at = pointer.current ?? held.current;
+      if (words && at) {
+        const [a, b] = JSON.parse(words) as [string, string | null];
+        const first = document.createElement('b');
+        first.textContent = a;
+        const kids: Node[] = [first];
+        if (b) {
+          const second = document.createElement('span');
+          second.textContent = b;
+          kids.push(second);
+        }
+        el.replaceChildren(...kids);
+        el.style.display = 'flex';
+        const c = canvas.current;
+        const width = c?.clientWidth ?? 0;
+        const height = (c?.clientHeight ?? 0) - covered.current;
+        // Below and right of the cursor, as AutoCAD's; above a finger.
+        let x = at[0] + 18;
+        let y = held.current ? at[1] - 140 : at[1] + 18;
+        if (x + el.offsetWidth > width - 4) x = at[0] - 18 - el.offsetWidth;
+        if (y + el.offsetHeight > height - 4) y = at[1] - 18 - el.offsetHeight;
+        el.style.left = `${Math.max(4, x)}px`;
+        el.style.top = `${Math.max(4, y)}px`;
+      } else {
+        el.style.display = 'none';
+      }
+    }
+    const box = typed.current;
+    // The renderer's own, as each key changes it, not the page's copy.
+    const text = v?.tool_typing_text() ? (JSON.parse(v.tool_state(false)) as ToolState).text : null;
+    if (box) {
+      if (!text) {
+        if (box.childElementCount) box.replaceChildren();
+        return;
+      }
+      const v2 = view.current;
+      // A text's height is its capitals', about 0.7 of the font's size.
+      const size = (text.height / 0.7) * v2.scale;
+      const color = layerColor.current;
+      const lines = text.lines.map((line, i) => {
+        const el2 = document.createElement('div');
+        el2.className = `tline${i === text.lines.length - 1 ? ' current' : ''}`;
+        el2.textContent = line.text;
+        const [x, y] = toScreen(v2, line.at[0], line.at[1]);
+        el2.style.left = `${x}px`;
+        el2.style.top = `${y}px`;
+        el2.style.fontSize = `${size}px`;
+        el2.style.color = color;
+        return el2;
+      });
+      box.replaceChildren(...lines);
+    }
+  };
+  // The current layer's colour on screen, for the text being typed.
+  const layerColor = useRef('#eef1f4');
   const area = (): Area => {
     const c = canvas.current;
     const width = c?.clientWidth ?? 0;
@@ -341,6 +462,21 @@ export function Drawing({
     tapped: ([sx, sy], pointerType) => {
       const v = viewer.current;
       if (!v || !loadedReply.current) return;
+      if (toolActive()) {
+        // A tool takes the click or the tap: a point, on the snap in reach
+        // of where it is, or an object to pick.
+        const [x, y] = toDrawing(view.current, sx, sy);
+        if (pointerType === 'mouse') {
+          pointer.current = [sx, sy];
+          hoverNow();
+        } else {
+          v.hover(x, y, REACH_TOUCH / view.current.scale, TIE / view.current.scale);
+        }
+        toolOutcome.current?.(v.tool_click(x, y, PICK_REACH / view.current.scale));
+        if (pointerType !== 'mouse') v.clear_hover();
+        redraw();
+        return;
+      }
       // A click on a snap reads its point out; anything else picks. The
       // snap is the one at the click itself, found now, not the one a
       // frame not yet drawn would have found.
@@ -368,10 +504,28 @@ export function Drawing({
     },
     holdTakenBack: () => {
       held.current = null;
+      viewer.current?.clear_tool_pointer();
       hideLoupe();
       redraw();
     },
+    tapsOnly: () => toolActive(),
     holdEnded: (p, taken) => {
+      if (toolActive()) {
+        // Lifting gives the tool the point the magnifier shows: the snap
+        // under the finger, found again where it lifts, or the point.
+        held.current = null;
+        hideLoupe();
+        const v = viewer.current;
+        v?.clear_tool_pointer();
+        if (v && taken) {
+          const [x, y] = toDrawing(view.current, p[0], p[1]);
+          v.hover(x, y, REACH_TOUCH / view.current.scale, TIE / view.current.scale);
+          toolOutcome.current?.(v.tool_click(x, y, PICK_REACH / view.current.scale));
+          v.clear_hover();
+        }
+        redraw();
+        return;
+      }
       // The snap is found again where the finger lifts, on what is drawn
       // now and of the snaps running now: a sheet drawn anew under the
       // finger, or Object snap turned off from a keyboard, since it was
@@ -548,6 +702,8 @@ export function Drawing({
         // anew, as after a lost context, starts from it, not its defaults.
         viewer.current.set_grid(gridNow.current);
         viewer.current.set_running(mask.current);
+        viewer.current.set_ortho(orthoNow.current);
+        if (layerNow.current) viewer.current.set_layer(layerNow.current.name, layerNow.current.color);
         hoverKey.current = '';
         return true;
       } catch (e) {
@@ -623,13 +779,23 @@ export function Drawing({
       hovered.current = hoveredOf(viewer.current);
       redraw();
     };
-    // A press on the drawing gives it the keys back from a control.
+    // A press on the drawing gives it the keys back from a control, but
+    // not from the command bar while a Text tool's words are typed there.
     const keysHere = (e: PointerEvent) => {
       if ((e.target as Element | null)?.closest?.('button')) return;
+      if (viewer.current?.tool_typing_text()) return;
       const focused = document.activeElement;
       if (focused instanceof HTMLElement && focused !== document.body) focused.blur();
     };
     window.addEventListener('keydown', tab);
+    // A right-click is Enter while a tool runs, as AutoCAD's is.
+    const menu = (e: MouseEvent) => {
+      if (!toolNow.current?.tool) return;
+      e.preventDefault();
+      toolEnter.current?.();
+    };
+    b.addEventListener('contextmenu', menu);
+    if (handle) handle.current = { viewer: () => viewer.current, redraw };
     b.addEventListener('pointerdown', keysHere);
     b.addEventListener('pointermove', hover);
     b.addEventListener('pointerleave', away);
@@ -657,6 +823,8 @@ export function Drawing({
       probe();
       detach();
       b.removeEventListener('pointerdown', keysHere);
+      b.removeEventListener('contextmenu', menu);
+      if (handle) handle.current = null;
       b.removeEventListener('pointermove', hover);
       b.removeEventListener('pointerleave', away);
       window.removeEventListener('keydown', tab);
@@ -741,6 +909,28 @@ export function Drawing({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapMask]);
 
+  // Ortho and the current layer, which the tools draw by.
+  useEffect(() => {
+    viewer.current?.set_ortho(ortho);
+    redraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ortho]);
+  useEffect(() => {
+    if (!layer) return;
+    viewer.current?.set_layer(layer.name, layer.color);
+    layerColor.current = screen_color(layer.color);
+    redraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layer?.name, layer?.color]);
+  // A tool's step: drawn again, its rubber band and its words with it, and
+  // the snap under the cursor found again, as a tool picking objects
+  // catches none.
+  useEffect(() => {
+    hoverKey.current = '';
+    redraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool]);
+
   // The grid on or off.
   useEffect(() => {
     viewer.current?.set_grid(grid);
@@ -800,9 +990,11 @@ export function Drawing({
 
   return (
     <div className="viewport" ref={box}>
-      <canvas className={`stage${compact ? '' : ' crosshair'}`} ref={canvas} aria-label="The drawing" />
+      <canvas className={`stage${compact ? '' : ' crosshair'}`} ref={canvas} aria-label="The drawing" data-tool={tool?.tool ?? undefined} />
       <canvas className="loupe" ref={loupe} aria-hidden="true" />
       <div className="snaptag" ref={tag} aria-live="polite" />
+      <div className="dyn" ref={dyn} aria-hidden="true" data-dyn />
+      <div className="typed" ref={typed} aria-hidden="true" data-typed />
       <div className="zoombtns">
         {!compact && (
           <>

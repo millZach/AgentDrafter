@@ -1,22 +1,26 @@
 // The drafting app's frame round the drawing, in the look Zach picked
-// (#150): the ribbon, with its drawing tools shown before they work; the
-// command bar under the drawing, which prompts; and the status bar, with
-// the cursor's place, the paper, Grid, Object snap, Ortho and the
-// connection. Plain components: what they do is the page's (App.tsx), and
+// (#150), with the drawing tools of #152: the ribbon, with the tools and
+// the Layer box that sets the current layer; the command bar under the
+// drawing, which prompts and takes what is typed; the status bar, with the
+// cursor's place, the paper, Grid, Object snap, Ortho and the connection;
+// the dialog an edit to a template's object asks first in; and a phone's
+// small box for text. Plain components: what they do is the page's (App.tsx), and
 // what they say is worked out in frame.ts.
 
-import { useState, type ReactNode, type RefObject } from 'react';
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 
 import {
   PANELS,
   SNAPS,
-  SOON,
   TOGGLES,
+  templateWords,
   type Act,
+  type LayerEntry,
   type LiveState,
   type Prompt,
   type SnapEntry,
   type SnapKind,
+  type TemplateEdit,
   type Tool,
   type Toggle,
   type ToolKey,
@@ -57,18 +61,30 @@ export interface RibbonProps {
   folded: boolean;
   toggles: Record<Toggle, boolean>;
   onToggle(toggle: Toggle): void;
-  /** A tool still to come was tapped. */
-  onSoon(tool: Tool): void;
-  /** The selected object's layer, and the colour it shows in; null with nothing selected. */
-  layer: { name: string; color: string } | null;
-  /** The tool just tapped, which flashes. */
-  flashing: ToolKey | null;
+  /** A drawing tool was clicked or tapped: it starts, or ends when it runs. */
+  onTool(tool: Tool): void;
+  /** The tool running, shown pressed. */
+  running: ToolKey | null;
+  /** The sheet's layers, for the Layer box, and the current layer, which new objects go on. */
+  layers: readonly LayerEntry[];
+  current: string;
+  onLayer(name: string): void;
+  /** The box is opened: its layers are asked for again. */
+  onLayersOpen?(): void;
+  /** A layer's colour on screen, `#rrggbb`, for its swatch. */
+  swatch(layer: LayerEntry | undefined): string;
+  /** The selected object's layer, which the box shows while no tool runs; null with nothing selected. */
+  selected: { name: string; color: string } | null;
   /** Opens the Object snap menu, from a phone's Status panel. */
   onSnaps(): void;
 }
 
-export function Ribbon({ folded, toggles, onToggle, onSoon, layer, flashing, onSnaps }: RibbonProps) {
+export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, current, onLayer, onLayersOpen, swatch, selected, onSnaps }: RibbonProps) {
   const [tip, setTip] = useState<{ tool: Tool; left: number; top: number } | null>(null);
+  // While an object is selected and no tool runs, the box shows its layer,
+  // as the frame did; otherwise the current layer, which it sets.
+  const showing = selected && !running ? selected : null;
+  const layer = layers.find((l) => l.name === current);
   return (
     <nav className="ribbon" aria-label="Tools">
       {PANELS.map((panel) => (
@@ -78,10 +94,10 @@ export function Ribbon({ folded, toggles, onToggle, onSoon, layer, flashing, onS
               <button
                 key={tool.key}
                 type="button"
-                className={`rb${flashing === tool.key ? ' flash' : ''}`}
+                className={`rb${running === tool.key ? ' on' : ''}`}
                 data-tool={tool.key}
-                aria-disabled="true"
-                aria-label={`${tool.label}, coming soon`}
+                aria-pressed={running === tool.key}
+                aria-label={`${tool.label} (${tool.alias})`}
                 onPointerEnter={(e) => {
                   if (e.pointerType !== 'mouse') return;
                   const r = e.currentTarget.getBoundingClientRect();
@@ -90,7 +106,7 @@ export function Ribbon({ folded, toggles, onToggle, onSoon, layer, flashing, onS
                 onPointerLeave={() => setTip(null)}
                 onClick={() => {
                   setTip(null);
-                  onSoon(tool);
+                  onTool(tool);
                 }}
               >
                 <svg viewBox="0 0 28 28" aria-hidden="true">
@@ -100,22 +116,38 @@ export function Ribbon({ folded, toggles, onToggle, onSoon, layer, flashing, onS
               </button>
             ))}
           </div>
-          <h3>
-            {panel.title} <span className="soon">Soon</span>
-          </h3>
+          <h3>{panel.title}</h3>
         </section>
       ))}
       <section className="panel">
         <div className="row">
           <div className="layerbox">
-            <div className="lay" title="Choosing the layer new objects go on comes with the drawing tools">
-              <span className="sw" style={layer?.color ? { background: layer.color } : undefined} />
-              <span className={`ln${layer ? '' : ' muted'}`} data-layer>
-                {layer ? layer.name : 'No object selected'}
-              </span>
-              <span className="caret">&#9662;</span>
-            </div>
-            <small>{layer ? 'The selected object’s layer' : 'Select an object to see its layer'}</small>
+            <label className="lay" title="The current layer: new objects go on it">
+              <span className="sw" style={{ background: showing ? showing.color || 'transparent' : swatch(layer) }} />
+              {showing ? (
+                <span className="ln" data-layer>
+                  {showing.name}
+                </span>
+              ) : (
+                <select
+                  className="ln"
+                  data-layer
+                  aria-label="The current layer"
+                  value={current}
+                  onChange={(e) => onLayer(e.currentTarget.value)}
+                  onFocus={() => onLayersOpen?.()}
+                >
+                  {(layers.length ? layers : [{ name: current }]).map((l) => (
+                    <option key={l.name} value={l.name}>
+                      {l.name}
+                      {l.locked ? ' (locked)' : ''}
+                      {l.on === false || l.frozen ? ' (not shown)' : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </label>
+            <small>{showing ? 'The selected object’s layer' : 'Current layer: new objects go on it'}</small>
           </div>
         </div>
         <h3>Layer</h3>
@@ -149,7 +181,6 @@ export function Ribbon({ folded, toggles, onToggle, onSoon, layer, flashing, onS
             <kbd>{tip.tool.alias}</kbd>
           </b>
           {tip.tool.tip}
-          <span className="soonline">{SOON}</span>
         </div>
       )}
     </nav>
@@ -162,10 +193,49 @@ export interface CommandBarProps {
   history: string[];
   onAct(act: Act): void;
   bar: RefObject<HTMLDivElement | null>;
+  /** The field typing goes into: aliases, points, lengths, options' letters and a text's words. */
+  field: RefObject<HTMLInputElement | null>;
+  /** What the field says when it is empty. */
+  placeholder: string;
+  /** A phone's: the field shows only when asked for, by ⌨ Type, or when the text itself is typed. */
+  touch: boolean;
+  fieldShown: boolean;
+  /** Whether a phone offers ⌨ Type: not beside a selected object's options, which keep the bar one line. */
+  typeOffered?: boolean;
+  onShowField(): void;
+  /** Enter, or Space where Space is Enter, with what the field holds. */
+  onEnter(text: string): void;
+  /** Esc in the field. */
+  onEscape(): void;
+  /** What the field holds, as it is typed: a text's words show on the drawing. */
+  onTyping(text: string): void;
+  /** Whether Space is a space: the text itself is being typed. */
+  typingText: boolean;
+  /** That the objects picked are part of the template, said while the tool runs. */
+  warning: TemplateEdit | null;
+  /** What the keys do now. */
+  note: string;
 }
 
-/** The command bar under the drawing: it prompts, with options to click; typing comes with the drawing tools. */
-export function CommandBar({ prompt, history, onAct, bar }: CommandBarProps) {
+/** The command bar under the drawing: it prompts, with options to click, and takes what is typed. */
+export function CommandBar({
+  prompt,
+  history,
+  onAct,
+  bar,
+  field,
+  placeholder,
+  touch,
+  fieldShown,
+  typeOffered = true,
+  onShowField,
+  onEnter,
+  onEscape,
+  onTyping,
+  typingText,
+  warning,
+  note,
+}: CommandBarProps) {
   return (
     <div className="cmd" data-ui>
       <div className="hist" aria-hidden="true">
@@ -173,25 +243,193 @@ export function CommandBar({ prompt, history, onAct, bar }: CommandBarProps) {
           <div key={`${i}${line}`}>{line}</div>
         ))}
       </div>
-      <div className="cmdbar" ref={bar} role="status" aria-label="Command bar">
+      {warning && (
+        <div className="cmdwarn" role="alert" data-warning>
+          <span aria-hidden="true">&#9888;</span>
+          <span>
+            <b>{warning.title}</b> {warning.detail}
+          </span>
+        </div>
+      )}
+      <div className="cmdbar" ref={bar} aria-label="Command bar">
         <span className="chev">&gt;_</span>
-        <span className="cmdline">
+        <span className="cmdline" role="status">
           {prompt.command && <span className="cmdname">{prompt.command}</span>}
           {prompt.parts.map((part, i) =>
             'text' in part ? (
-              <span key={i}>{part.text}</span>
+              // The brackets and dots between options, which a phone, whose options are buttons, leaves out.
+              <span key={i} className={/^\s*[[\]·]?\s*$/.test(part.text) ? 'brk' : undefined}>
+                {part.text}
+              </span>
             ) : 'snap' in part ? (
               <span key={i} className="snapw">
                 {part.snap}
               </span>
+            ) : 'layer' in part ? (
+              <span key={i} className="laytag">
+                {part.layer}{' '}
+              </span>
+            ) : 'error' in part ? (
+              <span key={i} className="cmderr" data-error>
+                {part.error}
+              </span>
             ) : (
-              <button key={i} type="button" className="opt" data-opt={part.act} onClick={() => onAct(part.act)}>
+              <button
+                key={i}
+                type="button"
+                className={`opt${part.main ? ' main' : ''}`}
+                data-opt={part.act}
+                onClick={() => onAct(part.act)}
+              >
                 {part.option}
               </button>
             ),
           )}
+          {touch && !fieldShown && typeOffered && (
+            <button type="button" className="kbd" data-type onClick={onShowField} aria-label="Type in the command bar">
+              &#9000; Type
+            </button>
+          )}
         </span>
-        <span className="cmdnote">F3: snaps on/off · Tab: the next snap here</span>
+        <input
+          ref={field}
+          className="cmdin"
+          hidden={touch && !fieldShown}
+          autoComplete="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          enterKeyHint="go"
+          aria-label="Type a command, a point or a length"
+          placeholder={placeholder}
+          onChange={(e) => onTyping(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || (e.key === ' ' && !typingText)) {
+              e.preventDefault();
+              e.stopPropagation();
+              const text = e.currentTarget.value;
+              e.currentTarget.value = '';
+              onEnter(text);
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              // Esc drops what is typed; with nothing typed, or a text's
+              // words, it ends the tool too.
+              const typed = e.currentTarget.value;
+              e.currentTarget.value = '';
+              if (!typed || typingText) onEscape();
+            } else if (e.key !== 'F3' && e.key !== 'F7' && e.key !== 'F8') {
+              // The page's own keys stay out of the field's typing.
+              e.stopPropagation();
+            }
+          }}
+        />
+        <span className="cmdnote">{note}</span>
+      </div>
+    </div>
+  );
+}
+
+export interface TemplateDialogProps {
+  edit: TemplateEdit;
+  /** The sheet shown, marked among them. */
+  sheet: string;
+  onCancel(): void;
+  onConfirm(): void;
+}
+
+/** An edit to a template's object asks first, naming every sheet it changes (Zach, 2026-11-19). */
+export function TemplateDialog({ edit, sheet, onCancel, onConfirm }: TemplateDialogProps) {
+  const words = templateWords(edit);
+  // Change all takes the focus once, as the dialog opens: not again on a
+  // later render, which would take it back from Cancel.
+  const all = useRef<HTMLButtonElement>(null);
+  useEffect(() => all.current?.focus(), []);
+  return (
+    <div className="va-modal" role="dialog" aria-modal="true" aria-label="Template warning" data-template-dialog>
+      <div className="dialog tw">
+        <h3>{words.title}</h3>
+        <p>{words.body}</p>
+        <div className="sheets">
+          {edit.sheets.map((s) => (
+            <span key={s} className={s.toUpperCase() === sheet.toUpperCase() ? 'here' : ''}>
+              {s}
+            </span>
+          ))}
+        </div>
+        <div className="dialog-acts">
+          <button type="button" className="btn" data-tw="cancel" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn warn"
+            data-tw="all"
+            ref={all}
+            onClick={onConfirm}
+          >
+            {words.button}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export interface TextBoxProps {
+  /** The height new text is drawn at, in the sheet's unit. */
+  height: number;
+  /** The sheet's unit, such as `in`. */
+  unit: string;
+  onAdd(text: string, height: number): void;
+  onCancel(): void;
+  onTyping(text: string): void;
+}
+
+/** A phone's small box for a Text tool's words and height (Zach, 2026-11-19). */
+export function TextBox({ height, unit, onAdd, onCancel, onTyping }: TextBoxProps) {
+  const [text, setText] = useState('');
+  const [h, setH] = useState(String(height));
+  const add = () => {
+    if (!text.trim()) return;
+    onAdd(text, Number(h) > 0 ? Number(h) : height);
+  };
+  return (
+    <div className="tbox" data-ui aria-label="Text" role="group">
+      <label>
+        Text
+        <input
+          data-tbox-text
+          autoComplete="off"
+          placeholder="Type the text"
+          enterKeyHint="done"
+          value={text}
+          ref={(el) => {
+            if (el && document.activeElement !== el && !text) el.focus({ preventScroll: true });
+          }}
+          onChange={(e) => {
+            setText(e.currentTarget.value);
+            onTyping(e.currentTarget.value);
+          }}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter') add();
+            if (e.key === 'Escape') onCancel();
+          }}
+        />
+      </label>
+      <div className="two">
+        <label>
+          Height{unit ? `, ${unit}` : ''}
+          <input data-tbox-height inputMode="decimal" value={h} onChange={(e) => setH(e.currentTarget.value)} onKeyDown={(e) => e.stopPropagation()} />
+        </label>
+        <div className="acts">
+          <button type="button" className="btn" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="btn primary" data-tbox-add disabled={!text.trim()} onClick={add}>
+            Add
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -291,8 +529,8 @@ export interface SnapMenuProps {
 /**
  * The Object snap menu: snapping on and off (F3), each snap with its
  * marker and a line on what it means, ticked when it runs, Defaults and
- * Clear all. Perpendicular and Tangent act only inside a drawing tool,
- * from its last point, from build 4.
+ * Clear all. Perpendicular and Tangent will act only inside a drawing
+ * tool, from its last point: not built yet.
  */
 export function SnapMenu({ on, running, place, onToggle, onSnap, onDefaults, onClear }: SnapMenuProps) {
   const row = (x: SnapEntry) => (
@@ -331,7 +569,7 @@ export function SnapMenu({ on, running, place, onToggle, onSnap, onDefaults, onC
       </header>
       <ul>
         {SNAPS.filter((x) => !x.tool).map(row)}
-        <li className="grp">Inside a drawing tool, from the last point</li>
+        <li className="grp">Inside a drawing tool, from the last point: coming</li>
         {SNAPS.filter((x) => x.tool).map(row)}
       </ul>
       <footer>

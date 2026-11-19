@@ -36,6 +36,8 @@ export interface Summary {
   objects: SheetObject[];
   /** How many object snaps the sheet came with. */
   snaps: number;
+  /** On a drawing set's sheet as it is, its template and every sheet built from it. */
+  template?: { path: string; sheets: string[] } | null;
 }
 
 /** One of the sheet's objects, as the core says what it is. */
@@ -46,6 +48,8 @@ export interface SheetObject {
   layer: string;
   block?: string;
   attributes?: { tag: string; value: string }[];
+  /** On a drawing set's sheet as it is, where it is written: its sheet's `template`, or its `row`. */
+  from?: 'template' | 'row';
 }
 
 /** What the halos mark now. */

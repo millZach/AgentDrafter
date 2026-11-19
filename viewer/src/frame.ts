@@ -1,9 +1,11 @@
 // What the drafting app's frame says, worked out apart from React so it is
-// tested on its own: the drawing tools the ribbon shows before they work,
-// what the command bar prompts, the drawing's units in words, the cursor's
-// coordinates, the status bar's toggles, and where quick properties sit
-// beside the selected object. None of it is drawing logic: what is drawn,
-// and what a tap picks, is the renderer's (ADR-0007).
+// tested on its own: the drawing tools on the ribbon, what the command bar
+// prompts, the drawing's units in words, the cursor's coordinates, the
+// status bar's toggles, the current layer, where an object comes from, and
+// where quick properties sit beside the selected object. None of it is
+// drawing logic: what is drawn, what a tap picks and what a drawing tool
+// does are the renderer's (ADR-0007), and what an edit means is the
+// core's; this file only puts their words in the frame.
 
 /** A drawing tool, as the ribbon shows it. */
 export interface Tool {
@@ -12,7 +14,7 @@ export interface Tool {
   label: string;
   /** AutoCAD's command, as the command bar names it. */
   command: string;
-  /** AutoCAD's alias, which the command bar will take. */
+  /** AutoCAD's alias, which the command bar takes: the renderer reads it (crates/agentdrafter-viewer/src/tools.rs). */
   alias: string;
   /** What it does, in plain words. */
   tip: string;
@@ -20,36 +22,38 @@ export interface Tool {
 
 export type ToolKey = 'line' | 'circle' | 'rectangle' | 'text' | 'move' | 'erase';
 
-/** The ribbon's panels and their tools, in order. Every one is still to come. */
+/** The ribbon's panels and their tools, in order. */
 export const PANELS: { title: string; tools: Tool[] }[] = [
   {
     title: 'Draw',
     tools: [
-      { key: 'line', label: 'Line', command: 'LINE', alias: 'L', tip: 'Draws straight lines. Click a start point, then keep clicking.' },
-      { key: 'circle', label: 'Circle', command: 'CIRCLE', alias: 'C', tip: 'Click the centre, then click how big it is, or type a radius.' },
-      { key: 'rectangle', label: 'Rectangle', command: 'RECTANG', alias: 'REC', tip: 'Click one corner, then the opposite corner.' },
+      { key: 'line', label: 'Line', command: 'LINE', alias: 'L', tip: 'Draws straight lines. Click a start point, then keep clicking. Enter or Done ends it.' },
+      { key: 'circle', label: 'Circle', command: 'CIRCLE', alias: 'C', tip: 'Click the centre, then a point on the circle, or type the radius.' },
+      { key: 'rectangle', label: 'Rectangle', command: 'RECTANG', alias: 'REC', tip: 'Click one corner, then the opposite corner, or type its size as @width,height.' },
       { key: 'text', label: 'Text', command: 'TEXT', alias: 'T', tip: 'Click where the text starts, type it, and press Enter.' },
     ],
   },
   {
     title: 'Modify',
     tools: [
-      { key: 'move', label: 'Move', command: 'MOVE', alias: 'M', tip: 'Pick an object, a point to hold it by, then where that point goes.' },
-      { key: 'erase', label: 'Erase', command: 'ERASE', alias: 'E', tip: 'Click an object to remove it. Undo brings it back.' },
+      { key: 'move', label: 'Move', command: 'MOVE', alias: 'M', tip: 'Pick objects, a point to hold them by, then where that point goes.' },
+      { key: 'erase', label: 'Erase', command: 'ERASE', alias: 'E', tip: 'Pick objects to remove. Undo brings them back.' },
     ],
   },
 ];
 
-/** What a tool still to come says when it is tapped. */
-export const SOON = 'Coming soon. For now an agent draws, through change sets.';
+/** The tool of this name, as the page names it. */
+export function toolOf(key: string): Tool | undefined {
+  return PANELS.flatMap((p) => p.tools).find((t) => t.key === key);
+}
 
-/** The status bar's toggles: Grid draws, Object snap catches snaps; Ortho holds its state until drawing tools come. */
+/** The status bar's toggles: Grid draws, Object snap catches snaps, Ortho holds Line and Move level or upright. */
 export type Toggle = 'grid' | 'osnap' | 'ortho';
 
 export const TOGGLES: { key: Toggle; label: string; fkey: string; title: string }[] = [
   { key: 'grid', label: 'Grid', fkey: 'F7', title: 'The grid behind the drawing' },
   { key: 'osnap', label: 'Object snap', fkey: 'F3', title: 'The cursor catches ends, middles, centres and crossings' },
-  { key: 'ortho', label: 'Ortho', fkey: 'F8', title: 'When drawing tools come, lines stay level or upright' },
+  { key: 'ortho', label: 'Ortho', fkey: 'F8', title: 'Ortho: lines you draw and moves stay level or upright' },
 ];
 
 /** The toggle a function key turns, as AutoCAD's do: F3, F7 and F8. */
@@ -60,7 +64,7 @@ export function toggleFor(key: string): Toggle | null {
 /** What turning a toggle says in the command bar's history. */
 export function toggledWords(toggle: Toggle, on: boolean): string {
   const t = TOGGLES.find((x) => x.key === toggle) as (typeof TOGGLES)[number];
-  return `${t.label} ${on ? 'on' : 'off'}${toggle === 'ortho' ? ': it acts once drawing tools come' : ''}`;
+  return `${t.label} ${on ? 'on' : 'off'}`;
 }
 
 /** What the connection's dot shows: the stream open, reaching the server, the set as it was, or nothing to watch. */
@@ -152,10 +156,16 @@ export function typeWords(o: Named): string {
   return o.block ? `Insert of ${o.block}` : o.type.charAt(0).toUpperCase() + o.type.slice(1);
 }
 
-/** A part of the command bar's line: words, or an option to click. */
-export type Part = { text: string } | { option: string; act: Act } | { snap: string };
+/** A part of the command bar's line: words, an option to click, a snap's name, the layer a tool draws on, or what went wrong. */
+export type Part =
+  | { text: string }
+  | { option: string; act: Act; main?: boolean }
+  | { snap: string }
+  | { layer: string }
+  | { error: string };
 
-export type Act = 'clear' | 'older' | 'newer' | 'live' | 'ok' | 'copy';
+/** What an option does: the page's own, or a running tool's (`tool:done`), which the renderer takes. */
+export type Act = 'clear' | 'older' | 'newer' | 'live' | 'copy' | 'move' | 'erase' | `tool:${string}`;
 
 /** What the command bar prompts: a command's name, when one is named, and its line. */
 export interface Prompt {
@@ -164,8 +174,8 @@ export interface Prompt {
 }
 
 export interface PromptState {
-  /** A tool still to come that was just tapped. */
-  soon: Tool | null;
+  /** The drawing tool running, as the renderer says it, or what went wrong with what was typed; null with neither. */
+  tool?: ToolState | null;
   /** The entry shown as it was, or null for the set as it is. */
   at: number | null;
   /** Whether that entry cannot be shown. */
@@ -196,16 +206,26 @@ const options = (...acts: [string, Act][]): Part[] => [
   { text: ' ]' },
 ];
 
-/** What the command bar says now: prompts only, until drawing tools come. */
+/** What the command bar says now: the tool running's prompt, or the frame's. */
 export function promptFor(s: PromptState): Prompt {
-  if (s.soon) {
-    // What it will do, in plain words, as its tip says on hover, for a tap
-    // or a key that has no hover.
-    return {
-      command: s.soon.command,
-      parts: [{ text: `(${s.soon.alias}) ${s.soon.tip} ${SOON} ` }, ...options(['OK', 'ok'])],
-    };
+  const t = s.tool;
+  if (t?.tool && s.at === null) {
+    // The renderer's words, with its options to click, and what went wrong.
+    const parts: Part[] = [];
+    if (t.layer !== null) parts.push({ layer: `on ${t.layer}` });
+    parts.push({ text: `${t.prompt} ` });
+    if (t.options.length) {
+      parts.push({ text: '[ ' });
+      t.options.forEach((o, i) => {
+        if (i) parts.push({ text: ' · ' });
+        parts.push({ option: o.label, act: `tool:${o.act}`, main: o.main });
+      });
+      parts.push({ text: ' ]' });
+    }
+    if (t.error) parts.push({ error: t.error });
+    return { command: t.command, parts };
   }
+  if (t?.error && s.at === null) return { command: null, parts: [{ error: `${t.error} ` }, ...options(['OK', 'tool:ok'])] };
   const stepping = options(['Older', 'older'], ['Newer', 'newer'], ['Live', 'live']);
   if (s.at !== null && s.cannot) return { command: null, parts: [{ text: `Entry ${s.at} cannot be shown ` }, ...stepping] };
   if (s.at !== null) return { command: null, parts: [{ text: `Showing entry ${s.at} as it was, read-only ` }, ...stepping] };
@@ -214,17 +234,175 @@ export function promptFor(s: PromptState): Prompt {
     const acts: [string, Act][] = s.taken.copy ? [['Copy as snapped point', 'copy'], ['Clear', 'clear']] : [['Clear', 'clear']];
     return { command: null, parts: [{ snap: s.taken.label }, { text: `${s.taken.rest} ` }, ...options(...acts)] };
   }
-  if (s.selected) return { command: null, parts: [{ text: `${nameOf(s.selected)} selected ` }, ...options(['Clear', 'clear'])] };
+  if (s.selected) {
+    // Move and Erase take what is selected, as AutoCAD's do.
+    return { command: null, parts: [{ text: `${nameOf(s.selected)} selected ` }, ...options(['Move', 'move'], ['Erase', 'erase'], ['Clear', 'clear'])] };
+  }
   return {
     command: null,
     parts: [
       {
         text: s.touch
-          ? 'Tap an object to see it, or touch and hold to read a point'
-          : 'Select an object, or click a snap to read its point',
+          ? 'Pick a tool in Tools, or tap an object to see it; touch and hold to read a point'
+          : 'Type a command, such as L for Line, or select an object, or click a snap to read its point',
       },
     ],
   };
+}
+
+/** A template edit the page asks about first: what the renderer says of it. */
+export interface TemplateEdit {
+  title: string;
+  detail: string;
+  /** The template, as the rows write its path. */
+  path: string;
+  /** Every sheet built from it, which the edit changes. */
+  sheets: string[];
+}
+
+/** What the renderer says of the drawing tool running (`Viewer.tool_state`). */
+export interface ToolState {
+  tool: ToolKey | null;
+  command: string | null;
+  /** The layer a tool that draws draws on. */
+  layer: string | null;
+  prompt: string;
+  options: { label: string; act: string; main: boolean }[];
+  error: string | null;
+  /** That the objects picked are the template's, and what an edit to them reaches. */
+  warning: TemplateEdit | null;
+  placeholder: string;
+  /** Whether what is typed is the text itself, so Space is a space. */
+  typing_text: boolean;
+  takes_points: boolean;
+  selecting: boolean;
+  picked: number[];
+  points: [number, number][];
+  /** The text a Text tool is typing: each line where it goes, the one being typed last. */
+  text: { height: number; lines: { text: string; at: [number, number] }[] } | null;
+}
+
+/** A change set a tool has ready (`Outcome.send`). */
+export interface ToolSend {
+  change_set: { operations: unknown[] };
+  what: string;
+  sheets: string[];
+  template?: TemplateEdit;
+}
+
+/** What came of a tool's step: lines for the history, and the change sets to send, in order. */
+export interface ToolOutcome {
+  log: string[];
+  sends?: ToolSend[];
+}
+
+/** The template dialog's words: its heading, what it says, and its button. */
+export function templateWords(edit: TemplateEdit): { title: string; body: string; button: string } {
+  const file = edit.path.split('/').pop() ?? edit.path;
+  return {
+    title: edit.title,
+    body: `${edit.detail} The template ${file} changes, and so does every sheet built from it:`,
+    button: edit.sheets.length > 1 ? `Change all ${edit.sheets.length} sheets` : 'Change the template',
+  };
+}
+
+/** A sheet's template and the sheets built from it, as `display-list --origins` gives them. */
+export interface TemplateOf {
+  path: string;
+  sheets: string[];
+}
+
+/**
+ * Where an object comes from, as quick properties say it: the template,
+ * which an edit to it changes on every sheet built from it, or this
+ * sheet's row; null when the core did not say, as for a sheet description.
+ */
+export function originWords(from: string | undefined, template: TemplateOf | null | undefined): string | null {
+  // One short line, so the card keeps its room on a phone.
+  if (from === 'row') return 'This sheet’s row';
+  if (from === 'template' && template) {
+    const n = template.sheets.length;
+    return n > 1 ? `The template (${n} sheets)` : 'The template (this sheet only)';
+  }
+  return null;
+}
+
+/** A layer as `query layers` lists it. */
+export interface LayerEntry {
+  name: string;
+  /** Its colour: an index, or a name such as a true colour. */
+  color?: number | string;
+  locked?: boolean;
+  on?: boolean;
+  frozen?: boolean;
+}
+
+/** A layer's colour index, for the swatch and the rubber band; 7 for any colour that is not an index. */
+export function colorIndex(color: number | string | undefined): number {
+  return typeof color === 'number' && color >= 1 && color <= 255 ? color : 7;
+}
+
+/** Where the browser keeps the current layer of each set it has drawn on. */
+export const LAYER_KEY = 'agentdrafter-current-layer';
+
+/** The current layer kept for the set at `source`, if any. */
+export function readCurrentLayer(keeps: Keeps | null, source: string): string | null {
+  try {
+    const kept = JSON.parse(keeps?.getItem(LAYER_KEY) ?? '{}') as Record<string, unknown>;
+    const layer = kept[source];
+    return typeof layer === 'string' ? layer : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Keeps `layer` as the set's current layer, if the browser lets it. */
+export function writeCurrentLayer(keeps: Keeps | null, source: string, layer: string): void {
+  try {
+    let kept: Record<string, unknown> = {};
+    try {
+      kept = JSON.parse(keeps?.getItem(LAYER_KEY) ?? '{}') as Record<string, unknown>;
+    } catch {
+      // A value that is not ours is replaced.
+    }
+    keeps?.setItem(LAYER_KEY, JSON.stringify({ ...kept, [source]: layer }));
+  } catch {
+    // A browser that keeps nothing: the layer lasts the visit.
+  }
+}
+
+/**
+ * Whether the renderer dropped the tool running, `was`, when a sheet was
+ * drawn: another sheet or layout ends it with nothing sent. The command
+ * bar's field is cleared then, as Esc clears it, so what was typed for the
+ * dropped tool is not entered into what comes next.
+ */
+export function droppedOnLoad(was: string | null, now: string | null): boolean {
+  return was !== null && now === null;
+}
+
+/**
+ * The layers the Layer box holds while they are asked for again: the same
+ * sheet's (`of`, as the page keys it, the same as `was`) stay, so a layer
+ * the sheet has not got does not come back as current while the reply is
+ * on its way; another sheet's go, null, until its own come.
+ */
+export function layersWhileAsked(
+  was: string,
+  of: string,
+  held: LayerEntry[] | null,
+): LayerEntry[] | null {
+  return was === of ? held : null;
+}
+
+/**
+ * The current layer of a sheet whose layers are `layers`: the one kept, if
+ * the sheet has it, or layer 0. While the layers are still being asked for
+ * (null), the one kept, so nothing drawn meanwhile goes on 0 by mistake.
+ */
+export function currentLayerOf(kept: string | null, layers: readonly LayerEntry[] | null): string {
+  if (layers === null) return kept ?? '0';
+  return kept !== null && layers.some((l) => l.name === kept) ? kept : '0';
 }
 
 /** One of AutoCAD's object snaps, as the core names it. */
@@ -261,7 +439,7 @@ export interface SnapEntry {
   k: SnapKind;
   label: string;
   hint: string;
-  /** Acts only inside a drawing tool, from the last point: build 4. */
+  /** Acts only inside a drawing tool, from the last point: not built yet. */
   tool?: boolean;
   /** AutoCAD's AutoSnap marker, an SVG path round 0,0 of half size `s`, y down. */
   path(s: number): string;
