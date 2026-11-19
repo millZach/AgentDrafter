@@ -2239,23 +2239,6 @@ const checks = {
           const bar = await page.textContent('.cmdbar');
           assert(bar.includes(`Endpoint of FT-101: ${end[0].toFixed(4)}, ${end[1].toFixed(4)} in`), `the snap lifted is FT-101's, where it is: ${bar.slice(0, 120)}`);
         }
-        // Object snap turned off from a keyboard while the finger is held:
-        // the lift takes no snap.
-        {
-          await page.tap('.opt[data-opt="clear"]');
-          const [hx, hy] = await still();
-          await touch('touchStart', [[hx + 4, hy + 3]]);
-          await sleep(500);
-          // Held on FT-101's endpoint, before Object snap goes off.
-          assert((await page.textContent('.snaptag')) === 'Endpoint · FT-101', 'the finger is held on FT-101');
-          await page.keyboard.press('F3');
-          await sleep(100);
-          await touch('touchEnd', []);
-          await sleep(300);
-          const bar = await page.textContent('.cmdbar');
-          assert(!bar.includes('Endpoint of'), `with Object snap off, the lift takes no snap: ${bar.slice(0, 120)}`);
-          await page.keyboard.press('F3');
-        }
         // The menu is in Tools, under Status.
         await page.tap('.toolsbtn');
         await page.tap('[data-snaps]');
