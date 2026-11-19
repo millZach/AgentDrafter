@@ -28,6 +28,8 @@ export interface Surface {
   touched(): void;
   /** A tap or a click, not a drag, at a point of the element, and the pointer that made it: a pick, or a click on a snap. */
   tapped?(at: [number, number], pointer: string): void;
+  /** A double tap or double click there: true when it opened what is there, such as a text to edit, so it does not zoom. */
+  doubleTapped?(at: [number, number], pointer: string): boolean;
   /** A finger held still: the magnifier comes up there. */
   held?(at: [number, number]): void;
   /** The held finger moves. */
@@ -279,6 +281,7 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     if (tap) {
       if (!surface.tapsOnly?.() && lastTap && now - lastTap.t < 320 && distance(p, lastTap.p) < 30) {
         lastTap = null;
+        if (surface.doubleTapped?.(p, e.pointerType)) return;
         const view = surface.view();
         glide.to(zoomAt(view, p[0], p[1], view.scale * 2.2, surface.limits()), 260, p);
       } else {

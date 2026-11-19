@@ -188,6 +188,8 @@ export interface PromptState {
   taken?: Taken | null;
   /** A phone's words: a finger taps and holds where a mouse clicks. */
   touch?: boolean;
+  /** A text whose contents are being edited on the drawing, or in a phone's box. */
+  editing?: Named | null;
 }
 
 /** A snap taken with no tool running, as the command bar reads it out. */
@@ -230,6 +232,19 @@ export function promptFor(s: PromptState): Prompt {
   if (s.at !== null && s.cannot) return { command: null, parts: [{ text: `Entry ${s.at} cannot be shown ` }, ...stepping] };
   if (s.at !== null) return { command: null, parts: [{ text: `Showing entry ${s.at} as it was, read-only ` }, ...stepping] };
   if (s.reaching) return { command: null, parts: [{ text: 'Reaching the server… changes show when it is back' }] };
+  if (s.editing) {
+    // A text's contents edited on the drawing, as AutoCAD's TEXTEDIT.
+    return {
+      command: 'TEXTEDIT',
+      parts: [
+        {
+          text: s.touch
+            ? `${nameOf(s.editing)}: type in the box. Done applies it, Cancel puts it back`
+            : `${nameOf(s.editing)}: type on the drawing. Enter or clicking away applies it, Esc puts it back`,
+        },
+      ],
+    };
+  }
   if (s.taken) {
     const acts: [string, Act][] = s.taken.copy ? [['Copy as snapped point', 'copy'], ['Clear', 'clear']] : [['Clear', 'clear']];
     return { command: null, parts: [{ snap: s.taken.label }, { text: `${s.taken.rest} ` }, ...options(...acts)] };
@@ -288,6 +303,121 @@ export interface ToolSend {
   what: string;
   sheets: string[];
   template?: TemplateEdit;
+}
+
+/** Where a quick property's value is written, as its chip says it (`Viewer.props_fields`). */
+export type PropTone = 'template' | 'row_value' | 'unset';
+
+/** One row of quick properties an edit can change, as the renderer gives it (`Viewer.props_fields`). */
+export interface PropField {
+  /** What an edit names it: `layer`, `contents`, `radius`, `diameter` or `attribute:N`. */
+  key: string;
+  label: string;
+  value: string;
+  editable: boolean;
+  /** An mtext's contents, which take more than one line. */
+  multiline: boolean;
+  numeric: boolean;
+  /** One of an insert's attributes. */
+  attribute: boolean;
+  chip?: { words: string; tone: PropTone };
+  /** What an edit to it changes, said before it is edited. */
+  note?: string;
+}
+
+/** What an edit in quick properties came to (`Viewer.props_edit`): the change set to send, what went wrong, or neither when the value is as it was. */
+export interface PropEdited {
+  error?: string;
+  send?: ToolSend;
+}
+
+/** What came of a commit of a quick property: sent (or asked about first), as it was, or what went wrong. */
+export type Committed = { kind: 'sent' } | { kind: 'same' } | { kind: 'error'; message: string };
+
+/** A key pressed in a field quick properties edit, or in a text edited on the drawing. */
+export interface FieldKey {
+  key: string;
+  shiftKey?: boolean;
+  /** Whether an input method is composing, as for Japanese or Chinese. */
+  isComposing?: boolean;
+  /** 229 while an input method has the key, in browsers that do not say isComposing. */
+  keyCode?: number;
+}
+
+/**
+ * What a key does in a field: Enter lands it (Shift+Enter is a new line in
+ * one of more lines), Esc puts it back. While an input method composes,
+ * Enter and Esc are its own, to confirm or dismiss a candidate: nothing.
+ */
+export function fieldKey(e: FieldKey, multiline: boolean): 'land' | 'cancel' | null {
+  if (e.isComposing || e.keyCode === 229) return null;
+  if (e.key === 'Escape') return 'cancel';
+  if (e.key === 'Enter' && !(multiline && e.shiftKey)) return 'land';
+  return null;
+}
+
+/**
+ * What landing a field sends: what it holds, unless that is what it showed
+ * when it was focused, or its value; then nothing. So Enter on a field not
+ * typed in, a field put back, or one left again before its last edit's
+ * sheet is drawn, sends nothing.
+ */
+export function toSend(holds: string, atFocus: string, value: string): string | null {
+  return holds === atFocus || holds === value ? null : holds;
+}
+
+/**
+ * A paste into a one-line field: when it holds a line break, which the
+ * browser would strip before anything could refuse it, the text the field
+ * would hold, for the renderer to refuse; null when the paste is the
+ * browser's to take, as into a field of more lines.
+ */
+export function pastedLines(value: string, start: number, end: number, pasted: string, multiline: boolean): string | null {
+  if (multiline || !/[\r\n]/.test(pasted)) return null;
+  return value.slice(0, start) + pasted + value.slice(end);
+}
+
+/** What a tap or a click was on: the object's place in the drawing loaded, and its ID, if it has one. */
+export interface Tapped {
+  place: number;
+  id: string | null;
+}
+
+/**
+ * What the second tap or click of a double one does, after a first on
+ * `first` (null for none, or a drawing loaded since): on the same object,
+ * found by its ID, which a drawing loaded between them may have moved to
+ * another place, it opens it, as a text to edit, and zooms if it is not
+ * one; on two objects, a phone's second tap selects its own, and a
+ * laptop's double click zooms, as on nothing.
+ */
+export function secondTap(first: Tapped | null, now: Tapped, touch: boolean): 'open' | 'pick' | 'zoom' {
+  if (now.place < 0) return 'zoom';
+  const same = first !== null && (first.id !== null || now.id !== null ? first.id === now.id : first.place === now.place);
+  if (same) return 'open';
+  return touch ? 'pick' : 'zoom';
+}
+
+/** A view of a sheet: the journal's entry it is as it was at, null for the set as it is, its sheet and its layout. */
+export interface SheetView {
+  at: number | null;
+  sheet: string | null;
+  layout: string | null;
+}
+
+/**
+ * Whether quick properties and the Layer box edit: only while the view
+ * asked for and the drawing loaded are the same, and both the set as it
+ * is. A step back to an entry whose drawing has not come yet leaves the
+ * live drawing on the canvas, and it is not edited then. An asked sheet or
+ * layout of null is the first.
+ */
+export function editsHere(asked: SheetView, loaded: (SheetView & { layouts: string[] }) | null): boolean {
+  if (!loaded || asked.at !== null || loaded.at !== null) return false;
+  const same = (a: string | null, b: string | null) => (a ?? '').toUpperCase() === (b ?? '').toUpperCase();
+  if (asked.sheet !== null && !same(asked.sheet, loaded.sheet)) return false;
+  const first = loaded.layouts[0] ?? null;
+  return asked.layout === null ? loaded.layout === null || same(loaded.layout, first) : same(asked.layout, loaded.layout);
 }
 
 /** What came of a tool's step: lines for the history, and the change sets to send, in order. */

@@ -18,7 +18,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 
-import { freeBeside, newlyHidden, placeBeside, snapTag, type Box, type Hovered, type Named, type ToolState } from './frame.ts';
+import { freeBeside, newlyHidden, placeBeside, secondTap, snapTag, type Box, type Hovered, type Named, type Tapped, type ToolState } from './frame.ts';
 
 import { screen_color, Viewer } from './wasm/agentdrafter_viewer.js';
 import { attachGestures, Glide, type Surface } from './gestures.ts';
@@ -111,6 +111,17 @@ export interface DrawingProps {
   layer?: { name: string; color: number };
   /** Filled in with what lets the page reach the renderer: the tools run in it. */
   handle?: RefObject<DrawingHandle | null>;
+  /**
+   * A text being edited on the drawing, on a laptop: placed over the picked
+   * object at each draw, so it follows it as the view moves.
+   */
+  editor?: RefObject<HTMLElement | null>;
+  /**
+   * A double click or double tap on an object, or a tap on the object
+   * already picked on a phone: true when the page opened it, as a text to
+   * edit, so nothing else comes of it.
+   */
+  onOpen?(place: number, touch: boolean): boolean;
 }
 
 /** What the page reaches the renderer by. */
@@ -173,6 +184,8 @@ export function Drawing({
   ortho = false,
   layer,
   handle,
+  editor,
+  onOpen,
 }: DrawingProps) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -192,6 +205,9 @@ export function Drawing({
   const shownMarks = useRef({ marks, picked });
   const pendingFocus = useRef<Focus | null>(null);
   const pick = useRef(onPick);
+  const open = useRef(onOpen);
+  // The object the last tap or click picked, by its place and its ID; null for none.
+  const tapped = useRef<Tapped | null>(null);
   const cursor = useRef(onCursor);
   const colorOf = useRef(onPickedColor);
   const narrow = useRef(compact);
@@ -242,6 +258,7 @@ export function Drawing({
   covered.current = coveredBelow;
   shownMarks.current = { marks, picked };
   pick.current = onPick;
+  open.current = onOpen;
   cursor.current = onCursor;
   colorOf.current = onPickedColor;
   narrow.current = compact;
@@ -276,6 +293,37 @@ export function Drawing({
     el.style.top = `${y}px`;
     el.style.visibility = 'visible';
   };
+
+  // A text edited on the drawing, over it, as the view moves: at its left
+  // and its middle, at least as tall as the text shows.
+  const placeEditor = () => {
+    const el = editor?.current;
+    if (!el) return;
+    const b = pickedBox.current;
+    // Unseen until placed, but never hidden: a hidden field cannot take
+    // the keys as it opens.
+    if (narrow.current || b.length !== 4) {
+      el.style.opacity = '0';
+      return;
+    }
+    const v = view.current;
+    const [l, t] = toScreen(v, b[0] as number, b[3] as number);
+    const [r, bottom] = toScreen(v, b[2] as number, b[1] as number);
+    const c = canvas.current;
+    const width = c?.clientWidth ?? 0;
+    const tall = Math.max(0, bottom - t);
+    el.style.setProperty('--text-px', `${tall}px`);
+    // As wide as the text shows, and room to type on, within the drawing.
+    el.style.width = `${Math.round(Math.max(260, Math.min(width - 60, r - l + 80)))}px`;
+    const middle = (t + bottom) / 2;
+    const box = el.getBoundingClientRect();
+    el.style.left = `${Math.max(4, Math.min(width - box.width - 4, l - 10))}px`;
+    el.style.top = `${Math.max(4, middle - 26)}px`;
+    el.style.opacity = '1';
+  };
+
+  // What a tap at `place` of the drawing loaded was on, by its ID too.
+  const tappedOn = (place: number): Tapped => ({ place, id: place >= 0 ? (objects.current[place]?.id ?? null) : null });
 
   // The crosshair and the snap the cursor holds, in step with the view:
   // found again only when the drawing point under the cursor moves.
@@ -349,6 +397,7 @@ export function Drawing({
     kept.push({ at: began, ms: performance.now() - began });
     if (kept.length > 2000) kept.splice(0, kept.length - 2000);
     placeCard();
+    placeEditor();
     placeToolWords();
     const at = pointer.current;
     if (held.current) return;
@@ -484,14 +533,36 @@ export function Drawing({
         pointer.current = [sx, sy];
         hoverNow();
       }
+      const [x, y] = toDrawing(view.current, sx, sy);
+      const place = v.pick(x, y, PICK_REACH / view.current.scale);
+      // What this tap was on, for a second tap that makes it a double one.
+      tapped.current = tappedOn(place);
       const h = hovered.current;
       if (pointerType === 'mouse' && h) {
         take.current?.(h);
         return;
       }
+      // On a phone, a tap on the object already picked opens it, as a text
+      // to edit.
+      if (pointerType !== 'mouse' && place >= 0 && place === shownMarks.current.picked && open.current?.(place, true)) return;
+      pick.current(place >= 0 ? place : null);
+    },
+    doubleTapped: ([sx, sy], pointerType) => {
+      const v = viewer.current;
+      if (!v || !loadedReply.current || toolActive()) return false;
       const [x, y] = toDrawing(view.current, sx, sy);
       const place = v.pick(x, y, PICK_REACH / view.current.scale);
-      pick.current(place >= 0 ? place : null);
+      const now = tappedOn(place);
+      const touch = pointerType !== 'mouse';
+      const does = secondTap(tapped.current, now, touch);
+      tapped.current = now;
+      // Two taps on two objects are two picks: the second selects its own,
+      // and opens nothing. A double click that edits no text zooms.
+      if (does === 'pick') {
+        pick.current(place);
+        return true;
+      }
+      return does === 'open' && !!open.current?.(place, touch);
     },
     held: (p) => {
       held.current = p;
@@ -665,6 +736,9 @@ export function Drawing({
     try {
       const summary = JSON.parse(v.load(text)) as Summary;
       objects.current = summary.objects;
+      // A tap on an object with no ID is known by its place, which the
+      // drawing loaded now may give another.
+      if (tapped.current && tapped.current.id === null) tapped.current = null;
       v.set_running(mask.current);
       hoverKey.current = '';
       const sameSheet = loadedSheet.current?.toUpperCase() === summary.sheet.toUpperCase();

@@ -17,8 +17,13 @@
 //! ([`crate::display_snaps`]). With `origins`, it says where each of a
 //! drawing set's objects comes from, its sheet's template or its row, and
 //! which sheets are built from that template: what an edit to it reaches,
-//! as a change set writes it (`docs/change-sets.md`).
+//! as a change set writes it (`docs/change-sets.md`). With `values`, each
+//! object gives the values quick properties edit, a text's contents, a
+//! circle's or an arc's radius and an insert's attribute values, and on a
+//! drawing set's sheet where each is written: by the object itself, by the
+//! sheet's row, in how many places, or nowhere.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -27,7 +32,7 @@ use std::sync::Arc;
 
 use crate::build::is_same_file;
 use crate::change::FilesAsOf;
-use crate::description::{read_sheet_record, SavedSet};
+use crate::description::{read_sheet_record, ObjectSources, SavedSet, SheetSources, Source};
 use crate::display_snaps::{edge_fills, snaps_of, DisplaySnap};
 use crate::draw::{self, Bounds, DisplayList, HatchCutShort};
 use crate::error::{Error, ErrorCode};
@@ -76,6 +81,11 @@ pub struct DisplayListRequest {
     /// Without it, nothing, and the reply is as it was.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub origins: bool,
+    /// Give the values quick properties edit of each object, and on a
+    /// drawing set's sheet where each is written. Without it, none, and the
+    /// reply is as it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub values: bool,
 }
 
 impl DisplayListRequest {
@@ -89,6 +99,7 @@ impl DisplayListRequest {
             layout: None,
             snaps: false,
             origins: false,
+            values: false,
         }
     }
 }
@@ -121,6 +132,78 @@ pub struct SheetObject {
     /// alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<Origin>,
+    /// With `values`, the values quick properties edit, for a text, an
+    /// mtext, a circle, an arc or an insert with attributes; none for any
+    /// other object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub values: Option<ObjectValues>,
+}
+
+/// What quick properties edit of an object: a text's or an mtext's
+/// contents, a circle's or an arc's radius, and an insert's attribute
+/// values, each, on a drawing set's sheet, with where it is written.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ObjectValues {
+    /// A text's or an mtext's contents, as they show.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contents: Option<WrittenValue>,
+    /// A circle's or an arc's radius, in drawing units.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+    /// An insert's attribute values, one for each of its `attributes`, in
+    /// their order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<AttributeValue>,
+}
+
+/// A text value of an object, and where it is written.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct WrittenValue {
+    /// The value, as it shows.
+    pub value: String,
+    /// On a drawing set's sheet, where it is written; none for a sheet
+    /// description or a DWG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written: Option<Written>,
+    /// When the row writes it, the name of the row's value, such as
+    /// `WIRE_1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_value: Option<String>,
+    /// When the row writes it, how many places on the sheet the row's value
+    /// fills, this one among them: every one changes with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fills: Option<usize>,
+}
+
+/// One attribute value of an insert, and where it is written.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AttributeValue {
+    /// Its tag.
+    pub tag: String,
+    /// Which of the tag's values it is, counted from 1, when the block
+    /// defines the tag more than once, as `set_attribute` names it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurrence: Option<usize>,
+    #[serde(flatten)]
+    pub value: WrittenValue,
+}
+
+/// Where one of a drawing set's sheet's values is written, as a change set
+/// writes an edit to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Written {
+    /// By the object itself, where its `from` says: an edit reaches every
+    /// sheet built from its template, or its sheet alone.
+    Own,
+    /// By the sheet's row, as a value its template takes from the row: an
+    /// edit sets the row's value, on this sheet alone, in every place it
+    /// fills.
+    RowValue,
+    /// Nowhere: an attribute the insert gives no value for, which shows its
+    /// definition's default. An edit sets it on the insert, where its
+    /// `from` says.
+    Unset,
 }
 
 /// Where a drawing set's object is written, as a change set edits it.
@@ -252,12 +335,7 @@ pub fn display_list_with(
         }
     }
     let source = request.source.as_path();
-    let drawn = read(
-        source,
-        request.sheet.as_deref(),
-        request.entry,
-        request.origins,
-    )?;
+    let drawn = read(source, request.sheet.as_deref(), request.entry, request)?;
     // A sheet drawn in several layouts draws the one asked for.
     let pages = drawn.sheet.pages();
     let layouts: Vec<String> = if pages.len() > 1 {
@@ -378,11 +456,14 @@ struct Drawn {
 
 /// What each of `sheet`'s objects is, with its ID and name when `ids`
 /// gives them, by the same places, and where it is written when `from`
-/// says, by the same places.
+/// says, by the same places. With `values`, the values quick properties
+/// edit, and where each is written when `sources` says.
 fn objects_of(
     sheet: &Sheet,
     ids: &[(String, Option<String>)],
     from: &[Origin],
+    values: bool,
+    sources: Option<&SheetSources>,
 ) -> Vec<SheetObject> {
     sheet
         .objects
@@ -393,6 +474,12 @@ fn objects_of(
                 Object::Insert(insert) => (Some(insert.block.clone()), insert.attributes.clone()),
                 _ => (None, Vec::new()),
             };
+            let values = values
+                .then(|| {
+                    let written = sources.map(|s| (s.objects.get(i), &s.fills));
+                    values_of(object, &attributes, written)
+                })
+                .flatten();
             SheetObject {
                 id: ids.get(i).map(|(id, _)| id.clone()),
                 name: ids.get(i).and_then(|(_, name)| name.clone()),
@@ -401,22 +488,109 @@ fn objects_of(
                 block,
                 attributes,
                 from: from.get(i).copied(),
+                values,
             }
         })
         .collect()
+}
+
+/// The values quick properties edit of `object`, whose attributes are
+/// `attributes`, and where each is written when `written` says, on a
+/// drawing set's sheet: the object's own sources, and how many places each
+/// of the row's values fills. None for an object with none.
+fn values_of(
+    object: &Object,
+    attributes: &[Attribute],
+    written: Option<(Option<&ObjectSources>, &BTreeMap<String, usize>)>,
+) -> Option<ObjectValues> {
+    let own = written.map(|(own, fills)| (own.cloned().unwrap_or_default(), fills));
+    // A value, and where it is written when the sheet is a set's.
+    let value = |value: &str, source: Option<Source>| -> WrittenValue {
+        let mut given = WrittenValue {
+            value: value.to_owned(),
+            written: None,
+            row_value: None,
+            fills: None,
+        };
+        if let (Some(source), Some((_, fills))) = (source, &own) {
+            given.written = Some(match source {
+                Source::Own => Written::Own,
+                Source::Unset => Written::Unset,
+                Source::Row(name) => {
+                    given.fills = Some(fills.get(&name).copied().unwrap_or(1));
+                    given.row_value = Some(name);
+                    Written::RowValue
+                }
+            });
+        }
+        given
+    };
+    let contents = |text: &str| {
+        let source = own
+            .as_ref()
+            .map(|(own, _)| own.contents.clone().unwrap_or(Source::Own));
+        Some(ObjectValues {
+            contents: Some(value(text, source)),
+            radius: None,
+            attributes: Vec::new(),
+        })
+    };
+    let radius = |radius: f64| {
+        Some(ObjectValues {
+            contents: None,
+            radius: Some(radius),
+            attributes: Vec::new(),
+        })
+    };
+    match object {
+        Object::Text(text) => contents(&text.contents),
+        Object::MText(text) => contents(&text.contents),
+        Object::Circle(circle) => radius(circle.radius),
+        Object::Arc(arc) => radius(arc.radius),
+        Object::Insert(_) if !attributes.is_empty() => {
+            let values = attributes
+                .iter()
+                .enumerate()
+                .map(|(i, attribute)| {
+                    // A tag the block defines more than once names which.
+                    let same = |a: &Attribute| a.tag == attribute.tag;
+                    let before = attributes[..i].iter().filter(|a| same(a)).count();
+                    let repeated = before > 0 || attributes[i + 1..].iter().any(same);
+                    let occurrence = repeated.then_some(before);
+                    let source = own
+                        .as_ref()
+                        .map(|(own, _)| own.attribute(&attribute.tag, occurrence));
+                    AttributeValue {
+                        tag: attribute.tag.clone(),
+                        occurrence: occurrence.map(|n| n + 1),
+                        value: value(&attribute.value, source),
+                    }
+                })
+                .collect();
+            Some(ObjectValues {
+                contents: None,
+                radius: None,
+                attributes: values,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Reads the sheet `sheet` names from `source`: a drawing set's folder, as
 /// it was just after its journal's entry `entry` when one is given, or one
 /// sheet description or DWG, whose one sheet is named by its file. With
 /// `origins`, a set's sheet says where each object is written and which
-/// sheets its template reaches; without, neither is worked out.
+/// sheets its template reaches; without, neither is worked out. With
+/// `values`, each object gives the values quick properties edit, and a
+/// set's sheet where each is written.
 fn read(
     source: &Path,
     sheet: Option<&str>,
     entry: Option<u64>,
-    origins: bool,
+    request: &DisplayListRequest,
 ) -> Result<Drawn, Error> {
+    let origins = request.origins;
     let named = |name: &str| sheet.is_none_or(|s| s.to_lowercase() == name.to_lowercase());
     if source.is_dir() {
         let set = match entry {
@@ -427,7 +601,14 @@ fn read(
         let Some(row) = set.rows.iter().find(|row| named(&row.sheet)) else {
             return Err(no_such_sheet(sheet, &names));
         };
-        let record = set.sheet(row)?;
+        // With values, the sheet and where each of its values is written,
+        // from one read of its template.
+        let (record, sources) = if request.values {
+            let (record, sources) = set.sheet_with_sources(row)?;
+            (record, Some(sources))
+        } else {
+            (set.sheet(row)?, None)
+        };
         let ids: Vec<(String, Option<String>)> = (0..record.objects.len())
             .map(|i| (record.id(i), record.objects[i].name.clone()))
             .collect();
@@ -468,7 +649,7 @@ fn read(
             name: record.name,
             names,
             units: Some(record.sheet.units),
-            objects: objects_of(&record.sheet, &ids, &from),
+            objects: objects_of(&record.sheet, &ids, &from, request.values, sources.as_ref()),
             sheet: record.sheet,
             objects_not_drawn: 0,
             template,
@@ -501,7 +682,7 @@ fn read(
     Ok(Drawn {
         names: vec![name.clone()],
         name,
-        objects: objects_of(&record.sheet, &ids, &[]),
+        objects: objects_of(&record.sheet, &ids, &[], request.values, None),
         sheet: record.sheet,
         units: record.units,
         objects_not_drawn: record.objects_not_drawn,

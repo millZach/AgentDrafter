@@ -55,6 +55,12 @@
 //            which lands in the journal and builds the
 //            sheet's DWG again; the template warning's Cancel and Change
 //            all; and Undo last of a drafter's edit.
+// - props:   editing in quick properties, by mouse and keyboard and by
+//            touch: a layer, a text's contents in the panel and on the
+//            drawing, an attribute, a radius and a diameter, and the Layer
+//            box moving the selected object, each one change set; Esc and
+//            Cancel landing nothing, Change all landing on every sheet, a
+//            row value on its sheet alone; and Undo last of an edit.
 //
 // It writes results.json, the screenshots and each compared image into
 // --out (target/viewer-e2e by default), and exits 1 when any check fails.
@@ -1152,8 +1158,10 @@ const checks = {
       const shown = await page.evaluate(() => {
         const rows = {};
         for (const tr of document.querySelectorAll('.qp .kv tr')) {
-          const th = tr.querySelector('th')?.textContent;
-          if (th) rows[th] = tr.querySelector('td')?.textContent;
+          // A row's label, without the chip under it; an editable row's value is its field's.
+          const th = tr.querySelector('th')?.firstChild?.textContent;
+          const field = tr.querySelector('td input, td select, td textarea');
+          if (th) rows[th] = field ? field.value : tr.querySelector('td')?.textContent;
         }
         return rows;
       });
@@ -1659,7 +1667,7 @@ const checks = {
         });
         const apart = card[0] >= device.box[2] || card[2] <= device.box[0];
         assert(apart && card[1] < device.box[3] + 1, `quick properties sit beside the device: ${JSON.stringify({ card, device: device.box })}`);
-        assert((await page.textContent('[data-layer]')) === '0', 'the Layer box shows its layer');
+        assert((await page.inputValue('select[data-layer]')) === '0', 'the Layer box shows its layer');
         assert((await bar(page)).includes('FT-101 selected [ Move Erase Clear ]'), `the command bar names it: ${await bar(page)}`);
         assert((await page.textContent('.qp')).includes('Comes from'), 'quick properties say where it comes from');
         await page.screenshot({ path: join(out, 'frame-laptop-selected.png') });
@@ -2284,6 +2292,602 @@ const checks = {
         await context.close();
       }
       return { ...seen, screenshots: ['tools-laptop-line.png', 'tools-laptop-text.png', 'tools-laptop-move.png', 'tools-laptop-template.png', 'tools-laptop-after.png', 'tools-phone-line.png', 'tools-phone-text.png'] };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * Editing in quick properties (#153), by mouse and keyboard at laptop
+   * size and by touch at phone size, against a copy of the demo plant: a
+   * layer, a text's contents in the panel and on the drawing, an attribute,
+   * a radius and a diameter, and the Layer box moving the selected object.
+   * Each edit is one change set through `change`; Esc lands nothing; a
+   * value the row fills says so first and lands on its sheet alone; an edit
+   * to the template asks first, Cancel landing nothing and Change all
+   * landing on every sheet; Undo last takes an edit back.
+   */
+  async props() {
+    const folder = freshPlant('props');
+    const set = join(folder, 'demo-plant');
+    // A circle of the sheet's own, for its radius and diameter.
+    const added = sendChange(folder, {
+      operations: [
+        { op: 'add_circle', sheet: 'DP-LD-101', center: [13, 3.6, 0], radius: 0.25, layer: 'notes', id: 'washer' },
+        // A second, far from it, clear of its card, which shows the radius the first comes to.
+        { op: 'add_circle', sheet: 'DP-LD-101', center: [4.5, 3.4, 0], radius: 0.3, layer: 'notes', id: 'washer2' },
+      ],
+    });
+    assert(added.ok, `the circle is added: ${JSON.stringify(added)}`);
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    const seen = { laptop: {}, phone: {} };
+    // The same JSON, whatever the order of its keys.
+    const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
+    const same = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+    const SEVEN = ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'];
+    const journal = () => agentIn(folder, 'journal', 'demo-plant').result.entries;
+    const rows = () => readFileSync(join(set, 'rows.yaml'), 'utf8');
+    const template = () => readFileSync(join(set, 'templates', 'loop-2-wire.yaml'), 'utf8');
+    const bar = (page) => page.evaluate(() => document.querySelector('.cmdbar').textContent);
+    const frames = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    // Waits for the journal to hold one more entry than `before`, a change
+    // set that landed, and gives it with its one operation.
+    const landed = async (page, before, what) => {
+      const until = Date.now() + 30000;
+      let entries = journal();
+      while (entries.length <= before) {
+        assert(Date.now() < until, `${what}: no change set landed: ${await bar(page)}`);
+        await sleep(100);
+        entries = journal();
+      }
+      assert(entries.length === before + 1, `${what}: one change set: ${JSON.stringify(entries.slice(before))}`);
+      const entry = entries.at(-1);
+      assert(entry.kind === 'change_set' && entry.landed_on?.length, `${what} landed: ${JSON.stringify(entry)}`);
+      assert(entry.change_set.operations.length === 1, `${what} is one operation: ${JSON.stringify(entry.change_set.operations)}`);
+      return { entry, op: entry.change_set.operations[0] };
+    };
+    const nothingLands = async (before, what) => {
+      await sleep(1200);
+      assert(journal().length === before, `${what} lands nothing`);
+    };
+    // The place of the first object of the sheet shown that `test` takes, as the page holds it.
+    const placeOf = (page, test) => page.evaluate(`window.agentdrafterViewer.summary.objects.findIndex(${test})`);
+    // Where the drawing point `at` is on the page.
+    const onPage = (page, at) =>
+      page.evaluate(([x, y]) => {
+        const v = window.agentdrafterViewer.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+      }, at);
+    // Shows the object at `place` large, and gives a point on the page that
+    // picks it, as a click there does.
+    const showAndFind = async (page, place, zoom = 4) => {
+      await page.click('[aria-label="Fit the sheet"]').catch(() => page.tap('[aria-label="Fit the sheet"]'));
+      await sleep(600);
+      const at = await page.evaluate(
+        ([p, zoom]) => {
+          const probe = window.agentdrafterViewer;
+          const [x0, y0, x1, y1] = probe.bounds([p]);
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          const scale = probe.view().scale * zoom;
+          probe.show({ left: (x0 + x1) / 2 - r.width / 2 / scale, top: (y0 + y1) / 2 + r.height / 4 / scale, scale });
+          return [x0, y0, x1, y1];
+        },
+        [place, zoom],
+      );
+      await frames(page);
+      return findOn(page, place, at);
+    };
+    // A point on the page that picks the object at `place`, in its box, at the view shown.
+    const findOn = async (page, place, box) => {
+      const [x0, y0, x1, y1] = box ?? (await page.evaluate((p) => window.agentdrafterViewer.bounds([p]), place));
+      for (let j = 1; j < 8; j++) {
+        for (let i = 1; i < 12; i++) {
+          const x = x0 + ((x1 - x0) * i) / 12;
+          const y = y0 + ((y1 - y0) * j) / 8;
+          const picked = await page.evaluate(([x, y]) => window.agentdrafterViewer.pickAt(x, y, 16), [x, y]);
+          if (picked === place) return onPage(page, [x, y]);
+        }
+      }
+      throw new Error(`no point on the page picks object ${place}`);
+    };
+    const select = async (page, place, touch) => {
+      const [x, y] = await showAndFind(page, place);
+      if (touch) await page.touchscreen.tap(x, y);
+      else await page.mouse.click(x, y);
+      await page.waitForFunction((p) => window.agentdrafterViewer.marked?.picked === p, place, { timeout: 15000 });
+      await page.waitForSelector('.qp [data-prop="layer"]');
+      return [x, y];
+    };
+    const chips = (page) => page.evaluate(() => [...document.querySelectorAll('.qp [data-chip]')].map((c) => c.textContent));
+    const valueOf = (page, key) => page.inputValue(`.qp [data-prop="${key}"]`);
+    // An attribute's field, by its tag.
+    const attributeKey = (page, place, tag) =>
+      page.evaluate(([p, t]) => `attribute:${window.agentdrafterViewer.summary.objects[p].values.attributes.findIndex((a) => a.tag === t)}`, [place, tag]);
+    const waitValue = (page, key, value) =>
+      page.waitForFunction(
+        ([k, v]) => document.querySelector(`.qp [data-prop="${k}"]`)?.value === v,
+        [key, value],
+        { timeout: 15000 },
+      );
+    try {
+      // A laptop: the mouse and the keyboard.
+      {
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        // Snapping off, so a click picks.
+        await page.keyboard.press('F3');
+        await page.waitForFunction(() => window.agentdrafterViewer.summary.objects.some((o) => o.values));
+
+        // A wire number, which the row's WIRE_1 fills in four places.
+        const wire = await placeOf(page, "(o) => o.values?.contents?.row_value === 'WIRE_1'");
+        await select(page, wire, false);
+        const wireChips = await chips(page);
+        assert(wireChips.includes('4 places') && wireChips.includes('7 sheets'), `the chips say where its values are written: ${wireChips}`);
+        await page.click('.qp [data-prop="contents"]');
+        const note = await page.textContent('.qp [data-note="contents"]');
+        assert(note.includes('row value WIRE_1') && note.includes('4 places') && note.includes('Only this sheet changes'), `the row value says so before it is edited: ${note}`);
+        await page.screenshot({ path: join(out, 'props-laptop-row-value.png') });
+        // Esc puts it back and lands nothing.
+        let before = journal().length;
+        const rowsBefore = rows();
+        await page.fill('.qp [data-prop="contents"]', '999');
+        await page.keyboard.press('Escape');
+        assert((await valueOf(page, 'contents')) === '101+', 'Esc puts the value back');
+        assert(await page.isVisible('.qp'), 'Esc in a field keeps the selection');
+        await nothingLands(before, 'Esc');
+        assert(rows() === rowsBefore, 'Esc writes nothing');
+        // Enter lands it: the row's value, on this sheet alone.
+        await page.click('.qp [data-prop="contents"]');
+        await page.fill('.qp [data-prop="contents"]', '101A+');
+        await page.keyboard.press('Enter');
+        let { entry, op } = await landed(page, before, 'Contents, in the panel');
+        assert(op.op === 'change' && JSON.stringify(op.set) === '{"contents":"101A+"}', `change sets the contents: ${JSON.stringify(op)}`);
+        assert(JSON.stringify(entry.landed_on) === '["DP-LD-101"]', `a row value lands on its sheet alone: ${entry.landed_on}`);
+        assert(rows().includes('WIRE_1: 101A+') && template() === readFileSync(join(root, 'examples', 'demo-plant', 'templates', 'loop-2-wire.yaml'), 'utf8'), 'the row value is set, the template untouched');
+        await waitValue(page, 'contents', '101A+');
+        seen.laptop.contents = entry.entry;
+
+        // The row's own device: its layer, then an attribute left by a click away.
+        const device = await placeOf(page, "(o) => o.id === 'DP-LD-101/device'");
+        await select(page, device, false);
+        before = journal().length;
+        await page.selectOption('.qp [data-prop="layer"]', 'wire');
+        ({ entry, op } = await landed(page, before, 'Layer, in the panel'));
+        assert(op.op === 'change' && op.target.id === 'DP-LD-101/device' && op.set.layer === 'wire', `change sets the layer: ${JSON.stringify(op)}`);
+        assert(JSON.stringify(entry.landed_on) === '["DP-LD-101"]', 'the row\'s own object reaches its sheet alone');
+        seen.laptop.layer = entry.entry;
+        await waitValue(page, 'layer', 'wire');
+        const loop = await attributeKey(page, device, 'LOOP');
+        before = journal().length;
+        await page.click(`.qp [data-prop="${loop}"]`);
+        await page.fill(`.qp [data-prop="${loop}"]`, '101A');
+        // Leaving the field lands it.
+        await page.click('.qp header b');
+        ({ entry, op } = await landed(page, before, 'An attribute, on leaving the field'));
+        assert(
+          same(op, { op: 'set_attribute', target: { id: 'DP-LD-101/device' }, tag: 'LOOP', value: '101A' }),
+          `set_attribute sets it: ${JSON.stringify(op)}`,
+        );
+        seen.laptop.attribute = entry.entry;
+
+        // The circle: its radius, then its diameter, which sends its radius.
+        const washer = await placeOf(page, "(o) => o.id === 'DP-LD-101/washer'");
+        await select(page, washer, false);
+        assert((await valueOf(page, 'radius')) === '0.2500' && (await valueOf(page, 'diameter')) === '0.5000', 'the radius and the diameter show');
+        before = journal().length;
+        await page.fill('.qp [data-prop="radius"]', '0.4');
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'Radius'));
+        assert(same(op, { op: 'change', target: { id: 'DP-LD-101/washer' }, set: { radius: 0.4 } }), `the radius: ${JSON.stringify(op)}`);
+        seen.laptop.radius = entry.entry;
+        await waitValue(page, 'diameter', '0.8000');
+        before = journal().length;
+        await page.fill('.qp [data-prop="diameter"]', '0.6');
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'Diameter'));
+        assert(JSON.stringify(op.set) === '{"radius":0.3}', `a diameter typed sends its radius: ${JSON.stringify(op)}`);
+        seen.laptop.diameter = entry.entry;
+        await waitValue(page, 'radius', '0.3000');
+        // A wrong radius says why and lands nothing.
+        before = journal().length;
+        await page.fill('.qp [data-prop="radius"]', '-2');
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('.qp [data-prop-error="radius"]');
+        assert((await page.textContent('.qp [data-prop-error="radius"]')).includes('more than 0'), 'a radius of 0 or less is refused');
+        await page.keyboard.press('Escape');
+        await nothingLands(before, 'A wrong radius');
+
+        // What is typed on one circle does not follow the selection to
+        // another whose radius shows the same: leaving the first lands it,
+        // and the second shows its own.
+        // The sheet's drawing is held back meanwhile, so the second is
+        // picked before the first's new radius is drawn.
+        let releaseFirst;
+        const firstHeld = new Promise((done) => {
+          releaseFirst = done;
+        });
+        await context.route('**/commands/display-list', async (route) => {
+          await firstHeld;
+          await route.continue().catch(() => {});
+        });
+        before = journal().length;
+        await page.click('.qp [data-prop="radius"]');
+        await page.fill('.qp [data-prop="radius"]', '0.45');
+        const washer2 = await placeOf(page, "(o) => o.id === 'DP-LD-101/washer2'");
+        await select(page, washer2, false);
+        ({ entry, op } = await landed(page, before, 'A radius left by picking another circle'));
+        assert(op.target.id === 'DP-LD-101/washer' && op.set.radius === 0.45, `the first circle's radius lands: ${JSON.stringify(op)}`);
+        assert((await valueOf(page, 'radius')) === '0.3000', `the second circle shows its own radius: ${await valueOf(page, 'radius')}`);
+        before = journal().length;
+        await page.click('.qp [data-prop="radius"]');
+        await page.click('.qp header b');
+        await nothingLands(before, 'Focusing and leaving the second circle');
+        releaseFirst();
+        await sleep(300);
+        await context.unroute('**/commands/display-list');
+        seen.laptop.draft_stays = entry.entry;
+
+        // A field landed with Enter, focused again and left before the
+        // sheet is drawn again, while it still shows what was sent, sends
+        // nothing more: the sheet's drawing is held back meanwhile.
+        const cabinet = await placeOf(page, "(o) => o.id === 'DP-LD-101/cabinet-tag'");
+        await select(page, cabinet, false);
+        let releaseSheet;
+        const sheetHeld = new Promise((done) => {
+          releaseSheet = done;
+        });
+        await context.route('**/commands/display-list', async (route) => {
+          await sheetHeld;
+          await route.continue().catch(() => {});
+        });
+        before = journal().length;
+        await page.click('.qp [data-prop="contents"]');
+        await page.fill('.qp [data-prop="contents"]', 'CONTROL PANEL CP-100A');
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'Contents, by Enter'));
+        await page.click('.qp [data-prop="contents"]');
+        assert((await valueOf(page, 'contents')) === 'CONTROL PANEL CP-100A', 'the field shows what was sent');
+        await page.keyboard.press('Tab');
+        await nothingLands(before + 1, 'Leaving it again before the sheet is drawn again');
+        releaseSheet();
+        await sleep(300);
+        await context.unroute('**/commands/display-list');
+        await waitValue(page, 'contents', 'CONTROL PANEL CP-100A');
+        seen.laptop.left_again = entry.entry;
+
+        // A change that fails while the field has the focus again: the
+        // field shows its value again, and the same value typed again
+        // lands. The change is held, then fails, made up.
+        await select(page, await placeOf(page, "(o) => o.id === 'DP-LD-101/washer2'"), false);
+        let failChange;
+        const changeHeld = new Promise((done) => {
+          failChange = done;
+        });
+        await context.route('**/commands/change', async (route) => {
+          await changeHeld;
+          await route
+            .fulfill({
+              status: 422,
+              contentType: 'application/json',
+              body: JSON.stringify({ ok: false, error: { code: 'refused', message: 'a made-up failure of the change' } }),
+            })
+            .catch(() => {});
+        });
+        before = journal().length;
+        await page.click('.qp [data-prop="radius"]');
+        await page.fill('.qp [data-prop="radius"]', '0.55');
+        await page.keyboard.press('Enter');
+        await page.click('.qp [data-prop="radius"]');
+        assert((await valueOf(page, 'radius')) === '0.55', 'the field shows what was sent');
+        failChange();
+        await waitValue(page, 'radius', '0.3000');
+        await context.unroute('**/commands/change');
+        assert(await page.evaluate(() => document.activeElement?.getAttribute('data-prop') === 'radius'), 'the field has the focus still');
+        assert(journal().length === before, 'the failed change landed nothing');
+        await page.fill('.qp [data-prop="radius"]', '0.55');
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'The same radius typed again after a failed change'));
+        assert(same(op, { op: 'change', target: { id: 'DP-LD-101/washer2' }, set: { radius: 0.55 } }), `the radius typed again lands: ${JSON.stringify(op)}`);
+        await waitValue(page, 'radius', '0.5500');
+        seen.laptop.retry_after_failure = entry.entry;
+
+        // A radius pasted with a line break is only checked: it lands on
+        // Enter, not as it is pasted.
+        before = journal().length;
+        await page.click('.qp [data-prop="radius"]');
+        await page.evaluate(() => {
+          const el = document.querySelector('.qp [data-prop="radius"]');
+          el.select();
+          const data = new DataTransfer();
+          data.setData('text/plain', '0.6\n');
+          el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+        });
+        await nothingLands(before, 'A radius pasted, before Enter');
+        assert(!(await page.$('.qp [data-prop-error="radius"]')), 'a number pasted with a line break is not refused');
+        assert((await valueOf(page, 'radius')) === '0.6', `the field shows what was pasted: ${await valueOf(page, 'radius')}`);
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'A pasted radius, on Enter'));
+        assert(same(op, { op: 'change', target: { id: 'DP-LD-101/washer2' }, set: { radius: 0.6 } }), `the pasted radius lands on Enter: ${JSON.stringify(op)}`);
+        await waitValue(page, 'radius', '0.6000');
+        seen.laptop.paste = entry.entry;
+
+        // A text on the drawing: a double click on the service text.
+        const service = await placeOf(page, "(o) => o.id === 'DP-LD-101/service'");
+        const [sx, sy] = await showAndFind(page, service);
+        await page.mouse.dblclick(sx, sy);
+        await page.waitForSelector('[data-text-edit]');
+        await page.waitForFunction(() => getComputedStyle(document.querySelector('.tedit')).opacity === '1');
+        // It takes the keys as it opens, the text selected, as AutoCAD's does.
+        assert(await page.evaluate(() => document.activeElement?.matches('[data-text-edit]')), 'the text on the drawing takes the keys');
+        assert((await bar(page)).includes('TEXTEDIT'), `the command bar says the text is edited on the drawing: ${await bar(page)}`);
+        const onDrawing = await page.textContent('.tedit');
+        assert(onDrawing.includes('row value SERVICE'), `the box says where it is written: ${onDrawing}`);
+        await page.screenshot({ path: join(out, 'props-laptop-text-on-drawing.png') });
+        before = journal().length;
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.querySelector('[data-text-edit]'));
+        await nothingLands(before, 'Esc on the drawing');
+        await page.mouse.dblclick(sx, sy);
+        await page.waitForSelector('[data-text-edit]');
+        // Typed with the keys, as a drafter does: End, then the words.
+        await page.keyboard.press('End');
+        await page.keyboard.type(' METER');
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'Contents, on the drawing'));
+        assert(op.op === 'change' && op.target.id === 'DP-LD-101/service' && op.set.contents === 'FT-101 RAW WATER INLET FLOW METER', `the text on the drawing: ${JSON.stringify(op)}`);
+        assert(rows().includes('SERVICE: FT-101 RAW WATER INLET FLOW METER'), 'its row value is set');
+        seen.laptop.text_on_drawing = entry.entry;
+
+        // An attribute the template leaves unset: Cancel, then Change all.
+        const title = await placeOf(page, "(o) => o.id === 'DP-LD-101/title-block'");
+        await select(page, title, false);
+        const checked = await attributeKey(page, title, 'CHECKED');
+        const templateBefore = template();
+        const ask = async () => {
+          await page.click(`.qp [data-prop="${checked}"]`);
+          const said = await page.textContent(`.qp [data-note="${checked}"]`);
+          assert(said.includes('leaves CHECKED unset') && said.includes('all 7 sheets'), `it says so before it is edited: ${said}`);
+          await page.fill(`.qp [data-prop="${checked}"]`, 'ZM');
+          await page.keyboard.press('Enter');
+          await page.waitForSelector('[data-template-dialog]');
+          const asked = await page.textContent('[data-template-dialog]');
+          assert(asked.includes('The template leaves CHECKED unset.') && asked.includes('Change all 7 sheets') && SEVEN.every((s) => asked.includes(s)) && !asked.includes('DP-LD-103'), `the dialog: ${asked}`);
+        };
+        before = journal().length;
+        await ask();
+        await page.screenshot({ path: join(out, 'props-laptop-template.png') });
+        await page.click('[data-tw="cancel"]');
+        await nothingLands(before, 'Cancel');
+        assert(template() === templateBefore, 'Cancel writes nothing');
+        await waitValue(page, checked, '');
+        await ask();
+        await page.click('[data-tw="all"]');
+        ({ entry, op } = await landed(page, before, 'An unset attribute, Change all'));
+        assert(same(op, { op: 'set_attribute', target: { id: 'DP-LD-101/title-block' }, tag: 'CHECKED', value: 'ZM' }), `set_attribute: ${JSON.stringify(op)}`);
+        assert(JSON.stringify(entry.landed_on) === JSON.stringify(SEVEN), `it lands on every sheet built from the template: ${entry.landed_on}`);
+        assert(template().includes('CHECKED: ZM'), 'it is set on the template');
+        seen.laptop.template_attribute = { entry: entry.entry, sheets: entry.landed_on.length };
+
+        // The Layer box moves the selected object: a template's text.
+        const room = await placeOf(page, "(o) => o.values?.contents?.value === 'CONTROL ROOM'");
+        await select(page, room, false);
+        const boxSays = await page.textContent('.layerbox small');
+        assert(boxSays.startsWith('Pick a layer to move'), `the Layer box says it moves the object: ${boxSays}`);
+        before = journal().length;
+        const beforeMove = template();
+        await page.selectOption('select[data-layer]', 'wire');
+        await page.waitForSelector('[data-template-dialog]');
+        const asked = await page.textContent('[data-template-dialog]');
+        assert(asked.includes('Changing its layer changes 7 sheets.'), `the dialog: ${asked}`);
+        await page.click('[data-tw="all"]');
+        ({ entry, op } = await landed(page, before, 'The Layer box'));
+        assert(op.op === 'change' && op.set.layer === 'wire' && entry.landed_on.length === 7, `the Layer box moves it, on every sheet: ${JSON.stringify(op)} ${entry.landed_on}`);
+        seen.laptop.layer_box = { entry: entry.entry, sheets: entry.landed_on.length };
+        // Undo last takes it back.
+        await page.waitForFunction(
+          (n) => {
+            const b = document.querySelector('.titlebar button[data-act="undo"]');
+            return b && !b.disabled && b.textContent.includes(`(#${n})`);
+          },
+          entry.entry,
+          { timeout: 30000 },
+        );
+        await page.click('.titlebar button[data-act="undo"]');
+        const until = Date.now() + 20000;
+        let undone = journal().at(-1);
+        while (!(undone.kind === 'undo' && undone.undo_state !== 'pending' && template() === beforeMove)) {
+          assert(Date.now() < until, `Undo last takes the edit back: ${JSON.stringify(undone)}`);
+          await sleep(100);
+          undone = journal().at(-1);
+        }
+        assert(JSON.stringify(undone.undid) === JSON.stringify([entry.entry]), `the undo takes the edit: ${JSON.stringify(undone)}`);
+        seen.laptop.undo = undone.entry;
+
+        // An entry asked for whose drawing has not come yet: the live
+        // drawing is still on the canvas, and quick properties and the
+        // Layer box edit nothing while it is.
+        let releaseEntry;
+        const entryHeld = new Promise((done) => {
+          releaseEntry = done;
+        });
+        await context.route('**/commands/display-list', async (route) => {
+          if (route.request().postDataJSON()?.entry !== undefined) await entryHeld;
+          await route.continue().catch(() => {});
+        });
+        await page.click('button[aria-label="Older"]');
+        await page.waitForFunction(() => document.querySelector('.cmdbar').textContent.includes('as it was'));
+        const deviceNow = await placeOf(page, "(o) => o.id === 'DP-LD-101/device'");
+        await page.mouse.click(...(await showAndFind(page, deviceNow, 3)));
+        await page.waitForSelector('.qp');
+        assert((await page.locator('.qp [data-prop]').count()) === 0, 'quick properties are read-only');
+        assert((await page.locator('select[data-layer]').count()) === 0, 'the Layer box moves nothing');
+        releaseEntry();
+        await sleep(300);
+        await context.unroute('**/commands/display-list');
+        await page.click('button[data-act="live"]');
+        seen.laptop.read_only_while_coming = true;
+        // The made-up failure of a change is the one 422.
+        assert(problems.filter((p) => !p.includes('422')).length === 0, problems.join('; '));
+        await context.close();
+      }
+
+      // A phone: taps, its keyboard and the text box.
+      {
+        const context = await b.newContext(PHONE);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        await page.tap('.toolsbtn');
+        await page.tap('.ribbon [data-toggle="osnap"]');
+        await page.tap('.toolsbtn');
+        await page.waitForFunction(() => window.agentdrafterViewer.summary.objects.some((o) => o.values));
+
+        // Two quick taps on two texts within 30 pixels are two picks: the
+        // second selects its own and opens no text box.
+        {
+          const service = await placeOf(page, "(o) => o.id === 'DP-LD-101/service'");
+          const signalFirst = await placeOf(page, "(o) => o.id === 'DP-LD-101/signal'");
+          const a = await showAndFind(page, service, 2);
+          const c = await findOn(page, signalFirst);
+          assert(Math.hypot(a[0] - c[0], a[1] - c[1]) < 30, `the two taps are within 30 pixels: ${a} ${c}`);
+          // When each finger lifted, as the gestures time it.
+          await page.evaluate(() => {
+            window.liftedAt = [];
+            window.addEventListener('pointerup', (e) => window.liftedAt.push(e.timeStamp), true);
+          });
+          await page.touchscreen.tap(...a);
+          await page.touchscreen.tap(...c);
+          const lifted = await page.evaluate(() => window.liftedAt);
+          assert(lifted.length === 2 && lifted[1] - lifted[0] < 320, `the two taps are inside the double tap's 320 ms: ${lifted}`);
+          await sleep(600);
+          assert(!(await page.$('[data-text-box]')), 'two taps on two objects open no text box');
+          const picked = await page.evaluate(() => window.agentdrafterViewer.marked?.picked);
+          assert(picked === signalFirst, `the second tap selects the second text: ${picked}, not ${signalFirst}`);
+          await page.tap('.qp [data-close]');
+          await page.waitForFunction(() => !document.querySelector('.qp'));
+          seen.phone.two_taps = picked;
+        }
+
+        // A text: tapped, then tapped again, edited in the box.
+        const signal = await placeOf(page, "(o) => o.id === 'DP-LD-101/signal'");
+        await select(page, signal, true);
+        // The card may bring it up above itself: found again where it is now.
+        await sleep(800);
+        await page.touchscreen.tap(...(await findOn(page, signal)));
+        await page.waitForSelector('[data-text-box]');
+        assert((await page.textContent('[data-text-box]')).includes('row value SIGNAL'), 'the box says where it is written');
+        await page.fill('[data-text-box] [data-tbox-text]', '0-600 GPM = 4-20 mA');
+        await page.screenshot({ path: join(out, 'props-phone-text.png') });
+        let before = journal().length;
+        await page.tap('[data-tbox-done]');
+        let { entry, op } = await landed(page, before, 'Contents, by touch');
+        assert(op.op === 'change' && op.target.id === 'DP-LD-101/signal' && op.set.contents === '0-600 GPM = 4-20 mA', `the text by touch: ${JSON.stringify(op)}`);
+        seen.phone.text = entry.entry;
+
+        // The device's attribute, in the card, with the phone's keyboard.
+        const device = await placeOf(page, "(o) => o.id === 'DP-LD-101/device'");
+        await select(page, device, true);
+        const func = await attributeKey(page, device, 'FUNC');
+        before = journal().length;
+        await page.tap(`.qp [data-prop="${func}"]`);
+        await page.fill(`.qp [data-prop="${func}"]`, 'FIT');
+        await page.screenshot({ path: join(out, 'props-phone-attribute.png') });
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'An attribute, by touch'));
+        assert(op.op === 'set_attribute' && op.tag === 'FUNC' && op.value === 'FIT', `the attribute by touch: ${JSON.stringify(op)}`);
+        seen.phone.attribute = entry.entry;
+        // Its layer, in the card.
+        before = journal().length;
+        await page.selectOption('.qp [data-prop="layer"]', 'notes');
+        ({ entry, op } = await landed(page, before, 'Layer, by touch'));
+        assert(op.set.layer === 'notes', `the layer by touch: ${JSON.stringify(op)}`);
+        seen.phone.layer = entry.entry;
+        // The Layer box, in Tools, moves it again.
+        // The sheet drawn again with it, not only the field, which holds what was sent until then.
+        await page.waitForFunction(() => window.agentdrafterViewer.summary.objects.find((o) => o.id === 'DP-LD-101/device')?.layer === 'notes', null, { timeout: 15000 });
+        before = journal().length;
+        await page.tap('.toolsbtn');
+        await page.selectOption('select[data-layer]', 'wire');
+        ({ entry, op } = await landed(page, before, 'The Layer box, by touch'));
+        assert(op.target.id === 'DP-LD-101/device' && op.set.layer === 'wire', `the Layer box by touch: ${JSON.stringify(op)}`);
+        seen.phone.layer_box = entry.entry;
+        if (await page.isVisible('.ribbon [data-toggle="osnap"]')) await page.tap('.toolsbtn');
+
+        // The circle's radius and diameter.
+        const washer = await placeOf(page, "(o) => o.id === 'DP-LD-101/washer'");
+        await select(page, washer, true);
+        before = journal().length;
+        await page.tap('.qp [data-prop="radius"]');
+        await page.fill('.qp [data-prop="radius"]', '0.35');
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'Radius, by touch'));
+        assert(JSON.stringify(op.set) === '{"radius":0.35}', `the radius by touch: ${JSON.stringify(op)}`);
+        seen.phone.radius = entry.entry;
+        await waitValue(page, 'diameter', '0.7000');
+        before = journal().length;
+        await page.tap('.qp [data-prop="diameter"]');
+        await page.fill('.qp [data-prop="diameter"]', '1');
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'Diameter, by touch'));
+        assert(JSON.stringify(op.set) === '{"radius":0.5}', `a diameter typed by touch sends its radius: ${JSON.stringify(op)}`);
+        seen.phone.diameter = entry.entry;
+
+        // A template's own text, in the card: Cancel, then Change all.
+        const box = await placeOf(page, "(o) => o.values?.contents?.value === 'JUNCTION BOX'");
+        await select(page, box, true);
+        const templateBefore = template();
+        const ask = async () => {
+          await page.tap('.qp [data-prop="contents"]');
+          await page.fill('.qp [data-prop="contents"]', 'JUNCTION BOXES');
+          await page.keyboard.press('Enter');
+          await page.waitForSelector('[data-template-dialog]');
+          const asked = await page.textContent('[data-template-dialog]');
+          assert(asked.includes('Changing its text changes 7 sheets.') && asked.includes('Change all 7 sheets'), `the dialog: ${asked}`);
+        };
+        before = journal().length;
+        await ask();
+        await page.screenshot({ path: join(out, 'props-phone-template.png') });
+        await page.tap('[data-tw="cancel"]');
+        await nothingLands(before, 'Cancel, by touch');
+        assert(template() === templateBefore, 'Cancel writes nothing');
+        await waitValue(page, 'contents', 'JUNCTION BOX');
+        await ask();
+        await page.tap('[data-tw="all"]');
+        ({ entry, op } = await landed(page, before, 'A template text, Change all, by touch'));
+        assert(op.set.contents === 'JUNCTION BOXES' && JSON.stringify(entry.landed_on) === JSON.stringify(SEVEN), `Change all by touch: ${JSON.stringify(op)} ${entry.landed_on}`);
+        seen.phone.template_text = { entry: entry.entry, sheets: entry.landed_on.length };
+        // Undo last, in the peek, takes it back.
+        await page.waitForFunction(
+          (n) => [...document.querySelectorAll('button[data-act="undo"]')].some((b) => !b.disabled && b.textContent.includes(`(#${n})`)),
+          entry.entry,
+          { timeout: 30000 },
+        );
+        await page.tap('button[data-act="undo"]:visible');
+        const until = Date.now() + 20000;
+        let undone = journal().at(-1);
+        while (!(undone.kind === 'undo' && undone.undo_state !== 'pending' && template() === templateBefore)) {
+          assert(Date.now() < until, `Undo last takes the edit back, by touch: ${JSON.stringify(undone)}`);
+          await sleep(100);
+          undone = journal().at(-1);
+        }
+        seen.phone.undo = undone.entry;
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      return {
+        ...seen,
+        screenshots: [
+          'props-laptop-row-value.png',
+          'props-laptop-text-on-drawing.png',
+          'props-laptop-template.png',
+          'props-phone-text.png',
+          'props-phone-attribute.png',
+          'props-phone-template.png',
+        ],
+      };
     } finally {
       await b.close();
       await server.stop();

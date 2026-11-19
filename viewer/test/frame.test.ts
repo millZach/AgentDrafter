@@ -3,6 +3,11 @@ import { test } from 'node:test';
 
 import {
   CORE_ORDER,
+  editsHere,
+  fieldKey,
+  pastedLines,
+  secondTap,
+  toSend,
   coordinates,
   DEFAULT_RUNNING,
   freeBeside,
@@ -76,6 +81,31 @@ test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move and Erase 
     ],
   );
   for (const tool of PANELS.flatMap((p) => p.tools)) assert.ok(tool.tip.length > 20, `${tool.label} has a tip in plain words`);
+});
+
+test('a text edited on the drawing says so in the command bar, as TEXTEDIT, and how it lands', () => {
+  const text = { id: 'DP-LD-101/service', type: 'text' };
+  const laptop = promptFor({ ...none, selected: text, editing: text });
+  assert.equal(laptop.command, 'TEXTEDIT');
+  assert.equal(words(laptop.parts), 'service: type on the drawing. Enter or clicking away applies it, Esc puts it back');
+  const phone = promptFor({ ...none, selected: text, editing: text, touch: true });
+  assert.equal(words(phone.parts), 'service: type in the box. Done applies it, Cancel puts it back');
+  // Not while the set as it was is shown, which is read-only.
+  assert.equal(promptFor({ ...none, at: 3, selected: text, editing: text }).command, null);
+});
+
+test('an attribute the template leaves unset asks before it is set on every sheet', () => {
+  const edit = {
+    title: 'The template leaves CHECKED unset.',
+    detail: 'Setting it sets it on the template, so it lands on all 7 sheets.',
+    path: 'templates/loop-2-wire.yaml',
+    sheets: ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'],
+  };
+  assert.deepEqual(templateWords(edit), {
+    title: 'The template leaves CHECKED unset.',
+    body: 'Setting it sets it on the template, so it lands on all 7 sheets. The template loop-2-wire.yaml changes, and so does every sheet built from it:',
+    button: 'Change all 7 sheets',
+  });
 });
 
 test('the command bar prompts for a command or a selection, and offers Move, Erase and Clear on what is selected', () => {
@@ -343,4 +373,78 @@ test('a tool the renderer dropped as another sheet or layout was drawn clears wh
   assert.equal(droppedOnLoad('text', 'text'), false);
   // No tool was running: nothing to drop, nothing typed for one.
   assert.equal(droppedOnLoad(null, null), false);
+});
+
+test('Enter lands a field and Esc puts it back, but not while an input method composes', () => {
+  assert.equal(fieldKey({ key: 'Enter' }, false), 'land');
+  assert.equal(fieldKey({ key: 'Escape' }, false), 'cancel');
+  assert.equal(fieldKey({ key: 'Enter', shiftKey: true }, true), null, 'Shift+Enter is a new line in an mtext');
+  assert.equal(fieldKey({ key: 'Enter', shiftKey: true }, false), 'land');
+  // Enter that confirms a candidate, and Esc that dismisses one, are the input method's.
+  assert.equal(fieldKey({ key: 'Enter', isComposing: true }, false), null);
+  assert.equal(fieldKey({ key: 'Escape', isComposing: true }, false), null);
+  assert.equal(fieldKey({ key: 'Process', keyCode: 229 }, false), null);
+  assert.equal(fieldKey({ key: 'Enter', keyCode: 229 }, false), null);
+  assert.equal(fieldKey({ key: 'a' }, false), null);
+});
+
+test('a field landed as it showed when focused, or as its value, sends nothing', () => {
+  // Untouched, or put back to what it showed.
+  assert.equal(toSend('0.1235', '0.1235', '0.1235'), null);
+  // Focused again before the sheet drawn again shows what was sent: as it showed then, nothing.
+  assert.equal(toSend('101A+', '101A+', '101+'), null);
+  // Typed back to its value.
+  assert.equal(toSend('101+', '101A+', '101+'), null);
+  assert.equal(toSend('0.4', '0.3000', '0.3000'), '0.4');
+});
+
+test('line breaks pasted into a one-line field are kept for the renderer to refuse, not stripped', () => {
+  assert.equal(pastedLines('FT-101', 6, 6, ' A\nB', false), 'FT-101 A\nB');
+  assert.equal(pastedLines('FT-101', 0, 2, 'X\r\nY', false), 'X\r\nY-101');
+  // One line pasted, or into a field of more lines: the browser takes it.
+  assert.equal(pastedLines('FT-101', 6, 6, ' A', false), null);
+  assert.equal(pastedLines('NOTES', 5, 5, '\n2.', true), null);
+});
+
+test('the second tap of a double one opens only the object the first was on, found by its ID', () => {
+  const service = { place: 4, id: 'DP-LD-101/service' };
+  const signal = { place: 5, id: 'DP-LD-101/signal' };
+  // The same text twice: it opens, on a phone and on a laptop.
+  assert.equal(secondTap(service, service, true), 'open');
+  assert.equal(secondTap(service, service, false), 'open');
+  // A drawing loaded between them put the second object at the first's
+  // old place: two objects, by their IDs, though the places match.
+  assert.equal(secondTap(service, { place: 4, id: 'DP-LD-101/signal' }, true), 'pick');
+  // The same object moved to another place is still the same.
+  assert.equal(secondTap(service, { place: 9, id: 'DP-LD-101/service' }, true), 'open');
+  // Two objects: a phone's second tap selects; a laptop's double click zooms, as before.
+  assert.equal(secondTap(service, signal, true), 'pick');
+  assert.equal(secondTap(service, signal, false), 'zoom');
+  // Nothing remembered, or a tap on nothing.
+  assert.equal(secondTap(null, signal, true), 'pick');
+  assert.equal(secondTap(null, signal, false), 'zoom');
+  assert.equal(secondTap(service, { place: -1, id: null }, true), 'zoom');
+  // Objects with no ID, by their place in one drawing.
+  assert.equal(secondTap({ place: 2, id: null }, { place: 2, id: null }, false), 'open');
+  assert.equal(secondTap({ place: 2, id: null }, { place: 3, id: null }, false), 'zoom');
+});
+
+test('quick properties edit only while the drawing loaded is the view asked for and the set as it is', () => {
+  const loaded = { at: null, sheet: 'DP-LD-101', layout: null, layouts: [] };
+  assert.equal(editsHere({ at: null, sheet: null, layout: null }, loaded), true);
+  assert.equal(editsHere({ at: null, sheet: 'dp-ld-101', layout: null }, loaded), true);
+  // An entry asked for while the live drawing is still on the canvas.
+  assert.equal(editsHere({ at: 3, sheet: 'DP-LD-101', layout: null }, loaded), false);
+  // The entry's drawing loaded.
+  assert.equal(editsHere({ at: 3, sheet: 'DP-LD-101', layout: null }, { ...loaded, at: 3 }), false);
+  // Back to live asked for while the entry is still drawn.
+  assert.equal(editsHere({ at: null, sheet: 'DP-LD-101', layout: null }, { ...loaded, at: 3 }), false);
+  // Another sheet asked for, not drawn yet.
+  assert.equal(editsHere({ at: null, sheet: 'DP-LD-102', layout: null }, loaded), false);
+  // Layouts: the first is the one drawn when none is asked for.
+  const laid = { at: null, sheet: 'LAY-001', layout: 'Assembly', layouts: ['Assembly', 'Wiring'] };
+  assert.equal(editsHere({ at: null, sheet: 'LAY-001', layout: null }, laid), true);
+  assert.equal(editsHere({ at: null, sheet: 'LAY-001', layout: 'wiring' }, laid), false);
+  assert.equal(editsHere({ at: null, sheet: 'LAY-001', layout: 'wiring' }, { ...laid, layout: 'Wiring' }), true);
+  assert.equal(editsHere({ at: null, sheet: null, layout: null }, null), false);
 });

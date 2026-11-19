@@ -72,8 +72,12 @@ import {
   type Taken,
   type Tool,
   type Toggle,
+  editsHere,
+  type Committed,
+  type PropEdited,
+  type PropField,
 } from './frame.ts';
-import { CommandBar, Ribbon, SnapMenu, StatusBar, TemplateDialog, TextBox } from './Frame.tsx';
+import { CommandBar, Ribbon, SnapMenu, StatusBar, TemplateDialog, TextBox, TextEditBox, TextOnDrawing } from './Frame.tsx';
 import { screen_color } from './wasm/agentdrafter_viewer.js';
 import { Assistant, JournalList, Peek, QuickProperties } from './Panels.tsx';
 import type { Summary } from './probe.ts';
@@ -263,6 +267,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const [fieldShown, setFieldShown] = useState(false);
   // An edit to a template's object, waiting for the drafter's yes.
   const [templateAsk, setTemplateAsk] = useState<ToolSend | null>(null);
+  // A text whose contents are edited on the drawing, or in a phone's box,
+  // by its place; and a count that moves on when an edit in quick
+  // properties is cancelled, so its fields show their values again.
+  const [editing, setEditing] = useState<{ place: number; touch: boolean } | null>(null);
+  const [propsReset, setPropsReset] = useState(0);
+  const editor = useRef<HTMLDivElement>(null);
   // A tool asked for while the set as it was is shown: it starts once the set as it is is drawn.
   // The objects it takes go by their IDs: their places on the set as it was are not theirs on the set as it is.
   const [pendingTool, setPendingTool] = useState<{ word: string; ids: string[] } | null>(null);
@@ -400,6 +410,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
     // The set as it is says where each object comes from, which the tools
     // and quick properties need.
     if (at === null) input.origins = true;
+    // And with each object's values, which quick properties edit, and
+    // where each is written.
+    if (at === null) input.values = true;
     const generation = generationOf(at, sheetKey);
     run('display-list', input, token).then(
       (text) => {
@@ -873,7 +886,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // Sends a tool's change set through `change`, as an agent would, and
   // asks for the sheets it landed on as soon as `change` replies, without
   // waiting for the journal.
-  const sendOne = async (s: ToolSend) => {
+  // Gives whether it landed on any sheet.
+  const sendOne = async (s: ToolSend): Promise<boolean> => {
     const landed = (reply: ChangeReply | undefined) => {
       const sheets = (reply?.sheets ?? []).filter((x) => x.ok).map((x) => upper(x.sheet));
       const entry = reply?.journal_entry;
@@ -890,9 +904,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
       const reply = await call<ChangeReply>('change', { set: source, change_set: s.change_set }, token);
       landed(reply);
       log(`${s.what}: change set ${reply.journal_entry ?? ''} landed`.replace('  ', ' '));
+      return true;
     } catch (e) {
       if (e instanceof CommandError && e.result) landed(e.result as ChangeReply);
       say('warn', `${s.what}: not landed`, why(e, token));
+      return !!(e instanceof CommandError && (e.result as ChangeReply | undefined)?.sheets?.some((x) => x.ok));
     }
   };
   // Undo last and Accept wait while any is on its way: a change set they
@@ -900,7 +916,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const sendChange = (s: ToolSend) => {
     setSending((n) => n + 1);
     const sent = sendQueue.current.then(() => sendOne(s)).finally(() => setSending((n) => n - 1));
-    sendQueue.current = sent.catch(() => {});
+    sendQueue.current = sent.then(
+      () => {},
+      () => {},
+    );
     return sent;
   };
   const startTool = (word: string, fromSelection = true) => {
@@ -971,7 +990,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
   escape.current = () => {
     // Esc drops what is typed, as AutoCAD's does.
     if (field.current) field.current.value = '';
-    if (templateAsk) cancelTemplate();
+    if (editing) setEditing(null);
+    else if (templateAsk) cancelTemplate();
     else if (asking) setAsking(null);
     else if (snapMenu) setSnapMenu(null);
     else if (toolsOpen) setToolsOpen(false);
@@ -1031,12 +1051,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const cancelTemplate = () => {
     const was = templateAsk;
     setTemplateAsk(null);
+    setPropsReset((n) => n + 1);
     if (was) log(`${was.what}: cancelled, nothing changed`);
   };
   const confirmTemplate = () => {
     const was = templateAsk;
     setTemplateAsk(null);
-    if (was) void sendChange(was);
+    // An edit in quick properties that did not land shows its value again.
+    if (was) void sendChange(was).then((ok) => ok || setPropsReset((n) => n + 1));
   };
 
   // The sheet's layers, for the Layer box: asked for each sheet, and again
@@ -1150,6 +1172,86 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const sheets = summary?.sheets ?? [];
   const name = summary?.name ?? '';
   const object = pickedPlace !== null ? summary?.objects[pickedPlace] : undefined;
+  // Quick properties' fields, as the renderer gives them from the sheet it
+  // holds: what each shows, whether it can be edited, and where its value
+  // is written.
+  // They edit only while the drawing on the canvas is the view asked for
+  // and the set as it is: a step back to an entry whose drawing is still
+  // coming leaves the live drawing there, which is not edited then.
+  const editable = editsHere(
+    { at, sheet: wanted, layout: wantedLayout },
+    summary ? { at: summary.entry, sheet: summary.sheet, layout: summary.layout, layouts: summary.layouts } : null,
+  );
+  const fieldsOf = (place: number | null): PropField[] => {
+    const v = renderer();
+    if (!v || place === null || !summary) return [];
+    const given = JSON.parse(v.props_fields(place)) as PropField[];
+    return editable ? given : given.map((f) => ({ ...f, editable: false, note: undefined }));
+  };
+  const fields = fieldsOf(pickedPlace);
+  // An edit in quick properties, on the drawing or in the Layer box: the
+  // renderer gives its change set, which is sent as a tool's is, asked
+  // about first when it edits the template.
+  const editProp = (place: number, key: string, value: string): Committed => {
+    const v = renderer();
+    if (!v) return { kind: 'same' };
+    if (!editable) {
+      const why = 'The drawing shown is not the set as it is: nothing is edited until it is.';
+      log(why);
+      return { kind: 'error', message: why };
+    }
+    const done = JSON.parse(v.props_edit(place, key, value)) as PropEdited;
+    if (done.error) {
+      log(done.error);
+      return { kind: 'error', message: done.error };
+    }
+    if (!done.send) return { kind: 'same' };
+    if (done.send.template) setTemplateAsk(done.send);
+    else void sendChange(done.send).then((ok) => ok || setPropsReset((n) => n + 1));
+    return { kind: 'sent' };
+  };
+  const commitProp = (key: string, value: string): Committed => (pickedPlace === null ? { kind: 'same' } : editProp(pickedPlace, key, value));
+  // Why the renderer would refuse a field's value, sending nothing: for a paste.
+  const refuseProp = (key: string, value: string): string | null => {
+    const v = renderer();
+    if (!v || pickedPlace === null) return null;
+    return (JSON.parse(v.props_edit(pickedPlace, key, value)) as PropEdited).error ?? null;
+  };
+  // A double click on a text, or a tap on the text already selected on a
+  // phone, edits its contents on the drawing.
+  const openText = (place: number, touch: boolean): boolean => {
+    const contents = fieldsOf(place).find((f) => f.key === 'contents');
+    if (!contents?.editable) return false;
+    if (place !== pickedPlace) pick(place);
+    setEditing({ place, touch });
+    const o = summary?.objects[place];
+    if (o) log(`Editing ${nameOf(o)}’s text on the drawing`);
+    drawing.current?.redraw();
+    return true;
+  };
+  const editingField = editing !== null && editing.place === pickedPlace ? fields.find((f) => f.key === 'contents') : undefined;
+  // Another object picked, or another sheet, ends the text's editing.
+  useEffect(() => {
+    if (editing && (pickedPlace !== editing.place || at !== null)) setEditing(null);
+  }, [editing, pickedPlace, at]);
+  const textDone = (text: string) => {
+    const place = editing?.place ?? null;
+    setEditing(null);
+    if (place === null) return;
+    const done = editProp(place, 'contents', text);
+    if (done.kind === 'error') say('warn', 'The text was not changed', done.message);
+  };
+  const textCancelled = () => {
+    setEditing(null);
+    log('Text editing cancelled, nothing changed');
+  };
+  // Why the renderer would refuse a text's contents, sending nothing: for
+  // line breaks pasted into one line, which the browser would strip.
+  const refuseText = (text: string): string | null => {
+    const v = renderer();
+    if (!v || editing === null) return null;
+    return (JSON.parse(v.props_edit(editing.place, 'contents', text)) as PropEdited).error ?? null;
+  };
   const { state: liveState, line } = liveLine(at, !!noJournal, stream);
   const prompt = promptFor({
     tool: toolState,
@@ -1159,6 +1261,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     selected: object ?? null,
     taken: taken?.taken ?? null,
     touch: !wide,
+    editing: editingField && object ? object : null,
   });
   const act = (a: Act) => {
     if (a === 'clear') pick(null);
@@ -1373,7 +1476,21 @@ export function App({ token, source, sheet, layout }: AppProps) {
           onLayer={chooseLayer}
           onLayersOpen={() => setLayersAsked((n) => n + 1)}
           swatch={(l) => screen_color(colorIndex(l?.color))}
-          selected={object ? { name: object.layer, color: pickedColor } : null}
+          selected={
+            object
+              ? {
+                  name: object.layer,
+                  color: pickedColor,
+                  movable: !!fields.find((f) => f.key === 'layer')?.editable,
+                  label: nameOf(object),
+                }
+              : null
+          }
+          onMoveTo={(name) => {
+            if (pickedPlace === null) return;
+            const done = editProp(pickedPlace, 'layer', name);
+            if (done.kind === 'error') say('warn', 'The layer was not changed', done.message);
+          }}
           onSnaps={() => openSnapMenu(null)}
         />
       </div>
@@ -1440,6 +1557,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
             ortho={toggles.ortho}
             layer={toolLayer}
             handle={drawing}
+            editor={editor}
+            onOpen={openText}
           />
           <div className="va-overlays">
             {toast && (
@@ -1478,8 +1597,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
               onCancel={() => toolDid(renderer()?.tool_option('cancel') ?? '')}
             />
           )}
-          {object && summary && (
-            <section className="qp" ref={card} data-ui aria-label={`Quick properties of ${nameOf(object)}`}>
+          {/* A phone's text box takes the card's place while a text is edited in it. */}
+          {object && summary && !(editingField && editing && (editing.touch || !wide)) && (
+            <section className="qp" ref={card} key={`${summary.sheet}|${object.id ?? pickedPlace}`} data-ui aria-label={`Quick properties of ${nameOf(object)}`}>
               <QuickProperties
                 object={object}
                 color={pickedColor}
@@ -1488,10 +1608,38 @@ export function App({ token, source, sheet, layout }: AppProps) {
                 fails={(findings.get(upper(summary.sheet)) ?? [])
                   .filter((f) => object.id && f.object?.id && upper(f.object.id) === upper(object.id))
                   .map((f) => f.message)}
+                fields={fields}
+                layers={(layers ?? []).map((l) => l.name)}
+                onCommit={commitProp}
+                onRefuse={refuseProp}
+                resetKey={propsReset}
                 onClose={() => pick(null)}
                 onShow={(n) => showEntry(n)}
               />
             </section>
+          )}
+          {editingField && editing && !editing.touch && wide && (
+            <TextOnDrawing
+              key={`${editing.place}:${editingField.value}`}
+              ref={editor}
+              value={editingField.value}
+              multiline={editingField.multiline}
+              note={editingField.note ?? null}
+              onDone={textDone}
+              onCancel={textCancelled}
+              refuse={refuseText}
+            />
+          )}
+          {editingField && editing && (editing.touch || !wide) && (
+            <TextEditBox
+              key={`${editing.place}:${editingField.value}`}
+              value={editingField.value}
+              multiline={editingField.multiline}
+              note={editingField.note ?? null}
+              onDone={textDone}
+              onCancel={textCancelled}
+              refuse={refuseText}
+            />
           )}
           <CommandBar
             prompt={prompt}

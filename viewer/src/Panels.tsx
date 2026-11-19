@@ -1,10 +1,12 @@
 // What the side panel and the cards hold: the peek, which a phone always
 // shows, with the stream's state, the newest entry, Undo last and Accept;
 // the journal, which steps through the set's entries; quick properties,
-// which show the object the drafter selected; and the assistant's place.
+// which show the object the drafter selected and edit its layer, a
+// text's contents, an insert's attributes and a circle's radius; and the
+// assistant's place.
 // Plain components: what they do is the page's (App.tsx).
 
-import { useState } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent } from 'react';
 
 import {
   changedBy,
@@ -17,7 +19,7 @@ import {
   type Entry,
   type JournalReport,
 } from './journal.ts';
-import { nameOf, typeWords, type LiveState } from './frame.ts';
+import { fieldKey, nameOf, pastedLines, toSend, typeWords, type Committed, type LiveState, type PropField } from './frame.ts';
 import type { SheetObject } from './probe.ts';
 
 export interface PeekProps {
@@ -222,26 +224,64 @@ export interface QuickPropertiesProps {
   fails: string[];
   /** Where it comes from, the template or the sheet's row, in words; null when the core did not say. */
   origin?: string | null;
+  /** The rows an edit can change, as the renderer gives them; empty while it has not. */
+  fields?: PropField[];
+  /** The sheet's layers, by name, which the Layer field picks among. */
+  layers?: string[];
+  /** Lands an edit of a field: one change set, or asked about first. */
+  onCommit?(key: string, value: string): Committed;
+  /** Why the renderer would refuse `value` for a field, sending nothing; null when it would not. */
+  onRefuse?(key: string, value: string): string | null;
+  /** Moves on when an edit asked about was cancelled, so every field shows its value again. */
+  resetKey?: number;
   onClose(): void;
   onShow(entry: number): void;
 }
 
 /**
  * Quick properties: what the selected object is, beside it on a laptop and
- * as a card above the command bar on a phone. They only show, until
- * editing comes (build 5).
+ * as a card above the command bar on a phone. Its layer, a text's
+ * contents, an insert's attribute values and a circle's radius or
+ * diameter are edited in place (#153): an edit lands on Enter or on
+ * leaving the field, and Esc puts the value back and lands nothing.
  */
-export function QuickProperties({ object, color, journal, fails, origin = null, onClose, onShow }: QuickPropertiesProps) {
-  const rows: [string, string][] = [
-    ['Type', typeWords(object)],
-    ['Layer', object.layer],
+export function QuickProperties({
+  object,
+  color,
+  journal,
+  fails,
+  origin = null,
+  fields = [],
+  layers = [],
+  onCommit,
+  onRefuse,
+  resetKey = 0,
+  onClose,
+  onShow,
+}: QuickPropertiesProps) {
+  const edited = fields.filter((f) => !f.attribute);
+  const before: [string, string][] = [['Type', typeWords(object)]];
+  // Until the renderer gives the fields, the layer shows as it did.
+  if (!edited.length) before.push(['Layer', object.layer]);
+  const after: [string, string][] = [
     ['ID', object.id ?? '(none)'],
     ['Name', object.name ?? '(none)'],
     ...(object.block ? [['Block', object.block] as [string, string]] : []),
     ...(origin ? [['Comes from', origin] as [string, string]] : []),
   ];
+  const attributeFields = fields.filter((f) => f.attribute);
   const attributes = object.attributes ?? [];
   const history = journal && object.id ? changedBy(journal, object.id) : [];
+  const commit = (key: string, value: string): Committed => onCommit?.(key, value) ?? { kind: 'same' };
+  const refuse = (key: string, value: string): string | null => onRefuse?.(key, value) ?? null;
+  const plain = (rows: [string, string][]) =>
+    rows.map(([k, v]) => (
+      <tr key={k}>
+        <th>{k}</th>
+        <td>{v}</td>
+      </tr>
+    ));
+  const row = (f: PropField) => <PropRow key={f.key} field={f} layers={layers} onCommit={commit} onRefuse={refuse} resetKey={resetKey} />;
   return (
     <>
       <header>
@@ -259,26 +299,25 @@ export function QuickProperties({ object, color, journal, fails, origin = null, 
         ))}
         <table className="kv">
           <tbody>
-            {rows.map(([k, v]) => (
-              <tr key={k}>
-                <th>{k}</th>
-                <td>{v}</td>
-              </tr>
-            ))}
+            {plain(before)}
+            {edited.map(row)}
+            {plain(after)}
           </tbody>
         </table>
-        {attributes.length > 0 && (
+        {(attributeFields.length > 0 || attributes.length > 0) && (
           <>
             <h5>Attributes</h5>
             <table className="kv attrs">
               <tbody>
-                {attributes.map((a, i) => (
-                  // A block may define a tag more than once, so the place keys it.
-                  <tr key={i}>
-                    <th>{a.tag}</th>
-                    <td>{a.value === '' ? '(empty)' : a.value}</td>
-                  </tr>
-                ))}
+                {attributeFields.length
+                  ? attributeFields.map(row)
+                  : attributes.map((a, i) => (
+                      // A block may define a tag more than once, so the place keys it.
+                      <tr key={i}>
+                        <th>{a.tag}</th>
+                        <td>{a.value === '' ? '(empty)' : a.value}</td>
+                      </tr>
+                    ))}
               </tbody>
             </table>
           </>
@@ -296,6 +335,196 @@ export function QuickProperties({ object, color, journal, fails, origin = null, 
           <p className="muted">No change set in the journal changed it.</p>
         )}
       </div>
+    </>
+  );
+}
+
+interface PropRowProps {
+  field: PropField;
+  layers: string[];
+  onCommit(key: string, value: string): Committed;
+  onRefuse(key: string, value: string): string | null;
+  resetKey: number;
+}
+
+/**
+ * One row of quick properties an edit can change: its label, with a chip
+ * that says where its value is written, and its field. The note that says
+ * what an edit changes shows while the field is being edited.
+ */
+function PropRow({ field, layers, onCommit, onRefuse, resetKey }: PropRowProps) {
+  // What is typed, while it differs from the value; kept once sent, until
+  // the sheet drawn again shows the value or the edit is cancelled.
+  const [draft, setDraft] = useState<string | null>(null);
+  const [focused, setFocused] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Enter or Esc has dealt with the field, so leaving it does nothing more.
+  const settled = useRef(false);
+  // What the field showed when it was focused, apart from what was sent:
+  // landing it again as it was sends nothing.
+  const atFocus = useRef(field.value);
+  const resetSeen = useRef(resetKey);
+  useEffect(() => {
+    setDraft(null);
+    setError(null);
+    // An edit that did not land, or was cancelled, is dropped from what the
+    // field showed at focus too, though it has the focus again: typing it
+    // again sends it, and Esc does not put it back.
+    const dropped = resetSeen.current !== resetKey;
+    resetSeen.current = resetKey;
+    if (dropped || document.activeElement?.getAttribute('data-prop') !== field.key) atFocus.current = field.value;
+  }, [field.value, field.key, resetKey]);
+  const shown = draft ?? field.value;
+  const label = (
+    <th>
+      {field.label}
+      {field.chip && (
+        <small className={`qchip ${field.chip.tone}`} data-chip={field.chip.tone}>
+          {field.chip.words}
+        </small>
+      )}
+    </th>
+  );
+  if (!field.editable) {
+    return (
+      <tr data-prop-row={field.key}>
+        {label}
+        <td>{field.value === '' && field.attribute ? '(empty)' : field.value}</td>
+      </tr>
+    );
+  }
+  /**
+   * Lands `value`: false when it says what went wrong instead. Nothing is
+   * sent when it is what the field showed at `since` or its value.
+   */
+  const land = (value: string, since: string): boolean => {
+    if (toSend(value, since, field.value) === null) {
+      setError(null);
+      if (value === field.value) setDraft(null);
+      return true;
+    }
+    const done = onCommit(field.key, value);
+    if (done.kind === 'error') {
+      setError(done.message);
+      return false;
+    }
+    setError(null);
+    if (done.kind === 'same') setDraft(null);
+    return true;
+  };
+  const focus = () => {
+    settled.current = false;
+    atFocus.current = shown;
+    setFocused(true);
+  };
+  let input;
+  if (field.key === 'layer') {
+    const names = layers.includes(field.value) ? layers : [field.value, ...layers];
+    input = (
+      <select
+        className="qin"
+        data-prop={field.key}
+        aria-label={field.label}
+        value={shown}
+        onFocus={focus}
+        onBlur={() => setFocused(false)}
+        onKeyDown={(e) => e.stopPropagation()}
+        onChange={(e) => {
+          const name = e.currentTarget.value;
+          setDraft(name);
+          // A layer picked lands at once, as AutoCAD's does.
+          if (!land(name, field.value)) setDraft(null);
+        }}
+      >
+        {names.map((n) => (
+          <option key={n} value={n}>
+            {n}
+          </option>
+        ))}
+      </select>
+    );
+  } else {
+    const keys = (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      // The field's keys are its own, not the command bar's.
+      e.stopPropagation();
+      const does = fieldKey({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode }, field.multiline);
+      if (does === 'cancel') {
+        // Back to what it showed when it was focused.
+        e.preventDefault();
+        settled.current = true;
+        setDraft(atFocus.current === field.value ? null : atFocus.current);
+        setError(null);
+        e.currentTarget.blur();
+      } else if (does === 'land') {
+        e.preventDefault();
+        settled.current = true;
+        if (land(shown, atFocus.current)) e.currentTarget.blur();
+        else settled.current = false;
+      }
+    };
+    // Line breaks pasted into a one-line field reach the renderer, which
+    // says whether they can go there, before the browser strips them. A
+    // paste only checks: what it gives lands on Enter or on leaving the
+    // field, as what is typed does.
+    const paste = (e: ClipboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      const el = e.currentTarget;
+      const end = el.value.length;
+      const next = pastedLines(el.value, el.selectionStart ?? end, el.selectionEnd ?? end, e.clipboardData.getData('text'), field.multiline);
+      if (next === null) return;
+      e.preventDefault();
+      const why = onRefuse(field.key, next);
+      setError(why);
+      if (!why) setDraft(next);
+    };
+    const leave = () => {
+      setFocused(false);
+      if (settled.current) {
+        settled.current = false;
+        return;
+      }
+      // Leaving the field lands it, as Enter does, unless it holds what it
+      // showed when focused; what went wrong is said, and the value put back.
+      if (draft !== null && !land(draft, atFocus.current)) setDraft(null);
+    };
+    const props = {
+      className: 'qin',
+      'data-prop': field.key,
+      'aria-label': field.label,
+      value: shown,
+      autoComplete: 'off',
+      spellCheck: false,
+      onFocus: focus,
+      onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(e.currentTarget.value),
+      onKeyDown: keys,
+      onPaste: paste,
+      onBlur: leave,
+    };
+    input = field.multiline ? (
+      <textarea {...props} rows={Math.min(6, Math.max(2, shown.split('\n').length))} />
+    ) : (
+      <input {...props} inputMode={field.numeric ? 'decimal' : undefined} enterKeyHint="done" />
+    );
+  }
+  return (
+    <>
+      <tr data-prop-row={field.key} className="qrow">
+        {label}
+        <td>{input}</td>
+      </tr>
+      {focused && field.note && (
+        <tr className="qnote">
+          <td colSpan={2} data-note={field.key}>
+            {field.note}
+          </td>
+        </tr>
+      )}
+      {error && (
+        <tr className="qnote err">
+          <td colSpan={2} role="alert" data-prop-error={field.key}>
+            {error}
+          </td>
+        </tr>
+      )}
     </>
   );
 }

@@ -477,7 +477,7 @@ pub(super) fn places_in(
 /// The name of the row's value a template puts at `node`, if it puts one
 /// there: `{row: NAME}`. Any other mapping there is an error, since a
 /// template puts text or a value from the row in that place.
-fn row_value_name(node: &Node, path: &str) -> Result<Option<String>, Error> {
+pub(super) fn row_value_name(node: &Node, path: &str) -> Result<Option<String>, Error> {
     if !matches!(node.kind, Kind::Mapping(_)) {
         return Ok(None);
     }

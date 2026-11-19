@@ -119,8 +119,9 @@ pub use check::{
 pub use commands::{commands, find_command, Command, CommandInfo, JsonReply};
 pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
 pub use display_list::{
-    display_list, display_list_with, DisplayListReport, DisplayListRequest, Origin, SheetObject,
-    TemplateReach, DISPLAY_LIST_TOLERANCE,
+    display_list, display_list_with, AttributeValue, DisplayListReport, DisplayListRequest,
+    ObjectValues, Origin, SheetObject, TemplateReach, Written, WrittenValue,
+    DISPLAY_LIST_TOLERANCE,
 };
 pub use display_snaps::DisplaySnap;
 pub use draw::{

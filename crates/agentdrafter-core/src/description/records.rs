@@ -12,9 +12,10 @@ use std::sync::Arc;
 
 use super::blocks::Noticed;
 use super::ids::{object_id, ObjectRecord};
+use super::written::{sheet_sources, SheetSources};
 use super::{
-    library_beside, on_its_own_with_records, read_file, read_rows_in, read_set_settings_in,
-    read_template_in, template_path, Disk, ReadFiles, Row,
+    library_beside, on_its_own_with_records, read_file, read_file_in, read_rows_in,
+    read_set_settings_in, read_template_in, template_in, template_path, Disk, ReadFiles, Row,
 };
 use crate::error::Error;
 use crate::model::Sheet;
@@ -137,6 +138,30 @@ impl SavedSet {
             self.units,
             &mut Vec::new(),
         )
+    }
+
+    /// Reads the sheet `row` names as [`SavedSet::sheet`] does, and where
+    /// each of its values is written: by each object itself, by the row,
+    /// or nowhere. Both come from one read of the template, so a change
+    /// that lands between two reads cannot pair one sheet's objects with
+    /// another's sources.
+    pub(crate) fn sheet_with_sources(
+        &self,
+        row: &Row,
+    ) -> Result<(SheetRecord, SheetSources), Error> {
+        let template = template_path(&self.folder, row);
+        let text = read_file_in(self.files.as_ref(), &template, "the template")?;
+        let (record, _) = template_in(
+            self.files.as_ref(),
+            &text,
+            &template,
+            row,
+            &self.rows_file,
+            self.units,
+            &mut Vec::new(),
+        )?;
+        let sources = sheet_sources(&text, row, &record.objects);
+        Ok((record, sources))
     }
 }
 
