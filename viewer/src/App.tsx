@@ -885,7 +885,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // Sends a tool's change set through `change`, as an agent would, and
   // asks for the sheets it landed on as soon as `change` replies, without
   // waiting for the journal.
-  const sendOne = async (s: ToolSend) => {
+  // Gives whether it landed on any sheet.
+  const sendOne = async (s: ToolSend): Promise<boolean> => {
     const landed = (reply: ChangeReply | undefined) => {
       const sheets = (reply?.sheets ?? []).filter((x) => x.ok).map((x) => upper(x.sheet));
       const entry = reply?.journal_entry;
@@ -902,9 +903,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
       const reply = await call<ChangeReply>('change', { set: source, change_set: s.change_set }, token);
       landed(reply);
       log(`${s.what}: change set ${reply.journal_entry ?? ''} landed`.replace('  ', ' '));
+      return true;
     } catch (e) {
       if (e instanceof CommandError && e.result) landed(e.result as ChangeReply);
       say('warn', `${s.what}: not landed`, why(e, token));
+      return !!(e instanceof CommandError && (e.result as ChangeReply | undefined)?.sheets?.some((x) => x.ok));
     }
   };
   // Undo last and Accept wait while any is on its way: a change set they
@@ -912,7 +915,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const sendChange = (s: ToolSend) => {
     setSending((n) => n + 1);
     const sent = sendQueue.current.then(() => sendOne(s)).finally(() => setSending((n) => n - 1));
-    sendQueue.current = sent.catch(() => {});
+    sendQueue.current = sent.then(
+      () => {},
+      () => {},
+    );
     return sent;
   };
   const startTool = (word: string, fromSelection = true) => {
@@ -1050,7 +1056,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const confirmTemplate = () => {
     const was = templateAsk;
     setTemplateAsk(null);
-    if (was) void sendChange(was);
+    // An edit in quick properties that did not land shows its value again.
+    if (was) void sendChange(was).then((ok) => ok || setPropsReset((n) => n + 1));
   };
 
   // The sheet's layers, for the Layer box: asked for each sheet, and again
@@ -1186,7 +1193,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     }
     if (!done.send) return { kind: 'same' };
     if (done.send.template) setTemplateAsk(done.send);
-    else void sendChange(done.send);
+    else void sendChange(done.send).then((ok) => ok || setPropsReset((n) => n + 1));
     return { kind: 'sent' };
   };
   const commitProp = (key: string, value: string): Committed => (pickedPlace === null ? { kind: 'same' } : editProp(pickedPlace, key, value));
