@@ -1658,6 +1658,15 @@ fn an_adds_schema_takes_exactly_what_the_add_takes() {
             ),
             false,
         ),
+        // No part is null: only a repeated tag's list of values takes one.
+        (
+            on_template(
+                insert.clone(),
+                "attributes",
+                json!({"TITLE": [null, {"row": "SHEET"}]}),
+            ),
+            false,
+        ),
         // A text's fixed parts are one line; an mtext's need not be.
         (
             on_template(text.clone(), "contents", json!(["A\nB ", {"row": "REV"}])),

@@ -287,14 +287,18 @@ pub(crate) fn template_schema() -> Value {
     });
     // An attribute's list of parts: each fixed part an attribute's value,
     // one line with no control character, and one value from the row at
-    // least, as the reader takes it for a tag the block defines once.
+    // least, as the reader takes it for a tag the block defines once. A
+    // part is never null, which only a repeated tag's list of values takes.
+    let mut part = one.clone();
+    part["not"] = json!({ "type": "null" });
     defs["attribute_parts"] = json!({
         "description": "An attribute's value as a list of parts: plain text, each part one \
                         line with no control character as an attribute's value is, and values \
-                        from the row, {row: NAME}, joined in order, one at least.",
+                        from the row, {row: NAME}, joined in order, one at least. No part is \
+                        null.",
         "type": "array",
         "minItems": 1,
-        "items": one.clone(),
+        "items": part,
         "contains": { "$ref": "#/$defs/row_value" },
     });
     let attributes = &mut defs["insert"]["properties"]["attributes"];
