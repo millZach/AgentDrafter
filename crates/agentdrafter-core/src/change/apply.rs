@@ -1362,7 +1362,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 // the row sets this sheet's row values alone, so a refusal
                 // of it reaches this sheet alone (ADR-0005).
                 let row_alone = set.keys().all(|key| key == "contents")
-                    && record.from_row_at(list, index, "contents");
+                    && record.takes_from_row(list, index, "contents");
                 return fail(if row_alone { vec![k] } else { reach }, from_record(e));
             }
         },

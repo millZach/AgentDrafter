@@ -1838,7 +1838,7 @@ impl RecordFile {
 
     /// Whether the object of `list` at `index` takes its `key` from the
     /// row, whole, `{row: NAME}`, or in a list of parts.
-    pub(crate) fn from_row_at(&self, list: ObjectList, index: usize, key: &str) -> bool {
+    pub(crate) fn takes_from_row(&self, list: ObjectList, index: usize, key: &str) -> bool {
         self.items(list)
             .and_then(|items| items.get(index))
             .and_then(|item| object_parts(item).1)
