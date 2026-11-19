@@ -138,22 +138,36 @@ pub struct SnapRef {
     pub with: Option<usize>,
 }
 
-/// A point a tool took: where, the snap it was taken on, if any, and
-/// whether it was typed.
+/// A point a tool took: where, its height, the snap it was taken on, if
+/// any, and whether it was typed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Taken {
     pub at: [f64; 2],
+    /// Its Z: a snap's own, as its snapped point resolves; for a point typed
+    /// relative to another, or a length towards the cursor, that point's;
+    /// 0 for a point clicked on no snap, or typed as `x,y`.
+    pub z: f64,
     pub snap: Option<SnapRef>,
     pub typed: bool,
 }
 
 impl Taken {
-    /// A point typed or worked out, on no snap.
-    pub fn typed(at: [f64; 2]) -> Self {
+    /// A point typed or worked out, on no snap, at height `z`.
+    pub fn typed(at: [f64; 2], z: f64) -> Self {
         Taken {
             at,
+            z,
             snap: None,
             typed: true,
+        }
+    }
+
+    /// The point as an operation writes it: `[x, y, z]`, a Z of 0 as `0`.
+    fn coordinates(&self) -> Value {
+        if self.z == 0.0 {
+            json!([self.at[0], self.at[1], 0])
+        } else {
+            json!([self.at[0], self.at[1], self.z])
         }
     }
 }
@@ -227,6 +241,8 @@ pub struct Context {
     /// add names it: `paper`, or the layout's name on a sheet drawn in
     /// several; none on a sheet drawn in model space.
     pub space: Option<String>,
+    /// On a sheet drawn in several layouts, the one shown.
+    pub layout: Option<String>,
 }
 
 /// What a tool wants next.
@@ -398,7 +414,7 @@ pub struct Tools {
     text_height: Option<f64>,
     /// The last point taken, which `@dx,dy` is measured from when no tool
     /// has its own, as AutoCAD's LASTPOINT.
-    last_point: Option<[f64; 2]>,
+    last_point: Option<([f64; 2], f64)>,
     error: Option<String>,
     context: Context,
 }
@@ -498,10 +514,17 @@ fn length_angle(a: [f64; 2], b: [f64; 2]) -> (f64, f64) {
 
 impl Tools {
     /// The sheet shown, as a `display-list` reply gives it. A tool running
-    /// on the same sheet keeps its picks and points, followed by their
-    /// objects' IDs; another sheet ends it.
+    /// on the same sheet and layout keeps its picks and points, followed by
+    /// their objects' IDs; another sheet, or another layout of it, drops
+    /// it, with nothing sent: its points were taken on another page.
     pub fn load(&mut self, context: Context) {
-        let same = context.sheet.eq_ignore_ascii_case(&self.context.sheet) && !context.past;
+        let same_layout = match (&context.layout, &self.context.layout) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            (None, None) => true,
+            _ => false,
+        };
+        let same =
+            context.sheet.eq_ignore_ascii_case(&self.context.sheet) && same_layout && !context.past;
         if !same {
             self.running = None;
         } else if let Some(running) = &mut self.running {
@@ -786,11 +809,16 @@ impl Tools {
     /// The point the next one is measured from: Ortho, a length typed alone
     /// and the rubber band use it.
     pub fn base(&self) -> Option<[f64; 2]> {
+        self.base_taken().map(|t| t.at)
+    }
+
+    /// The point the next one is measured from, as it was taken.
+    fn base_taken(&self) -> Option<&Taken> {
         match &self.running.as_ref()?.step {
-            Step::LineNext { points } => points.last().map(|p| p.at),
-            Step::CircleRadius { center, .. } => Some(center.at),
-            Step::RectangleSecond { first } => Some(first.at),
-            Step::MoveSecond { base, .. } => Some(base.at),
+            Step::LineNext { points } => points.last(),
+            Step::CircleRadius { center, .. } => Some(center),
+            Step::RectangleSecond { first } => Some(first),
+            Step::MoveSecond { base, .. } => Some(base),
             _ => None,
         }
     }
@@ -807,10 +835,11 @@ impl Tools {
     /// Where the next point would go: on the snap the cursor holds, or at
     /// the cursor, held level or upright by Ortho. A snap wins over Ortho,
     /// as AutoCAD's object snaps override it.
-    pub fn aim(&self, cursor: [f64; 2], snap: Option<(SnapRef, [f64; 2])>) -> Taken {
+    pub fn aim(&self, cursor: [f64; 2], snap: Option<(SnapRef, [f64; 3])>) -> Taken {
         if let Some((snap, at)) = snap {
             return Taken {
-                at,
+                at: [at[0], at[1]],
+                z: at[2],
                 snap: Some(snap),
                 typed: false,
             };
@@ -827,6 +856,7 @@ impl Tools {
         }
         Taken {
             at,
+            z: 0.0,
             snap: None,
             typed: false,
         }
@@ -901,7 +931,7 @@ impl Tools {
                         Some(_) => format!(" through {}", self.point_words(&point)),
                         None => String::new(),
                     };
-                    self.last_point = Some(point.at);
+                    self.last_point = Some((point.at, point.z));
                     let mut outcome = self.land_circle(&center, radius, &through);
                     outcome.log.splice(0..0, log);
                     return outcome;
@@ -922,7 +952,7 @@ impl Tools {
                     );
                     Some(Step::RectangleSecond { first })
                 } else {
-                    self.last_point = Some(point.at);
+                    self.last_point = Some((point.at, point.z));
                     return self.land_rectangle(&first, &point);
                 }
             }
@@ -945,7 +975,7 @@ impl Tools {
                 if (point.at[0] - base.at[0]).hypot(point.at[1] - base.at[1]) < 1e-9 {
                     Some(Step::MoveSecond { picked, base })
                 } else {
-                    self.last_point = Some(point.at);
+                    self.last_point = Some((point.at, point.z));
                     let mut outcome = self.land_move(&picked, &base, &point);
                     outcome
                         .log
@@ -955,7 +985,7 @@ impl Tools {
             }
             other => Some(other),
         };
-        self.last_point = Some(point.at);
+        self.last_point = Some((point.at, point.z));
         self.running = next.map(|step| Running { kind, step });
         Outcome {
             log,
@@ -1138,7 +1168,7 @@ impl Tools {
             if line.trim().is_empty() {
                 return self.end(true);
             }
-            let next = Taken::typed([at.at[0], at.at[1] - self.text_height() * 5.0 / 3.0]);
+            let next = Taken::typed([at.at[0], at.at[1] - self.text_height() * 5.0 / 3.0], at.z);
             lines.push((line.clone(), at));
             self.running = Some(Running {
                 kind,
@@ -1253,9 +1283,17 @@ impl Tools {
             }
             _ => {}
         }
-        let base = self.base().or(self.last_point);
-        match typed_point(typed, base) {
-            Some(Ok(at)) => return self.point(Taken::typed(at)),
+        let base = self.base_taken().map(|t| (t.at, t.z)).or(self.last_point);
+        match typed_point(typed, base.map(|b| b.0)) {
+            Some(Ok(at)) => {
+                // A point typed relative to another is at its height.
+                let z = if typed.starts_with('@') {
+                    base.map_or(0.0, |b| b.1)
+                } else {
+                    0.0
+                };
+                return self.point(Taken::typed(at, z));
+            }
             Some(Err(why)) => {
                 self.error = Some(why);
                 return Outcome::default();
@@ -1293,10 +1331,11 @@ impl Tools {
                         (dx, dy) = (1.0, 0.0);
                     }
                     let far = dx.hypot(dy);
-                    return self.point(Taken::typed([
-                        base[0] + length * dx / far,
-                        base[1] + length * dy / far,
-                    ]));
+                    let z = self.base_taken().map_or(0.0, |t| t.z);
+                    return self.point(Taken::typed(
+                        [base[0] + length * dx / far, base[1] + length * dy / far],
+                        z,
+                    ));
                 }
             }
             self.error = Some("A length alone needs a first point: type x,y or click.".to_owned());
@@ -1327,7 +1366,7 @@ impl Tools {
                 return v;
             }
         }
-        json!([t.at[0], t.at[1], 0])
+        t.coordinates()
     }
 
     fn snapped(&self, s: &SnapRef, template_edit: bool) -> Option<Value> {
@@ -1409,9 +1448,9 @@ impl Tools {
         let mut op = self.add("add_polyline");
         op["points"] = json!([
             self.point_value(first, false),
-            [x1, y0, 0],
+            Taken::typed([x1, y0], first.z).coordinates(),
             self.point_value(second, false),
-            [x0, y1, 0],
+            Taken::typed([x0, y1], first.z).coordinates(),
         ]);
         op["closed"] = json!(true);
         self.adds(
@@ -1527,7 +1566,9 @@ impl Tools {
         let plain = picked.len() > 1;
         let point = |t: &Taken, template: bool| {
             if plain {
-                json!([t.at[0], t.at[1], 0])
+                // Each point at its own height, as its snap resolves, so
+                // the group moves as each single move would.
+                t.coordinates()
             } else {
                 self.point_value(t, template)
             }

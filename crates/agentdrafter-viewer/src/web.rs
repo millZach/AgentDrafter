@@ -589,6 +589,7 @@ impl Viewer {
             template: sheet.template.clone(),
             past: sheet.entry.is_some(),
             space: sheet.space.clone(),
+            layout: sheet.layout.clone(),
         });
         let mut loaded = self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?;
         loaded.snaps = snaps;
@@ -1185,7 +1186,7 @@ impl Viewer {
                     which: c.which.clone(),
                     with: c.with,
                 },
-                [c.at[0], c.at[1]],
+                [c.at[0], c.at[1], c.at[2]],
             )
         });
         self.tools.aim(at, snap)

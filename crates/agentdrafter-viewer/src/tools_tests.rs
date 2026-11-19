@@ -39,6 +39,7 @@ fn context() -> Context {
         }),
         past: false,
         space: None,
+        layout: None,
     }
 }
 
@@ -51,6 +52,7 @@ fn tools() -> Tools {
 fn at(x: f64, y: f64) -> Taken {
     Taken {
         at: [x, y],
+        z: 0.0,
         snap: None,
         typed: false,
     }
@@ -59,6 +61,7 @@ fn at(x: f64, y: f64) -> Taken {
 fn snapped(x: f64, y: f64, snap: SnapKind, object: usize, which: Option<&str>) -> Taken {
     Taken {
         at: [x, y],
+        z: 0.0,
         snap: Some(SnapRef {
             snap,
             object,
@@ -185,7 +188,10 @@ fn ortho_holds_a_line_level_or_upright_but_a_snap_wins() {
         which: None,
         with: None,
     };
-    assert_eq!(t.aim([3.0, 1.4], Some((snap, [3.1, 1.6]))).at, [3.1, 1.6]);
+    assert_eq!(
+        t.aim([3.0, 1.4], Some((snap, [3.1, 1.6, 0.0]))).at,
+        [3.1, 1.6]
+    );
     // A length typed alone goes level, towards the cursor.
     t.input("2", Some([1.5, 1.2]));
     assert_eq!(t.state(false).points[1], [3.0, 1.0]);
@@ -583,4 +589,59 @@ fn radius_sets_the_radius_and_diameter_the_diameter() {
     );
     t.option("radius");
     assert_eq!(operations(&t.input("10", None))[0]["radius"], json!(10.0));
+}
+
+#[test]
+fn a_group_move_keeps_each_points_height() {
+    // From a snap at Z 0 to one at Z 5 on stationary geometry: each object
+    // moves by (10, 0, 5), as each single move would.
+    let mut t = tools();
+    t.start(ToolKind::Move, &[0, 1]);
+    t.point(snapped(
+        0.0,
+        0.0,
+        SnapKind::Endpoint,
+        2,
+        Some("objects[3].from"),
+    ));
+    let mut to = snapped(10.0, 0.0, SnapKind::Endpoint, 2, Some("objects[3].to"));
+    to.z = 5.0;
+    let ops = operations(&t.point(to));
+    for op in &ops {
+        assert_eq!(op["from"], json!([0.0, 0.0, 0]));
+        assert_eq!(op["to"], json!([10.0, 0.0, 5.0]));
+    }
+    // A point typed relative to a snap at Z 5 is at Z 5: the move is level.
+    t.start(ToolKind::Move, &[0, 1]);
+    let mut from = snapped(1.0, 1.0, SnapKind::Endpoint, 2, Some("objects[3].from"));
+    from.z = 5.0;
+    t.point(from);
+    let ops = operations(&t.input("@2,0", None));
+    assert_eq!(ops[0]["from"], json!([1.0, 1.0, 5.0]));
+    assert_eq!(ops[0]["to"], json!([3.0, 1.0, 5.0]));
+}
+
+#[test]
+fn another_layout_of_the_sheet_drops_the_tool_running_with_nothing_sent() {
+    // As another sheet does: its points were taken on another page.
+    let on = |layout: &str| Context {
+        layout: Some(layout.to_owned()),
+        space: Some(layout.to_owned()),
+        ..context()
+    };
+    let mut t = Tools::default();
+    t.load(on("Assembly"));
+    t.input("L", None);
+    t.input("1,1", None);
+    t.input("2,1", None);
+    t.load(on("Assembly"));
+    assert_eq!(
+        t.running(),
+        Some(ToolKind::Line),
+        "the same layout drawn again keeps it"
+    );
+    t.load(on("Wiring"));
+    assert_eq!(t.running(), None);
+    // Enter then sends nothing of what was taken on Assembly.
+    assert!(t.input("", None).sends.is_empty());
 }

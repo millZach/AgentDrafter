@@ -25,6 +25,7 @@ import {
   promptFor,
   colorIndex,
   currentLayerOf,
+  layersWhileAsked,
   LAYER_KEY,
   originWords,
   readCurrentLayer,
@@ -163,6 +164,12 @@ test('the current layer is kept for each set, and is layer 0 where the sheet has
   // While the layers are still coming, the one kept: a circle drawn then goes on it, not on 0.
   assert.equal(currentLayerOf('wire', null), 'wire');
   assert.equal(currentLayerOf(null, null), '0');
+  // Reopening the box asks again for the same sheet's layers: they stay
+  // meanwhile, so `wire`, which sheet B has not got, does not come back.
+  const sheetB = [{ name: '0', color: 7 }];
+  assert.equal(currentLayerOf('wire', layersWhileAsked('set|B', 'set|B', sheetB)), '0');
+  // Another sheet's are still coming: the layer kept, until they come.
+  assert.equal(layersWhileAsked('set|A', 'set|B', sheetB), null);
   kept.set(LAYER_KEY, 'not json');
   assert.equal(readCurrentLayer(keeps, 'examples/demo-plant'), null);
   assert.equal(colorIndex(1), 1);

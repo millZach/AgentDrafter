@@ -372,6 +372,20 @@ export function writeCurrentLayer(keeps: Keeps | null, source: string, layer: st
 }
 
 /**
+ * The layers the Layer box holds while they are asked for again: the same
+ * sheet's (`of`, as the page keys it, the same as `was`) stay, so a layer
+ * the sheet has not got does not come back as current while the reply is
+ * on its way; another sheet's go, null, until its own come.
+ */
+export function layersWhileAsked(
+  was: string,
+  of: string,
+  held: readonly LayerEntry[] | null,
+): readonly LayerEntry[] | null {
+  return was === of ? held : null;
+}
+
+/**
  * The current layer of a sheet whose layers are `layers`: the one kept, if
  * the sheet has it, or layer 0. While the layers are still being asked for
  * (null), the one kept, so nothing drawn meanwhile goes on 0 by mistake.

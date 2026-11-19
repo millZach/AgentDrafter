@@ -43,6 +43,7 @@ import {
   colorIndex,
   coordinates,
   currentLayerOf,
+  layersWhileAsked,
   DEFAULT_RUNNING,
   originWords,
   readCurrentLayer,
@@ -1030,13 +1031,22 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // after every change set, which would add a request to each one landing.
   const [layersAsked, setLayersAsked] = useState(0);
   const hasTemplate = !!summary?.template;
+  // The sheet the layers held are of: asked again for the same sheet, as
+  // when the box is reopened, they stay until the reply replaces them.
+  const layersOf = useRef('');
   useEffect(() => {
     if (!summary || summary.entry !== null || !hasTemplate) {
+      // None held for a sheet as it is: the next ask starts from nothing.
+      layersOf.current = '';
       setLayers([]);
       return;
     }
-    // Still coming: the layer kept is the current one until they come.
-    setLayers(null);
+    // Another sheet's are still coming: the layer kept is the current one
+    // until they come. The same sheet's stay as they are meanwhile.
+    const of = `${source}|${upper(summary.sheet)}`;
+    const was = layersOf.current;
+    layersOf.current = of;
+    setLayers((held) => layersWhileAsked(was, of, held));
     let current = true;
     call<{ layers: { sheet: string; layers: LayerEntry[] }[] }>(
       'query',
