@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, display_list_with, DisplayListReport, DisplayListRequest, ErrorCode,
-    ObjectValues, Origin, SetBuildRequest, Settings, Shape,
+    build_set_with, change_with, display_list_with, ChangeRequest, DisplayListReport,
+    DisplayListRequest, ErrorCode, ObjectValues, Origin, SetBuildRequest, Settings, Shape,
 };
 use serde_json::{json, Value};
 
@@ -492,5 +492,75 @@ fn with_values_a_made_up_set_says_where_each_value_is_written() {
     assert_eq!(
         values_of(&other, "S-2/heading")["contents"]["value"],
         "SECOND"
+    );
+}
+
+#[test]
+fn with_values_the_set_as_it_was_at_an_entry_says_where_each_value_was_written() {
+    // A copy of the demo plant's records, to change.
+    let set = scratch("values-entry");
+    let plant = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/demo-plant");
+    for file in ["set.yaml", "rows.yaml", "blocks.yaml"] {
+        fs::copy(plant.join(file), set.join(file)).unwrap();
+    }
+    fs::create_dir_all(set.join("templates")).unwrap();
+    for file in ["loop-2-wire.yaml", "loop-3-wire.yaml"] {
+        fs::copy(
+            plant.join("templates").join(file),
+            set.join("templates").join(file),
+        )
+        .unwrap();
+    }
+    let apply = |change_set: Value| {
+        let reply = change_with(
+            &ChangeRequest {
+                set: set.clone(),
+                change_set,
+                dry_run: false,
+            },
+            &Settings::default(),
+        );
+        reply.result.unwrap().journal_entry.unwrap()
+    };
+    // Entry 1 touches the row alone; entry 2 sets CHECKED, which the
+    // template left unset, on the template.
+    let first = apply(
+        json!({"operations": [{"op": "set_attribute", "target": {"id": "DP-LD-101/title-block"}, "tag": "REV", "value": "A"}]}),
+    );
+    let second = apply(
+        json!({"operations": [{"op": "set_attribute", "target": {"id": "DP-LD-101/title-block"}, "tag": "CHECKED", "value": "ZM"}]}),
+    );
+    assert_eq!((first, second), (1, 2));
+    let checked = |entry: Option<u64>| {
+        let mut request = DisplayListRequest::new(&set);
+        request.sheet = Some("DP-LD-101".to_owned());
+        request.values = true;
+        request.entry = entry;
+        let told = display_list_with(&request, &Settings::default()).unwrap();
+        let title = values_of(&told, "DP-LD-101/title-block");
+        let by_tag = |tag: &str| {
+            title["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["tag"] == tag)
+                .cloned()
+                .unwrap()
+        };
+        (by_tag("CHECKED"), by_tag("REV"))
+    };
+    let (was, rev_was) = checked(Some(first));
+    assert_eq!(
+        was,
+        json!({"tag": "CHECKED", "value": "", "written": "unset"}),
+        "as it was at entry 1, the template left it unset"
+    );
+    assert_eq!(rev_was["value"], "A");
+    assert_eq!(rev_was["written"], "row_value");
+    let (now, _) = checked(None);
+    assert_eq!(
+        now,
+        json!({"tag": "CHECKED", "value": "ZM", "written": "own"}),
+        "as it is, the template writes it"
     );
 }

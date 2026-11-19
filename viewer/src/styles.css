@@ -256,6 +256,7 @@ select.qin { font-family: var(--ui); }
 .tedit textarea { font-size: 14px; resize: none; }
 .tedit input:focus, .tedit textarea:focus { outline: none; border-color: var(--blue); }
 .tnote { margin: 5px 0 0; padding: 4px 7px; font-size: 11px; line-height: 1.35; color: #cfe3ff; background: #1f3047; border: 1px solid #3c6694; border-radius: 3px; }
+.terr { margin: 5px 0 0; font-size: 11px; color: #ffb0b0; }
 .tedit small { display: block; margin-top: 4px; font-size: 11px; color: var(--dim); }
 .tbox textarea { background: #1b2129; border: 1px solid #5a6577; border-radius: 3px; padding: 6px 7px; color: #fff; font-size: 16px; width: 100%; resize: none; }
 .tbox .tnote { margin: 0 0 6px; }

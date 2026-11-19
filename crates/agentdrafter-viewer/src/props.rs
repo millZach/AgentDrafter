@@ -380,6 +380,13 @@ pub fn edit(context: &Context, place: usize, key: &str, typed: &str) -> Edited {
                 return Edited::error("An arc is edited by its radius.");
             }
             let what = if diameter { "diameter" } else { "radius" };
+            // The value as the field shows it, to four decimals, lands
+            // nothing: Enter on it, or a field put back to it, is not an
+            // edit, though the radius itself has more digits.
+            let shown = f4(if diameter { radius * 2.0 } else { radius });
+            if typed.trim() == shown {
+                return Edited::default();
+            }
             let Some(n) = number(typed) else {
                 return Edited::error(format!("Type the {what} as a number, such as 0.25."));
             };

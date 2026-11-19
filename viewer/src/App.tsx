@@ -72,6 +72,7 @@ import {
   type Taken,
   type Tool,
   type Toggle,
+  editsHere,
   type Committed,
   type PropEdited,
   type PropField,
@@ -1174,10 +1175,18 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // Quick properties' fields, as the renderer gives them from the sheet it
   // holds: what each shows, whether it can be edited, and where its value
   // is written.
+  // They edit only while the drawing on the canvas is the view asked for
+  // and the set as it is: a step back to an entry whose drawing is still
+  // coming leaves the live drawing there, which is not edited then.
+  const editable = editsHere(
+    { at, sheet: wanted, layout: wantedLayout },
+    summary ? { at: summary.entry, sheet: summary.sheet, layout: summary.layout, layouts: summary.layouts } : null,
+  );
   const fieldsOf = (place: number | null): PropField[] => {
     const v = renderer();
     if (!v || place === null || !summary) return [];
-    return JSON.parse(v.props_fields(place)) as PropField[];
+    const given = JSON.parse(v.props_fields(place)) as PropField[];
+    return editable ? given : given.map((f) => ({ ...f, editable: false, note: undefined }));
   };
   const fields = fieldsOf(pickedPlace);
   // An edit in quick properties, on the drawing or in the Layer box: the
@@ -1186,6 +1195,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const editProp = (place: number, key: string, value: string): Committed => {
     const v = renderer();
     if (!v) return { kind: 'same' };
+    if (!editable) {
+      const why = 'The drawing shown is not the set as it is: nothing is edited until it is.';
+      log(why);
+      return { kind: 'error', message: why };
+    }
     const done = JSON.parse(v.props_edit(place, key, value)) as PropEdited;
     if (done.error) {
       log(done.error);
@@ -1224,6 +1238,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const textCancelled = () => {
     setEditing(null);
     log('Text editing cancelled, nothing changed');
+  };
+  // Why the renderer would refuse a text's contents, sending nothing: for
+  // line breaks pasted into one line, which the browser would strip.
+  const refuseText = (text: string): string | null => {
+    const v = renderer();
+    if (!v || editing === null) return null;
+    return (JSON.parse(v.props_edit(editing.place, 'contents', text)) as PropEdited).error ?? null;
   };
   const { state: liveState, line } = liveLine(at, !!noJournal, stream);
   const prompt = promptFor({
@@ -1572,7 +1593,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
           )}
           {/* A phone's text box takes the card's place while a text is edited in it. */}
           {object && summary && !(editingField && editing && (editing.touch || !wide)) && (
-            <section className="qp" ref={card} data-ui aria-label={`Quick properties of ${nameOf(object)}`}>
+            <section className="qp" ref={card} key={`${summary.sheet}|${object.id ?? pickedPlace}`} data-ui aria-label={`Quick properties of ${nameOf(object)}`}>
               <QuickProperties
                 object={object}
                 color={pickedColor}
@@ -1599,6 +1620,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
               note={editingField.note ?? null}
               onDone={textDone}
               onCancel={textCancelled}
+              refuse={refuseText}
             />
           )}
           {editingField && editing && (editing.touch || !wide) && (
@@ -1609,6 +1631,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
               note={editingField.note ?? null}
               onDone={textDone}
               onCancel={textCancelled}
+              refuse={refuseText}
             />
           )}
           <CommandBar

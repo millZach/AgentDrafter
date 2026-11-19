@@ -601,7 +601,14 @@ fn read(
         let Some(row) = set.rows.iter().find(|row| named(&row.sheet)) else {
             return Err(no_such_sheet(sheet, &names));
         };
-        let record = set.sheet(row)?;
+        // With values, the sheet and where each of its values is written,
+        // from one read of its template.
+        let (record, sources) = if request.values {
+            let (record, sources) = set.sheet_with_sources(row)?;
+            (record, Some(sources))
+        } else {
+            (set.sheet(row)?, None)
+        };
         let ids: Vec<(String, Option<String>)> = (0..record.objects.len())
             .map(|i| (record.id(i), record.objects[i].name.clone()))
             .collect();
@@ -637,12 +644,6 @@ fn read(
             (from, Some(reach))
         } else {
             (Vec::new(), None)
-        };
-        // With values, where each of them is written.
-        let sources = if request.values {
-            Some(set.sources(row, &record)?)
-        } else {
-            None
         };
         return Ok(Drawn {
             name: record.name,

@@ -334,6 +334,71 @@ export interface PropEdited {
 /** What came of a commit of a quick property: sent (or asked about first), as it was, or what went wrong. */
 export type Committed = { kind: 'sent' } | { kind: 'same' } | { kind: 'error'; message: string };
 
+/** A key pressed in a field quick properties edit, or in a text edited on the drawing. */
+export interface FieldKey {
+  key: string;
+  shiftKey?: boolean;
+  /** Whether an input method is composing, as for Japanese or Chinese. */
+  isComposing?: boolean;
+  /** 229 while an input method has the key, in browsers that do not say isComposing. */
+  keyCode?: number;
+}
+
+/**
+ * What a key does in a field: Enter lands it (Shift+Enter is a new line in
+ * one of more lines), Esc puts it back. While an input method composes,
+ * Enter and Esc are its own, to confirm or dismiss a candidate: nothing.
+ */
+export function fieldKey(e: FieldKey, multiline: boolean): 'land' | 'cancel' | null {
+  if (e.isComposing || e.keyCode === 229) return null;
+  if (e.key === 'Escape') return 'cancel';
+  if (e.key === 'Enter' && !(multiline && e.shiftKey)) return 'land';
+  return null;
+}
+
+/**
+ * What landing a field sends: what it holds, unless that is what it showed
+ * when it was focused, or its value; then nothing. So Enter on a field not
+ * typed in, a field put back, or one left again before its last edit's
+ * sheet is drawn, sends nothing.
+ */
+export function toSend(holds: string, atFocus: string, value: string): string | null {
+  return holds === atFocus || holds === value ? null : holds;
+}
+
+/**
+ * A paste into a one-line field: when it holds a line break, which the
+ * browser would strip before anything could refuse it, the text the field
+ * would hold, for the renderer to refuse; null when the paste is the
+ * browser's to take, as into a field of more lines.
+ */
+export function pastedLines(value: string, start: number, end: number, pasted: string, multiline: boolean): string | null {
+  if (multiline || !/[\r\n]/.test(pasted)) return null;
+  return value.slice(0, start) + pasted + value.slice(end);
+}
+
+/** A view of a sheet: the journal's entry it is as it was at, null for the set as it is, its sheet and its layout. */
+export interface SheetView {
+  at: number | null;
+  sheet: string | null;
+  layout: string | null;
+}
+
+/**
+ * Whether quick properties and the Layer box edit: only while the view
+ * asked for and the drawing loaded are the same, and both the set as it
+ * is. A step back to an entry whose drawing has not come yet leaves the
+ * live drawing on the canvas, and it is not edited then. An asked sheet or
+ * layout of null is the first.
+ */
+export function editsHere(asked: SheetView, loaded: (SheetView & { layouts: string[] }) | null): boolean {
+  if (!loaded || asked.at !== null || loaded.at !== null) return false;
+  const same = (a: string | null, b: string | null) => (a ?? '').toUpperCase() === (b ?? '').toUpperCase();
+  if (asked.sheet !== null && !same(asked.sheet, loaded.sheet)) return false;
+  const first = loaded.layouts[0] ?? null;
+  return asked.layout === null ? loaded.layout === null || same(loaded.layout, first) : same(asked.layout, loaded.layout);
+}
+
 /** What came of a tool's step: lines for the history, and the change sets to send, in order. */
 export interface ToolOutcome {
   log: string[];

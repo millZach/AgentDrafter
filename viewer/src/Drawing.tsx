@@ -206,6 +206,8 @@ export function Drawing({
   const pendingFocus = useRef<Focus | null>(null);
   const pick = useRef(onPick);
   const open = useRef(onOpen);
+  // The object the last tap or click picked, by its place; -1 for none.
+  const tappedPlace = useRef(-1);
   const cursor = useRef(onCursor);
   const colorOf = useRef(onPickedColor);
   const narrow = useRef(compact);
@@ -528,13 +530,15 @@ export function Drawing({
         pointer.current = [sx, sy];
         hoverNow();
       }
+      const [x, y] = toDrawing(view.current, sx, sy);
+      const place = v.pick(x, y, PICK_REACH / view.current.scale);
+      // What this tap was on, for a second tap that makes it a double one.
+      tappedPlace.current = place;
       const h = hovered.current;
       if (pointerType === 'mouse' && h) {
         take.current?.(h);
         return;
       }
-      const [x, y] = toDrawing(view.current, sx, sy);
-      const place = v.pick(x, y, PICK_REACH / view.current.scale);
       // On a phone, a tap on the object already picked opens it, as a text
       // to edit.
       if (pointerType !== 'mouse' && place >= 0 && place === shownMarks.current.picked && open.current?.(place, true)) return;
@@ -545,7 +549,15 @@ export function Drawing({
       if (!v || !loadedReply.current || toolActive()) return false;
       const [x, y] = toDrawing(view.current, sx, sy);
       const place = v.pick(x, y, PICK_REACH / view.current.scale);
-      return place >= 0 && !!open.current?.(place, pointerType !== 'mouse');
+      if (place < 0) return false;
+      // Two taps on two objects are two picks: the second selects its own,
+      // and opens nothing.
+      if (place !== tappedPlace.current) {
+        tappedPlace.current = place;
+        pick.current(place);
+        return true;
+      }
+      return !!open.current?.(place, pointerType !== 'mouse');
     },
     held: (p) => {
       held.current = p;

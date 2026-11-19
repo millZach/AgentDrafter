@@ -3,6 +3,10 @@ import { test } from 'node:test';
 
 import {
   CORE_ORDER,
+  editsHere,
+  fieldKey,
+  pastedLines,
+  toSend,
   coordinates,
   DEFAULT_RUNNING,
   freeBeside,
@@ -368,4 +372,60 @@ test('a tool the renderer dropped as another sheet or layout was drawn clears wh
   assert.equal(droppedOnLoad('text', 'text'), false);
   // No tool was running: nothing to drop, nothing typed for one.
   assert.equal(droppedOnLoad(null, null), false);
+});
+
+test('Enter lands a field and Esc puts it back, but not while an input method composes', () => {
+  assert.equal(fieldKey({ key: 'Enter' }, false), 'land');
+  assert.equal(fieldKey({ key: 'Escape' }, false), 'cancel');
+  assert.equal(fieldKey({ key: 'Enter', shiftKey: true }, true), null, 'Shift+Enter is a new line in an mtext');
+  assert.equal(fieldKey({ key: 'Enter', shiftKey: true }, false), 'land');
+  // Enter that confirms a candidate, and Esc that dismisses one, are the input method's.
+  assert.equal(fieldKey({ key: 'Enter', isComposing: true }, false), null);
+  assert.equal(fieldKey({ key: 'Escape', isComposing: true }, false), null);
+  assert.equal(fieldKey({ key: 'Process', keyCode: 229 }, false), null);
+  assert.equal(fieldKey({ key: 'Enter', keyCode: 229 }, false), null);
+  assert.equal(fieldKey({ key: 'a' }, false), null);
+});
+
+test('a field landed as it showed when focused, or as its value, sends nothing', () => {
+  // Untouched, or put back to what it showed.
+  assert.equal(toSend('0.1235', '0.1235', '0.1235'), null);
+  // Focused again before the sheet drawn again shows what was sent: as it showed then, nothing.
+  assert.equal(toSend('101A+', '101A+', '101+'), null);
+  // Typed back to its value.
+  assert.equal(toSend('101+', '101A+', '101+'), null);
+  assert.equal(toSend('0.4', '0.3000', '0.3000'), '0.4');
+});
+
+test('line breaks pasted into a one-line field are kept for the renderer to refuse, not stripped', () => {
+  assert.equal(pastedLines('FT-101', 6, 6, ' A
+B', false), 'FT-101 A
+B');
+  assert.equal(pastedLines('FT-101', 0, 2, 'X
+Y', false), 'X
+Y-101');
+  // One line pasted, or into a field of more lines: the browser takes it.
+  assert.equal(pastedLines('FT-101', 6, 6, ' A', false), null);
+  assert.equal(pastedLines('NOTES', 5, 5, '
+2.', true), null);
+});
+
+test('quick properties edit only while the drawing loaded is the view asked for and the set as it is', () => {
+  const loaded = { at: null, sheet: 'DP-LD-101', layout: null, layouts: [] };
+  assert.equal(editsHere({ at: null, sheet: null, layout: null }, loaded), true);
+  assert.equal(editsHere({ at: null, sheet: 'dp-ld-101', layout: null }, loaded), true);
+  // An entry asked for while the live drawing is still on the canvas.
+  assert.equal(editsHere({ at: 3, sheet: 'DP-LD-101', layout: null }, loaded), false);
+  // The entry's drawing loaded.
+  assert.equal(editsHere({ at: 3, sheet: 'DP-LD-101', layout: null }, { ...loaded, at: 3 }), false);
+  // Back to live asked for while the entry is still drawn.
+  assert.equal(editsHere({ at: null, sheet: 'DP-LD-101', layout: null }, { ...loaded, at: 3 }), false);
+  // Another sheet asked for, not drawn yet.
+  assert.equal(editsHere({ at: null, sheet: 'DP-LD-102', layout: null }, loaded), false);
+  // Layouts: the first is the one drawn when none is asked for.
+  const laid = { at: null, sheet: 'LAY-001', layout: 'Assembly', layouts: ['Assembly', 'Wiring'] };
+  assert.equal(editsHere({ at: null, sheet: 'LAY-001', layout: null }, laid), true);
+  assert.equal(editsHere({ at: null, sheet: 'LAY-001', layout: 'wiring' }, laid), false);
+  assert.equal(editsHere({ at: null, sheet: 'LAY-001', layout: 'wiring' }, { ...laid, layout: 'Wiring' }), true);
+  assert.equal(editsHere({ at: null, sheet: null, layout: null }, null), false);
 });

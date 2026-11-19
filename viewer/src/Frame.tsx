@@ -7,12 +7,14 @@
 // small box for text. Plain components: what they do is the page's (App.tsx), and
 // what they say is worked out in frame.ts.
 
-import { forwardRef, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
+import { forwardRef, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 
 import {
   PANELS,
   SNAPS,
   TOGGLES,
+  fieldKey,
+  pastedLines,
   templateWords,
   type Act,
   type LayerEntry,
@@ -461,6 +463,31 @@ export interface TextEditProps {
   onDone(text: string): void;
   /** Esc or Cancel: the contents are put back, and nothing lands. */
   onCancel(): void;
+  /** Why the renderer would refuse these contents, if it would: line breaks pasted into one line, which the browser strips, are checked by it first. */
+  refuse?(text: string): string | null;
+}
+
+/**
+ * The key and paste rules both editors of a text's contents share: Enter
+ * and Esc are an input method's while it composes; line breaks pasted
+ * into one line are refused, said under the field, before the browser
+ * strips them.
+ */
+function useTextKeys(multiline: boolean, refuse: ((text: string) => string | null) | undefined, setText: (text: string) => void) {
+  const [refused, setRefused] = useState<string | null>(null);
+  const does = (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+    fieldKey({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode }, multiline);
+  const paste = (e: ClipboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const el = e.currentTarget;
+    const end = el.value.length;
+    const next = pastedLines(el.value, el.selectionStart ?? end, el.selectionEnd ?? end, e.clipboardData.getData('text'), multiline);
+    if (next === null) return;
+    e.preventDefault();
+    const why = refuse?.(next) ?? null;
+    setRefused(why);
+    if (!why) setText(next);
+  };
+  return { does, paste, refused, setRefused };
 }
 
 /**
@@ -468,8 +495,9 @@ export interface TextEditProps {
  * TEXTEDIT: a box over the text, placed by the drawing as it pans and
  * zooms. Enter or a click away lands it; Esc puts it back.
  */
-export const TextOnDrawing = forwardRef<HTMLDivElement, TextEditProps>(function TextOnDrawing({ value, multiline, note, onDone, onCancel }, box) {
+export const TextOnDrawing = forwardRef<HTMLDivElement, TextEditProps>(function TextOnDrawing({ value, multiline, note, onDone, onCancel, refuse }, box) {
   const [text, setText] = useState(value);
+  const { does, paste, refused, setRefused } = useTextKeys(multiline, refuse, setText);
   // Enter or Esc has dealt with it: the blur that follows does nothing more.
   const settled = useRef(false);
   const field = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
@@ -480,11 +508,12 @@ export const TextOnDrawing = forwardRef<HTMLDivElement, TextEditProps>(function 
   }, []);
   const keys = (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     e.stopPropagation();
-    if (e.key === 'Escape') {
+    const key = does(e);
+    if (key === 'cancel') {
       e.preventDefault();
       settled.current = true;
       onCancel();
-    } else if (e.key === 'Enter' && !(multiline && e.shiftKey)) {
+    } else if (key === 'land') {
       e.preventDefault();
       settled.current = true;
       onDone(text);
@@ -496,8 +525,12 @@ export const TextOnDrawing = forwardRef<HTMLDivElement, TextEditProps>(function 
     autoComplete: 'off',
     spellCheck: false,
     ref: field,
-    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setText(e.currentTarget.value),
+    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      setRefused(null);
+      setText(e.currentTarget.value);
+    },
     onKeyDown: keys,
+    onPaste: paste,
     onBlur: () => {
       if (!settled.current) onDone(text);
     },
@@ -506,26 +539,38 @@ export const TextOnDrawing = forwardRef<HTMLDivElement, TextEditProps>(function 
     <div className={`tedit${multiline ? ' multi' : ''}`} ref={box} data-ui role="group" aria-label="Edit the text">
       {multiline ? <textarea {...props} rows={Math.max(2, text.split('\n').length)} /> : <input {...props} />}
       {note && <p className="tnote">{note}</p>}
+      {refused && (
+        <p className="terr" role="alert" data-text-refused>
+          {refused}
+        </p>
+      )}
       <small>{multiline ? 'Enter or click away: done · Shift+Enter: new line · Esc: cancel' : 'Enter or click away: done · Esc: cancel'}</small>
     </div>
   );
 });
 
 /** A phone's small box for a text's contents, as for a Text tool's words (build 4): Done lands them, Cancel puts them back. */
-export function TextEditBox({ value, multiline, note, onDone, onCancel }: TextEditProps) {
+export function TextEditBox({ value, multiline, note, onDone, onCancel, refuse }: TextEditProps) {
   const [text, setText] = useState(value);
+  const { does, paste, refused, setRefused } = useTextKeys(multiline, refuse, setText);
   const keys = (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     e.stopPropagation();
-    if (e.key === 'Escape') onCancel();
-    else if (e.key === 'Enter' && !multiline) onDone(text);
+    const key = does(e);
+    if (key === 'cancel') onCancel();
+    // A phone's return is a new line in an mtext: Done lands it.
+    else if (key === 'land' && !multiline) onDone(text);
   };
   const props = {
     'data-tbox-text': true,
     autoComplete: 'off',
     spellCheck: false,
     value: text,
-    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setText(e.currentTarget.value),
+    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      setRefused(null);
+      setText(e.currentTarget.value);
+    },
     onKeyDown: keys,
+    onPaste: paste,
   };
   return (
     <div className="tbox" data-ui aria-label="Edit the text" role="group" data-text-box>
@@ -534,6 +579,11 @@ export function TextEditBox({ value, multiline, note, onDone, onCancel }: TextEd
         {multiline ? <textarea {...props} rows={3} /> : <input {...props} enterKeyHint="done" />}
       </label>
       {note && <p className="tnote">{note}</p>}
+      {refused && (
+        <p className="terr" role="alert" data-text-refused>
+          {refused}
+        </p>
+      )}
       <div className="two">
         <span />
         <div className="acts">

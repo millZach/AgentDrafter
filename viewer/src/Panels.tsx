@@ -6,7 +6,7 @@
 // assistant's place.
 // Plain components: what they do is the page's (App.tsx).
 
-import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent } from 'react';
 
 import {
   changedBy,
@@ -19,7 +19,7 @@ import {
   type Entry,
   type JournalReport,
 } from './journal.ts';
-import { nameOf, typeWords, type Committed, type LiveState, type PropField } from './frame.ts';
+import { fieldKey, nameOf, pastedLines, toSend, typeWords, type Committed, type LiveState, type PropField } from './frame.ts';
 import type { SheetObject } from './probe.ts';
 
 export interface PeekProps {
@@ -355,10 +355,14 @@ function PropRow({ field, layers, onCommit, resetKey }: PropRowProps) {
   const [error, setError] = useState<string | null>(null);
   // Enter or Esc has dealt with the field, so leaving it does nothing more.
   const settled = useRef(false);
+  // What the field showed when it was focused, apart from what was sent:
+  // landing it again as it was sends nothing.
+  const atFocus = useRef(field.value);
   useEffect(() => {
     setDraft(null);
     setError(null);
-  }, [field.value, resetKey]);
+    if (document.activeElement?.getAttribute('data-prop') !== field.key) atFocus.current = field.value;
+  }, [field.value, field.key, resetKey]);
   const shown = draft ?? field.value;
   const label = (
     <th>
@@ -378,8 +382,16 @@ function PropRow({ field, layers, onCommit, resetKey }: PropRowProps) {
       </tr>
     );
   }
-  /** Lands what is typed: false when it says what went wrong instead. */
-  const land = (value: string): boolean => {
+  /**
+   * Lands `value`: false when it says what went wrong instead. Nothing is
+   * sent when it is what the field showed at `since` or its value.
+   */
+  const land = (value: string, since: string): boolean => {
+    if (toSend(value, since, field.value) === null) {
+      setError(null);
+      if (value === field.value) setDraft(null);
+      return true;
+    }
     const done = onCommit(field.key, value);
     if (done.kind === 'error') {
       setError(done.message);
@@ -391,6 +403,7 @@ function PropRow({ field, layers, onCommit, resetKey }: PropRowProps) {
   };
   const focus = () => {
     settled.current = false;
+    atFocus.current = shown;
     setFocused(true);
   };
   let input;
@@ -409,7 +422,7 @@ function PropRow({ field, layers, onCommit, resetKey }: PropRowProps) {
           const name = e.currentTarget.value;
           setDraft(name);
           // A layer picked lands at once, as AutoCAD's does.
-          if (!land(name)) setDraft(null);
+          if (!land(name, field.value)) setDraft(null);
         }}
       >
         {names.map((n) => (
@@ -423,18 +436,30 @@ function PropRow({ field, layers, onCommit, resetKey }: PropRowProps) {
     const keys = (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       // The field's keys are its own, not the command bar's.
       e.stopPropagation();
-      if (e.key === 'Escape') {
+      const does = fieldKey({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode }, field.multiline);
+      if (does === 'cancel') {
+        // Back to what it showed when it was focused.
         e.preventDefault();
         settled.current = true;
-        setDraft(null);
+        setDraft(atFocus.current === field.value ? null : atFocus.current);
         setError(null);
         e.currentTarget.blur();
-      } else if (e.key === 'Enter' && !(field.multiline && e.shiftKey)) {
+      } else if (does === 'land') {
         e.preventDefault();
         settled.current = true;
-        if (land(shown)) e.currentTarget.blur();
+        if (land(shown, atFocus.current)) e.currentTarget.blur();
         else settled.current = false;
       }
+    };
+    // Line breaks pasted into a one-line field reach the renderer, which
+    // says they cannot go there, before the browser strips them.
+    const paste = (e: ClipboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      const el = e.currentTarget;
+      const end = el.value.length;
+      const next = pastedLines(el.value, el.selectionStart ?? end, el.selectionEnd ?? end, e.clipboardData.getData('text'), field.multiline);
+      if (next === null) return;
+      e.preventDefault();
+      land(next, atFocus.current);
     };
     const leave = () => {
       setFocused(false);
@@ -442,13 +467,9 @@ function PropRow({ field, layers, onCommit, resetKey }: PropRowProps) {
         settled.current = false;
         return;
       }
-      // Leaving the field lands it, as Enter does; what went wrong is said,
-      // and the value put back.
-      if (draft !== null && draft !== field.value) {
-        if (!land(draft)) setDraft(null);
-      } else {
-        setDraft(null);
-      }
+      // Leaving the field lands it, as Enter does, unless it holds what it
+      // showed when focused; what went wrong is said, and the value put back.
+      if (draft !== null && !land(draft, atFocus.current)) setDraft(null);
     };
     const props = {
       className: 'qin',
@@ -460,6 +481,7 @@ function PropRow({ field, layers, onCommit, resetKey }: PropRowProps) {
       onFocus: focus,
       onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(e.currentTarget.value),
       onKeyDown: keys,
+      onPaste: paste,
       onBlur: leave,
     };
     input = field.multiline ? (

@@ -2313,7 +2313,11 @@ const checks = {
     const set = join(folder, 'demo-plant');
     // A circle of the sheet's own, for its radius and diameter.
     const added = sendChange(folder, {
-      operations: [{ op: 'add_circle', sheet: 'DP-LD-101', center: [13, 3.6, 0], radius: 0.25, layer: 'notes', id: 'washer' }],
+      operations: [
+        { op: 'add_circle', sheet: 'DP-LD-101', center: [13, 3.6, 0], radius: 0.25, layer: 'notes', id: 'washer' },
+        // A second, which shows the radius the first comes to.
+        { op: 'add_circle', sheet: 'DP-LD-101', center: [14.2, 3.6, 0], radius: 0.3, layer: 'notes', id: 'washer2' },
+      ],
     });
     assert(added.ok, `the circle is added: ${JSON.stringify(added)}`);
     const server = await serve('127.0.0.1:0', folder);
@@ -2497,6 +2501,50 @@ const checks = {
         await page.keyboard.press('Escape');
         await nothingLands(before, 'A wrong radius');
 
+        // What is typed on one circle does not follow the selection to
+        // another whose radius shows the same: leaving the first lands it,
+        // and the second shows its own.
+        before = journal().length;
+        await page.click('.qp [data-prop="radius"]');
+        await page.fill('.qp [data-prop="radius"]', '0.45');
+        const washer2 = await placeOf(page, "(o) => o.id === 'DP-LD-101/washer2'");
+        await select(page, washer2, false);
+        ({ entry, op } = await landed(page, before, 'A radius left by picking another circle'));
+        assert(op.target.id === 'DP-LD-101/washer' && op.set.radius === 0.45, `the first circle's radius lands: ${JSON.stringify(op)}`);
+        assert((await valueOf(page, 'radius')) === '0.3000', `the second circle shows its own radius: ${await valueOf(page, 'radius')}`);
+        before = journal().length;
+        await page.click('.qp [data-prop="radius"]');
+        await page.click('.qp header b');
+        await nothingLands(before, 'Focusing and leaving the second circle');
+        seen.laptop.draft_stays = entry.entry;
+
+        // A field landed with Enter, focused again and left before the
+        // sheet is drawn again, while it still shows what was sent, sends
+        // nothing more: the sheet's drawing is held back meanwhile.
+        const cabinet = await placeOf(page, "(o) => o.id === 'DP-LD-101/cabinet-tag'");
+        await select(page, cabinet, false);
+        let releaseSheet;
+        const sheetHeld = new Promise((done) => {
+          releaseSheet = done;
+        });
+        await context.route('**/commands/display-list', async (route) => {
+          await sheetHeld;
+          await route.continue();
+        });
+        before = journal().length;
+        await page.click('.qp [data-prop="contents"]');
+        await page.fill('.qp [data-prop="contents"]', 'CONTROL PANEL CP-100A');
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'Contents, by Enter'));
+        await page.click('.qp [data-prop="contents"]');
+        assert((await valueOf(page, 'contents')) === 'CONTROL PANEL CP-100A', 'the field shows what was sent');
+        await page.keyboard.press('Tab');
+        await nothingLands(before + 1, 'Leaving it again before the sheet is drawn again');
+        releaseSheet();
+        await context.unroute('**/commands/display-list');
+        await waitValue(page, 'contents', 'CONTROL PANEL CP-100A');
+        seen.laptop.left_again = entry.entry;
+
         // A text on the drawing: a double click on the service text.
         const service = await placeOf(page, "(o) => o.id === 'DP-LD-101/service'");
         const [sx, sy] = await showAndFind(page, service);
@@ -2588,6 +2636,29 @@ const checks = {
         }
         assert(JSON.stringify(undone.undid) === JSON.stringify([entry.entry]), `the undo takes the edit: ${JSON.stringify(undone)}`);
         seen.laptop.undo = undone.entry;
+
+        // An entry asked for whose drawing has not come yet: the live
+        // drawing is still on the canvas, and quick properties and the
+        // Layer box edit nothing while it is.
+        let releaseEntry;
+        const entryHeld = new Promise((done) => {
+          releaseEntry = done;
+        });
+        await context.route('**/commands/display-list', async (route) => {
+          if (route.request().postDataJSON()?.entry !== undefined) await entryHeld;
+          await route.continue();
+        });
+        await page.click('button[aria-label="Older"]');
+        await page.waitForFunction(() => document.querySelector('.cmdbar').textContent.includes('as it was'));
+        const deviceNow = await placeOf(page, "(o) => o.id === 'DP-LD-101/device'");
+        await page.mouse.click(...(await showAndFind(page, deviceNow, 3)));
+        await page.waitForSelector('.qp');
+        assert((await page.locator('.qp [data-prop]').count()) === 0, 'quick properties are read-only');
+        assert((await page.locator('select[data-layer]').count()) === 0, 'the Layer box moves nothing');
+        releaseEntry();
+        await context.unroute('**/commands/display-list');
+        await page.click('button[data-act="live"]');
+        seen.laptop.read_only_while_coming = true;
         assert(problems.length === 0, problems.join('; '));
         await context.close();
       }
@@ -2601,6 +2672,25 @@ const checks = {
         await page.tap('.ribbon [data-toggle="osnap"]');
         await page.tap('.toolsbtn');
         await page.waitForFunction(() => window.agentdrafterViewer.summary.objects.some((o) => o.values));
+
+        // Two quick taps on two texts within 30 pixels are two picks: the
+        // second selects its own and opens no text box.
+        {
+          const service = await placeOf(page, "(o) => o.id === 'DP-LD-101/service'");
+          const signalFirst = await placeOf(page, "(o) => o.id === 'DP-LD-101/signal'");
+          const a = await showAndFind(page, service, 2);
+          const c = await findOn(page, signalFirst);
+          assert(Math.hypot(a[0] - c[0], a[1] - c[1]) < 30, `the two taps are within 30 pixels: ${a} ${c}`);
+          await page.touchscreen.tap(...a);
+          await page.touchscreen.tap(...c);
+          await sleep(600);
+          assert(!(await page.$('[data-text-box]')), 'two taps on two objects open no text box');
+          const picked = await page.evaluate(() => window.agentdrafterViewer.marked?.picked);
+          assert(picked !== null && picked !== service, `the second tap selects: ${picked}`);
+          await page.tap('.qp [data-close]');
+          await page.waitForFunction(() => !document.querySelector('.qp'));
+          seen.phone.two_taps = picked;
+        }
 
         // A text: tapped, then tapped again, edited in the box.
         const signal = await placeOf(page, "(o) => o.id === 'DP-LD-101/signal'");

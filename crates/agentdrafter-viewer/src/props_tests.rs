@@ -438,3 +438,24 @@ fn an_object_that_cannot_be_edited_shows_its_fields_read_only() {
     );
     assert_eq!(edit(&context, WASHER, "layer", "notes"), Edited::default());
 }
+
+#[test]
+fn a_radius_or_diameter_as_it_shows_lands_nothing_though_the_radius_has_more_digits() {
+    let mut context = context();
+    context.objects[WASHER].values = Some(json!({"radius": 0.123456}));
+    let fields = fields(&context, WASHER);
+    assert_eq!(field(&fields, "radius").value, "0.1235");
+    assert_eq!(field(&fields, "diameter").value, "0.2469");
+    // Enter on the field as it shows, or put back to it, sends nothing.
+    assert_eq!(
+        edit(&context, WASHER, "radius", "0.1235"),
+        Edited::default()
+    );
+    assert_eq!(
+        edit(&context, WASHER, "diameter", " 0.2469 "),
+        Edited::default()
+    );
+    // A value typed sends it.
+    let edited = edit(&context, WASHER, "radius", "0.12");
+    assert_eq!(operation(&edited)["set"], json!({"radius": 0.12}));
+}
