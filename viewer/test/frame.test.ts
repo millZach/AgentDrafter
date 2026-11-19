@@ -398,16 +398,11 @@ test('a field landed as it showed when focused, or as its value, sends nothing',
 });
 
 test('line breaks pasted into a one-line field are kept for the renderer to refuse, not stripped', () => {
-  assert.equal(pastedLines('FT-101', 6, 6, ' A
-B', false), 'FT-101 A
-B');
-  assert.equal(pastedLines('FT-101', 0, 2, 'X
-Y', false), 'X
-Y-101');
+  assert.equal(pastedLines('FT-101', 6, 6, ' A\nB', false), 'FT-101 A\nB');
+  assert.equal(pastedLines('FT-101', 0, 2, 'X\r\nY', false), 'X\r\nY-101');
   // One line pasted, or into a field of more lines: the browser takes it.
   assert.equal(pastedLines('FT-101', 6, 6, ' A', false), null);
-  assert.equal(pastedLines('NOTES', 5, 5, '
-2.', true), null);
+  assert.equal(pastedLines('NOTES', 5, 5, '\n2.', true), null);
 });
 
 test('quick properties edit only while the drawing loaded is the view asked for and the set as it is', () => {
