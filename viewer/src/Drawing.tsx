@@ -269,15 +269,15 @@ export function Drawing({
     el.style.display = 'block';
     const c = canvas.current;
     const w = el.offsetWidth;
-    const h = el.offsetHeight;
+    const tall = el.offsetHeight;
     const width = c?.clientWidth ?? 0;
     const height = c?.clientHeight ?? 0;
     const left = centred ? x - w / 2 : x;
     // Beside a marker, below it and to its right, `y` 12 below it: above it
     // where below would leave the drawing.
-    const top = !centred && y + h > height - 4 ? y - 24 - h : y;
+    const top = !centred && y + tall > height - 4 ? y - 24 - tall : y;
     el.style.left = `${Math.max(4, Math.min(width - w - 4, left))}px`;
-    el.style.top = `${Math.max(4, Math.min(height - h - 4, top))}px`;
+    el.style.top = `${Math.max(4, Math.min(height - tall - 4, top))}px`;
   };
 
   const draw = () => {
