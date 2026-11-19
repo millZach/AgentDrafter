@@ -457,7 +457,7 @@ fn the_rubber_band_and_the_words_at_the_cursor() {
 }
 
 #[test]
-fn a_group_move_or_one_from_a_point_on_what_it_moves_goes_by_coordinates() {
+fn a_group_move_goes_by_coordinates_and_one_objects_keeps_its_snaps() {
     // Two objects from a snap on the first: the core would find the snap
     // again after moving the first, and the second would move by nothing.
     let mut t = tools();
@@ -469,7 +469,20 @@ fn a_group_move_or_one_from_a_point_on_what_it_moves_goes_by_coordinates() {
         assert_eq!(op["from"], json!([0.5, 0.5, 0]));
         assert_eq!(op["to"], json!([1.5, 0.5, 0]));
     }
-    // One object to a snap on itself: by coordinates too.
+    // Two objects to a snap on another object: by coordinates too, the
+    // same displacement for each.
+    t.start(ToolKind::Move, &[0, 1]);
+    t.point(at(1.0, 1.0));
+    let ops = operations(&t.point(snapped(
+        2.5,
+        6.5,
+        SnapKind::Endpoint,
+        2,
+        Some("objects[3].to"),
+    )));
+    assert!(ops.iter().all(|op| op["to"] == json!([2.5, 6.5, 0])));
+    // One object to a snap on itself: the core works it out before it
+    // moves, so the snapped point stays.
     t.start(ToolKind::Move, &[2]);
     t.point(at(2.0, 6.5));
     let ops = operations(&t.point(snapped(
@@ -479,7 +492,7 @@ fn a_group_move_or_one_from_a_point_on_what_it_moves_goes_by_coordinates() {
         2,
         Some("objects[3].to"),
     )));
-    assert_eq!(ops[0]["to"], json!([2.5, 6.5, 0]));
+    assert_eq!(ops[0]["to"]["snap"]["which"], "objects[3].to");
     // One object from a snap on another: the snapped point stays.
     t.start(ToolKind::Move, &[2]);
     t.point(snapped(0.5, 0.5, SnapKind::Endpoint, 0, Some("points[0]")));

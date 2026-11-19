@@ -1520,14 +1520,11 @@ impl Tools {
         // The core applies one move after another, working a snapped point
         // out on the sheet as it stands then: a snap on an object moved
         // before would be found where it went, and the next object would
-        // move by less. So a move of several objects, or one from or to a
-        // point on what it moves, goes by coordinates, the same for each.
-        let on_moved = |t: &Taken| {
-            t.snap.as_ref().is_some_and(|s| {
-                picked.contains(&s.object) || s.with.is_some_and(|w| picked.contains(&w))
-            })
-        };
-        let plain = picked.len() > 1 || on_moved(base) || on_moved(to);
+        // move by less. So a move of several objects goes by coordinates,
+        // the same for each. One object's own move works its `from` and
+        // `to` out before it moves (docs/change-sets.md), so its snapped
+        // points stay, a snap on itself among them.
+        let plain = picked.len() > 1;
         let point = |t: &Taken, template: bool| {
             if plain {
                 json!([t.at[0], t.at[1], 0])
