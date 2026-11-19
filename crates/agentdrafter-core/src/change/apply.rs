@@ -2595,10 +2595,31 @@ fn sync(
             .find(|(b, _)| b == block)
             .map(|(_, tags)| tags.iter().filter(|t| *t == tag).count())
     };
+    // How many times each block carried each tag in the library as the
+    // change set found it: a list given for a tag it carries once now is a
+    // list of parts (#102) only when it carried the tag once then too, and
+    // otherwise a repeated tag's values, which keep their first.
+    let before: Vec<(String, Vec<String>)> = read_file(&library.path, "the block library")
+        .and_then(|text| RecordFile::from_text(&library.path, text))
+        .map(|found| {
+            blocks
+                .iter()
+                .map(|b| (b.clone(), found.block_carried_tags(b).unwrap_or_default()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let once_before = |block: &str, tag: &str| {
+        before
+            .iter()
+            .find(|(b, _)| b == block)
+            .is_some_and(|(_, tags)| tags.iter().filter(|t| *t == tag).count() == 1)
+    };
     // What fitting `given` to the block `block` takes away, and how many
     // times the block carries its tag; none when it fits as it is.
     let unfit = |block: &str, given: &GivenValue| {
         let n = count(block, &given.tag)?;
+        let mut given = given.clone();
+        given.parts = given.parts && once_before(block, &given.tag);
         given.unfitted(n).map(|gone| (n, gone))
     };
     // The blocks an insert on a sheet reaches through: these, and every
@@ -2726,7 +2747,10 @@ pub(crate) fn fit_library_inserts(
             let fitted: Vec<_> = insert
                 .values
                 .into_iter()
-                .filter_map(|given| {
+                .filter_map(|mut given| {
+                    // A block's insert takes no value from a row, so no
+                    // list of parts.
+                    given.parts = false;
                     let n = tags.iter().filter(|t| **t == given.tag).count();
                     let gone = given.unfitted(n)?;
                     Some((outer.clone(), index, given, n, gone))

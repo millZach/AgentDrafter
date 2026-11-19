@@ -442,3 +442,30 @@ fn a_query_finds_the_joined_text() {
         ["S-1/card"]
     );
 }
+
+#[test]
+fn redefining_the_block_keeps_a_list_of_parts_whole() {
+    let set = built_set("redefine");
+    let reply = apply(
+        &set,
+        json!([{"op": "redefine_block", "name": "CARD", "objects": [
+            {"circle": {"center": [0, 0, 0], "radius": 5}},
+            {"attdef": {"tag": "TITLE", "position": [2, 6, 0], "height": 2}},
+            {"attdef": {"tag": "NOTE", "position": [2, 3, 0], "height": 1}},
+            {"attdef": {"tag": "NOTE", "position": [2, 1, 0], "height": 1}}
+        ]}]),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    assert!(reply.result.unwrap().operations[0]
+        .attributes_removed
+        .is_empty());
+    let template = fs::read_to_string(set.join("templates/t.yaml")).unwrap();
+    assert!(
+        template.contains("TITLE: [{row: AREA}, ' PANEL ', {row: PANEL}]"),
+        "{template}"
+    );
+    assert_eq!(
+        attributes(&in_dwg(&set, "S-1", "S-1/card"))[0],
+        ("TITLE", "AREA 1 PANEL P1")
+    );
+}
