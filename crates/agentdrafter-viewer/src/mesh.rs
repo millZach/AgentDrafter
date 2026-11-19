@@ -73,6 +73,10 @@ pub struct SheetReply {
     /// snaps find on the objects the page draws itself.
     #[serde(default)]
     pub snaps: Vec<DisplaySnap>,
+    /// With the snaps, the places among the display list's items of the
+    /// fills whose edges the nearest snap finds a point on.
+    #[serde(default)]
+    pub edges: Vec<usize>,
     pub display_list: DisplayList,
 }
 
@@ -495,6 +499,7 @@ mod tests {
             entry: None,
             objects: Vec::new(),
             snaps: Vec::new(),
+            edges: Vec::new(),
             display_list,
         }
     }

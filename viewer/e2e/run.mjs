@@ -179,13 +179,18 @@ async function live(page) {
 }
 
 /** `agentdrafter serve` in the scratch folder, or `cwd`, with every line it printed. */
-/** Every server a check started, stopped when the run ends however it ends. */
+/**
+ * Every server a check started, stopped when the run ends: at its end, on
+ * an error, or on SIGINT, SIGTERM, SIGHUP (its terminal closed) or SIGBREAK
+ * (Windows' Ctrl+Break). Only a SIGKILL, which no process can catch, leaves
+ * them running.
+ */
 const servers = new Set();
 const stopAll = () => {
   for (const child of servers) if (child.exitCode === null) child.kill();
 };
 process.on('exit', stopAll);
-for (const signal of ['SIGINT', 'SIGTERM']) {
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
   process.on(signal, () => {
     stopAll();
     process.exit(1);
@@ -1922,7 +1927,14 @@ const checks = {
         const snapped = dry.result?.operations?.[0]?.snapped?.[0];
         assert(dry.ok && JSON.stringify(snapped?.at) === JSON.stringify(end), `a change set takes the copied point: ${JSON.stringify(dry.error ?? snapped)}`);
         await page.screenshot({ path: join(out, 'snaps-laptop-taken.png') });
-        await page.click('.opt[data-opt="clear"]');
+        // Another sheet asked for: the read-out, of an object not on it, goes.
+        await page.click('.tab:has-text("DP-LD-102")');
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'DP-LD-102');
+        assert(!(await page.$('.opt[data-opt="copy"]')), 'Copy goes with the sheet its object is on');
+        await page.click('.tab:has-text("DP-LD-101")');
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'DP-LD-101');
+        await centre(page, end, 6);
+        await frames(page);
         // Tab steps to the next snap in reach.
         assert(pair, 'two snaps lie near each other');
         {
@@ -1945,6 +1957,66 @@ const checks = {
           const second = await hovered(page);
           assert(first?.count >= 2 && second?.place === 1 && second.count === first.count, `Tab steps to the next: ${JSON.stringify({ first, second })}`);
           seen.tab = { count: first.count, first: first.snap, second: second.snap };
+          // From a focused button, Tab moves the focus on, as on any page.
+          await page.focus('.status [data-toggle="grid"]');
+          await page.keyboard.press('Tab');
+          await frames(page);
+          const kept = await hovered(page);
+          const moved = await page.evaluate(() => document.activeElement?.getAttribute('data-toggle'));
+          assert(kept?.place === 1 && moved !== 'grid', `Tab from a button leaves the snaps alone: ${JSON.stringify({ kept, moved })}`);
+          await page.evaluate(() => document.activeElement?.blur());
+        }
+        // A click made before the next frame takes the snap under it, not
+        // the one the cursor caught before: the move and the click in one
+        // task, so no frame comes between.
+        {
+          const other = listed
+            .filter((s) => s.snap === 'endpoint' && s.object !== h.object)
+            .map((s) => [s, Math.hypot(s.at[0] - end[0], s.at[1] - end[1])])
+            .filter(([, d]) => d > 0.05)
+            .sort((a, c) => a[1] - c[1])[0]?.[0];
+          assert(other, 'another endpoint lies near');
+          await centre(page, end, 6);
+          await page.mouse.move(x + 5, y + 4);
+          await frames(page);
+          assert((await hovered(page))?.which === 'objects[3].from', 'the cursor holds FT-101');
+          const [ox, oy] = await onPage(page, other.at);
+          await page.evaluate(([ox, oy]) => {
+            const stage = document.querySelector('.stage');
+            const at = { clientX: ox, clientY: oy, pointerId: 1, pointerType: 'mouse', button: 0, bubbles: true };
+            stage.dispatchEvent(new PointerEvent('pointermove', at));
+            stage.dispatchEvent(new PointerEvent('pointerdown', at));
+            stage.dispatchEvent(new PointerEvent('pointerup', at));
+          }, [ox, oy]);
+          await frames(page);
+          const fast = await page.textContent('.cmdbar');
+          const said = `${other.at[0].toFixed(4)}, ${other.at[1].toFixed(4)} in`;
+          assert(fast.includes(said) && !fast.includes('Endpoint of FT-101'), `a fast click takes the snap under it: ${fast.slice(0, 120)} (wanted ${said})`);
+          await page.click('.opt[data-opt="clear"]');
+        }
+        // The tag beside a snap at the drawing's foot flips above it, in sight.
+        {
+          await page.evaluate(
+            ([ex, ey]) => {
+              const p = window.agentdrafterViewer;
+              const r = document.querySelector('.stage').getBoundingClientRect();
+              const scale = p.view().scale;
+              p.show({ left: ex - r.width / 2 / scale, top: ey + (r.height - 10) / scale, scale });
+            },
+            [end[0], end[1]],
+          );
+          await frames(page);
+          const [bx, by] = await onPage(page, end);
+          await page.mouse.move(bx + 2, by - 1);
+          await frames(page);
+          const place = await page.evaluate(() => {
+            const t = document.querySelector('.snaptag').getBoundingClientRect();
+            const s = document.querySelector('.stage').getBoundingClientRect();
+            return { shown: getComputedStyle(document.querySelector('.snaptag')).display, top: t.top, bottom: t.bottom, stage: s.bottom };
+          });
+          assert(place.shown === 'block' && place.bottom <= place.stage && place.bottom < by, `the tag sits above the snap, on the drawing: ${JSON.stringify({ place, by })}`);
+          await centre(page, end, 6);
+          await frames(page);
         }
         // The menu: Endpoint unticked, and the cursor no longer catches it; kept across a reload.
         await page.mouse.move(x + 5, y + 4);
@@ -1977,6 +2049,28 @@ const checks = {
         await frames(page);
         assert((await hovered(page)) === null && (await page.getAttribute('.status [data-toggle="osnap"]', 'aria-pressed')) === 'false', 'F3 turns snapping off');
         await page.keyboard.press('F3');
+        // With Object snap off the sheet comes without its snaps, and
+        // turning it on asks for them.
+        await page.evaluate(() => {
+          const kept = JSON.parse(localStorage.getItem('agentdrafter-object-snaps') ?? '{}');
+          localStorage.setItem('agentdrafter-object-snaps', JSON.stringify({ ...kept, on: false }));
+        });
+        const asked = [];
+        const ask = (request) => {
+          if (request.url().includes('/display-list')) asked.push(JSON.parse(request.postData() ?? '{}'));
+        };
+        page.on('request', ask);
+        await page.reload();
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary);
+        assert((await page.evaluate(() => window.agentdrafterViewer.summary.snaps)) === 0, 'with Object snap off, no snaps come');
+        const before = asked.length;
+        await page.keyboard.press('F3');
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.snaps > 0, null, { timeout: 15000 });
+        page.off('request', ask);
+        assert(
+          before > 0 && asked.slice(0, before).every((input) => !input.snaps) && asked.slice(before).some((input) => input.snaps === true),
+          `the snaps are asked for only once Object snap is on: ${JSON.stringify(asked)}`,
+        );
         // The search for the snaps in reach, per pointer move, over the paper.
         const each = await page.evaluate(() => {
           const p = window.agentdrafterViewer;
@@ -2014,6 +2108,24 @@ const checks = {
         await page.waitForFunction(() => document.querySelector('.cmdbar').textContent.includes('Endpoint of FT-101'));
         assert((await page.evaluate(() => getComputedStyle(document.querySelector('.loupe')).display)) === 'none', 'lifting puts the magnifier away');
         await page.screenshot({ path: join(out, 'snaps-phone-taken.png') });
+        // A change lands while the finger is held: the snap lifted is found
+        // on the sheet as it is now, its object and its point agreeing,
+        // though an object before FT-101's is gone and every place after it
+        // has moved down one.
+        {
+          const objects = agentIn(folder, 'display-list', 'demo-plant', '--sheet', 'DP-LD-101').result.objects;
+          const earlier = objects.slice(0, objects.findIndex((o) => o.id === 'DP-LD-101/device')).find((o) => o.id);
+          assert(earlier, 'an object comes before FT-101');
+          await page.tap('.opt[data-opt="clear"]');
+          await touch('touchStart', [[x + 4, y + 3]]);
+          await sleep(500);
+          assert(sendChange(folder, { operations: [{ op: 'delete', target: { id: earlier.id } }] }).ok, `${earlier.id} is deleted`);
+          await page.waitForFunction((gone) => !window.agentdrafterViewer.summary.objects.some((o) => o.id === gone), earlier.id, { timeout: 15000 });
+          await touch('touchEnd', []);
+          await page.waitForFunction(() => document.querySelector('.cmdbar').textContent.includes('Endpoint of'));
+          const bar = await page.textContent('.cmdbar');
+          assert(bar.includes(`Endpoint of FT-101: ${end[0].toFixed(4)}, ${end[1].toFixed(4)} in`), `the snap lifted is FT-101's, where it is: ${bar.slice(0, 120)}`);
+        }
         // The menu is in Tools, under Status.
         await page.tap('.toolsbtn');
         await page.tap('[data-snaps]');

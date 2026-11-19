@@ -269,10 +269,15 @@ export function Drawing({
     el.style.display = 'block';
     const c = canvas.current;
     const w = el.offsetWidth;
+    const h = el.offsetHeight;
     const width = c?.clientWidth ?? 0;
+    const height = c?.clientHeight ?? 0;
     const left = centred ? x - w / 2 : x;
+    // Beside a marker, below it and to its right, `y` 12 below it: above it
+    // where below would leave the drawing.
+    const top = !centred && y + h > height - 4 ? y - 24 - h : y;
     el.style.left = `${Math.max(4, Math.min(width - w - 4, left))}px`;
-    el.style.top = `${Math.max(4, y)}px`;
+    el.style.top = `${Math.max(4, Math.min(height - h - 4, top))}px`;
   };
 
   const draw = () => {
@@ -336,7 +341,13 @@ export function Drawing({
     tapped: ([sx, sy], pointerType) => {
       const v = viewer.current;
       if (!v || !loadedReply.current) return;
-      // A click on a snap reads its point out; anything else picks.
+      // A click on a snap reads its point out; anything else picks. The
+      // snap is the one at the click itself, found now, not the one a
+      // frame not yet drawn would have found.
+      if (pointerType === 'mouse') {
+        pointer.current = [sx, sy];
+        hoverNow();
+      }
       const h = hovered.current;
       if (pointerType === 'mouse' && h) {
         take.current?.(h);
@@ -361,6 +372,9 @@ export function Drawing({
       redraw();
     },
     holdEnded: (p, taken) => {
+      // The sheet drawn anew under the finger: its snap is found again on
+      // what is drawn now, so its point and its object agree.
+      if (loupeReply.current !== loadedReply.current) showLoupe(p);
       const h = hoveredOf(loupeViewer.current);
       held.current = null;
       hideLoupe();
@@ -505,6 +519,8 @@ export function Drawing({
       // journal is stepped through, keeps the reviewer's view.
       if (!sameSheet || followFit.current) fitSheet(0);
       else redraw();
+      // A finger held: the magnifier shows what is drawn now.
+      if (held.current) showLoupe(held.current);
       const probe = window.agentdrafterViewer;
       if (probe) probe.summary = summary;
       onLoaded(summary);
@@ -593,10 +609,13 @@ export function Drawing({
       redraw();
       cursor.current?.(null, null);
     };
-    // Tab steps to the next snap in reach, as AutoCAD's does.
+    // Tab steps to the next snap in reach, as AutoCAD's does, while the
+    // drawing has the keys: from a button or a field it moves the focus on.
     const tab = (e: KeyboardEvent) => {
       const h = hovered.current;
       if (e.key !== 'Tab' || !pointer.current || !h || h.count < 2 || held.current) return;
+      const focused = document.activeElement;
+      if (focused && focused !== document.body && focused !== b && focused !== c) return;
       e.preventDefault();
       viewer.current?.next_snap();
       hovered.current = hoveredOf(viewer.current);

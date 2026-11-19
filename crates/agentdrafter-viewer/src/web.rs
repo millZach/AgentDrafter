@@ -356,6 +356,8 @@ struct Loaded {
     list: DisplayList,
     /// The object snaps the sheet came with.
     snaps: Vec<DisplaySnap>,
+    /// The fills whose edges the nearest snap finds a point on.
+    edges: Vec<usize>,
     origin: [f64; 2],
     paper: [f64; 4],
     millimetres_per_unit: f64,
@@ -532,8 +534,10 @@ impl Viewer {
         self.marks.clear();
         self.caught.clear();
         let snaps = std::mem::take(&mut sheet.snaps);
+        let edges = std::mem::take(&mut sheet.edges);
         let mut loaded = self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?;
         loaded.snaps = snaps;
+        loaded.edges = edges;
         self.bind_colors(&loaded);
         self.sheet = Some(loaded);
         Ok(summary)
@@ -582,7 +586,15 @@ impl Viewer {
     pub fn hover(&mut self, x: f64, y: f64, reach: f64, tie: f64) -> u32 {
         self.chosen = 0;
         self.caught = match &self.sheet {
-            Some(sheet) => candidates(&sheet.snaps, &sheet.list, self.running, [x, y], reach, tie),
+            Some(sheet) => candidates(
+                &sheet.snaps,
+                &sheet.list,
+                &sheet.edges,
+                self.running,
+                [x, y],
+                reach,
+                tie,
+            ),
             None => Vec::new(),
         };
         self.caught.len() as u32
@@ -1170,6 +1182,7 @@ impl Viewer {
         Ok(Loaded {
             list,
             snaps: Vec::new(),
+            edges: Vec::new(),
             origin: mesh.origin,
             paper: mesh.paper,
             millimetres_per_unit,

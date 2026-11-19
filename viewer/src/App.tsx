@@ -111,6 +111,8 @@ interface Drawn {
   at: number | null;
   sheetKey: string;
   generation: string;
+  /** Whether it came with its object snaps. */
+  snaps: boolean;
 }
 
 /** The object the reviewer picked: by its ID, so it is followed as the sheet changes; by its place when it has none. */
@@ -205,8 +207,27 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // The Object snap menu: above the status bar's Object snap on a laptop
   // (its place), a card on a phone ('card'), or shut.
   const [snapMenu, setSnapMenu] = useState<{ left: number; bottom: number } | 'card' | null>(null);
-  // A snap taken with no tool running: its point read out, and its snapped point.
-  const [taken, setTaken] = useState<{ taken: Taken; point: { snap: Record<string, unknown> } | null } | null>(null);
+  // A snap taken with no tool running: its point read out, its snapped
+  // point, and the sheet drawn and the object it was taken on, by its ID.
+  const [taken, setTaken] = useState<{
+    taken: Taken;
+    point: { snap: Record<string, unknown> } | null;
+    summary: Summary;
+    id: string | null;
+  } | null>(null);
+  // The read-out goes when what it names does: another sheet drawn, or its
+  // object gone from this one. An object with no ID is known only by its
+  // place, which any new drawing of the sheet may give another.
+  useEffect(() => {
+    setTaken((t) => {
+      if (!t) return t;
+      // Another sheet asked for goes at once, before it is drawn.
+      if (wanted !== null && upper(wanted) !== upper(t.summary.sheet)) return null;
+      if (t.summary === summary) return t;
+      if (!summary || upper(summary.sheet) !== upper(t.summary.sheet) || t.id === null) return null;
+      return summary.objects.some((o) => o.id === t.id) ? t : null;
+    });
+  }, [summary, wanted]);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [soon, setSoon] = useState<Tool | null>(null);
   const [side, setSide] = useState<'journal' | 'assistant'>('journal');
@@ -264,7 +285,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
 
   const sheetKey = upper(wanted ?? '');
   const layoutKey = upper(wantedLayout ?? '');
-  const cacheKey = `${at ?? 'live'}|${sheetKey}|${layoutKey}`;
+  // The set as it is comes with its object snaps, for the cursor to catch,
+  // while Object snap is on; the set as it was, read-only, without. A
+  // sheet drawn without them is asked for again when it is turned on.
+  const withSnaps = at === null && toggles.osnap;
+  const cacheKey = `${at ?? 'live'}|${sheetKey}|${layoutKey}|${withSnaps ? 'snaps' : ''}`;
   const version = at === null ? (versions[sheetKey || ANY] ?? 0) : 0;
 
   /**
@@ -284,12 +309,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // for again. A sheet as it was at an entry never changes.
   useEffect(() => {
     let current = true;
-    const kept = replies.current.get(cacheKey);
+    // With Object snap off, a drawing kept with its snaps does as well.
+    const kept = replies.current.get(cacheKey) ?? (withSnaps ? undefined : replies.current.get(`${cacheKey}snaps`));
     if (kept) {
       // A sheet drawn before is shown again at once: whatever another sheet
       // was saying, loading or failing, is not this one's to say. The
       // request for that other sheet, if it is still out, is let go.
-      setReply({ text: kept, at, sheetKey, generation: generationOf(at, sheetKey) });
+      setReply({ text: kept, at, sheetKey, generation: generationOf(at, sheetKey), snaps: withSnaps });
       setStatus({ kind: 'shown' });
       return;
     }
@@ -300,9 +326,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (wanted) input.sheet = wanted;
     if (wantedLayout) input.layout = wantedLayout;
     if (at !== null) input.entry = at;
-    // The set as it is comes with its object snaps, for the cursor to
-    // catch; the set as it was, read-only, without.
-    else input.snaps = true;
+    if (withSnaps) input.snaps = true;
     const generation = generationOf(at, sheetKey);
     run('display-list', input, token).then(
       (text) => {
@@ -312,7 +336,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
         if (generationOf(at, sheetKey) !== generation) return;
         replies.current.set(cacheKey, text);
         if (!current) return;
-        setReply({ text, at, sheetKey, generation });
+        setReply({ text, at, sheetKey, generation, snaps: withSnaps });
       },
       (e) => {
         if (!current) return;
@@ -338,7 +362,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       // Kept by its sheet's own name too, while it is still current.
       if (reply && generationOf(reply.at, reply.sheetKey) === reply.generation) {
         replies.current.set(
-          `${shown.entry ?? 'live'}|${upper(shown.sheet)}|${upper(shown.layout ?? '')}`,
+          `${shown.entry ?? 'live'}|${upper(shown.sheet)}|${upper(shown.layout ?? '')}|${reply.snaps ? 'snaps' : ''}`,
           reply.text,
         );
       }
@@ -664,7 +688,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const read = takenOf(h, summary.objects, summary.units);
     setSoon(null);
     setPicked(o ? { id: o.id ?? null, place: h.object, summary } : null);
-    setTaken({ taken: read, point: snappedPoint(h, summary.objects) });
+    setTaken({ taken: read, point: snappedPoint(h, summary.objects), summary, id: o?.id ?? null });
     log(`${read.label}${read.rest}`);
   };
   const noSnap = (p: [number, number]) => {

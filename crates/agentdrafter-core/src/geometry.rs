@@ -77,6 +77,35 @@ impl Chain {
     }
 }
 
+/// A clipped viewport's boundary, as the closed polyline or the circle it
+/// is drawn as.
+fn clip_boundary(viewport: &crate::model::Viewport) -> Object {
+    let layer = viewport.layer.clone();
+    let properties = viewport.properties.clone();
+    match viewport.clip.as_ref() {
+        Some(crate::model::Clip::Circle { center, radius }) => {
+            Object::Circle(crate::model::Circle {
+                center: *center,
+                radius: *radius,
+                layer,
+                properties,
+            })
+        }
+        Some(crate::model::Clip::Polyline { points, bulges }) => {
+            Object::Polyline(crate::model::Polyline {
+                points: points.clone(),
+                bulges: bulges.clone(),
+                widths: Vec::new(),
+                width: 0.0,
+                closed: true,
+                layer,
+                properties,
+            })
+        }
+        None => Object::Viewport(viewport.clone()),
+    }
+}
+
 pub(crate) fn p3(p: Point3) -> P3 {
     [p.x, p.y, p.z]
 }
@@ -254,7 +283,11 @@ impl<'a> Reader<'a> {
                 let corners: Vec<P3> = solid.corners.iter().map(|&p| p3(p)).collect();
                 outline(&corners)
             }
-            // A viewport's frame, on the paper.
+            // A viewport's frame, on the paper: its clipping boundary, when
+            // it is clipped, as the page draws it.
+            Object::Viewport(viewport) if viewport.clip.is_some() => {
+                self.curves(&clip_boundary(viewport))
+            }
             Object::Viewport(viewport) => {
                 let corners: Vec<P3> = viewport.frame().iter().map(|&p| p3(p)).collect();
                 outline(&corners)
@@ -565,6 +598,11 @@ impl<'a> Reader<'a> {
                 for (place, curve) in self.curves(object) {
                     out.push((Midpoint, place, curve.point(0.5)));
                 }
+            }
+            // A clipped viewport's are its boundary's, as a closed
+            // polyline's or a circle's.
+            Object::Viewport(viewport) if viewport.clip.is_some() => {
+                out.extend(self.local_snaps(&clip_boundary(viewport)));
             }
             // A viewport's frame's corners, from its lower left corner
             // anticlockwise, the middles of its sides and its middle.

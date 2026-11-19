@@ -3,15 +3,17 @@
 // and pan at once; a double tap or double click zooms in where it lands;
 // the wheel zooms where the pointer is, a trackpad's pinch (a wheel with
 // ctrlKey) faster. Every change goes through the surface, which draws it on
-// the next frame. A finger held still for HOLD_MS brings the magnifier,
-// and moves it until it lifts, which takes the snap it shows; a finger
-// pans only once it has moved SLOP pixels, so a hold is not lost to a
-// tremor.
+// the next frame. A finger held still for HOLD_MS brings the magnifier
+// where it is, and moves it until it lifts, which takes the snap it shows;
+// a pointer pans only once it has moved SLOP pixels from where it went
+// down, so a hold is not lost to a tremor nor a click to a jitter, and a
+// gesture that panned is never also a tap. A finger that moves on more than
+// STILL pixels, short of panning, is held still anew from there. A second
+// finger ends a hold, with nothing taken, and pinches.
 //
 // A finger is judged by its own events' times, when it moved, not by when
 // the page got round to them: on a slow device the moves of a finger that
-// is dragging can reach the page after the hold's timer has fired. A
-// finger that has moved more than STILL pixels is never held, and a hold
+// is dragging can reach the page after the hold's timer has fired. A hold
 // the timer began is taken back, with nothing taken, when a move comes
 // that the finger made before the hold was due.
 
@@ -97,8 +99,11 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
   const pointers = new Map<number, Point>();
   let pinchStart: PinchStart | null = null;
   let last: Point | null = null;
-  // Where the first finger went down, and when, by its event's time.
+  // Where the first pointer went down, and when, by its event's time; where
+  // it has rested since when, by its events' times; and where it is.
   let downAt: { p: Point; t: number } | null = null;
+  let still: { p: Point; t: number } | null = null;
+  let current: Point | null = null;
   let lastTap: { p: Point; t: number } | null = null;
   let multi = false;
   const moves: { t: number; dx: number; dy: number }[] = [];
@@ -107,11 +112,23 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
   let holdTimer = 0;
   let holding = false;
   let panning = false;
-  // Whether the finger has moved more than STILL since it went down.
-  let moved = false;
+  // Whether the pointer down is a finger or a pen, which may hold.
+  let mayHold = false;
   const stopHold = () => {
     if (holdTimer) clearTimeout(holdTimer);
     holdTimer = 0;
+  };
+  // The hold comes HOLD_MS after the finger came to rest, where it is then.
+  const armHold = () => {
+    stopHold();
+    if (!mayHold || !surface.held) return;
+    holdTimer = window.setTimeout(() => {
+      holdTimer = 0;
+      if (pointers.size === 1 && !panning && !multi && current) {
+        holding = true;
+        surface.held?.(current);
+      }
+    }, HOLD_MS);
   };
   // A hold that was never one: the magnifier goes.
   const takeBack = () => {
@@ -119,7 +136,7 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     surface.holdTakenBack?.();
   };
   // Whether an event, by its own time, came before the hold was due.
-  const beforeHold = (e: PointerEvent) => !!downAt && e.timeStamp - downAt.t < HOLD_MS;
+  const beforeHold = (e: PointerEvent) => !!still && e.timeStamp - still.t < HOLD_MS;
 
   const local = (e: PointerEvent | WheelEvent): Point => {
     const r = element.getBoundingClientRect();
@@ -148,20 +165,14 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     if (holding && pointers.size > 1) takeBack();
     if (pointers.size === 1) {
       last = p;
+      current = p;
       downAt = { p, t: e.timeStamp };
+      still = downAt;
       multi = false;
-      moved = false;
-      panning = e.pointerType === 'mouse';
+      panning = false;
+      mayHold = e.pointerType !== 'mouse';
       moves.length = 0;
-      if (e.pointerType !== 'mouse' && surface.held) {
-        holdTimer = window.setTimeout(() => {
-          holdTimer = 0;
-          if (pointers.size === 1 && !panning && !moved && last) {
-            holding = true;
-            surface.held?.(last);
-          }
-        }, HOLD_MS);
-      }
+      armHold();
     } else if (pointers.size === 2) {
       const [a, b] = twoFingers();
       pinchStart = { view: surface.view(), a, b };
@@ -173,20 +184,25 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     if (!pointers.has(e.pointerId)) return;
     const p = local(e);
     pointers.set(e.pointerId, p);
-    // A finger that strays past a tremor is moving: it is never held.
-    if (pointers.size === 1 && downAt && !moved && distance(p, downAt.p) > STILL) {
-      moved = true;
-      stopHold();
-      // The hold came up while this move, made before it was due, was on
-      // its way: the finger was dragging all along.
-      if (holding && beforeHold(e)) takeBack();
+    if (pointers.size === 1 && !panning && !multi) {
+      current = p;
+      // A finger that moves on past a tremor rests anew where it is.
+      if (still && distance(p, still.p) > STILL) {
+        // The hold came up while this move, made before it was due, was on
+        // its way: the finger was moving all along.
+        if (holding && beforeHold(e)) takeBack();
+        if (!holding) {
+          still = { p, t: e.timeStamp };
+          armHold();
+        }
+      }
     }
     if (holding) {
       surface.holdMoved?.(p);
       return;
     }
     if (pointers.size === 1 && last && !panning) {
-      // A finger pans once it has moved far enough; until then it may hold.
+      // A pointer pans once it has moved far enough; until then a finger may hold.
       if (!downAt || distance(p, downAt.p) < SLOP) return;
       panning = true;
       stopHold();
@@ -239,7 +255,8 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     if (!start || e.type !== 'pointerup') return;
     // Taps and flings by the events' own times, as the finger made them.
     const now = e.timeStamp;
-    const tap = !multi && distance(p, start.p) < 10 && now - start.t < 450;
+    // A gesture that panned was a drag, never also a tap.
+    const tap = !multi && !panning && distance(p, start.p) < 10 && now - start.t < 450;
     if (tap) {
       if (lastTap && now - lastTap.t < 320 && distance(p, lastTap.p) < 30) {
         lastTap = null;

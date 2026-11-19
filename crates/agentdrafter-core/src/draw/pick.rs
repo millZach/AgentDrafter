@@ -219,27 +219,47 @@ fn to_ring(p: Point2, ring: &[Point2]) -> f64 {
 /// The point of a stroke drawn on the page itself nearest `at`, within
 /// `reach` drawing units, and the place in the sheet's objects of the
 /// object that draws it: AutoCAD's nearest snap as the cursor finds it,
-/// on what the display list draws, its curves within its tolerance. Model
-/// space seen through a viewport, and fills, are not looked at. Of two as
-/// near, the one drawn later, which lies on top.
-pub fn nearest(list: &DisplayList, at: Point2, reach: f64) -> Option<(usize, Point2)> {
+/// on what the display list draws, its curves within its tolerance. Of the
+/// fills, only the edges of those `edges` names by their places among the
+/// items, in order, are looked at, as the display list's `edges` gives
+/// them: a
+/// polyline's with width, a solid's and a donut's. Model space seen
+/// through a viewport is not. Of two as near, the one drawn later, which
+/// lies on top.
+pub fn nearest(
+    list: &DisplayList,
+    edges: &[usize],
+    at: Point2,
+    reach: f64,
+) -> Option<(usize, Point2)> {
     let mut best: Option<(f64, usize, Point2)> = None;
-    for item in list.items.iter().filter(|item| item.viewport.is_none()) {
-        let Shape::Stroke { runs, .. } = &item.shape else {
+    for (k, item) in list.items.iter().enumerate() {
+        if item.viewport.is_some() {
             continue;
+        }
+        let pieces: Vec<(Point2, Point2)> = match &item.shape {
+            Shape::Stroke { runs, .. } => runs
+                .iter()
+                .flat_map(|run| match run.as_slice() {
+                    [] => Vec::new(),
+                    [dot] => vec![(*dot, *dot)],
+                    points => points.windows(2).map(|w| (w[0], w[1])).collect(),
+                })
+                .collect(),
+            // A contour is closed: its last point runs back to its first.
+            Shape::Fill { contours, .. } if edges.binary_search(&k).is_ok() => contours
+                .iter()
+                .flat_map(|ring| {
+                    (0..ring.len()).map(move |i| (ring[i], ring[(i + 1) % ring.len()]))
+                })
+                .collect(),
+            Shape::Fill { .. } => Vec::new(),
         };
-        for run in runs {
-            let pieces: Vec<(Point2, Point2)> = match run.as_slice() {
-                [] => Vec::new(),
-                [dot] => vec![(*dot, *dot)],
-                points => points.windows(2).map(|w| (w[0], w[1])).collect(),
-            };
-            for (a, b) in pieces {
-                let p = foot(at, a, b);
-                let d = distance(at, p);
-                if d <= reach && best.is_none_or(|(e, _, _)| d <= e) {
-                    best = Some((d, item.object, p));
-                }
+        for (a, b) in pieces {
+            let p = foot(at, a, b);
+            let d = distance(at, p);
+            if d <= reach && best.is_none_or(|(e, _, _)| d <= e) {
+                best = Some((d, item.object, p));
             }
         }
     }
@@ -308,11 +328,33 @@ mod tests {
             ],
             ..DisplayList::default()
         };
-        assert_eq!(nearest(&list, [4.0, 0.5], 1.0), Some((0, [4.0, 0.0])));
-        assert_eq!(nearest(&list, [4.0, 1.6], 1.0), Some((1, [4.0, 2.0])));
+        assert_eq!(nearest(&list, &[], [4.0, 0.5], 1.0), Some((0, [4.0, 0.0])));
+        assert_eq!(nearest(&list, &[], [4.0, 1.6], 1.0), Some((1, [4.0, 2.0])));
         // Past the end, the end; out of reach, none.
-        assert_eq!(nearest(&list, [11.0, 0.0], 2.0), Some((0, [10.0, 0.0])));
-        assert_eq!(nearest(&list, [4.0, 5.0], 1.0), None);
+        assert_eq!(
+            nearest(&list, &[], [11.0, 0.0], 2.0),
+            Some((0, [10.0, 0.0]))
+        );
+        assert_eq!(nearest(&list, &[], [4.0, 5.0], 1.0), None);
+    }
+
+    #[test]
+    fn the_nearest_point_is_on_the_edge_of_a_fill_a_line_draws() {
+        // A polyline with width draws only a fill: its edge is found where
+        // the display list's `edges` names it, and a fill it does not name,
+        // text's or a hatch's, is passed over.
+        let list = DisplayList {
+            items: vec![square(0, [0.0, 0.0], 2.0), square(1, [10.0, 0.0], 2.0)],
+            ..DisplayList::default()
+        };
+        assert_eq!(nearest(&list, &[0], [1.0, 2.5], 1.0), Some((0, [1.0, 2.0])));
+        // The closing edge, from the last point back to the first.
+        assert_eq!(
+            nearest(&list, &[0], [-0.5, 1.0], 1.0),
+            Some((0, [0.0, 1.0]))
+        );
+        assert_eq!(nearest(&list, &[0], [11.0, 2.5], 1.0), None);
+        assert_eq!(nearest(&list, &[], [1.0, 2.5], 1.0), None);
     }
 
     use super::super::{Color, Item};

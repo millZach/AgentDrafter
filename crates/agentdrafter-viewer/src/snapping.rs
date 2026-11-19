@@ -57,13 +57,16 @@ fn rank(kind: SnapKind) -> usize {
 }
 
 /// The snaps of the kinds `running` holds (bits by [`bit`]) within `reach`
-/// drawing units of `at`, in the order the cursor takes them: nearest
-/// first by steps of `tie`, and within a step, the higher in [`PRIORITY`]. One point found twice as one kind is offered
-/// once. With Nearest running and nothing else in reach, the nearest point
-/// of what `list` draws.
+/// drawing units of `at`, in the order the cursor takes them: those within
+/// `tie` of the nearest first, the higher in [`PRIORITY`] first among them,
+/// then the rest, nearest first. One point found twice as one kind, the
+/// same in all three of its coordinates, is offered once. With Nearest
+/// running and nothing else in reach, the nearest point of what `list`
+/// draws, the edges of the fills `edges` names among it.
 pub fn candidates(
     snaps: &[DisplaySnap],
     list: &DisplayList,
+    edges: &[usize],
     running: u32,
     at: [f64; 2],
     reach: f64,
@@ -85,8 +88,13 @@ pub fn candidates(
         if distance > reach {
             continue;
         }
+        // Two points one above the other are two: Tab reaches each.
         let same = |c: &Candidate| {
-            c.snap == s.snap && (c.at[0] - s.at.x).hypot(c.at[1] - s.at.y) <= reach * 1e-9
+            c.snap == s.snap
+                && (c.at[0] - s.at.x)
+                    .hypot(c.at[1] - s.at.y)
+                    .hypot(c.at[2] - s.at.z)
+                    <= reach * 1e-9
         };
         if found.iter().any(same) {
             continue;
@@ -101,7 +109,7 @@ pub fn candidates(
         });
     }
     if found.is_empty() && running & bit(SnapKind::Nearest) != 0 {
-        if let Some((object, p)) = nearest(list, at, reach) {
+        if let Some((object, p)) = nearest(list, edges, at, reach) {
             found.push(Candidate {
                 snap: SnapKind::Nearest,
                 object,
@@ -112,20 +120,25 @@ pub fn candidates(
             });
         }
     }
-    // Distances in steps of `tie`: within a step, the kind decides, then
-    // the distance; a total order, so the sort is sound.
-    let step = |d: f64| {
-        if tie > 0.0 {
-            (d / tie).floor() as i64
-        } else {
-            0
-        }
-    };
+    // Those within `tie` of the nearest are about as near it: among them
+    // the kind decides, then the distance; the rest follow by distance.
+    let nearest = found
+        .iter()
+        .map(|c| c.distance)
+        .fold(f64::INFINITY, f64::min);
+    let close = |c: &Candidate| c.distance <= nearest + tie.max(0.0);
     found.sort_by(|a, b| {
-        step(a.distance)
-            .cmp(&step(b.distance))
-            .then(rank(a.snap).cmp(&rank(b.snap)))
+        close(b)
+            .cmp(&close(a))
+            .then_with(|| {
+                if close(a) {
+                    rank(a.snap).cmp(&rank(b.snap))
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
             .then(a.distance.total_cmp(&b.distance))
+            .then(rank(a.snap).cmp(&rank(b.snap)))
     });
     found
 }
@@ -158,6 +171,7 @@ mod tests {
         let found = candidates(
             &snaps,
             &DisplayList::default(),
+            &[],
             RUNNING,
             [0.0, 0.0],
             2.0,
@@ -178,6 +192,7 @@ mod tests {
         let found = candidates(
             &snaps,
             &DisplayList::default(),
+            &[],
             RUNNING,
             [0.0, 0.0],
             2.0,
@@ -195,6 +210,49 @@ mod tests {
     }
 
     #[test]
+    fn the_tie_is_measured_from_the_nearest_snap() {
+        // A midpoint 1.9 from the cursor and an endpoint 2.1, 2 apart at
+        // most counting as about as near: the endpoint, higher in the
+        // order, first, though steps of 2 would part them.
+        let snaps = [
+            snap(0, SnapKind::Midpoint, 1.9, 0.0),
+            snap(1, SnapKind::Endpoint, 0.0, 2.1),
+            snap(2, SnapKind::Center, 0.0, -4.5),
+            snap(3, SnapKind::Endpoint, -5.0, 0.0),
+        ];
+        let found = candidates(
+            &snaps,
+            &DisplayList::default(),
+            &[],
+            RUNNING,
+            [0.0, 0.0],
+            10.0,
+            2.0,
+        );
+        let order: Vec<usize> = found.iter().map(|c| c.object).collect();
+        // Then the rest by distance, whatever their kinds.
+        assert_eq!(order, [1, 0, 2, 3]);
+    }
+
+    #[test]
+    fn two_points_one_above_the_other_are_two() {
+        let mut high = snap(1, SnapKind::Endpoint, 0.5, 0.0);
+        high.at.z = 10.0;
+        let snaps = [snap(0, SnapKind::Endpoint, 0.5, 0.0), high];
+        let found = candidates(
+            &snaps,
+            &DisplayList::default(),
+            &[],
+            RUNNING,
+            [0.0, 0.0],
+            2.0,
+            0.01,
+        );
+        let at: Vec<[f64; 3]> = found.iter().map(|c| c.at).collect();
+        assert_eq!(at, [[0.5, 0.0, 0.0], [0.5, 0.0, 10.0]]);
+    }
+
+    #[test]
     fn only_the_running_snaps_and_one_point_once() {
         let snaps = [
             snap(0, SnapKind::Endpoint, 0.5, 0.0),
@@ -206,6 +264,7 @@ mod tests {
         let found = candidates(
             &snaps,
             &DisplayList::default(),
+            &[],
             only_ends,
             [0.0, 0.0],
             2.0,
@@ -214,7 +273,16 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].snap, found[0].object), (SnapKind::Endpoint, 0));
         // Snapping off: nothing.
-        assert!(candidates(&snaps, &DisplayList::default(), 0, [0.0, 0.0], 2.0, 0.01).is_empty());
+        assert!(candidates(
+            &snaps,
+            &DisplayList::default(),
+            &[],
+            0,
+            [0.0, 0.0],
+            2.0,
+            0.01
+        )
+        .is_empty());
     }
 
     #[test]
@@ -237,14 +305,14 @@ mod tests {
             ..DisplayList::default()
         };
         let running = bit(SnapKind::Endpoint) | bit(SnapKind::Nearest);
-        let found = candidates(&[], &list, running, [3.0, 0.4], 1.0, 0.01);
+        let found = candidates(&[], &list, &[], running, [3.0, 0.4], 1.0, 0.01);
         assert_eq!(found.len(), 1);
         assert_eq!(
             (found[0].snap, found[0].object, found[0].at),
             (SnapKind::Nearest, 4, [3.0, 0.0, 0.0])
         );
         let end = [snap(4, SnapKind::Endpoint, 3.5, 0.0)];
-        let found = candidates(&end, &list, running, [3.0, 0.4], 1.0, 0.01);
+        let found = candidates(&end, &list, &[], running, [3.0, 0.4], 1.0, 0.01);
         assert_eq!(
             found.iter().map(|c| c.snap).collect::<Vec<_>>(),
             [SnapKind::Endpoint]
