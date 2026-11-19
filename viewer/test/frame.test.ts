@@ -2,8 +2,20 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  CORE_ORDER,
   coordinates,
+  DEFAULT_RUNNING,
   freeBeside,
+  readSnapSettings,
+  runningMask,
+  SNAPS,
+  SNAPS_KEY,
+  snappedPoint,
+  snapTag,
+  snapWords,
+  takenOf,
+  writeSnapSettings,
+  type Hovered,
   newlyHidden,
   liveLine,
   nameOf,
@@ -20,7 +32,7 @@ import {
   type PromptState,
 } from '../src/frame.ts';
 
-const words = (parts: Part[]) => parts.map((p) => ('text' in p ? p.text : `<${p.option}>`)).join('');
+const words = (parts: Part[]) => parts.map((p) => ('text' in p ? p.text : 'snap' in p ? p.snap : `<${p.option}>`)).join('');
 const none: PromptState = { soon: null, at: null, cannot: false, reaching: false, selected: null };
 
 test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move and Erase in Modify, with AutoCAD aliases', () => {
@@ -35,7 +47,8 @@ test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move and Erase 
 });
 
 test('the command bar prompts to select, and names what is selected with Clear', () => {
-  assert.equal(words(promptFor(none).parts), 'Select an object to see its properties');
+  assert.equal(words(promptFor(none).parts), 'Select an object, or click a snap to read its point');
+  assert.equal(words(promptFor({ ...none, touch: true }).parts), 'Tap an object to see it, or touch and hold to read a point');
   const selected = promptFor({ ...none, selected: { id: 'DP-LD-101/device', name: 'FT-101', type: 'insert', block: 'TRANSMITTER' } });
   assert.equal(selected.command, null);
   assert.equal(words(selected.parts), 'FT-101 selected [ <Clear> ]');
@@ -79,6 +92,7 @@ test('F3, F7 and F8 turn Object snap, Grid and Ortho, as in AutoCAD', () => {
   assert.equal(toggleFor('F8'), 'ortho');
   assert.equal(toggleFor('F9'), null);
   assert.equal(toggledWords('grid', false), 'Grid off');
+  assert.equal(toggledWords('osnap', true), 'Object snap on');
   assert.equal(toggledWords('ortho', true), 'Ortho on: it acts once drawing tools come');
 });
 
@@ -99,8 +113,8 @@ test('units, the paper and the cursor in words', () => {
   assert.equal(paperWords({ ...sheet, paper_declared: false, paper_name: null, paper: [-5, -5, 105, 55] }), 'Extents, inches');
   assert.equal(paperWords({ paper_declared: false, paper_name: null, paper: [0, 0, 1, 1], units: null }), 'Extents');
   assert.equal(paperWords({ ...sheet, units: null }), 'ANSI B landscape');
-  assert.equal(coordinates(1.72, 6.5, 'in'), '1.720, 6.500 in');
-  assert.equal(coordinates(-3, 0, null), '-3.000, 0.000');
+  assert.equal(coordinates(1.72, 6.5, 'in'), '1.7200, 6.5000 in');
+  assert.equal(coordinates(-3, 0, null), '-3.0000, 0.0000');
 });
 
 test('an object is called by its name, its ID without the sheet, or its type', () => {
@@ -144,4 +158,66 @@ test('quick properties sit to the right of the object, or to its left, kept in t
   // Wider than the room either side: kept inside it.
   const [x] = placeBeside([10, 10, 990, 50], card, room);
   assert.ok(x >= 8 && x + 268 <= 992, `kept inside: ${x}`);
+});
+
+const plant = [
+  { id: 'DP-LD-101/device', name: 'FT-101', type: 'insert', block: 'TRANSMITTER' },
+  { id: 'DP-LD-101/field-wire-1', type: 'line' },
+  { id: 'DP-LD-101/objects[7]', type: 'circle' },
+];
+const endpoint: Hovered = { snap: 'endpoint', object: 0, which: 'objects[3].from', with: null, at: [2.3, 6.5, 0], place: 0, count: 1 };
+
+test("the running snaps are the renderer's bits, by the core's order, none while Object snap is off", () => {
+  assert.equal(CORE_ORDER[0], 'endpoint');
+  assert.equal(CORE_ORDER[10], 'nearest');
+  // Endpoint, Midpoint, Centre and Intersection: bits 0, 1, 2 and 6.
+  assert.equal(runningMask(true, DEFAULT_RUNNING), 0b100_0111);
+  assert.equal(runningMask(false, DEFAULT_RUNNING), 0);
+  // Perpendicular and Tangent act only inside a tool: no bit yet.
+  assert.equal(runningMask(true, ['perpendicular', 'tangent']), 0);
+  assert.equal(runningMask(true, ['nearest']), 1 << 10);
+  // The menu lists ten, the last two inside a drawing tool.
+  assert.deepEqual(SNAPS.filter((x) => x.tool).map((x) => x.k), ['perpendicular', 'tangent']);
+});
+
+test('Object snap and the running snaps are remembered, the defaults when nothing is kept or it cannot be read', () => {
+  const kept = new Map<string, string>();
+  const store = { getItem: (k: string) => kept.get(k) ?? null, setItem: (k: string, v: string) => void kept.set(k, v) };
+  assert.deepEqual(readSnapSettings(store), { on: true, running: ['endpoint', 'midpoint', 'center', 'intersection'] });
+  writeSnapSettings(store, { on: false, running: ['quadrant', 'node'] });
+  assert.deepEqual(JSON.parse(kept.get(SNAPS_KEY) as string), { on: false, running: ['quadrant', 'node'] });
+  assert.deepEqual(readSnapSettings(store), { on: false, running: ['quadrant', 'node'] });
+  // A snap the page does not know is dropped; text that is not JSON gives the defaults.
+  kept.set(SNAPS_KEY, JSON.stringify({ on: true, running: ['endpoint', 'extension'] }));
+  assert.deepEqual(readSnapSettings(store).running, ['endpoint']);
+  kept.set(SNAPS_KEY, 'not json');
+  assert.deepEqual(readSnapSettings(store).running, [...DEFAULT_RUNNING]);
+  assert.deepEqual(readSnapSettings(null).on, true);
+});
+
+test("the tag names the snap and its object, both of an intersection's, and Tab when there are more", () => {
+  assert.deepEqual(snapTag(endpoint, plant), { main: 'Endpoint', sub: 'FT-101' });
+  const crossing: Hovered = { snap: 'intersection', object: 1, which: null, with: 2, at: [1, 1, 0], place: 1, count: 3 };
+  // An object with no name of its own and a numbered place is called by its type.
+  assert.deepEqual(snapTag(crossing, plant), { main: 'Intersection', sub: 'field-wire-1 × circle  (2 of 3, Tab)' });
+  assert.equal(snapWords(crossing, plant), 'Intersection of field-wire-1 and circle');
+  // Under a finger, no Tab to step with.
+  assert.deepEqual(snapTag(crossing, plant, false), { main: 'Intersection', sub: 'field-wire-1 × circle' });
+});
+
+test('a snap taken is read out, and copied as the snapped point a change set takes', () => {
+  assert.deepEqual(snappedPoint(endpoint, plant), { snap: { id: 'DP-LD-101/device', snap: 'endpoint', which: 'objects[3].from' } });
+  const crossing: Hovered = { snap: 'intersection', object: 1, which: '0', with: 2, at: [1, 1, 0], place: 0, count: 1 };
+  assert.deepEqual(snappedPoint(crossing, plant), {
+    snap: { id: 'DP-LD-101/field-wire-1', snap: 'intersection', with: { id: 'DP-LD-101/objects[7]' }, which: '0' },
+  });
+  // The nearest point is taken only from another snap; an object with no ID has no snapped point.
+  assert.equal(snappedPoint({ ...endpoint, snap: 'nearest', which: null }, plant), null);
+  assert.equal(snappedPoint(endpoint, [{ type: 'line' }]), null);
+  const taken = takenOf(endpoint, plant, 'in');
+  assert.deepEqual(taken, { label: 'Endpoint', rest: ' of FT-101: 2.3000, 6.5000 in', copy: true });
+  const said = promptFor({ ...none, taken, selected: plant[0] ?? null });
+  assert.equal(words(said.parts), 'Endpoint of FT-101: 2.3000, 6.5000 in [ <Copy as snapped point> <Clear> ]');
+  // Without a snapped point, only Clear.
+  assert.equal(words(promptFor({ ...none, taken: { ...taken, copy: false } }).parts), 'Endpoint of FT-101: 2.3000, 6.5000 in [ <Clear> ]');
 });

@@ -43,12 +43,12 @@ export const PANELS: { title: string; tools: Tool[] }[] = [
 /** What a tool still to come says when it is tapped. */
 export const SOON = 'Coming soon. For now an agent draws, through change sets.';
 
-/** The status bar's toggles: Grid draws; Object snap and Ortho hold their state until drawing tools come. */
+/** The status bar's toggles: Grid draws, Object snap catches snaps; Ortho holds its state until drawing tools come. */
 export type Toggle = 'grid' | 'osnap' | 'ortho';
 
 export const TOGGLES: { key: Toggle; label: string; fkey: string; title: string }[] = [
   { key: 'grid', label: 'Grid', fkey: 'F7', title: 'The grid behind the drawing' },
-  { key: 'osnap', label: 'Object snap', fkey: 'F3', title: 'When drawing tools come, the cursor catches ends, middles and centres' },
+  { key: 'osnap', label: 'Object snap', fkey: 'F3', title: 'The cursor catches ends, middles, centres and crossings' },
   { key: 'ortho', label: 'Ortho', fkey: 'F8', title: 'When drawing tools come, lines stay level or upright' },
 ];
 
@@ -60,7 +60,7 @@ export function toggleFor(key: string): Toggle | null {
 /** What turning a toggle says in the command bar's history. */
 export function toggledWords(toggle: Toggle, on: boolean): string {
   const t = TOGGLES.find((x) => x.key === toggle) as (typeof TOGGLES)[number];
-  return `${t.label} ${on ? 'on' : 'off'}${toggle === 'grid' ? '' : ': it acts once drawing tools come'}`;
+  return `${t.label} ${on ? 'on' : 'off'}${toggle === 'ortho' ? ': it acts once drawing tools come' : ''}`;
 }
 
 /** What the connection's dot shows: the stream open, reaching the server, the set as it was, or nothing to watch. */
@@ -131,7 +131,7 @@ export function paperWords(s: PaperOf): string {
 /** The cursor's place on the drawing, as the status bar shows it. */
 export function coordinates(x: number, y: number, units: string | null | undefined): string {
   const { short } = unitWords(units);
-  return `${x.toFixed(3)}, ${y.toFixed(3)}${short ? ` ${short}` : ''}`;
+  return `${x.toFixed(4)}, ${y.toFixed(4)}${short ? ` ${short}` : ''}`;
 }
 
 /** An object as the command bar and quick properties call it. */
@@ -153,9 +153,9 @@ export function typeWords(o: Named): string {
 }
 
 /** A part of the command bar's line: words, or an option to click. */
-export type Part = { text: string } | { option: string; act: Act };
+export type Part = { text: string } | { option: string; act: Act } | { snap: string };
 
-export type Act = 'clear' | 'older' | 'newer' | 'live' | 'ok';
+export type Act = 'clear' | 'older' | 'newer' | 'live' | 'ok' | 'copy';
 
 /** What the command bar prompts: a command's name, when one is named, and its line. */
 export interface Prompt {
@@ -174,6 +174,20 @@ export interface PromptState {
   reaching: boolean;
   /** The selected object, if any. */
   selected: Named | null;
+  /** A snap just taken with no tool running: its point read out. */
+  taken?: Taken | null;
+  /** A phone's words: a finger taps and holds where a mouse clicks. */
+  touch?: boolean;
+}
+
+/** A snap taken with no tool running, as the command bar reads it out. */
+export interface Taken {
+  /** The snap's name, such as `Endpoint`. */
+  label: string;
+  /** The rest of the read-out: ` of FT-101: 2.3000, 6.5000 in`. */
+  rest: string;
+  /** Whether it can be copied as a snapped point. */
+  copy: boolean;
 }
 
 const options = (...acts: [string, Act][]): Part[] => [
@@ -196,8 +210,226 @@ export function promptFor(s: PromptState): Prompt {
   if (s.at !== null && s.cannot) return { command: null, parts: [{ text: `Entry ${s.at} cannot be shown ` }, ...stepping] };
   if (s.at !== null) return { command: null, parts: [{ text: `Showing entry ${s.at} as it was, read-only ` }, ...stepping] };
   if (s.reaching) return { command: null, parts: [{ text: 'Reaching the server… changes show when it is back' }] };
+  if (s.taken) {
+    const acts: [string, Act][] = s.taken.copy ? [['Copy as snapped point', 'copy'], ['Clear', 'clear']] : [['Clear', 'clear']];
+    return { command: null, parts: [{ snap: s.taken.label }, { text: `${s.taken.rest} ` }, ...options(...acts)] };
+  }
   if (s.selected) return { command: null, parts: [{ text: `${nameOf(s.selected)} selected ` }, ...options(['Clear', 'clear'])] };
-  return { command: null, parts: [{ text: 'Select an object to see its properties' }] };
+  return {
+    command: null,
+    parts: [
+      {
+        text: s.touch
+          ? 'Tap an object to see it, or touch and hold to read a point'
+          : 'Select an object, or click a snap to read its point',
+      },
+    ],
+  };
+}
+
+/** One of AutoCAD's object snaps, as the core names it. */
+export type SnapKind =
+  | 'endpoint'
+  | 'midpoint'
+  | 'center'
+  | 'quadrant'
+  | 'insertion'
+  | 'node'
+  | 'intersection'
+  | 'apparent_intersection'
+  | 'perpendicular'
+  | 'tangent'
+  | 'nearest';
+
+/** The core's order of the snaps (`SnapKind::ALL`), which gives each its bit for the renderer. */
+export const CORE_ORDER: readonly SnapKind[] = [
+  'endpoint',
+  'midpoint',
+  'center',
+  'quadrant',
+  'insertion',
+  'node',
+  'intersection',
+  'apparent_intersection',
+  'perpendicular',
+  'tangent',
+  'nearest',
+];
+
+/** A snap as the Object snap menu lists it: its name, a line on what it means, and its marker. */
+export interface SnapEntry {
+  k: SnapKind;
+  label: string;
+  hint: string;
+  /** Acts only inside a drawing tool, from the last point: build 4. */
+  tool?: boolean;
+  /** AutoCAD's AutoSnap marker, an SVG path round 0,0 of half size `s`, y down. */
+  path(s: number): string;
+}
+
+const circlePath = (r: number, cx = 0, cy = 0) =>
+  `M${cx + r} ${cy}A${r} ${r} 0 1 0 ${cx - r} ${cy}A${r} ${r} 0 1 0 ${cx + r} ${cy}Z`;
+
+/** The snaps the menu lists, in its order, as the prototype Zach picked (#151) lists them. */
+export const SNAPS: readonly SnapEntry[] = [
+  { k: 'endpoint', label: 'Endpoint', hint: 'The ends of lines, arcs and polyline corners', path: (s) => `M${-s} ${-s}H${s}V${s}H${-s}Z` },
+  { k: 'midpoint', label: 'Midpoint', hint: 'The middle of a line, an arc or a polyline side', path: (s) => `M0 ${-s}L${s} ${s * 0.8}H${-s}Z` },
+  { k: 'center', label: 'Centre', hint: 'The centre of a circle or an arc', path: (s) => circlePath(s) },
+  { k: 'quadrant', label: 'Quadrant', hint: 'A circle’s 0°, 90°, 180° and 270° points', path: (s) => `M0 ${-s}L${s} 0L0 ${s}L${-s} 0Z` },
+  { k: 'intersection', label: 'Intersection', hint: 'Where two objects cross', path: (s) => `M${-s} ${-s}L${s} ${s}M${s} ${-s}L${-s} ${s}` },
+  {
+    k: 'insertion',
+    label: 'Insertion',
+    hint: 'Where a block or a text is placed',
+    path: (s) => `M${-s} ${-s * 0.2}H${s * 0.2}V${s}H${-s}ZM${-s * 0.2} ${-s * 0.2}V${-s}H${s}V${s * 0.2}H${s * 0.2}`,
+  },
+  {
+    k: 'node',
+    label: 'Node',
+    hint: 'Where a text’s baseline starts, and points',
+    path: (s) => `${circlePath(s)}M${-s * 0.7} ${-s * 0.7}L${s * 0.7} ${s * 0.7}M${s * 0.7} ${-s * 0.7}L${-s * 0.7} ${s * 0.7}`,
+  },
+  { k: 'nearest', label: 'Nearest', hint: 'The nearest point on any object', path: (s) => `M${-s} ${-s}H${s}L${-s} ${s}H${s}Z` },
+  { k: 'perpendicular', label: 'Perpendicular', hint: 'Square to an object, from the last point', tool: true, path: (s) => `M${-s} ${-s}V${s}H${s}M${-s} 0H0V${s}` },
+  { k: 'tangent', label: 'Tangent', hint: 'Touching a circle, from the last point', tool: true, path: (s) => `${circlePath(s * 0.7, 0, s * 0.3)}M${-s} ${-s * 0.4}H${s}` },
+];
+
+/** The snap's name, as the tag, the menu and the read-out say it. */
+export function snapLabel(k: SnapKind): string {
+  return SNAPS.find((x) => x.k === k)?.label ?? 'Apparent intersection';
+}
+
+/**
+ * The running snaps by default: AutoCAD's (Endpoint, Centre, Intersection
+ * and Extension, OSMODE 4133), less Extension, which the core has not got,
+ * and with Midpoint, which a beginner reaches for first.
+ */
+export const DEFAULT_RUNNING: readonly SnapKind[] = ['endpoint', 'midpoint', 'center', 'intersection'];
+
+/**
+ * The renderer's bits for the running snaps: bit `i` for the `i`th of the
+ * core's order; none while Object snap is off. Perpendicular and Tangent
+ * act only in a drawing tool, from its last point, so they have no bit yet.
+ */
+export function runningMask(on: boolean, running: Iterable<SnapKind>): number {
+  if (!on) return 0;
+  let mask = 0;
+  for (const k of running) {
+    if (k === 'perpendicular' || k === 'tangent') continue;
+    const i = CORE_ORDER.indexOf(k);
+    if (i >= 0) mask |= 1 << i;
+  }
+  return mask;
+}
+
+/** Object snap (F3) and the running snaps, as the page remembers them. */
+export interface SnapSettings {
+  on: boolean;
+  running: SnapKind[];
+}
+
+/** Where the browser keeps them, for this page, across visits. */
+export const SNAPS_KEY = 'agentdrafter-object-snaps';
+
+/** Somewhere to keep text, as a browser's localStorage is. */
+export interface Keeps {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+/** The snap settings kept, or the defaults when there are none, or they cannot be read. */
+export function readSnapSettings(keeps: Keeps | null): SnapSettings {
+  const defaults = { on: true, running: [...DEFAULT_RUNNING] };
+  try {
+    const text = keeps?.getItem(SNAPS_KEY);
+    if (!text) return defaults;
+    const kept = JSON.parse(text) as Partial<SnapSettings>;
+    const running = Array.isArray(kept.running) ? kept.running.filter((k): k is SnapKind => SNAPS.some((x) => x.k === k)) : null;
+    return { on: typeof kept.on === 'boolean' ? kept.on : true, running: running ?? defaults.running };
+  } catch {
+    return defaults;
+  }
+}
+
+/** Keeps the snap settings, if the browser lets it. */
+export function writeSnapSettings(keeps: Keeps | null, settings: SnapSettings): void {
+  try {
+    keeps?.setItem(SNAPS_KEY, JSON.stringify(settings));
+  } catch {
+    // A browser that keeps nothing, such as a private window: the settings last the visit.
+  }
+}
+
+/** The snap the cursor holds, as the renderer says it (`Viewer.hovered`). */
+export interface Hovered {
+  snap: SnapKind;
+  /** The object's place in the sheet's objects. */
+  object: number;
+  which: string | null;
+  /** For an intersection, the other object's place. */
+  with: number | null;
+  at: [number, number, number];
+  /** Its place among the snaps in reach, and how many there are. */
+  place: number;
+  count: number;
+}
+
+/** An object as the snap's tag names it: its name, its ID's own part, or its block or type. */
+function objectWords(o: Named | undefined): string {
+  if (!o) return '?';
+  if (o.name) return o.name;
+  const own = o.id ? o.id.split('/').slice(1).join('/') : '';
+  if (own && !/^objects\[/.test(own)) return own;
+  return o.block ?? o.type;
+}
+
+/**
+ * What the tag beside the marker says: the snap, and its object, or both of
+ * an intersection's; with `tab`, as with a keyboard, which of the snaps in
+ * reach it is, for Tab to step through.
+ */
+export function snapTag(h: Hovered, objects: readonly Named[], tab = true): { main: string; sub: string } {
+  const of = h.with !== null ? `${objectWords(objects[h.object])} × ${objectWords(objects[h.with])}` : objectWords(objects[h.object]);
+  return { main: snapLabel(h.snap), sub: tab && h.count > 1 ? `${of}  (${h.place + 1} of ${h.count}, Tab)` : of };
+}
+
+/** The snap in words: `Endpoint of FT-101`, `Intersection of C-101 and 101+`. */
+export function snapWords(h: Hovered, objects: readonly Named[]): string {
+  const label = snapLabel(h.snap);
+  return h.with !== null
+    ? `${label} of ${objectWords(objects[h.object])} and ${objectWords(objects[h.with])}`
+    : `${label} of ${objectWords(objects[h.object])}`;
+}
+
+/**
+ * The snapped point a change set's operation takes for it
+ * (docs/change-sets.md, Snapped points): the object by its ID, the snap,
+ * `which` of its points, and an intersection's other object. None for the
+ * nearest point, which a snapped point takes only from another snap, and
+ * for an object with no ID, such as one of a DWG.
+ */
+export function snappedPoint(h: Hovered, objects: readonly Named[]): { snap: Record<string, unknown> } | null {
+  const id = objects[h.object]?.id;
+  if (!id || h.snap === 'nearest' || h.snap === 'perpendicular' || h.snap === 'tangent') return null;
+  const snap: Record<string, unknown> = { id, snap: h.snap };
+  if (h.with !== null) {
+    const other = objects[h.with]?.id;
+    if (!other) return null;
+    snap.with = { id: other };
+  }
+  if (h.which) snap.which = h.which;
+  return { snap };
+}
+
+/** A snap taken with no tool running, read out as AutoCAD's ID command reads a point. */
+export function takenOf(h: Hovered, objects: readonly Named[], units: string | null | undefined): Taken {
+  const words = snapWords(h, objects);
+  const label = snapLabel(h.snap);
+  return {
+    label,
+    rest: `${words.slice(label.length)}: ${coordinates(h.at[0], h.at[1], units)}`,
+    copy: snappedPoint(h, objects) !== null,
+  };
 }
 
 /** A box on the screen, in CSS pixels: left, top, right, bottom. */

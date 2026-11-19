@@ -11,7 +11,10 @@
 //! its ID, name, type and layer, and an insert's block and attributes, so
 //! the page can show the object the reviewer picks from what the core's
 //! pick finds in the display list. A drawing set can be drawn as it was at
-//! an entry of its journal, rebuilt in memory from the undo states.
+//! an entry of its journal, rebuilt in memory from the undo states. With
+//! `snaps`, the reply also gives each object's object snaps, so the viewer
+//! finds the snap nearest the cursor with no round trip
+//! ([`crate::display_snaps`]).
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +24,7 @@ use std::sync::Arc;
 
 use crate::change::FilesAsOf;
 use crate::description::{read_sheet_record, SavedSet};
+use crate::display_snaps::{edge_fills, snaps_of, DisplaySnap};
 use crate::draw::{self, Bounds, DisplayList, HatchCutShort};
 use crate::error::{Error, ErrorCode};
 use crate::model::{Attribute, Object, Paper, Sheet};
@@ -58,6 +62,11 @@ pub struct DisplayListRequest {
     /// any case. Without it, the sheet's first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
+    /// Give each object's object snaps with the display list: every point
+    /// its own snaps find, and where it crosses another. Without it, none,
+    /// and the reply is as it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub snaps: bool,
 }
 
 impl DisplayListRequest {
@@ -69,6 +78,7 @@ impl DisplayListRequest {
             tolerance: None,
             entry: None,
             layout: None,
+            snaps: false,
         }
     }
 }
@@ -151,6 +161,19 @@ pub struct DisplayListReport {
     /// Each of the sheet's objects, by its place, which each item of the
     /// display list names as its `object`.
     pub objects: Vec<SheetObject>,
+    /// With `snaps`, every point the object snaps find on the objects the
+    /// page draws itself, each with its object by its place, the snap,
+    /// `which` of the object's points, and for an intersection the other
+    /// object by its place, as `query snap` names them. Left out without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snaps: Option<Vec<DisplaySnap>>,
+    /// With `snaps`, the places among the display list's items of the fills
+    /// the nearest snap finds a point on, at their edges, as it does along
+    /// a stroke: those a polyline with width, a solid and a donut draw on
+    /// the page itself, and no text's, hatch's or arrowhead's. Left out
+    /// without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edges: Option<Vec<usize>>,
     /// What the sheet draws.
     pub display_list: DisplayList,
 }
@@ -245,6 +268,8 @@ pub fn display_list_with(
     let layout = (!layouts.is_empty())
         .then(|| sheet.layout.as_ref().map(|l| l.name.clone()))
         .flatten();
+    let snaps = request.snaps.then(|| snaps_of(sheet, &fonts, &list));
+    let edges = request.snaps.then(|| edge_fills(sheet, &list));
     Ok(DisplayListReport {
         source: source.display().to_string(),
         name,
@@ -262,6 +287,8 @@ pub fn display_list_with(
         hatches_cut_short: list.hatches_cut_short.clone(),
         entry: request.entry,
         objects: drawn.objects.clone(),
+        snaps,
+        edges,
         display_list: list,
     })
 }

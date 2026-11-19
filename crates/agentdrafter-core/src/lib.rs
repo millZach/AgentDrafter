@@ -71,6 +71,7 @@ mod check;
 mod commands;
 mod description;
 mod display_list;
+mod display_snaps;
 mod draw;
 mod dwg;
 mod error;
@@ -121,9 +122,10 @@ pub use display_list::{
     display_list, display_list_with, DisplayListReport, DisplayListRequest, SheetObject,
     DISPLAY_LIST_TOLERANCE,
 };
+pub use display_snaps::DisplaySnap;
 pub use draw::{
-    object_bounds, pick, Bounds, Color, DisplayList, FillRule, Item, PageFrom, Point2, Shape,
-    TextRun,
+    nearest, object_bounds, outlines, pick, Bounds, Color, DisplayList, FillRule, Item, Outline,
+    PageFrom, Point2, Shape, TextRun,
 };
 pub use error::{Error, ErrorCode};
 pub use geometry::measure::{Box3, Measures};

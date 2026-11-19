@@ -216,6 +216,157 @@ fn to_ring(p: Point2, ring: &[Point2]) -> f64 {
     nearest
 }
 
+/// The outline of a fill whose edges the nearest snap finds a point on,
+/// and the place among the display list's items of the fill it is of.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Outline {
+    pub item: usize,
+    /// The pieces of its contours' edges with the fill on one side only.
+    pub pieces: Vec<(Point2, Point2)>,
+}
+
+/// The outlines of the fills `edges` names by their places among `list`'s
+/// items, in order, as the display list's `edges` gives them: a polyline's
+/// with width, a solid's and a donut's. Worked out once a sheet is drawn,
+/// for [`nearest`] to look along.
+pub fn outlines(list: &DisplayList, edges: &[usize]) -> Vec<Outline> {
+    edges
+        .iter()
+        .filter_map(|&item| match &list.items.get(item)?.shape {
+            Shape::Fill { rule, contours } => Some(Outline {
+                item,
+                pieces: fill_outline(*rule, contours),
+            }),
+            Shape::Stroke { .. } => None,
+        })
+        .collect()
+}
+
+/// The outer outline of a fill: the pieces of its contours' edges that
+/// have the fill on one side and not the other. A polyline with width is
+/// drawn as a contour for each segment, and where two meet, their shared
+/// end, a seam, has the fill on both sides: it is no edge of what is drawn,
+/// and neither is an edge inside another contour.
+pub(crate) fn fill_outline(rule: FillRule, contours: &[Vec<Point2>]) -> Vec<(Point2, Point2)> {
+    let edges: Vec<(Point2, Point2)> = contours
+        .iter()
+        .filter(|ring| ring.len() >= 2)
+        .flat_map(|ring| (0..ring.len()).map(move |i| (ring[i], ring[(i + 1) % ring.len()])))
+        .filter(|(a, b)| a != b)
+        .collect();
+    let Some(bounds) = Bounds::of(edges.iter().flat_map(|(a, b)| [*a, *b])) else {
+        return Vec::new();
+    };
+    let size = (bounds.max[0] - bounds.min[0])
+        .max(bounds.max[1] - bounds.min[1])
+        .max(f64::MIN_POSITIVE);
+    // How near a point is to lie on an edge, and how far either side of an
+    // edge the fill is looked for.
+    let on = size * 1e-9;
+    let side = size * 1e-6;
+    let mut out = Vec::new();
+    for (n, &(a, b)) in edges.iter().enumerate() {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let length = dx.hypot(dy);
+        // Where other edges cross or touch it cut it into pieces, each
+        // wholly an edge of the fill or not.
+        let mut cuts = vec![0.0, 1.0];
+        for (m, &(c, d)) in edges.iter().enumerate() {
+            if m == n
+                || c[0].max(d[0]) < a[0].min(b[0]) - on
+                || c[0].min(d[0]) > a[0].max(b[0]) + on
+                || c[1].max(d[1]) < a[1].min(b[1]) - on
+                || c[1].min(d[1]) > a[1].max(b[1]) + on
+            {
+                continue;
+            }
+            for p in [c, d] {
+                if to_segment(p, a, b) <= on {
+                    cuts.push(((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (length * length));
+                }
+            }
+            let (ex, ey) = (d[0] - c[0], d[1] - c[1]);
+            let across = dx * ey - dy * ex;
+            if across.abs() > f64::EPSILON * length * ex.hypot(ey) {
+                let t = ((c[0] - a[0]) * ey - (c[1] - a[1]) * ex) / across;
+                let u = ((c[0] - a[0]) * dy - (c[1] - a[1]) * dx) / across;
+                if (0.0..=1.0).contains(&u) {
+                    cuts.push(t);
+                }
+            }
+        }
+        cuts.retain(|t| (0.0..=1.0).contains(t));
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup_by(|x, y| (*x - *y).abs() <= 1e-12);
+        let normal = [-dy / length * side, dx / length * side];
+        let at = |t: f64| [a[0] + t * dx, a[1] + t * dy];
+        for pair in cuts.windows(2) {
+            let mid = at((pair[0] + pair[1]) / 2.0);
+            let left = inside([mid[0] + normal[0], mid[1] + normal[1]], rule, contours);
+            let right = inside([mid[0] - normal[0], mid[1] - normal[1]], rule, contours);
+            if left != right {
+                out.push((at(pair[0]), at(pair[1])));
+            }
+        }
+    }
+    out
+}
+
+/// The point of a stroke drawn on the page itself nearest `at`, within
+/// `reach` drawing units, and the place in the sheet's objects of the
+/// object that draws it: AutoCAD's nearest snap as the cursor finds it,
+/// on what the display list draws, its curves within its tolerance. Of the
+/// fills, only those with one of `outlines`, in the order of their items,
+/// are looked at, along their outlines, not the seams inside them. Model
+/// space seen through a viewport is not. Of two as near, the one drawn
+/// later, which lies on top.
+pub fn nearest(
+    list: &DisplayList,
+    outlines: &[Outline],
+    at: Point2,
+    reach: f64,
+) -> Option<(usize, Point2)> {
+    let mut best: Option<(f64, usize, Point2)> = None;
+    for (k, item) in list.items.iter().enumerate() {
+        if item.viewport.is_some() {
+            continue;
+        }
+        let pieces: Vec<(Point2, Point2)> = match &item.shape {
+            Shape::Stroke { runs, .. } => runs
+                .iter()
+                .flat_map(|run| match run.as_slice() {
+                    [] => Vec::new(),
+                    [dot] => vec![(*dot, *dot)],
+                    points => points.windows(2).map(|w| (w[0], w[1])).collect(),
+                })
+                .collect(),
+            Shape::Fill { .. } => match outlines.binary_search_by_key(&k, |o| o.item) {
+                Ok(o) => outlines[o].pieces.clone(),
+                Err(_) => Vec::new(),
+            },
+        };
+        for (a, b) in pieces {
+            let p = foot(at, a, b);
+            let d = distance(at, p);
+            if d <= reach && best.is_none_or(|(e, _, _)| d <= e) {
+                best = Some((d, item.object, p));
+            }
+        }
+    }
+    best.map(|(_, object, p)| (object, p))
+}
+
+/// The point of the segment from `a` to `b` nearest `p`.
+fn foot(p: Point2, a: Point2, b: Point2) -> Point2 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let length2 = dx * dx + dy * dy;
+    if length2 <= 0.0 {
+        return a;
+    }
+    let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2).clamp(0.0, 1.0);
+    [a[0] + t * dx, a[1] + t * dy]
+}
+
 fn to_segment(p: Point2, a: Point2, b: Point2) -> f64 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let length2 = dx * dx + dy * dy;
@@ -257,6 +408,84 @@ pub(crate) fn inside(p: Point2, rule: FillRule, contours: &[Vec<Point2>]) -> boo
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_nearest_point_is_on_the_stroke_drawn_nearest() {
+        let list = DisplayList {
+            items: vec![
+                stroke(0, &[[0.0, 0.0], [10.0, 0.0]], 0.25),
+                stroke(1, &[[0.0, 2.0], [10.0, 2.0]], 0.25),
+            ],
+            ..DisplayList::default()
+        };
+        assert_eq!(nearest(&list, &[], [4.0, 0.5], 1.0), Some((0, [4.0, 0.0])));
+        assert_eq!(nearest(&list, &[], [4.0, 1.6], 1.0), Some((1, [4.0, 2.0])));
+        // Past the end, the end; out of reach, none.
+        assert_eq!(
+            nearest(&list, &[], [11.0, 0.0], 2.0),
+            Some((0, [10.0, 0.0]))
+        );
+        assert_eq!(nearest(&list, &[], [4.0, 5.0], 1.0), None);
+    }
+
+    #[test]
+    fn the_nearest_point_is_on_the_edge_of_a_fill_a_line_draws() {
+        // A polyline with width draws only a fill: its edge is found where
+        // the display list's `edges` names it, and a fill it does not name,
+        // text's or a hatch's, is passed over.
+        let list = DisplayList {
+            items: vec![square(0, [0.0, 0.0], 2.0), square(1, [10.0, 0.0], 2.0)],
+            ..DisplayList::default()
+        };
+        let named = outlines(&list, &[0]);
+        assert_eq!(
+            nearest(&list, &named, [1.0, 2.5], 1.0),
+            Some((0, [1.0, 2.0]))
+        );
+        // The closing edge, from the last point back to the first.
+        assert_eq!(
+            nearest(&list, &named, [-0.5, 1.0], 1.0),
+            Some((0, [0.0, 1.0]))
+        );
+        assert_eq!(nearest(&list, &named, [11.0, 2.5], 1.0), None);
+        assert_eq!(nearest(&list, &[], [1.0, 2.5], 1.0), None);
+    }
+
+    #[test]
+    fn the_nearest_point_is_on_a_fills_outline_not_the_seams_inside_it() {
+        // Two segments of a polyline 4 wide, (0, 0) to (10, 0) to (20, 0),
+        // a contour each, meeting at x = 10: their shared end is inside
+        // what is drawn.
+        let quad = |x0: f64, x1: f64| vec![[x0, -2.0], [x1, -2.0], [x1, 2.0], [x0, 2.0]];
+        let list = DisplayList {
+            items: vec![Item {
+                shape: Shape::Fill {
+                    rule: FillRule::NonZero,
+                    contours: vec![quad(0.0, 10.0), quad(10.0, 20.0)],
+                },
+                ..square(0, [0.0, 0.0], 1.0)
+            }],
+            ..DisplayList::default()
+        };
+        let named = outlines(&list, &[0]);
+        // Inside, by the seam: the outline is 1.5 away, out of reach.
+        assert_eq!(nearest(&list, &named, [10.0, 0.5], 1.0), None);
+        // By the outline, the nearest point on it.
+        assert_eq!(
+            nearest(&list, &named, [10.0, 1.5], 1.0),
+            Some((0, [10.0, 2.0]))
+        );
+        assert_eq!(
+            nearest(&list, &named, [20.5, 0.0], 1.0),
+            Some((0, [20.0, 0.0]))
+        );
+        // The seam is no piece of the outline; its ends' sides are.
+        assert!(named[0]
+            .pieces
+            .iter()
+            .all(|(a, b)| !(a[0] == 10.0 && b[0] == 10.0)));
+    }
+
     use super::super::{Color, Item};
     use super::*;
 

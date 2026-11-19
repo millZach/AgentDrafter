@@ -13,7 +13,7 @@
 //! in millimetres of paper, so the GPU draws them at any zoom as the PNG
 //! draws them at its dots per inch.
 
-use agentdrafter_core::{Bounds, Color, DisplayList, FillRule, Paper, Shape};
+use agentdrafter_core::{Bounds, Color, DisplayList, DisplaySnap, FillRule, Paper, Shape};
 use lyon_tessellation::geom::point;
 use lyon_tessellation::path::Path;
 use lyon_tessellation::{
@@ -69,6 +69,14 @@ pub struct SheetReply {
     /// insert's block and attributes.
     #[serde(default)]
     pub objects: Vec<serde_json::Value>,
+    /// The object snaps, when the page asked for them: every point the
+    /// snaps find on the objects the page draws itself.
+    #[serde(default)]
+    pub snaps: Vec<DisplaySnap>,
+    /// With the snaps, the places among the display list's items of the
+    /// fills whose edges the nearest snap finds a point on.
+    #[serde(default)]
+    pub edges: Vec<usize>,
     pub display_list: DisplayList,
 }
 
@@ -190,6 +198,8 @@ pub struct Summary {
     pub entry: Option<u64>,
     /// What each of the sheet's objects is, by its place.
     pub objects: Vec<serde_json::Value>,
+    /// How many object snaps the sheet came with.
+    pub snaps: usize,
 }
 
 /// Reads a `display-list` reply. A reply that is not ok gives its error's
@@ -407,6 +417,7 @@ impl Mesh {
             fills_not_drawn: self.fills_not_drawn,
             entry: sheet.entry,
             objects: sheet.objects.clone(),
+            snaps: sheet.snaps.len(),
         }
     }
 }
@@ -487,6 +498,8 @@ mod tests {
             extents: display_list.extents(),
             entry: None,
             objects: Vec::new(),
+            snaps: Vec::new(),
+            edges: Vec::new(),
             display_list,
         }
     }

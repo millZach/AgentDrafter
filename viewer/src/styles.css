@@ -18,6 +18,7 @@
   --warn: #ffb020;
   --bad: #ff5d5d;
   --past: #e0a85a;
+  --snap: #f2e24b;
   --ui: 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
   --mono: Consolas, 'Cascadia Mono', ui-monospace, Menlo, monospace;
 }
@@ -148,6 +149,21 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
 }
 .stage { display: block; width: 100%; height: 100%; }
+/* On a laptop the renderer's crosshair is the cursor over the drawing, as AutoCAD's is. */
+.stage.crosshair { cursor: none; }
+
+/* The snap's tag beside its marker, and the magnifier a held finger brings up. */
+.snaptag {
+  position: absolute; z-index: 4; display: none; pointer-events: none; white-space: nowrap; max-width: calc(100% - 8px);
+  overflow: hidden; text-overflow: ellipsis; padding: 2px 7px; border-radius: 3px; background: rgba(20, 24, 30, .92);
+  border: 1px solid #6a7689; color: #c8d0da; font-size: 12px; line-height: 16px;
+}
+.snaptag b { color: var(--snap); font-weight: 600; }
+.loupe {
+  position: absolute; z-index: 4; display: none; pointer-events: none; border-radius: 50%;
+  box-shadow: 0 0 0 2px #c8d0da, 0 8px 24px rgba(0, 0, 0, .55);
+}
+.snapw { color: var(--snap); font-weight: 600; }
 /* Stepping back: the drawing looks a little warmer while it shows the set as it was. */
 .va-vp.past .stage { filter: sepia(.35); }
 .zoombtns {
@@ -242,11 +258,62 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
   /* Many layouts scroll in their strip; the status controls after it keep their room. */
   flex: 0 1 auto; min-width: 80px; overflow-x: auto;
 }
-.status > :not(.va-layouts):not(.grow):not(.live) { flex: none; }
+/* The controls and the cursor's read-out keep their size; the layout
+   strip and the paper give way to them on a narrow bar, so Grid, Object
+   snap, Ortho, the connection and the coordinates with the snap's name are
+   always on the screen, whole. */
+.status > :not(.va-layouts):not(.grow):not(.live):not(.coords):not(.paperlabel) { flex: none; }
 .status .va-layouts .tab { background: none; border: 0; border-radius: 0; padding: 0 12px; color: var(--dim); }
 .status .va-layouts .tab.on { background: var(--canvas); color: #fff; border-top: 2px solid var(--blue); }
-.coords { font-family: var(--mono); align-self: center; min-width: 170px; padding-left: 10px; color: var(--text); white-space: nowrap; }
-.paperlabel { align-self: center; padding: 0 10px; white-space: nowrap; }
+.coords {
+  font-family: var(--mono); align-self: center; flex: 0 0 auto; min-width: 250px; padding-left: 10px; color: var(--text);
+  white-space: nowrap;
+}
+.coords .snapw { font-family: var(--ui); font-weight: 400; margin-left: 8px; }
+/* Object snap, with the ▴ that opens its menu. */
+.osgroup { display: flex; align-items: stretch; flex: none; }
+.osgroup .tog[data-toggle='osnap'] { padding-right: 4px; }
+.osmenubtn { background: none; border: 0; padding: 0 7px; color: #7f8a98; font-size: 10px; }
+.osmenubtn:hover, .osmenubtn[aria-expanded='true'] { background: #2c3440; color: #fff; }
+
+/* The Object snap menu: which snaps run. */
+.osmenu {
+  position: fixed; z-index: 35; width: 330px; background: #2f3743; border: 1px solid #5a6577; border-radius: 6px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .6); padding: 8px 0 6px; font-size: 13px; max-height: calc(100% - 16px); overflow: auto;
+}
+.osmenu.card { left: 8px; right: 8px; bottom: 8px; width: auto; }
+.osmenu header { display: flex; align-items: center; gap: 8px; padding: 0 12px 6px; border-bottom: 1px solid #3c4553; }
+.osmenu header b { flex: 1; }
+.osmenu .sw2 {
+  display: flex; align-items: center; gap: 6px; background: none; border: 1px solid var(--edge); border-radius: 12px;
+  padding: 1px 9px 1px 4px; font-size: 12px; color: var(--dim);
+}
+.osmenu .sw2 i { width: 22px; height: 12px; border-radius: 6px; background: #4b5464; position: relative; }
+.osmenu .sw2 i::after {
+  content: ''; position: absolute; left: 2px; top: 2px; width: 8px; height: 8px; border-radius: 50%; background: #c8d0da;
+  transition: left .15s;
+}
+.osmenu .sw2[aria-checked='true'] { color: #7fc0ff; border-color: #3d6c9e; }
+.osmenu .sw2[aria-checked='true'] i { background: #1f6fc9; }
+.osmenu .sw2[aria-checked='true'] i::after { left: 12px; background: #fff; }
+.osmenu ul { list-style: none; margin: 0; padding: 4px 0; }
+.osmenu li.grp { padding: 8px 12px 2px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+.osrow {
+  display: grid; grid-template-columns: 18px 22px minmax(0, 1fr); gap: 8px; align-items: center; width: 100%; text-align: left;
+  background: none; border: 0; padding: 4px 12px;
+}
+.osrow:hover { background: #3a4352; }
+.osrow .ck {
+  width: 15px; height: 15px; border: 1px solid #6a7689; border-radius: 3px; display: grid; place-items: center; font-size: 11px;
+  line-height: 1; color: #fff;
+}
+.osrow[aria-checked='true'] .ck { background: #1f6fc9; border-color: #3d8fe8; }
+.osrow svg { width: 22px; height: 22px; fill: none; stroke: var(--snap); stroke-width: 1.6; }
+.osrow small { display: block; color: var(--dim); font-size: 11px; line-height: 1.25; }
+.osmenu.off .osrow svg { stroke: #7f8a98; }
+.osmenu footer { display: flex; gap: 6px; padding: 6px 12px 0; border-top: 1px solid #3c4553; align-items: center; }
+.osmenu footer small { flex: 1; color: var(--dim); font-size: 11px; }
+.paperlabel { align-self: center; padding: 0 10px; white-space: nowrap; flex: 0 1 auto; min-width: 60px; overflow: hidden; text-overflow: ellipsis; }
 .tog { background: none; border: 0; padding: 0 9px; color: #7f8a98; white-space: nowrap; }
 .tog[aria-pressed='true'] { color: #7fc0ff; }
 .tog:hover { background: #2c3440; }
