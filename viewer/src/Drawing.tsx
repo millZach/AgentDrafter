@@ -304,11 +304,13 @@ export function Drawing({
     }
     const v = view.current;
     const [l, t] = toScreen(v, b[0] as number, b[3] as number);
-    const [, bottom] = toScreen(v, b[2] as number, b[1] as number);
+    const [r, bottom] = toScreen(v, b[2] as number, b[1] as number);
     const c = canvas.current;
     const width = c?.clientWidth ?? 0;
     const tall = Math.max(0, bottom - t);
     el.style.setProperty('--text-px', `${tall}px`);
+    // As wide as the text shows, and room to type on, within the drawing.
+    el.style.width = `${Math.round(Math.max(260, Math.min(width - 60, r - l + 80)))}px`;
     const middle = (t + bottom) / 2;
     const box = el.getBoundingClientRect();
     el.style.left = `${Math.max(4, Math.min(width - box.width - 4, l - 10))}px`;

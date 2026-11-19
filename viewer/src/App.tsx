@@ -1563,7 +1563,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
               onCancel={() => toolDid(renderer()?.tool_option('cancel') ?? '')}
             />
           )}
-          {object && summary && (
+          {/* A phone's text box takes the card's place while a text is edited in it. */}
+          {object && summary && !(editingField && editing && (editing.touch || !wide)) && (
             <section className="qp" ref={card} data-ui aria-label={`Quick properties of ${nameOf(object)}`}>
               <QuickProperties
                 object={object}

@@ -245,7 +245,7 @@ select.qin { font-family: var(--ui); }
 
 /* A text's contents edited on the drawing, over the text. */
 .tedit {
-  position: absolute; z-index: 6; visibility: hidden; min-width: 220px; max-width: min(560px, calc(100% - 60px));
+  position: absolute; z-index: 6; visibility: hidden; min-width: 220px; max-width: calc(100% - 60px); box-sizing: border-box;
   background: rgba(33, 40, 48, .96); border: 1px solid var(--blue); border-radius: 4px; padding: 6px 8px 5px;
   box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
 }
