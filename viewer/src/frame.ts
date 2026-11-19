@@ -380,8 +380,8 @@ export function writeCurrentLayer(keeps: Keeps | null, source: string, layer: st
 export function layersWhileAsked(
   was: string,
   of: string,
-  held: readonly LayerEntry[] | null,
-): readonly LayerEntry[] | null {
+  held: LayerEntry[] | null,
+): LayerEntry[] | null {
   return was === of ? held : null;
 }
 
