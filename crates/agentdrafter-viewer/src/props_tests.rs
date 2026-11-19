@@ -153,6 +153,53 @@ fn a_value_the_row_fills_says_its_row_value_and_its_places_before_it_is_edited()
 }
 
 #[test]
+fn a_value_joined_from_parts_names_its_row_values_and_sends_its_whole_text() {
+    let mut context = context();
+    context.objects.push(ObjectInfo {
+        id: Some("DP-LD-101/slot".to_owned()),
+        name: None,
+        kind: "text".to_owned(),
+        block: None,
+        layer: "notes".to_owned(),
+        values: Some(json!({"contents": {
+            "value": "PANEL P1 SLOT 3",
+            "written": "row_values",
+            "row_values": [{"name": "PANEL", "fills": 2}, {"name": "SLOT", "fills": 1}]
+        }})),
+        from_template: Some(true),
+        through_viewport: false,
+    });
+    let slot = context.objects.len() - 1;
+    let fields = fields(&context, slot);
+    let contents = field(&fields, "contents");
+    assert_eq!(
+        contents.chip,
+        Some(Chip {
+            words: "2 row values".to_owned(),
+            tone: Tone::RowValue
+        })
+    );
+    assert_eq!(
+        contents.note.as_deref(),
+        Some(
+            "Joined from this sheet\u{2019}s row values PANEL and SLOT and the template\u{2019}s \
+             fixed text. Edit the whole text, keeping the fixed text as it is, and each value is \
+             set. PANEL fills 2 places on this sheet, and they all change. Only this sheet \
+             changes."
+        )
+    );
+    // The whole text goes in the change the page sends now, on this sheet
+    // alone, with nothing asked: the core matches it to the parts.
+    let edited = edit(&context, slot, "contents", "PANEL P2 SLOT 4");
+    assert_eq!(
+        operation(&edited),
+        json!({"op": "change", "target": {"id": "DP-LD-101/slot"}, "set": {"contents": "PANEL P2 SLOT 4"}})
+    );
+    assert_eq!(sent(&edited).sheets, ["DP-LD-101"]);
+    assert_eq!(sent(&edited).template, None);
+}
+
+#[test]
 fn a_templates_value_asks_first_naming_every_sheet() {
     let context = context();
     let edited = edit(&context, TITLE, "contents", "FIELD DEVICES");

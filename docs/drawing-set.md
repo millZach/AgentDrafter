@@ -120,7 +120,7 @@ A template is a sheet's border, title block and fixed content, waiting for data.
 - as a multileader's content's `text`, `content: {text: {row: NAME}}`, or an older leader's annotation's;
 - as an attribute value of a multileader's block content, `content: {block: TAG_BALLOON, attributes: {TAG: {row: NAME}}}`, as an insert's.
 
-A value from the row stands for the whole value; it is not spliced into other text. The same value can be used in more than one place. Each sheet is the template with every `{row: NAME}` replaced by its row's value `NAME`, and is built as a sheet description is.
+The same value can be used in more than one place, and a text's contents or an attribute's value may join values from the row with other text ([below](#a-rows-value-inside-other-text)). Each sheet is the template with every `{row: NAME}` replaced by its row's value `NAME`, and is built as a sheet description is.
 
 - **Units.** A template states `units`, as every sheet description does, and it must be the set's. A block library it names must be in the same unit.
 - **Block library.** A template names its block library under `block_library`, relative to the template's own folder, as a sheet description does.
@@ -130,6 +130,33 @@ A value from the row stands for the whole value; it is not spliced into other te
 - **IDs.** A template's objects are on every sheet built from it, so each sheet's object's [ID](sheet-description.md#ids-and-names) is the sheet's name joined to the `id` the template gives the object, or to its place in the template: the demo set's border is `DEMO-001/border` on its first sheet and `DEMO-002/border` on its second, and its trim line, which has no `id`, is `DEMO-001/objects[0]`. Each sheet's name is given once in a set and each `id` once in its template, so every ID is unique in the set.
 
 A sheet description built on its own takes no value from a row: `{row: NAME}` in it is an error that says to build the set's folder or to write the value.
+
+### A row's value inside other text
+
+A text's or an mtext's `contents`, or the value of an insert's attribute, may be a **list of parts**: plain text and values from the row, joined in order. Zach decided on 2026-11-19 (#102) that this is how a value from the row stands inside other text:
+
+```yaml
+  - text: {contents: ['PANEL ', {row: PANEL}, ' SLOT ', {row: SLOT}], position: [1, 7.4, 0], height: 0.25, id: heading}
+  - insert:
+      block: CARD_TITLE
+      position: [10.5, 0.5, 0]
+      attributes:
+        TITLE: [{row: AREA}, ' I/O PANEL ', {row: PANEL}]
+        DWG_NO: {row: DWG_NO}
+```
+
+A row with `PANEL: P1` and `SLOT: '3'` draws the heading `PANEL P1 SLOT 3`. `examples/panel-set/` is a made-up set built this way.
+
+- **The whole-value form stays.** `{row: NAME}` alone is the whole value, as before.
+- **Nothing inside a string is read for values.** A brace or a backslash in a part is text and shows as written, as in any `mtext` ([Text](sheet-description.md#text)), so nothing needs escaping.
+- **A list holds one value from the row at least.** A list with none is refused: write the text as one string. Each item is plain text or `{row: NAME}`; a null, a list or any other mapping there is an error.
+- **The joined text is held to the rules of its place**: a text's contents must show and are one line, an attribute's value is one line. A fixed part of a text's contents or an attribute's value that holds a line break, or another control character, is refused at that part, since no row could make the text build; an mtext's parts may hold line breaks. An error in the joined text is placed at the sheet's first value the list holds, in the rows file, and names the list.
+- **An attribute's list depends on its block.** A tag the insert's block defines once takes a list of parts; a tag it defines more than once takes a list of its values, one for each occurrence, as before ([A tag defined more than once](sheet-description.md#a-tag-defined-more-than-once)), each of which may be `{row: NAME}`. A list of parts for one occurrence of a repeated tag is not offered yet.
+- **Only these places take a list**: a text's and an mtext's contents, and an insert's attribute values. A table cell, a multileader's content, its block content's attributes and an older leader's annotation take `{row: NAME}` whole, as before.
+- **A row lacking a value** one part needs is the `missing_value` error, naming each place the template puts it.
+- **A row's own objects, and a sheet description built on its own**, take no value from a row, in a list or whole: a list of parts holding `{row: NAME}` there is the same error as `{row: NAME}`, placed at that item.
+
+A change set edits such a value by matching the new text to the fixed parts, and sets each row value it holds in that sheet's row, or sets one part alone with `row_value` ([Change sets](change-sets.md#where-a-change-lands)). A query finds a sheet's text and attribute values as they are joined.
 
 ## Building
 
@@ -182,13 +209,13 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 
 ## How it is read
 
-`crates/agentdrafter-core/src/description/set.rs` reads the settings and the rows, `template.rs` fills a template in from a row and hands it to the sheet description's reader with the row's own objects, and `set_schema.rs` writes the three schemas. `crates/agentdrafter-core/src/set.rs` builds a set, sheet by sheet, through the same code that builds one sheet description, works out the set's folder each DWG's build mark records (`set_in_mark`), and finds the set a DWG's mark names (`set_of_dwg`). `src/dwg.rs` writes the mark, and reads it from the DWG's drawing properties alone, without reading the drawing.
+`crates/agentdrafter-core/src/description/set.rs` reads the settings and the rows, `template.rs` fills a template in from a row, joining each list of parts as `parts.rs` reads it, and hands it to the sheet description's reader with the row's own objects, and `set_schema.rs` writes the three schemas. `crates/agentdrafter-core/src/set.rs` builds a set, sheet by sheet, through the same code that builds one sheet description, works out the set's folder each DWG's build mark records (`set_in_mark`), and finds the set a DWG's mark names (`set_of_dwg`). `src/dwg.rs` writes the mark, and reads it from the DWG's drawing properties alone, without reading the drawing.
 
 ## What is not offered yet
 
 - Stamping an output with its revision. A set's sheets plot to PDF with `agentdrafter plot <folder>` ([plotting](plot.md#where-it-goes)), each stamped with its template, its rows file and its block library.
 - The journal and undo across the set. Stable IDs, [queries](query.md) and [change sets](change-sets.md) across the set are built.
-- A value from the row spliced into other text, such as `SHEET {n} OF {m}`, or put anywhere but an attribute's value or a text's contents, such as a position or a layer; and a default for a value a row leaves out.
+- Numbering worked out across the set, such as `SHEET {n} OF {m}`; a value from the row put anywhere but an attribute's value or a text's contents, such as a position or a layer; and a default for a value a row leaves out. A row's own values inside other text are [built](#a-rows-value-inside-other-text).
 - More than one rows file in a set.
 - One block library enforced for the whole set: each template names its own, in the set's unit.
 - Rendering a sheet from its template and row to PNG. A set's sheet renders as any DWG does, with `agentdrafter render <output>/<sheet>.dwg` ([Rendering](render.md)), and its PNG's stamp names the DWG; `render` refuses a template, since it holds values from a row.

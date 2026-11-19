@@ -15,8 +15,9 @@ use serde_json::{json, Map, Value};
 
 use crate::description::schema::{block_library_schema, sheet_description_schema};
 use crate::description::{
-    article, kind_keys, objects_table, rows_schema, template_schema, Axis, LeaderLineEdit,
-    TableEdit, CELL_KEYS, DIMENSION_STYLE_KEYS, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
+    article, kind_keys, objects_table, rows_schema, template_schema, value_name_problem, Axis,
+    LeaderLineEdit, TableEdit, CELL_KEYS, DIMENSION_STYLE_KEYS, LAYER_KEYS, LINETYPE_KEYS,
+    TEXT_STYLE_KEYS, VALUE_NAME,
 };
 use crate::error::{Error, ErrorCode};
 use crate::geometry::{SnapKind, SnapRef};
@@ -484,8 +485,12 @@ fn does(spec: &Spec) -> String {
                          template takes from the row are set in that sheet's row, and so is the \
                          text of a multileader's content or a leader's annotation its template \
                          takes from the row, when the new content or annotation differs in its \
-                         text alone; any other change of them edits the template. AutoCAD's \
-                         CHANGE."
+                         text alone; any other change of them edits the template. Contents the \
+                         template joins from a list of parts, plain text and values from the \
+                         row, are matched to the parts' fixed text, and each row value they \
+                         hold is set in that sheet's row; it is refused when the fixed text \
+                         differs or the text splits more than one way, and row_value sets one \
+                         part alone. AutoCAD's CHANGE."
             .to_owned(),
         Kind::ChangeViewport => "Sets a viewport's scale, its view centre, the point of model \
                                  space at its middle, or its display lock, locked: each that is \
@@ -670,7 +675,12 @@ fn does(spec: &Spec) -> String {
                                in capitals, as AutoCAD keeps it. When the insert's template \
                                takes that attribute from the row, the sheet's row value is set \
                                instead, on that sheet alone, and the reply names every place on \
-                               the sheet the value fills. AutoCAD's ATTEDIT."
+                               the sheet the value fills. A value the template joins from a list \
+                               of parts, plain text and values from the row, is matched to the \
+                               parts' fixed text, and each row value it holds is set; it is \
+                               refused when the fixed text differs or the value splits more \
+                               than one way, and row_value sets one part alone. AutoCAD's \
+                               ATTEDIT."
             .to_owned(),
     }
 }
@@ -784,7 +794,13 @@ fn definitions() -> Map<String, Value> {
     // A table's cell as a template writes it: the cell, or its text, may be
     // a value from the row, which the reader takes only in a template.
     let mut template_defs = template_schema()["$defs"].take();
-    for name in ["row_value", "value_name"] {
+    for name in [
+        "row_value",
+        "value_name",
+        "parts",
+        "text_parts",
+        "attribute_parts",
+    ] {
         defs.insert(name.into(), template_defs[name].take());
     }
     let mut cell = template_defs["table_cell"].take();
@@ -1152,6 +1168,9 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             if let Some(one_of) = own.remove("oneOf") {
                 all_of.push(json!({ "oneOf": one_of }));
             }
+            if let Some(sheet_alone) = template_parts(object, own) {
+                all_of.push(sheet_alone);
+            }
             own.insert("allOf".into(), Value::Array(all_of));
             schema
         }
@@ -1173,6 +1192,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                     "minProperties": 1,
                     "propertyNames": { "not": { "enum": ["id"] } },
                 },
+                ROW_VALUE_KEY: row_value_key(),
             },
         }),
         Kind::ChangeViewport => json!({
@@ -1360,6 +1380,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                     "minimum": 1,
                 },
                 "value": { "$ref": "#/$defs/attribute_value" },
+                ROW_VALUE_KEY: row_value_key(),
             },
         }),
     };
@@ -1368,6 +1389,85 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
     let required = schema["required"].as_array_mut().expect("a list");
     required.insert(0, json!(OP_KEY));
     schema
+}
+
+/// Lets an add of a text, an mtext or an insert, whose schema is `own`,
+/// take a list of parts (#102) where a template's reader takes one: a
+/// text's or an mtext's contents, and an insert's attribute values. Gives
+/// the condition that refuses one on an add to a sheet's row, which writes
+/// its values itself; none for another object.
+fn template_parts(object: &str, own: &mut Map<String, Value>) -> Option<Value> {
+    let properties = own.get_mut("properties")?.as_object_mut()?;
+    let parts = match object {
+        "text" => "#/$defs/text_parts",
+        "mtext" => "#/$defs/parts",
+        "insert" => {
+            let attributes = properties.get_mut("attributes")?;
+            let values = attributes.get_mut("additionalProperties")?;
+            let written = values.take();
+            *values = json!({ "anyOf": [written, { "$ref": "#/$defs/attribute_parts" }] });
+            let said = attributes["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            attributes["description"] = json!(format!(
+                "{said} Added to a template, an attribute its block defines once may take a list \
+                 of parts instead, plain text and values from the row, {{row: NAME}}, joined in \
+                 order; added to a sheet's row, none."
+            ));
+            return Some(json!({
+                "if": { "required": ["sheet"] },
+                "then": {
+                    "properties": {
+                        "attributes": {
+                            "additionalProperties": {
+                                "not": {
+                                    "type": "array",
+                                    "contains": { "$ref": "#/$defs/row_value" },
+                                },
+                            },
+                        },
+                    },
+                },
+            }));
+        }
+        _ => return None,
+    };
+    let contents = properties.get_mut("contents")?;
+    let written = contents.take();
+    let said = written["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    *contents = json!({
+        "description": format!(
+            "{said} Added to a template, it may be a list of parts instead, plain text and \
+             values from the row, {{row: NAME}}, joined in order; added to a sheet's row, it may \
+             not."
+        ),
+        "anyOf": [written, { "$ref": parts }],
+    });
+    Some(json!({
+        "if": { "required": ["sheet"] },
+        "then": { "properties": { "contents": { "not": { "type": "array" } } } },
+    }))
+}
+
+/// The key of an operation that sets one row value of a list of parts.
+pub(crate) const ROW_VALUE_KEY: &str = "row_value";
+
+/// The schema of an operation's `row_value`.
+fn row_value_key() -> Value {
+    json!({
+        "description": "When the template joins this value from a list of parts, plain text \
+                        and values from the row, the one row value of the parts to set, by \
+                        name, to the text sent, on this sheet alone. Without it the text sent \
+                        is the whole value, matched to the parts' fixed text to find each row \
+                        value's. The name of one of the row's values: ASCII letters, \
+                        digits, _ and -, such as PANEL.",
+        "type": "string",
+        "pattern": VALUE_NAME,
+    })
 }
 
 /// The schema of a table operation, before its `op`.
@@ -1733,6 +1833,10 @@ pub(crate) struct Operation {
     pub index: usize,
     pub spec: &'static Spec,
     pub body: Body,
+    /// For a change of a text's contents or a set_attribute whose template
+    /// joins the value from a list of parts, the one row value of the parts
+    /// it sets, by name, rather than matching the whole text to the parts.
+    pub row_value: Option<String>,
     /// The operation as it was sent.
     pub sent: Value,
 }
@@ -2369,7 +2473,7 @@ fn operation(
             Body::Add { to, keys, snaps }
         }
         Kind::Change => {
-            keys(&["target", "set"])?;
+            keys(&["target", "set", ROW_VALUE_KEY])?;
             let target = target()?;
             let set = match map.get("set") {
                 Some(Value::Object(set)) if !set.is_empty() => set.clone(),
@@ -2591,7 +2695,7 @@ fn operation(
             Body::Delete { target: target()? }
         }
         Kind::SetAttribute => {
-            keys(&["target", "tag", "occurrence", "value"])?;
+            keys(&["target", "tag", "occurrence", "value", ROW_VALUE_KEY])?;
             let target = target()?;
             let occurrence =
                 match map.get("occurrence") {
@@ -2972,10 +3076,29 @@ fn operation(
             }
         }
     };
+    // Only change and set_attribute take it: the keys above refuse it
+    // elsewhere.
+    let row_value = match map.get(ROW_VALUE_KEY) {
+        None => None,
+        Some(Value::String(name)) => match value_name_problem(name) {
+            None => Some(name.clone()),
+            Some(problem) => return Err(fail(ErrorCode::BadValue, problem, ROW_VALUE_KEY)),
+        },
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected row_value, the name of the one row value to set of the parts the \
+                 template joins the value from, such as PANEL"
+                    .to_owned(),
+                ROW_VALUE_KEY,
+            ))
+        }
+    };
     Ok(Operation {
         index,
         spec,
         body,
+        row_value,
         sent: value.clone(),
     })
 }

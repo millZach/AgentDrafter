@@ -1,0 +1,19 @@
+# One row per sheet: each value once, which the template joins into its
+# heading, its title and its note wherever it needs them.
+rows:
+  - sheet: PNL-001
+    template: templates/card.yaml
+    values:
+      AREA: AREA 100
+      PANEL: P1
+      SLOT: '3'
+      DWG_NO: PNL-001
+      REV: '0'
+  - sheet: PNL-002
+    template: templates/card.yaml
+    values:
+      AREA: AREA 200
+      PANEL: P2
+      SLOT: '7'
+      DWG_NO: PNL-002
+      REV: A

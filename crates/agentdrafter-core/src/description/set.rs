@@ -288,7 +288,24 @@ fn row_values(node: &Node, path: &str) -> Result<Vec<RowValue>, Error> {
 
 /// Why `name` cannot name a value of a row, if it cannot: a name is one or
 /// more ASCII letters, digits, `_` and `-`.
-pub(super) fn value_name_problem(name: &str) -> Option<String> {
+impl Row {
+    /// This row with the values `names` as `other` gives them, and its own
+    /// otherwise: a row as it would be had only some of a change set's
+    /// edits to its values been made.
+    pub(crate) fn with_values_of(&self, other: &Row, names: &[String]) -> Row {
+        let mut row = self.clone();
+        for value in &mut row.values {
+            if names.contains(&value.name) {
+                if let Some(theirs) = other.values.iter().find(|v| v.name == value.name) {
+                    value.text = theirs.text.clone();
+                }
+            }
+        }
+        row
+    }
+}
+
+pub(crate) fn value_name_problem(name: &str) -> Option<String> {
     if name.is_empty() {
         return Some("the name of a value cannot be empty".to_owned());
     }

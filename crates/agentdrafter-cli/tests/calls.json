@@ -2,7 +2,9 @@
   "change_sets": {
     "move.json": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]},
     "partial.json": {"operations": [{"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5}, {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "nope"}]},
-    "snap.json": {"operations": [{"op": "add_line", "sheet": "DEMO-002", "from": {"snap": {"id": "DEMO-002/border", "snap": "endpoint", "which": "points[0]"}}, "to": {"snap": {"id": "DEMO-002/border", "snap": "midpoint", "which": "segments[1]"}}}, {"op": "move", "target": {"id": "DEMO-002/heading"}, "from": {"snap": {"id": "DEMO-002/heading", "snap": "insertion"}}, "to": [1, 9.5, 0]}]}
+    "snap.json": {"operations": [{"op": "add_line", "sheet": "DEMO-002", "from": {"snap": {"id": "DEMO-002/border", "snap": "endpoint", "which": "points[0]"}}, "to": {"snap": {"id": "DEMO-002/border", "snap": "midpoint", "which": "segments[1]"}}}, {"op": "move", "target": {"id": "DEMO-002/heading"}, "from": {"snap": {"id": "DEMO-002/heading", "snap": "insertion"}}, "to": [1, 9.5, 0]}]},
+    "parts.json": {"operations": [{"op": "change", "target": {"id": "DEMO-001/notes"}, "set": {"contents": ["NOTES FOR ", {"row": "DWG_NO"}, " REV ", {"row": "REV"}]}}, {"op": "change", "target": {"id": "DEMO-002/notes"}, "set": {"contents": "NOTES FOR DEMO-002 REV B"}}]},
+    "part.json": {"operations": [{"op": "change", "target": {"id": "DEMO-003/notes"}, "set": {"contents": "C"}, "row_value": "REV"}]}
   },
   "calls": {
     "build": {
@@ -111,6 +113,16 @@
       "command": "change",
       "args": ["change", "demo-set", "snap.json"],
       "input": {"set": "demo-set", "change_set": {"operations": [{"op": "add_line", "sheet": "DEMO-002", "from": {"snap": {"id": "DEMO-002/border", "snap": "endpoint", "which": "points[0]"}}, "to": {"snap": {"id": "DEMO-002/border", "snap": "midpoint", "which": "segments[1]"}}}, {"op": "move", "target": {"id": "DEMO-002/heading"}, "from": {"snap": {"id": "DEMO-002/heading", "snap": "insertion"}}, "to": [1, 9.5, 0]}]}}
+    },
+    {
+      "command": "change",
+      "args": ["change", "demo-set", "parts.json"],
+      "input": {"set": "demo-set", "change_set": {"operations": [{"op": "change", "target": {"id": "DEMO-001/notes"}, "set": {"contents": ["NOTES FOR ", {"row": "DWG_NO"}, " REV ", {"row": "REV"}]}}, {"op": "change", "target": {"id": "DEMO-002/notes"}, "set": {"contents": "NOTES FOR DEMO-002 REV B"}}]}}
+    },
+    {
+      "command": "change",
+      "args": ["change", "demo-set", "part.json"],
+      "input": {"set": "demo-set", "change_set": {"operations": [{"op": "change", "target": {"id": "DEMO-003/notes"}, "set": {"contents": "C"}, "row_value": "REV"}]}}
     }
   ]
 }

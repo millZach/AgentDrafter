@@ -179,6 +179,11 @@ pub struct OperationOutcome {
     /// row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_value: Option<RowValueSet>,
+    /// The row's values it sets, when the template joins the value it was
+    /// asked to set from a list of parts and the new text was matched to
+    /// the parts: each value the parts hold.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub row_values: Vec<RowValueSet>,
     /// The objects whose place was written as their `id`, so that deleting
     /// an object before them did not move their IDs.
     #[serde(skip_serializing_if = "Vec::is_empty")]

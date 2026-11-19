@@ -1583,6 +1583,12 @@ fn an_adds_schema_takes_exactly_what_the_add_takes() {
         op[key] = value;
         on_sheet(op)
     };
+    // An add to the template, which may take a list of parts (#102).
+    let on_template = |mut op: Value, key: &str, value: Value| {
+        op[key] = value;
+        op["template"] = json!("templates/ansi-b.yaml");
+        op
+    };
     let circle = json!({"op": "add_circle", "center": [5, 5, 0], "radius": 0.5});
     let text = json!({"op": "add_text", "contents": "A", "position": [1, 8, 0], "height": 0.2});
     let mtext = json!({"op": "add_mtext", "contents": "A", "position": [1, 7, 0], "height": 0.1});
@@ -1614,6 +1620,62 @@ fn an_adds_schema_takes_exactly_what_the_add_takes() {
         (with(text.clone(), "contents", json!(" ")), false),
         (with(mtext.clone(), "contents", json!("")), false),
         (with(mtext.clone(), "contents", json!("\n")), false),
+        // A list of parts, on an add to a template and not to a sheet's row.
+        (
+            on_template(mtext.clone(), "contents", json!(["REV ", {"row": "REV"}])),
+            true,
+        ),
+        (
+            on_template(text.clone(), "contents", json!(["REV ", {"row": "REV"}])),
+            true,
+        ),
+        (
+            on_template(
+                insert.clone(),
+                "attributes",
+                json!({"TITLE": ["SHEET ", {"row": "SHEET"}]}),
+            ),
+            true,
+        ),
+        (
+            with(mtext.clone(), "contents", json!(["REV ", {"row": "REV"}])),
+            false,
+        ),
+        (
+            with(
+                insert.clone(),
+                "attributes",
+                json!({"TITLE": ["SHEET ", {"row": "SHEET"}]}),
+            ),
+            false,
+        ),
+        // An attribute's fixed parts are one line, as its value is.
+        (
+            on_template(
+                insert.clone(),
+                "attributes",
+                json!({"TITLE": ["A\n", {"row": "SHEET"}]}),
+            ),
+            false,
+        ),
+        // No part is null: only a repeated tag's list of values takes one.
+        (
+            on_template(
+                insert.clone(),
+                "attributes",
+                json!({"TITLE": [null, {"row": "SHEET"}]}),
+            ),
+            false,
+        ),
+        // A text's fixed parts are one line; an mtext's need not be.
+        (
+            on_template(text.clone(), "contents", json!(["A\nB ", {"row": "REV"}])),
+            false,
+        ),
+        (
+            on_template(mtext.clone(), "contents", json!(["A\nB ", {"row": "REV"}])),
+            true,
+        ),
     ];
     let mut disagreements = Vec::new();
     for (op, accepted) in cases {

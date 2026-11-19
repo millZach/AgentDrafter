@@ -160,7 +160,7 @@ impl SavedSet {
             self.units,
             &mut Vec::new(),
         )?;
-        let sources = sheet_sources(&text, row, &record.objects);
+        let sources = sheet_sources(&text, row, &record.objects, &record.sheet.blocks);
         Ok((record, sources))
     }
 }

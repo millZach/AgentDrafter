@@ -9,8 +9,10 @@
 //! before it is edited, as Zach decided on 2026-11-19: a value of the
 //! template changes every sheet built from it, and the page asks first; a
 //! value the sheet's row fills changes on this sheet only, in every place
-//! it fills; an attribute the template leaves unset is set on the template,
-//! so it lands on every sheet built from it.
+//! it fills; so does a value the template joins from a list of parts, the
+//! sheet's row values and fixed text (#102), whose whole text is sent and
+//! matched to the parts by the core; an attribute the template leaves
+//! unset is set on the template, so it lands on every sheet built from it.
 //!
 //! An edit is one change set with the operation the core has for it:
 //! `change` for a layer, contents and a radius, `set_attribute` for an
@@ -99,6 +101,10 @@ enum Lands<'a> {
     Row,
     /// The sheet's row's value `name`, in `fills` places on this sheet.
     RowValue { name: String, fills: usize },
+    /// The sheet's row's values the template joins with fixed text in a
+    /// list of parts: each value's name, and the places it fills on this
+    /// sheet.
+    RowValues(Vec<(String, usize)>),
     /// Nowhere yet: an attribute the insert leaves unset, which an edit
     /// sets on the insert, in the template or in the row.
     Unset(Option<&'a Reach>),
@@ -127,6 +133,26 @@ fn value_lands<'a>(object: &ObjectInfo, context: &'a Context, written: &Value) -
                 .to_owned(),
             fills: written.get("fills").and_then(Value::as_u64).unwrap_or(1) as usize,
         },
+        Some("row_values") => Lands::RowValues(
+            written
+                .get("row_values")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|v| {
+                            (
+                                v.get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                v.get("fills").and_then(Value::as_u64).unwrap_or(1) as usize,
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
         Some("unset") => Lands::Unset(match object_lands(object, context) {
             Lands::Template(reach) => Some(reach),
             _ => None,
@@ -179,6 +205,31 @@ fn chip_and_note(lands: &Lands, tag: Option<&str>) -> (Option<Chip>, Option<Stri
             };
             (
                 chip(plural(*fills, "place", "places"), Tone::RowValue),
+                Some(note),
+            )
+        }
+        Lands::RowValues(values) => {
+            let names: Vec<String> = values.iter().map(|(name, _)| name.clone()).collect();
+            let which = if names.len() == 1 {
+                format!("this sheet\u{2019}s row value {}", names[0])
+            } else {
+                format!("this sheet\u{2019}s row values {}", and_list(&names))
+            };
+            let mut note = format!(
+                "Joined from {which} and the template\u{2019}s fixed text. Edit the whole text, \
+                 keeping the fixed text as it is, and each value is set."
+            );
+            for (name, fills) in values.iter().filter(|(_, fills)| *fills > 1) {
+                note.push_str(&format!(
+                    " {name} fills {fills} places on this sheet, and they all change."
+                ));
+            }
+            note.push_str(" Only this sheet changes.");
+            (
+                chip(
+                    plural(values.len(), "row value", "row values"),
+                    Tone::RowValue,
+                ),
                 Some(note),
             )
         }
@@ -523,6 +574,15 @@ impl Asked {
             path: reach.path.clone(),
             sheets: reach.sheets.clone(),
         }
+    }
+}
+
+/// Names in words, the last after `and`: `A`, `A and B`, `A, B and C`.
+fn and_list(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 

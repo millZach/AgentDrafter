@@ -20,7 +20,7 @@ use super::template::ROW_KEY;
 use crate::units::Unit;
 
 /// The name of a row's value, as a regular expression.
-const VALUE_NAME: &str = "^[A-Za-z0-9_-]+$";
+pub(crate) const VALUE_NAME: &str = "^[A-Za-z0-9_-]+$";
 
 /// The schema of a drawing set's settings, `set.yaml`.
 pub(crate) fn set_schema() -> Value {
@@ -205,9 +205,12 @@ pub(crate) fn template_schema() -> Value {
          drawing set it writes {{{ROW_KEY}: NAME}} in place of the value: as an insert's \
          attribute value, as a text's or an mtext's contents, as a table cell or its text, or \
          as a multileader's content's or a leader's annotation's text, or as an attribute value \
-         of a multileader's block content. Each sheet is the template with \
-         every {{{ROW_KEY}: NAME}} replaced by its row's value NAME, and is built as a sheet \
-         description is. Its declared unit is the set's. {SUBSET}"
+         of a multileader's block content. A text's or an mtext's contents, and the value of \
+         an attribute the insert's block defines once, may also be a list of parts, plain text \
+         and values from the row joined in order, such as ['PANEL ', {{{ROW_KEY}: PANEL}}]. \
+         Each sheet is the template with every {{{ROW_KEY}: NAME}} replaced by its row's value \
+         NAME, and is built as a sheet description is. Its declared unit is the set's. \
+         {SUBSET}"
     ));
     let library = &mut schema["properties"]["block_library"]["description"];
     *library = json!(library
@@ -234,6 +237,40 @@ pub(crate) fn template_schema() -> Value {
             { "type": ["integer", "boolean"] },
         ],
     });
+    defs["parts"] = json!({
+        "description": format!(
+            "A list of parts: plain text and values from the row, {{{ROW_KEY}: NAME}}, joined in \
+             order into one text, such as ['PANEL ', {{{ROW_KEY}: PANEL}}, ' SLOT ', \
+             {{{ROW_KEY}: SLOT}}]. Nothing inside a string is read for values: a brace or a \
+             backslash in one is text, shown as written. It holds one value from the row at least; a \
+             text with none is written as one string. The joined text is held to the rules of \
+             the place it fills. An edit of the joined text is matched to the fixed parts, to \
+             set each row value it holds on that sheet alone."
+        ),
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "anyOf": [
+                { "type": ["string", "number", "boolean"] },
+                { "$ref": "#/$defs/row_value" },
+            ],
+        },
+        "contains": { "$ref": "#/$defs/row_value" },
+    });
+    // A text is one line, so its fixed parts hold no line break.
+    let mut one_line = defs["parts"].clone();
+    one_line["description"] = json!(format!(
+        "{} A text is one line and holds no control character, so no fixed part holds a \
+         line break or another control character.",
+        one_line["description"].as_str().unwrap_or_default()
+    ));
+    one_line["items"]["anyOf"][0] = json!({
+        "anyOf": [
+            { "type": "string", "pattern": format!("^[^{CONTROL}]*$") },
+            { "type": ["number", "boolean"] },
+        ],
+    });
+    defs["text_parts"] = one_line;
     let attributes = &mut defs["insert"]["properties"]["attributes"];
     attributes["description"] = json!(
         "The values of the block's attributes, from tag to value: text, or a value from the row, \
@@ -248,6 +285,23 @@ pub(crate) fn template_schema() -> Value {
             { "$ref": "#/$defs/row_value" },
         ],
     });
+    // An attribute's list of parts: each fixed part an attribute's value,
+    // one line with no control character, and one value from the row at
+    // least, as the reader takes it for a tag the block defines once. A
+    // part is never null, which only a repeated tag's list of values takes.
+    let mut part = one.clone();
+    part["not"] = json!({ "type": "null" });
+    defs["attribute_parts"] = json!({
+        "description": "An attribute's value as a list of parts: plain text, each part one \
+                        line with no control character as an attribute's value is, and values \
+                        from the row, {row: NAME}, joined in order, one at least. No part is \
+                        null.",
+        "type": "array",
+        "minItems": 1,
+        "items": part,
+        "contains": { "$ref": "#/$defs/row_value" },
+    });
+    let attributes = &mut defs["insert"]["properties"]["attributes"];
     attributes["additionalProperties"] = json!({
         "anyOf": [
             one.clone(),
@@ -260,6 +314,16 @@ pub(crate) fn template_schema() -> Value {
         .replace("#/$defs/attribute_value", "#/$defs/content_attribute_value");
     defs["mleader"]["properties"]["content"]["anyOf"][1]["properties"]["attributes"] =
         serde_json::from_str(&content).expect("a schema is JSON");
+    // An insert's, not a multileader's, may be a list of parts.
+    defs["insert"]["properties"]["attributes"]["description"] = json!(
+        "The values of the block's attributes, from tag to value: text, or a value from the row, \
+         {row: NAME}. A tag the block defines more than once takes a list of values, one for \
+         each in the order the block defines them, which may be shorter than that, each text or \
+         a value from the row. A tag the block defines once may take a list of parts instead, \
+         plain text and values from the row joined in order, such as ['REV ', {row: REV}], \
+         holding one value from the row at least. An attribute not given, or given as null, \
+         takes its definition's default."
+    );
     // A table's cell, or its text, may be a value from the row.
     let row_value = json!({ "$ref": "#/$defs/row_value" });
     if let Some(choices) = defs["table_cell"]["anyOf"].as_array_mut() {
@@ -301,12 +365,14 @@ pub(crate) fn template_schema() -> Value {
             .unwrap_or_default();
         *contents = json!({
             "description": format!(
-                "{description} In a template, or a value from the row, {{{ROW_KEY}: NAME}}, which \
-                 these rules apply to once it is filled in."
+                "{description} In a template, or a value from the row, {{{ROW_KEY}: NAME}}, or a \
+                 list of parts, plain text and values from the row joined in order, which these \
+                 rules apply to once it is filled in."
             ),
             "anyOf": [
                 written,
                 { "$ref": "#/$defs/row_value" },
+                { "$ref": if kind == "text" { "#/$defs/text_parts" } else { "#/$defs/parts" } },
             ],
         });
     }

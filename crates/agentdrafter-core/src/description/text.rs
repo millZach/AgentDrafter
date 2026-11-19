@@ -118,6 +118,13 @@ pub(super) fn text(
     })
 }
 
+/// An mtext's contents as written, as they show: a block scalar ends with a
+/// line break, and text does not end with an empty line, so line breaks at
+/// the end are dropped, and CR LF is a line break, as LF is.
+pub(crate) fn shown_mtext(written: &str) -> String {
+    written.trim_end_matches(['\n', '\r']).replace("\r\n", "\n")
+}
+
 pub(super) fn mtext(
     fields: &Fields,
     units: Unit,
@@ -127,8 +134,7 @@ pub(super) fn mtext(
     let contents_node = fields.require_text("contents")?;
     let contents_path = fields.path_of("contents");
     let written = scalar(contents_node, &contents_path, "the text")?;
-    // A block scalar ends with a line break; text does not end with an empty line.
-    let contents = written.trim_end_matches(['\n', '\r']).replace("\r\n", "\n");
+    let contents = shown_mtext(written);
     if let Some(problem) = contents_problem(&contents) {
         return Err(bad_value(contents_node, &contents_path, problem));
     }

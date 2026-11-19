@@ -1,0 +1,6 @@
+# A made-up drawing set of two I/O card sheets, in inches, whose template
+# writes a row's values inside other text as a list of parts (#102).
+# Building this folder writes one DWG per row into dwg/.
+units: in
+output: dwg
+rows: rows.yaml
