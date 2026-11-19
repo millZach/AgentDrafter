@@ -26,8 +26,15 @@ pub(crate) enum Part {
 /// The parts of `node`, at `path`, if it is a list: each item plain text or
 /// a value from the row. A list that holds anything else, or no value from
 /// the row, is an error, since a text without one is written as one string.
-/// None when `node` is not a list.
-pub(super) fn read_parts(node: &Node, path: &str) -> Result<Option<Vec<Part>>, Error> {
+/// None when `node` is not a list. When `one_line`, for a text's contents
+/// or an attribute's value, which are one line, a fixed part that holds a
+/// line break is an error at that part, since no row can make the joined
+/// text one line.
+pub(super) fn read_parts(
+    node: &Node,
+    path: &str,
+    one_line: bool,
+) -> Result<Option<Vec<Part>>, Error> {
     let Kind::Sequence(items) = &node.kind else {
         return Ok(None);
     };
@@ -35,6 +42,14 @@ pub(super) fn read_parts(node: &Node, path: &str) -> Result<Option<Vec<Part>>, E
     for (i, item) in items.iter().enumerate() {
         let item_path = index_path(path, i);
         match &item.kind {
+            Kind::Scalar(text) if one_line && text.contains(['\n', '\r']) => {
+                return Err(bad_value(
+                    item,
+                    &item_path,
+                    "this part holds a line break, and the text it is part of is one line; \
+                     write the part on one line, or make the text an mtext",
+                ))
+            }
             Kind::Scalar(text) if !item.is_bare_null() => parts.push(Part::Text(text.clone())),
             Kind::Mapping(_) => match row_value_name(item, &item_path)? {
                 Some(name) => parts.push(Part::Row(name)),
@@ -68,7 +83,7 @@ pub(super) fn read_parts(node: &Node, path: &str) -> Result<Option<Vec<Part>>, E
 /// The parts of `node` as [`read_parts`] reads them, or none when it is
 /// not a list of parts.
 pub(super) fn parts_of(node: &Node) -> Option<Vec<Part>> {
-    read_parts(node, "").ok().flatten()
+    read_parts(node, "", false).ok().flatten()
 }
 
 /// The names of the row's values the parts hold, each once, in the order
@@ -124,6 +139,32 @@ pub(crate) fn join(
     }
 }
 
+/// The parts of an mtext's contents as they show once joined: CR LF is a
+/// line break, as LF is, and the line breaks the parts end with are
+/// dropped, as [`super::text::shown_mtext`] drops them from the contents,
+/// so an edit of the text as it shows matches them.
+pub(crate) fn shown_mtext_parts(parts: &[Part]) -> Vec<Part> {
+    let mut shown: Vec<Part> = parts
+        .iter()
+        .map(|part| match part {
+            Part::Text(text) => Part::Text(text.replace("\r\n", "\n")),
+            row => row.clone(),
+        })
+        .collect();
+    for part in shown.iter_mut().rev() {
+        let Part::Text(text) = part else {
+            break;
+        };
+        let kept = text.trim_end_matches(['\n', '\r']).len();
+        let emptied = kept == 0;
+        text.truncate(kept);
+        if !emptied {
+            break;
+        }
+    }
+    shown
+}
+
 /// Why a text could not be matched to its parts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Unsplit {
@@ -131,18 +172,31 @@ pub(crate) enum Unsplit {
     Differs,
     /// The text can be split more than one way: two of the splits.
     Ambiguous(Vec<(String, String)>, Vec<(String, String)>),
+    /// The text could not be told to split one way only within
+    /// [`MOST_STEPS`] steps, as with many row values side by side.
+    Unclear,
 }
+
+/// The most steps a match takes before it gives up on telling whether a
+/// text splits one way only.
+const MOST_STEPS: usize = 100_000;
 
 /// Each row value of `parts`, by name, each once in the order it first
 /// comes, with its text in `text`: the one way the text splits around the
 /// fixed parts. A value the parts hold twice takes the same text in both.
 /// A text whose fixed parts differ, or that splits more than one way, such
 /// as one that puts two row values side by side with no fixed text between,
-/// is refused.
+/// is refused. The fixed text is checked first, and each row value ends
+/// only where the fixed text after it begins, so a text that cannot match
+/// is refused at once.
 pub(crate) fn split(parts: &[Part], text: &str) -> Result<Vec<(String, String)>, Unsplit> {
+    if !fixed_text_fits(parts, text) {
+        return Err(Unsplit::Differs);
+    }
     let mut found: Vec<Vec<(String, String)>> = Vec::new();
     let mut taken: Vec<(String, String)> = Vec::new();
-    matches(parts, text, &mut taken, &mut found);
+    let mut steps = 0;
+    matches(parts, text, &mut taken, &mut found, &mut steps);
     let order = names(parts);
     let ordered = |m: Vec<(String, String)>| -> Vec<(String, String)> {
         order
@@ -151,6 +205,7 @@ pub(crate) fn split(parts: &[Part], text: &str) -> Result<Vec<(String, String)>,
             .collect()
     };
     match found.len() {
+        _ if found.len() < 2 && steps > MOST_STEPS => Err(Unsplit::Unclear),
         0 => Err(Unsplit::Differs),
         1 => Ok(ordered(found.remove(0))),
         _ => {
@@ -160,15 +215,49 @@ pub(crate) fn split(parts: &[Part], text: &str) -> Result<Vec<(String, String)>,
     }
 }
 
+/// Whether `text` holds the fixed text of `parts` where they put it: it
+/// starts with the first part when that is fixed text, ends with the last
+/// when that is, and holds each other fixed part, in order, between.
+fn fixed_text_fits(parts: &[Part], text: &str) -> bool {
+    let mut parts = parts;
+    let mut rest = text;
+    if let Some((Part::Text(first), more)) = parts.split_first() {
+        let Some(after) = rest.strip_prefix(first.as_str()) else {
+            return false;
+        };
+        rest = after;
+        parts = more;
+    }
+    if let Some((Part::Text(last), more)) = parts.split_last() {
+        let Some(before) = rest.strip_suffix(last.as_str()) else {
+            return false;
+        };
+        rest = before;
+        parts = more;
+    }
+    for part in parts {
+        if let Part::Text(fixed) = part {
+            match rest.find(fixed.as_str()) {
+                Some(at) => rest = &rest[at + fixed.len()..],
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
 /// Adds to `found` each way, up to two, that `text` matches `parts` with
-/// the values `taken` so far.
+/// the values `taken` so far, counting its steps in `steps` and giving up
+/// past [`MOST_STEPS`].
 fn matches(
     parts: &[Part],
     text: &str,
     taken: &mut Vec<(String, String)>,
     found: &mut Vec<Vec<(String, String)>>,
+    steps: &mut usize,
 ) {
-    if found.len() >= 2 {
+    *steps += 1;
+    if found.len() >= 2 || *steps > MOST_STEPS {
         return;
     }
     let Some((first, rest)) = parts.split_first() else {
@@ -180,7 +269,7 @@ fn matches(
     match first {
         Part::Text(fixed) => {
             if let Some(after) = text.strip_prefix(fixed.as_str()) {
-                matches(rest, after, taken, found);
+                matches(rest, after, taken, found, steps);
             }
         }
         Part::Row(name) => {
@@ -191,19 +280,35 @@ fn matches(
                 .map(|(_, v)| v.clone())
             {
                 if let Some(after) = text.strip_prefix(value.as_str()) {
-                    matches(rest, after, taken, found);
+                    matches(rest, after, taken, found, steps);
                 }
                 return;
             }
-            let ends = text
-                .char_indices()
-                .map(|(i, _)| i)
-                .chain(std::iter::once(text.len()));
+            // The value ends where the fixed text after it begins, or at
+            // the end when it is the last part; beside another value, at
+            // any character.
+            let ends: Vec<usize> = match rest.first() {
+                None => vec![text.len()],
+                Some(Part::Text(next)) => text
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .chain(std::iter::once(text.len()))
+                    .filter(|&i| text[i..].starts_with(next.as_str()))
+                    .collect(),
+                Some(Part::Row(_)) => text
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .chain(std::iter::once(text.len()))
+                    .collect(),
+            };
             for end in ends {
+                if !fixed_text_fits(rest, &text[end..]) {
+                    continue;
+                }
                 taken.push((name.clone(), text[..end].to_owned()));
-                matches(rest, &text[end..], taken, found);
+                matches(rest, &text[end..], taken, found, steps);
                 taken.pop();
-                if found.len() >= 2 {
+                if found.len() >= 2 || *steps > MOST_STEPS {
                     return;
                 }
             }
@@ -250,6 +355,30 @@ mod tests {
         assert_eq!(
             pattern(&parts),
             "['PANEL ', {row: PANEL}, ' SLOT ', {row: SLOT}]"
+        );
+    }
+
+    #[test]
+    fn a_text_that_cannot_match_many_values_side_by_side_is_refused_at_once() {
+        // Eight values side by side, then fixed text the edit lacks: the
+        // fixed text is checked first.
+        let mut side: Vec<Part> = ["A", "B", "C", "D", "E", "F", "G", "H"]
+            .iter()
+            .map(|n| row(n))
+            .collect();
+        side.push(text("!"));
+        assert_eq!(split(&side, &"x".repeat(40)), Err(Unsplit::Differs));
+        // With it, the first two of its many splits are found.
+        assert!(matches!(
+            split(&side, &format!("{}!", "x".repeat(40))),
+            Err(Unsplit::Ambiguous(..))
+        ));
+        // A value that must come again as it was, which no split of the
+        // values before it allows, gives up past the most steps.
+        side.push(row("A"));
+        assert_eq!(
+            split(&side, &format!("{}!y", "x".repeat(40))),
+            Err(Unsplit::Unclear)
         );
     }
 }

@@ -39,7 +39,7 @@ use crate::description::parts::{self, Unsplit};
 use crate::description::SheetRecord;
 use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
-    template_at, template_in, template_path, AttributeSet, Disk, FromRow, GivenValue,
+    shown_mtext, template_at, template_in, template_path, AttributeSet, Disk, FromRow, GivenValue,
     LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile, Row,
     TableEdit, ID_SEPARATOR,
 };
@@ -1357,7 +1357,14 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 }
                 from_row = changed.from_row;
             }
-            Err(e) => return fail(reach, from_record(e)),
+            Err(e) => {
+                // A change of nothing but contents the template takes from
+                // the row sets this sheet's row values alone, so a refusal
+                // of it reaches this sheet alone (ADR-0005).
+                let row_alone = set.keys().all(|key| key == "contents")
+                    && record.from_row_at(list, index, "contents");
+                return fail(if row_alone { vec![k] } else { reach }, from_record(e));
+            }
         },
         Body::Move { .. } => {
             let by = moved_by.expect("a move's distance");
@@ -1515,6 +1522,10 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         // them all back; one that sets the row's value alone reaches its
         // sheet.
         let refused_on = if edits_object { reach.clone() } else { vec![k] };
+        let is_mtext = record
+            .objects(list)
+            .get(index)
+            .is_some_and(|object| object.kind == "mtext");
         let set_what = match &op.body {
             Body::SetAttribute { .. } => format!("{attribute_set} of `{id}`"),
             Body::TableEdit {
@@ -1576,7 +1587,14 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
             }
             (FromRow::Parts(held), None) => {
                 let pattern = parts::pattern(held);
-                match parts::split(held, &text) {
+                // An mtext's text is matched as it shows: without the line
+                // breaks it ends with, and CR LF as LF.
+                let matched = if is_mtext {
+                    parts::split(&parts::shown_mtext_parts(held), &shown_mtext(&text))
+                } else {
+                    parts::split(held, &text)
+                };
+                match matched {
                     Ok(values) => (values, Some(pattern)),
                     Err(Unsplit::Differs) => {
                         return fail(
@@ -1612,6 +1630,22 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                                      each row value with row_value, one of {}",
                                     each(&first),
                                     each(&second),
+                                    parts::names(held).join(", ")
+                                ),
+                                text_field,
+                            ),
+                        );
+                    }
+                    Err(Unsplit::Unclear) => {
+                        return fail(
+                            refused_on,
+                            op_err(
+                                ErrorCode::BadValue,
+                                format!(
+                                    "`{text}` cannot be told to split one way only into the \
+                                     parts {pattern} the template joins {set_what} from: they \
+                                     put row values side by side, and the text splits too many \
+                                     ways to try. Set each row value with row_value, one of {}",
                                     parts::names(held).join(", ")
                                 ),
                                 text_field,
@@ -2158,6 +2192,19 @@ fn apply_block(
         )
     };
     let mut before = None;
+    // The tags each block to bring into line carries just before this
+    // operation, as the change set has built the library so far.
+    let carried_before: Vec<(String, Vec<String>)> = match (block_op, name) {
+        (BlockOp::Redefine | BlockOp::Sync, Some(name)) => record
+            .block_carried_tags(name)
+            .map(|tags| vec![(name.to_owned(), tags)])
+            .unwrap_or_default(),
+        (BlockOp::Sync, None) => names
+            .iter()
+            .map(|n| (n.clone(), record.block_carried_tags(n).unwrap_or_default()))
+            .collect(),
+        _ => Vec::new(),
+    };
     let to_sync: Vec<String> = match (block_op, name) {
         (BlockOp::Add, Some(name)) => {
             if let Some(same) = names.iter().find(|n| one_name(n, name)) {
@@ -2201,7 +2248,7 @@ fn apply_block(
     let synced = if block_op == BlockOp::Add {
         Synced::default()
     } else {
-        match sync(at, l, &to_sync, op) {
+        match sync(at, l, &to_sync, &carried_before, op) {
             Ok(synced) => synced,
             Err(applied) => return *applied,
         }
@@ -2366,6 +2413,16 @@ fn apply_import(
             return fail(e, field);
         }
     };
+    // The tags each block it replaces carries just before the import, as
+    // the change set has built the library so far.
+    let carried_before: Vec<(String, Vec<String>)> = planned
+        .replaced()
+        .into_iter()
+        .map(|b| {
+            let tags = record.block_carried_tags(&b).unwrap_or_default();
+            (b, tags)
+        })
+        .collect();
     if let Err(e) = write_plan(record, &planned) {
         return fail(e, "");
     }
@@ -2376,7 +2433,7 @@ fn apply_import(
     let synced = if replaced.is_empty() {
         Synced::default()
     } else {
-        match sync(at, l, &replaced, op) {
+        match sync(at, l, &replaced, &carried_before, op) {
             Ok(synced) => synced,
             Err(applied) => return *applied,
         }
@@ -2567,10 +2624,16 @@ struct Synced {
 /// than once takes a single value as its list's first item. A new tag
 /// needs nothing written, since an insert that gives no value takes the
 /// definition's default.
+///
+/// `before` gives the tags each block carried, in order, just before the
+/// operation, as the change set had built the library so far: before a
+/// redefinition or an import its old definition, and for an attsync the
+/// definition in force.
 fn sync(
     at: &mut Attempt,
     l: usize,
     blocks: &[String],
+    before: &[(String, Vec<String>)],
     op: &Operation,
 ) -> Result<Synced, Box<Applied>> {
     let files = at.files;
@@ -2595,19 +2658,10 @@ fn sync(
             .find(|(b, _)| b == block)
             .map(|(_, tags)| tags.iter().filter(|t| *t == tag).count())
     };
-    // How many times each block carried each tag in the library as the
-    // change set found it: a list given for a tag it carries once now is a
-    // list of parts (#102) only when it carried the tag once then too, and
-    // otherwise a repeated tag's values, which keep their first.
-    let before: Vec<(String, Vec<String>)> = read_file(&library.path, "the block library")
-        .and_then(|text| RecordFile::from_text(&library.path, text))
-        .map(|found| {
-            blocks
-                .iter()
-                .map(|b| (b.clone(), found.block_carried_tags(b).unwrap_or_default()))
-                .collect()
-        })
-        .unwrap_or_default();
+    // A list given for a tag the block carries once now is a list of parts
+    // (#102) only when the block carried the tag once just before the
+    // operation, as `before` gives it, too; otherwise it is a repeated
+    // tag's values, which keep their first.
     let once_before = |block: &str, tag: &str| {
         before
             .iter()
@@ -3629,8 +3683,32 @@ fn attribute(
                 cause = Some((i, rest.to_owned(), matched));
             }
         } else if let Some(value) = field.strip_prefix(&format!("rows[{}].values.", k)) {
-            if let Some((_, _, i)) = at.values.iter().find(|(r, n, _)| *r == k && n == value) {
-                cause = Some((*i, String::new(), None));
+            let blamed = blame_row_values(at, k, value, &error);
+            match blamed.as_slice() {
+                [] => {}
+                [i] => cause = Some((*i, String::new(), None)),
+                [first, ..] => {
+                    // More than one operation set the values the text
+                    // joins, and none alone made it fail: each is named.
+                    let each: Vec<String> = blamed
+                        .iter()
+                        .map(|&i| format!("{i} (`{}`)", ops[i].spec.name))
+                        .collect();
+                    return Error {
+                        message: format!(
+                            "operations {} on sheet `{}`, each setting a row value the text \
+                             joins: {}",
+                            join_and(&each),
+                            files.name(k),
+                            error.message
+                        ),
+                        field: Some(format!("operations[{first}]")),
+                        line: None,
+                        column: None,
+                        file: None,
+                        ..error
+                    };
+                }
             }
         }
     } else if in_template {
@@ -3692,6 +3770,101 @@ fn attribute(
         line: None,
         column: None,
         ..error
+    }
+}
+
+/// The operations to blame for `error`, about sheet `k`'s row value
+/// `value`, in order. A value a template joins in a list of parts with
+/// others may fail for another's text, so every operation that set one of
+/// those values is tried: the sheet is read with that operation's values
+/// alone, the others as they were, and an operation whose values alone
+/// fail so is to blame. When exactly one is, it is named; otherwise each
+/// that set one is. A value no list joins is blamed on the operation that
+/// set it.
+fn blame_row_values(at: &Attempt, k: usize, value: &str, error: &Error) -> Vec<usize> {
+    let files = at.files;
+    let t = files.template_of[k];
+    let set_by = |name: &str| {
+        at.values
+            .iter()
+            .find(|(r, n, _)| *r == k && n == name)
+            .map(|(_, _, i)| *i)
+    };
+    // The template as the change set has it, or as it was when the change
+    // set has not read it.
+    let read;
+    let template = match &at.templates[t] {
+        Some(Ok(template)) => template,
+        _ => match files.templates[t]
+            .text
+            .clone()
+            .and_then(|text| RecordFile::from_text(&files.templates[t].path, text))
+        {
+            Ok(found) => {
+                read = found;
+                &read
+            }
+            Err(_) => return set_by(value).into_iter().collect(),
+        },
+    };
+    // How many times each block the template's inserts place carries a tag,
+    // as the library stands.
+    let library = files.library_of[t].and_then(|l| match &at.libraries[l] {
+        Some(Ok(library)) => Some(library),
+        _ => None,
+    });
+    let carried: Vec<(String, Vec<String>)> = template
+        .inserts(ObjectList::Template)
+        .into_iter()
+        .filter_map(|insert| {
+            let tags = library?.block_carried_tags(&insert.block)?;
+            Some((insert.block, tags))
+        })
+        .collect();
+    let carries = |block: &str, tag: &str| {
+        carried
+            .iter()
+            .find(|(b, _)| b == block)
+            .map(|(_, tags)| tags.iter().filter(|t| *t == tag).count())
+    };
+    let beside = template.parts_beside(value, &carries);
+    let mut contributed: Vec<usize> = beside.iter().filter_map(|name| set_by(name)).collect();
+    contributed.sort_unstable();
+    contributed.dedup();
+    if contributed.len() < 2 {
+        return set_by(value)
+            .or(contributed.first().copied())
+            .into_iter()
+            .collect();
+    }
+    let rows = match at
+        .rows
+        .new_text()
+        .map(|text| text.unwrap_or_else(|| files.rows_text.clone()))
+        .and_then(|text| rows_at(&text, &files.rows_path))
+    {
+        Ok(rows) => rows,
+        Err(_) => return contributed,
+    };
+    let alone: Vec<usize> = contributed
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let names: Vec<String> = at
+                .values
+                .iter()
+                .filter(|(r, _, by)| *r == k && *by == i)
+                .map(|(_, n, _)| n.clone())
+                .collect();
+            let mut tried = files.rows.clone();
+            tried[k] = files.rows[k].with_values_of(&rows[k], &names);
+            sheet_record(at, &tried, k, &mut Vec::new()).is_err_and(|e| e.code == error.code)
+        })
+        .collect();
+    if alone.len() == 1 {
+        alone
+    } else {
+        contributed
     }
 }
 

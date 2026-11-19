@@ -15,8 +15,9 @@ use serde_json::{json, Map, Value};
 
 use crate::description::schema::{block_library_schema, sheet_description_schema};
 use crate::description::{
-    article, kind_keys, objects_table, rows_schema, template_schema, Axis, LeaderLineEdit,
-    TableEdit, CELL_KEYS, DIMENSION_STYLE_KEYS, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
+    article, kind_keys, objects_table, rows_schema, template_schema, value_name_problem, Axis,
+    LeaderLineEdit, TableEdit, CELL_KEYS, DIMENSION_STYLE_KEYS, LAYER_KEYS, LINETYPE_KEYS,
+    TEXT_STYLE_KEYS, VALUE_NAME,
 };
 use crate::error::{Error, ErrorCode};
 use crate::geometry::{SnapKind, SnapRef};
@@ -793,7 +794,7 @@ fn definitions() -> Map<String, Value> {
     // A table's cell as a template writes it: the cell, or its text, may be
     // a value from the row, which the reader takes only in a template.
     let mut template_defs = template_schema()["$defs"].take();
-    for name in ["row_value", "value_name"] {
+    for name in ["row_value", "value_name", "parts", "text_parts"] {
         defs.insert(name.into(), template_defs[name].take());
     }
     let mut cell = template_defs["table_cell"].take();
@@ -1161,6 +1162,9 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             if let Some(one_of) = own.remove("oneOf") {
                 all_of.push(json!({ "oneOf": one_of }));
             }
+            if let Some(sheet_alone) = template_parts(object, own) {
+                all_of.push(sheet_alone);
+            }
             own.insert("allOf".into(), Value::Array(all_of));
             schema
         }
@@ -1381,6 +1385,68 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
     schema
 }
 
+/// Lets an add of a text, an mtext or an insert, whose schema is `own`,
+/// take a list of parts (#102) where a template's reader takes one: a
+/// text's or an mtext's contents, and an insert's attribute values. Gives
+/// the condition that refuses one on an add to a sheet's row, which writes
+/// its values itself; none for another object.
+fn template_parts(object: &str, own: &mut Map<String, Value>) -> Option<Value> {
+    let properties = own.get_mut("properties")?.as_object_mut()?;
+    let parts = match object {
+        "text" => "#/$defs/text_parts",
+        "mtext" => "#/$defs/parts",
+        "insert" => {
+            let attributes = properties.get_mut("attributes")?;
+            let values = attributes.get_mut("additionalProperties")?;
+            let written = values.take();
+            *values = json!({ "anyOf": [written, { "$ref": "#/$defs/parts" }] });
+            let said = attributes["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            attributes["description"] = json!(format!(
+                "{said} Added to a template, an attribute its block defines once may take a list \
+                 of parts instead, plain text and values from the row, {{row: NAME}}, joined in \
+                 order; added to a sheet's row, none."
+            ));
+            return Some(json!({
+                "if": { "required": ["sheet"] },
+                "then": {
+                    "properties": {
+                        "attributes": {
+                            "additionalProperties": {
+                                "not": {
+                                    "type": "array",
+                                    "contains": { "$ref": "#/$defs/row_value" },
+                                },
+                            },
+                        },
+                    },
+                },
+            }));
+        }
+        _ => return None,
+    };
+    let contents = properties.get_mut("contents")?;
+    let written = contents.take();
+    let said = written["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    *contents = json!({
+        "description": format!(
+            "{said} Added to a template, it may be a list of parts instead, plain text and \
+             values from the row, {{row: NAME}}, joined in order; added to a sheet's row, it may \
+             not."
+        ),
+        "anyOf": [written, { "$ref": parts }],
+    });
+    Some(json!({
+        "if": { "required": ["sheet"] },
+        "then": { "properties": { "contents": { "not": { "type": "array" } } } },
+    }))
+}
+
 /// The key of an operation that sets one row value of a list of parts.
 pub(crate) const ROW_VALUE_KEY: &str = "row_value";
 
@@ -1391,8 +1457,10 @@ fn row_value_key() -> Value {
                         and values from the row, the one row value of the parts to set, by \
                         name, to the text sent, on this sheet alone. Without it the text sent \
                         is the whole value, matched to the parts' fixed text to find each row \
-                        value's.",
-        "$ref": "#/$defs/value_name",
+                        value's. The name of one of the row's values: ASCII letters, \
+                        digits, _ and -, such as PANEL.",
+        "type": "string",
+        "pattern": VALUE_NAME,
     })
 }
 
@@ -3006,7 +3074,10 @@ fn operation(
     // elsewhere.
     let row_value = match map.get(ROW_VALUE_KEY) {
         None => None,
-        Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
+        Some(Value::String(name)) => match value_name_problem(name) {
+            None => Some(name.clone()),
+            Some(problem) => return Err(fail(ErrorCode::BadValue, problem, ROW_VALUE_KEY)),
+        },
         Some(_) => {
             return Err(fail(
                 ErrorCode::WrongType,

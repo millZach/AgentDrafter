@@ -836,6 +836,22 @@ fn the_template_schema_accepts_exactly_the_templates_the_reader_accepts() {
             (place, "[{row: 'A B'}]", json!([{"row": "A B"}]), false),
         ]);
     }
+    // A text is one line, so a fixed part holding a line break can never
+    // build; an mtext's may.
+    cases.extend([
+        (
+            &TEXT_CONTENTS,
+            "[\"A\\nB \", {row: PANEL}]",
+            json!(["A\nB ", {"row": "PANEL"}]),
+            false,
+        ),
+        (
+            &MTEXT_CONTENTS,
+            "[\"A\\nB \", {row: PANEL}]",
+            json!(["A\nB ", {"row": "PANEL"}]),
+            true,
+        ),
+    ]);
     cases.extend([
         (&ATTRIBUTE_LIST, "[A, B, C]", json!(["A", "B", "C"]), true),
         (

@@ -20,7 +20,7 @@ use super::template::ROW_KEY;
 use crate::units::Unit;
 
 /// The name of a row's value, as a regular expression.
-const VALUE_NAME: &str = "^[A-Za-z0-9_-]+$";
+pub(crate) const VALUE_NAME: &str = "^[A-Za-z0-9_-]+$";
 
 /// The schema of a drawing set's settings, `set.yaml`.
 pub(crate) fn set_schema() -> Value {
@@ -257,6 +257,19 @@ pub(crate) fn template_schema() -> Value {
         },
         "contains": { "$ref": "#/$defs/row_value" },
     });
+    // A text is one line, so its fixed parts hold no line break.
+    let mut one_line = defs["parts"].clone();
+    one_line["description"] = json!(format!(
+        "{} A text is one line, so no fixed part holds a line break.",
+        one_line["description"].as_str().unwrap_or_default()
+    ));
+    one_line["items"]["anyOf"][0] = json!({
+        "anyOf": [
+            { "type": "string", "pattern": "^[^\\r\\n]*$" },
+            { "type": ["number", "boolean"] },
+        ],
+    });
+    defs["text_parts"] = one_line;
     let attributes = &mut defs["insert"]["properties"]["attributes"];
     attributes["description"] = json!(
         "The values of the block's attributes, from tag to value: text, or a value from the row, \
@@ -341,7 +354,7 @@ pub(crate) fn template_schema() -> Value {
             "anyOf": [
                 written,
                 { "$ref": "#/$defs/row_value" },
-                { "$ref": "#/$defs/parts" },
+                { "$ref": if kind == "text" { "#/$defs/text_parts" } else { "#/$defs/parts" } },
             ],
         });
     }

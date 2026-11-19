@@ -1836,6 +1836,16 @@ impl RecordFile {
         Ok(words)
     }
 
+    /// Whether the object of `list` at `index` takes its `key` from the
+    /// row, whole, `{row: NAME}`, or in a list of parts.
+    pub(crate) fn from_row_at(&self, list: ObjectList, index: usize, key: &str) -> bool {
+        self.items(list)
+            .and_then(|items| items.get(index))
+            .and_then(|item| object_parts(item).1)
+            .and_then(|keys| keys.iter().find(|e| e.key == key))
+            .is_some_and(|e| row_value_name(&e.value).is_some() || parts_of(&e.value).is_some())
+    }
+
     /// The text of row `row`'s value `name`, if the row gives it.
     pub(crate) fn row_value(&self, row: usize, name: &str) -> Option<String> {
         let values = mapping_entry(self.row_node(row)?, "values")?;
@@ -1929,6 +1939,32 @@ impl RecordFile {
                 });
         }
         places
+    }
+
+    /// The names of the row values the template's lists of parts join
+    /// beside the row value `name`, it among them, each once: every value
+    /// that fills a place `name` fills in parts. `carries` says how many
+    /// times an insert's block carries a tag.
+    pub(crate) fn parts_beside(&self, name: &str, carries: Carries) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let Some(items) = self.items(ObjectList::Template) else {
+            return names;
+        };
+        for item in items {
+            let mut item = item.clone();
+            let _ = super::template::places_in(&mut item, "", carries, &mut |node, _, parts| {
+                let held = parts.then(|| parts_of(node)).flatten().unwrap_or_default();
+                if held.contains(&Part::Row(name.to_owned())) {
+                    for found in super::parts::names(&held) {
+                        if !names.contains(&found) {
+                            names.push(found);
+                        }
+                    }
+                }
+                Ok(())
+            });
+        }
+        names
     }
 
     /// The file's new text, with every edit made, or `None` when nothing

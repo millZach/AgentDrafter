@@ -242,7 +242,9 @@ pub(super) fn fill_with_records(
         let carries = |block: &str, tag: &str| carried_in(library?, block, tag);
         each_place(root, &carries, &mut |node, place, parts_here| {
             if parts_here {
-                if let Some(parts) = read_parts(node, &place)? {
+                // Only an mtext's contents take more than one line.
+                let one_line = !place.ends_with(".mtext.contents");
+                if let Some(parts) = read_parts(node, &place, one_line)? {
                     let pattern = parts::pattern(&parts);
                     let joined =
                         parts::join(&parts, |name| row.value(name).map(|v| v.text.clone()));

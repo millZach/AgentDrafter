@@ -44,7 +44,7 @@ mod table;
 mod table_schema;
 mod template;
 mod text;
-pub(crate) use text::TEXT_STYLE_KEYS;
+pub(crate) use text::{shown_mtext, TEXT_STYLE_KEYS};
 mod written;
 pub(crate) use written::{ObjectSources, SheetSources, Source};
 
@@ -71,9 +71,10 @@ pub(crate) use mark::{mark_text, parse_mark, MarkFailure};
 pub(crate) use objects::article;
 pub(crate) use records::{read_sheet_record, read_sheet_record_noting, SavedSet, SheetRecord};
 pub(crate) use set::{
-    read_rows, read_rows_in, read_set_settings, read_set_settings_in, rows_at, template_path, Row,
+    read_rows, read_rows_in, read_set_settings, read_set_settings_in, rows_at, template_path,
+    value_name_problem, Row,
 };
-pub(crate) use set_schema::{rows_schema, set_schema, template_schema};
+pub(crate) use set_schema::{rows_schema, set_schema, template_schema, VALUE_NAME};
 pub(crate) use table::CELL_KEYS;
 pub(crate) use template::{
     library_named, read_template, read_template_in, template_at, template_in,
