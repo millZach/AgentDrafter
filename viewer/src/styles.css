@@ -258,10 +258,16 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
   /* Many layouts scroll in their strip; the status controls after it keep their room. */
   flex: 0 1 auto; min-width: 80px; overflow-x: auto;
 }
-.status > :not(.va-layouts):not(.grow):not(.live) { flex: none; }
+/* The controls keep their size; the layout strip, then the paper and the
+   coordinates, give way to them on a narrow bar, so Grid, Object snap,
+   Ortho and the connection are always on the screen. */
+.status > :not(.va-layouts):not(.grow):not(.live):not(.coords):not(.paperlabel) { flex: none; }
 .status .va-layouts .tab { background: none; border: 0; border-radius: 0; padding: 0 12px; color: var(--dim); }
 .status .va-layouts .tab.on { background: var(--canvas); color: #fff; border-top: 2px solid var(--blue); }
-.coords { font-family: var(--mono); align-self: center; min-width: 250px; padding-left: 10px; color: var(--text); white-space: nowrap; }
+.coords {
+  font-family: var(--mono); align-self: center; flex: 0 1 250px; min-width: 130px; padding-left: 10px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .coords .snapw { font-family: var(--ui); font-weight: 400; margin-left: 8px; }
 /* Object snap, with the ▴ that opens its menu. */
 .osgroup { display: flex; align-items: stretch; flex: none; }
@@ -306,7 +312,7 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 .osmenu.off .osrow svg { stroke: #7f8a98; }
 .osmenu footer { display: flex; gap: 6px; padding: 6px 12px 0; border-top: 1px solid #3c4553; align-items: center; }
 .osmenu footer small { flex: 1; color: var(--dim); font-size: 11px; }
-.paperlabel { align-self: center; padding: 0 10px; white-space: nowrap; }
+.paperlabel { align-self: center; padding: 0 10px; white-space: nowrap; flex: 0 1 auto; min-width: 60px; overflow: hidden; text-overflow: ellipsis; }
 .tog { background: none; border: 0; padding: 0 9px; color: #7f8a98; white-space: nowrap; }
 .tog[aria-pressed='true'] { color: #7fc0ff; }
 .tog:hover { background: #2c3440; }

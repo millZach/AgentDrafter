@@ -497,11 +497,20 @@ const checks = {
         requestAnimationFrame(tick);
         window.agentdrafterViewer.takeDraws();
       });
-      const touch = (type, points) =>
-        cdp.send('Input.dispatchTouchEvent', {
+      // Each event carries the time the finger made it, as a real finger's
+      // does: a gesture's moves 8 ms apart from its start, however long the
+      // page takes to handle each. Without them, a slow page acknowledges
+      // the finger going down so late that, by its events, it rested before
+      // moving, as a held finger does.
+      let finger = 0;
+      const touch = (type, points) => {
+        finger = type === 'touchStart' ? Date.now() / 1000 : finger + 0.008;
+        return cdp.send('Input.dispatchTouchEvent', {
           type,
+          timestamp: finger,
           touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 2, radiusY: 2, force: 1 })),
         });
+      };
       const toDrawing = (v, sx, sy) => [v.left + (sx - box.x) / v.scale, v.top - (sy - box.y) / v.scale];
       const toPage = (v, x, y) => [box.x + (x - v.left) * v.scale, box.y + (v.top - y) * v.scale];
       const view = () => page.evaluate(() => window.agentdrafterViewer.view());
@@ -1762,8 +1771,17 @@ const checks = {
         await page.mouse.move(stage[0] + 20, y, { steps: 6 });
         await sleep(30);
         await page.mouse.move(stage[0] + 10, y, { steps: 2 });
+        // Held still before letting go, so the drag ends where it is, with no
+        // fling to run on while the test reads the view; then the view is
+        // read once it has stopped.
+        await sleep(200);
         await page.mouse.up();
-        await sleep(1200);
+        for (let still = 0, last = ''; still < 3; ) {
+          await sleep(100);
+          const now = JSON.stringify(await page.evaluate(() => window.agentdrafterViewer.view()));
+          still = now === last ? still + 1 : 0;
+          last = now;
+        }
         const away = await at(page, 'DP-LD-101/device');
         assert(away.box[2] < stage[0], `FT-101 is panned off the screen: ${JSON.stringify(away.box)}`);
         const panned = await page.evaluate(() => window.agentdrafterViewer.view());

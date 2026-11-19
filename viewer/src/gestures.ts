@@ -7,6 +7,13 @@
 // and moves it until it lifts, which takes the snap it shows; a finger
 // pans only once it has moved SLOP pixels, so a hold is not lost to a
 // tremor.
+//
+// A finger is judged by its own events' times, when it moved, not by when
+// the page got round to them: on a slow device the moves of a finger that
+// is dragging can reach the page after the hold's timer has fired. A
+// finger that has moved more than STILL pixels is never held, and a hold
+// the timer began is taken back, with nothing taken, when a move comes
+// that the finger made before the hold was due.
 
 import { between, ease, pinch, panBy, zoomAt, type Limits, type PinchStart, type View } from './view.ts';
 
@@ -25,6 +32,8 @@ export interface Surface {
   holdMoved?(at: [number, number]): void;
   /** The held finger lifts, `taken` when it lifted rather than was cancelled. */
   holdEnded?(at: [number, number], taken: boolean): void;
+  /** What looked like a hold was a finger moving, or a quick tap, all along: the magnifier goes, and nothing is taken. */
+  holdTakenBack?(): void;
 }
 
 type Point = [number, number];
@@ -34,6 +43,9 @@ export const HOLD_MS = 350;
 
 /** How far a finger moves, in CSS pixels, before it pans rather than holds. */
 export const SLOP = 6;
+
+/** How far a held finger may stray, in CSS pixels, a tremor: further, and it is moving. */
+export const STILL = 3;
 
 /** Moves the surface's view to `to` over `ms` milliseconds; stops on a new gesture. */
 export class Glide {
@@ -85,6 +97,7 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
   const pointers = new Map<number, Point>();
   let pinchStart: PinchStart | null = null;
   let last: Point | null = null;
+  // Where the first finger went down, and when, by its event's time.
   let downAt: { p: Point; t: number } | null = null;
   let lastTap: { p: Point; t: number } | null = null;
   let multi = false;
@@ -94,10 +107,19 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
   let holdTimer = 0;
   let holding = false;
   let panning = false;
+  // Whether the finger has moved more than STILL since it went down.
+  let moved = false;
   const stopHold = () => {
     if (holdTimer) clearTimeout(holdTimer);
     holdTimer = 0;
   };
+  // A hold that was never one: the magnifier goes.
+  const takeBack = () => {
+    holding = false;
+    surface.holdTakenBack?.();
+  };
+  // Whether an event, by its own time, came before the hold was due.
+  const beforeHold = (e: PointerEvent) => !!downAt && e.timeStamp - downAt.t < HOLD_MS;
 
   const local = (e: PointerEvent | WheelEvent): Point => {
     const r = element.getBoundingClientRect();
@@ -122,16 +144,19 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     const p = local(e);
     pointers.set(e.pointerId, p);
     stopHold();
+    // A second finger: a pinch, never a hold.
+    if (holding && pointers.size > 1) takeBack();
     if (pointers.size === 1) {
       last = p;
-      downAt = { p, t: performance.now() };
+      downAt = { p, t: e.timeStamp };
       multi = false;
+      moved = false;
       panning = e.pointerType === 'mouse';
       moves.length = 0;
       if (e.pointerType !== 'mouse' && surface.held) {
         holdTimer = window.setTimeout(() => {
           holdTimer = 0;
-          if (pointers.size === 1 && !panning && last) {
+          if (pointers.size === 1 && !panning && !moved && last) {
             holding = true;
             surface.held?.(last);
           }
@@ -148,6 +173,14 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     if (!pointers.has(e.pointerId)) return;
     const p = local(e);
     pointers.set(e.pointerId, p);
+    // A finger that strays past a tremor is moving: it is never held.
+    if (pointers.size === 1 && downAt && !moved && distance(p, downAt.p) > STILL) {
+      moved = true;
+      stopHold();
+      // The hold came up while this move, made before it was due, was on
+      // its way: the finger was dragging all along.
+      if (holding && beforeHold(e)) takeBack();
+    }
     if (holding) {
       surface.holdMoved?.(p);
       return;
@@ -163,7 +196,7 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
       const dy = p[1] - last[1];
       last = p;
       surface.show(panBy(surface.view(), dx, dy));
-      moves.push({ t: performance.now(), dx, dy });
+      moves.push({ t: e.timeStamp, dx, dy });
       if (moves.length > 8) moves.shift();
     } else if (pointers.size >= 2 && pinchStart) {
       const [a, b] = twoFingers();
@@ -176,6 +209,9 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     const p = local(e);
     pointers.delete(e.pointerId);
     stopHold();
+    // A finger lifted before the hold was due, by its own time, was a tap:
+    // a hold that came up meanwhile is taken back.
+    if (holding && beforeHold(e)) takeBack();
     if (holding) {
       holding = false;
       pointers.clear();
@@ -201,7 +237,8 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     const start = downAt;
     downAt = null;
     if (!start || e.type !== 'pointerup') return;
-    const now = performance.now();
+    // Taps and flings by the events' own times, as the finger made them.
+    const now = e.timeStamp;
     const tap = !multi && distance(p, start.p) < 10 && now - start.t < 450;
     if (tap) {
       if (lastTap && now - lastTap.t < 320 && distance(p, lastTap.p) < 30) {

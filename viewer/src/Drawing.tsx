@@ -355,6 +355,11 @@ export function Drawing({
       held.current = p;
       showLoupe(p);
     },
+    holdTakenBack: () => {
+      held.current = null;
+      hideLoupe();
+      redraw();
+    },
     holdEnded: (p, taken) => {
       const h = hoveredOf(loupeViewer.current);
       held.current = null;
