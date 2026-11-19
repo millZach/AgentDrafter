@@ -549,7 +549,8 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
     max-height: min(44%, calc(100% - var(--qp-bottom) - 8px)); visibility: visible;
   }
   /* A phone's fields at 16 pixels, so focusing one does not zoom the page. */
-  .qin { font-size: 16px; line-height: 18px; height: 22px; padding: 1px 5px; }
+  .qin { font-size: 16px; line-height: 16px; height: 20px; padding: 1px 5px; }
+  .kv .qrow th, .kv .qrow td { padding-top: 0; padding-bottom: 1px; }
   textarea.qin { height: auto; }
   .va-overlays { left: 8px; right: 8px; max-width: none; }
   .long { display: none; }
