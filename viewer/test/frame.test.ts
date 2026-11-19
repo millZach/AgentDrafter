@@ -160,6 +160,9 @@ test('the current layer is kept for each set, and is layer 0 where the sheet has
   assert.equal(currentLayerOf('wire', layers), 'wire');
   assert.equal(currentLayerOf('notes', layers), '0');
   assert.equal(currentLayerOf(null, layers), '0');
+  // While the layers are still coming, the one kept: a circle drawn then goes on it, not on 0.
+  assert.equal(currentLayerOf('wire', null), 'wire');
+  assert.equal(currentLayerOf(null, null), '0');
   kept.set(LAYER_KEY, 'not json');
   assert.equal(readCurrentLayer(keeps, 'examples/demo-plant'), null);
   assert.equal(colorIndex(1), 1);

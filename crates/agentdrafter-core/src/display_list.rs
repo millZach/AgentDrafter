@@ -218,6 +218,12 @@ pub struct DisplayListReport {
     /// or a DWG.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template: Option<TemplateReach>,
+    /// With `origins`, on a sheet drawn in a layout, the space an object
+    /// drawn on the page goes in, as a change set's add names it: `paper`,
+    /// or on a sheet drawn in several layouts the name of the one drawn.
+    /// Left out without it, and for a sheet drawn in model space.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
     /// What the sheet draws.
     pub display_list: DisplayList,
 }
@@ -246,13 +252,12 @@ pub fn display_list_with(
         }
     }
     let source = request.source.as_path();
-    let mut drawn = read(source, request.sheet.as_deref(), request.entry)?;
-    if !request.origins {
-        drawn.template = None;
-        for object in &mut drawn.objects {
-            object.from = None;
-        }
-    }
+    let drawn = read(
+        source,
+        request.sheet.as_deref(),
+        request.entry,
+        request.origins,
+    )?;
     // A sheet drawn in several layouts draws the one asked for.
     let pages = drawn.sheet.pages();
     let layouts: Vec<String> = if pages.len() > 1 {
@@ -318,6 +323,20 @@ pub fn display_list_with(
     let layout = (!layouts.is_empty())
         .then(|| sheet.layout.as_ref().map(|l| l.name.clone()))
         .flatten();
+    // With origins, on a sheet drawn in a layout, the space an object drawn
+    // on the page goes in, as an add names it.
+    let space = request
+        .origins
+        .then(|| {
+            sheet.layout.as_ref().map(|l| {
+                if layouts.is_empty() {
+                    "paper".to_owned()
+                } else {
+                    l.name.clone()
+                }
+            })
+        })
+        .flatten();
     let snaps = request.snaps.then(|| snaps_of(sheet, &fonts, &list));
     let edges = request.snaps.then(|| edge_fills(sheet, &list));
     Ok(DisplayListReport {
@@ -340,6 +359,7 @@ pub fn display_list_with(
         snaps,
         edges,
         template: drawn.template,
+        space,
         display_list: list,
     })
 }
@@ -388,8 +408,15 @@ fn objects_of(
 
 /// Reads the sheet `sheet` names from `source`: a drawing set's folder, as
 /// it was just after its journal's entry `entry` when one is given, or one
-/// sheet description or DWG, whose one sheet is named by its file.
-fn read(source: &Path, sheet: Option<&str>, entry: Option<u64>) -> Result<Drawn, Error> {
+/// sheet description or DWG, whose one sheet is named by its file. With
+/// `origins`, a set's sheet says where each object is written and which
+/// sheets its template reaches; without, neither is worked out.
+fn read(
+    source: &Path,
+    sheet: Option<&str>,
+    entry: Option<u64>,
+    origins: bool,
+) -> Result<Drawn, Error> {
     let named = |name: &str| sheet.is_none_or(|s| s.to_lowercase() == name.to_lowercase());
     if source.is_dir() {
         let set = match entry {
@@ -404,34 +431,39 @@ fn read(source: &Path, sheet: Option<&str>, entry: Option<u64>) -> Result<Drawn,
         let ids: Vec<(String, Option<String>)> = (0..record.objects.len())
             .map(|i| (record.id(i), record.objects[i].name.clone()))
             .collect();
-        let from: Vec<Origin> = record
-            .objects
-            .iter()
-            .map(|o| {
-                if o.in_row {
-                    Origin::Row
-                } else {
-                    Origin::Template
-                }
-            })
-            .collect();
-        // The sheets built from the same template: those whose rows name
-        // one file, as the file system resolves their paths, as a change
-        // set finds the sheets a template edit reaches.
-        let template_file = source.join(&row.template);
-        let sheets = set
-            .rows
-            .iter()
-            .filter(|other| {
-                other.template == row.template
-                    || is_same_file(&template_file, &source.join(&other.template))
-            })
-            .map(|other| other.sheet.clone())
-            .collect();
-        let template = Some(TemplateReach {
-            path: row.template.clone(),
-            sheets,
-        });
+        let (from, template) = if origins {
+            let from: Vec<Origin> = record
+                .objects
+                .iter()
+                .map(|o| {
+                    if o.in_row {
+                        Origin::Row
+                    } else {
+                        Origin::Template
+                    }
+                })
+                .collect();
+            // The sheets built from the same template: those whose rows
+            // name one file, as the file system resolves their paths, as a
+            // change set finds the sheets a template edit reaches.
+            let template_file = source.join(&row.template);
+            let sheets = set
+                .rows
+                .iter()
+                .filter(|other| {
+                    other.template == row.template
+                        || is_same_file(&template_file, &source.join(&other.template))
+                })
+                .map(|other| other.sheet.clone())
+                .collect();
+            let reach = TemplateReach {
+                path: row.template.clone(),
+                sheets,
+            };
+            (from, Some(reach))
+        } else {
+            (Vec::new(), None)
+        };
         return Ok(Drawn {
             name: record.name,
             names,

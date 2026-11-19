@@ -463,7 +463,8 @@ fn display_list_does() -> String {
      `origins`, on a drawing set's sheet, each object also gives `from`, `template` or `row`, \
      where a change set writes an edit to it, and the reply gives `template`: the sheet's \
      template, its `path` as the rows write it, and every sheet built from it under `sheets`, \
-     which an edit to one of the template's objects reaches. A loop \
+     which an edit to one of the template's objects reaches, and on a sheet drawn in a layout \
+     `space`, the space an object drawn on the page goes in, as an add names it. A loop \
      sheet's display list runs to megabytes: it is for the viewer to draw, not to read."
         .to_owned()
 }
@@ -485,7 +486,7 @@ fn display_list_input() -> Value {
                 "type": "boolean",
             },
             "origins": {
-                "description": "On a drawing set's sheet, say where each object is written, `from` its sheet's `template` or its `row`, and give `template`: the template's path and every sheet built from it, which an edit to a template's object reaches. Without it, neither.",
+                "description": "On a drawing set's sheet, say where each object is written, `from` its sheet's `template` or its `row`, and give `template`: the template's path and every sheet built from it, which an edit to a template's object reaches; and on a sheet drawn in a layout, `space`: the space an object drawn on the page goes in, `paper` or the layout's name. Without it, none of them.",
                 "type": "boolean",
             },
             "fonts": fonts(),

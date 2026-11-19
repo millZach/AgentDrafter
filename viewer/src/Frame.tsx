@@ -7,7 +7,7 @@
 // small box for text. Plain components: what they do is the page's (App.tsx), and
 // what they say is worked out in frame.ts.
 
-import { useState, type ReactNode, type RefObject } from 'react';
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 
 import {
   PANELS,
@@ -312,8 +312,11 @@ export function CommandBar({
             } else if (e.key === 'Escape') {
               e.preventDefault();
               e.stopPropagation();
-              if (e.currentTarget.value && !typingText) e.currentTarget.value = '';
-              else onEscape();
+              // Esc drops what is typed; with nothing typed, or a text's
+              // words, it ends the tool too.
+              const typed = e.currentTarget.value;
+              e.currentTarget.value = '';
+              if (!typed || typingText) onEscape();
             } else if (e.key !== 'F3' && e.key !== 'F7' && e.key !== 'F8') {
               // The page's own keys stay out of the field's typing.
               e.stopPropagation();
@@ -337,6 +340,10 @@ export interface TemplateDialogProps {
 /** An edit to a template's object asks first, naming every sheet it changes (Zach, 2026-11-19). */
 export function TemplateDialog({ edit, sheet, onCancel, onConfirm }: TemplateDialogProps) {
   const words = templateWords(edit);
+  // Change all takes the focus once, as the dialog opens: not again on a
+  // later render, which would take it back from Cancel.
+  const all = useRef<HTMLButtonElement>(null);
+  useEffect(() => all.current?.focus(), []);
   return (
     <div className="va-modal" role="dialog" aria-modal="true" aria-label="Template warning" data-template-dialog>
       <div className="dialog tw">
@@ -357,7 +364,7 @@ export function TemplateDialog({ edit, sheet, onCancel, onConfirm }: TemplateDia
             type="button"
             className="btn warn"
             data-tw="all"
-            ref={(el) => el?.focus()}
+            ref={all}
             onClick={onConfirm}
           >
             {words.button}

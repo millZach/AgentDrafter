@@ -262,14 +262,24 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // An edit to a template's object, waiting for the drafter's yes.
   const [templateAsk, setTemplateAsk] = useState<ToolSend | null>(null);
   // A tool asked for while the set as it was is shown: it starts once the set as it is is drawn.
-  const [pendingTool, setPendingTool] = useState<{ word: string; picked: number[] } | null>(null);
+  // The objects it takes go by their IDs: their places on the set as it was are not theirs on the set as it is.
+  const [pendingTool, setPendingTool] = useState<{ word: string; ids: string[] } | null>(null);
   // The change sets this page sent whose sheets it has already asked for again.
   const ownEntries = useRef(new Set<number>());
+  // The entries whose sheets the journal's event asked for again, so a
+  // change set's reply that comes after does not ask twice.
+  const journalDrew = useRef(new Set<number>());
+  // How many change sets this page sent have not replied yet: Undo last
+  // and Accept wait for every one. They are sent one after another, in
+  // the order the tools gave them.
+  const [sending, setSending] = useState(0);
+  const sendQueue = useRef<Promise<void>>(Promise.resolve());
   // The newest change set this page sent that landed, which Undo last
   // takes until the journal the page holds has caught up with it.
   const [ownLatest, setOwnLatest] = useState<number | null>(null);
   // The sheet's layers, for the Layer box, and the current layer kept for this set.
-  const [layers, setLayers] = useState<LayerEntry[]>([]);
+  // Null while they are being asked for.
+  const [layers, setLayers] = useState<LayerEntry[] | null>(null);
   const [keptLayer, setKeptLayer] = useState<string | null>(() => readCurrentLayer(keeps, source));
   const [side, setSide] = useState<'journal' | 'assistant'>('journal');
   const [history, setHistory] = useState<string[]>([]);
@@ -561,9 +571,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
         const touched = [...new Set(fresh.flatMap((e) => sheetsTouched(e, report)).map(upper))];
         // A change set this page sent had its sheets asked for again as
         // soon as `change` replied: they are not asked for twice.
-        const others = [
-          ...new Set(fresh.filter((e) => !ownEntries.current.has(e.entry)).flatMap((e) => sheetsTouched(e, report)).map(upper)),
-        ];
+        const theirs = fresh.filter((e) => !ownEntries.current.has(e.entry));
+        for (const e of theirs) journalDrew.current.add(e.entry);
+        const others = [...new Set(theirs.flatMap((e) => sheetsTouched(e, report)).map(upper))];
         drawAgain(others);
         const last = fresh.at(-1) as Entry;
         const landed = [...fresh].reverse().find((e) => e.kind === 'change_set' && (e.landed_on?.length ?? 0) > 0);
@@ -838,9 +848,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (text) {
       const o = JSON.parse(text) as ToolOutcome;
       for (const line of o.log) log(line);
-      if (o.send) {
-        if (o.send.template) setTemplateAsk(o.send);
-        else void sendChange(o.send);
+      // Each in order: one to a template's object is asked about first.
+      for (const s of o.sends ?? []) {
+        if (s.template) setTemplateAsk(s);
+        else void sendChange(s);
       }
     }
     refreshTool();
@@ -848,21 +859,19 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // Sends a tool's change set through `change`, as an agent would, and
   // asks for the sheets it landed on as soon as `change` replies, without
   // waiting for the journal.
-  const sendChange = async (s: ToolSend) => {
+  const sendOne = async (s: ToolSend) => {
     const landed = (reply: ChangeReply | undefined) => {
       const sheets = (reply?.sheets ?? []).filter((x) => x.ok).map((x) => upper(x.sheet));
       const entry = reply?.journal_entry;
       if (entry !== undefined) {
-        // The journal already told of it: its sheets were asked for then.
-        if (seen.current !== null && seen.current >= entry) return;
-        ownEntries.current.add(entry);
         if (sheets.length) setOwnLatest((n) => Math.max(n ?? 0, entry));
+        // The journal's event drew its sheets already. A first reading of
+        // the journal draws none, so only an event that did counts.
+        if (journalDrew.current.has(entry)) return;
+        ownEntries.current.add(entry);
       }
       drawAgain(sheets);
     };
-    // Undo last and Accept wait while it is on its way: the change set
-    // they would take may be about to land.
-    setBusy('change');
     try {
       const reply = await call<ChangeReply>('change', { set: source, change_set: s.change_set }, token);
       landed(reply);
@@ -870,9 +879,15 @@ export function App({ token, source, sheet, layout }: AppProps) {
     } catch (e) {
       if (e instanceof CommandError && e.result) landed(e.result as ChangeReply);
       say('warn', `${s.what}: not landed`, why(e, token));
-    } finally {
-      setBusy(null);
     }
+  };
+  // Undo last and Accept wait while any is on its way: a change set they
+  // would take may be about to land.
+  const sendChange = (s: ToolSend) => {
+    setSending((n) => n + 1);
+    const sent = sendQueue.current.then(() => sendOne(s)).finally(() => setSending((n) => n - 1));
+    sendQueue.current = sent.catch(() => {});
+    return sent;
   };
   const startTool = (word: string, fromSelection = true) => {
     setToolsOpen(false);
@@ -880,9 +895,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setSnapMenu(null);
     const picked = fromSelection && pickedPlace !== null ? [pickedPlace] : [];
     if (at !== null) {
-      // The set as it was is read-only: the tool starts on the set as it is.
+      // The set as it was is read-only: the tool starts on the set as it
+      // is, on the selected object found there by its ID.
       backToLive();
-      setPendingTool({ word, picked });
+      setPendingTool({ word, ids: fromSelection && picked.length && object?.id ? [object.id] : [] });
       return;
     }
     const v = renderer();
@@ -909,22 +925,29 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (!v) return;
     if (!toolState?.tool && text.trim()) {
       // A tool's alias starts it, Move and Erase on what is selected.
-      if (at !== null) {
-        backToLive();
-        setPendingTool({ word: text.trim(), picked: pickedPlace !== null ? [pickedPlace] : [] });
-        return;
-      }
       startTool(text.trim());
       return;
     }
     toolDid(v.tool_input(text));
+  };
+  // Enter, Space or a right-click away from the field: what it holds is entered.
+  const enterTyped = () => {
+    const f = field.current;
+    const text = f?.value ?? '';
+    if (f) f.value = '';
+    enter(text);
   };
   useEffect(() => {
     if (!pendingTool || !summary || summary.entry !== null || at !== null) return;
     const v = renderer();
     if (!v) return;
     setPendingTool(null);
-    toolDid(v.tool_start(pendingTool.word, Uint32Array.from(pendingTool.picked)));
+    const live = pendingTool.ids.map((id) => places.get(upper(id)));
+    pendingTool.ids.forEach((id, i) => {
+      if (live[i] === undefined) log(`${id} is not on the sheet as it is: the tool starts without it`);
+    });
+    const found = live.filter((p): p is number => p !== undefined);
+    toolDid(v.tool_start(pendingTool.word, Uint32Array.from(found)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingTool, summary, at]);
 
@@ -932,6 +955,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // out of whatever is open, one thing at a time.
   const escape = useRef<() => void>(() => {});
   escape.current = () => {
+    // Esc drops what is typed, as AutoCAD's does.
+    if (field.current) field.current.value = '';
     if (templateAsk) cancelTemplate();
     else if (asking) setAsking(null);
     else if (snapMenu) setSnapMenu(null);
@@ -957,7 +982,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (target?.closest?.('button') && (e.key === 'Enter' || e.key === ' ')) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      enter('');
+      enterTyped();
       return;
     }
     if (e.key.length === 1 && e.key !== ' ') {
@@ -1010,6 +1035,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
       setLayers([]);
       return;
     }
+    // Still coming: the layer kept is the current one until they come.
+    setLayers(null);
     let current = true;
     call<{ layers: { sheet: string; layers: LayerEntry[] }[] }>(
       'query',
@@ -1026,7 +1053,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [summary?.sheet, summary?.entry, hasTemplate, layersAsked, source, token]);
   const currentLayer = currentLayerOf(keptLayer, layers);
-  const layerEntry = layers.find((l) => l.name === currentLayer);
+  const layerEntry = layers?.find((l) => l.name === currentLayer);
   const chooseLayer = (name: string) => {
     setKeptLayer(name);
     writeCurrentLayer(keeps, source, name);
@@ -1091,6 +1118,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // is the newest an undo can take: Undo last takes it, not the one before
   // it, which would undo both.
   const undoable = ownLatest !== null && (!journal || newest(journal) < ownLatest) ? ownLatest : journal ? lastUndoable(journal) : null;
+  // Undo last and Accept wait while anything is busy, or any change set this page sent has not replied.
+  const busyNow = busy ?? (sending > 0 ? 'change' : null);
   const blocked = !!journal && (!!journal.inconsistent || (!!lastAccept && pending.length === 0));
 
   const sheets = summary?.sheets ?? [];
@@ -1138,7 +1167,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       failing={failing}
       undoable={undoable}
       blocked={blocked}
-      busy={busy}
+      busy={busyNow}
       stepping={at !== null}
       onShow={(n) => showEntry(n)}
       onUndo={() => void undo(undoable)}
@@ -1151,7 +1180,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       failing={failing}
       at={at}
       focused={focused}
-      busy={busy}
+      busy={busyNow}
       onStep={step}
       onShow={(n) => showEntry(n)}
       onUndo={(n) => void undo(n)}
@@ -1269,7 +1298,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
               type="button"
               className="qa"
               data-act="undo"
-              disabled={!undoable || busy !== null || at !== null}
+              disabled={!undoable || busyNow !== null || at !== null}
               title={at !== null ? 'Off while you look back at an entry' : undoable ? `Undo change set ${undoable}` : 'Nothing an undo can take'}
               onClick={() => void undo(undoable)}
             >
@@ -1300,7 +1329,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             type="button"
             className={`btn primary${blocked ? ' blocked' : ''}`}
             data-act="accept"
-            disabled={!journal || busy !== null || at !== null}
+            disabled={!journal || busyNow !== null || at !== null}
             onClick={() => void askAccept()}
           >
             {acceptLabel}
@@ -1314,7 +1343,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
           onToggle={toggle}
           onTool={ribbonTool}
           running={toolState?.tool ?? null}
-          layers={layers}
+          layers={layers ?? []}
           current={currentLayer}
           onLayer={chooseLayer}
           onLayersOpen={() => setLayersAsked((n) => n + 1)}
@@ -1382,7 +1411,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             onPickedColor={setPickedColor}
             tool={toolState}
             onToolOutcome={toolDid}
-            onToolEnter={() => enter('')}
+            onToolEnter={enterTyped}
             ortho={toggles.ortho}
             layer={toolLayer}
             handle={drawing}
@@ -1421,7 +1450,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
                 drawing.current?.redraw();
               }}
               onAdd={(t, h) => toolDid(renderer()?.tool_text_box(t, h) ?? '')}
-              onCancel={endTool}
+              onCancel={() => toolDid(renderer()?.tool_option('cancel') ?? '')}
             />
           )}
           {object && summary && (

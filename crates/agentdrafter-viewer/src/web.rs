@@ -572,12 +572,23 @@ impl Viewer {
         self.caught.clear();
         let snaps = std::mem::take(&mut sheet.snaps);
         let edges = std::mem::take(&mut sheet.edges);
+        // An object whose drawing on the page is cut at a viewport's window
+        // is model space seen through it: its points there are not its own.
+        let mut objects: Vec<ObjectInfo> = sheet.objects.iter().map(ObjectInfo::of).collect();
+        for item in &sheet.display_list.items {
+            if item.clip.is_some() {
+                if let Some(o) = objects.get_mut(item.object) {
+                    o.through_viewport = true;
+                }
+            }
+        }
         self.tools.load(Context {
             sheet: sheet.sheet.clone(),
             units: sheet.units.clone(),
-            objects: sheet.objects.iter().map(ObjectInfo::of).collect(),
+            objects,
             template: sheet.template.clone(),
             past: sheet.entry.is_some(),
+            space: sheet.space.clone(),
         });
         let mut loaded = self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?;
         loaded.snaps = snaps;

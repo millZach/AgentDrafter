@@ -290,10 +290,10 @@ export interface ToolSend {
   template?: TemplateEdit;
 }
 
-/** What came of a tool's step: lines for the history, and a change set to send. */
+/** What came of a tool's step: lines for the history, and the change sets to send, in order. */
 export interface ToolOutcome {
   log: string[];
-  send?: ToolSend;
+  sends?: ToolSend[];
 }
 
 /** The template dialog's words: its heading, what it says, and its button. */
@@ -371,8 +371,13 @@ export function writeCurrentLayer(keeps: Keeps | null, source: string, layer: st
   }
 }
 
-/** The current layer of a sheet whose layers are `layers`: the one kept, if the sheet has it, or layer 0. */
-export function currentLayerOf(kept: string | null, layers: readonly LayerEntry[]): string {
+/**
+ * The current layer of a sheet whose layers are `layers`: the one kept, if
+ * the sheet has it, or layer 0. While the layers are still being asked for
+ * (null), the one kept, so nothing drawn meanwhile goes on 0 by mistake.
+ */
+export function currentLayerOf(kept: string | null, layers: readonly LayerEntry[] | null): string {
+  if (layers === null) return kept ?? '0';
   return kept !== null && layers.some((l) => l.name === kept) ? kept : '0';
 }
 

@@ -82,6 +82,10 @@ pub struct SheetReply {
     /// built from it, which an edit to its objects reaches.
     #[serde(default)]
     pub template: Option<Reach>,
+    /// With `origins`, on a sheet drawn in a layout, the space an object
+    /// drawn on the page goes in.
+    #[serde(default)]
+    pub space: Option<String>,
     pub display_list: DisplayList,
 }
 
@@ -509,6 +513,7 @@ mod tests {
             snaps: Vec::new(),
             edges: Vec::new(),
             template: None,
+            space: None,
             display_list,
         }
     }

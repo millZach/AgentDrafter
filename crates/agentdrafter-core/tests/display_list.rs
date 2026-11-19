@@ -240,3 +240,50 @@ fn with_origins_each_object_says_whether_its_template_or_its_row_writes_it() {
 
     assert_eq!(snapshot::snapshot(&plant), before, "nothing is written");
 }
+
+#[test]
+fn with_origins_a_sheet_drawn_in_a_layout_names_the_space_an_add_goes_in() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    // A made-up set of one sheet, its template one of the layout examples.
+    let set_of = |name: &str, example: &str, units: &str| -> PathBuf {
+        let set = scratch(name);
+        fs::create_dir_all(set.join("templates")).unwrap();
+        fs::copy(examples.join(example), set.join("templates").join(example)).unwrap();
+        fs::write(
+            set.join("set.yaml"),
+            format!("units: {units}\noutput: dwg\nrows: rows.yaml\n"),
+        )
+        .unwrap();
+        fs::write(
+            set.join("rows.yaml"),
+            format!("rows:\n  - sheet: LAY-001\n    template: templates/{example}\n"),
+        )
+        .unwrap();
+        set
+    };
+    let space = |set: &Path, layout: Option<&str>, origins: bool| {
+        let mut request = DisplayListRequest::new(set);
+        request.layout = layout.map(str::to_owned);
+        request.origins = origins;
+        display_list_with(&request, &Settings::default())
+            .unwrap()
+            .space
+    };
+
+    // One layout: an add drawn on its page goes in paper space.
+    let one = set_of("layout-space-one", "layout.yaml", "mm");
+    assert_eq!(space(&one, None, true).as_deref(), Some("paper"));
+    assert_eq!(space(&one, None, false), None, "without origins, nothing");
+
+    // Several: an add names the layout drawn.
+    let several = set_of("layout-space-several", "layouts.yaml", "mm");
+    assert_eq!(space(&several, None, true).as_deref(), Some("Assembly"));
+    assert_eq!(
+        space(&several, Some("wiring"), true).as_deref(),
+        Some("Wiring")
+    );
+
+    // A sheet drawn in model space names none.
+    let plant = examples.join("demo-plant");
+    assert_eq!(space(&plant, None, true), None);
+}

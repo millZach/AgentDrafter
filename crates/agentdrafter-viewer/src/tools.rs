@@ -168,6 +168,9 @@ pub struct ObjectInfo {
     /// Whether it is written in the sheet's template; none when the core did
     /// not say, as for a sheet description.
     pub from_template: Option<bool>,
+    /// Whether it is model space seen through a viewport of the layout
+    /// drawn, whose points on the page are the viewport's, not its own.
+    pub through_viewport: bool,
 }
 
 impl ObjectInfo {
@@ -180,6 +183,7 @@ impl ObjectInfo {
             kind: text("type").unwrap_or_default(),
             block: text("block"),
             from_template: text("from").map(|f| f == "template"),
+            through_viewport: false,
         }
     }
 
@@ -219,6 +223,10 @@ pub struct Context {
     pub template: Option<Reach>,
     /// Whether it is the set as it was at an entry, read-only.
     pub past: bool,
+    /// On a sheet drawn in a layout, the space a new object goes in, as an
+    /// add names it: `paper`, or the layout's name on a sheet drawn in
+    /// several; none on a sheet drawn in model space.
+    pub space: Option<String>,
 }
 
 /// What a tool wants next.
@@ -291,12 +299,14 @@ pub struct Send {
 }
 
 /// What a step of a tool came to: lines for the command bar's history,
-/// and the change set to send, if the tool has what it needs.
+/// and the change sets to send, in order, if the tool has what it needs:
+/// two when a tool ended by another kept what it drew and the other sent
+/// at once, as Erase on objects already selected does.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Outcome {
     pub log: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub send: Option<Send>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sends: Vec<Send>,
 }
 
 /// An option of a prompt, to click.
@@ -652,11 +662,17 @@ impl Tools {
         }
         let mut outcome = self.end(false);
         self.last = Some(kind);
-        let picked: Vec<usize> = picked
+        let mut picked: Vec<usize> = picked
             .iter()
             .copied()
             .filter(|&p| self.nameable(p))
             .collect();
+        if kind == ToolKind::Move {
+            if let Some(&p) = picked.iter().find(|&&p| self.through_viewport(p)) {
+                self.error = Some(self.viewport_words(p));
+                picked.retain(|&p| !self.through_viewport(p));
+            }
+        }
         let step = match kind {
             ToolKind::Line => Step::LineFirst,
             ToolKind::Circle => Step::CircleCenter,
@@ -675,13 +691,32 @@ impl Tools {
             format!("{} {}", kind.command(), self.picked_words(&picked))
         });
         self.running = Some(Running { kind, step });
-        // Erase with objects already selected erases them at once.
+        // Erase with objects already selected erases them at once, after
+        // what the tool it ended kept, if any: both are sent, in order.
         if kind == ToolKind::Erase && !picked.is_empty() {
             let done = self.finish_select();
             outcome.log.extend(done.log);
-            outcome.send = done.send.or(outcome.send);
+            outcome.sends.extend(done.sends);
         }
         outcome
+    }
+
+    /// Whether the object at `place` is model space seen through a
+    /// viewport, whose points on the page are not its own.
+    fn through_viewport(&self, place: usize) -> bool {
+        self.context
+            .objects
+            .get(place)
+            .is_some_and(|o| o.through_viewport)
+    }
+
+    /// Why Move does not take an object seen through a viewport.
+    fn viewport_words(&self, place: usize) -> String {
+        format!(
+            "{} is in model space, seen through a viewport: Move moves only what is drawn on \
+             the paper here.",
+            self.object_words(place)
+        )
     }
 
     /// Whether a change set can name the object at `place`: it has an ID.
@@ -733,7 +768,7 @@ impl Tools {
             } else {
                 Vec::new()
             },
-            send: None,
+            sends: Vec::new(),
         }
     }
 
@@ -922,7 +957,10 @@ impl Tools {
         };
         self.last_point = Some(point.at);
         self.running = next.map(|step| Running { kind, step });
-        Outcome { log, send: None }
+        Outcome {
+            log,
+            sends: Vec::new(),
+        }
     }
 
     /// Picks the object at `place`, or takes it out when it is picked, in
@@ -934,6 +972,8 @@ impl Tools {
         };
         let words = self.object_words(place);
         let nameable = self.nameable(place);
+        let viewport = self.through_viewport(place);
+        let viewport_words = self.viewport_words(place);
         let Some(Running {
             kind,
             step: Step::Select { picked },
@@ -942,6 +982,10 @@ impl Tools {
             return Outcome::default();
         };
         let command = kind.command();
+        if *kind == ToolKind::Move && viewport {
+            self.error = Some(viewport_words);
+            return Outcome::default();
+        }
         if !nameable {
             self.error = Some(format!(
                 "{words} has no ID, so a change set cannot name it."
@@ -960,7 +1004,7 @@ impl Tools {
         };
         Outcome {
             log: vec![line],
-            send: None,
+            sends: Vec::new(),
         }
     }
 
@@ -1019,7 +1063,18 @@ impl Tools {
                 self.error = None;
                 Outcome::default()
             }
-            "cancel" => self.escape(),
+            // Cancel drops the line being typed, as in a phone's text box;
+            // Esc keeps it, as AutoCAD's TEXT does.
+            "cancel" => {
+                if let Some(Running {
+                    step: Step::TextType { current, .. },
+                    ..
+                }) = &mut self.running
+                {
+                    current.clear();
+                }
+                self.escape()
+            }
             // Done finishes the text, the line being typed with it.
             "done"
                 if matches!(
@@ -1033,7 +1088,8 @@ impl Tools {
             "done" => self.input("", None),
             "undo" => self.input("U", None),
             "close" => self.input("C", None),
-            "diameter" | "radius" => self.input("D", None),
+            "diameter" => self.input("D", None),
+            "radius" => self.input("R", None),
             "height" => self.input("H", None),
             _ => Outcome::default(),
         }
@@ -1062,7 +1118,7 @@ impl Tools {
             ));
             return Outcome {
                 log: vec![format!("“{typed}” is not a drawing tool")],
-                send: None,
+                sends: Vec::new(),
             };
         };
         let kind = running.kind;
@@ -1094,7 +1150,7 @@ impl Tools {
             });
             return Outcome {
                 log: vec![format!("TEXT: “{line}”; Enter again to finish")],
-                send: None,
+                sends: Vec::new(),
             };
         }
         if let Step::TextHeight = running.step {
@@ -1114,7 +1170,7 @@ impl Tools {
                     });
                     Outcome {
                         log: vec![format!("TEXT height {h}{}", self.unit())],
-                        send: None,
+                        sends: Vec::new(),
                     }
                 }
                 None => {
@@ -1157,7 +1213,7 @@ impl Tools {
                 });
                 return Outcome {
                     log: vec!["LINE: last point taken back".to_owned()],
-                    send: None,
+                    sends: Vec::new(),
                 };
             }
             (Step::LineNext { points }, "C" | "CLOSE") => {
@@ -1170,8 +1226,9 @@ impl Tools {
                 self.running = None;
                 return self.land_lines(&points);
             }
-            (Step::CircleRadius { center, diameter }, "D" | "DIAMETER" | "R" | "RADIUS") => {
-                let diameter = !diameter;
+            (Step::CircleRadius { center, .. }, "D" | "DIAMETER" | "R" | "RADIUS") => {
+                // Each word sets its own mode: RADIUS never turns Diameter on.
+                let diameter = matches!(upper.as_str(), "D" | "DIAMETER");
                 self.running = Some(Running {
                     kind,
                     step: Step::CircleRadius {
@@ -1184,7 +1241,7 @@ impl Tools {
                         "CIRCLE: type the {}",
                         if diameter { "diameter" } else { "radius" }
                     )],
-                    send: None,
+                    sends: Vec::new(),
                 };
             }
             (Step::TextStart, "H" | "HEIGHT") => {
@@ -1300,20 +1357,25 @@ impl Tools {
         Some(json!({ "snap": snap }))
     }
 
-    /// An add on this sheet, in its row, on the current layer.
+    /// An add on this sheet, in its row, on the current layer, in the space
+    /// the page shows: a layout's paper space on a sheet drawn in a layout.
     fn add(&self, op: &str) -> Value {
-        json!({"op": op, "sheet": self.context.sheet, "layer": self.layer})
+        let mut op = json!({"op": op, "sheet": self.context.sheet, "layer": self.layer});
+        if let Some(space) = &self.context.space {
+            op["space"] = json!(space);
+        }
+        op
     }
 
     fn adds(&self, operations: Vec<Value>, what: String) -> Outcome {
         Outcome {
             log: vec![format!("{what}: sent")],
-            send: Some(Send {
+            sends: vec![Send {
                 change_set: json!({ "operations": operations }),
                 what,
                 sheets: vec![self.context.sheet.clone()],
                 template: None,
-            }),
+            }],
         }
     }
 
@@ -1455,6 +1517,24 @@ impl Tools {
     }
 
     fn land_move(&mut self, picked: &[usize], base: &Taken, to: &Taken) -> Outcome {
+        // The core applies one move after another, working a snapped point
+        // out on the sheet as it stands then: a snap on an object moved
+        // before would be found where it went, and the next object would
+        // move by less. So a move of several objects, or one from or to a
+        // point on what it moves, goes by coordinates, the same for each.
+        let on_moved = |t: &Taken| {
+            t.snap.as_ref().is_some_and(|s| {
+                picked.contains(&s.object) || s.with.is_some_and(|w| picked.contains(&w))
+            })
+        };
+        let plain = picked.len() > 1 || on_moved(base) || on_moved(to);
+        let point = |t: &Taken, template: bool| {
+            if plain {
+                json!([t.at[0], t.at[1], 0])
+            } else {
+                self.point_value(t, template)
+            }
+        };
         let operations: Vec<Value> = picked
             .iter()
             .map(|&p| {
@@ -1462,20 +1542,20 @@ impl Tools {
                 json!({
                     "op": "move",
                     "target": self.target(p),
-                    "from": self.point_value(base, template),
-                    "to": self.point_value(to, template),
+                    "from": point(base, template),
+                    "to": point(to, template),
                 })
             })
             .collect();
         let what = format!("Moved {}", self.picked_words(picked));
         Outcome {
             log: Vec::new(),
-            send: Some(Send {
+            sends: vec![Send {
                 change_set: json!({ "operations": operations }),
                 what,
                 sheets: self.reached(picked),
                 template: self.template_edit(ToolKind::Move, picked),
-            }),
+            }],
         }
     }
 
@@ -1487,12 +1567,12 @@ impl Tools {
         let what = format!("Erased {}", self.picked_words(picked));
         Outcome {
             log: Vec::new(),
-            send: Some(Send {
+            sends: vec![Send {
                 change_set: json!({ "operations": operations }),
                 what,
                 sheets: self.reached(picked),
                 template: self.template_edit(ToolKind::Erase, picked),
-            }),
+            }],
         }
     }
 

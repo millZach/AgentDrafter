@@ -2240,6 +2240,34 @@ const checks = {
         entry = await landed(page, before, 'Text, in the box');
         assert(entry.change_set.operations[0].contents === 'VENT', `Text from the box: ${JSON.stringify(entry.change_set.operations)}`);
         seen.phone.text = entry.entry;
+        // Rectangle from Tools: two corners tapped.
+        before = journal().length;
+        await page.tap('.toolsbtn');
+        await page.tap('.rb[data-tool="rectangle"]', { force: true });
+        await page.touchscreen.tap(...(await onPage(page, [14, 3.2])));
+        await sleep(400);
+        await page.touchscreen.tap(...(await onPage(page, [15.2, 4.0])));
+        entry = await landed(page, before, 'Rectangle, by touch');
+        const rectangle = entry.change_set.operations[0];
+        assert(rectangle.op === 'add_polyline' && rectangle.closed === true && rectangle.points.length === 4, `Rectangle by touch: ${JSON.stringify(rectangle)}`);
+        const rectangleId = entry.objects.find((o) => o.how === 'added').id;
+        seen.phone.rectangle = entry.entry;
+        // Move from Tools: the rectangle tapped, Done, a base point and where it goes.
+        before = journal().length;
+        await page.tap('.toolsbtn');
+        await page.tap('.rb[data-tool="move"]', { force: true });
+        await page.touchscreen.tap(...(await onPage(page, [15.2, 3.6])));
+        await sleep(300);
+        assert((await bar(page)).includes('1 object picked'), `the rectangle is picked: ${await bar(page)}`);
+        await page.tap('.opt[data-opt="tool:done"]');
+        await page.touchscreen.tap(...(await onPage(page, [15.2, 3.2])));
+        await sleep(400);
+        await page.touchscreen.tap(...(await onPage(page, [15.2, 4.4])));
+        entry = await landed(page, before, 'Move, by touch');
+        const moved = entry.change_set.operations[0];
+        assert(moved.op === 'move' && moved.target.id === rectangleId && Array.isArray(moved.from) && Array.isArray(moved.to), `Move by touch: ${JSON.stringify(moved)}`);
+        assert(moved.to[1] - moved.from[1] > 1, `it moves up by the taps: ${JSON.stringify(moved)}`);
+        seen.phone.move = entry.entry;
         // Erase from Tools: the line drawn, tapped, then Erase 1.
         before = journal().length;
         await page.tap('.toolsbtn');

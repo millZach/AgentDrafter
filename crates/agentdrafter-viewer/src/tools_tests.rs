@@ -14,6 +14,7 @@ fn context() -> Context {
         kind: kind.to_owned(),
         block: None,
         from_template: Some(template),
+        through_viewport: false,
     };
     Context {
         sheet: "DP-LD-101".to_owned(),
@@ -37,6 +38,7 @@ fn context() -> Context {
             ],
         }),
         past: false,
+        space: None,
     }
 }
 
@@ -69,8 +71,8 @@ fn snapped(x: f64, y: f64, snap: SnapKind, object: usize, which: Option<&str>) -
 
 fn operations(outcome: &Outcome) -> Vec<Value> {
     outcome
-        .send
-        .as_ref()
+        .sends
+        .last()
         .expect("a change set to send")
         .change_set["operations"]
         .as_array()
@@ -107,7 +109,7 @@ fn line_sends_one_add_line_per_segment_on_the_current_layer_with_its_snapped_poi
     t.point(snapped(2.3, 6.5, SnapKind::Endpoint, 0, Some("points[0]")));
     t.point(at(4.123456, 6.5));
     let outcome = t.point(at(4.123456, 8.0));
-    assert!(outcome.send.is_none(), "Line keeps going until Done");
+    assert!(outcome.sends.is_empty(), "Line keeps going until Done");
     let outcome = t.option("done");
     let ops = operations(&outcome);
     assert_eq!(ops.len(), 2);
@@ -119,7 +121,7 @@ fn line_sends_one_add_line_per_segment_on_the_current_layer_with_its_snapped_poi
     );
     assert_eq!(ops[1]["from"], json!([4.1235, 6.5, 0]));
     assert_eq!(ops[1]["to"], json!([4.1235, 8.0, 0]));
-    let send = outcome.send.unwrap();
+    let send = outcome.sends.last().cloned().unwrap();
     assert_eq!(send.what, "2 lines drawn");
     assert_eq!(send.sheets, ["DP-LD-101"]);
     assert!(send.template.is_none(), "an add goes in the sheet's row");
@@ -165,7 +167,7 @@ fn u_takes_back_the_last_point_and_esc_keeps_what_was_drawn() {
     t.start(ToolKind::Line, &[]);
     t.point(at(0.0, 0.0));
     let outcome = t.escape();
-    assert!(outcome.send.is_none());
+    assert!(outcome.sends.is_empty());
     assert_eq!(outcome.log, ["LINE: cancelled, nothing changed"]);
 }
 
@@ -233,13 +235,13 @@ fn rectangle_is_one_closed_polyline() {
                "closed": true})
     );
     assert_eq!(
-        outcome.send.unwrap().what,
+        outcome.sends.last().cloned().unwrap().what,
         "Rectangle drawn, 2.000 × 1.000 in"
     );
     // Corners level with each other would draw a line.
     t.start(ToolKind::Rectangle, &[]);
     t.input("1,1", None);
-    assert!(t.input("3,1", None).send.is_none());
+    assert!(t.input("3,1", None).sends.is_empty());
     assert!(t.state(false).error.is_some());
 }
 
@@ -302,7 +304,7 @@ fn move_picks_then_takes_a_base_and_a_second_point() {
                "from": {"snap": {"id": "DP-LD-101/device", "snap": "insertion"}},
                "to": [3.0, 6.5, 0]})
     );
-    let send = outcome.send.unwrap();
+    let send = outcome.sends.last().cloned().unwrap();
     assert!(
         send.template.is_none(),
         "the row's own object reaches its sheet alone"
@@ -324,7 +326,7 @@ fn moving_a_templates_object_warns_and_names_its_sheets_with_row_snaps_as_coordi
     );
     t.point(snapped(0.5, 0.5, SnapKind::Endpoint, 0, Some("points[0]")));
     let outcome = t.point(snapped(2.0, 6.5, SnapKind::Insertion, 2, None));
-    let send = outcome.send.unwrap();
+    let send = outcome.sends.last().cloned().unwrap();
     let edit = send.template.unwrap();
     assert_eq!(edit.path, "templates/loop-2-wire.yaml");
     assert_eq!(edit.sheets, ["DP-LD-101", "DP-LD-102", "DP-LD-104"]);
@@ -347,7 +349,7 @@ fn moving_a_templates_object_warns_and_names_its_sheets_with_row_snaps_as_coordi
 fn erase_with_objects_selected_first_erases_them_at_once() {
     let mut t = tools();
     let outcome = t.start(ToolKind::Erase, &[1, 2]);
-    let send = outcome.send.unwrap();
+    let send = outcome.sends.last().cloned().unwrap();
     assert_eq!(
         send.change_set,
         json!({"operations": [
@@ -370,7 +372,7 @@ fn erase_with_objects_selected_first_erases_them_at_once() {
     );
     t.pick(Some(2));
     assert_eq!(t.state(false).options[0].label, "Erase 1");
-    let send = t.option("done").send.unwrap();
+    let send = t.option("done").sends.last().cloned().unwrap();
     assert_eq!(send.what, "Erased device");
 }
 
@@ -452,4 +454,120 @@ fn the_rubber_band_and_the_words_at_the_cursor() {
     t.point(at(1.0, 1.0));
     let band = t.band(Some(&t.aim([2.0, 3.0], None)));
     assert_eq!(band.moving, Some((vec![2], [1.0, 2.0])));
+}
+
+#[test]
+fn a_group_move_or_one_from_a_point_on_what_it_moves_goes_by_coordinates() {
+    // Two objects from a snap on the first: the core would find the snap
+    // again after moving the first, and the second would move by nothing.
+    let mut t = tools();
+    t.start(ToolKind::Move, &[0, 1]);
+    t.point(snapped(0.5, 0.5, SnapKind::Endpoint, 0, Some("points[0]")));
+    let ops = operations(&t.input("@1,0", None));
+    assert_eq!(ops.len(), 2);
+    for op in &ops {
+        assert_eq!(op["from"], json!([0.5, 0.5, 0]));
+        assert_eq!(op["to"], json!([1.5, 0.5, 0]));
+    }
+    // One object to a snap on itself: by coordinates too.
+    t.start(ToolKind::Move, &[2]);
+    t.point(at(2.0, 6.5));
+    let ops = operations(&t.point(snapped(
+        2.5,
+        6.5,
+        SnapKind::Endpoint,
+        2,
+        Some("objects[3].to"),
+    )));
+    assert_eq!(ops[0]["to"], json!([2.5, 6.5, 0]));
+    // One object from a snap on another: the snapped point stays.
+    t.start(ToolKind::Move, &[2]);
+    t.point(snapped(0.5, 0.5, SnapKind::Endpoint, 0, Some("points[0]")));
+    let ops = operations(&t.input("@1,0", None));
+    assert_eq!(ops[0]["from"]["snap"]["id"], "DP-LD-101/border");
+}
+
+#[test]
+fn on_a_sheet_drawn_in_a_layout_an_add_names_its_space_and_move_leaves_what_a_viewport_shows() {
+    let mut c = context();
+    c.space = Some("paper".to_owned());
+    c.objects[2].through_viewport = true;
+    let mut t = Tools::default();
+    t.load(c);
+    t.input("L", None);
+    t.input("1,1", None);
+    t.input("2,1", None);
+    let ops = operations(&t.input("", None));
+    assert_eq!(ops[0]["space"], "paper");
+    // Move refuses an object seen through a viewport, picked or selected first.
+    t.start(ToolKind::Move, &[]);
+    t.pick(Some(2));
+    assert!(t.state(false).picked.is_empty());
+    assert!(t
+        .state(false)
+        .error
+        .unwrap()
+        .contains("seen through a viewport"));
+    t.escape();
+    t.start(ToolKind::Move, &[2]);
+    assert_eq!(t.running(), Some(ToolKind::Move));
+    assert!(
+        t.state(false).selecting,
+        "with nothing left to move, it asks for objects"
+    );
+    // Erase takes it: deleting needs no point of its own.
+    t.escape();
+    let send = t.start(ToolKind::Erase, &[2]).sends.pop().unwrap();
+    assert_eq!(send.change_set["operations"][0]["op"], "delete");
+}
+
+#[test]
+fn cancel_lands_nothing_typed_in_the_line_being_typed() {
+    let mut t = tools();
+    t.start(ToolKind::Text, &[]);
+    t.point(at(1.0, 1.0));
+    t.typing("VALVE");
+    let outcome = t.option("cancel");
+    assert!(outcome.sends.is_empty(), "nothing typed in the box lands");
+    assert_eq!(t.running(), None);
+    // Esc keeps it, as AutoCAD's TEXT does.
+    t.start(ToolKind::Text, &[]);
+    t.point(at(1.0, 1.0));
+    t.typing("VALVE");
+    assert_eq!(operations(&t.escape())[0]["contents"], "VALVE");
+}
+
+#[test]
+fn another_tool_that_sends_at_once_sends_after_what_the_first_kept() {
+    let mut t = tools();
+    t.start(ToolKind::Text, &[]);
+    t.point(at(1.0, 1.0));
+    t.typing("VENT");
+    let outcome = t.start(ToolKind::Erase, &[2]);
+    let ops: Vec<&str> = outcome
+        .sends
+        .iter()
+        .map(|s| s.change_set["operations"][0]["op"].as_str().unwrap())
+        .collect();
+    assert_eq!(ops, ["add_text", "delete"], "both, in order");
+    assert!(outcome.log.iter().any(|l| l.contains("Text “VENT” added")));
+}
+
+#[test]
+fn radius_sets_the_radius_and_diameter_the_diameter() {
+    let mut t = tools();
+    t.input("C", None);
+    t.input("0,0", None);
+    t.input("RADIUS", None);
+    assert_eq!(operations(&t.input("10", None))[0]["radius"], json!(10.0));
+    t.input("C", None);
+    t.input("0,0", None);
+    t.input("D", None);
+    t.input("D", None);
+    assert!(
+        t.state(false).prompt.starts_with("Type the diameter"),
+        "D twice stays on Diameter"
+    );
+    t.option("radius");
+    assert_eq!(operations(&t.input("10", None))[0]["radius"], json!(10.0));
 }
