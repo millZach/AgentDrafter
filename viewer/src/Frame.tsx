@@ -69,6 +69,8 @@ export interface RibbonProps {
   layers: readonly LayerEntry[];
   current: string;
   onLayer(name: string): void;
+  /** The box is opened: its layers are asked for again. */
+  onLayersOpen?(): void;
   /** A layer's colour on screen, `#rrggbb`, for its swatch. */
   swatch(layer: LayerEntry | undefined): string;
   /** The selected object's layer, which the box shows while no tool runs; null with nothing selected. */
@@ -77,7 +79,7 @@ export interface RibbonProps {
   onSnaps(): void;
 }
 
-export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, current, onLayer, swatch, selected, onSnaps }: RibbonProps) {
+export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, current, onLayer, onLayersOpen, swatch, selected, onSnaps }: RibbonProps) {
   const [tip, setTip] = useState<{ tool: Tool; left: number; top: number } | null>(null);
   // While an object is selected and no tool runs, the box shows its layer,
   // as the frame did; otherwise the current layer, which it sets.
@@ -133,6 +135,7 @@ export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, cur
                   aria-label="The current layer"
                   value={current}
                   onChange={(e) => onLayer(e.currentTarget.value)}
+                  onFocus={() => onLayersOpen?.()}
                 >
                   {(layers.length ? layers : [{ name: current }]).map((l) => (
                     <option key={l.name} value={l.name}>

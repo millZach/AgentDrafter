@@ -1001,9 +1001,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
   };
 
   // The sheet's layers, for the Layer box: asked for each sheet, and again
-  // after each change to it.
+  // when the box is opened, which takes in a layer a change set added. Not
+  // after every change set, which would add a request to each one landing.
+  const [layersAsked, setLayersAsked] = useState(0);
+  const hasTemplate = !!summary?.template;
   useEffect(() => {
-    if (!summary || summary.entry !== null || !summary.template) {
+    if (!summary || summary.entry !== null || !hasTemplate) {
       setLayers([]);
       return;
     }
@@ -1019,7 +1022,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
     return () => {
       current = false;
     };
-  }, [summary?.sheet, summary?.entry, summary?.template, version, source, token]);
+    // The summary itself changes with each drawing: only what is asked by matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summary?.sheet, summary?.entry, hasTemplate, layersAsked, source, token]);
   const currentLayer = currentLayerOf(keptLayer, layers);
   const layerEntry = layers.find((l) => l.name === currentLayer);
   const chooseLayer = (name: string) => {
@@ -1312,6 +1317,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
           layers={layers}
           current={currentLayer}
           onLayer={chooseLayer}
+          onLayersOpen={() => setLayersAsked((n) => n + 1)}
           swatch={(l) => screen_color(colorIndex(l?.color))}
           selected={object ? { name: object.layer, color: pickedColor } : null}
           onSnaps={() => openSnapMenu(null)}

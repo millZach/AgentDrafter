@@ -161,7 +161,7 @@ New objects go on the [current layer](#the-current-layer), in the sheet's row, a
 
 ### The current layer
 
-The Layer box lists the sheet's layers, as `query layers` gives them, a locked one and one not shown so marked, and sets the current layer, which every new object goes on, as AutoCAD's current layer. It starts as layer `0`; the page keeps the layer chosen for each drawing set in the browser's local storage (`agentdrafter-current-layer`), and goes back to `0` on a sheet that has not got it. The prompt of a tool that draws names it (`on wire`), and its rubber band is drawn in its colour.
+The Layer box lists the sheet's layers, as `query layers` gives them, asked for each sheet and again when the box is opened, a locked one and one not shown so marked, and sets the current layer, which every new object goes on, as AutoCAD's current layer. It starts as layer `0`; the page keeps the layer chosen for each drawing set in the browser's local storage (`agentdrafter-current-layer`), and goes back to `0` on a sheet that has not got it. The prompt of a tool that draws names it (`on wire`), and its rubber band is drawn in its colour.
 
 ## Undo and accept
 
