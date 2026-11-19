@@ -201,11 +201,16 @@ fn overlap(a: &Box2, b: &Box2) -> bool {
 /// looked at against every box.
 const MOST_CELLS: usize = 64;
 
+/// The most cells of the grid along a side.
+const MOST_SIDE: f64 = 1_048_576.0;
+
 /// Each pair of `boxes` that overlap, by their places, the earlier first,
-/// in order. Each box is put in the cells it covers of a grid of about one
-/// cell a box, and a pair is looked at in the one cell the lower left
-/// corner of their overlap is in, so it is found once; a box that covers
-/// many cells, a border's, is looked at against every box instead.
+/// in order. Each box is put in the cells it covers of a grid whose cells
+/// are as wide and as tall as a box's middling width and height, so most
+/// boxes cover a cell or two, however long and thin they are, and a pair is
+/// looked at in the one cell the lower left corner of their overlap is in,
+/// so it is found once. A box that covers many cells, a border's, is looked
+/// at against every box instead. Only the cells a box is in are held.
 fn overlapping(boxes: &[Box2]) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     let Some(all) = boxes.iter().copied().reduce(|a, b| {
@@ -216,18 +221,32 @@ fn overlapping(boxes: &[Box2]) -> Vec<(usize, usize)> {
     }) else {
         return pairs;
     };
-    let side = ((boxes.len() as f64).sqrt().ceil() as usize).clamp(1, 1024);
-    let size =
-        [0, 1].map(|axis| ((all.1[axis] - all.0[axis]) / side as f64).max(f64::MIN_POSITIVE));
+    // The cells: a box's middling size along each axis, but no smaller than
+    // a share of the whole, so boxes of no width, upright lines, still
+    // spread over the grid, and never more than MOST_SIDE along a side.
+    let side = (boxes.len() as f64).sqrt().ceil().max(1.0);
+    let size = [0, 1].map(|axis| {
+        let mut spans: Vec<f64> = boxes.iter().map(|b| b.1[axis] - b.0[axis]).collect();
+        let middle = spans.len() / 2;
+        let (_, middling, _) = spans.select_nth_unstable_by(middle, f64::total_cmp);
+        let whole = all.1[axis] - all.0[axis];
+        middling
+            .max(whole / (64.0 * side))
+            .max(whole / MOST_SIDE)
+            .max(f64::MIN_POSITIVE)
+    });
+    let cells =
+        [0, 1].map(|axis| ((all.1[axis] - all.0[axis]) / size[axis]).ceil().max(1.0) as usize);
     let cell = |p: [f64; 2]| {
-        let at = |axis: usize| (((p[axis] - all.0[axis]) / size[axis]) as usize).min(side - 1);
+        let at =
+            |axis: usize| (((p[axis] - all.0[axis]) / size[axis]) as usize).min(cells[axis] - 1);
         (at(0), at(1))
     };
     let mut grid: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
     let mut large = Vec::new();
     for (k, b) in boxes.iter().enumerate() {
         let ((x0, y0), (x1, y1)) = (cell(b.0), cell(b.1));
-        if (x1 - x0 + 1) * (y1 - y0 + 1) > MOST_CELLS {
+        if (x1 - x0 + 1).saturating_mul(y1 - y0 + 1) > MOST_CELLS {
             large.push(k);
             continue;
         }
@@ -295,6 +314,33 @@ mod tests {
         assert!(found.contains(&(0, 200)));
         assert!(found.contains(&(201, 202)));
         assert!(found.contains(&(1, 203)));
+    }
+
+    #[test]
+    fn long_thin_boxes_are_found_as_short_ones_are() {
+        // Long lines one above another, a few upright ones across them, and
+        // a box round them all.
+        let mut boxes: Vec<Box2> = (0..300)
+            .map(|i| ([0.0, i as f64], [1000.0, i as f64 + 0.5]))
+            .collect();
+        boxes.extend((0..5).map(|i| {
+            (
+                [i as f64 * 200.0 + 50.0, 10.0],
+                [i as f64 * 200.0 + 50.0, 20.2],
+            )
+        }));
+        boxes.push(([-5.0, -5.0], [1005.0, 305.0]));
+        let found = overlapping(&boxes);
+        let mut every = Vec::new();
+        for a in 0..boxes.len() {
+            for b in a + 1..boxes.len() {
+                if overlap(&boxes[a], &boxes[b]) {
+                    every.push((a, b));
+                }
+            }
+        }
+        assert_eq!(found, every);
+        assert!(found.contains(&(10, 300)) && found.contains(&(20, 304)));
     }
 
     #[test]
