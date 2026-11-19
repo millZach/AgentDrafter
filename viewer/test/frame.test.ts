@@ -25,6 +25,7 @@ import {
   promptFor,
   colorIndex,
   currentLayerOf,
+  droppedOnLoad,
   layersWhileAsked,
   LAYER_KEY,
   originWords,
@@ -332,4 +333,14 @@ test('a snap taken is read out, and copied as the snapped point a change set tak
   assert.equal(words(said.parts), 'Endpoint of FT-101: 2.3000, 6.5000 in [ <Copy as snapped point> <Clear> ]');
   // Without a snapped point, only Clear.
   assert.equal(words(promptFor({ ...none, taken: { ...taken, copy: false } }).parts), 'Endpoint of FT-101: 2.3000, 6.5000 in [ <Clear> ]');
+});
+
+test('a tool the renderer dropped as another sheet or layout was drawn clears what was typed for it', () => {
+  // Text running, `E` typed and not entered, then layout Wiring drawn: the
+  // renderer drops Text, and the field's `E` must not start Erase later.
+  assert.equal(droppedOnLoad('text', null), true);
+  // The same sheet drawn again keeps the tool, and what is typed.
+  assert.equal(droppedOnLoad('text', 'text'), false);
+  // No tool was running: nothing to drop, nothing typed for one.
+  assert.equal(droppedOnLoad(null, null), false);
 });

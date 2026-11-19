@@ -43,6 +43,7 @@ import {
   colorIndex,
   coordinates,
   currentLayerOf,
+  droppedOnLoad,
   layersWhileAsked,
   DEFAULT_RUNNING,
   originWords,
@@ -337,12 +338,20 @@ export function App({ token, source, sheet, layout }: AppProps) {
 
   // The drawing tools run in the renderer, which the drawing holds.
   const renderer = () => drawing.current?.viewer() ?? null;
-  const refreshTool = useCallback(() => {
+  // The tool running as last read from the renderer, which a sheet drawn
+  // again is compared with.
+  const toolRead = useRef<ToolState | null>(null);
+  const refreshTool = useCallback((): ToolState | null => {
     const v = drawing.current?.viewer();
-    setToolState(v ? (JSON.parse(v.tool_state(!wide)) as ToolState) : null);
+    const state = v ? (JSON.parse(v.tool_state(!wide)) as ToolState) : null;
+    toolRead.current = state;
+    setToolState(state);
     drawing.current?.redraw();
+    return state;
   }, [wide]);
-  useEffect(() => refreshTool(), [refreshTool]);
+  useEffect(() => {
+    refreshTool();
+  }, [refreshTool]);
 
   const sheetKey = upper(wanted ?? '');
   const layoutKey = upper(wantedLayout ?? '');
@@ -430,8 +439,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
           reply.text,
         );
       }
-      // The tool running follows the sheet drawn again, or ends on another.
-      refreshTool();
+      // The tool running follows the sheet drawn again, or is dropped on
+      // another sheet or layout: then what was typed for it goes too, as Esc
+      // drops it, so it is not entered into whatever comes next.
+      const was = toolRead.current?.tool ?? null;
+      const now = refreshTool()?.tool ?? null;
+      if (droppedOnLoad(was, now) && field.current) field.current.value = '';
       if (!wanted) setWanted(shown.sheet);
       if (!wantedLayout && shown.layout) setWantedLayout(shown.layout);
       // The address names the sheet and the layout shown, so a reload shows them again.
@@ -1071,7 +1084,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
   };
   const toolLayer = useMemo(() => ({ name: currentLayer, color: colorIndex(layerEntry?.color) }), [currentLayer, layerEntry?.color]);
   // The prompt shows the current layer a tool draws on.
-  useEffect(() => refreshTool(), [toolLayer, refreshTool]);
+  useEffect(() => {
+    refreshTool();
+  }, [toolLayer, refreshTool]);
 
   // The cursor's place, written straight into the status bar, so a moving
   // mouse redraws nothing else.

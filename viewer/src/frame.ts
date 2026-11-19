@@ -372,6 +372,16 @@ export function writeCurrentLayer(keeps: Keeps | null, source: string, layer: st
 }
 
 /**
+ * Whether the renderer dropped the tool running, `was`, when a sheet was
+ * drawn: another sheet or layout ends it with nothing sent. The command
+ * bar's field is cleared then, as Esc clears it, so what was typed for the
+ * dropped tool is not entered into what comes next.
+ */
+export function droppedOnLoad(was: string | null, now: string | null): boolean {
+  return was !== null && now === null;
+}
+
+/**
  * The layers the Layer box holds while they are asked for again: the same
  * sheet's (`of`, as the page keys it, the same as `was`) stay, so a layer
  * the sheet has not got does not come back as current while the reply is
