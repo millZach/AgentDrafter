@@ -1933,6 +1933,8 @@ const checks = {
         assert(!(await page.$('.opt[data-opt="copy"]')), 'Copy goes with the sheet its object is on');
         await page.click('.tab:has-text("DP-LD-101")');
         await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'DP-LD-101');
+        // The sheet's tab keeps the keys until the drawing takes them back.
+        await page.evaluate(() => document.activeElement?.blur());
         await centre(page, end, 6);
         await frames(page);
         // Tab steps to the next snap in reach.

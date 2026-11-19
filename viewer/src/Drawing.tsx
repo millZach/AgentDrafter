@@ -621,7 +621,14 @@ export function Drawing({
       hovered.current = hoveredOf(viewer.current);
       redraw();
     };
+    // A press on the drawing gives it the keys back from a control.
+    const keysHere = (e: PointerEvent) => {
+      if ((e.target as Element | null)?.closest?.('button')) return;
+      const focused = document.activeElement;
+      if (focused instanceof HTMLElement && focused !== document.body) focused.blur();
+    };
     window.addEventListener('keydown', tab);
+    b.addEventListener('pointerdown', keysHere);
     b.addEventListener('pointermove', hover);
     b.addEventListener('pointerleave', away);
     const lost = (e: Event) => e.preventDefault();
@@ -647,6 +654,7 @@ export function Drawing({
     return () => {
       probe();
       detach();
+      b.removeEventListener('pointerdown', keysHere);
       b.removeEventListener('pointermove', hover);
       b.removeEventListener('pointerleave', away);
       window.removeEventListener('keydown', tab);
