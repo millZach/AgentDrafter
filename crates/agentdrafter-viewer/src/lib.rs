@@ -13,6 +13,9 @@
 //! - [`snapping`] finds the object snaps in reach of the cursor, among the
 //!   running ones, from those the display list gives; [`overlay`] lays out
 //!   the crosshair and the snap markers drawn over the drawing.
+//! - [`tools`] runs the drafter's drawing tools, Line, Circle, Rectangle,
+//!   Text, Move and Erase: their steps, prompts, rubber bands and the change
+//!   set each gives, in plain Rust.
 //! - `web` (built for `wasm32` only) is the module the page loads: it draws
 //!   the mesh with WebGL2 at the view the page asks for, on dark model
 //!   space in AutoCAD's screen colours, index 7 white, the paper a dashed
@@ -29,6 +32,7 @@ pub mod grid;
 pub mod mesh;
 pub mod overlay;
 pub mod snapping;
+pub mod tools;
 
 #[cfg(target_arch = "wasm32")]
 mod web;

@@ -407,7 +407,13 @@ fn read(source: &Path, sheet: Option<&str>, entry: Option<u64>) -> Result<Drawn,
         let from: Vec<Origin> = record
             .objects
             .iter()
-            .map(|o| if o.in_row { Origin::Row } else { Origin::Template })
+            .map(|o| {
+                if o.in_row {
+                    Origin::Row
+                } else {
+                    Origin::Template
+                }
+            })
             .collect();
         // The sheets built from the same template: those whose rows name
         // one file, as the file system resolves their paths, as a change

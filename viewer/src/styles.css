@@ -97,10 +97,10 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
   display: grid; justify-items: center; gap: 3px; min-width: 60px; padding: 6px 6px 4px; border: 1px solid transparent;
   border-radius: 3px; background: none; font-size: 12px; color: #c2cad4;
 }
-.rb svg { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; opacity: .5; }
+.rb svg { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .rb .pt { fill: var(--blue); stroke: none; }
 .rb:hover { background: #414a5a; border-color: #56627a; }
-.rb.flash { border-color: var(--blue); background: #2d3d55; }
+.rb.on { background: #274b76; border-color: var(--blue); color: #fff; }
 .layerbox { display: grid; gap: 5px; min-width: 200px; }
 .layerbox .lay {
   display: flex; align-items: center; gap: 6px; background: #2b323d; border: 1px solid var(--edge); border-radius: 3px;
@@ -108,6 +108,8 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 }
 .sw { width: 13px; height: 13px; border: 1px solid #111; flex: none; background: transparent; }
 .layerbox .ln { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.layerbox select.ln { min-width: 0; background: transparent; border: 0; padding: 0; color: var(--text); font: inherit; appearance: auto; }
+.layerbox select.ln option { background: #2b323d; }
 .layerbox .caret { opacity: .35; }
 .layerbox small { color: var(--dim); font-size: 11px; }
 .tog2 { background: #2b323d; border: 1px solid var(--edge); border-radius: 3px; padding: 6px 10px; color: #7f8a98; }
@@ -221,7 +223,7 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 .qp h5 { margin: 8px 0 3px; font-size: 11px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
 .qp .err { color: #ffb0b0; margin: 4px 0; }
 .kv { width: 100%; border-collapse: collapse; }
-.kv th { text-align: left; color: var(--dim); font-weight: 400; padding: 2px 8px 2px 0; width: 70px; vertical-align: top; }
+.kv th { text-align: left; color: var(--dim); font-weight: 400; padding: 2px 8px 2px 0; width: 82px; vertical-align: top; white-space: nowrap; }
 .kv td { padding: 2px 0; font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip { background: #2a313c; border: 1px solid #5a6577; border-radius: 10px; padding: 1px 8px; font-size: 12px; text-align: left; }
@@ -247,6 +249,51 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 .opt { background: none; border: 0; color: #7fc0ff; padding: 0 1px; text-decoration: underline; font: inherit; }
 .opt:hover { color: #fff; }
 .cmdnote { color: #7f8a98; font: 11px var(--ui); white-space: nowrap; flex: none; }
+.opt.main { font-weight: 700; }
+.laytag { color: #9fd0ff; }
+.cmderr { display: block; color: #ffb0b0; white-space: normal; font-family: var(--ui); }
+/* What is typed: an alias, a point, a length, or a text's words. */
+.cmdin {
+  flex: 0 0 150px; min-width: 0; background: transparent; border: 0; border-bottom: 1px solid #6a7689; color: #fff;
+  font: 13px var(--mono); padding: 2px; outline: none;
+}
+.cmdin:focus { border-bottom-color: var(--blue); }
+.kbd {
+  display: inline-block; background: #2b3a50; border: 1px solid #4f6684; border-radius: 12px; color: #cfe3ff;
+  padding: 3px 9px; font: 13px var(--ui); margin: 2px;
+}
+/* An edit to a template's object says so while the tool runs. */
+.cmdwarn {
+  pointer-events: auto; display: flex; align-items: flex-start; gap: 8px; margin: 0 0 4px; padding: 6px 10px;
+  background: rgba(74, 54, 18, .97); border: 1px solid #c98a1c; border-radius: 4px; color: #ffe2b0; font: 13px var(--ui);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
+}
+.cmdwarn b { color: #fff; }
+
+/* What a tool says at the cursor, as AutoCAD's dynamic input, and the text a Text tool is typing. */
+.dyn {
+  position: absolute; z-index: 4; display: none; gap: 6px; pointer-events: none; font: 12px var(--mono);
+}
+.dyn b, .dyn span { padding: 2px 7px; border-radius: 2px; white-space: nowrap; }
+.dyn b { background: #1d4f86; border: 1px solid var(--blue); color: #fff; font-weight: 400; }
+.dyn span { background: #2b323d; border: 1px solid #6a7689; color: #dfe5ec; }
+.typed { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 3; }
+.tline {
+  position: absolute; white-space: pre; line-height: 1; transform: translateY(-80%); font-family: var(--ui); font-weight: 300;
+}
+.tline.current::after { content: ''; display: inline-block; width: 1.5px; height: 0.9em; margin-left: 2px; background: #fff; animation: caret 1s steps(1) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+
+/* A phone's small box for a Text tool's words and height. */
+.tbox {
+  position: absolute; z-index: 8; left: 8px; right: 8px; bottom: calc(var(--peek, 0px) + var(--cmd, 32px) + 16px);
+  background: rgba(48, 56, 69, .98); border: 1px solid #6a7689; border-radius: 5px; box-shadow: 0 8px 22px rgba(0, 0, 0, .5);
+  padding: 8px 10px;
+}
+.tbox label { display: grid; gap: 3px; font-size: 11px; color: var(--dim); margin-bottom: 6px; }
+.tbox input { background: #1b2129; border: 1px solid #5a6577; border-radius: 3px; padding: 6px 7px; color: #fff; font-size: 16px; width: 100%; }
+.tbox .two { display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: end; }
+.tbox .acts { display: flex; gap: 6px; justify-content: flex-end; margin-bottom: 6px; }
 
 /* the status bar */
 .status {
@@ -410,7 +457,14 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
 .dialog p { line-height: 1.45; }
 .dialog .findings { margin: 6px 0; padding-left: 18px; }
 .dialog .findings li { margin-bottom: 4px; }
-.dialog-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.dialog-acts { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+/* The template dialog: the sheets an edit changes, this one marked. */
+.dialog.tw { border-top: 3px solid var(--warn); }
+.dialog .sheets { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.dialog .sheets span { font: 12px var(--mono); background: #3a4250; border: 1px solid #5a6577; border-radius: 3px; padding: 0 6px; }
+.dialog .sheets span.here { border-color: var(--blue); color: #fff; }
+.btn.warn { background: #7a5410; border-color: #c98a1c; color: #fff; font-weight: 600; }
+.btn.warn:hover { background: #8d6216; }
 
 @media (min-width: 900px) {
   /* One row the height of the screen: a long journal scrolls in its panel, never stretches the drawing. */
@@ -448,6 +502,11 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   .zoombtns { top: auto; transform: none; bottom: calc(var(--peek, 0px) + 8px); right: 8px; }
   .cmd { bottom: calc(var(--peek, 0px) + 8px); width: calc(100% - 64px); left: 8px; transform: none; }
   .cmdnote, .hist { display: none; }
+  .cmdbar { flex-wrap: wrap; }
+  .cmdin { flex: 1 1 100%; font-size: 16px; padding: 6px 4px; background: #1b2129; border: 1px solid #5a6577; border-radius: 3px; }
+  .opt { display: inline-block; background: #2b3a50; border: 1px solid #4f6684; border-radius: 12px; color: #cfe3ff; text-decoration: none; padding: 2px 9px; margin: 1px 2px; font: 13px var(--ui); }
+  .brk, .chev { display: none; }
+  .opt.main { background: #1f6fc9; border-color: #3d8fe8; color: #fff; font-weight: 600; }
   /* Above the command bar at its real height (--cmd, which the page measures, a wrapped prompt's among
      it), and above the journal however far it is raised (--sheet, which the sheet sets). */
   .qp {

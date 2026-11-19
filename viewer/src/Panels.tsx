@@ -220,6 +220,8 @@ export interface QuickPropertiesProps {
   journal: JournalReport | null;
   /** The failed checks the object fails, in words. */
   fails: string[];
+  /** Where it comes from, the template or the sheet's row, in words; null when the core did not say. */
+  origin?: string | null;
   onClose(): void;
   onShow(entry: number): void;
 }
@@ -229,13 +231,14 @@ export interface QuickPropertiesProps {
  * as a card above the command bar on a phone. They only show, until
  * editing comes (build 5).
  */
-export function QuickProperties({ object, color, journal, fails, onClose, onShow }: QuickPropertiesProps) {
+export function QuickProperties({ object, color, journal, fails, origin = null, onClose, onShow }: QuickPropertiesProps) {
   const rows: [string, string][] = [
     ['Type', typeWords(object)],
     ['Layer', object.layer],
     ['ID', object.id ?? '(none)'],
     ['Name', object.name ?? '(none)'],
     ...(object.block ? [['Block', object.block] as [string, string]] : []),
+    ...(origin ? [['Comes from', origin] as [string, string]] : []),
   ];
   const attributes = object.attributes ?? [];
   const history = journal && object.id ? changedBy(journal, object.id) : [];

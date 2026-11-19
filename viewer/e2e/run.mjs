@@ -35,7 +35,7 @@
 //            move, and on a phone the magnifier a held finger brings up
 //            and the snap it takes when lifted;
 // - frame:   the drafting app's frame at laptop and phone sizes: the ribbon's
-//            tools still to come, the command bar's prompts, quick
+//            tools and tips, the command bar's prompts, quick
 //            properties beside the selected object, the Layer box, the
 //            status bar's coordinates, paper and toggles, Grid (F7) drawing
 //            and taking away the grid, the side panel's tabs, and on a
@@ -49,7 +49,12 @@
 // - rewind:  a journal cut back, as a commit rolled back cuts it, drops
 //            the drawings kept and draws the set as it is;
 // - follow:  a picked object stays picked as objects before it are
-//            deleted, and the pick clears when it is deleted itself.
+//            deleted, and the pick clears when it is deleted itself;
+// - tools:   the drawing tools, by mouse, by alias and typed coordinates,
+//            and by touch: each sends one change set through `change`,
+//            which lands in the journal and builds the
+//            sheet's DWG again; the template warning's Cancel and Change
+//            all; and Undo last of a drafter's edit.
 //
 // It writes results.json, the screenshots and each compared image into
 // --out (target/viewer-e2e by default), and exits 1 when any check fails.
@@ -1525,27 +1530,28 @@ const checks = {
           [...document.querySelectorAll('.ribbon .panel')].map((p) => [p.querySelector('h3').textContent.trim(), [...p.querySelectorAll('.rb')].map((t) => t.textContent)]),
         );
         assert(
-          JSON.stringify(ribbon) === JSON.stringify([['Draw Soon', ['Line', 'Circle', 'Rectangle', 'Text']], ['Modify Soon', ['Move', 'Erase']], ['Layer', []]]),
+          JSON.stringify(ribbon) === JSON.stringify([['Draw', ['Line', 'Circle', 'Rectangle', 'Text']], ['Modify', ['Move', 'Erase']], ['Layer', []]]),
           `the ribbon: ${JSON.stringify(ribbon)}`,
         );
-        assert((await bar(page)).includes('Select an object, or click a snap to read its point'), `the command bar prompts: ${await bar(page)}`);
-        // A tool still to come: its tip on hover, and a note in the command bar when clicked.
+        assert(
+          (await bar(page)).includes('Type a command, such as L for Line, or select an object, or click a snap to read its point'),
+          `the command bar prompts: ${await bar(page)}`,
+        );
+        // A tool: its tip on hover, and its prompt in the command bar when clicked, until Esc.
         await page.hover('.rb[data-tool="rectangle"]');
         await page.waitForSelector('.tip');
         const tip = await page.textContent('.tip');
-        assert(tip.includes('REC') && tip.includes('Coming soon'), `the tip names the alias and says it is coming: ${tip}`);
+        assert(tip.includes('REC') && tip.includes('opposite corner'), `the tip names the alias and says what it does: ${tip}`);
         await page.click('.rb[data-tool="rectangle"]', { force: true });
-        assert(
-          (await bar(page)).includes('RECTANG(REC) Click one corner, then the opposite corner. Coming soon'),
-          `the command bar says what the tool does and that it is coming: ${await bar(page)}`,
-        );
-        await page.click('.opt[data-opt="ok"]');
-        assert(!(await bar(page)).includes('Coming soon'), 'OK clears it');
-        // From the keyboard, with no hover: the same words.
+        assert((await bar(page)).includes('RECTANGon 0 Click the first corner'), `the command bar prompts for the tool: ${await bar(page)}`);
+        assert((await page.getAttribute('.rb[data-tool="rectangle"]', 'aria-pressed')) === 'true', 'the tool shows pressed');
+        await page.keyboard.press('Escape');
+        assert(!(await bar(page)).includes('RECTANG'), `Esc ends it: ${await bar(page)}`);
+        // From the keyboard, with no hover: Enter on a tool starts it.
         await page.focus('.rb[data-tool="circle"]');
         await page.keyboard.press('Enter');
-        assert((await bar(page)).includes('CIRCLE(C) Click the centre, then click how big it is'), `Enter on a tool says what it does: ${await bar(page)}`);
-        await page.click('.opt[data-opt="ok"]');
+        assert((await bar(page)).includes('CIRCLEon 0 Click the centre'), `Enter on a tool starts it: ${await bar(page)}`);
+        await page.click('.opt[data-opt="tool:cancel"]');
         // The status bar: the cursor's place, the paper, and the toggles.
         const stage = await page.evaluate(() => {
           const r = document.querySelector('.stage').getBoundingClientRect();
@@ -1654,7 +1660,8 @@ const checks = {
         const apart = card[0] >= device.box[2] || card[2] <= device.box[0];
         assert(apart && card[1] < device.box[3] + 1, `quick properties sit beside the device: ${JSON.stringify({ card, device: device.box })}`);
         assert((await page.textContent('[data-layer]')) === '0', 'the Layer box shows its layer');
-        assert((await bar(page)).includes('FT-101 selected [ Clear ]'), `the command bar names it: ${await bar(page)}`);
+        assert((await bar(page)).includes('FT-101 selected [ Move Erase Clear ]'), `the command bar names it: ${await bar(page)}`);
+        assert((await page.textContent('.qp')).includes('Comes from'), 'quick properties say where it comes from');
         await page.screenshot({ path: join(out, 'frame-laptop-selected.png') });
         // They follow it as the view moves.
         await page.click('[aria-label="Zoom in"]');
@@ -1667,7 +1674,7 @@ const checks = {
         assert(card2[0] >= moved.box[2] - 1 || card2[2] <= moved.box[0] + 1, `quick properties follow the device: ${JSON.stringify({ card2, device: moved.box })}`);
         await page.click('.opt[data-opt="clear"]');
         await page.waitForFunction(() => !document.querySelector('.qp'));
-        assert((await page.textContent('[data-layer]')) === 'No object selected', 'nothing selected');
+        assert((await page.inputValue('select[data-layer]')) === '0', 'with nothing selected, the Layer box sets the current layer, layer 0');
         // The side panel: the journal, and the assistant's place.
         await page.click('.stab:has-text("Assistant")');
         assert((await page.textContent('.sidebody')).includes('Not here yet'), 'the assistant is coming');
@@ -1726,8 +1733,8 @@ const checks = {
         await page.screenshot({ path: join(out, 'frame-phone-tools.png') });
         await page.tap('.rb[data-tool="erase"]', { force: true });
         assert(!(await page.isVisible('.ribbon')), 'a tool tapped folds the ribbon');
-        assert((await bar(page)).includes('ERASE(E) Click an object to remove it. Undo brings it back. Coming soon'), `the command bar says what Erase does and that it is coming: ${await bar(page)}`);
-        await page.tap('.opt[data-opt="ok"]');
+        assert((await bar(page)).includes('ERASETap the objects to erase'), `the command bar prompts for Erase: ${await bar(page)}`);
+        await page.tap('.opt[data-opt="tool:cancel"]');
         const device = await at(page, 'DP-LD-101/device');
         await page.touchscreen.tap(...middle(device.box));
         await page.waitForSelector('.qp');
@@ -1781,17 +1788,20 @@ const checks = {
         seen.phone = { toggles, placed, raised };
         await context.close();
       }
-      // A small phone, 320 by 568: a tool's prompt wraps the command bar, and
-      // quick properties stay above it, at its real height.
+      // A small phone, 320 by 568: a long prompt, a word typed that is not a
+      // tool, wraps the command bar, and quick properties stay above it, at
+      // its real height.
       {
         const context = await b.newContext({ ...PHONE, viewport: { width: 320, height: 568 } });
         const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
         const device = await at(page, 'DP-LD-101/device');
         await page.touchscreen.tap(...middle(device.box));
         await page.waitForSelector('.qp');
-        await page.tap('.toolsbtn');
-        await page.tap('.rb[data-tool="rectangle"]', { force: true });
+        // A selected object's options fill the bar; a keyboard types into the field all the same.
+        await page.keyboard.type('zz');
+        await page.keyboard.press('Enter');
         await sleep(600);
+        assert((await bar(page)).includes('is not a drawing tool'), `the word is not a tool: ${await bar(page)}`);
         const small = await page.evaluate(() => {
           const qp = document.querySelector('.qp').getBoundingClientRect();
           const cmd = document.querySelector('.cmdbar').getBoundingClientRect();
@@ -1807,8 +1817,8 @@ const checks = {
         seen.small = { ...small, device: deviceSmall };
         await context.close();
       }
-      // The drafter pans the selected object away while a tool's prompt is
-      // up; when the prompt goes and the command bar shrinks, the view stays
+      // The drafter pans the selected object away while a long prompt is up;
+      // when the prompt goes and the command bar shrinks, the view stays
       // where the drafter put it.
       {
         const context = await b.newContext(PHONE);
@@ -1817,9 +1827,9 @@ const checks = {
         await page.touchscreen.tap(...middle(device.box));
         await page.waitForSelector('.qp');
         await sleep(500);
-        await page.tap('.toolsbtn');
-        await page.tap('.rb[data-tool="rectangle"]', { force: true });
-        const tapped = Date.now();
+        // A selected object's options fill the bar; a keyboard types into the field all the same.
+        await page.keyboard.type('zz');
+        await page.keyboard.press('Enter');
         await sleep(400);
         const stage = await page.evaluate(() => {
           const r = document.querySelector('.stage').getBoundingClientRect();
@@ -1855,10 +1865,11 @@ const checks = {
         const away = await at(page, 'DP-LD-101/device');
         assert(away.box[2] < stage[0], `FT-101 is panned off the screen: ${JSON.stringify(away.box)}`);
         const panned = await page.evaluate(() => window.agentdrafterViewer.view());
-        assert((await bar(page)).includes('Coming soon'), 'the prompt is still up');
-        // The prompt goes after six seconds; the bar shrinks.
-        await sleep(Math.max(0, 6000 - (Date.now() - tapped)) + 800);
-        assert(!(await bar(page)).includes('Coming soon'), `the prompt has gone: ${await bar(page)}`);
+        assert((await bar(page)).includes('is not a drawing tool'), 'the prompt is still up');
+        // OK takes the prompt away; the bar shrinks.
+        await page.tap('.opt[data-opt="tool:ok"]');
+        await sleep(800);
+        assert(!(await bar(page)).includes('is not a drawing tool'), `the prompt has gone: ${await bar(page)}`);
         const after = await page.evaluate(() => window.agentdrafterViewer.view());
         assert(
           Math.abs(after.left - panned.left) < 1e-9 && Math.abs(after.top - panned.top) < 1e-9 && after.scale === panned.scale,
@@ -1893,6 +1904,358 @@ const checks = {
         ...seen,
         screenshots: ['frame-laptop-selected.png', 'frame-phone-tools.png', 'frame-phone-selected.png', 'frame-phone-journal-raised.png', 'frame-phone-320-prompt-wrapped.png', 'frame-phone-landscape-selected.png'],
       };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * The drawing tools: each by mouse, by its alias and typed coordinates,
+   * and by touch, against a copy of the demo plant. Each sends one change
+   * set through `change`, which the journal records and
+   * which builds the sheet's DWG again; the template warning's Cancel lands
+   * nothing and its Change all lands on every sheet named; Undo last takes
+   * a drafter's edit back.
+   */
+  async tools() {
+    const folder = freshPlant('tools');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    const seen = { laptop: {}, phone: {} };
+    const journal = () => agentIn(folder, 'journal', 'demo-plant').result.entries;
+    const dwg = (sheet) => readFileSync(join(folder, 'demo-plant', 'dwg', `${sheet}.dwg`)).toString('base64');
+    const template = () => readFileSync(join(folder, 'demo-plant', 'templates', 'loop-2-wire.yaml'), 'utf8');
+    const bar = (page) => page.evaluate(() => document.querySelector('.cmdbar').textContent);
+    const frames = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    // Where the drawing point `at` is on the page.
+    const onPage = (page, at) =>
+      page.evaluate(([x, y]) => {
+        const v = window.agentdrafterViewer.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+      }, at);
+    const snapOf = (id, snap, which) => {
+      const args = ['query', 'snap', 'demo-plant', '--id', id, '--snap', snap];
+      if (which) args.push('--which', which);
+      const asked = agentIn(folder, ...args);
+      assert(asked.ok && asked.result.points.length === 1, `query snap ${id}: ${JSON.stringify(asked)}`);
+      return asked.result.points[0].at;
+    };
+    // Waits for the journal to hold one more entry than `before`, which
+    // must be a change set that landed, and for the page
+    // to draw the sheet with what it added, if it added an object.
+    const landed = async (page, before, what, sheet = 'DP-LD-101') => {
+      const until = Date.now() + 30000;
+      let entries = journal();
+      while (entries.length <= before) {
+        assert(Date.now() < until, `${what}: no change set landed: ${await bar(page)}`);
+        await sleep(100);
+        entries = journal();
+      }
+      const entry = entries.at(-1);
+      assert(entry.kind === 'change_set' && entry.landed_on?.includes(sheet), `${what} landed: ${JSON.stringify(entry)}`);
+      const added = (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith(`${sheet}/`)).map((o) => o.id);
+      for (const id of added) {
+        await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+      }
+      return entry;
+    };
+    // Shows `at` at the middle of the drawing, three times the fitted scale, for a snap to be caught alone.
+    const zoomTo = async (page, at) => {
+      await page.click('[aria-label="Fit the sheet"]');
+      await sleep(600);
+      await page.evaluate(([x, y]) => {
+        const p = window.agentdrafterViewer;
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        const scale = p.view().scale * 3;
+        p.show({ left: x - r.width / 2 / scale, top: y + r.height / 3 / scale, scale });
+      }, at);
+      await frames(page);
+    };
+    const fitAll = async (page) => {
+      await page.click('[aria-label="Fit the sheet"]');
+      await sleep(600);
+    };
+    const typeIn = async (page, ...lines) => {
+      for (const line of lines) {
+        await page.keyboard.type(line);
+        await page.keyboard.press('Enter');
+        await frames(page);
+      }
+    };
+    try {
+      // A laptop: the mouse, and typing.
+      {
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        // The current layer: new objects go on it.
+        await page.waitForFunction(() => document.querySelectorAll('select[data-layer] option').length > 2);
+        await page.selectOption('select[data-layer]', 'wire');
+        // Line, by its alias and typed coordinates.
+        let before = journal().length;
+        let built = dwg('DP-LD-101');
+        await typeIn(page, 'L', '1,1', '@2,0');
+        assert((await bar(page)).includes('LINEon wire Click the next point'), `Line prompts on the current layer: ${await bar(page)}`);
+        await typeIn(page, '@1<90', '');
+        let entry = await landed(page, before, 'Line, typed');
+        const segments = entry.change_set.operations.map((o) => `${o.op} ${o.sheet} ${o.layer} ${JSON.stringify(o.from)} ${JSON.stringify(o.to)}`);
+        assert(
+          JSON.stringify(segments) === JSON.stringify(['add_line DP-LD-101 wire [1,1,0] [3,1,0]', 'add_line DP-LD-101 wire [3,1,0] [3,2,0]']),
+          `Line sends one add_line a segment on the current layer, where typed: ${JSON.stringify(segments)}`,
+        );
+        assert(dwg('DP-LD-101') !== built, 'the DWG is built again');
+        seen.laptop.line_typed = entry.entry;
+        // Line by mouse: from FT-101's endpoint, a snap, then level with it, by Ortho.
+        const end = snapOf('DP-LD-101/device', 'endpoint', 'objects[3].from');
+        await zoomTo(page, end);
+        before = journal().length;
+        await page.click('.rb[data-tool="line"]');
+        const [ex, ey] = await onPage(page, end);
+        await page.mouse.move(ex + 4, ey + 3);
+        await frames(page);
+        await page.mouse.click(ex + 4, ey + 3);
+        await page.keyboard.press('F8');
+        await page.mouse.move(ex + 150, ey + 9);
+        await frames(page);
+        const dyn = await page.textContent('[data-dyn]');
+        assert(/in/.test(dyn) && /°/.test(dyn), `the length and angle show at the cursor: ${dyn}`);
+        await page.screenshot({ path: join(out, 'tools-laptop-line.png') });
+        await page.mouse.click(ex + 150, ey + 9);
+        await page.mouse.click(ex + 150, ey + 9, { button: 'right' });
+        entry = await landed(page, before, 'Line, by mouse');
+        const [op] = entry.change_set.operations;
+        assert(
+          JSON.stringify(op.from) === JSON.stringify({ snap: { id: 'DP-LD-101/device', snap: 'endpoint', which: 'objects[3].from' } }),
+          `the first point goes as a snapped point: ${JSON.stringify(op.from)}`,
+        );
+        assert(Array.isArray(op.to) && op.to[1] === end[1], `Ortho holds the line level: ${JSON.stringify(op.to)} from ${end}`);
+        await page.keyboard.press('F8');
+        seen.laptop.line_mouse = entry.entry;
+        // Fit again, for the clicks to come, in the empty part of the
+        // control room under the cabinet.
+        await fitAll(page);
+        // Circle, by its alias, a typed centre and a typed radius.
+        before = journal().length;
+        await typeIn(page, 'c', '13,3.6', '0.25');
+        entry = await landed(page, before, 'Circle');
+        assert(
+          entry.change_set.operations[0].op === 'add_circle' && entry.change_set.operations[0].radius === 0.25 && JSON.stringify(entry.change_set.operations[0].center) === '[13,3.6,0]',
+          `Circle sends add_circle: ${JSON.stringify(entry.change_set.operations)}`,
+        );
+        const circleId = entry.objects.find((o) => o.how === 'added').id;
+        seen.laptop.circle = entry.entry;
+        // Rectangle: a corner clicked, the other typed as its size.
+        before = journal().length;
+        await page.click('.rb[data-tool="rectangle"]');
+        // Snapping off, so the click is the point itself.
+        await page.keyboard.press('F3');
+        const corner = await onPage(page, [14, 3]);
+        await page.mouse.click(corner[0], corner[1]);
+        await typeIn(page, '@1,0.5');
+        await page.keyboard.press('F3');
+        entry = await landed(page, before, 'Rectangle');
+        const rect = entry.change_set.operations[0];
+        assert(rect.op === 'add_polyline' && rect.closed === true && rect.points.length === 4 && rect.layer === 'wire', `Rectangle sends a closed add_polyline: ${JSON.stringify(rect)}`);
+        seen.laptop.rectangle = entry.entry;
+        // Text, typed on the drawing: two lines.
+        before = journal().length;
+        await typeIn(page, 'DT');
+        await page.keyboard.press('F3');
+        const place = await onPage(page, [10.2, 4.3]);
+        await page.mouse.click(place[0], place[1]);
+        await page.keyboard.press('F3');
+        await page.keyboard.type('PUMP P-1');
+        await frames(page);
+        const shown = await page.textContent('[data-typed]');
+        assert(shown.includes('PUMP P-1'), `the text shows on the drawing as it is typed: ${shown}`);
+        await page.screenshot({ path: join(out, 'tools-laptop-text.png') });
+        await page.keyboard.press('Enter');
+        await typeIn(page, 'SUCTION', '');
+        entry = await landed(page, before, 'Text');
+        assert(
+          entry.change_set.operations.map((o) => `${o.op} ${o.contents}`).join() === 'add_text PUMP P-1,add_text SUCTION',
+          `Text sends one add_text a line: ${JSON.stringify(entry.change_set.operations)}`,
+        );
+        seen.laptop.text = entry.entry;
+        // Move: the row's device selected first, then Move, from its endpoint.
+        before = journal().length;
+        built = dwg('DP-LD-101');
+        await page.keyboard.press('F3');
+        const device = await objectOf(page, 'DP-LD-101/device');
+        // Near its top, clear of the line drawn from its endpoint, which runs across its middle.
+        await page.mouse.click(...(await onPage(page, [(device.bounds[0] + device.bounds[2]) / 2, device.bounds[3] - 0.02])));
+        await page.keyboard.press('F3');
+        assert((await bar(page)).includes('FT-101 selected'), `the device is selected: ${await bar(page)}`);
+        await page.waitForSelector('.qp');
+        await page.click('.opt[data-opt="move"]');
+        assert((await bar(page)).includes('MOVE'), `Move takes what is selected: ${await bar(page)}`);
+        await zoomTo(page, end);
+        const [bx, by] = await onPage(page, end);
+        await page.mouse.move(bx + 3, by + 2);
+        await frames(page);
+        await page.mouse.click(bx + 3, by + 2);
+        await page.mouse.move(bx + 120, by + 40);
+        await frames(page);
+        await page.screenshot({ path: join(out, 'tools-laptop-move.png') });
+        await typeIn(page, '@0.25,0');
+        entry = await landed(page, before, 'Move');
+        const moved = entry.change_set.operations[0];
+        assert(
+          moved.op === 'move' && moved.target.id === 'DP-LD-101/device' && moved.from?.snap?.snap === 'endpoint' && Array.isArray(moved.to),
+          `Move sends move from the snapped base point: ${JSON.stringify(moved)}`,
+        );
+        await fitAll(page);
+        assert(JSON.stringify(entry.landed_on) === '["DP-LD-101"]', 'the row\'s own object reaches its sheet alone');
+        assert(dwg('DP-LD-101') !== built, 'the DWG is built again');
+        seen.laptop.move = entry.entry;
+        // Erase: the circle drawn, selected, then Delete.
+        before = journal().length;
+        const circle = await objectOf(page, circleId);
+        assert(circle.place >= 0, 'the circle drawn is on the sheet');
+        await page.keyboard.press('F3');
+        await page.mouse.click(...(await onPage(page, [circle.bounds[2], (circle.bounds[1] + circle.bounds[3]) / 2])));
+        await page.keyboard.press('F3');
+        await page.waitForSelector('.qp');
+        await page.keyboard.press('Delete');
+        entry = await landed(page, before, 'Erase');
+        assert(JSON.stringify(entry.change_set.operations) === JSON.stringify([{ op: 'delete', target: { id: circleId } }]), `Erase sends delete: ${JSON.stringify(entry.change_set.operations)}`);
+        await page.waitForFunction((gone) => !window.agentdrafterViewer.summary.objects.some((o) => o.id === gone), circleId);
+        seen.laptop.erase = entry.entry;
+        // A template's object: the junction box, by the tool first, then the pick.
+        const corner0 = snapOf('DP-LD-101/junction-box', 'endpoint', 'points[0]');
+        const tryMove = async () => {
+          await fitAll(page);
+          // Its left side, half way up, between the wires that cross it.
+          const edgeAt = await onPage(page, [6.38, 6.5]);
+          await typeIn(page, 'M');
+          await page.mouse.click(edgeAt[0], edgeAt[1]);
+          await frames(page);
+          const warned = await page.textContent('[data-warning]');
+          assert(warned.includes('This is part of the template.') && warned.includes('Moving it changes 7 sheets.'), `the command bar warns: ${warned}`);
+          await typeIn(page, '');
+          await zoomTo(page, corner0);
+          const c = await onPage(page, corner0);
+          await page.mouse.move(c[0] + 2, c[1] + 2);
+          await frames(page);
+          await page.mouse.click(c[0] + 2, c[1] + 2);
+          await typeIn(page, '@0.1,0');
+          await page.waitForSelector('[data-template-dialog]');
+          const asked = await page.textContent('[data-template-dialog]');
+          for (const s of ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302']) {
+            assert(asked.includes(s), `the dialog names ${s}: ${asked}`);
+          }
+          assert(!asked.includes('DP-LD-103') && asked.includes('Change all 7 sheets'), `the dialog: ${asked}`);
+        };
+        before = journal().length;
+        const templateBefore = template();
+        await tryMove();
+        await page.screenshot({ path: join(out, 'tools-laptop-template.png') });
+        await page.click('[data-tw="cancel"]');
+        await sleep(1500);
+        assert(journal().length === before && template() === templateBefore, 'Cancel lands nothing');
+        const sheetsBuilt = ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'].map((s) => [s, dwg(s)]);
+        await tryMove();
+        await page.click('[data-tw="all"]');
+        entry = await landed(page, before, 'Move of a template object');
+        assert(entry.landed_on.length === 7 && !entry.landed_on.includes('DP-LD-103'), `it lands on every sheet built from the template: ${entry.landed_on}`);
+        assert(sheetsBuilt.every(([s, was]) => dwg(s) !== was), 'every sheet named has its DWG built again');
+        assert(template() !== templateBefore, 'the template changes');
+        assert(
+          JSON.stringify(entry.change_set.operations[0].from) === JSON.stringify({ snap: { id: 'DP-LD-101/junction-box', snap: 'endpoint', which: 'points[0]' } }),
+          `a snap on a template's object stays a snapped point: ${JSON.stringify(entry.change_set.operations[0])}`,
+        );
+        seen.laptop.template_move = { entry: entry.entry, sheets: entry.landed_on.length };
+        // Undo last takes the drafter's edit back, on every sheet: once
+        // `change` has replied, it names it, and is on.
+        await page.waitForFunction(
+          (n) => {
+            const b = document.querySelector('.titlebar button[data-act="undo"]');
+            return b && !b.disabled && b.textContent.includes(`(#${n})`);
+          },
+          entry.entry,
+          { timeout: 30000 },
+        );
+        await page.click('.titlebar button[data-act="undo"]');
+        // The journal's entry is written ahead of the files and marked done after: wait for both.
+        const until = Date.now() + 20000;
+        let undone = journal().at(-1);
+        while (!(undone.kind === 'undo' && undone.undo_state !== 'pending' && template() === templateBefore)) {
+          assert(Date.now() < until, `Undo last undoes the drafter's edit and puts the template back: ${JSON.stringify(undone)}`);
+          await sleep(100);
+          undone = journal().at(-1);
+        }
+        assert(JSON.stringify(undone.undid) === JSON.stringify([entry.entry]), `the undo takes the drafter's edit: ${JSON.stringify(undone)}`);
+        seen.laptop.undo = journal().at(-1).entry;
+        await page.screenshot({ path: join(out, 'tools-laptop-after.png') });
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      // A phone: taps, the options, ⌨ Type and the text box.
+      {
+        const context = await b.newContext(PHONE);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        // Snapping off, so each tap is the point itself.
+        await page.tap('.toolsbtn');
+        await page.tap('.ribbon [data-toggle="osnap"]');
+        // Line: Tools, Line, two taps and Done.
+        let before = journal().length;
+        await page.tap('.rb[data-tool="line"]', { force: true });
+        assert((await bar(page)).includes('Tap the first point'), `the phone's words: ${await bar(page)}`);
+        await page.touchscreen.tap(...(await onPage(page, [11.5, 3.0])));
+        await sleep(400);
+        await page.touchscreen.tap(...(await onPage(page, [13.5, 3.0])));
+        await sleep(400);
+        await page.screenshot({ path: join(out, 'tools-phone-line.png') });
+        await page.tap('.opt[data-opt="tool:done"]');
+        let entry = await landed(page, before, 'Line, by touch');
+        assert(entry.change_set.operations.length === 1 && entry.change_set.operations[0].op === 'add_line', `one line: ${JSON.stringify(entry.change_set.operations)}`);
+        const lineId = entry.objects.find((o) => o.how === 'added').id;
+        seen.phone.line = entry.entry;
+        // Circle by ⌨ Type: its alias, a tap for the centre and a radius typed.
+        before = journal().length;
+        await page.tap('[data-type]');
+        await page.keyboard.type('C');
+        await page.keyboard.press('Enter');
+        await sleep(300);
+        await page.touchscreen.tap(...(await onPage(page, [12.5, 4.0])));
+        await sleep(300);
+        // The field stays open; typing goes back into it.
+        await page.keyboard.type('0.2');
+        await page.keyboard.press('Enter');
+        entry = await landed(page, before, 'Circle, by touch and typing');
+        assert(entry.change_set.operations[0].radius === 0.2, `the radius typed: ${JSON.stringify(entry.change_set.operations)}`);
+        seen.phone.circle = entry.entry;
+        // Text in the small box.
+        before = journal().length;
+        await page.tap('.toolsbtn');
+        await page.tap('.rb[data-tool="text"]', { force: true });
+        await page.touchscreen.tap(...(await onPage(page, [12.0, 3.5])));
+        await page.waitForSelector('[data-tbox-text]');
+        await page.fill('[data-tbox-text]', 'VENT');
+        await page.screenshot({ path: join(out, 'tools-phone-text.png') });
+        await page.tap('[data-tbox-add]');
+        entry = await landed(page, before, 'Text, in the box');
+        assert(entry.change_set.operations[0].contents === 'VENT', `Text from the box: ${JSON.stringify(entry.change_set.operations)}`);
+        seen.phone.text = entry.entry;
+        // Erase from Tools: the line drawn, tapped, then Erase 1.
+        before = journal().length;
+        await page.tap('.toolsbtn');
+        await page.tap('.rb[data-tool="erase"]', { force: true });
+        await page.touchscreen.tap(...(await onPage(page, [12.5, 3.0])));
+        await sleep(300);
+        await page.screenshot({ path: join(out, 'tools-phone-erase.png') });
+        assert((await bar(page)).includes('1 object picked'), `the line is picked: ${await bar(page)}`);
+        await page.tap('.opt[data-opt="tool:done"]');
+        entry = await landed(page, before, 'Erase, by touch');
+        assert(JSON.stringify(entry.change_set.operations) === JSON.stringify([{ op: 'delete', target: { id: lineId } }]), `Erase by touch: ${JSON.stringify(entry.change_set.operations)}`);
+        seen.phone.erase = entry.entry;
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      return { ...seen, screenshots: ['tools-laptop-line.png', 'tools-laptop-text.png', 'tools-laptop-move.png', 'tools-laptop-template.png', 'tools-laptop-after.png', 'tools-phone-line.png', 'tools-phone-text.png'] };
     } finally {
       await b.close();
       await server.stop();

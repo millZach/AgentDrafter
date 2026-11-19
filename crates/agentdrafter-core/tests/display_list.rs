@@ -184,7 +184,10 @@ fn with_origins_each_object_says_whether_its_template_or_its_row_writes_it() {
 
     request.origins = true;
     let told = display_list_with(&request, &Settings::default()).unwrap();
-    let reach = told.template.as_ref().expect("a set's sheet names its template");
+    let reach = told
+        .template
+        .as_ref()
+        .expect("a set's sheet names its template");
     assert_eq!(reach.path, "templates/loop-2-wire.yaml");
     assert_eq!(
         reach.sheets,
@@ -214,7 +217,10 @@ fn with_origins_each_object_says_whether_its_template_or_its_row_writes_it() {
         .unwrap();
     assert_eq!(border.from, Some(Origin::Template));
     assert!(told.objects.iter().all(|o| o.from.is_some()));
-    assert_eq!(told.display_list, plain.display_list, "what is drawn is the same");
+    assert_eq!(
+        told.display_list, plain.display_list,
+        "what is drawn is the same"
+    );
 
     // The other template's one sheet.
     request.sheet = Some("DP-LD-103".to_owned());

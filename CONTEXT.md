@@ -438,19 +438,31 @@ The browser window where the reviewer watches a drawing set change, steps throug
 _Avoid_: app, editor, UI
 
 **Drafting app**:
-The viewer with drawing tools and an assistant, in a browser or in its desktop shell, where a drafter draws and edits the way they use AutoCAD. Every edit made in it is a change set. Its frame is built round the viewer; its drawing tools and its assistant are not yet ([`docs/drafting-app.md`](docs/drafting-app.md)).
+The viewer with drawing tools and an assistant, in a browser or in its desktop shell, where a drafter draws and edits the way they use AutoCAD. Every edit made in it is a change set. Its frame and its first drawing tools are built round the viewer; its assistant is not yet ([`docs/drafting-app.md`](docs/drafting-app.md)).
 _Avoid_: editor, CAD program, GUI
 
 **Drawing tool**:
-What a drafter picks in the drafting app to make one operation by clicking and typing, such as Line or Move. It gathers the operation's input on the drawing and sends it as a change set.
+What a drafter picks in the drafting app to make one operation by clicking and typing, such as Line or Move. It gathers the operation's input on the drawing and sends it as a change set. It runs in the viewer's renderer, and its AutoCAD aliases, such as `L` or `REC`, are its own, not an operation's.
 _Avoid_: command (a command is the core's), tool on its own (the MCP server's word for a command), button
+
+**Current layer**:
+The layer a drawing tool puts each new object on, as AutoCAD's current layer is. The drafter sets it in the ribbon's Layer box; the page keeps it for each drawing set.
+_Avoid_: active layer, default layer
+
+**Rubber band**:
+What a drawing tool draws from its last point to the cursor before the next click, such as the line it would draw or the circle's size, as AutoCAD's rubber band shows it. It is the page's alone: nothing is sent until the tool has what it needs.
+_Avoid_: preview (a proposal is shown before it lands), ghost
+
+**Template warning**:
+What the drafting app says before an edit to an object that comes from a template lands: that every sheet built from the template changes, naming them, with "Change all N sheets" or Cancel.
+_Avoid_: template prompt, shared-edit warning
 
 **Command bar**:
 The line at the bottom of the drafting app's drawing where a drafter types a drawing tool's alias, a coordinate or words for the assistant, and reads the tool's prompt.
 _Avoid_: command line (that is an interface), prompt, console
 
 **Ribbon**:
-The strip of the drafting app above the drawing that holds its drawing tools in panels, Draw, Modify and Layer, as AutoCAD's ribbon does, cut down to a few labelled tools. A tool still to come is shown dimmed, and says so.
+The strip of the drafting app above the drawing that holds its drawing tools in panels, Draw, Modify and Layer, as AutoCAD's ribbon does, cut down to a few labelled tools, with the Layer box that sets the current layer.
 _Avoid_: toolbar, menu
 
 **Quick properties**:

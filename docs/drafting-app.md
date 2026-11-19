@@ -1,6 +1,6 @@
 # The drafting app
 
-**Status: builds 1 to 3 are done.** The records are written, the [viewer](viewer.md) is in the frame (#150), the ribbon, a tab for each sheet, the command bar, the status bar and quick properties, round dark model space, and the cursor catches [object snaps](viewer.md#object-snaps) (#151), with nothing that edits. The drawing tools and the assistant are not built. This page sets out the drafting app the viewer grows into (issue [#144](https://github.com/millZach/AgentDrafter/issues/144)), in the order it will be built. Its terms are in [`CONTEXT.md`](../CONTEXT.md): drafting app, drafter, drawing tool, command bar, assistant, proposal and guide.
+**Status: builds 1 to 4 are done.** The records are written, the [viewer](viewer.md) is in the frame (#150), the ribbon, a tab for each sheet, the command bar, the status bar and quick properties, round dark model space, the cursor catches [object snaps](viewer.md#object-snaps) (#151), and the first [drawing tools](viewer.md#drawing-tools) draw and edit through change sets (#152): Line, Circle, Rectangle, Text, Move and Erase. Editing in quick properties and the assistant are not built. This page sets out the drafting app the viewer grows into (issue [#144](https://github.com/millZach/AgentDrafter/issues/144)), in the order it will be built. Its terms are in [`CONTEXT.md`](../CONTEXT.md): drafting app, drafter, drawing tool, command bar, assistant, proposal and guide.
 
 ## What it is
 
@@ -63,7 +63,7 @@ A proposal is made against the set as it stood. If the set has changed by the ti
 
 - **The frame:** the ribbon, a tab for each sheet, the command bar, the status bar, and quick properties in place of the inspector.
 - **Drawing tools in the Rust renderer:** the tool's state, its rubber band, the snap lookup, grips, the crosshair and the size at the cursor. The page's React asks the renderer for the prompt and draws the frame round it.
-- **The command bar.** Aliases come from the `operations` command, which lists them. It takes typed coordinates. Words that are not a drawing tool's alias go to the assistant.
+- **The command bar.** It takes a drawing tool's AutoCAD alias, typed coordinates and lengths. The aliases are the drawing tools' own, in the renderer, not the operations': `L`, `C`, `REC`, `T` and the rest start tools, which may send operations whose AutoCAD names differ (Rectangle sends `add_polyline`), and `T` starts TEXT here where AutoCAD's starts MTEXT. Words that are not a drawing tool's alias will go to the assistant.
 - **The assistant's panel:** the chat, proposals with Keep and Discard, the guide's banner, and the journal.
 
 ## The assistant
@@ -81,7 +81,7 @@ Each is one ticket, proven as [`AGENTS.md`](../AGENTS.md) asks.
 1. **The records:** this page, the plan, ADR-0011 and the glossary. *Done (#145).*
 2. **The frame** in the viewer, with selecting and quick properties that only show. *Done (#150): [the viewer](viewer.md#the-frame) sets out what was built. The prototype Zach picked on 2026-11-18 is kept as the tag [`prototype/drafting-app-frame-150`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-frame-150/prototypes/drafting-app-frame).*
 3. **Object snaps with the display list**, and the crosshair and snap markers. *Done (#151): [the viewer](viewer.md#object-snaps) sets out what was built. The prototype Zach picked on 2026-11-18 is kept as the tag [`prototype/drafting-app-snaps-151`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-snaps-151/prototypes/drafting-app-snaps). The intersections are listed by the core in the reply; the length and angle at the cursor wait for build 4 (#152).*
-4. **The first drawing tools:** Line, Circle, Rectangle, Text, Move and Erase, with the command bar, typed coordinates and the template warning.
+4. **The first drawing tools:** Line, Circle, Rectangle, Text, Move and Erase, with the command bar, typed coordinates and the template warning. *Done (#152): [the viewer](viewer.md#drawing-tools) sets out what was built. The prototype Zach picked on 2026-11-19 is kept as the tag [`prototype/drafting-app-tools-152`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-tools-152/prototypes/drafting-app-tools). The core gained `display-list --origins`, where each object is written and the sheets its template reaches, for the template warning.*
 5. **Editing in quick properties:** layer, text, attribute values and radius.
 6. **A change set drawn before it lands.**
 7. **Proposals,** shown dashed with Keep and Discard.

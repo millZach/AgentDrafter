@@ -23,7 +23,15 @@ import {
   paperWords,
   placeBeside,
   promptFor,
-  SOON,
+  colorIndex,
+  currentLayerOf,
+  LAYER_KEY,
+  originWords,
+  readCurrentLayer,
+  templateWords,
+  toolOf,
+  writeCurrentLayer,
+  type ToolState,
   toggledWords,
   toggleFor,
   typeWords,
@@ -32,8 +40,30 @@ import {
   type PromptState,
 } from '../src/frame.ts';
 
-const words = (parts: Part[]) => parts.map((p) => ('text' in p ? p.text : 'snap' in p ? p.snap : `<${p.option}>`)).join('');
-const none: PromptState = { soon: null, at: null, cannot: false, reaching: false, selected: null };
+const words = (parts: Part[]) =>
+  parts
+    .map((p) => ('text' in p ? p.text : 'snap' in p ? p.snap : 'layer' in p ? `{${p.layer}} ` : 'error' in p ? `!${p.error}` : `<${p.option}>`))
+    .join('');
+const none: PromptState = { tool: null, at: null, cannot: false, reaching: false, selected: null };
+
+/** A tool's state as the renderer gives it, with nothing taken. */
+const toolState = (over: Partial<ToolState>): ToolState => ({
+  tool: null,
+  command: null,
+  layer: null,
+  prompt: '',
+  options: [],
+  error: null,
+  warning: null,
+  placeholder: '',
+  typing_text: false,
+  takes_points: false,
+  selecting: false,
+  picked: [],
+  points: [],
+  text: null,
+  ...over,
+});
 
 test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move and Erase in Modify, with AutoCAD aliases', () => {
   assert.deepEqual(
@@ -46,28 +76,100 @@ test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move and Erase 
   for (const tool of PANELS.flatMap((p) => p.tools)) assert.ok(tool.tip.length > 20, `${tool.label} has a tip in plain words`);
 });
 
-test('the command bar prompts to select, and names what is selected with Clear', () => {
-  assert.equal(words(promptFor(none).parts), 'Select an object, or click a snap to read its point');
-  assert.equal(words(promptFor({ ...none, touch: true }).parts), 'Tap an object to see it, or touch and hold to read a point');
+test('the command bar prompts for a command or a selection, and offers Move, Erase and Clear on what is selected', () => {
+  assert.equal(words(promptFor(none).parts), 'Type a command, such as L for Line, or select an object, or click a snap to read its point');
+  assert.equal(words(promptFor({ ...none, touch: true }).parts), 'Pick a tool in Tools, or tap an object to see it; touch and hold to read a point');
   const selected = promptFor({ ...none, selected: { id: 'DP-LD-101/device', name: 'FT-101', type: 'insert', block: 'TRANSMITTER' } });
   assert.equal(selected.command, null);
-  assert.equal(words(selected.parts), 'FT-101 selected [ <Clear> ]');
+  assert.equal(words(selected.parts), 'FT-101 selected [ <Move> <Erase> <Clear> ]');
   assert.deepEqual(
     selected.parts.filter((p) => 'act' in p).map((p) => ('act' in p ? p.act : '')),
-    ['clear'],
+    ['move', 'erase', 'clear'],
   );
 });
 
-test('a tool still to come names its command, says what it does in plain words and that it is coming, until OK', () => {
-  const line = PANELS[0]?.tools[0];
-  assert.ok(line);
-  const p = promptFor({ ...none, soon: line, selected: { type: 'line' } });
+test('a running tool prompts in the renderer’s words, on its layer, with its options to click and what went wrong', () => {
+  const line = toolState({
+    tool: 'line',
+    command: 'LINE',
+    layer: 'wire',
+    prompt: 'Click the next point, or type @dx,dy or a length',
+    options: [
+      { label: 'Undo', act: 'undo', main: false },
+      { label: 'Done', act: 'done', main: true },
+    ],
+    takes_points: true,
+  });
+  const p = promptFor({ ...none, tool: line, selected: { type: 'line' } });
   assert.equal(p.command, 'LINE');
-  assert.equal(words(p.parts), `(L) Draws straight lines. Click a start point, then keep clicking. ${SOON} [ <OK> ]`);
-  // A tap or a key has no hover to show the tip: the command bar says it.
-  const rectangle = PANELS[0]?.tools[2];
-  assert.ok(rectangle);
-  assert.match(words(promptFor({ ...none, soon: rectangle }).parts), /^\(REC\) Click one corner, then the opposite corner\. Coming soon/);
+  assert.equal(words(p.parts), '{on wire} Click the next point, or type @dx,dy or a length [ <Undo> · <Done> ]');
+  assert.deepEqual(
+    p.parts.filter((x) => 'act' in x).map((x) => ('act' in x ? [x.act, x.main] : [])),
+    [
+      ['tool:undo', false],
+      ['tool:done', true],
+    ],
+  );
+  const wrong = promptFor({ ...none, tool: { ...line, error: '“x” is not a point.' } });
+  assert.match(words(wrong.parts), /!“x” is not a point\.$/);
+  // Move draws nothing new, so names no layer.
+  assert.doesNotMatch(words(promptFor({ ...none, tool: { ...line, tool: 'move', command: 'MOVE', layer: null } }).parts), /\{on/);
+  // A word typed that is not a tool says so, with OK, while no tool runs.
+  const said = promptFor({ ...none, tool: toolState({ error: '“hello” is not a drawing tool' }) });
+  assert.equal(words(said.parts), '!“hello” is not a drawing tool [ <OK> ]');
+  // The set as it was shows no tool.
+  assert.match(words(promptFor({ ...none, at: 3, tool: line }).parts), /^Showing entry 3/);
+});
+
+test('the template dialog names its template and asks to change all its sheets', () => {
+  const edit = {
+    title: 'This is part of the template.',
+    detail: 'Moving it changes 7 sheets.',
+    path: 'templates/loop-2-wire.yaml',
+    sheets: ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'],
+  };
+  assert.deepEqual(templateWords(edit), {
+    title: 'This is part of the template.',
+    body: 'Moving it changes 7 sheets. The template loop-2-wire.yaml changes, and so does every sheet built from it:',
+    button: 'Change all 7 sheets',
+  });
+  assert.equal(templateWords({ ...edit, sheets: ['DP-LD-103'] }).button, 'Change the template');
+});
+
+test('quick properties say where an object comes from', () => {
+  const template = { path: 'templates/loop-2-wire.yaml', sheets: ['DP-LD-101', 'DP-LD-102'] };
+  assert.equal(originWords('template', template), 'The template (2 sheets)');
+  assert.equal(originWords('template', { ...template, sheets: ['DP-LD-103'] }), 'The template (this sheet only)');
+  assert.equal(originWords('row', template), 'This sheet’s row');
+  assert.equal(originWords(undefined, null), null);
+});
+
+test('the current layer is kept for each set, and is layer 0 where the sheet has not got it', () => {
+  const kept = new Map<string, string>();
+  const keeps = { getItem: (k: string) => kept.get(k) ?? null, setItem: (k: string, v: string) => void kept.set(k, v) };
+  assert.equal(readCurrentLayer(keeps, 'examples/demo-plant'), null);
+  writeCurrentLayer(keeps, 'examples/demo-plant', 'wire');
+  writeCurrentLayer(keeps, 'examples/demo-set', 'notes');
+  assert.equal(readCurrentLayer(keeps, 'examples/demo-plant'), 'wire');
+  assert.equal(readCurrentLayer(keeps, 'examples/demo-set'), 'notes');
+  assert.ok(kept.has(LAYER_KEY));
+  const layers = [
+    { name: '0', color: 7 },
+    { name: 'wire', color: 7 },
+  ];
+  assert.equal(currentLayerOf('wire', layers), 'wire');
+  assert.equal(currentLayerOf('notes', layers), '0');
+  assert.equal(currentLayerOf(null, layers), '0');
+  kept.set(LAYER_KEY, 'not json');
+  assert.equal(readCurrentLayer(keeps, 'examples/demo-plant'), null);
+  assert.equal(colorIndex(1), 1);
+  assert.equal(colorIndex('#ff0000'), 7);
+  assert.equal(colorIndex(undefined), 7);
+});
+
+test('every tool is found by its name', () => {
+  assert.equal(toolOf('rectangle')?.alias, 'REC');
+  assert.equal(toolOf('nothing'), undefined);
 });
 
 test('stepping back offers Older, Newer and Live, and says when the entry cannot be shown', () => {
@@ -93,7 +195,7 @@ test('F3, F7 and F8 turn Object snap, Grid and Ortho, as in AutoCAD', () => {
   assert.equal(toggleFor('F9'), null);
   assert.equal(toggledWords('grid', false), 'Grid off');
   assert.equal(toggledWords('osnap', true), 'Object snap on');
-  assert.equal(toggledWords('ortho', true), 'Ortho on: it acts once drawing tools come');
+  assert.equal(toggledWords('ortho', true), 'Ortho on');
 });
 
 test('units, the paper and the cursor in words', () => {

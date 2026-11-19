@@ -13,6 +13,7 @@
 //! in millimetres of paper, so the GPU draws them at any zoom as the PNG
 //! draws them at its dots per inch.
 
+use crate::tools::Reach;
 use agentdrafter_core::{Bounds, Color, DisplayList, DisplaySnap, FillRule, Paper, Shape};
 use lyon_tessellation::geom::point;
 use lyon_tessellation::path::Path;
@@ -77,6 +78,10 @@ pub struct SheetReply {
     /// fills whose edges the nearest snap finds a point on.
     #[serde(default)]
     pub edges: Vec<usize>,
+    /// With `origins`, a drawing set's sheet's template and the sheets
+    /// built from it, which an edit to its objects reaches.
+    #[serde(default)]
+    pub template: Option<Reach>,
     pub display_list: DisplayList,
 }
 
@@ -200,6 +205,8 @@ pub struct Summary {
     pub objects: Vec<serde_json::Value>,
     /// How many object snaps the sheet came with.
     pub snaps: usize,
+    /// With `origins`, its template and the sheets built from it.
+    pub template: Option<Reach>,
 }
 
 /// Reads a `display-list` reply. A reply that is not ok gives its error's
@@ -418,6 +425,7 @@ impl Mesh {
             entry: sheet.entry,
             objects: sheet.objects.clone(),
             snaps: sheet.snaps.len(),
+            template: sheet.template.clone(),
         }
     }
 }
@@ -500,6 +508,7 @@ mod tests {
             objects: Vec::new(),
             snaps: Vec::new(),
             edges: Vec::new(),
+            template: None,
             display_list,
         }
     }
