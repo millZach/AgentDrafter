@@ -298,8 +298,10 @@ export function Drawing({
     const el = editor?.current;
     if (!el) return;
     const b = pickedBox.current;
+    // Unseen until placed, but never hidden: a hidden field cannot take
+    // the keys as it opens.
     if (narrow.current || b.length !== 4) {
-      el.style.visibility = 'hidden';
+      el.style.opacity = '0';
       return;
     }
     const v = view.current;
@@ -315,7 +317,7 @@ export function Drawing({
     const box = el.getBoundingClientRect();
     el.style.left = `${Math.max(4, Math.min(width - box.width - 4, l - 10))}px`;
     el.style.top = `${Math.max(4, middle - 26)}px`;
-    el.style.visibility = 'visible';
+    el.style.opacity = '1';
   };
 
   // The crosshair and the snap the cursor holds, in step with the view:

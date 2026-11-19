@@ -2502,7 +2502,9 @@ const checks = {
         const [sx, sy] = await showAndFind(page, service);
         await page.mouse.dblclick(sx, sy);
         await page.waitForSelector('[data-text-edit]');
-        await page.waitForFunction(() => getComputedStyle(document.querySelector('.tedit')).visibility === 'visible');
+        await page.waitForFunction(() => getComputedStyle(document.querySelector('.tedit')).opacity === '1');
+        // It takes the keys as it opens, the text selected, as AutoCAD's does.
+        assert(await page.evaluate(() => document.activeElement?.matches('[data-text-edit]')), 'the text on the drawing takes the keys');
         assert((await bar(page)).includes('TEXTEDIT'), `the command bar says the text is edited on the drawing: ${await bar(page)}`);
         const onDrawing = await page.textContent('.tedit');
         assert(onDrawing.includes('row value SERVICE'), `the box says where it is written: ${onDrawing}`);
@@ -2513,7 +2515,9 @@ const checks = {
         await nothingLands(before, 'Esc on the drawing');
         await page.mouse.dblclick(sx, sy);
         await page.waitForSelector('[data-text-edit]');
-        await page.fill('[data-text-edit]', 'FT-101 RAW WATER INLET FLOW METER');
+        // Typed with the keys, as a drafter does: End, then the words.
+        await page.keyboard.press('End');
+        await page.keyboard.type(' METER');
         await page.keyboard.press('Enter');
         ({ entry, op } = await landed(page, before, 'Contents, on the drawing'));
         assert(op.op === 'change' && op.target.id === 'DP-LD-101/service' && op.set.contents === 'FT-101 RAW WATER INLET FLOW METER', `the text on the drawing: ${JSON.stringify(op)}`);
