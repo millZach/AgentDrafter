@@ -2191,6 +2191,20 @@ const checks = {
         const cdp = await context.newCDPSession(page);
         const touch = (type, points) =>
           cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([px, py], id) => ({ x: px, y: py, id, radiusX: 2, radiusY: 2, force: 1 })) });
+        // Where FT-101's endpoint is on the screen once the view is still:
+        // a snap taken selects its object, and the page glides to bring it
+        // clear of the card, so each hold finds the point again.
+        const still = async () => {
+          const until = Date.now() + 5000;
+          for (let calm = 0, last = ''; calm < 3; ) {
+            assert(Date.now() < until, 'the view comes to rest');
+            await sleep(100);
+            const now = JSON.stringify(await page.evaluate(() => window.agentdrafterViewer.view()));
+            calm = now === last ? calm + 1 : 0;
+            last = now;
+          }
+          return onPage(page, end);
+        };
         await touch('touchStart', [[x + 4, y + 3]]);
         await sleep(500);
         const loupe = await page.evaluate(() => {
@@ -2215,7 +2229,8 @@ const checks = {
           const earlier = objects.slice(0, objects.findIndex((o) => o.id === 'DP-LD-101/device')).find((o) => o.id);
           assert(earlier, 'an object comes before FT-101');
           await page.tap('.opt[data-opt="clear"]');
-          await touch('touchStart', [[x + 4, y + 3]]);
+          const [hx, hy] = await still();
+          await touch('touchStart', [[hx + 4, hy + 3]]);
           await sleep(500);
           assert(sendChange(folder, { operations: [{ op: 'delete', target: { id: earlier.id } }] }).ok, `${earlier.id} is deleted`);
           await page.waitForFunction((gone) => !window.agentdrafterViewer.summary.objects.some((o) => o.id === gone), earlier.id, { timeout: 15000 });
@@ -2228,8 +2243,11 @@ const checks = {
         // the lift takes no snap.
         {
           await page.tap('.opt[data-opt="clear"]');
-          await touch('touchStart', [[x + 4, y + 3]]);
+          const [hx, hy] = await still();
+          await touch('touchStart', [[hx + 4, hy + 3]]);
           await sleep(500);
+          // Held on FT-101's endpoint, before Object snap goes off.
+          assert((await page.textContent('.snaptag')) === 'Endpoint · FT-101', 'the finger is held on FT-101');
           await page.keyboard.press('F3');
           await sleep(100);
           await touch('touchEnd', []);
