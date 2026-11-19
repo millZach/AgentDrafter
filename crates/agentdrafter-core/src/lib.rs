@@ -124,8 +124,8 @@ pub use display_list::{
 };
 pub use display_snaps::DisplaySnap;
 pub use draw::{
-    nearest, object_bounds, pick, Bounds, Color, DisplayList, FillRule, Item, PageFrom, Point2,
-    Shape, TextRun,
+    nearest, object_bounds, outlines, pick, Bounds, Color, DisplayList, FillRule, Item, Outline,
+    PageFrom, Point2, Shape, TextRun,
 };
 pub use error::{Error, ErrorCode};
 pub use geometry::measure::{Box3, Measures};

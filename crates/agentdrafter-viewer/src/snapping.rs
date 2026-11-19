@@ -6,7 +6,7 @@
 //! taken only when no other snap is in reach, as it lies everywhere on
 //! every object. Plain computation, tested natively; `web` draws it.
 
-use agentdrafter_core::{nearest, DisplayList, DisplaySnap, SnapKind};
+use agentdrafter_core::{nearest, DisplayList, DisplaySnap, Outline, SnapKind};
 
 /// Which of two snaps about as near the cursor wins: AutoCAD's ends and
 /// crossings first, then middles and centres, then the rest.
@@ -62,11 +62,11 @@ fn rank(kind: SnapKind) -> usize {
 /// then the rest, nearest first. One point found twice as one kind, the
 /// same in all three of its coordinates, is offered once. With Nearest
 /// running and nothing else in reach, the nearest point of what `list`
-/// draws, the edges of the fills `edges` names among it.
+/// draws, along the `outlines` of its fills.
 pub fn candidates(
     snaps: &[DisplaySnap],
     list: &DisplayList,
-    edges: &[usize],
+    outlines: &[Outline],
     running: u32,
     at: [f64; 2],
     reach: f64,
@@ -109,7 +109,7 @@ pub fn candidates(
         });
     }
     if found.is_empty() && running & bit(SnapKind::Nearest) != 0 {
-        if let Some((object, p)) = nearest(list, edges, at, reach) {
+        if let Some((object, p)) = nearest(list, outlines, at, reach) {
             found.push(Candidate {
                 snap: SnapKind::Nearest,
                 object,

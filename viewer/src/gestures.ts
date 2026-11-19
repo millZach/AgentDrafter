@@ -228,6 +228,23 @@ export function attachGestures(element: HTMLElement, surface: Surface, glide: Gl
     // A finger lifted before the hold was due, by its own time, was a tap:
     // a hold that came up meanwhile is taken back.
     if (holding && beforeHold(e)) takeBack();
+    // A finger that rested HOLD_MS or more by its own events' times was
+    // held, though a busy page got its lift before the hold's timer: it is
+    // held and lifted at once, and takes the snap where it lifted.
+    if (
+      !holding &&
+      mayHold &&
+      surface.held &&
+      e.type === 'pointerup' &&
+      pointers.size === 0 &&
+      !panning &&
+      !multi &&
+      still &&
+      !beforeHold(e)
+    ) {
+      surface.held(p);
+      holding = true;
+    }
     if (holding) {
       holding = false;
       pointers.clear();

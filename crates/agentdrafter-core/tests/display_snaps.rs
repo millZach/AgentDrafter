@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    display_list_with, nearest, query_with, Answer, DisplayListReport, DisplayListRequest,
-    ObjectRef, Query, QueryRequest, Settings, SnapKind, SnapRef,
+    display_list_with, nearest, outlines, query_with, Answer, DisplayListReport,
+    DisplayListRequest, ObjectRef, Query, QueryRequest, Settings, SnapKind, SnapRef,
 };
 
 /// The places in its blocks a snap's `which` passes through:
@@ -219,6 +219,7 @@ objects:
   - polyline: {id: zigzag, points: [[50, -8, 0], [55, 8, 0], [60, -8, 0], [65, 8, 0], [70, -8, 0]], linetype: DOT}
   - spline: {id: wave, fit_points: [[45, 2, 0], [60, -6, 0], [75, 2, 0]], linetype: DASH}
   - polyline: {id: wide, points: [{point: [0, 40, 0], start_width: 2, end_width: 2}, [20, 40, 0]]}
+  - polyline: {id: bent, points: [{point: [0, 60, 0], start_width: 4, end_width: 4}, {point: [10, 60, 0], start_width: 4, end_width: 4}, [20, 60, 0]]}
   - line: {id: over-wide, from: [5, 35, 0], to: [5, 45, 0], linetype: DASH}
   - hatch: {id: fill, pattern: SOLID, boundary: [{polyline: {points: [[80, 30, 0], [90, 30, 0], [90, 40, 0], [80, 40, 0]]}}]}
 ";
@@ -309,15 +310,28 @@ fn the_nearest_snap_finds_the_edge_of_a_polyline_with_width_not_a_hatch() {
     assert_eq!(of(wide).len(), 1, "the wide polyline's fill: {edges:?}");
     assert!(of(fill).is_empty(), "no hatch's: {edges:?}");
     // On its edge, half its width above its middle line.
-    let (object, at) = nearest(&report.display_list, edges, [12.0, 41.4], 1.0).unwrap();
+    let named = outlines(&report.display_list, edges);
+    let (object, at) = nearest(&report.display_list, &named, [12.0, 41.4], 1.0).unwrap();
     assert_eq!(object, wide);
     assert!(
         (at[0] - 12.0).abs() < 1e-9 && (at[1] - 41.0).abs() < 1e-6,
         "{at:?}"
     );
+    // Inside a polyline 4 wide, by where its two segments meet: the seam
+    // between them is no edge of what is drawn, and its outline is 1.5
+    // away, out of reach.
+    assert_eq!(
+        nearest(&report.display_list, &named, [10.0, 60.5], 1.0),
+        None
+    );
+    let bent = place_of(&report, "bent");
+    assert_eq!(
+        nearest(&report.display_list, &named, [10.0, 61.5], 1.0).map(|(o, _)| o),
+        Some(bent)
+    );
     // The solid hatch's fill is passed over.
     assert_eq!(
-        nearest(&report.display_list, edges, [85.0, 41.0], 2.0),
+        nearest(&report.display_list, &named, [85.0, 41.0], 2.0),
         None
     );
     // Without the snaps, no edges.
@@ -465,5 +479,72 @@ fn a_clipped_viewport_snaps_on_the_boundary_it_is_drawn_as() {
             .iter()
             .any(|(_, w, _)| w.as_deref().unwrap_or("").starts_with("corners")),
         "{polygon:?}"
+    );
+}
+
+#[test]
+fn a_crossing_with_drawn_geometry_is_kept_where_geometry_not_drawn_crosses_too() {
+    // The block's first line is on a frozen layer, its second drawn; a line
+    // crosses both at the origin, where `query snap` finds one crossing.
+    let dir = scratch("merged");
+    std::fs::write(
+        dir.join("blocks.yaml"),
+        "units: mm
+layers:
+  hidden: {frozen: true}
+blocks:
+  CROSS:
+    objects:
+      - line: {from: [-10, 0, 0], to: [10, 0, 0], layer: hidden}
+      - line: {from: [-10, -10, 0], to: [10, 10, 0]}
+",
+    )
+    .unwrap();
+    let source = dir.join("sheet.yaml");
+    std::fs::write(
+        &source,
+        "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {id: cross, block: CROSS, position: [0, 0, 0]}
+  - line: {id: upright, from: [0, -20, 0], to: [0, 20, 0]}
+",
+    )
+    .unwrap();
+    let report = with_snaps(&source, None);
+    let (cross, upright) = (place_of(&report, "cross"), place_of(&report, "upright"));
+    let listed: Vec<_> = report
+        .snaps
+        .as_ref()
+        .unwrap()
+        .iter()
+        .filter(|s| s.snap == SnapKind::Intersection)
+        .map(|s| (s.object, s.with, s.which.clone(), s.at))
+        .collect();
+    let answer = query_with(
+        &QueryRequest {
+            source: source.clone(),
+            sheet: None,
+            query: Query::Snap(SnapRef {
+                id: Some(report.objects[cross].id.clone().unwrap()),
+                snap: Some(SnapKind::Intersection),
+                with: Some(ObjectRef {
+                    id: Some(report.objects[upright].id.clone().unwrap()),
+                    name: None,
+                }),
+                ..SnapRef::default()
+            }),
+        },
+        &settings(),
+    )
+    .unwrap();
+    let Answer::Snap { points, .. } = &answer.answer else {
+        panic!("not a snap");
+    };
+    assert_eq!(points.len(), 1, "{points:?}");
+    assert_eq!(
+        listed,
+        vec![(cross, Some(upright), points[0].which.clone(), points[0].at)],
+        "the drawn diagonal's crossing at the origin, named as `query snap` names it"
     );
 }

@@ -258,15 +258,16 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
   /* Many layouts scroll in their strip; the status controls after it keep their room. */
   flex: 0 1 auto; min-width: 80px; overflow-x: auto;
 }
-/* The controls keep their size; the layout strip, then the paper and the
-   coordinates, give way to them on a narrow bar, so Grid, Object snap,
-   Ortho and the connection are always on the screen. */
+/* The controls and the cursor's read-out keep their size; the layout
+   strip and the paper give way to them on a narrow bar, so Grid, Object
+   snap, Ortho, the connection and the coordinates with the snap's name are
+   always on the screen, whole. */
 .status > :not(.va-layouts):not(.grow):not(.live):not(.coords):not(.paperlabel) { flex: none; }
 .status .va-layouts .tab { background: none; border: 0; border-radius: 0; padding: 0 12px; color: var(--dim); }
 .status .va-layouts .tab.on { background: var(--canvas); color: #fff; border-top: 2px solid var(--blue); }
 .coords {
-  font-family: var(--mono); align-self: center; flex: 0 1 250px; min-width: 130px; padding-left: 10px; color: var(--text);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--mono); align-self: center; flex: 0 0 auto; min-width: 250px; padding-left: 10px; color: var(--text);
+  white-space: nowrap;
 }
 .coords .snapw { font-family: var(--ui); font-weight: 400; margin-left: 8px; }
 /* Object snap, with the ▴ that opens its menu. */

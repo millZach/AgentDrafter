@@ -181,16 +181,19 @@ async function live(page) {
 /** `agentdrafter serve` in the scratch folder, or `cwd`, with every line it printed. */
 /**
  * Every server a check started, stopped when the run ends: at its end, on
- * an error, or on SIGINT, SIGTERM, SIGHUP (its terminal closed) or SIGBREAK
- * (Windows' Ctrl+Break). Only a SIGKILL, which no process can catch, leaves
- * them running.
+ * an error, or on SIGINT, SIGTERM, SIGHUP (its terminal closed), SIGQUIT,
+ * SIGUSR2 or SIGALRM, or on Windows SIGBREAK (Ctrl+Break). A kill no
+ * process can catch, SIGKILL, or a signal not listed here, can leave one
+ * running.
  */
 const servers = new Set();
 const stopAll = () => {
   for (const child of servers) if (child.exitCode === null) child.kill();
 };
 process.on('exit', stopAll);
-for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+const signals =
+  process.platform === 'win32' ? ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] : ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT', 'SIGUSR2', 'SIGALRM'];
+for (const signal of signals) {
   process.on(signal, () => {
     stopAll();
     process.exit(1);
@@ -383,8 +386,28 @@ const checks = {
       const laptop = await open(await b.newContext(LAPTOP), `${server.base}/?source=layouts.yaml`, null);
       const inStatus = await laptop.page.evaluate(() => [...document.querySelectorAll('.status .va-layouts .tab')].map((t) => t.textContent));
       assert(JSON.stringify(inStatus) === JSON.stringify(['Assembly', 'Wiring']), `the layout tabs in the status bar: ${JSON.stringify(inStatus)}`);
+      // A snap taken in Assembly, on a-frame's corner: another layout
+      // drawn takes the read-out and its Copy away, though the sheet still
+      // holds a-frame.
+      {
+        const listed = agentIn(scratch, 'display-list', 'layouts.yaml', '--layout', 'Assembly', '--snaps').result;
+        const frame = listed.objects.findIndex((o) => o.id?.endsWith('/a-frame'));
+        const corner = listed.snaps.find((s) => s.object === frame && s.snap === 'endpoint');
+        assert(corner, `a-frame has an endpoint: ${frame}`);
+        await laptop.page.waitForFunction(() => window.agentdrafterViewer?.summary?.snaps > 0);
+        const [fx, fy] = await laptop.page.evaluate(([x, y]) => {
+          const v = window.agentdrafterViewer.view();
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+        }, corner.at);
+        await laptop.page.mouse.move(fx + 1, fy + 1);
+        await laptop.page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+        await laptop.page.mouse.click(fx + 1, fy + 1);
+        await laptop.page.waitForSelector('.opt[data-opt="copy"]');
+      }
       await laptop.page.click('.status .va-layouts .tab:has-text("Wiring")');
       await laptop.page.waitForFunction(() => window.agentdrafterViewer?.summary?.layout === 'Wiring');
+      assert(!(await laptop.page.$('.opt[data-opt="copy"]')), 'Copy goes with the layout its point was taken in');
       await laptop.page.screenshot({ path: join(out, 'layouts-laptop.png') });
       // Ten layouts at 900 CSS pixels: the strip scrolls; Grid, Object snap,
       // Ortho and the connection stay on the screen.
@@ -405,6 +428,39 @@ const checks = {
       assert(strip.tabs === 10 && strip.scrolls, `ten layout tabs, scrolling in their strip: ${JSON.stringify(strip)}`);
       assert(strip.controls.every(([, ok]) => ok), `the status controls stay on the screen: ${JSON.stringify(strip)}`);
       assert(narrow.problems.length === 0, narrow.problems.join('; '));
+      // At 900 CSS pixels, in a wider face (letters spaced 0.5 px apart, as
+      // DejaVu Sans is wider than this machine's), the read-out of a snap
+      // with a long name stays whole: the paper and the layouts give way.
+      {
+        const wide = await b.newContext({ viewport: { width: 900, height: 700 }, deviceScaleFactor: 1 });
+        await wide.addInitScript(() =>
+          localStorage.setItem('agentdrafter-object-snaps', JSON.stringify({ on: true, running: ['endpoint', 'midpoint', 'center', 'quadrant', 'intersection'] })),
+        );
+        const quad = await open(wide, `${server.base}/?source=layouts.yaml`, null);
+        await quad.page.waitForFunction(() => window.agentdrafterViewer?.summary?.snaps > 0);
+        await quad.page.evaluate(() => {
+          for (const el of document.querySelectorAll('.status, .status *')) el.style.letterSpacing = '0.5px';
+        });
+        const [qx, qy] = await quad.page.evaluate(() => {
+          const v = window.agentdrafterViewer.view();
+          const r = document.querySelector('.stage').getBoundingClientRect();
+          return [r.left + (175 - v.left) * v.scale, r.top + (v.top - 195) * v.scale];
+        });
+        await quad.page.mouse.move(qx + 1, qy + 1);
+        await quad.page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+        const readout = await quad.page.evaluate(() => {
+          const c = document.querySelector('.status .coords');
+          const r = c.getBoundingClientRect();
+          return { text: c.textContent, whole: c.scrollWidth <= c.clientWidth + 0.5, right: r.right, live: document.querySelector('.status .live').getBoundingClientRect().right };
+        });
+        await quad.page.screenshot({ path: join(out, 'layouts-quadrant-at-900.png') });
+        assert(
+          readout.text === '175.0000, 195.0000 mmQuadrant' && readout.whole && readout.live <= 900.5,
+          `the read-out is whole and the connection on the screen: ${JSON.stringify(readout)}`,
+        );
+        assert(quad.problems.length === 0, quad.problems.join('; '));
+        await wide.close();
+      }
       assert(problems.length === 0 && one.problems.length === 0 && laptop.problems.length === 0, [...problems, ...one.problems, ...laptop.problems].join('; '));
       return { first, second, laptop_status_bar: inStatus, ten_at_900: strip };
     } finally {
@@ -1781,11 +1837,20 @@ const checks = {
         // read once it has stopped.
         await sleep(200);
         await page.mouse.up();
-        for (let still = 0, last = ''; still < 3; ) {
-          await sleep(100);
-          const now = JSON.stringify(await page.evaluate(() => window.agentdrafterViewer.view()));
-          still = now === last ? still + 1 : 0;
-          last = now;
+        // A view that never comes to rest fails the check, with what it
+        // last showed, within 5 seconds, so the run goes on and stops its
+        // servers.
+        {
+          const samples = [];
+          const until = Date.now() + 5000;
+          for (let still = 0, last = ''; still < 3; ) {
+            assert(Date.now() < until, `the view comes to rest after the drag: ${samples.slice(-4).join(' ')}`);
+            await sleep(100);
+            const now = JSON.stringify(await page.evaluate(() => window.agentdrafterViewer.view()));
+            samples.push(now);
+            still = now === last ? still + 1 : 0;
+            last = now;
+          }
         }
         const away = await at(page, 'DP-LD-101/device');
         assert(away.box[2] < stage[0], `FT-101 is panned off the screen: ${JSON.stringify(away.box)}`);
@@ -2081,6 +2146,37 @@ const checks = {
           return p.timeSnapSearch(at, 12);
         });
         assert(each < 0.5, `the search takes ${each} ms a move`);
+        // An intersection taken: deleting the other object it names takes
+        // the read-out and its Copy away, though its own object is still
+        // there. One clear of every endpoint, so it is the snap caught.
+        {
+          const objects = agentIn(folder, 'display-list', 'demo-plant', '--sheet', 'DP-LD-101').result.objects;
+          const device = objects.findIndex((o) => o.id === 'DP-LD-101/device');
+          const crossing = listed.find(
+            (s) =>
+              s.snap === 'intersection' &&
+              objects[s.object]?.id &&
+              objects[s.with]?.id &&
+              s.object !== device &&
+              s.with !== device &&
+              listed.every((t) => t.snap === 'intersection' || Math.hypot(t.at[0] - s.at[0], t.at[1] - s.at[1]) > 0.1),
+          );
+          assert(crossing, 'an intersection clear of every other snap');
+          await centre(page, crossing.at, 6);
+          await frames(page);
+          const [cx, cy] = await onPage(page, crossing.at);
+          await page.mouse.move(cx + 2, cy + 1);
+          await frames(page);
+          const caught = await hovered(page);
+          assert(caught?.snap === 'intersection', `the intersection is caught: ${JSON.stringify(caught)}`);
+          await page.mouse.click(cx + 2, cy + 1);
+          await page.waitForSelector('.opt[data-opt="copy"]');
+          const other = objects[caught.with].id;
+          assert(sendChange(folder, { operations: [{ op: 'delete', target: { id: other } }] }).ok, `${other} is deleted`);
+          await page.waitForFunction((gone) => !window.agentdrafterViewer.summary.objects.some((o) => o.id === gone), other, { timeout: 15000 });
+          await frames(page);
+          assert(!(await page.$('.opt[data-opt="copy"]')), `Copy goes with ${other}, the intersection's other object`);
+        }
         seen.laptop = { snaps: count, endpoint: end, copied, search_ms_per_move: each };
         assert(problems.length === 0, problems.join('; '));
         await context.close();
@@ -2127,6 +2223,20 @@ const checks = {
           await page.waitForFunction(() => document.querySelector('.cmdbar').textContent.includes('Endpoint of'));
           const bar = await page.textContent('.cmdbar');
           assert(bar.includes(`Endpoint of FT-101: ${end[0].toFixed(4)}, ${end[1].toFixed(4)} in`), `the snap lifted is FT-101's, where it is: ${bar.slice(0, 120)}`);
+        }
+        // Object snap turned off from a keyboard while the finger is held:
+        // the lift takes no snap.
+        {
+          await page.tap('.opt[data-opt="clear"]');
+          await touch('touchStart', [[x + 4, y + 3]]);
+          await sleep(500);
+          await page.keyboard.press('F3');
+          await sleep(100);
+          await touch('touchEnd', []);
+          await sleep(300);
+          const bar = await page.textContent('.cmdbar');
+          assert(!bar.includes('Endpoint of'), `with Object snap off, the lift takes no snap: ${bar.slice(0, 120)}`);
+          await page.keyboard.press('F3');
         }
         // The menu is in Tools, under Status.
         await page.tap('.toolsbtn');

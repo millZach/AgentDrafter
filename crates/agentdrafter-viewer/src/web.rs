@@ -58,7 +58,7 @@ use web_sys::{
     WebGlUniformLocation, WebGlVertexArrayObject,
 };
 
-use agentdrafter_core::{object_bounds, pick, Bounds, DisplayList, DisplaySnap};
+use agentdrafter_core::{object_bounds, outlines, pick, Bounds, DisplayList, DisplaySnap, Outline};
 
 use crate::grid::{first_line, grid};
 use crate::mesh::{read_reply, screen_rgba, Kind, Mesh, Run, Span};
@@ -356,8 +356,8 @@ struct Loaded {
     list: DisplayList,
     /// The object snaps the sheet came with.
     snaps: Vec<DisplaySnap>,
-    /// The fills whose edges the nearest snap finds a point on.
-    edges: Vec<usize>,
+    /// The outlines of the fills the nearest snap finds a point on.
+    outlines: Vec<Outline>,
     origin: [f64; 2],
     paper: [f64; 4],
     millimetres_per_unit: f64,
@@ -537,7 +537,7 @@ impl Viewer {
         let edges = std::mem::take(&mut sheet.edges);
         let mut loaded = self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?;
         loaded.snaps = snaps;
-        loaded.edges = edges;
+        loaded.outlines = outlines(&loaded.list, &edges);
         self.bind_colors(&loaded);
         self.sheet = Some(loaded);
         Ok(summary)
@@ -589,7 +589,7 @@ impl Viewer {
             Some(sheet) => candidates(
                 &sheet.snaps,
                 &sheet.list,
-                &sheet.edges,
+                &sheet.outlines,
                 self.running,
                 [x, y],
                 reach,
@@ -1182,7 +1182,7 @@ impl Viewer {
         Ok(Loaded {
             list,
             snaps: Vec::new(),
-            edges: Vec::new(),
+            outlines: Vec::new(),
             origin: mesh.origin,
             paper: mesh.paper,
             millimetres_per_unit,

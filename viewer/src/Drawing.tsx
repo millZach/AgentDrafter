@@ -372,10 +372,12 @@ export function Drawing({
       redraw();
     },
     holdEnded: (p, taken) => {
-      // The sheet drawn anew under the finger: its snap is found again on
-      // what is drawn now, so its point and its object agree.
-      if (loupeReply.current !== loadedReply.current) showLoupe(p);
-      const h = hoveredOf(loupeViewer.current);
+      // The snap is found again where the finger lifts, on what is drawn
+      // now and of the snaps running now: a sheet drawn anew under the
+      // finger, or Object snap turned off from a keyboard, since it was
+      // last found takes nothing it no longer shows.
+      showLoupe(p);
+      const h = mask.current ? hoveredOf(loupeViewer.current) : null;
       held.current = null;
       hideLoupe();
       redraw();
@@ -733,6 +735,8 @@ export function Drawing({
     mask.current = snapMask;
     viewer.current?.set_running(snapMask);
     hoverKey.current = '';
+    // A finger held: the magnifier shows the snaps running now.
+    if (held.current) showLoupe(held.current);
     redraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapMask]);

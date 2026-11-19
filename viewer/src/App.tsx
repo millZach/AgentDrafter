@@ -208,26 +208,29 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // (its place), a card on a phone ('card'), or shut.
   const [snapMenu, setSnapMenu] = useState<{ left: number; bottom: number } | 'card' | null>(null);
   // A snap taken with no tool running: its point read out, its snapped
-  // point, and the sheet drawn and the object it was taken on, by its ID.
+  // point, the sheet and layout drawn it was taken on, and every object it
+  // names, by its ID: its own, and an intersection's other.
   const [taken, setTaken] = useState<{
     taken: Taken;
     point: { snap: Record<string, unknown> } | null;
     summary: Summary;
-    id: string | null;
+    ids: (string | null)[];
   } | null>(null);
-  // The read-out goes when what it names does: another sheet drawn, or its
-  // object gone from this one. An object with no ID is known only by its
-  // place, which any new drawing of the sheet may give another.
+  // The read-out goes when what it names does: another sheet or layout
+  // drawn, or an object it names gone from this one. An object with no ID
+  // is known only by its place, which any new drawing may give another.
   useEffect(() => {
     setTaken((t) => {
       if (!t) return t;
-      // Another sheet asked for goes at once, before it is drawn.
-      if (wanted !== null && upper(wanted) !== upper(t.summary.sheet)) return null;
-      if (t.summary === summary) return t;
-      if (!summary || upper(summary.sheet) !== upper(t.summary.sheet) || t.id === null) return null;
-      return summary.objects.some((o) => o.id === t.id) ? t : null;
+      // Another sheet or layout asked for goes at once, before it is drawn.
+      const was = t.summary;
+      if (wanted !== null && upper(wanted) !== upper(was.sheet)) return null;
+      if (wantedLayout !== null && upper(wantedLayout) !== upper(was.layout ?? '')) return null;
+      if (was === summary) return t;
+      if (!summary || upper(summary.sheet) !== upper(was.sheet) || upper(summary.layout ?? '') !== upper(was.layout ?? '')) return null;
+      return t.ids.every((id) => id !== null && summary.objects.some((o) => o.id === id)) ? t : null;
     });
-  }, [summary, wanted]);
+  }, [summary, wanted, wantedLayout]);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [soon, setSoon] = useState<Tool | null>(null);
   const [side, setSide] = useState<'journal' | 'assistant'>('journal');
@@ -688,7 +691,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const read = takenOf(h, summary.objects, summary.units);
     setSoon(null);
     setPicked(o ? { id: o.id ?? null, place: h.object, summary } : null);
-    setTaken({ taken: read, point: snappedPoint(h, summary.objects), summary, id: o?.id ?? null });
+    const ids = [o?.id ?? null, ...(h.with === null ? [] : [summary.objects[h.with]?.id ?? null])];
+    setTaken({ taken: read, point: snappedPoint(h, summary.objects), summary, ids });
     log(`${read.label}${read.rest}`);
   };
   const noSnap = (p: [number, number]) => {

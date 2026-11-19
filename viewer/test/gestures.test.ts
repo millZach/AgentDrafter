@@ -123,3 +123,25 @@ test('a drag that panned is never also a tap, by finger or by mouse', () => {
     mock.timers.reset();
   }
 });
+
+test('a finger held still, its lift reaching a busy page before the hold was shown, is a hold and a lift', () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const { said, fire, detach, kinds } = rig();
+    // Down and up handled back to back, their own times 400 ms apart; the
+    // hold's timer has not fired.
+    fire('pointerdown', 1, 100, 100);
+    fire('pointerup', 1, 101, 100, 'touch', 400);
+    assert.deepEqual(kinds(), ['held', 'holdEnded']);
+    assert.deepEqual(said[1], ['holdEnded', [101, 100], true]);
+    detach();
+    // A quick tap is still a tap.
+    const quick = rig();
+    quick.fire('pointerdown', 1, 100, 100);
+    quick.fire('pointerup', 1, 100, 100, 'touch', 120);
+    assert.deepEqual(quick.kinds(), ['tapped']);
+    quick.detach();
+  } finally {
+    mock.timers.reset();
+  }
+});

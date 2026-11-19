@@ -102,25 +102,72 @@ pub(crate) fn snaps_of(sheet: &Sheet, fonts: &SheetFonts, list: &DisplayList) ->
         })
         .collect();
     let boxes: Vec<Box2> = shapes.iter().map(|(_, _, b)| *b).collect();
-    for (k, l) in overlapping(&boxes) {
+    // Each pair is looked at as the grid finds it, and only the crossings
+    // kept, so a sheet of many boxes that overlap but never cross holds
+    // no list of its pairs; they are put in order at the end.
+    let mut crossings: Vec<(usize, usize, Vec<DisplaySnap>)> = Vec::new();
+    overlapping(&boxes, &mut |k, l| {
         let (i, parts, _) = &shapes[k];
         let (j, others, _) = &shapes[l];
-        // Counted over all of both, as `query snap` counts them, and kept
-        // where both the parts crossing are drawn.
-        for point in intersections(parts, others, false) {
-            if !shown(*i, point.part.as_deref()) || !shown(*j, point.with_part.as_deref()) {
-                continue;
-            }
-            snaps.push(DisplaySnap {
-                object: *i,
-                snap: SnapKind::Intersection,
-                which: point.which,
-                with: Some(*j),
-                at: point.at,
-            });
+        let found = drawn_crossings(*i, parts, *j, others, &shown);
+        if !found.is_empty() {
+            crossings.push((k, l, found));
         }
-    }
+    });
+    crossings.sort_unstable_by_key(|(k, l, _)| (*k, *l));
+    snaps.extend(crossings.into_iter().flat_map(|(_, _, found)| found));
     snaps
+}
+
+/// Where object `i`'s parts cross object `j`'s on the page: named as
+/// `query snap` names them, counted over all of both, and kept where a
+/// part the page draws of each crosses there. A crossing merged with one
+/// of geometry not drawn, at the same point, is kept by the drawn one.
+fn drawn_crossings(
+    i: usize,
+    parts: &[Part],
+    j: usize,
+    others: &[Part],
+    shown: &dyn Fn(usize, Option<&str>) -> bool,
+) -> Vec<DisplaySnap> {
+    let all = intersections(parts, others, false);
+    if all.is_empty() {
+        return Vec::new();
+    }
+    let drawn = |object: usize, of: &[Part]| -> Vec<Part> {
+        of.iter()
+            .filter(|part| shown(object, Some(&part.path)))
+            .cloned()
+            .collect()
+    };
+    let (seen, seen_others) = (drawn(i, parts), drawn(j, others));
+    let every = seen.len() == parts.len() && seen_others.len() == others.len();
+    let there = if every {
+        Vec::new()
+    } else {
+        intersections(&seen, &seen_others, false)
+    };
+    all.into_iter()
+        .filter(|point| {
+            every
+                || there.iter().any(|q| {
+                    let size = [point.at.x, point.at.y, point.at.z]
+                        .iter()
+                        .fold(1.0_f64, |most, v| most.max(v.abs()));
+                    (q.at.x - point.at.x)
+                        .hypot(q.at.y - point.at.y)
+                        .hypot(q.at.z - point.at.z)
+                        <= 1e-7 * size
+                })
+        })
+        .map(|point| DisplaySnap {
+            object: i,
+            snap: SnapKind::Intersection,
+            which: point.which,
+            with: Some(j),
+            at: point.at,
+        })
+        .collect()
 }
 
 /// The places among `list`'s items of the fills on the page itself that a
@@ -205,21 +252,20 @@ const MOST_CELLS: usize = 64;
 const MOST_SIDE: f64 = 1_048_576.0;
 
 /// Each pair of `boxes` that overlap, by their places, the earlier first,
-/// in order. Each box is put in the cells it covers of a grid whose cells
+/// given to `found` as it is found, in no set order. Each box is put in the cells it covers of a grid whose cells
 /// are as wide and as tall as a box's middling width and height, so most
 /// boxes cover a cell or two, however long and thin they are, and a pair is
 /// looked at in the one cell the lower left corner of their overlap is in,
 /// so it is found once. A box that covers many cells, a border's, is looked
 /// at against every box instead. Only the cells a box is in are held.
-fn overlapping(boxes: &[Box2]) -> Vec<(usize, usize)> {
-    let mut pairs = Vec::new();
+fn overlapping(boxes: &[Box2], found: &mut dyn FnMut(usize, usize)) {
     let Some(all) = boxes.iter().copied().reduce(|a, b| {
         (
             [a.0[0].min(b.0[0]), a.0[1].min(b.0[1])],
             [a.1[0].max(b.1[0]), a.1[1].max(b.1[1])],
         )
     }) else {
-        return pairs;
+        return;
     };
     // The cells: a box's middling size along each axis, but no smaller than
     // a share of the whole, so boxes of no width, upright lines, still
@@ -261,7 +307,7 @@ fn overlapping(boxes: &[Box2]) -> Vec<(usize, usize)> {
             for &b in &held[n + 1..] {
                 let (p, q) = (&boxes[a], &boxes[b]);
                 if overlap(p, q) && cell([p.0[0].max(q.0[0]), p.0[1].max(q.0[1])]) == here {
-                    pairs.push((a.min(b), a.max(b)));
+                    found(a.min(b), a.max(b));
                 }
             }
         }
@@ -274,17 +320,23 @@ fn overlapping(boxes: &[Box2]) -> Vec<(usize, usize)> {
                 continue;
             }
             if overlap(&boxes[a], &boxes[b]) {
-                pairs.push((a.min(b), a.max(b)));
+                found(a.min(b), a.max(b));
             }
         }
     }
-    pairs.sort_unstable();
-    pairs
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pairs `overlapping` finds, in order.
+    fn pairs_of(boxes: &[Box2]) -> Vec<(usize, usize)> {
+        let mut pairs = Vec::new();
+        overlapping(boxes, &mut |a, b| pairs.push((a, b)));
+        pairs.sort_unstable();
+        pairs
+    }
 
     fn square(x: f64, y: f64, side: f64) -> Box2 {
         ([x, y], [x + side, y + side])
@@ -301,7 +353,7 @@ mod tests {
         boxes.push(([-1.0, 1.0], [2001.0, 2.0]));
         boxes.push(([500.0, -500.0], [501.0, 500.0]));
         boxes.push(square(14.0, 4.0, 1.0));
-        let found = overlapping(&boxes);
+        let found = pairs_of(&boxes);
         let mut every = Vec::new();
         for a in 0..boxes.len() {
             for b in a + 1..boxes.len() {
@@ -330,7 +382,7 @@ mod tests {
             )
         }));
         boxes.push(([-5.0, -5.0], [1005.0, 305.0]));
-        let found = overlapping(&boxes);
+        let found = pairs_of(&boxes);
         let mut every = Vec::new();
         for a in 0..boxes.len() {
             for b in a + 1..boxes.len() {
