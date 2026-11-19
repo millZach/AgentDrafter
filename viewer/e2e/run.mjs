@@ -2319,6 +2319,9 @@ const checks = {
     const server = await serve('127.0.0.1:0', folder);
     const b = await browser();
     const seen = { laptop: {}, phone: {} };
+    // The same JSON, whatever the order of its keys.
+    const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
+    const same = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
     const SEVEN = ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'];
     const journal = () => agentIn(folder, 'journal', 'demo-plant').result.entries;
     const rows = () => readFileSync(join(set, 'rows.yaml'), 'utf8');
@@ -2462,7 +2465,7 @@ const checks = {
         await page.click('.qp header b');
         ({ entry, op } = await landed(page, before, 'An attribute, on leaving the field'));
         assert(
-          JSON.stringify(op) === JSON.stringify({ op: 'set_attribute', target: { id: 'DP-LD-101/device' }, tag: 'LOOP', value: '101A' }),
+          same(op, { op: 'set_attribute', target: { id: 'DP-LD-101/device' }, tag: 'LOOP', value: '101A' }),
           `set_attribute sets it: ${JSON.stringify(op)}`,
         );
         seen.laptop.attribute = entry.entry;
@@ -2475,7 +2478,7 @@ const checks = {
         await page.fill('.qp [data-prop="radius"]', '0.4');
         await page.keyboard.press('Enter');
         ({ entry, op } = await landed(page, before, 'Radius'));
-        assert(JSON.stringify(op) === JSON.stringify({ op: 'change', target: { id: 'DP-LD-101/washer' }, set: { radius: 0.4 } }), `the radius: ${JSON.stringify(op)}`);
+        assert(same(op, { op: 'change', target: { id: 'DP-LD-101/washer' }, set: { radius: 0.4 } }), `the radius: ${JSON.stringify(op)}`);
         seen.laptop.radius = entry.entry;
         await waitValue(page, 'diameter', '0.8000');
         before = journal().length;
@@ -2542,7 +2545,7 @@ const checks = {
         await ask();
         await page.click('[data-tw="all"]');
         ({ entry, op } = await landed(page, before, 'An unset attribute, Change all'));
-        assert(JSON.stringify(op) === JSON.stringify({ op: 'set_attribute', target: { id: 'DP-LD-101/title-block' }, tag: 'CHECKED', value: 'ZM' }), `set_attribute: ${JSON.stringify(op)}`);
+        assert(same(op, { op: 'set_attribute', target: { id: 'DP-LD-101/title-block' }, tag: 'CHECKED', value: 'ZM' }), `set_attribute: ${JSON.stringify(op)}`);
         assert(JSON.stringify(entry.landed_on) === JSON.stringify(SEVEN), `it lands on every sheet built from the template: ${entry.landed_on}`);
         assert(template().includes('CHECKED: ZM'), 'it is set on the template');
         seen.laptop.template_attribute = { entry: entry.entry, sheets: entry.landed_on.length };
