@@ -1115,6 +1115,29 @@ impl Viewer {
             .unwrap_or_default()
     }
 
+    /// The fields quick properties edit of the object at `place`, a place
+    /// in the sheet's objects, as JSON: each with its value, whether it can
+    /// be edited, and what it says of where its value is written.
+    pub fn props_fields(&self, place: u32) -> String {
+        to_json(&crate::props::fields(
+            self.tools.context(),
+            place as usize,
+        ))
+    }
+
+    /// What an edit of the field `key` of the object at `place` to `typed`
+    /// gives, as JSON: the change set to send, with the template's question
+    /// when it edits the template, what went wrong with what was typed, or
+    /// neither when the value is as it was.
+    pub fn props_edit(&self, place: u32, key: &str, typed: &str) -> String {
+        to_json(&crate::props::edit(
+            self.tools.context(),
+            place as usize,
+            key,
+            typed,
+        ))
+    }
+
     /// Ortho (F8): Line and Move held level or upright.
     pub fn set_ortho(&mut self, on: bool) {
         self.tools.ortho = on;

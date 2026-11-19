@@ -205,7 +205,7 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 .va-cannot { position: absolute; inset: 0; z-index: 4; background: rgba(33, 40, 48, .9); }
 .va-cannot .va-note b { display: block; margin-bottom: 4px; }
 
-/* quick properties, beside the selected object; show only */
+/* quick properties, beside the selected object; its layer, contents, radius and attributes edited in place */
 .qp {
   position: absolute; z-index: 5; width: 268px; max-height: calc(100% - 90px); display: flex; flex-direction: column;
   background: rgba(48, 56, 69, .97); border: 1px solid #5a6577; border-radius: 4px; box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
@@ -225,6 +225,41 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 .kv { width: 100%; border-collapse: collapse; }
 .kv th { text-align: left; color: var(--dim); font-weight: 400; padding: 2px 8px 2px 0; width: 82px; vertical-align: top; white-space: nowrap; }
 .kv td { padding: 2px 0; font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+/* An editable row: its chip says where its value is written; its note, while it is edited, what an edit changes. */
+.kv .qrow th { vertical-align: middle; }
+.qchip { display: block; width: fit-content; margin-top: 2px; padding: 0 6px; border-radius: 8px; font-size: 10px; line-height: 15px; border: 1px solid; }
+.qchip.template { color: #ffd27a; border-color: #8a6a26; background: #3a3020; }
+.qchip.row_value { color: #9cc9ff; border-color: #3c6694; background: #1f3047; }
+.qchip.row { color: #a6e3bd; border-color: #3c7a55; background: #1f3a2b; }
+.qchip.unset { color: #c7cdd6; border-color: #6a7689; background: #2b323d; }
+.qin {
+  width: 100%; background: #1b2129; border: 1px solid #5a6577; border-radius: 3px; padding: 3px 6px; color: #fff;
+  font: 12px var(--mono);
+}
+.qin:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
+textarea.qin { resize: vertical; font-family: var(--mono); }
+select.qin { font-family: var(--ui); }
+.qnote td { padding: 3px 0 5px; }
+.qnote td { font: 11px/1.35 var(--ui); color: #cfe3ff; }
+.qnote:not(.err) td { background: #1f3047; border: 1px solid #3c6694; border-radius: 3px; padding: 5px 7px; }
+.qnote.err td { color: #ffb0b0; }
+
+/* A text's contents edited on the drawing, over the text. */
+.tedit {
+  position: absolute; z-index: 6; visibility: hidden; min-width: 220px; max-width: min(560px, calc(100% - 60px));
+  background: rgba(33, 40, 48, .96); border: 1px solid var(--blue); border-radius: 4px; padding: 6px 8px 5px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+}
+.tedit input, .tedit textarea {
+  display: block; width: 100%; min-width: 0; background: transparent; color: #fff; border: 1px dashed #6a7689; border-radius: 2px;
+  font: 300 clamp(15px, calc(var(--text-px, 16px) * 1.25), 40px) var(--ui); padding: 2px 4px;
+}
+.tedit textarea { font-size: 14px; resize: none; }
+.tedit input:focus, .tedit textarea:focus { outline: none; border-color: var(--blue); }
+.tnote { margin: 5px 0 0; padding: 4px 7px; font-size: 11px; line-height: 1.35; color: #cfe3ff; background: #1f3047; border: 1px solid #3c6694; border-radius: 3px; }
+.tedit small { display: block; margin-top: 4px; font-size: 11px; color: var(--dim); }
+.tbox textarea { background: #1b2129; border: 1px solid #5a6577; border-radius: 3px; padding: 6px 7px; color: #fff; font-size: 16px; width: 100%; resize: none; }
+.tbox .tnote { margin: 0 0 6px; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip { background: #2a313c; border: 1px solid #5a6577; border-radius: 10px; padding: 1px 8px; font-size: 12px; text-align: left; }
 .chip:hover { border-color: var(--blue); }
@@ -514,6 +549,8 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
     left: 8px; right: 8px; top: auto; bottom: var(--qp-bottom); width: auto;
     max-height: min(44%, calc(100% - var(--qp-bottom) - 8px)); visibility: visible;
   }
+  /* A phone's fields at 16 pixels, so focusing one does not zoom the page. */
+  .qin { font-size: 16px; padding: 5px 7px; }
   .va-overlays { left: 8px; right: 8px; max-width: none; }
   .long { display: none; }
 }

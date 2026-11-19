@@ -13,6 +13,8 @@ fn context() -> Context {
         name: None,
         kind: kind.to_owned(),
         block: None,
+        layer: "0".to_owned(),
+        values: None,
         from_template: Some(template),
         through_viewport: false,
     };

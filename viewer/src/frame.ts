@@ -188,6 +188,8 @@ export interface PromptState {
   taken?: Taken | null;
   /** A phone's words: a finger taps and holds where a mouse clicks. */
   touch?: boolean;
+  /** A text whose contents are being edited on the drawing, or in a phone's box. */
+  editing?: Named | null;
 }
 
 /** A snap taken with no tool running, as the command bar reads it out. */
@@ -230,6 +232,19 @@ export function promptFor(s: PromptState): Prompt {
   if (s.at !== null && s.cannot) return { command: null, parts: [{ text: `Entry ${s.at} cannot be shown ` }, ...stepping] };
   if (s.at !== null) return { command: null, parts: [{ text: `Showing entry ${s.at} as it was, read-only ` }, ...stepping] };
   if (s.reaching) return { command: null, parts: [{ text: 'Reaching the server… changes show when it is back' }] };
+  if (s.editing) {
+    // A text's contents edited on the drawing, as AutoCAD's TEXTEDIT.
+    return {
+      command: 'TEXTEDIT',
+      parts: [
+        {
+          text: s.touch
+            ? `${nameOf(s.editing)}: type in the box. Done applies it, Cancel puts it back`
+            : `${nameOf(s.editing)}: type on the drawing. Enter or clicking away applies it, Esc puts it back`,
+        },
+      ],
+    };
+  }
   if (s.taken) {
     const acts: [string, Act][] = s.taken.copy ? [['Copy as snapped point', 'copy'], ['Clear', 'clear']] : [['Clear', 'clear']];
     return { command: null, parts: [{ snap: s.taken.label }, { text: `${s.taken.rest} ` }, ...options(...acts)] };
@@ -289,6 +304,35 @@ export interface ToolSend {
   sheets: string[];
   template?: TemplateEdit;
 }
+
+/** Where a quick property's value is written, as its chip says it (`Viewer.props_fields`). */
+export type PropTone = 'template' | 'row' | 'row_value' | 'unset';
+
+/** One row of quick properties an edit can change, as the renderer gives it (`Viewer.props_fields`). */
+export interface PropField {
+  /** What an edit names it: `layer`, `contents`, `radius`, `diameter` or `attribute:N`. */
+  key: string;
+  label: string;
+  value: string;
+  editable: boolean;
+  /** An mtext's contents, which take more than one line. */
+  multiline: boolean;
+  numeric: boolean;
+  /** One of an insert's attributes. */
+  attribute: boolean;
+  chip?: { words: string; tone: PropTone };
+  /** What an edit to it changes, said before it is edited. */
+  note?: string;
+}
+
+/** What an edit in quick properties came to (`Viewer.props_edit`): the change set to send, what went wrong, or neither when the value is as it was. */
+export interface PropEdited {
+  error?: string;
+  send?: ToolSend;
+}
+
+/** What came of a commit of a quick property: sent (or asked about first), as it was, or what went wrong. */
+export type Committed = { kind: 'sent' } | { kind: 'same' } | { kind: 'error'; message: string };
 
 /** What came of a tool's step: lines for the history, and the change sets to send, in order. */
 export interface ToolOutcome {

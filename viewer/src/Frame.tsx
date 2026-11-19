@@ -7,7 +7,7 @@
 // small box for text. Plain components: what they do is the page's (App.tsx), and
 // what they say is worked out in frame.ts.
 
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { forwardRef, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 
 import {
   PANELS,
@@ -73,13 +73,19 @@ export interface RibbonProps {
   onLayersOpen?(): void;
   /** A layer's colour on screen, `#rrggbb`, for its swatch. */
   swatch(layer: LayerEntry | undefined): string;
-  /** The selected object's layer, which the box shows while no tool runs; null with nothing selected. */
-  selected: { name: string; color: string } | null;
+  /**
+   * The selected object's layer, which the box shows while no tool runs,
+   * and, when it can be edited, moves it to the layer picked (#153); null
+   * with nothing selected.
+   */
+  selected: { name: string; color: string; movable?: boolean; label?: string } | null;
+  /** A layer picked with an object selected: the object moves to it. */
+  onMoveTo?(name: string): void;
   /** Opens the Object snap menu, from a phone's Status panel. */
   onSnaps(): void;
 }
 
-export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, current, onLayer, onLayersOpen, swatch, selected, onSnaps }: RibbonProps) {
+export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, current, onLayer, onLayersOpen, swatch, selected, onMoveTo, onSnaps }: RibbonProps) {
   const [tip, setTip] = useState<{ tool: Tool; left: number; top: number } | null>(null);
   // While an object is selected and no tool runs, the box shows its layer,
   // as the frame did; otherwise the current layer, which it sets.
@@ -124,7 +130,7 @@ export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, cur
           <div className="layerbox">
             <label className="lay" title="The current layer: new objects go on it">
               <span className="sw" style={{ background: showing ? showing.color || 'transparent' : swatch(layer) }} />
-              {showing ? (
+              {showing && !showing.movable ? (
                 <span className="ln" data-layer>
                   {showing.name}
                 </span>
@@ -132,12 +138,15 @@ export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, cur
                 <select
                   className="ln"
                   data-layer
-                  aria-label="The current layer"
-                  value={current}
-                  onChange={(e) => onLayer(e.currentTarget.value)}
+                  aria-label={showing ? `The layer of ${showing.label ?? 'the selected object'}` : 'The current layer'}
+                  value={showing ? showing.name : current}
+                  onChange={(e) => (showing ? onMoveTo?.(e.currentTarget.value) : onLayer(e.currentTarget.value))}
                   onFocus={() => onLayersOpen?.()}
                 >
-                  {(layers.length ? layers : [{ name: current }]).map((l) => (
+                  {(() => {
+                    const shown = showing ? showing.name : current;
+                    return layers.some((l) => l.name === shown) ? layers : [{ name: shown } as LayerEntry, ...layers];
+                  })().map((l) => (
                     <option key={l.name} value={l.name}>
                       {l.name}
                       {l.locked ? ' (locked)' : ''}
@@ -147,7 +156,13 @@ export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, cur
                 </select>
               )}
             </label>
-            <small>{showing ? 'The selected object’s layer' : 'Current layer: new objects go on it'}</small>
+            <small>
+              {showing
+                ? showing.movable
+                  ? `Pick a layer to move ${showing.label ?? 'it'} onto it`
+                  : 'The selected object’s layer'
+                : 'Current layer: new objects go on it'}
+            </small>
           </div>
         </div>
         <h3>Layer</h3>
@@ -428,6 +443,105 @@ export function TextBox({ height, unit, onAdd, onCancel, onTyping }: TextBoxProp
           </button>
           <button type="button" className="btn primary" data-tbox-add disabled={!text.trim()} onClick={add}>
             Add
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export interface TextEditProps {
+  /** The text's contents as they are. */
+  value: string;
+  /** An mtext's, which take more than one line: Shift+Enter, or a phone's return, starts the next. */
+  multiline: boolean;
+  /** Where its contents are written, and what an edit changes, said before it lands. */
+  note: string | null;
+  /** Its words are done: they land, unless they are as they were. */
+  onDone(text: string): void;
+  /** Esc or Cancel: the contents are put back, and nothing lands. */
+  onCancel(): void;
+}
+
+/**
+ * A text's contents edited on the drawing, on a laptop, as AutoCAD's
+ * TEXTEDIT: a box over the text, placed by the drawing as it pans and
+ * zooms. Enter or a click away lands it; Esc puts it back.
+ */
+export const TextOnDrawing = forwardRef<HTMLDivElement, TextEditProps>(function TextOnDrawing({ value, multiline, note, onDone, onCancel }, box) {
+  const [text, setText] = useState(value);
+  // Enter or Esc has dealt with it: the blur that follows does nothing more.
+  const settled = useRef(false);
+  const field = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
+  // It takes the keys as it opens, its words selected, as AutoCAD's does.
+  useEffect(() => {
+    field.current?.focus({ preventScroll: true });
+    field.current?.select();
+  }, []);
+  const keys = (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      settled.current = true;
+      onCancel();
+    } else if (e.key === 'Enter' && !(multiline && e.shiftKey)) {
+      e.preventDefault();
+      settled.current = true;
+      onDone(text);
+    }
+  };
+  const props = {
+    'data-text-edit': true,
+    value: text,
+    autoComplete: 'off',
+    spellCheck: false,
+    ref: field,
+    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setText(e.currentTarget.value),
+    onKeyDown: keys,
+    onBlur: () => {
+      if (!settled.current) onDone(text);
+    },
+  };
+  return (
+    <div className={`tedit${multiline ? ' multi' : ''}`} ref={box} data-ui role="group" aria-label="Edit the text">
+      {multiline ? <textarea {...props} rows={Math.max(2, text.split('\n').length)} /> : <input {...props} />}
+      {note && <p className="tnote">{note}</p>}
+      <small>{multiline ? 'Enter or click away: done · Shift+Enter: new line · Esc: cancel' : 'Enter or click away: done · Esc: cancel'}</small>
+    </div>
+  );
+});
+
+/** A phone's small box for a text's contents, as for a Text tool's words (build 4): Done lands them, Cancel puts them back. */
+export function TextEditBox({ value, multiline, note, onDone, onCancel }: TextEditProps) {
+  const [text, setText] = useState(value);
+  const keys = (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') onCancel();
+    else if (e.key === 'Enter' && !multiline) onDone(text);
+  };
+  const props = {
+    'data-tbox-text': true,
+    autoComplete: 'off',
+    spellCheck: false,
+    value: text,
+    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setText(e.currentTarget.value),
+    onKeyDown: keys,
+  };
+  return (
+    <div className="tbox" data-ui aria-label="Edit the text" role="group" data-text-box>
+      <label>
+        Contents
+        {multiline ? <textarea {...props} rows={3} /> : <input {...props} enterKeyHint="done" />}
+      </label>
+      {note && <p className="tnote">{note}</p>}
+      <div className="two">
+        <span />
+        <div className="acts">
+          <button type="button" className="btn" data-tbox-cancel onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="btn primary" data-tbox-done disabled={!text.trim()} onClick={() => onDone(text)}>
+            Done
           </button>
         </div>
       </div>

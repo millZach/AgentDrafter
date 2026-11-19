@@ -179,6 +179,11 @@ pub struct ObjectInfo {
     pub name: Option<String>,
     pub kind: String,
     pub block: Option<String>,
+    /// The layer it sits on.
+    pub layer: String,
+    /// What quick properties edit of it, as `display-list` with `values`
+    /// gives them; none when the core did not give them.
+    pub values: Option<Value>,
     /// Whether it is written in the sheet's template; none when the core did
     /// not say, as for a sheet description.
     pub from_template: Option<bool>,
@@ -196,6 +201,8 @@ impl ObjectInfo {
             name: text("name"),
             kind: text("type").unwrap_or_default(),
             block: text("block"),
+            layer: text("layer").unwrap_or_default(),
+            values: value.get("values").cloned(),
             from_template: text("from").map(|f| f == "template"),
             through_viewport: false,
         }
@@ -435,7 +442,7 @@ impl Default for Tools {
 }
 
 /// A coordinate in words, as the status bar gives it.
-fn f4(v: f64) -> String {
+pub(crate) fn f4(v: f64) -> String {
     format!("{:.4}", if v.abs() < 5e-5 { 0.0 } else { v })
 }
 
@@ -444,12 +451,12 @@ fn f3(v: f64) -> String {
     format!("{:.3}", if v.abs() < 5e-4 { 0.0 } else { v })
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
+pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// A number typed: digits with a point and a sign.
-fn number(text: &str) -> Option<f64> {
+pub(crate) fn number(text: &str) -> Option<f64> {
     let text = text.trim();
     let ok = !text.is_empty()
         && text
@@ -575,6 +582,11 @@ impl Tools {
             }
         }
         self.context = context;
+    }
+
+    /// What the tools know of the sheet shown.
+    pub fn context(&self) -> &Context {
+        &self.context
     }
 
     /// The tool running, if any.

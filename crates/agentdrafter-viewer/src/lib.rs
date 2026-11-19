@@ -16,6 +16,9 @@
 //! - [`tools`] runs the drafter's drawing tools, Line, Circle, Rectangle,
 //!   Text, Move and Erase: their steps, prompts, rubber bands and the change
 //!   set each gives, in plain Rust.
+//! - [`props`] edits quick properties: the fields an object's quick
+//!   properties edit, what each says of where its value is written, and the
+//!   change set an edit gives, in plain Rust.
 //! - `web` (built for `wasm32` only) is the module the page loads: it draws
 //!   the mesh with WebGL2 at the view the page asks for, on dark model
 //!   space in AutoCAD's screen colours, index 7 white, the paper a dashed
@@ -31,6 +34,7 @@
 pub mod grid;
 pub mod mesh;
 pub mod overlay;
+pub mod props;
 pub mod snapping;
 pub mod tools;
 
