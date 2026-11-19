@@ -2529,7 +2529,7 @@ const checks = {
         });
         await context.route('**/commands/display-list', async (route) => {
           await sheetHeld;
-          await route.continue();
+          await route.continue().catch(() => {});
         });
         before = journal().length;
         await page.click('.qp [data-prop="contents"]');
@@ -2541,6 +2541,7 @@ const checks = {
         await page.keyboard.press('Tab');
         await nothingLands(before + 1, 'Leaving it again before the sheet is drawn again');
         releaseSheet();
+        await sleep(300);
         await context.unroute('**/commands/display-list');
         await waitValue(page, 'contents', 'CONTROL PANEL CP-100A');
         seen.laptop.left_again = entry.entry;
@@ -2646,7 +2647,7 @@ const checks = {
         });
         await context.route('**/commands/display-list', async (route) => {
           if (route.request().postDataJSON()?.entry !== undefined) await entryHeld;
-          await route.continue();
+          await route.continue().catch(() => {});
         });
         await page.click('button[aria-label="Older"]');
         await page.waitForFunction(() => document.querySelector('.cmdbar').textContent.includes('as it was'));
@@ -2656,6 +2657,7 @@ const checks = {
         assert((await page.locator('.qp [data-prop]').count()) === 0, 'quick properties are read-only');
         assert((await page.locator('select[data-layer]').count()) === 0, 'the Layer box moves nothing');
         releaseEntry();
+        await sleep(300);
         await context.unroute('**/commands/display-list');
         await page.click('button[data-act="live"]');
         seen.laptop.read_only_while_coming = true;
