@@ -629,3 +629,49 @@ fn row_value_is_a_row_values_name_in_the_schema_and_the_reader() {
         assert_eq!(reply.ok, accepted, "the reader, {name}: {:#?}", reply.error);
     }
 }
+
+#[test]
+fn an_mtexts_line_break_across_two_fixed_parts_is_matched_as_it_shows() {
+    let set = built_set("mtext-split-break");
+    let reply = apply(
+        &set,
+        json!([{"op": "add_mtext", "template": "templates/t.yaml", "id": "split", "contents": ["A\r", "\nB ", {"row": "PANEL"}], "position": [0, 100, 0], "height": 3}]),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    assert_eq!(contents(&in_dwg(&set, "S-1", "S-1/split")), "A\nB P1");
+    let reply = apply(
+        &set,
+        json!([{"op": "change", "target": {"id": "S-1/split"}, "set": {"contents": "A\nB P2"}}]),
+    );
+    assert!(reply.ok, "{:#?}", reply.result);
+    assert_eq!(contents(&in_dwg(&set, "S-1", "S-1/split")), "A\nB P2");
+}
+
+#[test]
+fn a_tag_spelt_like_an_mtexts_place_is_held_to_an_attributes_one_line() {
+    let set = set_with("dotted-tag", ROWS);
+    fs::write(
+        set.join("blocks.yaml"),
+        "units: mm\nblocks:\n  DOTS:\n    objects:\n      - attdef: {tag: A.MTEXT.CONTENTS, position: [0, 0, 0], height: 2}\n",
+    )
+    .unwrap();
+    fs::write(
+        set.join("templates/t.yaml"),
+        "units: mm\nblock_library: ../blocks.yaml\nobjects:\n  - insert: {block: DOTS, position: [0, 0, 0], attributes: {a.mtext.contents: [\"A\\n\", {row: PANEL}]}}\n",
+    )
+    .unwrap();
+    let built = build_set_with(
+        &SetBuildRequest {
+            set,
+            overwrite: false,
+        },
+        &Settings::default(),
+    );
+    let e = built.result.unwrap().sheets[0].error.clone().unwrap();
+    assert_eq!(e.code, ErrorCode::BadValue);
+    assert_eq!(
+        e.field.as_deref(),
+        Some("objects[0].insert.attributes.a.mtext.contents[0]")
+    );
+    assert!(e.message.contains("line break"), "{}", e.message);
+}

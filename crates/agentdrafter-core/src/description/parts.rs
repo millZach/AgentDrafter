@@ -27,9 +27,10 @@ pub(crate) enum Part {
 /// a value from the row. A list that holds anything else, or no value from
 /// the row, is an error, since a text without one is written as one string.
 /// None when `node` is not a list. When `one_line`, for a text's contents
-/// or an attribute's value, which are one line, a fixed part that holds a
-/// line break is an error at that part, since no row can make the joined
-/// text one line.
+/// or an attribute's value, which are one line and hold no control
+/// character, a fixed part that holds a line break or another control
+/// character is an error at that part, since no row can make the joined
+/// text build.
 pub(super) fn read_parts(
     node: &Node,
     path: &str,
@@ -42,13 +43,20 @@ pub(super) fn read_parts(
     for (i, item) in items.iter().enumerate() {
         let item_path = index_path(path, i);
         match &item.kind {
-            Kind::Scalar(text) if one_line && text.contains(['\n', '\r']) => {
-                return Err(bad_value(
-                    item,
-                    &item_path,
-                    "this part holds a line break, and the text it is part of is one line; \
-                     write the part on one line, or make the text an mtext",
-                ))
+            Kind::Scalar(text) if one_line && text.chars().any(char::is_control) => {
+                let why = match text.chars().find(|c| c.is_control()) {
+                    Some('\n' | '\r') => "this part holds a line break, and the text it is part \
+                                          of is one line; write the part on one line, or make \
+                                          the text an mtext"
+                        .to_owned(),
+                    Some(c) => format!(
+                        "this part holds the control character `{}`, which the text it is part \
+                         of cannot hold",
+                        c.escape_default()
+                    ),
+                    None => unreachable!("found above"),
+                };
+                return Err(bad_value(item, &item_path, why));
             }
             Kind::Scalar(text) if !item.is_bare_null() => parts.push(Part::Text(text.clone())),
             Kind::Mapping(_) => match row_value_name(item, &item_path)? {
@@ -144,11 +152,20 @@ pub(crate) fn join(
 /// dropped, as [`super::text::shown_mtext`] drops them from the contents,
 /// so an edit of the text as it shows matches them.
 pub(crate) fn shown_mtext_parts(parts: &[Part]) -> Vec<Part> {
-    let mut shown: Vec<Part> = parts
-        .iter()
+    // Fixed parts side by side are one fixed text, as the reader reads the
+    // joined text, so a CR LF across two of them is one line break.
+    let mut joined: Vec<Part> = Vec::new();
+    for part in parts {
+        match (joined.last_mut(), part) {
+            (Some(Part::Text(before)), Part::Text(text)) => before.push_str(text),
+            _ => joined.push(part.clone()),
+        }
+    }
+    let mut shown: Vec<Part> = joined
+        .into_iter()
         .map(|part| match part {
             Part::Text(text) => Part::Text(text.replace("\r\n", "\n")),
-            row => row.clone(),
+            row => row,
         })
         .collect();
     for part in shown.iter_mut().rev() {

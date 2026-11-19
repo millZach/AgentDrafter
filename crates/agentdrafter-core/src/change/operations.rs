@@ -794,7 +794,13 @@ fn definitions() -> Map<String, Value> {
     // A table's cell as a template writes it: the cell, or its text, may be
     // a value from the row, which the reader takes only in a template.
     let mut template_defs = template_schema()["$defs"].take();
-    for name in ["row_value", "value_name", "parts", "text_parts"] {
+    for name in [
+        "row_value",
+        "value_name",
+        "parts",
+        "text_parts",
+        "attribute_parts",
+    ] {
         defs.insert(name.into(), template_defs[name].take());
     }
     let mut cell = template_defs["table_cell"].take();
@@ -1399,7 +1405,7 @@ fn template_parts(object: &str, own: &mut Map<String, Value>) -> Option<Value> {
             let attributes = properties.get_mut("attributes")?;
             let values = attributes.get_mut("additionalProperties")?;
             let written = values.take();
-            *values = json!({ "anyOf": [written, { "$ref": "#/$defs/parts" }] });
+            *values = json!({ "anyOf": [written, { "$ref": "#/$defs/attribute_parts" }] });
             let said = attributes["description"]
                 .as_str()
                 .unwrap_or_default()

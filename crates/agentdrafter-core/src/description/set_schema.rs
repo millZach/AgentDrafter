@@ -260,12 +260,13 @@ pub(crate) fn template_schema() -> Value {
     // A text is one line, so its fixed parts hold no line break.
     let mut one_line = defs["parts"].clone();
     one_line["description"] = json!(format!(
-        "{} A text is one line, so no fixed part holds a line break.",
+        "{} A text is one line and holds no control character, so no fixed part holds a \
+         line break or another control character.",
         one_line["description"].as_str().unwrap_or_default()
     ));
     one_line["items"]["anyOf"][0] = json!({
         "anyOf": [
-            { "type": "string", "pattern": "^[^\\r\\n]*$" },
+            { "type": "string", "pattern": format!("^[^{CONTROL}]*$") },
             { "type": ["number", "boolean"] },
         ],
     });
@@ -284,6 +285,19 @@ pub(crate) fn template_schema() -> Value {
             { "$ref": "#/$defs/row_value" },
         ],
     });
+    // An attribute's list of parts: each fixed part an attribute's value,
+    // one line with no control character, and one value from the row at
+    // least, as the reader takes it for a tag the block defines once.
+    defs["attribute_parts"] = json!({
+        "description": "An attribute's value as a list of parts: plain text, each part one \
+                        line with no control character as an attribute's value is, and values \
+                        from the row, {row: NAME}, joined in order, one at least.",
+        "type": "array",
+        "minItems": 1,
+        "items": one.clone(),
+        "contains": { "$ref": "#/$defs/row_value" },
+    });
+    let attributes = &mut defs["insert"]["properties"]["attributes"];
     attributes["additionalProperties"] = json!({
         "anyOf": [
             one.clone(),

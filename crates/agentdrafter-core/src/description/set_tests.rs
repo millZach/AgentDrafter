@@ -851,6 +851,13 @@ fn the_template_schema_accepts_exactly_the_templates_the_reader_accepts() {
             json!(["A\nB ", {"row": "PANEL"}]),
             true,
         ),
+        // Nor any other control character, as the text's reader refuses.
+        (
+            &TEXT_CONTENTS,
+            "[\"A\\tB \", {row: PANEL}]",
+            json!(["A\tB ", {"row": "PANEL"}]),
+            false,
+        ),
     ]);
     cases.extend([
         (&ATTRIBUTE_LIST, "[A, B, C]", json!(["A", "B", "C"]), true),

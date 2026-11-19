@@ -128,7 +128,7 @@ pub(crate) fn sheet_sources(
         let mut item = item.clone();
         let _ = places_in(&mut item, "", &carries, &mut |node, _, parts_here| {
             // A list of parts fills one place with each value it holds.
-            match parts_here.then(|| parts_of(node)).flatten() {
+            match parts_here.take().then(|| parts_of(node)).flatten() {
                 Some(parts) => {
                     for name in parts::names(&parts) {
                         *fills.entry(name).or_default() += 1;

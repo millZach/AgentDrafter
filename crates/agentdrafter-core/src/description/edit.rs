@@ -1928,7 +1928,7 @@ impl RecordFile {
             let _ =
                 super::template::places_in(&mut item, "", carries, &mut |node, place, parts| {
                     let fills = row_value_name(node).as_deref() == Some(name)
-                        || (parts
+                        || (parts.take()
                             && parts_of(node)
                                 .is_some_and(|p| p.contains(&Part::Row(name.to_owned()))));
                     if fills {
@@ -1953,7 +1953,11 @@ impl RecordFile {
         for item in items {
             let mut item = item.clone();
             let _ = super::template::places_in(&mut item, "", carries, &mut |node, _, parts| {
-                let held = parts.then(|| parts_of(node)).flatten().unwrap_or_default();
+                let held = parts
+                    .take()
+                    .then(|| parts_of(node))
+                    .flatten()
+                    .unwrap_or_default();
                 if held.contains(&Part::Row(name.to_owned())) {
                     for found in super::parts::names(&held) {
                         if !names.contains(&found) {

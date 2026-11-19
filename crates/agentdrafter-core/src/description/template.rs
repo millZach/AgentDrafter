@@ -240,10 +240,10 @@ pub(super) fn fill_with_records(
     if let Some(root) = root.as_mut() {
         let library = early.as_ref().and_then(|(_, read)| read.as_ref().ok());
         let carries = |block: &str, tag: &str| carried_in(library?, block, tag);
-        each_place(root, &carries, &mut |node, place, parts_here| {
-            if parts_here {
+        each_place(root, &carries, &mut |node, place, lists| {
+            if lists.take() {
                 // Only an mtext's contents take more than one line.
-                let one_line = !place.ends_with(".mtext.contents");
+                let one_line = lists == Lists::OneLine;
                 if let Some(parts) = read_parts(node, &place, one_line)? {
                     let pattern = parts::pattern(&parts);
                     let joined =
@@ -402,8 +402,8 @@ fn unused_values(
 pub(super) fn names(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     if let Ok(Some(mut root)) = strict_yaml::read(text) {
-        let _ = each_place(&mut root, &no_blocks, &mut |node, place, parts_here| {
-            let found = match parts_here.then(|| parts::parts_of(node)).flatten() {
+        let _ = each_place(&mut root, &no_blocks, &mut |node, place, lists| {
+            let found = match lists.take().then(|| parts::parts_of(node)).flatten() {
                 Some(parts) => parts::names(&parts),
                 None => row_value_name(node, &place)?.into_iter().collect(),
             };
@@ -482,10 +482,28 @@ fn row_value_in(node: &Node, place: &str) -> Option<(Pos, String)> {
         .map(|(i, item)| (item.at, index_path(place, i)))
 }
 
+/// Whether a list of parts may stand at a place, and of what kind of text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lists {
+    /// None may: a table cell, a leader's text, a repeated tag's value.
+    None,
+    /// A text's contents, or the value of an attribute its insert's block
+    /// carries once: one line.
+    OneLine,
+    /// An mtext's contents, which may take more than one line.
+    Lines,
+}
+
+impl Lists {
+    /// Whether a list of parts may stand there.
+    pub(crate) fn take(self) -> bool {
+        self != Lists::None
+    }
+}
+
 /// What [`places_in`] calls with each place: the node there, its path,
-/// and whether a list of parts may stand there, as a text's or an mtext's
-/// contents or the value of an attribute its insert's block carries once.
-pub(crate) type Visit<'a> = dyn FnMut(&mut Node, String, bool) -> Result<(), Error> + 'a;
+/// and whether a list of parts may stand there, and of what kind of text.
+pub(crate) type Visit<'a> = dyn FnMut(&mut Node, String, Lists) -> Result<(), Error> + 'a;
 
 /// Calls `visit` with each place in a sheet's tree where a template may put
 /// a value from a row, and the path of the place: each value under an
@@ -529,13 +547,13 @@ fn attribute_places(
         // A tag the block defines more than once takes a list, and each of
         // its items may be a value from the row.
         match &mut value.value.kind {
-            Kind::Sequence(_) if once => visit(&mut value.value, path, true)?,
+            Kind::Sequence(_) if once => visit(&mut value.value, path, Lists::OneLine)?,
             Kind::Sequence(items) => {
                 for (i, item) in items.iter_mut().enumerate() {
-                    visit(item, index_path(&path, i), false)?;
+                    visit(item, index_path(&path, i), Lists::None)?;
                 }
             }
-            _ => visit(&mut value.value, path, false)?,
+            _ => visit(&mut value.value, path, Lists::None)?,
         }
     }
     Ok(())
@@ -583,10 +601,15 @@ pub(super) fn places_in(
         }
         "text" | "mtext" => {
             if let Some(contents) = keys.iter_mut().find(|k| k.key == "contents") {
+                let lists = if object.key == "mtext" {
+                    Lists::Lines
+                } else {
+                    Lists::OneLine
+                };
                 visit(
                     &mut contents.value,
                     key_path(&object_path, "contents"),
-                    true,
+                    lists,
                 )?;
             }
         }
@@ -607,7 +630,7 @@ pub(super) fn places_in(
             let held_path = key_path(&object_path, holder);
             for key in held_keys.iter_mut() {
                 match key.key.as_str() {
-                    "text" => visit(&mut key.value, key_path(&held_path, "text"), false)?,
+                    "text" => visit(&mut key.value, key_path(&held_path, "text"), Lists::None)?,
                     // A multileader's block content's attribute values, as
                     // an insert's.
                     "attributes" if holder == "content" => {
@@ -644,9 +667,9 @@ pub(super) fn places_in(
                         continue;
                     };
                     if keys.iter().any(|k| k.key == ROW_KEY) {
-                        visit(item, path, false)?;
+                        visit(item, path, Lists::None)?;
                     } else if let Some(text) = keys.iter_mut().find(|k| k.key == "text") {
-                        visit(&mut text.value, key_path(&path, "text"), false)?;
+                        visit(&mut text.value, key_path(&path, "text"), Lists::None)?;
                     }
                 }
             }

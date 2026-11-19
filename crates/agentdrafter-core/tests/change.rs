@@ -1649,6 +1649,15 @@ fn an_adds_schema_takes_exactly_what_the_add_takes() {
             ),
             false,
         ),
+        // An attribute's fixed parts are one line, as its value is.
+        (
+            on_template(
+                insert.clone(),
+                "attributes",
+                json!({"TITLE": ["A\n", {"row": "SHEET"}]}),
+            ),
+            false,
+        ),
         // A text's fixed parts are one line; an mtext's need not be.
         (
             on_template(text.clone(), "contents", json!(["A\nB ", {"row": "REV"}])),
