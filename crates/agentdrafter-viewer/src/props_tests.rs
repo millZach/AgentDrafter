@@ -382,6 +382,17 @@ fn contents_are_one_line_for_a_text_and_more_for_an_mtext() {
         edit(&context, TITLE, "contents", "A\nB").error.as_deref(),
         Some("A text is one line.")
     );
+    // A lone CR is a line break, as LF is.
+    assert_eq!(
+        edit(&context, TITLE, "contents", "A\rB").error.as_deref(),
+        Some("A text is one line.")
+    );
+    assert_eq!(
+        edit(&context, TITLE_BLOCK, "attribute:1", "A\rB")
+            .error
+            .as_deref(),
+        Some("An attribute's value is one line.")
+    );
     assert_eq!(
         edit(&context, TITLE, "contents", "  ").error.as_deref(),
         Some("A text needs something to show.")

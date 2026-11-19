@@ -1211,6 +1211,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
     return { kind: 'sent' };
   };
   const commitProp = (key: string, value: string): Committed => (pickedPlace === null ? { kind: 'same' } : editProp(pickedPlace, key, value));
+  // Why the renderer would refuse a field's value, sending nothing: for a paste.
+  const refuseProp = (key: string, value: string): string | null => {
+    const v = renderer();
+    if (!v || pickedPlace === null) return null;
+    return (JSON.parse(v.props_edit(pickedPlace, key, value)) as PropEdited).error ?? null;
+  };
   // A double click on a text, or a tap on the text already selected on a
   // phone, edits its contents on the drawing.
   const openText = (place: number, touch: boolean): boolean => {
@@ -1605,6 +1611,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
                 fields={fields}
                 layers={(layers ?? []).map((l) => l.name)}
                 onCommit={commitProp}
+                onRefuse={refuseProp}
                 resetKey={propsReset}
                 onClose={() => pick(null)}
                 onShow={(n) => showEntry(n)}

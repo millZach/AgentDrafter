@@ -377,6 +377,27 @@ export function pastedLines(value: string, start: number, end: number, pasted: s
   return value.slice(0, start) + pasted + value.slice(end);
 }
 
+/** What a tap or a click was on: the object's place in the drawing loaded, and its ID, if it has one. */
+export interface Tapped {
+  place: number;
+  id: string | null;
+}
+
+/**
+ * What the second tap or click of a double one does, after a first on
+ * `first` (null for none, or a drawing loaded since): on the same object,
+ * found by its ID, which a drawing loaded between them may have moved to
+ * another place, it opens it, as a text to edit, and zooms if it is not
+ * one; on two objects, a phone's second tap selects its own, and a
+ * laptop's double click zooms, as on nothing.
+ */
+export function secondTap(first: Tapped | null, now: Tapped, touch: boolean): 'open' | 'pick' | 'zoom' {
+  if (now.place < 0) return 'zoom';
+  const same = first !== null && (first.id !== null || now.id !== null ? first.id === now.id : first.place === now.place);
+  if (same) return 'open';
+  return touch ? 'pick' : 'zoom';
+}
+
 /** A view of a sheet: the journal's entry it is as it was at, null for the set as it is, its sheet and its layout. */
 export interface SheetView {
   at: number | null;

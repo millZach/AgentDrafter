@@ -2559,6 +2559,62 @@ const checks = {
         await waitValue(page, 'contents', 'CONTROL PANEL CP-100A');
         seen.laptop.left_again = entry.entry;
 
+        // A change that fails while the field has the focus again: the
+        // field shows its value again, and the same value typed again
+        // lands. The change is held, then fails, made up.
+        await select(page, await placeOf(page, "(o) => o.id === 'DP-LD-101/washer2'"), false);
+        let failChange;
+        const changeHeld = new Promise((done) => {
+          failChange = done;
+        });
+        await context.route('**/commands/change', async (route) => {
+          await changeHeld;
+          await route
+            .fulfill({
+              status: 422,
+              contentType: 'application/json',
+              body: JSON.stringify({ ok: false, error: { code: 'refused', message: 'a made-up failure of the change' } }),
+            })
+            .catch(() => {});
+        });
+        before = journal().length;
+        await page.click('.qp [data-prop="radius"]');
+        await page.fill('.qp [data-prop="radius"]', '0.55');
+        await page.keyboard.press('Enter');
+        await page.click('.qp [data-prop="radius"]');
+        assert((await valueOf(page, 'radius')) === '0.55', 'the field shows what was sent');
+        failChange();
+        await waitValue(page, 'radius', '0.3000');
+        await context.unroute('**/commands/change');
+        assert(await page.evaluate(() => document.activeElement?.getAttribute('data-prop') === 'radius'), 'the field has the focus still');
+        assert(journal().length === before, 'the failed change landed nothing');
+        await page.fill('.qp [data-prop="radius"]', '0.55');
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'The same radius typed again after a failed change'));
+        assert(same(op, { op: 'change', target: { id: 'DP-LD-101/washer2' }, set: { radius: 0.55 } }), `the radius typed again lands: ${JSON.stringify(op)}`);
+        await waitValue(page, 'radius', '0.5500');
+        seen.laptop.retry_after_failure = entry.entry;
+
+        // A radius pasted with a line break is only checked: it lands on
+        // Enter, not as it is pasted.
+        before = journal().length;
+        await page.click('.qp [data-prop="radius"]');
+        await page.evaluate(() => {
+          const el = document.querySelector('.qp [data-prop="radius"]');
+          el.select();
+          const data = new DataTransfer();
+          data.setData('text/plain', '0.6\n');
+          el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+        });
+        await nothingLands(before, 'A radius pasted, before Enter');
+        assert(!(await page.$('.qp [data-prop-error="radius"]')), 'a number pasted with a line break is not refused');
+        assert((await valueOf(page, 'radius')) === '0.6', `the field shows what was pasted: ${await valueOf(page, 'radius')}`);
+        await page.keyboard.press('Enter');
+        ({ entry, op } = await landed(page, before, 'A pasted radius, on Enter'));
+        assert(same(op, { op: 'change', target: { id: 'DP-LD-101/washer2' }, set: { radius: 0.6 } }), `the pasted radius lands on Enter: ${JSON.stringify(op)}`);
+        await waitValue(page, 'radius', '0.6000');
+        seen.laptop.paste = entry.entry;
+
         // A text on the drawing: a double click on the service text.
         const service = await placeOf(page, "(o) => o.id === 'DP-LD-101/service'");
         const [sx, sy] = await showAndFind(page, service);
@@ -2674,7 +2730,8 @@ const checks = {
         await context.unroute('**/commands/display-list');
         await page.click('button[data-act="live"]');
         seen.laptop.read_only_while_coming = true;
-        assert(problems.length === 0, problems.join('; '));
+        // The made-up failure of a change is the one 422.
+        assert(problems.filter((p) => !p.includes('422')).length === 0, problems.join('; '));
         await context.close();
       }
 
@@ -2696,12 +2753,19 @@ const checks = {
           const a = await showAndFind(page, service, 2);
           const c = await findOn(page, signalFirst);
           assert(Math.hypot(a[0] - c[0], a[1] - c[1]) < 30, `the two taps are within 30 pixels: ${a} ${c}`);
+          // When each finger lifted, as the gestures time it.
+          await page.evaluate(() => {
+            window.liftedAt = [];
+            window.addEventListener('pointerup', (e) => window.liftedAt.push(e.timeStamp), true);
+          });
           await page.touchscreen.tap(...a);
           await page.touchscreen.tap(...c);
+          const lifted = await page.evaluate(() => window.liftedAt);
+          assert(lifted.length === 2 && lifted[1] - lifted[0] < 320, `the two taps are inside the double tap's 320 ms: ${lifted}`);
           await sleep(600);
           assert(!(await page.$('[data-text-box]')), 'two taps on two objects open no text box');
           const picked = await page.evaluate(() => window.agentdrafterViewer.marked?.picked);
-          assert(picked !== null && picked !== service, `the second tap selects: ${picked}`);
+          assert(picked === signalFirst, `the second tap selects the second text: ${picked}, not ${signalFirst}`);
           await page.tap('.qp [data-close]');
           await page.waitForFunction(() => !document.querySelector('.qp'));
           seen.phone.two_taps = picked;

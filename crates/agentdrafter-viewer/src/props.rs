@@ -355,7 +355,8 @@ pub fn edit(context: &Context, place: usize, key: &str, typed: &str) -> Edited {
             } else {
                 typed.to_owned()
             };
-            if !mtext && text.contains('\n') {
+            // A lone CR is a line break too, as LF and CR LF are.
+            if !mtext && text.contains(['\r', '\n']) {
                 return Edited::error("A text is one line.");
             }
             if text.trim().is_empty() {
@@ -425,7 +426,7 @@ pub fn edit(context: &Context, place: usize, key: &str, typed: &str) -> Edited {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            if typed.contains('\n') {
+            if typed.contains(['\r', '\n']) {
                 return Edited::error("An attribute's value is one line.");
             }
             // A field left as it shows lands nothing, an unset one's

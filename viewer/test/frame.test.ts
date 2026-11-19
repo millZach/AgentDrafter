@@ -6,6 +6,7 @@ import {
   editsHere,
   fieldKey,
   pastedLines,
+  secondTap,
   toSend,
   coordinates,
   DEFAULT_RUNNING,
@@ -403,6 +404,29 @@ test('line breaks pasted into a one-line field are kept for the renderer to refu
   // One line pasted, or into a field of more lines: the browser takes it.
   assert.equal(pastedLines('FT-101', 6, 6, ' A', false), null);
   assert.equal(pastedLines('NOTES', 5, 5, '\n2.', true), null);
+});
+
+test('the second tap of a double one opens only the object the first was on, found by its ID', () => {
+  const service = { place: 4, id: 'DP-LD-101/service' };
+  const signal = { place: 5, id: 'DP-LD-101/signal' };
+  // The same text twice: it opens, on a phone and on a laptop.
+  assert.equal(secondTap(service, service, true), 'open');
+  assert.equal(secondTap(service, service, false), 'open');
+  // A drawing loaded between them put the second object at the first's
+  // old place: two objects, by their IDs, though the places match.
+  assert.equal(secondTap(service, { place: 4, id: 'DP-LD-101/signal' }, true), 'pick');
+  // The same object moved to another place is still the same.
+  assert.equal(secondTap(service, { place: 9, id: 'DP-LD-101/service' }, true), 'open');
+  // Two objects: a phone's second tap selects; a laptop's double click zooms, as before.
+  assert.equal(secondTap(service, signal, true), 'pick');
+  assert.equal(secondTap(service, signal, false), 'zoom');
+  // Nothing remembered, or a tap on nothing.
+  assert.equal(secondTap(null, signal, true), 'pick');
+  assert.equal(secondTap(null, signal, false), 'zoom');
+  assert.equal(secondTap(service, { place: -1, id: null }, true), 'zoom');
+  // Objects with no ID, by their place in one drawing.
+  assert.equal(secondTap({ place: 2, id: null }, { place: 2, id: null }, false), 'open');
+  assert.equal(secondTap({ place: 2, id: null }, { place: 3, id: null }, false), 'zoom');
 });
 
 test('quick properties edit only while the drawing loaded is the view asked for and the set as it is', () => {

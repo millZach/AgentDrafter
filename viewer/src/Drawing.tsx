@@ -18,7 +18,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 
-import { freeBeside, newlyHidden, placeBeside, snapTag, type Box, type Hovered, type Named, type ToolState } from './frame.ts';
+import { freeBeside, newlyHidden, placeBeside, secondTap, snapTag, type Box, type Hovered, type Named, type Tapped, type ToolState } from './frame.ts';
 
 import { screen_color, Viewer } from './wasm/agentdrafter_viewer.js';
 import { attachGestures, Glide, type Surface } from './gestures.ts';
@@ -206,8 +206,8 @@ export function Drawing({
   const pendingFocus = useRef<Focus | null>(null);
   const pick = useRef(onPick);
   const open = useRef(onOpen);
-  // The object the last tap or click picked, by its place; -1 for none.
-  const tappedPlace = useRef(-1);
+  // The object the last tap or click picked, by its place and its ID; null for none.
+  const tapped = useRef<Tapped | null>(null);
   const cursor = useRef(onCursor);
   const colorOf = useRef(onPickedColor);
   const narrow = useRef(compact);
@@ -321,6 +321,9 @@ export function Drawing({
     el.style.top = `${Math.max(4, middle - 26)}px`;
     el.style.opacity = '1';
   };
+
+  // What a tap at `place` of the drawing loaded was on, by its ID too.
+  const tappedOn = (place: number): Tapped => ({ place, id: place >= 0 ? (objects.current[place]?.id ?? null) : null });
 
   // The crosshair and the snap the cursor holds, in step with the view:
   // found again only when the drawing point under the cursor moves.
@@ -533,7 +536,7 @@ export function Drawing({
       const [x, y] = toDrawing(view.current, sx, sy);
       const place = v.pick(x, y, PICK_REACH / view.current.scale);
       // What this tap was on, for a second tap that makes it a double one.
-      tappedPlace.current = place;
+      tapped.current = tappedOn(place);
       const h = hovered.current;
       if (pointerType === 'mouse' && h) {
         take.current?.(h);
@@ -549,15 +552,17 @@ export function Drawing({
       if (!v || !loadedReply.current || toolActive()) return false;
       const [x, y] = toDrawing(view.current, sx, sy);
       const place = v.pick(x, y, PICK_REACH / view.current.scale);
-      if (place < 0) return false;
+      const now = tappedOn(place);
+      const touch = pointerType !== 'mouse';
+      const does = secondTap(tapped.current, now, touch);
+      tapped.current = now;
       // Two taps on two objects are two picks: the second selects its own,
-      // and opens nothing.
-      if (place !== tappedPlace.current) {
-        tappedPlace.current = place;
+      // and opens nothing. A double click that edits no text zooms.
+      if (does === 'pick') {
         pick.current(place);
         return true;
       }
-      return !!open.current?.(place, pointerType !== 'mouse');
+      return does === 'open' && !!open.current?.(place, touch);
     },
     held: (p) => {
       held.current = p;
@@ -731,6 +736,9 @@ export function Drawing({
     try {
       const summary = JSON.parse(v.load(text)) as Summary;
       objects.current = summary.objects;
+      // A tap on an object with no ID is known by its place, which the
+      // drawing loaded now may give another.
+      if (tapped.current && tapped.current.id === null) tapped.current = null;
       v.set_running(mask.current);
       hoverKey.current = '';
       const sameSheet = loadedSheet.current?.toUpperCase() === summary.sheet.toUpperCase();

@@ -230,6 +230,8 @@ export interface QuickPropertiesProps {
   layers?: string[];
   /** Lands an edit of a field: one change set, or asked about first. */
   onCommit?(key: string, value: string): Committed;
+  /** Why the renderer would refuse `value` for a field, sending nothing; null when it would not. */
+  onRefuse?(key: string, value: string): string | null;
   /** Moves on when an edit asked about was cancelled, so every field shows its value again. */
   resetKey?: number;
   onClose(): void;
@@ -252,6 +254,7 @@ export function QuickProperties({
   fields = [],
   layers = [],
   onCommit,
+  onRefuse,
   resetKey = 0,
   onClose,
   onShow,
@@ -270,6 +273,7 @@ export function QuickProperties({
   const attributes = object.attributes ?? [];
   const history = journal && object.id ? changedBy(journal, object.id) : [];
   const commit = (key: string, value: string): Committed => onCommit?.(key, value) ?? { kind: 'same' };
+  const refuse = (key: string, value: string): string | null => onRefuse?.(key, value) ?? null;
   const plain = (rows: [string, string][]) =>
     rows.map(([k, v]) => (
       <tr key={k}>
@@ -277,7 +281,7 @@ export function QuickProperties({
         <td>{v}</td>
       </tr>
     ));
-  const row = (f: PropField) => <PropRow key={f.key} field={f} layers={layers} onCommit={commit} resetKey={resetKey} />;
+  const row = (f: PropField) => <PropRow key={f.key} field={f} layers={layers} onCommit={commit} onRefuse={refuse} resetKey={resetKey} />;
   return (
     <>
       <header>
@@ -339,6 +343,7 @@ interface PropRowProps {
   field: PropField;
   layers: string[];
   onCommit(key: string, value: string): Committed;
+  onRefuse(key: string, value: string): string | null;
   resetKey: number;
 }
 
@@ -347,7 +352,7 @@ interface PropRowProps {
  * that says where its value is written, and its field. The note that says
  * what an edit changes shows while the field is being edited.
  */
-function PropRow({ field, layers, onCommit, resetKey }: PropRowProps) {
+function PropRow({ field, layers, onCommit, onRefuse, resetKey }: PropRowProps) {
   // What is typed, while it differs from the value; kept once sent, until
   // the sheet drawn again shows the value or the edit is cancelled.
   const [draft, setDraft] = useState<string | null>(null);
@@ -358,10 +363,16 @@ function PropRow({ field, layers, onCommit, resetKey }: PropRowProps) {
   // What the field showed when it was focused, apart from what was sent:
   // landing it again as it was sends nothing.
   const atFocus = useRef(field.value);
+  const resetSeen = useRef(resetKey);
   useEffect(() => {
     setDraft(null);
     setError(null);
-    if (document.activeElement?.getAttribute('data-prop') !== field.key) atFocus.current = field.value;
+    // An edit that did not land, or was cancelled, is dropped from what the
+    // field showed at focus too, though it has the focus again: typing it
+    // again sends it, and Esc does not put it back.
+    const dropped = resetSeen.current !== resetKey;
+    resetSeen.current = resetKey;
+    if (dropped || document.activeElement?.getAttribute('data-prop') !== field.key) atFocus.current = field.value;
   }, [field.value, field.key, resetKey]);
   const shown = draft ?? field.value;
   const label = (
@@ -452,14 +463,18 @@ function PropRow({ field, layers, onCommit, resetKey }: PropRowProps) {
       }
     };
     // Line breaks pasted into a one-line field reach the renderer, which
-    // says they cannot go there, before the browser strips them.
+    // says whether they can go there, before the browser strips them. A
+    // paste only checks: what it gives lands on Enter or on leaving the
+    // field, as what is typed does.
     const paste = (e: ClipboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       const el = e.currentTarget;
       const end = el.value.length;
       const next = pastedLines(el.value, el.selectionStart ?? end, el.selectionEnd ?? end, e.clipboardData.getData('text'), field.multiline);
       if (next === null) return;
       e.preventDefault();
-      land(next, atFocus.current);
+      const why = onRefuse(field.key, next);
+      setError(why);
+      if (!why) setDraft(next);
     };
     const leave = () => {
       setFocused(false);
