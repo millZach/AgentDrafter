@@ -2315,8 +2315,8 @@ const checks = {
     const added = sendChange(folder, {
       operations: [
         { op: 'add_circle', sheet: 'DP-LD-101', center: [13, 3.6, 0], radius: 0.25, layer: 'notes', id: 'washer' },
-        // A second, left of it, clear of its card, which shows the radius the first comes to.
-        { op: 'add_circle', sheet: 'DP-LD-101', center: [11.8, 3.6, 0], radius: 0.3, layer: 'notes', id: 'washer2' },
+        // A second, far from it, clear of its card, which shows the radius the first comes to.
+        { op: 'add_circle', sheet: 'DP-LD-101', center: [4.5, 3.4, 0], radius: 0.3, layer: 'notes', id: 'washer2' },
       ],
     });
     assert(added.ok, `the circle is added: ${JSON.stringify(added)}`);
