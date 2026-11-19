@@ -29,10 +29,11 @@ use super::emit::{number_text, scalar_text, Context, Emitter};
 use super::ids::{ID_KEY, NAME_KEY};
 use super::leader::{ANNOTATION_KEYS, TEXT_CONTENT_KEYS};
 use super::objects::{article, BLOCK_OBJECT_TYPES, OBJECT_TYPES};
+use super::parts::{parts_of, Part};
 use super::polyline::VERTEX_KEYS;
 use super::set::ROW_OBJECTS_KEY;
 use super::strict_yaml::{self, index_path, key_path, Entry, Kind, Node, Source, Style};
-use super::template::ROW_KEY;
+use super::template::{Carries, ROW_KEY};
 use crate::error::{Error, ErrorCode};
 use crate::units::{parse_length, LengthError, Unit};
 
@@ -91,10 +92,20 @@ pub(crate) enum LeaderLineEdit {
 pub(crate) struct Changed {
     /// Whether the object's keys were edited.
     pub edited: bool,
-    /// The row's value a text's contents come from and the text to set it
-    /// to, when the change set the contents of a text whose template takes
-    /// them from the row.
-    pub from_row: Option<(String, String)>,
+    /// How the template takes a text's contents from the row and the text
+    /// to set them to, when the change set the contents of a text whose
+    /// template takes them from the row.
+    pub from_row: Option<(FromRow, String)>,
+}
+
+/// How a template takes a value from the row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FromRow {
+    /// Whole, as the row's value of this name, `{row: NAME}`.
+    Whole(String),
+    /// As a list of parts, plain text and values from the row joined in
+    /// order (#102).
+    Parts(Vec<Part>),
 }
 
 /// An insert in a list of objects, or among a block's: its place in the
@@ -122,6 +133,9 @@ pub(crate) struct GivenValue {
     /// Each item of the value, as the record writes it, when it is a list;
     /// none for an item written as a bare null.
     pub items: Option<Vec<Option<String>>>,
+    /// Whether the value is a list of parts by its shape: plain text and
+    /// values from the row, one at least (#102).
+    pub parts: bool,
 }
 
 impl GivenValue {
@@ -144,6 +158,8 @@ impl GivenValue {
         match (carried, &self.items) {
             (0, _) => Some(vec![(None, self.text.clone())]),
             (1, None) => None,
+            // A list of parts is one value, of a tag carried once.
+            (1, Some(_)) if self.parts => None,
             (1, Some(items)) => Some(past(items, 1)),
             (_, None) if self.null => None,
             (_, None) => Some(Vec::new()),
@@ -158,9 +174,9 @@ impl GivenValue {
 pub(crate) enum AttributeSet {
     /// The insert's attribute was written.
     Written,
-    /// The template takes the attribute's value from the row: the value
-    /// `name`, which is set in the sheet's row, not here.
-    FromRow(String),
+    /// The template takes the attribute's value from the row, whole or in
+    /// parts: the row's values are set in the sheet's row, not here.
+    FromRow(FromRow),
 }
 
 /// A record file being edited.
@@ -964,6 +980,7 @@ impl RecordFile {
                         text: text_of(&v.value),
                         null: v.value.is_bare_null(),
                         items,
+                        parts: parts_of(&v.value).is_some(),
                     }
                 })
                 .collect(),
@@ -1395,23 +1412,36 @@ impl RecordFile {
             }
             let position = keys.iter().position(|e| e.key == *key);
             if key == "contents" {
-                if let Some(name) = position.and_then(|p| row_value_name(&keys[p].value)) {
+                // Contents the template takes from the row, whole or in a
+                // list of parts.
+                let written = position.and_then(|p| {
+                    let now = &keys[p].value;
+                    row_value_name(now)
+                        .map(FromRow::Whole)
+                        .or_else(|| parts_of(now).map(FromRow::Parts))
+                });
+                if let Some(written) = written {
                     let text = match value {
                         Value::String(s) => s.clone(),
                         Value::Number(n) => n.to_string(),
                         Value::Bool(b) => b.to_string(),
                         _ => {
-                            return Err(Error::new(
-                                ErrorCode::WrongType,
-                                format!(
+                            let message = match &written {
+                                FromRow::Whole(name) => format!(
                                     "the template takes this text's contents from the row's \
                                      value `{name}`, which is text; give the new contents as text"
                                 ),
-                            )
-                            .at_field(field))
+                                FromRow::Parts(parts) => format!(
+                                    "the template joins this text's contents from the parts {}, \
+                                     with values from the row; give the new contents as text, \
+                                     which is matched to the parts",
+                                    super::parts::pattern(parts)
+                                ),
+                            };
+                            return Err(Error::new(ErrorCode::WrongType, message).at_field(field));
                         }
                     };
-                    from_row = Some((name, text));
+                    from_row = Some((written, text));
                     continue;
                 }
             }
@@ -1425,7 +1455,7 @@ impl RecordFile {
                 if let Some(found) =
                     position.and_then(|p| text_from_row(&keys[p].value, value, takes, units))
                 {
-                    from_row = Some(found);
+                    from_row = Some((FromRow::Whole(found.0), found.1));
                     from_row_key = if kind == "mleader" {
                         "content"
                     } else {
@@ -1589,7 +1619,11 @@ impl RecordFile {
         match slot {
             None => {
                 if let Some(name) = row_value_name(given) {
-                    return Ok(AttributeSet::FromRow(name));
+                    return Ok(AttributeSet::FromRow(FromRow::Whole(name)));
+                }
+                // A list given for a tag carried once is a list of parts.
+                if let Some(parts) = parts_of(given) {
+                    return Ok(AttributeSet::FromRow(FromRow::Parts(parts)));
                 }
                 *given = Node::scalar(value);
             }
@@ -1609,7 +1643,7 @@ impl RecordFile {
                     unreachable!("made a list above")
                 };
                 if let Some(name) = items.get(i).and_then(row_value_name) {
-                    return Ok(AttributeSet::FromRow(name));
+                    return Ok(AttributeSet::FromRow(FromRow::Whole(name)));
                 }
                 while items.len() <= i {
                     items.push(Node::bare_null());
@@ -1870,22 +1904,29 @@ impl RecordFile {
     }
 
     /// The places among the template's objects where it puts the row's
-    /// value `name`: each object's place in the list and where in it, such
-    /// as `attributes.TITLE` or `contents`.
-    pub(crate) fn row_value_places(&self, name: &str) -> Vec<(usize, String)> {
+    /// value `name`, whole or in a list of parts: each object's place in
+    /// the list and where in it, such as `attributes.TITLE` or `contents`.
+    /// `carries` says how many times an insert's block carries a tag, so a
+    /// list given for one is read as its block reads it.
+    pub(crate) fn row_value_places(&self, name: &str, carries: Carries) -> Vec<(usize, String)> {
         let mut places = Vec::new();
         let Some(items) = self.items(ObjectList::Template) else {
             return places;
         };
         for (i, item) in items.iter().enumerate() {
             let mut item = item.clone();
-            let _ = super::template::places_in(&mut item, "", &mut |node, place| {
-                if row_value_name(node).as_deref() == Some(name) {
-                    let within = place.split_once('.').map_or("", |(_, rest)| rest);
-                    places.push((i, within.to_owned()));
-                }
-                Ok(())
-            });
+            let _ =
+                super::template::places_in(&mut item, "", carries, &mut |node, place, parts| {
+                    let fills = row_value_name(node).as_deref() == Some(name)
+                        || (parts
+                            && parts_of(node)
+                                .is_some_and(|p| p.contains(&Part::Row(name.to_owned()))));
+                    if fills {
+                        let within = place.split_once('.').map_or("", |(_, rest)| rest);
+                        places.push((i, within.to_owned()));
+                    }
+                    Ok(())
+                });
         }
         places
     }

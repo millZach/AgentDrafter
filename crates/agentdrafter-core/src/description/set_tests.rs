@@ -799,6 +799,43 @@ fn the_template_schema_accepts_exactly_the_templates_the_reader_accepts() {
     for place in [&TEXT_CONTENTS, &MTEXT_CONTENTS] {
         cases.push((place, "[A]", json!(["A"]), false));
     }
+    // A list of parts (#102): plain text and values from the row, one at
+    // least, in a text's contents and an attribute its block defines once.
+    for place in [&ATTRIBUTE_VALUE, &TEXT_CONTENTS, &MTEXT_CONTENTS] {
+        cases.extend([
+            (
+                place,
+                "['PANEL ', {row: PANEL}, ' SLOT ', {row: SLOT}]",
+                json!(["PANEL ", {"row": "PANEL"}, " SLOT ", {"row": "SLOT"}]),
+                true,
+            ),
+            (place, "[{row: A}, 7]", json!([{"row": "A"}, 7]), true),
+            (
+                place,
+                "['{SPARE} ', {row: A}]",
+                json!(["{SPARE} ", {"row": "A"}]),
+                true,
+            ),
+        ]);
+    }
+    for place in [&TEXT_CONTENTS, &MTEXT_CONTENTS] {
+        cases.extend([
+            (place, "[]", json!([]), false),
+            (
+                place,
+                "[A, null, {row: B}]",
+                json!(["A", null, {"row": "B"}]),
+                false,
+            ),
+            (
+                place,
+                "[{row: A}, [B]]",
+                json!([{"row": "A"}, ["B"]]),
+                false,
+            ),
+            (place, "[{row: 'A B'}]", json!([{"row": "A B"}]), false),
+        ]);
+    }
     cases.extend([
         (&ATTRIBUTE_LIST, "[A, B, C]", json!(["A", "B", "C"]), true),
         (

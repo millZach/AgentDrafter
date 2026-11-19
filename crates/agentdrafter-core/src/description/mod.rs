@@ -33,6 +33,7 @@ mod leader_schema;
 mod mark;
 mod objects;
 pub(crate) mod paper;
+pub(crate) mod parts;
 mod polyline;
 mod records;
 pub(crate) mod schema;
@@ -61,8 +62,8 @@ use crate::units::{parse_length, LengthError, Unit};
 pub use blocks::parse_block_library;
 pub(crate) use dimension::{kind_keys, DIMENSION_STYLE_KEYS};
 pub(crate) use edit::{
-    AttributeSet, Axis, GivenValue, LeaderLineEdit, Listed, Matched, ObjectList, RecordFile,
-    TableEdit,
+    AttributeSet, Axis, FromRow, GivenValue, LeaderLineEdit, Listed, Matched, ObjectList,
+    RecordFile, TableEdit,
 };
 pub(crate) use emit::number_text;
 pub(crate) use ids::ID_SEPARATOR;

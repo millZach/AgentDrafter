@@ -26,7 +26,7 @@ use super::from_dimension::dimension_from;
 use super::journal::{commit_change_set, HowChanged, Landing, ObjectChanged, SheetFailed};
 use super::operations::{
     op_error, read_change_set, AddTo, BlockOp, Body, FromOp, Import, Kind, Motion, OpPoint,
-    Operation, PointSnap, Table, TableOp, Target,
+    Operation, PointSnap, Table, TableOp, Target, ROW_VALUE_KEY,
 };
 use super::MARK_FILE;
 use super::{
@@ -35,11 +35,13 @@ use super::{
 };
 use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::blocks::tag_in_capitals;
+use crate::description::parts::{self, Unsplit};
 use crate::description::SheetRecord;
 use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
-    template_at, template_in, template_path, AttributeSet, Disk, GivenValue, LeaderLineEdit,
-    Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile, Row, TableEdit, ID_SEPARATOR,
+    template_at, template_in, template_path, AttributeSet, Disk, FromRow, GivenValue,
+    LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile, Row,
+    TableEdit, ID_SEPARATOR,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -405,6 +407,8 @@ struct Done {
     before: Option<String>,
     after: Option<String>,
     row_value: Option<RowValueSet>,
+    /// The row values matched to a list of parts it sets.
+    row_values: Vec<RowValueSet>,
     ids_written: Vec<String>,
     /// The inserts a block operation brought into line.
     inserts: Vec<String>,
@@ -455,7 +459,12 @@ fn objects_changed(
                 add(format!("{}{ID_SEPARATOR}{local}", files.name(k)), how);
             }
         }
-        for fill in d.row_value.iter().flat_map(|row| &row.fills) {
+        for fill in d
+            .row_value
+            .iter()
+            .chain(&d.row_values)
+            .flat_map(|row| &row.fills)
+        {
             add(fill.id.clone(), HowChanged::Changed);
         }
         // Each insert of a block an operation redefined or brought into
@@ -735,6 +744,7 @@ pub(super) fn apply(
                 before: d.as_ref().and_then(|d| d.before.clone()),
                 after: d.as_ref().and_then(|d| d.after.clone()),
                 row_value: d.as_ref().and_then(|d| d.row_value.clone()),
+                row_values: d.as_ref().map(|d| d.row_values.clone()).unwrap_or_default(),
                 ids_written: d
                     .as_ref()
                     .map(|d| d.ids_written.clone())
@@ -1019,6 +1029,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 before: None,
                 after: Some(after),
                 row_value: None,
+                row_values: Vec::new(),
                 ids_written: Vec::new(),
                 inserts: Vec::new(),
                 attributes_removed: Vec::new(),
@@ -1306,6 +1317,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         before: Some(before),
         after: None,
         row_value: None,
+        row_values: Vec::new(),
         ids_written: Vec::new(),
         inserts: Vec::new(),
         attributes_removed: Vec::new(),
@@ -1314,7 +1326,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         message: String::new(),
     };
     let mut sheets = reach.clone();
-    let mut from_row: Option<(String, String)> = None;
+    let mut from_row: Option<(FromRow, String)> = None;
     // The attribute a set_attribute sets, in words, for its message.
     let mut attribute_set = String::new();
     // Whether the operation edits the object itself, not only a row value.
@@ -1408,10 +1420,10 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                     done.message =
                         format!("sets {attribute_set} of `{id}` to `{value}`{template_note}");
                 }
-                Ok(AttributeSet::FromRow(name)) => {
+                Ok(AttributeSet::FromRow(written)) => {
                     edits_object = false;
                     sheets = vec![k];
-                    from_row = Some((name, value.clone()));
+                    from_row = Some((written, value.clone()));
                 }
                 Err(e) => {
                     let field = if e.code == ErrorCode::BadValue {
@@ -1442,7 +1454,9 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                         done.message = format!("{words}, which it gives already");
                     }
                 }
-                from_row = edited.from_row;
+                from_row = edited
+                    .from_row
+                    .map(|(name, text)| (FromRow::Whole(name), text));
             }
             Err(e) => {
                 let field = e.field.clone().unwrap_or_default();
@@ -1479,56 +1493,28 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
     if done.after == done.before {
         done.after = None;
     }
-    if let Some((name, text)) = from_row {
+    // A row value named alone, of a value the template does not take from
+    // the row, names nothing to set.
+    if let (Some(asked), None) = (&op.row_value, &from_row) {
+        return fail(
+            reach,
+            op_err(
+                ErrorCode::BadValue,
+                format!(
+                    "row_value names `{asked}`, but the template does not take this value of \
+                     `{id}` from the row: it is written where the object is, so send the value \
+                     without row_value"
+                ),
+                ROW_VALUE_KEY,
+            ),
+        );
+    }
+    if let Some((written, text)) = from_row {
         // An operation that edits its object as well as a row's value
         // reaches every sheet the object is on, so a refusal of it holds
         // them all back; one that sets the row's value alone reaches its
         // sheet.
         let refused_on = if edits_object { reach.clone() } else { vec![k] };
-        // A row's value fills every place on the sheet its template takes
-        // it, and each is edited: none may be on a locked layer.
-        let t = files.template_of[k];
-        if let Ok(template) = at.template(t) {
-            let listed = template.objects(ObjectList::Template);
-            for (i, _) in template.row_value_places(&name) {
-                let layer = template
-                    .object_value(ObjectList::Template, i, "layer")
-                    .unwrap_or_else(|| "0".to_owned());
-                if template
-                    .table_value(Table::Layer.key(), &layer, "locked")
-                    .as_deref()
-                    == Some("true")
-                {
-                    let filled = format!("{}/{}", files.name(k), listed[i].id);
-                    return fail(refused_on, locked(&filled, &layer));
-                }
-            }
-        }
-        let was = at.rows.row_value(k, &name).unwrap_or_default();
-        if let Err(e) = at.rows.set_row_value(k, &name, &text) {
-            return fail(refused_on, from_record(e));
-        }
-        at.values.retain(|(r, n, _)| !(*r == k && *n == name));
-        at.values.push((k, name.clone(), op.index));
-        let t = files.template_of[k];
-        let fills = match at.template(t) {
-            Ok(template) => {
-                let listed = template.objects(ObjectList::Template);
-                template
-                    .row_value_places(&name)
-                    .into_iter()
-                    .map(|(i, place)| Fill {
-                        id: format!("{}/{}", files.name(k), listed[i].id),
-                        at: place,
-                    })
-                    .collect::<Vec<_>>()
-            }
-            Err(_) => Vec::new(),
-        };
-        let places: Vec<String> = fills
-            .iter()
-            .map(|f| format!("{} of `{}`", f.at, f.id))
-            .collect();
         let set_what = match &op.body {
             Body::SetAttribute { .. } => format!("{attribute_set} of `{id}`"),
             Body::TableEdit {
@@ -1543,12 +1529,210 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
             }
             _ => format!("the contents of `{id}`"),
         };
-        let row_message = format!(
-            "sets sheet `{}`'s row value {name} to `{text}`, since its template takes {set_what} \
-             from the row; the value fills {}",
-            files.name(k),
-            places.join(" and ")
-        );
+        // The field of the text sent, for a refusal of it.
+        let text_field = match &op.body {
+            Body::SetAttribute { .. } => "value",
+            _ => "set.contents",
+        };
+        // Each row value to set, and its text; and the parts the text was
+        // matched to, when it was.
+        let (sets, matched) = match (&written, &op.row_value) {
+            (FromRow::Whole(name), None) => (vec![(name.clone(), text.clone())], None),
+            (FromRow::Whole(name), Some(asked)) if asked == name => {
+                (vec![(name.clone(), text.clone())], None)
+            }
+            (FromRow::Whole(name), Some(asked)) => {
+                return fail(
+                    refused_on,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "row_value names `{asked}`, but the template takes {set_what} \
+                             whole from the row's value {name}; name {name}, or leave \
+                             row_value out"
+                        ),
+                        ROW_VALUE_KEY,
+                    ),
+                );
+            }
+            (FromRow::Parts(held), Some(asked)) => {
+                let names = parts::names(held);
+                if !names.contains(asked) {
+                    return fail(
+                        refused_on,
+                        op_err(
+                            ErrorCode::UnknownName,
+                            format!(
+                                "row_value names `{asked}`, which is not one of the row values \
+                                 of the parts {} the template joins {set_what} from; they are {}",
+                                parts::pattern(held),
+                                names.join(", ")
+                            ),
+                            ROW_VALUE_KEY,
+                        ),
+                    );
+                }
+                (vec![(asked.clone(), text.clone())], None)
+            }
+            (FromRow::Parts(held), None) => {
+                let pattern = parts::pattern(held);
+                match parts::split(held, &text) {
+                    Ok(values) => (values, Some(pattern)),
+                    Err(Unsplit::Differs) => {
+                        return fail(
+                            refused_on,
+                            op_err(
+                                ErrorCode::BadValue,
+                                format!(
+                                    "`{text}` does not match the parts {pattern} the template \
+                                     joins {set_what} from: its fixed text differs. Send the \
+                                     whole text with the parts' fixed text as it is, or set one \
+                                     row value with row_value, one of {}",
+                                    parts::names(held).join(", ")
+                                ),
+                                text_field,
+                            ),
+                        );
+                    }
+                    Err(Unsplit::Ambiguous(first, second)) => {
+                        let each = |values: &[(String, String)]| {
+                            values
+                                .iter()
+                                .map(|(name, value)| format!("{name} `{value}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        return fail(
+                            refused_on,
+                            op_err(
+                                ErrorCode::BadValue,
+                                format!(
+                                    "`{text}` splits more than one way into the parts {pattern} \
+                                     the template joins {set_what} from, such as {} or {}; set \
+                                     each row value with row_value, one of {}",
+                                    each(&first),
+                                    each(&second),
+                                    parts::names(held).join(", ")
+                                ),
+                                text_field,
+                            ),
+                        );
+                    }
+                }
+            }
+        };
+        let t = files.template_of[k];
+        let counts = carried_by_blocks(at, t);
+        let carries = |block: &str, tag: &str| {
+            counts
+                .iter()
+                .find(|(b, _)| b == block)
+                .map(|(_, tags)| tags.iter().filter(|t| *t == tag).count())
+        };
+        // A row's value fills every place on the sheet its template takes
+        // it, and each is edited: none may be on a locked layer.
+        if let Ok(template) = at.template(t) {
+            let listed = template.objects(ObjectList::Template);
+            for (name, _) in &sets {
+                for (i, _) in template.row_value_places(name, &carries) {
+                    let layer = template
+                        .object_value(ObjectList::Template, i, "layer")
+                        .unwrap_or_else(|| "0".to_owned());
+                    if template
+                        .table_value(Table::Layer.key(), &layer, "locked")
+                        .as_deref()
+                        == Some("true")
+                    {
+                        let filled = format!("{}/{}", files.name(k), listed[i].id);
+                        return fail(refused_on, locked(&filled, &layer));
+                    }
+                }
+            }
+        }
+        let mut set_values: Vec<RowValueSet> = Vec::new();
+        for (name, value) in sets {
+            let was = at.rows.row_value(k, &name).unwrap_or_default();
+            if let Err(e) = at.rows.set_row_value(k, &name, &value) {
+                return fail(refused_on, from_record(e));
+            }
+            at.values.retain(|(r, n, _)| !(*r == k && *n == name));
+            at.values.push((k, name.clone(), op.index));
+            let fills = match at.template(t) {
+                Ok(template) => {
+                    let listed = template.objects(ObjectList::Template);
+                    template
+                        .row_value_places(&name, &carries)
+                        .into_iter()
+                        .map(|(i, place)| Fill {
+                            id: format!("{}/{}", files.name(k), listed[i].id),
+                            at: place,
+                        })
+                        .collect::<Vec<_>>()
+                }
+                Err(_) => Vec::new(),
+            };
+            set_values.push(RowValueSet {
+                sheet: files.name(k).to_owned(),
+                value: name,
+                was,
+                now: value,
+                fills,
+            });
+        }
+        let places = |set: &RowValueSet| {
+            set.fills
+                .iter()
+                .map(|f| format!("{} of `{}`", f.at, f.id))
+                .collect::<Vec<String>>()
+                .join(" and ")
+        };
+        let row_message = match (&written, &matched) {
+            (FromRow::Whole(_), _) => {
+                let set = &set_values[0];
+                format!(
+                    "sets sheet `{}`'s row value {} to `{}`, since its template takes {set_what} \
+                     from the row; the value fills {}",
+                    files.name(k),
+                    set.value,
+                    set.now,
+                    places(set)
+                )
+            }
+            (FromRow::Parts(held), None) => {
+                let set = &set_values[0];
+                format!(
+                    "sets sheet `{}`'s row value {} to `{}`, one of the parts {} its template \
+                     joins {set_what} from; the value fills {}",
+                    files.name(k),
+                    set.value,
+                    set.now,
+                    parts::pattern(held),
+                    places(set)
+                )
+            }
+            (FromRow::Parts(_), Some(pattern)) => {
+                let each: Vec<String> = set_values
+                    .iter()
+                    .map(|set| format!("{} to `{}`", set.value, set.now))
+                    .collect();
+                let fills: Vec<String> = set_values
+                    .iter()
+                    .map(|set| format!("{} fills {}", set.value, places(set)))
+                    .collect();
+                format!(
+                    "sets sheet `{}`'s row {} {}, matched to the parts {pattern} its template \
+                     joins {set_what} from; {}",
+                    files.name(k),
+                    if set_values.len() == 1 {
+                        "value"
+                    } else {
+                        "values"
+                    },
+                    join_and(&each),
+                    fills.join("; ")
+                )
+            }
+        };
         done.message = if done.message.is_empty() {
             row_message
         } else {
@@ -1560,18 +1744,56 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         if sheets == vec![k] && matches!(file, FileRef::Template(_)) {
             done.record = files.rows_path.clone();
         }
-        done.row_value = Some(RowValueSet {
-            sheet: files.name(k).to_owned(),
-            value: name,
-            was,
-            now: text,
-            fills,
-        });
+        if matched.is_some() {
+            done.row_values = set_values;
+        } else {
+            done.row_value = set_values.pop();
+        }
     }
     Applied {
         sheets,
         outcome: Ok(done),
         refuse: false,
+    }
+}
+
+/// The block each insert of the template `t` places, each once, with the
+/// tags it carries, in order, as its library holds it now: how many times
+/// a block carries a tag says whether a list given for it is a list of
+/// parts.
+fn carried_by_blocks(at: &mut Attempt, t: usize) -> Vec<(String, Vec<String>)> {
+    let blocks: Vec<String> = match at.template(t) {
+        Ok(template) => template
+            .inserts(ObjectList::Template)
+            .into_iter()
+            .map(|insert| insert.block)
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    let Some(l) = at.files.library_of[t] else {
+        return Vec::new();
+    };
+    let Ok(library) = at.library(l) else {
+        return Vec::new();
+    };
+    let mut carried: Vec<(String, Vec<String>)> = Vec::new();
+    for block in blocks {
+        if carried.iter().any(|(b, _)| *b == block) {
+            continue;
+        }
+        if let Some(tags) = library.block_carried_tags(&block) {
+            carried.push((block, tags));
+        }
+    }
+    carried
+}
+
+/// Items in words, the last after `and`: `A`, `A and B`, `A, B and C`.
+fn join_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -1878,6 +2100,7 @@ fn apply_table(
             before,
             after,
             row_value: None,
+            row_values: Vec::new(),
             ids_written: Vec::new(),
             inserts: Vec::new(),
             attributes_removed: Vec::new(),
@@ -2054,6 +2277,7 @@ fn apply_block(
             before,
             after,
             row_value: None,
+            row_values: Vec::new(),
             ids_written: Vec::new(),
             inserts: synced.inserts,
             attributes_removed: synced.removed,
@@ -2212,6 +2436,7 @@ fn apply_import(
             before: None,
             after: None,
             row_value: None,
+            row_values: Vec::new(),
             ids_written: Vec::new(),
             inserts: synced.inserts,
             attributes_removed: synced.removed,
@@ -2906,6 +3131,7 @@ fn apply_dimension_from(
             before: None,
             after: Some(after),
             row_value: None,
+            row_values: Vec::new(),
             ids_written: Vec::new(),
             inserts: Vec::new(),
             attributes_removed: Vec::new(),

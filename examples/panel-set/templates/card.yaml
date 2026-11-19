@@ -1,0 +1,34 @@
+# A made-up 11 x 8.5 inch sheet, ANSI A, for one I/O card. Where a row's
+# value stands inside other text, the template writes a list of parts,
+# plain text and {row: NAME}, joined in order: the heading, the title
+# block's TITLE and the note. Nothing inside a string is read for values,
+# so the braces in the note's {SPARE} show as written.
+units: in
+paper: ANSI A landscape
+block_library: ../blocks.yaml
+layers:
+  trim: {color: 8, lineweight: 0.13}
+  border: {color: white, lineweight: 0.7}
+  notes: {color: cyan}
+text_styles:
+  notes: {font: romans.shx, width_factor: 0.8}
+objects:
+  - polyline: {points: [[0, 0, 0], [11, 0, 0], [11, 8.5, 0], [0, 8.5, 0]], closed: true, layer: trim}
+  - polyline: {points: [[0.5, 0.5, 0], [10.5, 0.5, 0], [10.5, 8, 0], [0.5, 8, 0]], closed: true, layer: border, id: border}
+  - insert:
+      block: CARD_TITLE
+      position: [10.5, 0.5, 0]
+      id: title-block
+      attributes:
+        TITLE: [{row: AREA}, ' I/O PANEL ', {row: PANEL}]
+        DWG_NO: {row: DWG_NO}
+        REV: {row: REV}
+  - text: {contents: ['PANEL ', {row: PANEL}, ' SLOT ', {row: SLOT}], position: [1, 7.4, 0], height: 0.25, style: notes, layer: notes, id: heading}
+  - mtext:
+      contents: ['CARD IN SLOT ', {row: SLOT}, ' OF PANEL ', {row: PANEL}, '. SPARES ARE MARKED {SPARE} AS DRAWING ', {row: DWG_NO}, ' SHOWS.']
+      position: [1, 6.6, 0]
+      height: 0.14
+      width: 5
+      style: notes
+      layer: notes
+      id: note

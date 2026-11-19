@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use super::edit::{AttributeSet, ObjectList, RecordFile};
+use super::edit::{AttributeSet, FromRow, ObjectList, RecordFile};
 use crate::units::Unit;
 
 const TEMPLATE: &str = include_str!("../../../../examples/demo-set/templates/ansi-b.yaml");
@@ -71,7 +71,10 @@ fn an_attribute_the_row_fills_is_left_to_the_row() {
     let set = record
         .set_attribute(ObjectList::Template, 2, "TITLE", None, "NEW", 0)
         .unwrap();
-    assert_eq!(set, AttributeSet::FromRow("TITLE".to_owned()));
+    assert_eq!(
+        set,
+        AttributeSet::FromRow(FromRow::Whole("TITLE".to_owned()))
+    );
     assert_eq!(record.new_text().unwrap(), None);
     let set = record
         .set_attribute(ObjectList::Template, 2, "DRAWN", None, "ZM", 0)
@@ -82,7 +85,7 @@ fn an_attribute_the_row_fills_is_left_to_the_row() {
     assert_eq!(new, ["        DRAWN: ZM"]);
     assert_eq!(gone, ["        DRAWN: AD"]);
     assert_eq!(
-        record.row_value_places("TITLE"),
+        record.row_value_places("TITLE", &super::template::no_blocks),
         [
             (2, "attributes.TITLE".to_owned()),
             (3, "contents".to_owned())
@@ -224,7 +227,7 @@ fn a_change_sets_keys_and_takes_them_away() {
     assert!(!changed.edited);
     assert_eq!(
         changed.from_row,
-        Some(("TITLE".to_owned(), "NEW HEADING".to_owned()))
+        Some((FromRow::Whole("TITLE".to_owned()), "NEW HEADING".to_owned()))
     );
     let id = record
         .change(

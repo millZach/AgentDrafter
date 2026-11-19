@@ -470,8 +470,10 @@ fn display_list_does() -> String {
      with its `tag` and, for a tag its block defines more than once, its `occurrence`; and on a \
      drawing set's sheet each text value says where it is `written`: `own`, by the object \
      itself; `row_value`, by the sheet's row, naming the `row_value` and how many places on the \
-     sheet it `fills`; or `unset`, an attribute the insert gives no value for, which shows its \
-     default. A loop sheet's display list runs to megabytes: it is for the viewer to draw, not \
+     sheet it `fills`; `row_values`, by the sheet's row as the row values its template joins \
+     with plain text in a list of parts, listing each under `row_values` with its `name` and \
+     how many places it `fills`; or `unset`, an attribute the insert gives no value for, which \
+     shows its default. A loop sheet's display list runs to megabytes: it is for the viewer to draw, not \
      to read."
         .to_owned()
 }
@@ -497,7 +499,7 @@ fn display_list_input() -> Value {
                 "type": "boolean",
             },
             "values": {
-                "description": "Give each object's `values`, what quick properties edit: a text's or an mtext's contents, a circle's or an arc's radius, and an insert's attribute values; and on a drawing set's sheet where each text value is `written`: by the object itself (`own`), by the sheet's row (`row_value`, with the value's name and how many places on the sheet it `fills`), or nowhere (`unset`, an attribute that shows its default). Without it, none.",
+                "description": "Give each object's `values`, what quick properties edit: a text's or an mtext's contents, a circle's or an arc's radius, and an insert's attribute values; and on a drawing set's sheet where each text value is `written`: by the object itself (`own`), by the sheet's row (`row_value`, with the value's name and how many places on the sheet it `fills`), by the row values its template joins with plain text in a list of parts (`row_values`, each with its `name` and how many places it `fills`), or nowhere (`unset`, an attribute that shows its default). Without it, none.",
                 "type": "boolean",
             },
             "fonts": fonts(),

@@ -173,6 +173,21 @@ pub struct WrittenValue {
     /// fills, this one among them: every one changes with it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fills: Option<usize>,
+    /// When the template joins it from a list of parts, plain text and the
+    /// row's values: each row value it holds, in the order they first come,
+    /// with how many places on the sheet each fills, this one among them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_values: Option<Vec<PartFills>>,
+}
+
+/// One row value a list of parts holds, and how many places on the sheet
+/// it fills.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PartFills {
+    /// The row value's name, such as `PANEL`.
+    pub name: String,
+    /// How many places on the sheet it fills, this one among them.
+    pub fills: usize,
 }
 
 /// One attribute value of an insert, and where it is written.
@@ -200,6 +215,11 @@ pub enum Written {
     /// edit sets the row's value, on this sheet alone, in every place it
     /// fills.
     RowValue,
+    /// By the sheet's row, as the row values its template joins with plain
+    /// text in a list of parts: an edit is matched to the parts and sets
+    /// each row value they hold, on this sheet alone, in every place each
+    /// fills.
+    RowValues,
     /// Nowhere: an attribute the insert gives no value for, which shows its
     /// definition's default. An edit sets it on the insert, where its
     /// `from` says.
@@ -511,6 +531,7 @@ fn values_of(
             written: None,
             row_value: None,
             fills: None,
+            row_values: None,
         };
         if let (Some(source), Some((_, fills))) = (source, &own) {
             given.written = Some(match source {
@@ -520,6 +541,18 @@ fn values_of(
                     given.fills = Some(fills.get(&name).copied().unwrap_or(1));
                     given.row_value = Some(name);
                     Written::RowValue
+                }
+                Source::Parts(names) => {
+                    given.row_values = Some(
+                        names
+                            .into_iter()
+                            .map(|name| PartFills {
+                                fills: fills.get(&name).copied().unwrap_or(1),
+                                name,
+                            })
+                            .collect(),
+                    );
+                    Written::RowValues
                 }
             });
         }

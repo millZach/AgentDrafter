@@ -7,6 +7,12 @@
 //! or an mtext's contents, or as a table cell's text. A sheet is the template with each `{row: NAME}`
 //! replaced by the row's value `NAME`, read as a sheet description is read.
 //!
+//! A text's or an mtext's contents, and the value of an attribute an
+//! insert's block defines once, may also be a list of parts, plain text and
+//! values from the row joined in order ([`super::parts`]), as Zach decided
+//! on 2026-11-19 (#102). A tag the block defines more than once takes a
+//! list of its values, as before, so which a list is comes of the block.
+//!
 //! A row may also hold objects of its own, which are on its sheet alone,
 //! after the template's. They write their values themselves: a value from
 //! the row has no place in them.
@@ -19,8 +25,9 @@
 
 use std::path::Path;
 
-use super::blocks::Noticed;
+use super::blocks::{self, Noticed};
 use super::ids::ObjectRecord;
+use super::parts::{self, read_parts};
 use super::records::{notices_of, SheetRecord};
 use super::set::{value_name_problem, Row};
 use super::strict_yaml::{self, index_path, key_path, Kind, Node, Pos};
@@ -36,6 +43,29 @@ use crate::units::Unit;
 /// The one key of a value a template takes from a row: `{row: NAME}`.
 pub(crate) const ROW_KEY: &str = "row";
 
+/// How many times the block of an insert carries an attribute: given the
+/// block's name and the tag, in capitals, the number of its definitions
+/// with that tag an insert carries a value for, when the block is known.
+/// A list given for a tag carried once is a list of parts; for a tag
+/// carried more than once, the tag's values.
+pub(crate) type Carries<'a> = &'a dyn Fn(&str, &str) -> Option<usize>;
+
+/// Knows no block, so a list given for an attribute is taken item by item,
+/// as a tag's values.
+pub(crate) fn no_blocks(_: &str, _: &str) -> Option<usize> {
+    None
+}
+
+/// How many times the block `block` of `library` carries `tag`, as
+/// [`Carries`] asks.
+fn carried_in(library: &BlockLibrary, block: &str, tag: &str) -> Option<usize> {
+    library
+        .blocks
+        .iter()
+        .find(|b| b.name == block)
+        .map(|b| b.carried_attributes().filter(|d| d.tag == tag).count())
+}
+
 /// One place a row's value went in a template.
 struct Filled {
     /// The path of the place in the template, such as
@@ -45,6 +75,9 @@ struct Filled {
     name: String,
     /// Where `{row: NAME}` is written in the template.
     at: Pos,
+    /// The list of parts the value went in, as the template writes it, when
+    /// it went in one.
+    parts: Option<String>,
 }
 
 /// Reads the template in the file at `path` as the sheet `row` names,
@@ -196,8 +229,42 @@ pub(super) fn fill_with_records(
     let mut root = strict_yaml::read(text)?;
     let mut filled: Vec<Filled> = Vec::new();
     let mut missing: Vec<(String, String)> = Vec::new();
+    // A list given for an attribute is a list of parts or a tag's values,
+    // as the insert's block carries the tag once or more, so the block
+    // library is read first when the template gives one.
+    let mut early: Option<(String, Result<BlockLibrary, Error>)> =
+        root.as_ref().and_then(library_read_early).map(|written| {
+            let read = load(&written);
+            (written, read)
+        });
     if let Some(root) = root.as_mut() {
-        each_place(root, &mut |node, place| {
+        let library = early.as_ref().and_then(|(_, read)| read.as_ref().ok());
+        let carries = |block: &str, tag: &str| carried_in(library?, block, tag);
+        each_place(root, &carries, &mut |node, place, parts_here| {
+            if parts_here {
+                if let Some(parts) = read_parts(node, &place)? {
+                    let pattern = parts::pattern(&parts);
+                    let joined =
+                        parts::join(&parts, |name| row.value(name).map(|v| v.text.clone()));
+                    let lacking = joined.as_ref().err().cloned().unwrap_or_default();
+                    for name in parts::names(&parts) {
+                        if lacking.contains(&name) {
+                            missing.push((name, place.clone()));
+                        } else {
+                            filled.push(Filled {
+                                place: place.clone(),
+                                name,
+                                at: node.at,
+                                parts: Some(pattern.clone()),
+                            });
+                        }
+                    }
+                    if let Ok(text) = joined {
+                        node.kind = Kind::Scalar(text);
+                    }
+                    return Ok(());
+                }
+            }
             let Some(name) = row_value_name(node, &place)? else {
                 return Ok(());
             };
@@ -208,6 +275,7 @@ pub(super) fn fill_with_records(
                         place,
                         name,
                         at: node.at,
+                        parts: None,
                     });
                 }
                 None => missing.push((name, place)),
@@ -224,8 +292,60 @@ pub(super) fn fill_with_records(
         path: row.objects_path(),
         file: rows_file,
     };
-    sheet_and_records(root, load, Some(set_units), Some(row_objects), noticed)
-        .map_err(|e| at_row_value(e, &filled, row, rows_file))
+    // The library read first is the one the sheet reads.
+    let mut load_once = |written: &str| match early.take() {
+        Some((first, read)) if first == written => read,
+        _ => load(written),
+    };
+    sheet_and_records(
+        root,
+        &mut load_once,
+        Some(set_units),
+        Some(row_objects),
+        noticed,
+    )
+    .map_err(|e| at_row_value(e, &filled, row, rows_file))
+}
+
+/// The block library a template's tree names, as it writes the path, when
+/// one of its inserts gives a list for an attribute, whose meaning the
+/// library says; none otherwise, or when the path is wrong, for the
+/// sheet's reading to refuse.
+fn library_read_early(root: &Node) -> Option<String> {
+    let Kind::Mapping(entries) = &root.kind else {
+        return None;
+    };
+    let objects = entries.iter().find(|e| e.key == "objects")?;
+    let Kind::Sequence(items) = &objects.value.kind else {
+        return None;
+    };
+    let lists = items.iter().any(|item| {
+        let Kind::Mapping(types) = &item.kind else {
+            return false;
+        };
+        let [object] = types.as_slice() else {
+            return false;
+        };
+        let Kind::Mapping(keys) = &object.value.kind else {
+            return false;
+        };
+        object.key == "insert"
+            && keys.iter().any(|k| {
+                k.key == "attributes"
+                    && matches!(&k.value.kind, Kind::Mapping(values)
+                        if values.iter().any(|v| matches!(v.value.kind, Kind::Sequence(_))))
+            })
+    });
+    if !lists {
+        return None;
+    }
+    let library = entries.iter().find(|e| e.key == "block_library")?;
+    if library.value.is_bare_null() {
+        return None;
+    }
+    blocks::library_path(&library.value, "block_library")
+        .ok()
+        .map(str::to_owned)
 }
 
 /// A notice for each of the row's values its template has no place for.
@@ -280,8 +400,12 @@ fn unused_values(
 pub(super) fn names(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     if let Ok(Some(mut root)) = strict_yaml::read(text) {
-        let _ = each_place(&mut root, &mut |node, place| {
-            if let Some(name) = row_value_name(node, &place)? {
+        let _ = each_place(&mut root, &no_blocks, &mut |node, place, parts_here| {
+            let found = match parts_here.then(|| parts::parts_of(node)).flatten() {
+                Some(parts) => parts::names(&parts),
+                None => row_value_name(node, &place)?.into_iter().collect(),
+            };
+            for name in found {
                 if !names.contains(&name) {
                     names.push(name);
                 }
@@ -294,47 +418,79 @@ pub(super) fn names(text: &str) -> Vec<String> {
 
 /// Refuses `{row: NAME}` in a sheet description built on its own: only a
 /// template built from a row of a drawing set has a row to take it from.
+/// So is a list of parts that holds one.
 pub(super) fn refuse_row_values(root: Option<&mut Node>) -> Result<(), Error> {
     let Some(root) = root else {
         return Ok(());
     };
-    each_place(root, &mut |node, place| match &node.kind {
-        Kind::Mapping(entries) if entries.iter().any(|e| e.key == ROW_KEY) => Err(Error::new(
-            ErrorCode::WrongType,
-            "a value from a row, `{row: NAME}`, is filled in when a template is built as a \
+    each_place(
+        root,
+        &no_blocks,
+        &mut |node, place, _| match row_value_in(node, &place) {
+            Some((at, field)) => Err(Error::new(
+                ErrorCode::WrongType,
+                "a value from a row, `{row: NAME}`, is filled in when a template is built as a \
                  sheet of a drawing set; a sheet description built on its own writes the value \
                  itself, so build the set's folder or write the value here",
-        )
-        .at_field(place)
-        .at_position(node.at.line, node.at.column)),
-        _ => Ok(()),
-    })
+            )
+            .at_field(field)
+            .at_position(at.line, at.column)),
+            None => Ok(()),
+        },
+    )
 }
 
 /// Refuses `{row: NAME}` in one of a row's own objects, at `path` in the
-/// rows file: the row writes its own objects' values itself.
+/// rows file: the row writes its own objects' values itself. So is a list
+/// of parts that holds one.
 pub(super) fn refuse_row_values_in(item: &Node, path: &str) -> Result<(), Error> {
     let mut item = item.clone();
-    places_in(&mut item, path, &mut |node, place| match &node.kind {
-        Kind::Mapping(entries) if entries.iter().any(|e| e.key == ROW_KEY) => Err(Error::new(
-            ErrorCode::WrongType,
-            "a value from a row, `{row: NAME}`, belongs in a template; a row's own objects \
-             are on its sheet alone, so write the value itself here",
-        )
-        .at_field(place)
-        .at_position(node.at.line, node.at.column)),
-        _ => Ok(()),
-    })
+    places_in(
+        &mut item,
+        path,
+        &no_blocks,
+        &mut |node, place, _| match row_value_in(node, &place) {
+            Some((at, field)) => Err(Error::new(
+                ErrorCode::WrongType,
+                "a value from a row, `{row: NAME}`, belongs in a template; a row's own objects \
+                 are on its sheet alone, so write the value itself here",
+            )
+            .at_field(field)
+            .at_position(at.line, at.column)),
+            None => Ok(()),
+        },
+    )
 }
+
+/// Where `node`, at `place`, writes a value from the row, and the path of
+/// it: `node` itself when it is `{row: NAME}`, or the first such item of a
+/// list.
+fn row_value_in(node: &Node, place: &str) -> Option<(Pos, String)> {
+    let is_row = |n: &Node| matches!(&n.kind, Kind::Mapping(entries) if entries.iter().any(|e| e.key == ROW_KEY));
+    if is_row(node) {
+        return Some((node.at, place.to_owned()));
+    }
+    let Kind::Sequence(items) = &node.kind else {
+        return None;
+    };
+    items
+        .iter()
+        .enumerate()
+        .find(|(_, item)| is_row(item))
+        .map(|(i, item)| (item.at, index_path(place, i)))
+}
+
+/// What [`places_in`] calls with each place: the node there, its path,
+/// and whether a list of parts may stand there, as a text's or an mtext's
+/// contents or the value of an attribute its insert's block carries once.
+pub(crate) type Visit<'a> = dyn FnMut(&mut Node, String, bool) -> Result<(), Error> + 'a;
 
 /// Calls `visit` with each place in a sheet's tree where a template may put
 /// a value from a row, and the path of the place: each value under an
 /// insert's `attributes`, and the `contents` of each text and mtext. A tree
-/// of another shape is left as it is, for the reader to refuse.
-fn each_place(
-    root: &mut Node,
-    visit: &mut dyn FnMut(&mut Node, String) -> Result<(), Error>,
-) -> Result<(), Error> {
+/// of another shape is left as it is, for the reader to refuse. `carries`
+/// says how many times an insert's block carries a tag.
+fn each_place(root: &mut Node, carries: Carries, visit: &mut Visit) -> Result<(), Error> {
     let Kind::Mapping(entries) = &mut root.kind else {
         return Ok(());
     };
@@ -345,32 +501,39 @@ fn each_place(
         return Ok(());
     };
     for (i, item) in items.iter_mut().enumerate() {
-        places_in(item, &index_path("objects", i), visit)?;
+        places_in(item, &index_path("objects", i), carries, visit)?;
     }
     Ok(())
 }
 
 /// Calls `visit` with each value of an insert's `attributes`, or of a
-/// multileader's block content's, at `path`.
+/// multileader's block content's, at `path`. For an insert, `block` names
+/// its block: a list given for a tag `carries` says it carries once is a
+/// list of parts, visited whole.
 fn attribute_places(
     attributes: &mut Node,
     path: &str,
-    visit: &mut dyn FnMut(&mut Node, String) -> Result<(), Error>,
+    block: Option<&str>,
+    carries: Carries,
+    visit: &mut Visit,
 ) -> Result<(), Error> {
     let Kind::Mapping(values) = &mut attributes.kind else {
         return Ok(());
     };
     for value in values {
         let path = key_path(path, &value.key);
+        let once =
+            block.and_then(|block| carries(block, &blocks::tag_in_capitals(&value.key))) == Some(1);
         // A tag the block defines more than once takes a list, and each of
         // its items may be a value from the row.
         match &mut value.value.kind {
+            Kind::Sequence(_) if once => visit(&mut value.value, path, true)?,
             Kind::Sequence(items) => {
                 for (i, item) in items.iter_mut().enumerate() {
-                    visit(item, index_path(&path, i))?;
+                    visit(item, index_path(&path, i), false)?;
                 }
             }
-            _ => visit(&mut value.value, path)?,
+            _ => visit(&mut value.value, path, false)?,
         }
     }
     Ok(())
@@ -382,7 +545,8 @@ fn attribute_places(
 pub(super) fn places_in(
     item: &mut Node,
     path: &str,
-    visit: &mut dyn FnMut(&mut Node, String) -> Result<(), Error>,
+    carries: Carries,
+    visit: &mut Visit,
 ) -> Result<(), Error> {
     let Kind::Mapping(types) = &mut item.kind else {
         return Ok(());
@@ -396,18 +560,32 @@ pub(super) fn places_in(
     };
     match object.key.as_str() {
         "insert" => {
+            let block = keys
+                .iter()
+                .find(|k| k.key == "block")
+                .and_then(|k| match &k.value.kind {
+                    Kind::Scalar(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
             let Some(attributes) = keys.iter_mut().find(|k| k.key == "attributes") else {
                 return Ok(());
             };
             attribute_places(
                 &mut attributes.value,
                 &key_path(&object_path, "attributes"),
+                Some(&block),
+                carries,
                 visit,
             )?;
         }
         "text" | "mtext" => {
             if let Some(contents) = keys.iter_mut().find(|k| k.key == "contents") {
-                visit(&mut contents.value, key_path(&object_path, "contents"))?;
+                visit(
+                    &mut contents.value,
+                    key_path(&object_path, "contents"),
+                    true,
+                )?;
             }
         }
         // A multileader's content's text, and an older leader's
@@ -427,13 +605,15 @@ pub(super) fn places_in(
             let held_path = key_path(&object_path, holder);
             for key in held_keys.iter_mut() {
                 match key.key.as_str() {
-                    "text" => visit(&mut key.value, key_path(&held_path, "text"))?,
+                    "text" => visit(&mut key.value, key_path(&held_path, "text"), false)?,
                     // A multileader's block content's attribute values, as
                     // an insert's.
                     "attributes" if holder == "content" => {
                         attribute_places(
                             &mut key.value,
                             &key_path(&held_path, "attributes"),
+                            None,
+                            carries,
                             visit,
                         )?;
                     }
@@ -462,9 +642,9 @@ pub(super) fn places_in(
                         continue;
                     };
                     if keys.iter().any(|k| k.key == ROW_KEY) {
-                        visit(item, path)?;
+                        visit(item, path, false)?;
                     } else if let Some(text) = keys.iter_mut().find(|k| k.key == "text") {
-                        visit(&mut text.value, key_path(&path, "text"))?;
+                        visit(&mut text.value, key_path(&path, "text"), false)?;
                     }
                 }
             }
@@ -544,11 +724,19 @@ fn at_row_value(error: Error, filled: &[Filled], row: &Row, rows_file: &Path) ->
         return error;
     };
     let at = row.value(&f.name).map_or(row.at, |v| v.at);
-    Error {
-        message: format!(
+    let message = match &f.parts {
+        None => format!(
             "the value `{}` of sheet `{}`, which its template `{}` fills in at `{}`: {}",
             f.name, row.sheet, row.template, f.place, error.message
         ),
+        Some(pattern) => format!(
+            "the text sheet `{}`'s template `{}` joins at `{}` from its parts {pattern}, with \
+             the row's value `{}`: {}",
+            row.sheet, row.template, f.place, f.name, error.message
+        ),
+    };
+    Error {
+        message,
         field: Some(row.value_path(&f.name)),
         line: Some(at.line),
         column: Some(at.column),

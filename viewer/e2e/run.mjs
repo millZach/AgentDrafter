@@ -2311,6 +2311,11 @@ const checks = {
   async props() {
     const folder = freshPlant('props');
     const set = join(folder, 'demo-plant');
+    // The made-up panel set beside it, whose template joins row values
+    // into other text (#102).
+    cpSync(join(root, 'examples', 'panel-set'), join(folder, 'panel-set'), { recursive: true, filter: (path) => !path.includes(join('panel-set', 'dwg')) });
+    const panel = agentIn(folder, 'build', 'panel-set');
+    assert(panel.ok, `the panel set builds: ${JSON.stringify(panel.error)}`);
     // A circle of the sheet's own, for its radius and diameter.
     const added = sendChange(folder, {
       operations: [
@@ -2877,6 +2882,45 @@ const checks = {
         assert(problems.length === 0, problems.join('; '));
         await context.close();
       }
+
+      // A value joined from a list of parts (#102), on the made-up panel
+      // set beside the plant: it edits as a row value does, its note names
+      // its row values, and the whole text goes in the change the page
+      // sends, which the core matches to the parts.
+      {
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=panel-set&sheet=PNL-001`, 'PNL-001');
+        await live(page);
+        await page.keyboard.press('F3');
+        const panelRows = () => readFileSync(join(folder, 'panel-set', 'rows.yaml'), 'utf8');
+        const panelJournal = () => agentIn(folder, 'journal', 'panel-set').result.entries;
+        const heading = await placeOf(page, "(o) => o.id === 'PNL-001/heading'");
+        await select(page, heading, false);
+        const said = await chips(page);
+        assert(said.includes('2 row values'), `the chip says its row values: ${said}`);
+        await page.click('.qp [data-prop="contents"]');
+        const note = await page.textContent('.qp [data-note="contents"]');
+        assert(note.includes('row values PANEL and SLOT') && note.includes('Only this sheet changes'), `the note names its row values: ${note}`);
+        const before = panelJournal().length;
+        await page.fill('.qp [data-prop="contents"]', 'PANEL P9 SLOT 5');
+        await page.keyboard.press('Enter');
+        assert((await page.locator('[data-template-dialog]').count()) === 0, 'no template dialog');
+        const until = Date.now() + 30000;
+        while (panelJournal().length <= before) {
+          assert(Date.now() < until, `the joined text lands: ${await bar(page)}`);
+          await sleep(100);
+        }
+        const entry = panelJournal().at(-1);
+        const op = entry.change_set.operations[0];
+        assert(same(op, { op: 'change', target: { id: 'PNL-001/heading' }, set: { contents: 'PANEL P9 SLOT 5' } }), `the whole text is sent: ${JSON.stringify(op)}`);
+        assert(JSON.stringify(entry.landed_on) === '["PNL-001"]', `it lands on its sheet alone: ${entry.landed_on}`);
+        assert(panelRows().includes('PANEL: P9') && panelRows().includes('SLOT: 5'), 'each row value is set');
+        await waitValue(page, 'contents', 'PANEL P9 SLOT 5');
+        await page.screenshot({ path: join(out, 'props-laptop-parts.png') });
+        seen.laptop.parts = entry.entry;
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
       return {
         ...seen,
         screenshots: [
@@ -2886,6 +2930,7 @@ const checks = {
           'props-phone-text.png',
           'props-phone-attribute.png',
           'props-phone-template.png',
+          'props-laptop-parts.png',
         ],
       };
     } finally {

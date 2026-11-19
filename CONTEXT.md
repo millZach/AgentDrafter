@@ -236,6 +236,10 @@ _Avoid_: record (a record is the file that is the truth for a sheet), entry, lin
 One of a row's values: the text its template's `{row: NAME}` stands for, on that row's sheet. It may fill several places on the sheet, such as a wire number written four times; an edit to any of them sets the row value, on that sheet alone, and every place it fills changes.
 _Avoid_: field, variable, placeholder (the template's `{row: NAME}` is where a row value goes, not the value)
 
+**List of parts**:
+A template's text or mtext contents, or an insert's attribute value, written as a list of plain text and `{row: NAME}`, joined in order, so that row values stand inside other text: `['PANEL ', {row: PANEL}, ' SLOT ', {row: SLOT}]`. Its plain text is its fixed parts; an edit of the joined text is matched to them to set each row value it holds, on that sheet alone.
+_Avoid_: format string, interpolation, splice (nothing inside a string is read)
+
 **Set settings**:
 The file at the top of a drawing set's folder, `set.yaml`, that declares the set's unit, where its outputs go and where its rows are.
 _Avoid_: project file, config

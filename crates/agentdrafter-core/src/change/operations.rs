@@ -484,8 +484,12 @@ fn does(spec: &Spec) -> String {
                          template takes from the row are set in that sheet's row, and so is the \
                          text of a multileader's content or a leader's annotation its template \
                          takes from the row, when the new content or annotation differs in its \
-                         text alone; any other change of them edits the template. AutoCAD's \
-                         CHANGE."
+                         text alone; any other change of them edits the template. Contents the \
+                         template joins from a list of parts, plain text and values from the \
+                         row, are matched to the parts' fixed text, and each row value they \
+                         hold is set in that sheet's row; it is refused when the fixed text \
+                         differs or the text splits more than one way, and row_value sets one \
+                         part alone. AutoCAD's CHANGE."
             .to_owned(),
         Kind::ChangeViewport => "Sets a viewport's scale, its view centre, the point of model \
                                  space at its middle, or its display lock, locked: each that is \
@@ -670,7 +674,12 @@ fn does(spec: &Spec) -> String {
                                in capitals, as AutoCAD keeps it. When the insert's template \
                                takes that attribute from the row, the sheet's row value is set \
                                instead, on that sheet alone, and the reply names every place on \
-                               the sheet the value fills. AutoCAD's ATTEDIT."
+                               the sheet the value fills. A value the template joins from a list \
+                               of parts, plain text and values from the row, is matched to the \
+                               parts' fixed text, and each row value it holds is set; it is \
+                               refused when the fixed text differs or the value splits more \
+                               than one way, and row_value sets one part alone. AutoCAD's \
+                               ATTEDIT."
             .to_owned(),
     }
 }
@@ -1173,6 +1182,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                     "minProperties": 1,
                     "propertyNames": { "not": { "enum": ["id"] } },
                 },
+                ROW_VALUE_KEY: row_value_key(),
             },
         }),
         Kind::ChangeViewport => json!({
@@ -1360,6 +1370,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                     "minimum": 1,
                 },
                 "value": { "$ref": "#/$defs/attribute_value" },
+                ROW_VALUE_KEY: row_value_key(),
             },
         }),
     };
@@ -1368,6 +1379,21 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
     let required = schema["required"].as_array_mut().expect("a list");
     required.insert(0, json!(OP_KEY));
     schema
+}
+
+/// The key of an operation that sets one row value of a list of parts.
+pub(crate) const ROW_VALUE_KEY: &str = "row_value";
+
+/// The schema of an operation's `row_value`.
+fn row_value_key() -> Value {
+    json!({
+        "description": "When the template joins this value from a list of parts, plain text \
+                        and values from the row, the one row value of the parts to set, by \
+                        name, to the text sent, on this sheet alone. Without it the text sent \
+                        is the whole value, matched to the parts' fixed text to find each row \
+                        value's.",
+        "$ref": "#/$defs/value_name",
+    })
 }
 
 /// The schema of a table operation, before its `op`.
@@ -1733,6 +1759,10 @@ pub(crate) struct Operation {
     pub index: usize,
     pub spec: &'static Spec,
     pub body: Body,
+    /// For a change of a text's contents or a set_attribute whose template
+    /// joins the value from a list of parts, the one row value of the parts
+    /// it sets, by name, rather than matching the whole text to the parts.
+    pub row_value: Option<String>,
     /// The operation as it was sent.
     pub sent: Value,
 }
@@ -2369,7 +2399,7 @@ fn operation(
             Body::Add { to, keys, snaps }
         }
         Kind::Change => {
-            keys(&["target", "set"])?;
+            keys(&["target", "set", ROW_VALUE_KEY])?;
             let target = target()?;
             let set = match map.get("set") {
                 Some(Value::Object(set)) if !set.is_empty() => set.clone(),
@@ -2591,7 +2621,7 @@ fn operation(
             Body::Delete { target: target()? }
         }
         Kind::SetAttribute => {
-            keys(&["target", "tag", "occurrence", "value"])?;
+            keys(&["target", "tag", "occurrence", "value", ROW_VALUE_KEY])?;
             let target = target()?;
             let occurrence =
                 match map.get("occurrence") {
@@ -2972,10 +3002,26 @@ fn operation(
             }
         }
     };
+    // Only change and set_attribute take it: the keys above refuse it
+    // elsewhere.
+    let row_value = match map.get(ROW_VALUE_KEY) {
+        None => None,
+        Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
+        Some(_) => {
+            return Err(fail(
+                ErrorCode::WrongType,
+                "expected row_value, the name of the one row value to set of the parts the \
+                 template joins the value from, such as PANEL"
+                    .to_owned(),
+                ROW_VALUE_KEY,
+            ))
+        }
+    };
     Ok(Operation {
         index,
         spec,
         body,
+        row_value,
         sent: value.clone(),
     })
 }
