@@ -82,6 +82,8 @@ export interface Probe {
   marked?: Marked;
   /** The box round the objects at these places, [left, bottom, right, top] in drawing units; empty when they draw nothing. */
   bounds(places: number[]): number[];
+  /** The place of the object a click at the drawing point (x, y) picks, within `reach` CSS pixels at the view shown, as a click does; -1 for none. */
+  pickAt(x: number, y: number, reach: number): number;
   view(): View;
   /** Shows `view` from the next frame, as a pan or a zoom does. */
   show(view: View): void;
@@ -123,6 +125,9 @@ export function installProbe(parts: Parts): () => void {
     summary: null,
     bounds(places) {
       return [...(parts.viewer()?.bounds_of(Uint32Array.from(places)) ?? [])];
+    },
+    pickAt(x, y, reach) {
+      return parts.viewer()?.pick(x, y, reach / parts.view().scale) ?? -1;
     },
     view: parts.view,
     show: parts.show,

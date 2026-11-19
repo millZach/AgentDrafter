@@ -306,7 +306,7 @@ export interface ToolSend {
 }
 
 /** Where a quick property's value is written, as its chip says it (`Viewer.props_fields`). */
-export type PropTone = 'template' | 'row' | 'row_value' | 'unset';
+export type PropTone = 'template' | 'row_value' | 'unset';
 
 /** One row of quick properties an edit can change, as the renderer gives it (`Viewer.props_fields`). */
 export interface PropField {

@@ -78,6 +78,31 @@ test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move and Erase 
   for (const tool of PANELS.flatMap((p) => p.tools)) assert.ok(tool.tip.length > 20, `${tool.label} has a tip in plain words`);
 });
 
+test('a text edited on the drawing says so in the command bar, as TEXTEDIT, and how it lands', () => {
+  const text = { id: 'DP-LD-101/service', type: 'text' };
+  const laptop = promptFor({ ...none, selected: text, editing: text });
+  assert.equal(laptop.command, 'TEXTEDIT');
+  assert.equal(words(laptop.parts), 'service: type on the drawing. Enter or clicking away applies it, Esc puts it back');
+  const phone = promptFor({ ...none, selected: text, editing: text, touch: true });
+  assert.equal(words(phone.parts), 'service: type in the box. Done applies it, Cancel puts it back');
+  // Not while the set as it was is shown, which is read-only.
+  assert.equal(promptFor({ ...none, at: 3, selected: text, editing: text }).command, null);
+});
+
+test('an attribute the template leaves unset asks before it is set on every sheet', () => {
+  const edit = {
+    title: 'The template leaves CHECKED unset.',
+    detail: 'Setting it sets it on the template, so it lands on all 7 sheets.',
+    path: 'templates/loop-2-wire.yaml',
+    sheets: ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'],
+  };
+  assert.deepEqual(templateWords(edit), {
+    title: 'The template leaves CHECKED unset.',
+    body: 'Setting it sets it on the template, so it lands on all 7 sheets. The template loop-2-wire.yaml changes, and so does every sheet built from it:',
+    button: 'Change all 7 sheets',
+  });
+});
+
 test('the command bar prompts for a command or a selection, and offers Move, Erase and Clear on what is selected', () => {
   assert.equal(words(promptFor(none).parts), 'Type a command, such as L for Line, or select an object, or click a snap to read its point');
   assert.equal(words(promptFor({ ...none, touch: true }).parts), 'Pick a tool in Tools, or tap an object to see it; touch and hold to read a point');

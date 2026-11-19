@@ -230,7 +230,6 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 .qchip { display: block; width: fit-content; margin-top: 2px; padding: 0 6px; border-radius: 8px; font-size: 10px; line-height: 15px; border: 1px solid; }
 .qchip.template { color: #ffd27a; border-color: #8a6a26; background: #3a3020; }
 .qchip.row_value { color: #9cc9ff; border-color: #3c6694; background: #1f3047; }
-.qchip.row { color: #a6e3bd; border-color: #3c7a55; background: #1f3a2b; }
 .qchip.unset { color: #c7cdd6; border-color: #6a7689; background: #2b323d; }
 .qin {
   width: 100%; background: #1b2129; border: 1px solid #5a6577; border-radius: 3px; padding: 3px 6px; color: #fff;

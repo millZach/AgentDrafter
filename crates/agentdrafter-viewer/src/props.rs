@@ -28,8 +28,6 @@ use crate::tools::{f4, number, plural, Context, ObjectInfo, Reach, Send, Templat
 pub enum Tone {
     /// The template's: an edit changes every sheet built from it.
     Template,
-    /// This sheet's row's own object: an edit changes this sheet alone.
-    Row,
     /// A value the sheet's row fills: an edit changes this sheet alone, in
     /// every place it fills.
     RowValue,
@@ -164,7 +162,9 @@ fn chip_and_note(lands: &Lands, tag: Option<&str>) -> (Option<Chip>, Option<Stri
             };
             (chip(plural(n, "sheet", "sheets"), Tone::Template), Some(note))
         }
-        Lands::Row => (chip("this sheet".to_owned(), Tone::Row), None),
+        // The default: "Comes from" says it, and a chip on each row would
+        // crowd a phone's card.
+        Lands::Row => (None, None),
         Lands::RowValue { name, fills } => {
             let note = if *fills > 1 {
                 format!(

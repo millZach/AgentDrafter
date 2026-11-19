@@ -191,13 +191,7 @@ fn a_rows_own_object_changes_this_sheet_alone() {
     assert_eq!(sent(&edited).sheets, ["DP-LD-101"]);
     assert_eq!(sent(&edited).template, None);
     let fields = fields(&context, WASHER);
-    assert_eq!(
-        field(&fields, "layer").chip,
-        Some(Chip {
-            words: "this sheet".to_owned(),
-            tone: Tone::Row
-        })
-    );
+    assert_eq!(field(&fields, "layer").chip, None, "the row's own, as Comes from says");
     assert_eq!(field(&fields, "layer").note, None);
 }
 
