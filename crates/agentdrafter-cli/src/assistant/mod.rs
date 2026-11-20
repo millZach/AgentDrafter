@@ -797,7 +797,7 @@ struct Turn {
 /// The note a conversation on `agent` begins with.
 fn started_words(agent: Agent, set: &Path) -> String {
     format!(
-        "On {}: AgentDrafter starts {} pointed at agentdrafter mcp, on {}.",
+        "On {}: AgentDrafter started {} and pointed it at agentdrafter mcp, on {}.",
         agent.name(),
         agent.command(),
         set.display()

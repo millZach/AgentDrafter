@@ -1,9 +1,9 @@
 // What the side panel and the cards hold: the peek, which a phone always
-// shows, with the stream's state, the newest entry, Undo last and Accept;
-// the journal, which steps through the set's entries; quick properties,
-// which show the object the drafter selected and edit its layer, a
-// text's contents, an insert's attributes and a circle's radius; and the
-// assistant's place.
+// shows, with the way into the assistant's chat, the stream's state, the
+// newest entry, Undo last and Accept; the journal, which steps through the
+// set's entries; and quick properties, which show the object the drafter
+// selected and edit its layer, a text's contents, an insert's attributes
+// and a circle's radius. The assistant's panel is Assistant.tsx.
 // Plain components: what they do is the page's (App.tsx).
 
 import { useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent } from 'react';
@@ -44,13 +44,22 @@ export interface PeekProps {
   onAccept(): void;
   /** The proposals waiting (#155): how many, in words, and what opens the first on the sheet shown; null for none. */
   proposals?: { count: number; words: string; onOpen(): void } | null;
+  /** The way into the assistant's chat (#156): what it says, the agent's name, whether none was found, and what opens the chat. */
+  ask?: { words: string; agent: string | null; none: boolean; onAsk(): void } | null;
 }
 
-export function Peek({ line, live, journal, failing, undoable, blocked, busy, stepping, onShow, onUndo, onAccept, proposals = null }: PeekProps) {
+export function Peek({ line, live, journal, failing, undoable, blocked, busy, stepping, onShow, onUndo, onAccept, proposals = null, ask = null }: PeekProps) {
   const last = journal?.entries.at(-1);
   const state = last && journal ? entryState(last, journal, failing) : null;
   return (
     <>
+      {ask && (
+        <button type="button" className={`pk-ask${ask.none ? ' none' : ''}`} data-act="ask" onClick={ask.onAsk}>
+          <i />
+          <span className="t">{ask.words}</span>
+          {ask.agent && <span className="a">{ask.agent}</span>}
+        </button>
+      )}
       <div className={`live ${live}`}>
         <i />
         <span>{line}</span>
@@ -562,19 +571,5 @@ function PropRow({ field, layers, onCommit, onRefuse, resetKey }: PropRowProps) 
         </tr>
       )}
     </>
-  );
-}
-
-/** The assistant's place in the side panel, which build 8 fills. */
-export function Assistant() {
-  return (
-    <div className="assist">
-      <h4>The assistant</h4>
-      <p>Your own agent will draft with you here: ask it what something is, have it draw, and keep or discard what it proposes.</p>
-      <div className="ghost">
-        Not here yet. Agents already draft through change sets from the command line, MCP, Python or HTTP; their work
-        lands in the Journal and on the drawing.
-      </div>
-    </div>
   );
 }

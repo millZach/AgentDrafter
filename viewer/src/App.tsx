@@ -2,10 +2,10 @@
 // title bar with Undo last and Accept, a ribbon with the drawing tools
 // (#152) and the Layer box, a tab for each of the drawing set's sheets, the
 // drawing as dark model space following the working revision live, the
-// command bar under it, a status bar, and the journal in a panel on the
-// right beside the assistant's place. On a phone the ribbon folds behind
-// Tools, the status bar goes, and the journal is a sheet that peeks up from
-// the bottom with Undo last and Accept. A toast names each change set as it
+// command bar under it, a status bar, and the assistant's panel on the
+// right, its Chat beside the Journal (#156). On a phone the ribbon folds
+// behind Tools, the status bar goes, and the panel is a sheet that peeks up
+// from the bottom with the way into the chat, Undo last and Accept. A toast names each change set as it
 // lands and its objects are marked; the journal steps back through the set
 // as it was; a tap selects an object, whose quick properties open beside
 // it. A drawing tool runs in the renderer: the page passes it the clicks,
@@ -13,7 +13,10 @@
 // through `change`, as an agent would, so it lands in the journal, where
 // Undo and Accept take it; the sheet is asked for again as soon as `change`
 // replies. An edit to a template's object is drawn first, before it lands,
-// on each sheet it reaches (#154), and lands only on Change all.
+// on each sheet it reaches (#154), and lands only on Change all. Words
+// typed in the command bar that are no tool's go to the assistant, which
+// is the drafter's own agent, started by `serve`; the page tells the core
+// what the drafter is looking at, with `look-at`, for it to read.
 //
 // The page learns of every change from the server's event stream, which
 // sends the journal each time it changes on disk, whichever process or
@@ -21,7 +24,20 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
-import { call, CommandError, run, watch, type StreamState } from './api.ts';
+import { assistantCall, call, CommandError, run, watch, watchAssistant, type StreamState } from './api.ts';
+import { AssistantPanel, type ChatCardView, type Side } from './Assistant.tsx';
+import {
+  agentName,
+  askHint,
+  lookingAtOf,
+  lookKey,
+  notSentWords,
+  peekAskWords,
+  spaceIsEnter,
+  typedRoute,
+  type AgentsReport,
+  type Conversation,
+} from './assistant.ts';
 import { BottomSheet } from './BottomSheet.tsx';
 import { Drawing, type DrawingHandle, type Focus, type GhostSpec, type Mark, type PreviewTag } from './Drawing.tsx';
 import {
@@ -85,8 +101,8 @@ import {
   previewRedrawnOn,
   reportGeneration,
   drawnFor,
-  enteredAs,
   layoutOn,
+  PANELS,
   previewVerdicts,
   type PreviewReport,
   type TemplateEdit,
@@ -95,8 +111,8 @@ import {
   type PropField,
 } from './frame.ts';
 import { CommandBar, PreviewBand, Ribbon, SnapMenu, StatusBar, TextBox, TextEditBox, TextOnDrawing, VerdictMark } from './Frame.tsx';
-import { screen_color } from './wasm/agentdrafter_viewer.js';
-import { Assistant, JournalList, Peek, QuickProperties } from './Panels.tsx';
+import { is_tool_word, screen_color } from './wasm/agentdrafter_viewer.js';
+import { JournalList, Peek, QuickProperties } from './Panels.tsx';
 import { ProposalCard } from './Proposals.tsx';
 import {
   cardLines,
@@ -259,6 +275,19 @@ const capitalWho = (by: string): string => {
 const listed = (items: (string | number)[]) =>
   items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 
+/** Whether a word typed in the command bar is a drawing tool's alias or name: the renderer's to say. */
+const toolWord = (word: string): boolean => {
+  try {
+    return is_tool_word(word);
+  } catch {
+    return false;
+  }
+};
+
+/** A tool's name on the ribbon, for the command bar's hint: `Move` for MOVE. */
+const toolName = (word: string): string | null =>
+  PANELS.flatMap((p) => p.tools).find((t) => [t.label, t.command, t.alias, t.key].some((x) => upper(x) === upper(word)))?.label ?? null;
+
 export function App({ token, source, sheet, layout }: AppProps) {
   const wide = useWide();
   const [wanted, setWanted] = useState<string | null>(sheet);
@@ -393,7 +422,27 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // Null while they are being asked for.
   const [layers, setLayers] = useState<LayerEntry[] | null>(null);
   const [keptLayer, setKeptLayer] = useState<string | null>(() => readCurrentLayer(keeps, source));
-  const [side, setSide] = useState<'journal' | 'assistant'>('journal');
+  // The side panel's tab: the assistant's chat first, as the prototype shows it.
+  const [side, setSide] = useState<Side>('chat');
+  // The assistant (#156): the agents `serve` found, the conversation its
+  // stream sends, and what the next message leaves off; why it cannot be
+  // reached, when it cannot.
+  const [agents, setAgents] = useState<AgentsReport | null>(null);
+  const [agentsDown, setAgentsDown] = useState<string | null>(null);
+  const [conversation, setConversation] = useState<Conversation | null>(null);
+  const [conversationDown, setConversationDown] = useState<string | null>(null);
+  const [assistantStream, setAssistantStream] = useState<StreamState>('reconnecting');
+  const [chipOff, setChipOff] = useState(false);
+  const [lookingAgain, setLookingAgain] = useState(false);
+  // What the command bar's field holds, for its hint.
+  const [typed, setTyped] = useState('');
+  // A phone's sheet, snapped where the page asks: full for the chat's input, down to its peek for a proposal opened.
+  const [snapAsked, setSnapAsked] = useState<{ key: number; snap: 'peek' | 'half' | 'full' } | null>(null);
+  const snapKeys = useRef(0);
+  const snapSheet = (snap: 'peek' | 'half' | 'full') => {
+    snapKeys.current += 1;
+    setSnapAsked({ key: snapKeys.current, snap });
+  };
   const [history, setHistory] = useState<string[]>([]);
   const [peekHeight, setPeekHeight] = useState(0);
   // The room quick properties have on a phone changes with how far the
@@ -1175,9 +1224,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const enter = (text: string) => {
     const v = renderer();
     if (!v) return;
-    const as = enteredAs(text, !!toolState?.tool, onPreview);
+    const as = typedRoute(text, !!toolState?.tool, onPreview, toolWord);
     if (as === 'refused') {
       log(preview ? 'Change all or Cancel the preview first' : 'Drawing the sheet as it is first');
+      return;
+    }
+    if (as === 'assistant') {
+      // Words that are no tool's go to the assistant, in its chat.
+      askFromBar(text.trim());
       return;
     }
     if (as === 'start') {
@@ -1192,6 +1246,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const f = field.current;
     const text = f?.value ?? '';
     if (f) f.value = '';
+    setTyped('');
     enter(text);
   };
   useEffect(() => {
@@ -1214,6 +1269,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   escape.current = () => {
     // Esc drops what is typed, as AutoCAD's does.
     if (field.current) field.current.value = '';
+    setTyped('');
     if (editing) setEditing(null);
     else if (preview) cancelPreview();
     else if (asking) setAsking(null);
@@ -1246,12 +1302,15 @@ export function App({ token, source, sheet, layout }: AppProps) {
       return;
     }
     if (target?.closest?.('button') && (e.key === 'Enter' || e.key === ' ')) return;
-    if (e.key === 'Enter' || e.key === ' ') {
+    // Space is Enter inside a tool, with nothing typed, or after a short
+    // alias; after other words it is a space, so a sentence can be typed
+    // for the assistant.
+    if (e.key === 'Enter' || (e.key === ' ' && spaceIsEnter(field.current?.value ?? '', !!toolState?.tool, toolWord))) {
       e.preventDefault();
       enterTyped();
       return;
     }
-    if (e.key.length === 1 && e.key !== ' ') {
+    if (e.key.length === 1) {
       // Typing anywhere goes to the command bar, as in AutoCAD.
       e.preventDefault();
       setFieldShown(true);
@@ -1259,6 +1318,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       if (!f) return;
       f.hidden = false;
       f.value += e.key;
+      setTyped(f.value);
       f.focus({ preventScroll: true });
       if (toolState?.typing_text) renderer()?.tool_typing(f.value);
       drawing.current?.redraw();
@@ -1783,6 +1843,127 @@ export function App({ token, source, sheet, layout }: AppProps) {
     }
   };
 
+  // The assistant (#156). The agents `serve` found on the PATH when it
+  // started, asked for once; Look again asks it to look again.
+  useEffect(() => {
+    let current = true;
+    assistantCall<AgentsReport>('', null, token).then(
+      (report) => {
+        if (!current) return;
+        setAgents(report);
+        setAgentsDown(null);
+      },
+      (e) => current && setAgentsDown(`The assistant can’t be reached: ${why(e, token)}`),
+    );
+    return () => {
+      current = false;
+    };
+  }, [token]);
+  // The conversation, from its stream: each event holds the whole of it.
+  // The assistant works on a drawing set, which has a journal.
+  const isSet = !!journal;
+  useEffect(() => {
+    if (!isSet) return;
+    return watchAssistant(
+      source,
+      token,
+      (text) => {
+        const replied = JSON.parse(text) as { ok: boolean; result?: Conversation; error?: { message?: string } };
+        if (!replied.ok || !replied.result) {
+          setConversationDown(`The assistant can’t be reached here: ${replied.error?.message ?? 'the server said nothing of it'}`);
+          return;
+        }
+        setConversationDown(null);
+        setConversation(replied.result);
+      },
+      setAssistantStream,
+    );
+  }, [source, token, isSet]);
+  const unreachable =
+    agentsDown ??
+    (noJournal ? 'The assistant works on a drawing set’s folder, and this is not one.' : null) ??
+    conversationDown ??
+    (assistantStream === 'refused' ? 'The assistant can’t be reached here: it works on a drawing set, in the viewer opened from the address agentdrafter serve printed.' : null);
+  const runningAgent = agentName(agents, conversation?.agent ?? null);
+  // What the drafter is looking at, which the next message carries: the
+  // sheet shown, its layout, and the object selected, by its ID.
+  const look = lookingAtOf(summary?.sheet ?? null, summary?.layout ?? null, object?.id ? { id: object.id, name: nameOf(object) } : null);
+  // The same, recorded in the core with `look-at` for the agent to read
+  // through `looking-at`: on a drawing set's sheet as it is, once it is
+  // drawn and each time it changes, a moment after. A failure says nothing.
+  const recordable = !!journal && at === null && !preview && !onPreview && !!summary && summary.entry === null && summary.preview == null;
+  const lookToRecord = recordable ? look : null;
+  const lookToRecordKey = lookKey(lookToRecord);
+  const lookRecorded = useRef('');
+  useEffect(() => {
+    if (!lookToRecord || lookToRecordKey === lookRecorded.current) return;
+    const soon = setTimeout(() => {
+      lookRecorded.current = lookToRecordKey;
+      call('look-at', { set: source, sheet: lookToRecord.sheet, layout: lookToRecord.layout, selected: lookToRecord.selected }, token).catch((e: unknown) => {
+        lookRecorded.current = '';
+        console.warn(`What you are looking at was not recorded: ${why(e, token)}`);
+      });
+    }, 300);
+    return () => clearTimeout(soon);
+    // The key says what it holds.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lookToRecordKey, source, token]);
+  /**
+   * Sends the drafter's message to the assistant, carrying what they look
+   * at unless × left it off; false when it did not go.
+   */
+  const ask = async (text: string, via: 'chat' | 'command_bar'): Promise<boolean> => {
+    if (!runningAgent) {
+      setSide('chat');
+      setRaise((r) => r + 1);
+      say('warn', 'No agent to ask', 'Install Claude Code or Codex first: the panel says how.');
+      return false;
+    }
+    if (conversation?.busy) {
+      say('info', `${runningAgent} is still working`, 'It answers one message at a time.');
+      return false;
+    }
+    try {
+      await assistantCall('messages', { set: source, text, via, looking_at: chipOff ? null : look }, token);
+      setChipOff(false);
+      return true;
+    } catch (e) {
+      say('warn', 'Not sent to the assistant', notSentWords(e instanceof CommandError ? e.code : '', why(e, token), runningAgent));
+      return false;
+    }
+  };
+  // Words from the command bar: the chat opens, raised to half on a phone, and they go.
+  function askFromBar(text: string) {
+    setSide('chat');
+    setRaise((r) => r + 1);
+    log(`To the assistant: “${text}”`);
+    void ask(text, 'command_bar');
+  }
+  const pickAgent = (agent: string) => {
+    assistantCall('agent', { set: source, agent }, token).catch((e: unknown) =>
+      say('warn', 'The agent was not changed', notSentWords(e instanceof CommandError ? e.code : '', why(e, token), runningAgent)),
+    );
+  };
+  const lookAgain = () => {
+    setLookingAgain(true);
+    assistantCall<AgentsReport>('find', {}, token)
+      .then(
+        (report) => {
+          setAgents(report);
+          setAgentsDown(null);
+        },
+        (e: unknown) => say('warn', 'Could not look again', why(e, token)),
+      )
+      .finally(() => setLookingAgain(false));
+  };
+  // A proposal's card in the chat says how it stands as its card on the
+  // drawing does, from the same preview, when it reaches the sheet shown.
+  const chatCard = (p: Proposal): ChatCardView => {
+    const c = cardViews.find((v) => v.p.proposal === p.proposal);
+    if (c) return { standing: c.standing, lines: c.lines, checking: c.standing === null };
+    return { standing: null, lines: cardLines(p, null, journal), checking: false };
+  };
+
   const undoLabel = `Undo last${undoable ? ` (#${undoable})` : ''}`;
   const acceptLabel = busy === 'accept' ? 'Checking…' : 'Accept…';
   const peek = wide ? null : (
@@ -1798,6 +1979,15 @@ export function App({ token, source, sheet, layout }: AppProps) {
       onShow={(n) => showEntry(n)}
       onUndo={() => void undo(undoable)}
       onAccept={() => void askAccept()}
+      ask={{
+        words: peekAskWords(runningAgent, !!conversation?.busy, !!agents),
+        agent: runningAgent,
+        none: !!agents && !runningAgent,
+        onAsk: () => {
+          setSide('chat');
+          setRaise((r) => r + 1);
+        },
+      }}
       proposals={
         proposals.length && at === null && !preview
           ? {
@@ -1831,34 +2021,37 @@ export function App({ token, source, sheet, layout }: AppProps) {
       <p className="muted">{noJournal ? `There is no journal here: ${noJournal}.` : 'Reading the journal…'}</p>
     </>
   );
-  // The journal now, and beside it the assistant's place, which build 8 fills.
+  // The assistant's panel: its Chat, and the Journal beside it.
   const body = (
-    <>
-      <div className="sidetabs" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          className={`stab${side === 'journal' ? ' on' : ''}`}
-          aria-selected={side === 'journal'}
-          onClick={() => setSide('journal')}
-        >
-          Journal
-        </button>
-        <button
-          type="button"
-          role="tab"
-          className={`stab${side === 'assistant' ? ' on' : ''}`}
-          aria-selected={side === 'assistant'}
-          onClick={() => {
-            setSide('assistant');
-            setRaise((r) => r + 1);
-          }}
-        >
-          Assistant <span className="soon">Soon</span>
-        </button>
-      </div>
-      <div className="sidebody">{side === 'journal' ? journalBody : <Assistant />}</div>
-    </>
+    <AssistantPanel
+      agents={agents}
+      unreachable={unreachable}
+      conversation={conversation}
+      look={look}
+      chipOff={chipOff}
+      onChipOff={setChipOff}
+      side={side}
+      onSide={setSide}
+      journal={journal}
+      journalBody={journalBody}
+      proposals={proposals}
+      cardView={chatCard}
+      proposalBusy={proposalBusy || busy !== null || sending > 0}
+      onOpenProposal={(p) => {
+        // On a phone the sheet goes down to its peek, so the band and the drawing show.
+        if (!wide) snapSheet('peek');
+        openProposal(p, summary?.sheet);
+      }}
+      onKeep={keepProposal}
+      onDiscard={discardProposal}
+      onSend={(text) => ask(text, 'chat')}
+      onPickAgent={pickAgent}
+      onLookAgain={lookAgain}
+      lookingAgain={lookingAgain}
+      onInputFocus={() => {
+        if (!wide) snapSheet('full');
+      }}
+    />
   );
 
   const layoutTabs =
@@ -2214,6 +2407,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
               }
             }}
             typingText={!!toolState?.typing_text}
+            hint={askHint(typed, !!toolState?.tool, onPreview, toolWord, toolName)}
+            spaceEnters={(text) => spaceIsEnter(text, !!toolState?.tool, toolWord)}
+            onTyped={setTyped}
             warning={preview ? null : (toolState?.warning ?? null)}
             band={
               preview ? (
@@ -2266,7 +2462,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             )
           )}
         </div>
-        <BottomSheet wide={wide} onCovers={setPeekHeight} onSettled={setSheetCovers} peek={peek} body={body} raise={raise} />
+        <BottomSheet wide={wide} onCovers={setPeekHeight} onSettled={setSheetCovers} peek={peek} body={body} raise={raise} snapTo={snapAsked} />
       </div>
       {wide && (
         <StatusBar
