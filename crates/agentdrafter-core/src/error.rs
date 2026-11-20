@@ -118,6 +118,9 @@ pub enum ErrorCode {
     /// back: the error names the set and the entry, and nothing more was
     /// changed.
     RollbackFailed,
+    /// A keep or a discard of a proposal that has ended already: it was
+    /// kept or discarded before.
+    ProposalEnded,
 }
 
 /// An error from the core, ready to report through any interface.

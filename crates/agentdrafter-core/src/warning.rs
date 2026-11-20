@@ -187,6 +187,18 @@ impl Warns for ChangeReport {
     }
 }
 
+impl Warns for crate::change::ProposeReport {
+    fn warn(&self, warnings: &mut Warnings) {
+        self.would.warn(warnings);
+    }
+}
+
+impl Warns for crate::change::KeepReport {
+    fn warn(&self, warnings: &mut Warnings) {
+        self.change.warn(warnings);
+    }
+}
+
 impl Warns for AcceptReport {
     fn warn(&self, warnings: &mut Warnings) {
         self.checks.warn(warnings);

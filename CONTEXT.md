@@ -490,7 +490,7 @@ The colours a sheet shows in on the drafting app's dark model space, where colou
 _Avoid_: theme, dark mode
 
 **Proposal**:
-A change set that waits to be kept or discarded. It is shown on the sheet before it lands, changes nothing until it is kept, and lands as a change set when it is.
+A change set that waits to be kept or discarded. It is shown on the sheet before it lands, changes nothing until it is kept, and lands as a change set when it is. `propose` records one, beside the journal, numbered on their own, with who proposed it; `keep` lands it on the set as it stands, as one journal entry that says who proposed it and who kept it; `discard` ends it, with a line in the journal that nothing undoes.
 _Avoid_: suggestion, draft, preview (a preview is the drawing of it), pending change
 
 **Guide**:

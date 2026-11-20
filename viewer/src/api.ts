@@ -174,7 +174,8 @@ export type StreamState = 'open' | 'reconnecting' | 'refused';
 /**
  * Watches the drawing set `set` through the server's event stream: each
  * time its journal changes on disk, `journal` is given the `journal`
- * command's reply. A browser's EventSource sends no headers, so the stream
+ * command's reply, and each time a proposal is made, kept or discarded,
+ * `proposals` the `proposals` command's. A browser's EventSource sends no headers, so the stream
  * is read with fetch, which sends the token as every command does. A
  * stream that ends is opened again, a second later and then more slowly;
  * one the server refuses, for want of its token, is not. Gives back what
@@ -186,6 +187,7 @@ export function watch(
   journal: (reply: string) => void,
   state: (now: StreamState) => void,
   send: typeof fetch = fetch,
+  proposals: (reply: string) => void = () => {},
 ): () => void {
   const stop = new AbortController();
   let wait = 1000;
@@ -208,7 +210,10 @@ export function watch(
           if (done) break;
           const { events, rest } = readEvents(kept + value);
           kept = rest;
-          for (const e of events) if (e.event === 'journal') journal(e.data);
+          for (const e of events) {
+            if (e.event === 'journal') journal(e.data);
+            else if (e.event === 'proposals') proposals(e.data);
+          }
         }
       } catch {
         // Closed, or not reached: opened again below.

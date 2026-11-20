@@ -23,6 +23,9 @@
 //!   on the sheet as it would leave it: the rest faded, what it adds and
 //!   changes highlighted, the old places faint, what it deletes struck, and
 //!   a cloud round each check it would fail, in plain Rust.
+//! - [`ghosts`] lays out the proposals waiting on the sheet as it is (#155):
+//!   what each would add and change, dashed in the proposal's colour, what
+//!   it would delete struck, and the box its card is put by, in plain Rust.
 //! - `web` (built for `wasm32` only) is the module the page loads: it draws
 //!   the mesh with WebGL2 at the view the page asks for, on dark model
 //!   space in AutoCAD's screen colours, index 7 white, the paper a dashed
@@ -35,6 +38,7 @@
 //!
 //! It needs WebGL2 and nothing newer: no WebGPU.
 
+pub mod ghosts;
 pub mod grid;
 pub mod mesh;
 pub mod overlay;

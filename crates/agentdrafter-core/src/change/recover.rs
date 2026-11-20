@@ -358,6 +358,7 @@ fn kind_words(kind: EntryKind) -> &'static str {
         EntryKind::FailedAttempt => "a failed attempt",
         EntryKind::Undo => "an undo",
         EntryKind::Accept => "an accept",
+        EntryKind::Discard => "a proposal's discard",
     }
 }
 

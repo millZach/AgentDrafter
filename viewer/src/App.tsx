@@ -23,9 +23,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { call, CommandError, run, watch, type StreamState } from './api.ts';
 import { BottomSheet } from './BottomSheet.tsx';
-import { Drawing, type DrawingHandle, type Focus, type Mark, type PreviewTag } from './Drawing.tsx';
+import { Drawing, type DrawingHandle, type Focus, type GhostSpec, type Mark, type PreviewTag } from './Drawing.tsx';
 import {
   changedOn,
+  clock,
+  DRAFTER,
+  entryByline,
   entryTitle,
   firstSheet,
   journalReplaced,
@@ -37,6 +40,7 @@ import {
   since,
   staleDrawings,
   viaWords,
+  whoWords,
   type Entry,
   type JournalReport,
 } from './journal.ts';
@@ -92,6 +96,21 @@ import {
 import { CommandBar, PreviewBand, Ribbon, SnapMenu, StatusBar, TextBox, TextEditBox, TextOnDrawing, VerdictMark } from './Frame.tsx';
 import { screen_color } from './wasm/agentdrafter_viewer.js';
 import { Assistant, JournalList, Peek, QuickProperties } from './Panels.tsx';
+import { ProposalCard } from './Proposals.tsx';
+import {
+  cardLines,
+  onSheet,
+  peekWords,
+  proposalTitle,
+  proposedWords,
+  staleWords,
+  standing,
+  tabCounts,
+  type CardLine,
+  type Proposal,
+  type ProposalsReport,
+  type Standing,
+} from './proposals.ts';
 import type { Summary } from './probe.ts';
 
 export interface AppProps {
@@ -111,7 +130,7 @@ type Status =
   | { kind: 'failed'; message: string }
   | { kind: 'cannot'; message: string };
 
-type Tone = 'ok' | 'bad' | 'warn' | 'info';
+type Tone = 'ok' | 'bad' | 'warn' | 'info' | 'prop';
 
 interface Toast {
   key: number;
@@ -120,6 +139,8 @@ interface Toast {
   detail: string;
   /** The entry its Show button shows. */
   entry?: number;
+  /** The proposal its Show button opens. */
+  proposal?: number;
 }
 
 interface Finding {
@@ -159,6 +180,15 @@ interface Previewing {
   key: number;
   /** The object selected when it was made, as from quick properties: selected again once it ends. */
   picked: Picked | null;
+  /** A proposal opened (#155): Keep sends it with `keep`, and closing it leaves it waiting. */
+  proposal?: Proposal;
+}
+
+/** A waiting proposal drawn on a sheet as it would leave it (#155): the reply's text, its preview, or why it could not be drawn. */
+interface GhostReply {
+  text: string;
+  report: PreviewReport | null;
+  error: string | null;
 }
 
 /** The object the reviewer picked: by its ID, so it is followed as the sheet changes; by its place when it has none. */
@@ -217,6 +247,12 @@ function why(e: unknown, token: string | null): string {
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/** Who made a proposal, to start a toast with: `Assistant`, `Agent (MCP)`. */
+const capitalWho = (by: string): string => {
+  const who = whoWords(by);
+  return who.charAt(0).toUpperCase() + who.slice(1);
+};
+
 const listed = (items: (string | number)[]) =>
   items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 
@@ -305,6 +341,25 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const previewOpen = useRef(false);
   previewOpen.current = !!preview;
   const previewKeys = useRef(0);
+  // The proposals waiting (#155), from the server's event stream, and the
+  // numbers of those seen, so a new one is said in a toast.
+  const [proposals, setProposals] = useState<Proposal[]>([]);
+  const proposalsSeen = useRef<Set<number> | null>(null);
+  // Each waiting proposal drawn on the sheet shown as it would leave it,
+  // by `proposal|SHEET|LAYOUT|generation`, and those asked for.
+  const [ghostReplies, setGhostReplies] = useState<ReadonlyMap<string, GhostReply>>(new Map());
+  const ghostAsked = useRef(new Set<string>());
+  const ghostGeneration = useRef('');
+  // On a phone, the proposal whose chip is opened into its card.
+  const [chipOpen, setChipOpen] = useState<number | null>(null);
+  // While a keep or a discard is on its way.
+  const [proposalBusy, setProposalBusy] = useState(false);
+  // The time, for how long ago each proposal was made.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(tick);
+  }, []);
   // A text whose contents are edited on the drawing, or in a phone's box,
   // by its place; and a count that moves on when an edit in quick
   // properties is cancelled, so its fields show their values again.
@@ -598,7 +653,21 @@ export function App({ token, source, sheet, layout }: AppProps) {
       const n = entry.entry;
       switch (entry.kind) {
         case 'failed_attempt':
+          if (entry.proposal !== undefined) {
+            return say(
+              'bad',
+              `Proposal ${entry.proposal} was not kept. Nothing landed.`,
+              `${entry.error?.message ?? entry.failed_on?.[0]?.message ?? entryTitle(entry)} It is still waiting.`,
+              n,
+            );
+          }
           return say('bad', `Change set ${n} failed. Nothing landed.`, entry.error?.message ?? entryTitle(entry), n);
+        case 'discard':
+          return say(
+            'info',
+            `Discarded proposal ${entry.proposal ?? '?'}`,
+            `Proposed by ${whoWords(entry.proposed_by)}, discarded by ${whoWords(entry.discarded_by)}. Nothing changed, and nothing undoes a discard.`,
+          );
         case 'undo':
           return say(
             'info',
@@ -628,10 +697,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
           if (mine.length) {
             return say(
               'bad',
-              `Change set ${n} landed on ${listed(landed)}. ${plural(mine.length, 'check')} failed`,
+              `${entry.proposal !== undefined ? `Proposal ${entry.proposal} kept: change set` : 'Change set'} ${n} landed on ${listed(landed)}. ${plural(mine.length, 'check')} failed`,
               mine[0]?.message ?? '',
               n,
             );
+          }
+          if (entry.proposal !== undefined) {
+            return say('ok', `Proposal ${entry.proposal} kept: change set ${n} landed on ${listed(landed)}`, `${entryTitle(entry)} · ${entryByline(entry)}`, n);
           }
           return say('ok', `Change set ${n} landed on ${listed(landed)}`, entryTitle(entry), n);
         }
@@ -705,10 +777,34 @@ export function App({ token, source, sheet, layout }: AppProps) {
         }
       },
       setStream,
+      fetch,
+      (text) => {
+        // The proposals waiting, as each is made, kept or discarded.
+        const replied = JSON.parse(text) as { ok: boolean; result?: ProposalsReport };
+        if (!replied.ok || !replied.result) return;
+        const list = replied.result.proposals;
+        setProposals(list);
+        const known = proposalsSeen.current;
+        proposalsSeen.current = new Set(list.map((p) => p.proposal));
+        // The first snapshot says nothing; a proposal made since does.
+        const made = known ? list.filter((p) => !known.has(p.proposal)).at(-1) : undefined;
+        if (!made) return;
+        const title = `${capitalWho(made.by)} proposes: ${proposalTitle(made)}`;
+        keys.current += 1;
+        setToast({
+          key: keys.current,
+          tone: 'prop',
+          title,
+          detail: `Proposal ${made.proposal}, on ${listed(made.sheets)}. Nothing changes until you keep it.`,
+          proposal: made.proposal,
+        });
+        log(title);
+      },
     );
     return () => {
       stop();
       seen.current = null;
+      proposalsSeen.current = null;
     };
   }, [source, token, check, toastFor, log, drawAgain, redrawPreview]);
 
@@ -983,7 +1079,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // asks for the sheets it landed on as soon as `change` replies, without
   // waiting for the journal.
   // Gives whether it landed on any sheet.
-  const sendOne = async (s: ToolSend): Promise<boolean> => {
+  const sendOne = async (s: ToolSend, keep?: number): Promise<boolean> => {
     const landed = (reply: ChangeReply | undefined) => {
       const sheets = (reply?.sheets ?? []).filter((x) => x.ok).map((x) => upper(x.sheet));
       const entry = reply?.journal_entry;
@@ -997,9 +1093,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
       drawAgain(sheets);
     };
     try {
-      const reply = await call<ChangeReply>('change', { set: source, change_set: s.change_set }, token);
+      // A proposal kept (#155) lands through `keep`, which records who
+      // proposed it and who kept it; its reply is `change`'s.
+      const reply =
+        keep === undefined
+          ? await call<ChangeReply>('change', { set: source, change_set: s.change_set }, token)
+          : await call<ChangeReply>('keep', { set: source, proposal: keep, by: DRAFTER }, token);
       landed(reply);
-      log(`${s.what}: change set ${reply.journal_entry ?? ''} landed`.replace('  ', ' '));
+      log(`${s.what}${keep === undefined ? '' : ' kept'}: change set ${reply.journal_entry ?? ''} landed`.replace('  ', ' '));
       return true;
     } catch (e) {
       if (e instanceof CommandError && e.result) landed(e.result as ChangeReply);
@@ -1009,9 +1110,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
   };
   // Undo last and Accept wait while any is on its way: a change set they
   // would take may be about to land.
-  const sendChange = (s: ToolSend) => {
+  const sendChange = (s: ToolSend, keep?: number) => {
     setSending((n) => n + 1);
-    const sent = sendQueue.current.then(() => sendOne(s)).finally(() => setSending((n) => n - 1));
+    const sent = sendQueue.current.then(() => sendOne(s, keep)).finally(() => setSending((n) => n - 1));
     sendQueue.current = sent.then(
       () => {},
       () => {},
@@ -1199,11 +1300,16 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (!was) return;
     endPreview(was.home, was.homeLayout, was.picked);
     setPropsReset((n) => n + 1);
-    log(`${was.send.what}: cancelled, nothing changed`);
+    // A proposal closed is not ended: only Discard ends it.
+    log(was.proposal ? `Proposal ${was.proposal.proposal}: closed; it keeps waiting` : `${was.send.what}: cancelled, nothing changed`);
   };
   const confirmPreview = () => {
     const was = preview;
     if (!was || !previewCurrent) return;
+    if (was.proposal) {
+      keepProposal(was.proposal);
+      return;
+    }
     endPreview(was.home, was.homeLayout, was.picked);
     // An edit in quick properties that did not land shows its value again.
     void sendChange(was.send).then((ok) => ok || setPropsReset((n) => n + 1));
@@ -1216,6 +1322,67 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setPreview({ ...preview, key: previewKeys.current });
     log('Asked again whether each sheet would take it');
   };
+  // A proposal opened (#155): shown in the band's PROPOSAL form, the sheet
+  // shown as it would leave it, on the sheet it was opened on when it
+  // reaches it, or its first.
+  function openProposal(p: Proposal, on?: string) {
+    if (toolState?.tool) endTool();
+    setChipOpen(null);
+    setToast(null);
+    const title = proposalTitle(p);
+    const shown = summary?.sheet ?? wanted ?? '';
+    const reaches = (s: string | undefined) => !!s && p.sheets.some((x) => upper(x) === upper(s));
+    const go = reaches(on) ? (on as string) : reaches(shown) ? shown : (p.sheets[0] ?? shown);
+    previewKeys.current += 1;
+    setPicked(null);
+    setTaken(null);
+    setEditing(null);
+    setSnapMenu(null);
+    setToolsOpen(false);
+    setPreviewReport(null);
+    const home = preview?.home ?? shown;
+    const homeLayout = preview ? preview.homeLayout : (summary?.layout ?? wantedLayout ?? null);
+    setPreview({
+      send: {
+        change_set: p.change_set as ToolSend['change_set'],
+        what: `Proposal ${p.proposal}`,
+        sheets: p.sheets,
+        template: { title, detail: '', path: '', sheets: p.sheets, edit: title },
+      },
+      home,
+      homeLayout,
+      key: previewKeys.current,
+      picked: null,
+      proposal: p,
+    });
+    if (upper(go) !== upper(shown)) {
+      setWanted(go);
+      setWantedLayout(null);
+    }
+    field.current?.blur();
+    log(`Proposal ${p.proposal}, by ${whoWords(p.by)}: ${title}. Nothing has landed.`);
+  }
+  // Keep lands it as a change set, on the set as it stands; Discard ends
+  // it, with a line in the journal. Either ends it if it is open.
+  function keepProposal(p: Proposal) {
+    if (preview?.proposal) endPreview(preview.home, preview.homeLayout, preview.picked);
+    setChipOpen(null);
+    setProposalBusy(true);
+    void sendChange({ change_set: p.change_set as ToolSend['change_set'], what: `Proposal ${p.proposal}`, sheets: p.sheets }, p.proposal).finally(() =>
+      setProposalBusy(false),
+    );
+  }
+  function discardProposal(p: Proposal) {
+    if (preview?.proposal) endPreview(preview.home, preview.homeLayout, preview.picked);
+    setChipOpen(null);
+    setProposalBusy(true);
+    call('discard', { set: source, proposal: p.proposal, by: DRAFTER }, token)
+      .then(
+        () => log(`Proposal ${p.proposal} discarded: nothing changed`),
+        (e) => say('warn', `Proposal ${p.proposal} was not discarded`, why(e, token)),
+      )
+      .finally(() => setProposalBusy(false));
+  }
   const stepPreview = (by: number) => {
     if (!preview) return;
     const next = previewStep(preview.send.template.sheets, summary?.sheet ?? wanted ?? preview.home, by);
@@ -1257,6 +1424,91 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (v?.state === 'held') previewTags.push({ text: `Held back on ${summary.sheet}`, tone: 'held', at: null });
   }
   const previewMarks = preview && previewReport ? previewVerdicts(previewReport) : null;
+
+  // A proposal opened that has ended meanwhile, kept or discarded through
+  // any interface, is closed: there is nothing more to keep.
+  useEffect(() => {
+    const open = preview?.proposal;
+    if (!open || proposalsSeen.current === null) return;
+    if (proposals.some((p) => p.proposal === open.proposal)) return;
+    endPreview(preview.home, preview.homeLayout, preview.picked);
+    log(`Proposal ${open.proposal} has ended: it is no longer waiting`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proposals]);
+  // The proposal opened, as the stream says it now: what has landed since.
+  const openProposalNow = preview?.proposal ? (proposals.find((p) => p.proposal === preview.proposal?.proposal) ?? preview.proposal) : null;
+
+  // The proposals waiting on the sheet shown as it is (#155), each drawn
+  // dashed with its card at the change, from `display-list` with its change
+  // set, as a preview is drawn: asked for once for each state of the set.
+  const ghostsOn = at === null && !preview && !onPreview && !!summary && summary.entry === null && summary.preview == null;
+  const here = ghostsOn && summary ? onSheet(proposals, summary.sheet) : [];
+  const ghostAt = `${epoch}:${versions[ANY] ?? 0}`;
+  ghostGeneration.current = ghostAt;
+  const ghostKey = (p: Proposal) => `${p.proposal}|${upper(summary?.sheet ?? '')}|${upper(summary?.layout ?? '')}|${ghostAt}`;
+  const wantedGhosts = here.map(ghostKey).join(' ');
+  useEffect(() => {
+    if (!ghostsOn || !summary) return;
+    // Only this state of the set's are kept.
+    const keep = (m: ReadonlyMap<string, GhostReply>) => new Map([...m].filter(([k]) => k.endsWith(`|${ghostGeneration.current}`)));
+    for (const p of here) {
+      const key = ghostKey(p);
+      if (ghostAsked.current.has(key)) continue;
+      ghostAsked.current.add(key);
+      const input: Record<string, unknown> = { source, sheet: summary.sheet, change_set: p.change_set };
+      if (summary.layout) input.layout = summary.layout;
+      const done = (got: GhostReply) => {
+        if (!key.endsWith(`|${ghostGeneration.current}`)) return;
+        setGhostReplies((m) => keep(m).set(key, got));
+      };
+      run('display-list', input, token).then(
+        (text) => {
+          let report: PreviewReport | null = null;
+          try {
+            report = (JSON.parse(text) as { result?: { preview?: PreviewReport } }).result?.preview ?? null;
+          } catch {
+            // Not read: drawn as it cannot be.
+          }
+          done({ text, report, error: report ? null : 'it cannot be drawn' });
+        },
+        (e) => done({ text: '', report: null, error: why(e, token) }),
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ghostsOn, wantedGhosts, source, token]);
+  const ghostSpecs: GhostSpec[] = [];
+  const cardViews: { p: Proposal; title: string; standing: Standing | null; lines: CardLine[] }[] = here.map((p) => {
+    const got = ghostReplies.get(ghostKey(p));
+    const report = got?.report ?? null;
+    const st: Standing | null = got ? (report ? standing(report) : 'bad') : null;
+    if (got?.text && report) ghostSpecs.push({ proposal: p.proposal, reply: got.text, refused: st === 'bad', key: ghostKey(p) });
+    const lines = cardLines(p, report, journal);
+    // One the core refuses whole cannot be drawn: its card says why, in its words.
+    if (got && !report) lines.push({ tone: 'bad', icon: '✕', text: `Refused now: ${(got.error ?? '').replace(/`/g, '')}. Keep can’t land it.` });
+    return { p, title: proposalTitle(p), standing: st, lines };
+  });
+  const proposalCards =
+    cardViews.length > 0
+      ? cardViews.map((c) => (
+          <ProposalCard
+            key={c.p.proposal}
+            proposal={c.p}
+            title={c.title}
+            lines={c.lines}
+            standing={c.standing}
+            now={now}
+            compact={!wide}
+            open={chipOpen === c.p.proposal}
+            onOpenChip={(o) => setChipOpen(o ? c.p.proposal : null)}
+            onShow={() => openProposal(c.p, summary?.sheet)}
+            onKeep={() => keepProposal(c.p)}
+            onDiscard={() => discardProposal(c.p)}
+            busy={proposalBusy || busy !== null || sending > 0}
+          />
+        ))
+      : null;
+  const cardsKey = `${cardViews.map((c) => `${c.p.proposal}:${c.standing}:${c.lines.length}`).join(',')}|${chipOpen}|${wide}`;
+  const tabProposals = tabCounts(proposals);
 
   // The sheet's layers, for the Layer box: asked for each sheet, and again
   // when the box is opened, which takes in a layer a change set added. Not
@@ -1466,6 +1718,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     touch: !wide,
     editing: editingField && object ? object : null,
     previewing: !!preview,
+    proposal: !!preview?.proposal,
   });
   const act = (a: Act) => {
     if (a === 'clear') pick(null);
@@ -1504,6 +1757,18 @@ export function App({ token, source, sheet, layout }: AppProps) {
       onShow={(n) => showEntry(n)}
       onUndo={() => void undo(undoable)}
       onAccept={() => void askAccept()}
+      proposals={
+        proposals.length && at === null && !preview
+          ? {
+              count: proposals.length,
+              words: peekWords(here.length, proposals.length),
+              onOpen: () => {
+                const first = here[0] ?? proposals[0];
+                if (first) openProposal(first, summary?.sheet);
+              },
+            }
+          : null
+      }
     />
   );
   const journalBody = journal ? (
@@ -1733,6 +1998,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
             >
               <b>{s}</b>
               {dot}
+              {!preview && (tabProposals.get(upper(s)) ?? 0) > 0 && (
+                <span className="pcount" data-pcount={tabProposals.get(upper(s))} title={`${tabProposals.get(upper(s))} waiting proposals reach it`}>
+                  {tabProposals.get(upper(s))}
+                </span>
+              )}
             </button>
           );
         })}
@@ -1773,10 +2043,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
             editor={editor}
             onOpen={onPreview ? () => false : openText}
             previewTags={previewTags}
+            ghosts={ghostsOn ? ghostSpecs : []}
+            cards={ghostsOn ? proposalCards : null}
+            cardsKey={ghostsOn ? cardsKey : ''}
           />
           {preview && summary?.preview != null && (
-            <div className="pvhead" data-pvhead>
-              {summary.sheet} as it would be &middot; nothing has landed
+            <div className={`pvhead${preview.proposal ? ' prop' : ''}`} data-pvhead>
+              {summary.sheet} {preview.proposal ? `as proposal ${preview.proposal.proposal} would leave it` : 'as it would be'} &middot; nothing has landed
             </div>
           )}
           <div className="va-overlays">
@@ -1787,6 +2060,20 @@ export function App({ token, source, sheet, layout }: AppProps) {
                   <b>{toast.title}</b>
                   <small>{toast.detail}</small>
                 </div>
+                {toast.proposal !== undefined && proposals.some((p) => p.proposal === toast.proposal) && (
+                  <button
+                    type="button"
+                    className="btn sm"
+                    data-toast="show-proposal"
+                    onClick={() => {
+                      const p = proposals.find((x) => x.proposal === toast.proposal);
+                      setToast(null);
+                      if (p) openProposal(p);
+                    }}
+                  >
+                    Show
+                  </button>
+                )}
                 {toast.entry !== undefined && journal?.entries.some((e) => e.entry === toast.entry && e.kind === 'change_set') && (
                   <button
                     type="button"
@@ -1898,6 +2185,16 @@ export function App({ token, source, sheet, layout }: AppProps) {
                   onCancel={cancelPreview}
                   onGo={confirmPreview}
                   onCheckAgain={recheckPreview}
+                  proposal={
+                    openProposalNow
+                      ? {
+                          number: openProposalNow.proposal,
+                          proposed: proposedWords(openProposalNow, clock(openProposalNow.at).replace(/:\d\d(?=\s|$)/, ''), now),
+                          stale: staleWords(openProposalNow, journal),
+                          onDiscard: () => discardProposal(openProposalNow),
+                        }
+                      : undefined
+                  }
                 />
               ) : null
             }

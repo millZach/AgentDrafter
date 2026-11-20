@@ -314,6 +314,7 @@ fn moved_on(entries: &[Entry], seen: u64, newest: u64) -> Error {
                 EntryKind::FailedAttempt => "failed attempt",
                 EntryKind::Undo => "undo",
                 EntryKind::Accept => "accept",
+                EntryKind::Discard => "discard",
             };
             format!("{kind} {}", e.entry)
         })

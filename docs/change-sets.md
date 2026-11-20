@@ -297,6 +297,27 @@ failures:
 
 **Drawn before it lands.** `agentdrafter display-list <set> --sheet <sheet> --change-set <change-set.json | ->`, or `change_set` in the request, runs the same dry run and draws the sheet as the change set would leave it, reading the set through the records it would write; nothing is written and nothing goes in the journal. Its reply's `preview` holds the dry run's reply under `change`, the checker's reply on the sheets it would land on under `checks`, read from those records, and the objects it would add, change and delete, with what the sheet drawn would draw otherwise ([viewer.md](viewer.md#a-change-set-drawn-before-it-lands)). The drafting app draws a template edit with it before it lands. A preview writes nothing, so it rolls nothing back: on a set whose journal holds an entry a commit has not finished, or a last line written in part, it is refused with `rollback_failed`, and any other command on the set rolls that back first. A `change_set` of `null` is refused as `change` refuses it, and one with `entry` is refused.
 
+## Proposals
+
+A change set can wait, to be looked at first: an agent that wants its work seen before it lands calls `propose` where it would call `change` (#155). A **proposal** is a change set that waits, drawn on its sheets for the drafter to keep or discard; nothing changes until it is kept. Four commands of the registry, reached by every interface:
+
+```
+agentdrafter propose <drawing-set-folder> <change-set.json | -> [--by <who>] [--fonts <folder>]... [--no-system-fonts]
+agentdrafter proposals <drawing-set-folder>
+agentdrafter keep <drawing-set-folder> <proposal> [--by <who>] [--fonts <folder>]... [--no-system-fonts]
+agentdrafter discard <drawing-set-folder> <proposal> [--by <who>]
+```
+
+- **`propose`** (`set`, `change_set`, `by`) checks the change set as `change` checks it, by a [dry run](#a-dry-run) on the set as it is: a change set the core refuses whole, or one a sheet would refuse for its records, such as a name that does not exist, is not recorded, and the reply says why. A sheet whose DWG cannot be written just now, such as one open in AutoCAD, does not stop it: that is for whoever keeps it. It records the proposal in the set's folder, beside the journal, in `.agentdrafter/proposals/`, one file each, `<number>.json`, numbered from 1 on their own: who proposed it, when, the journal's newest entry it was made against (`base_entry`, 0 for an empty journal), the change set, and the sheets it reaches. It writes nothing else: no record, no DWG, no line of the journal. The reply gives its number, and under `would` the dry run's reply, what keeping it would do now.
+- **`proposals`** (`set`) lists those waiting, the oldest first: each one's `proposal`, `by`, `at`, `base_entry`, `changed_since`, the change sets and undos that landed after it was made, its `change_set` and its `sheets`. It is cheap: it reads the files and the journal, and draws nothing; the viewer draws each with [`display-list`'s `change_set`](#a-dry-run).
+- **`keep`** (`set`, `proposal`, `by`) lands it through `change`'s own path, applied to the set as it stands then, each sheet fully or not at all (ADR-0005), and its reply is `change`'s, with the proposal's number, `proposed_by` and `kept_by`. A proposal made before the set changed is applied to it as it now is, as any change set sent then would be. Its journal entry is a change set's, which also names the proposal, who proposed it and who kept it ([journal.md](journal.md#what-it-records)); it is undone and accepted as any change set is, and undoing it does not bring the proposal back. When the set refuses it, the attempt is recorded as `change` records a [failed attempt](journal.md#what-it-records), naming the proposal too, and the proposal goes on waiting.
+- **`discard`** (`set`, `proposal`, `by`) ends it without landing. The journal records it with a line of its own, `discard`, naming the proposal and who proposed and discarded it. It changes no file of the set, so there is nothing to undo, and an undo passes over it.
+- **Ended.** A proposal kept or discarded has ended: the journal's entry that ended it says so, so it ends in the same step as that entry is written. `keep` and `discard` refuse it with `proposal_ended`, which says how it ended and by whom, and record nothing. An undo of the change set that kept it does not end the ending.
+- **Who.** `by` is the caller's own words, up to 80 characters on one line, such as `Assistant`. With none, it is the interface it came through: `agent (command line)`, `agent (HTTP API)`, `agent (MCP)`, `agent (Python)`, or `drafter` through the viewer, whose page sends `drafter` itself and shows it as "you". It is recorded and shown; nothing else differs by it.
+- **An accept** is unchanged: proposals waiting go on waiting through it, and it issues only the change sets in place.
+
+The event stream reports a proposal made, kept and discarded as it reports a change set ([servers.md](servers.md#watching-a-set)).
+
 ## The reply
 
 ```json
@@ -337,7 +358,8 @@ An error from an operation names it, `operation 1 (`add_circle`)`, and the sheet
 | `shared_edit_failed` | The sheet was left as it was because a template edit in its part could not land on another sheet built from the same template, or an edit to a block library on another sheet whose template names it. |
 | `not_a_build`, `write_failed` | The sheet's DWG is not one AgentDrafter built, or cannot be written. |
 | `sheets_failed` | Some sheets failed and were left as they were; the others took their part. |
-| `read_failed` | A file of the set, or the mark, cannot be read. |
+| `read_failed` | A file of the set, or the mark, cannot be read; or a proposal's file. |
+| `proposal_ended` | A `keep` or a `discard` of a proposal kept or discarded already. |
 
 ## How the records are written
 

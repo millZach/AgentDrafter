@@ -184,6 +184,15 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
                 ),
             ))
         }
+        EntryKind::Discard => {
+            return Err(refuse(
+                ErrorCode::BadValue,
+                format!(
+                    "entry {wanted} is a proposal's discard, which changed nothing, so there is \
+                     nothing to undo; a discarded proposal is not brought back"
+                ),
+            ))
+        }
     }
     if let Some(by) = fates.get(&wanted).and_then(|f| f.undone_by) {
         return Err(refuse(

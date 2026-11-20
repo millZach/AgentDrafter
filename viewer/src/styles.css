@@ -558,6 +558,65 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
 .pvpaper { position: absolute; border: 3px solid var(--bad); box-sizing: border-box; }
 .pvpaper.held { border: 2px dashed #8a8f96; }
 
+/* Proposals (#155), as the picked prototype's B draws them: each waiting proposal dashed on its sheet,
+   with a card at the change joined by a leader; on a phone, a chip a tap opens. Purple is a proposal's. */
+.pvband.prop { border-color: #8c6bd6; border-top-color: #b48cff; }
+.pvhead.prop { color: rgba(201, 168, 255, .95); }
+.pvband.prop .pvchip { background: #b48cff; color: #170d2a; }
+.pvx { background: none; border: 0; color: var(--dim); font-size: 20px; line-height: 1; padding: 0 2px 2px 6px; }
+.pvx:hover { color: #fff; }
+.pvby { color: var(--dim); font-size: 12px; }
+.pvsum.stale { background: rgba(180, 140, 255, .12); border: 1px solid #8c6bd6; color: #e2d6ff; }
+.vd.stale { background: #b48cff; color: #170d2a; }
+.pcards { position: absolute; inset: 0; pointer-events: none; z-index: 3; overflow: hidden; }
+.pleaders { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; overflow: hidden; }
+.pleaders line { stroke: #8c6bd6; stroke-width: 1.2; stroke-dasharray: 3 3; }
+.pcard {
+  position: absolute; left: 0; top: 0; width: 258px; pointer-events: auto; background: rgba(38, 32, 56, .97);
+  border: 1px solid #8c6bd6; border-left: 3px solid #b48cff; border-radius: 5px; box-shadow: 0 6px 18px rgba(0, 0, 0, .5); font-size: 12px;
+}
+.pcard.bad { border-left-color: var(--bad); }
+.pc-head { display: flex; gap: 6px; align-items: center; width: 100%; background: none; border: 0; padding: 6px 8px 1px; text-align: left; }
+.pc-n { font: 700 11px/16px var(--mono); background: #b48cff; color: #170d2a; border-radius: 3px; padding: 0 5px; }
+.pc-t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #d9ccff; }
+.pc-t b { color: #fff; font-weight: 600; }
+.pc-open { color: #d9ccff; font-size: 12px; white-space: nowrap; }
+.pc-w { padding: 0 8px; font-weight: 600; font-size: 13px; }
+.pc-st { padding: 4px 8px 0; display: grid; gap: 3px; }
+.pc-acts { display: flex; gap: 6px; justify-content: flex-end; padding: 6px 8px 7px; }
+.pc-x { position: absolute; right: 2px; top: 0; background: none; border: 0; color: var(--dim); font-size: 20px; line-height: 1; padding: 2px 6px; }
+.pcard.compact { width: 196px; }
+.pcard.compact .pc-head { padding-right: 26px; }
+.pcard.compact .pc-w { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pcard.compact .pc-s { display: flex; gap: 4px; align-items: center; padding: 2px 8px 0; color: var(--dim); font-size: 11px; }
+.pcard.compact .pc-s .vd { width: 14px; height: 14px; font-size: 9px; }
+.pcard.compact .pc-acts .btn { flex: 1; padding: 5px 6px; }
+.pl { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; line-height: 1.35; }
+.pl .vd { width: 14px; height: 14px; font-size: 9px; margin-top: 1px; }
+.pl.stale { color: #d9ccff; }
+.pl.warn { color: #ffd28a; }
+.pl.bad { color: #ffb0b0; }
+.pl.ok { color: #9fe6bd; }
+.pchip {
+  position: absolute; left: 0; top: 0; pointer-events: auto; display: flex; gap: 5px; align-items: center;
+  background: rgba(38, 32, 56, .97); border: 1px solid #8c6bd6; border-radius: 14px; padding: 4px 8px 4px 5px;
+  font-size: 13px; color: #ebe4ff; box-shadow: 0 3px 10px rgba(0, 0, 0, .5);
+}
+.pchip.bad { border-color: #a04848; }
+.pchip .vd { width: 15px; height: 15px; font-size: 9px; }
+.pcount { font: 700 10px/1 var(--ui); background: #b48cff; color: #170d2a; border-radius: 8px; padding: 2px 5px; margin-left: 6px; }
+.pdot { font: 700 10px/1 var(--ui); font-style: normal; background: #b48cff; color: #170d2a; border-radius: 8px; padding: 2px 5px; }
+.peekprop {
+  display: flex; gap: 8px; align-items: center; width: 100%; background: rgba(180, 140, 255, .12); border: 1px dashed #8c6bd6;
+  border-radius: 5px; padding: 7px 10px; margin: 6px 0 2px; color: #ebe4ff; text-align: left; font-size: 14px;
+}
+.peekprop .t { flex: 1; }
+.peekprop .go { font-size: 18px; color: #d9ccff; }
+.va-toast.prop { border-left-color: #b48cff; }
+.dot.prop { background: #b48cff; }
+.je-by { display: block; color: #c9b4ff; font-size: 12px; }
+.b-discard { color: #8f99a6; border-style: dashed; }
+
 @media (min-width: 900px) {
   /* One row the height of the screen: a long journal scrolls in its panel, never stretches the drawing. */
   .va-main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; grid-template-rows: minmax(0, 1fr); }
@@ -629,6 +688,13 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   .pvtitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pvnav button { min-width: 44px; height: 34px; font-size: 14px; }
   .pvhead { right: 10px; }
+  .pvx { position: absolute; right: 4px; top: 5px; font-size: 24px; padding: 0 6px; }
+  .pvband.prop .pvhd { padding-right: 28px; }
+  .pvband.prop { position: relative; }
+  .pvband .pvby { order: 1; }
+  .pvband .pvsum.stale { order: 2; }
+  .pvacts .btn[data-pv=keep] { flex-basis: 100%; }
+  .pvacts .btn[data-pv=keep]:not(:disabled) { flex-basis: auto; }
 }
 
 /* A phone held on its side: too short for a card above the command bar, so

@@ -48,6 +48,10 @@ const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder> <change-set
 const JOURNAL_USAGE: &str = "agentdrafter journal <drawing-set-folder>";
 const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [--dry-run]";
 const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
+const PROPOSE_USAGE: &str = "agentdrafter propose <drawing-set-folder> <change-set.json | -> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
+const PROPOSALS_USAGE: &str = "agentdrafter proposals <drawing-set-folder>";
+const KEEP_USAGE: &str = "agentdrafter keep <drawing-set-folder> <proposal> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
+const DISCARD_USAGE: &str = "agentdrafter discard <drawing-set-folder> <proposal> [--by <who>]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]... [--no-system-fonts]";
 const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--change-set <change-set.json | ->] [--fonts <folder>]... [--no-system-fonts]";
@@ -100,6 +104,10 @@ fn cli_form(command: &str) -> Option<(&'static str, Parse)> {
         "journal" => (JOURNAL_USAGE, parse_journal),
         "undo" => (UNDO_USAGE, parse_undo),
         "accept" => (ACCEPT_USAGE, parse_accept),
+        "propose" => (PROPOSE_USAGE, parse_propose),
+        "proposals" => (PROPOSALS_USAGE, parse_proposals),
+        "keep" => (KEEP_USAGE, parse_keep),
+        "discard" => (DISCARD_USAGE, parse_discard),
         "check" => (CHECK_USAGE, parse_check),
         "import-blocks" => (IMPORT_BLOCKS_USAGE, parse_import_blocks),
         _ => return None,
@@ -711,6 +719,121 @@ fn parse_accept(mut args: Args) -> Result<Value, Error> {
     request.set =
         PathBuf::from(set.ok_or_else(|| usage("accept needs a drawing set's folder".into()))?);
     input_of(request, fonts)
+}
+
+/// What a proposal's command takes after the set's folder: a change set,
+/// or a proposal's number.
+#[derive(Clone, Copy, PartialEq)]
+enum Second {
+    ChangeSet,
+    Proposal,
+}
+
+/// Reads the arguments of `propose`, `keep` and `discard`: the set's
+/// folder, then the change set or the proposal's number, `--by`, and,
+/// where `fonts` says the command measures text, the font options.
+fn parse_proposing(
+    mut args: Args,
+    command: &str,
+    usage_text: &str,
+    second: Second,
+    fonts_taken: bool,
+) -> Result<Value, Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {usage_text}"));
+    let mut given: Vec<OsString> = Vec::new();
+    let mut by: Option<String> = None;
+    let mut fonts = FontOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--by") => {
+                let who = args
+                    .next()
+                    .ok_or_else(|| usage("--by needs who it is, such as Assistant".into()))?;
+                let who = who
+                    .into_string()
+                    .map_err(|_| usage("--by takes text (UTF-8)".into()))?;
+                if by.replace(who).is_some() {
+                    return Err(usage("--by is given twice".into()));
+                }
+            }
+            Some("--no-system-fonts") if fonts_taken => fonts.no_system = true,
+            Some("--fonts") if fonts_taken => fonts.push(PathBuf::from(
+                args.next()
+                    .ok_or_else(|| usage("--fonts needs a folder".into()))?,
+            )),
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("{command} takes no option `{flag}`")))
+            }
+            _ => given.push(arg),
+        }
+    }
+    let what = match second {
+        Second::ChangeSet => "a change set",
+        Second::Proposal => "a proposal's number",
+    };
+    let [set, then] = <[OsString; 2]>::try_from(given).map_err(|given| {
+        usage(format!(
+            "{command} takes a drawing set's folder and {what}, found {} arguments",
+            given.len()
+        ))
+    })?;
+    let set = set
+        .into_string()
+        .map_err(|_| usage("every interface takes paths as text (UTF-8)".into()))?;
+    let mut input = json!({ "set": set });
+    match second {
+        Second::ChangeSet => input["change_set"] = read_change_set(&then)?,
+        Second::Proposal => {
+            let number = entry_number(&then).ok_or_else(|| {
+                usage(format!(
+                    "{command} takes the proposal by its number, such as 2, not `{}`",
+                    then.to_string_lossy()
+                ))
+            })?;
+            input["proposal"] = json!(number);
+        }
+    }
+    if let Some(by) = by {
+        input["by"] = Value::String(by);
+    }
+    input_of(input, fonts)
+}
+
+fn parse_propose(args: Args) -> Result<Value, Error> {
+    parse_proposing(args, "propose", PROPOSE_USAGE, Second::ChangeSet, true)
+}
+
+fn parse_keep(args: Args) -> Result<Value, Error> {
+    parse_proposing(args, "keep", KEEP_USAGE, Second::Proposal, true)
+}
+
+fn parse_discard(args: Args) -> Result<Value, Error> {
+    parse_proposing(args, "discard", DISCARD_USAGE, Second::Proposal, false)
+}
+
+/// Reads `proposals`' argument: the set's folder.
+fn parse_proposals(args: Args) -> Result<Value, Error> {
+    let given: Vec<OsString> = args.collect();
+    if let Some(flag) = given
+        .iter()
+        .filter_map(|a| a.to_str())
+        .find(|a| a.starts_with('-') && a.len() > 1)
+    {
+        return Err(Error::usage(format!(
+            "proposals takes no option `{flag}`; usage: {PROPOSALS_USAGE}"
+        )));
+    }
+    let [set] = <[OsString; 1]>::try_from(given).map_err(|given| {
+        Error::usage(format!(
+            "proposals takes a drawing set's folder, found {} arguments; usage: \
+             {PROPOSALS_USAGE}",
+            given.len()
+        ))
+    })?;
+    let request = agentdrafter_core::ProposalsRequest {
+        set: PathBuf::from(set),
+    };
+    input_of(request, FontOptions::default())
 }
 
 fn parse_query(mut args: Args) -> Result<Value, Error> {

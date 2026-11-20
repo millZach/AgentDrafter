@@ -75,6 +75,19 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({"set": "missing", "despite_failed_checks": true, "newest_seen": 4, "dry_run": true, "fonts": ["f"], "no_system_fonts": true}),
         ),
         (
+            "propose",
+            json!({"set": "missing", "change_set": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [1, 0, 0]}]}, "by": "Assistant", "fonts": ["f"], "no_system_fonts": true}),
+        ),
+        ("proposals", json!({"set": "missing"})),
+        (
+            "keep",
+            json!({"set": "missing", "proposal": 1, "by": "drafter", "fonts": ["f"], "no_system_fonts": true}),
+        ),
+        (
+            "discard",
+            json!({"set": "missing", "proposal": 2, "by": "drafter"}),
+        ),
+        (
             "check",
             json!({"source": "missing", "sheets": ["DEMO-001"], "fonts": ["f"], "no_system_fonts": true}),
         ),

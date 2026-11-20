@@ -16,6 +16,7 @@ import {
   fieldKey,
   pastedLines,
   checkAgainOffered,
+  keepButton,
   previewButton,
   previewSummary,
   previewTitle,
@@ -377,6 +378,12 @@ export interface PreviewBandProps {
   onCancel(): void;
   onGo(): void;
   onCheckAgain(): void;
+  /**
+   * A proposal opened (#155), in the band's PROPOSAL form: its number, who
+   * made it and when, what has landed since, and Discard. Its Keep is the
+   * band's go, and × or Esc closes it, leaving it waiting.
+   */
+  proposal?: { number: number; proposed: string; stale: string | null; onDiscard(): void };
 }
 
 const TONE: Record<PreviewState, string> = { land: 'ok', check: 'warn', refused: 'bad', held: 'held' };
@@ -388,17 +395,27 @@ const TONE: Record<PreviewState, string> = { land: 'ok', check: 'warn', refused:
  * reach, steps through the sheets it reaches, says what would become of
  * the sheet shown and of them all, and lands it on all of them or cancels.
  */
-export function PreviewBand({ edit, sheet, report, refreshing = false, onStep, onCancel, onGo, onCheckAgain }: PreviewBandProps) {
-  const t = previewTitle(edit);
+export function PreviewBand({ edit, sheet, report, refreshing = false, onStep, onCancel, onGo, onCheckAgain, proposal }: PreviewBandProps) {
+  const t = previewTitle(edit, proposal?.number);
   const n = edit.sheets.length;
   const i = Math.max(0, edit.sheets.findIndex((s) => s.toUpperCase() === sheet.toUpperCase()));
   const verdict = report ? previewVerdicts(report).get(sheet.toUpperCase()) : undefined;
   const summary = report ? previewSummary(report) : null;
-  const button = report ? { ...previewButton(report) } : { label: n > 1 ? `Change all ${n} sheets` : 'Change the template', disabled: true };
+  const button = report
+    ? { ...(proposal ? keepButton(report) : previewButton(report)) }
+    : { label: proposal ? 'Keep' : n > 1 ? `Change all ${n} sheets` : 'Change the template', disabled: true };
   // A change landed since it was drawn: nothing is sent until it is drawn again.
   if (refreshing) button.disabled = true;
+  const fails = !!report && !report.change.failed && [...previewVerdicts(report).values()].some((v) => v.state === 'check');
   return (
-    <div className="pvband" role="region" aria-label="Preview" data-preview data-pv-refreshing={refreshing || undefined}>
+    <div
+      className={`pvband${proposal ? ' prop' : ''}`}
+      role="region"
+      aria-label={proposal ? `Proposal ${proposal.number}` : 'Preview'}
+      data-preview
+      data-proposal={proposal?.number}
+      data-pv-refreshing={refreshing || undefined}
+    >
       <div className="pvtop">
         <span className="pvhd">
           <span className="pvchip">{t.chip}</span>
@@ -422,19 +439,49 @@ export function PreviewBand({ edit, sheet, report, refreshing = false, onStep, o
           </button>
         </span>
         <span className="pvacts">
-          <button type="button" className="btn" data-pv="cancel" onClick={onCancel}>
-            Cancel
-          </button>
+          {proposal ? (
+            <button type="button" className="btn" data-pv="discard" onClick={proposal.onDiscard}>
+              Discard
+            </button>
+          ) : (
+            <button type="button" className="btn" data-pv="cancel" onClick={onCancel}>
+              Cancel
+            </button>
+          )}
           {report && !refreshing && checkAgainOffered(report) && (
             <button type="button" className="btn" data-pv="recheck" onClick={onCheckAgain}>
               Closed it: check again
             </button>
           )}
-          <button type="button" className="btn warn" data-pv="go" disabled={button.disabled} onClick={onGo}>
+          <button
+            type="button"
+            className={`btn ${proposal && !fails ? 'primary' : 'warn'}`}
+            data-pv={proposal ? 'keep' : 'go'}
+            disabled={button.disabled}
+            onClick={onGo}
+          >
             {button.label}
           </button>
+          {proposal && (
+            <button type="button" className="pvx" data-pv="close" aria-label="Close it: it keeps waiting" title="Close it: it keeps waiting" onClick={onCancel}>
+              &times;
+            </button>
+          )}
         </span>
       </div>
+      {proposal && (
+        <div className="pvby" data-pv-by>
+          {proposal.proposed}
+        </div>
+      )}
+      {proposal?.stale && (
+        <div className="pvsum stale" data-pv-stale>
+          <i className="vd stale" aria-hidden="true">
+            ↻
+          </i>{' '}
+          {proposal.stale}
+        </div>
+      )}
       <div className={`pvline ${verdict && !refreshing ? TONE[verdict.state] : ''}`} data-pv-verdict>
         {refreshing ? (
           <span className="muted">The set changed: drawing {sheet} as it would be again…</span>

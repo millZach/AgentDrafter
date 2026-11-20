@@ -262,14 +262,24 @@ class Interfaces(unittest.TestCase):
         )
 
         # Each command, run through each interface, gives the same reply; then
-        # the further calls of a command whose kinds one call cannot cover.
+        # the further calls of a command whose kinds one call cannot cover,
+        # each straight after the command it names under "after", if any.
         calls = SHARED["calls"]
         runs = []
+
+        def then(after):
+            runs.extend(
+                (call["command"], call["args"], call["input"])
+                for call in SHARED["also"]
+                if call.get("after") == after
+            )
+
         for command in registry:
             name = command["name"]
             self.assertIn(name, calls, f"`{name}` is in the registry: add a call of it to calls.json")
             runs.append((name, calls[name]["args"], calls[name]["input"]))
-        runs.extend((call["command"], call["args"], call["input"]) for call in SHARED["also"])
+            then(name)
+        then(None)
         for name, args, input in runs:
             by_library = library(name, input, self.folders["library"])
             code, by_cli = cli(args, self.folders["cli"])

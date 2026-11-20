@@ -86,6 +86,8 @@ export interface Probe {
   bounds(places: number[]): number[];
   /** The box round what a preview marks, [left, bottom, right, top] in drawing units; empty when the sheet is no preview. */
   previewExtent(): number[];
+  /** The box round what a waiting proposal marks on the sheet shown, drawn dashed over it, [left, bottom, right, top] in drawing units; empty when it is not drawn. */
+  ghostExtent(proposal: number): number[];
   /** The place of the object a click at the drawing point (x, y) picks, within `reach` CSS pixels at the view shown, as a click does; -1 for none. */
   pickAt(x: number, y: number, reach: number): number;
   view(): View;
@@ -132,6 +134,9 @@ export function installProbe(parts: Parts): () => void {
     },
     previewExtent() {
       return [...(parts.viewer()?.preview_extent() ?? [])];
+    },
+    ghostExtent(proposal) {
+      return [...(parts.viewer()?.ghost_extent(proposal) ?? [])];
     },
     pickAt(x, y, reach) {
       return parts.viewer()?.pick(x, y, reach / parts.view().scale) ?? -1;

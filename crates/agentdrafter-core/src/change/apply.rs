@@ -24,7 +24,7 @@ use serde_json::Value;
 
 use super::commit::Replacement;
 use super::from_dimension::dimension_from;
-use super::journal::{commit_change_set, HowChanged, Landing, ObjectChanged, SheetFailed};
+use super::journal::{commit_change_set, HowChanged, Keeping, Landing, ObjectChanged, SheetFailed};
 use super::operations::{
     op_error, read_change_set, AddTo, BlockOp, Body, FromOp, Import, Kind, Motion, OpPoint,
     Operation, PointSnap, Table, TableOp, Target, ROW_VALUE_KEY,
@@ -551,6 +551,7 @@ pub(super) fn apply(
     settings: &Settings,
     attempted: &mut Option<Landing>,
     kept: Option<&mut Kept>,
+    keeping: Option<&Keeping>,
 ) -> Result<ChangeReport, Error> {
     let files = SetFiles::load(&request.set)?;
     let change_set = read_change_set(&request.change_set, files.units)?;
@@ -774,6 +775,7 @@ pub(super) fn apply(
             &request.change_set,
             landing,
             replacements,
+            keeping,
         )?);
     }
 
