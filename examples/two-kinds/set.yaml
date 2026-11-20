@@ -1,0 +1,9 @@
+# A made-up drawing set of two kinds of sheet, in inches: area sheets drawn
+# from one template and schedule sheets from another, each kind with its own
+# rows file (#103). The set builds the rows of each file in turn, in the
+# order listed. Building this folder writes one DWG per row into dwg/.
+units: in
+output: dwg
+rows:
+  - rows/areas.yaml
+  - rows/schedules.yaml

@@ -2,9 +2,10 @@
 //! plus that row of data.
 //!
 //! A drawing set is a folder. Its settings, in [`SET_SETTINGS_FILE`],
-//! declare its unit, the folder its DWGs go to and the file its rows are
-//! in. Each row names a sheet, its template and the values the template
-//! takes from it, and builds the DWG `<output>/<sheet>.dwg`.
+//! declare its unit, the folder its DWGs go to and the rows files its rows
+//! are in, built in the order given. Each row names a sheet, its template
+//! and the values the template takes from it, and builds the DWG
+//! `<output>/<sheet>.dwg`.
 //!
 //! Each sheet is built fully or not at all (ADR-0005): a sheet that fails
 //! writes nothing, and a DWG an earlier build left there stays as it was.
@@ -17,7 +18,9 @@
 //! set's folder relative to the DWG's, so that a render or a plot of the
 //! DWG on its own finds its set wherever the set's output folder is
 //! ([`set_of_dwg`]). Zach decided on 2026-11-11 that the mark never holds
-//! a path in full, since these DWGs go to plants.
+//! a path in full, since these DWGs go to plants. A sheet of a set whose
+//! rows are in more than one rows file names its own rows file in the mark
+//! too ([`sheet_mark`]), so that it is read alone.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -27,7 +30,8 @@ use serde::{Deserialize, Serialize};
 use crate::build::{build_sheet, is_same_file, BuildReport};
 use crate::change::relative_to;
 use crate::description::{
-    read_rows, read_set_settings, read_template, rows_at, template_at, template_path,
+    read_rows_file_in, read_rows_files_in, read_set_settings, read_template, rows_of, rows_paths,
+    template_at, template_path, Disk, Row, RowsFile, SetSettings,
 };
 use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
@@ -174,8 +178,8 @@ pub fn build_set_with(request: &SetBuildRequest, settings: &Settings) -> Reply<S
 fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetReport, Error> {
     let folder = request.set.as_path();
     let set = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
-    let rows_file = folder.join(&set.rows);
-    let rows = read_rows(&rows_file)?;
+    let rows_files = read_rows_files_in(&Disk, folder, &set)?;
+    let rows = rows_of(&rows_files)?;
     let output = folder.join(&set.output);
     fs::create_dir_all(&output).map_err(|e| {
         Error::new(
@@ -184,19 +188,17 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         )
         .in_file(&output)
     })?;
-    let mark = BuildMark {
-        set: set_in_mark(folder, &set.output),
-    };
+    let marked = set_in_mark(folder, &set.output);
     let sheets: Vec<SheetOutcome> = rows
         .iter()
         .map(|row| {
+            let mark = sheet_mark(marked.as_deref(), &rows_files, row);
             let template = template_path(folder, row);
             let dwg = output.join(format!("{}.dwg", row.sheet));
             let mut notices = Vec::new();
-            let built = read_template(&template, row, &rows_file, set.units, &mut notices)
-                .and_then(|record| {
-                    build_sheet(&record, &template, &dwg, &mark, request.overwrite, settings)
-                });
+            let built = read_template(&template, row, set.units, &mut notices).and_then(|record| {
+                build_sheet(&record, &template, &dwg, &mark, request.overwrite, settings)
+            });
             let (result, error) = match built {
                 Ok(report) => (Some(report), None),
                 Err(error) => (None, Some(error)),
@@ -219,9 +221,25 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         built,
         failed: sheets.len() - built,
         sheets,
-        no_set_in_marks: mark.set.is_none().then(|| no_set_in_marks(&set.output)),
+        no_set_in_marks: marked.is_none().then(|| no_set_in_marks(&set.output)),
         inconsistent: crate::change::inconsistent(folder),
     })
+}
+
+/// The build mark of the DWG of the sheet `row` names, in a set whose DWGs'
+/// marks name it as `set` ([`set_in_mark`]) and whose rows files are
+/// `rows_files`. For a set of more than one rows file it names the row's
+/// own as well, relative to the set's folder, so that a render or a plot of
+/// the DWG on its own reads that file alone; not when the mark names no
+/// set, nor when the file's path holds `;`, which ends it in the mark: that
+/// DWG's set's rows files are all read, as for a set of one.
+pub(crate) fn sheet_mark(set: Option<&str>, rows_files: &[RowsFile], row: &Row) -> BuildMark {
+    let written = &rows_files[row.file_index].written;
+    let named = set.is_some() && rows_files.len() > 1 && !written.contains(';');
+    BuildMark {
+        set: set.map(str::to_owned),
+        rows: named.then(|| written.clone()),
+    }
 }
 
 /// The drawing set whose folder is `set` as the build marks of the DWGs it
@@ -303,6 +321,10 @@ pub(crate) struct DwgSet {
     /// `dwg/DEMO-001.dwg`, or `../issued/DEMO-001.dwg` for a set whose
     /// output folder is outside it.
     pub path: String,
+    /// The rows file the DWG's sheet's row is in, as its build mark names
+    /// it, relative to the set's folder: named for a set of more than one
+    /// rows file ([`sheet_mark`]). None when the mark names none.
+    pub rows: Option<String>,
 }
 
 /// The drawing set the DWG at `dwg` was built from: the folder its build
@@ -333,7 +355,12 @@ pub(crate) fn set_of_dwg(dwg: &Path) -> Result<DwgSet, String> {
     let mut why = None;
     for folder in folders {
         match set_at(folder, dwg, &written) {
-            Ok(set) => return Ok(set),
+            Ok(set) => {
+                return Ok(DwgSet {
+                    rows: mark.rows,
+                    ..set
+                })
+            }
             Err(not) => {
                 why.get_or_insert(not);
             }
@@ -378,6 +405,7 @@ fn set_at(folder: PathBuf, dwg: &Path, written: &str) -> Result<DwgSet, String> 
     Ok(DwgSet {
         path: relative_to(&folder, &built),
         folder,
+        rows: None,
     })
 }
 
@@ -398,7 +426,9 @@ pub(crate) struct DwgPaper {
 
 /// What the sheet a DWG was built as declares about its paper ([`DwgPaper`]).
 /// None when the DWG names no set, or the set, its rows or the DWG's row
-/// or template cannot be read: the DWG then plots to its extents. The DWG's
+/// or template cannot be read: the DWG then plots to its extents. When the
+/// DWG's mark names its rows file, only that file is read, so another of
+/// the set's rows files that cannot be read does not touch it. The DWG's
 /// row is the one whose DWG in the set's output folder is this very file,
 /// as the file system tells it, so letter case is matched as the file
 /// system matches it.
@@ -406,34 +436,58 @@ pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<DwgPaper> {
     let set = set_of_dwg(dwg).ok()?;
     let settings_file = set.folder.join(SET_SETTINGS_FILE);
     let settings = read_set_settings(&settings_file).ok()?;
-    let rows_file = set.folder.join(&settings.rows);
-    let rows_bytes = fs::read(&rows_file).ok()?;
-    let rows = rows_at(std::str::from_utf8(&rows_bytes).ok()?, &rows_file).ok()?;
+    let rows_files = marked_rows_files(&set.folder, &settings, set.rows.as_deref())?;
+    let rows = rows_of(&rows_files).ok()?;
     let output = set.folder.join(&settings.output);
     let row = rows
         .iter()
         .find(|r| is_same_file(&output.join(format!("{}.dwg", r.sheet)), dwg))?;
+    let rows_file = &rows_files[row.file_index];
     let template = template_path(&set.folder, row);
     let template_bytes = fs::read(&template).ok()?;
     let text = std::str::from_utf8(&template_bytes).ok()?;
     let mut notices = Vec::new();
-    let (record, _) = template_at(
-        text,
-        &template,
-        row,
-        &rows_file,
-        settings.units,
-        &mut notices,
-    )
-    .ok()?;
+    let (record, _) = template_at(text, &template, row, settings.units, &mut notices).ok()?;
     Some(DwgPaper {
         paper: record.sheet.paper,
         units: settings.units,
         read: vec![
             (SourceKind::Template, template, template_bytes),
-            (SourceKind::Rows, rows_file, rows_bytes),
+            (
+                SourceKind::Rows,
+                rows_file.path.clone(),
+                rows_file.text.clone().into_bytes(),
+            ),
         ],
     })
+}
+
+/// The rows files the sheet of a DWG whose build mark names `marked` is
+/// read from, in the set whose folder is `folder` and whose settings are
+/// `settings`: the rows file the mark names, alone, when it is one of the
+/// set's rows files, found by the file it leads to, however the settings
+/// spell it now; otherwise, when the mark names none or one that is no
+/// longer the set's, every rows file of the set, as for a set of one. None
+/// when they cannot be found or read.
+fn marked_rows_files(
+    folder: &Path,
+    settings: &SetSettings,
+    marked: Option<&str>,
+) -> Option<Vec<RowsFile>> {
+    if let Some(written) = marked {
+        let wanted = folder.join(written);
+        let plain = relative_to(folder, &wanted);
+        let found = rows_paths(folder, settings)
+            .ok()?
+            .into_iter()
+            .find(|found| {
+                relative_to(folder, &found.path) == plain || is_same_file(&found.path, &wanted)
+            });
+        if let Some(found) = found {
+            return read_rows_file_in(&Disk, found).ok().map(|file| vec![file]);
+        }
+    }
+    read_rows_files_in(&Disk, folder, settings).ok()
 }
 
 /// A file read to draw an output, with what it is and its bytes, for the
@@ -544,6 +598,82 @@ mod tests {
         }
     }
 
+    /// The rows file a DWG's build mark names is found among the set's
+    /// however the settings spell it now, and read alone; when it is no
+    /// longer one of them, every rows file of the set is read, so the
+    /// sheet still finds its paper and its row's file.
+    #[test]
+    fn a_marked_rows_file_is_found_however_the_settings_spell_it_and_else_all_are_read() {
+        let set = std::env::temp_dir()
+            .join(format!(
+                "agentdrafter-set-marked-rows-{}",
+                std::process::id()
+            ))
+            .join("two-kinds");
+        let _ = fs::remove_dir_all(&set);
+        copy_yaml(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/two-kinds"),
+            &set,
+        );
+        let reply = build_set_with(
+            &SetBuildRequest {
+                set: set.clone(),
+                overwrite: false,
+            },
+            &Settings::default(),
+        );
+        assert!(reply.ok, "{:#?}", reply.error);
+        let dwg = set.join("dwg").join("SCHED-201.dwg");
+        assert_eq!(
+            dwg::build_mark(&dwg).and_then(|mark| mark.rows).as_deref(),
+            Some("rows/schedules.yaml")
+        );
+        // The rows files the DWG's paper is read from, under `rows`.
+        let rows_read = |rows: &str| -> Vec<String> {
+            fs::write(
+                set.join(SET_SETTINGS_FILE),
+                format!("units: in\noutput: dwg\nrows: {rows}\n"),
+            )
+            .unwrap();
+            let found = paper_of_dwg(&dwg).expect("the sheet's paper is found");
+            assert!(found.paper.is_some(), "{rows}");
+            found
+                .read
+                .into_iter()
+                .filter(|(kind, ..)| *kind == SourceKind::Rows)
+                .map(|(_, path, _)| relative_to(&set, &path))
+                .collect()
+        };
+
+        // Respelled, and read alone: another rows file that cannot be read
+        // does not touch it.
+        let areas = set.join("rows").join("areas.yaml");
+        let areas_text = fs::read_to_string(&areas).unwrap();
+        fs::write(&areas, "rows: [\n").unwrap();
+        assert_eq!(
+            rows_read("[rows/areas.yaml, ./rows/schedules.yaml]"),
+            ["rows/schedules.yaml"]
+        );
+        assert_eq!(
+            rows_read("[rows/areas.yaml, rows/../rows/schedules.yaml]"),
+            ["rows/schedules.yaml"]
+        );
+        fs::write(&areas, areas_text).unwrap();
+
+        // The marked file is no longer one of the set's: every rows file is
+        // read, and the sheet's row is found in the file it is in now.
+        fs::rename(
+            set.join("rows").join("schedules.yaml"),
+            set.join("rows").join("sched.yaml"),
+        )
+        .unwrap();
+        assert_eq!(
+            rows_read("[rows/areas.yaml, rows/sched.yaml]"),
+            ["rows/sched.yaml"]
+        );
+        let _ = fs::remove_dir_all(set.parent().unwrap());
+    }
+
     /// Built on this system's own paths, on Windows as on the others: each
     /// DWG names its set relative to its own folder, with `/` between
     /// folders, and is found to be the set's from it.
@@ -584,7 +714,13 @@ mod tests {
             if written.is_empty() {
                 // The way back would name `jobs`, above the set: the DWG
                 // names no set, and the reply says why.
-                assert_eq!(dwg::build_mark(&dwg), Some(BuildMark { set: None }));
+                assert_eq!(
+                    dwg::build_mark(&dwg),
+                    Some(BuildMark {
+                        set: None,
+                        rows: None
+                    })
+                );
                 assert!(said.unwrap().contains("`../../issued`"));
                 assert_eq!(set_of_dwg(&dwg).unwrap_err(), NO_SET);
                 continue;
@@ -593,7 +729,8 @@ mod tests {
             assert_eq!(
                 dwg::build_mark(&dwg),
                 Some(BuildMark {
-                    set: Some(written.to_owned())
+                    set: Some(written.to_owned()),
+                    rows: None,
                 }),
                 "{output}"
             );

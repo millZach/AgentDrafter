@@ -84,7 +84,70 @@ fn settings_declare_the_unit_the_output_folder_and_the_rows_file() {
         parse_set_settings("units: in\noutput: ../issued/dwg\nrows: data/rows.yaml\n").unwrap();
     assert_eq!(settings.units, Unit::In);
     assert_eq!(settings.output, "../issued/dwg");
-    assert_eq!(settings.rows, "data/rows.yaml");
+    let rows: Vec<&str> = settings.rows.iter().map(|r| r.written.as_str()).collect();
+    assert_eq!(rows, ["data/rows.yaml"]);
+    assert_eq!(settings.rows[0].field, "rows");
+    assert!(!settings.rows_listed);
+}
+
+#[test]
+fn settings_may_list_rows_files_and_folders_of_them() {
+    let settings =
+        parse_set_settings("units: in\noutput: dwg\nrows:\n  - rows/areas.yaml\n  - schedules\n")
+            .unwrap();
+    assert!(settings.rows_listed);
+    let rows: Vec<(&str, &str, usize)> = settings
+        .rows
+        .iter()
+        .map(|r| (r.written.as_str(), r.field.as_str(), r.line))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("rows/areas.yaml", "rows[0]", 4),
+            ("schedules", "rows[1]", 5)
+        ]
+    );
+
+    for (rows, code, field, says) in [
+        ("[]", ErrorCode::BadValue, "rows", "lists no rows file"),
+        (
+            "[a.yaml, /b.yaml]",
+            ErrorCode::BadValue,
+            "rows[1]",
+            "cannot start with `/`",
+        ),
+        (
+            "[a.yaml, 'c:b.yaml']",
+            ErrorCode::BadValue,
+            "rows[1]",
+            "cannot hold `:`",
+        ),
+        (
+            "[a.yaml, null]",
+            ErrorCode::WrongType,
+            "rows[1]",
+            "a rows file or of a folder",
+        ),
+        (
+            "[[a.yaml]]",
+            ErrorCode::WrongType,
+            "rows[0]",
+            "a rows file or of a folder",
+        ),
+        (
+            "[a.yaml, b, a.yaml]",
+            ErrorCode::DuplicateName,
+            "rows[2]",
+            "named twice, by `rows[0]` and by `rows[2]`",
+        ),
+    ] {
+        let text = format!("units: in\noutput: dwg\nrows: {rows}\n");
+        let e = error(parse_set_settings(&text));
+        assert_eq!(e.code, code, "{rows}: {e:?}");
+        assert_eq!(e.field.as_deref(), Some(field), "{rows}: {e:?}");
+        assert!(e.message.contains(says), "{rows}: {e:?}");
+    }
 }
 
 #[test]
@@ -514,6 +577,32 @@ fn the_set_schema_accepts_exactly_the_settings_the_reader_accepts() {
         (&ROWS, "null", json!(null), false),
         (&ROWS, "'~'", json!("~"), true),
         (&ROWS, "'c:rows.yaml'", json!("c:rows.yaml"), false),
+        (&ROWS, "rows", json!("rows"), true),
+        (
+            &ROWS,
+            "[rows/a.yaml, rows/b.yaml]",
+            json!(["rows/a.yaml", "rows/b.yaml"]),
+            true,
+        ),
+        (&ROWS, "[rows]", json!(["rows"]), true),
+        (&ROWS, "[2026]", json!([2026]), true),
+        (&ROWS, "[]", json!([]), false),
+        (&ROWS, "['/a.yaml']", json!(["/a.yaml"]), false),
+        (&ROWS, "[a.yaml, null]", json!(["a.yaml", null]), false),
+        (&ROWS, "[[a.yaml]]", json!([["a.yaml"]]), false),
+        (&ROWS, "{a: b}", json!({"a": "b"}), false),
+        (
+            &ROWS,
+            "[rows/a.yaml, rows/a.yaml]",
+            json!(["rows/a.yaml", "rows/a.yaml"]),
+            false,
+        ),
+        (
+            &ROWS,
+            "[rows/a.yaml, rows/b.yaml, rows/a.yaml]",
+            json!(["rows/a.yaml", "rows/b.yaml", "rows/a.yaml"]),
+            false,
+        ),
     ];
     assert_reader_and_schema_agree(&set_schema(), cases, |yaml| {
         parse_set_settings(yaml).map(|_| ())

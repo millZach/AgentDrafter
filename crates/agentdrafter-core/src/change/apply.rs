@@ -1,7 +1,8 @@
 //! Applies a change set to a drawing set's own files.
 //!
 //! The operations are applied in order to the records held in memory: the
-//! set's rows file and the templates they name. Every sheet an operation
+//! set's rows files and the templates they name, each edit to a row in the
+//! rows file the row is in. Every sheet an operation
 //! reaches is then read from the edited records and built into a DWG in
 //! memory, as `agentdrafter build` would build it. A sheet that cannot take
 //! its part fails, and so does every operation that reaches it; a template
@@ -38,16 +39,16 @@ use crate::description::blocks::tag_in_capitals;
 use crate::description::parts::{self, Unsplit};
 use crate::description::SheetRecord;
 use crate::description::{
-    article, library_named, mark_text, one_name, read_file, read_set_settings, rows_at,
-    shown_mtext, template_at, template_in, template_path, AttributeSet, Disk, FromRow, GivenValue,
-    LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile, Row,
-    TableEdit, ID_SEPARATOR,
+    article, library_named, mark_text, one_name, read_file, read_rows_files_in, read_set_settings,
+    rows_of, shown_mtext, template_at, template_in, template_path, AttributeSet, Disk, FromRow,
+    GivenValue, LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile,
+    Row, RowsFile, TableEdit, ID_SEPARATOR,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
 use crate::geometry::SnapRef;
 use crate::import::{drawing_unit, is_dxf, plan, write_plan, BlocksImported, Existing};
-use crate::set::{set_in_mark, Notice, SET_SETTINGS_FILE};
+use crate::set::{set_in_mark, sheet_mark, Notice, SET_SETTINGS_FILE};
 use crate::settings::Settings;
 use crate::units::Unit;
 
@@ -59,11 +60,11 @@ struct SetFiles {
     folder: PathBuf,
     units: Unit,
     output: PathBuf,
-    /// The build mark the set's DWGs carry, naming the set as `build`
+    /// The set as the build marks of its DWGs name it, as `build` names it
     /// names it.
-    mark: BuildMark,
-    rows_path: PathBuf,
-    rows_text: String,
+    marked: Option<String>,
+    /// The set's rows files, in the order it builds their rows.
+    rows_files: Vec<RowsFile>,
     rows: Vec<Row>,
     templates: Vec<TemplateFile>,
     /// For each row, its template's place in `templates`.
@@ -109,9 +110,8 @@ struct TemplateFile {
 impl SetFiles {
     fn load(folder: &Path) -> Result<Self, Error> {
         let settings = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
-        let rows_path = folder.join(&settings.rows);
-        let rows_text = read_file(&rows_path, "the drawing set's rows")?;
-        let rows = rows_at(&rows_text, &rows_path)?;
+        let rows_files = read_rows_files_in(&Disk, folder, &settings)?;
+        let rows = rows_of(&rows_files)?;
         let mut templates: Vec<TemplateFile> = Vec::new();
         let mut template_of = Vec::with_capacity(rows.len());
         for (k, row) in rows.iter().enumerate() {
@@ -177,11 +177,8 @@ impl SetFiles {
             folder: folder.to_owned(),
             units: settings.units,
             output: folder.join(&settings.output),
-            mark: BuildMark {
-                set: set_in_mark(folder, &settings.output),
-            },
-            rows_path,
-            rows_text,
+            marked: set_in_mark(folder, &settings.output),
+            rows_files,
             rows,
             templates,
             template_of,
@@ -283,6 +280,30 @@ impl SetFiles {
     fn dwg(&self, k: usize) -> PathBuf {
         self.output.join(format!("{}.dwg", self.rows[k].sheet))
     }
+
+    /// The build mark sheet `k`'s DWG carries, as `build` writes it.
+    fn mark(&self, k: usize) -> BuildMark {
+        sheet_mark(self.marked.as_deref(), &self.rows_files, &self.rows[k])
+    }
+
+    /// Where sheet `k`'s own objects are written: its row's rows file, and
+    /// the list of its row there.
+    fn row_list(&self, k: usize) -> (FileRef, ObjectList) {
+        let row = &self.rows[k];
+        (FileRef::Rows(row.file_index), ObjectList::Row(row.index))
+    }
+
+    /// The path of the rows file sheet `k`'s row is in.
+    fn rows_path(&self, k: usize) -> &Path {
+        &self.rows[k].file
+    }
+}
+
+/// The place of sheet `k`'s rows file among the set's, and the list of its
+/// row's own objects there.
+fn row_place(files: &SetFiles, k: usize) -> (usize, ObjectList) {
+    let row = &files.rows[k];
+    (row.file_index, ObjectList::Row(row.index))
 }
 
 /// Whether two paths name one file: the file system says, so `..`, links
@@ -295,14 +316,16 @@ fn one_file(a: &Path, b: &Path) -> bool {
 /// Which record an object is written in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FileRef {
-    Rows,
+    /// The rows file at this place among the set's.
+    Rows(usize),
     Template(usize),
 }
 
 /// The change set's operations applied to the records in memory.
 struct Attempt<'a> {
     files: &'a SetFiles,
-    rows: RecordFile,
+    /// Each of the set's rows files, in the order of `files.rows_files`.
+    rows: Vec<RecordFile>,
     templates: Vec<Option<Result<RecordFile, Error>>>,
     /// The operation that last set each row value: the row, the value's
     /// name and the operation.
@@ -317,7 +340,11 @@ impl<'a> Attempt<'a> {
     fn new(files: &'a SetFiles) -> Result<Self, Error> {
         Ok(Self {
             files,
-            rows: RecordFile::from_text(&files.rows_path, files.rows_text.clone())?,
+            rows: files
+                .rows_files
+                .iter()
+                .map(|f| RecordFile::from_text(&f.path, f.text.clone()))
+                .collect::<Result<_, _>>()?,
             templates: files.templates.iter().map(|_| None).collect(),
             values: Vec::new(),
             libraries: files.libraries.iter().map(|_| None).collect(),
@@ -345,9 +372,34 @@ impl<'a> Attempt<'a> {
 
     fn file(&mut self, file: FileRef) -> Result<&mut RecordFile, Error> {
         match file {
-            FileRef::Rows => Ok(&mut self.rows),
+            FileRef::Rows(f) => Ok(&mut self.rows[f]),
             FileRef::Template(t) => self.template(t),
         }
+    }
+
+    /// The rows file sheet `k`'s row is in, as edited, and the list of its
+    /// row's own objects there.
+    fn row_record(&mut self, k: usize) -> (&mut RecordFile, ObjectList) {
+        let row = &self.files.rows[k];
+        (&mut self.rows[row.file_index], ObjectList::Row(row.index))
+    }
+
+    /// The set's rows as the records stand now: each rows file's edited
+    /// text, or its text as it was.
+    fn rows_now(&self) -> Result<Vec<Row>, Error> {
+        let files = self
+            .files
+            .rows_files
+            .iter()
+            .zip(&self.rows)
+            .map(|(file, record)| {
+                Ok(RowsFile {
+                    text: record.new_text()?.unwrap_or_else(|| file.text.clone()),
+                    ..file.clone()
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        rows_of(&files)
     }
 
     /// The objects on sheet `k`: its template's, then its row's own, each
@@ -361,12 +413,16 @@ impl<'a> Attempt<'a> {
             .enumerate()
             .map(|(i, l)| (FileRef::Template(t), ObjectList::Template, i, l))
             .collect();
+        let (file, list) = self.files.row_list(k);
+        let FileRef::Rows(f) = file else {
+            unreachable!("a row's objects are in its rows file")
+        };
         found.extend(
-            self.rows
-                .objects(ObjectList::Row(k))
+            self.rows[f]
+                .objects(list)
                 .into_iter()
                 .enumerate()
-                .map(|(i, l)| (FileRef::Rows, ObjectList::Row(k), i, l)),
+                .map(|(i, l)| (file, list, i, l)),
         );
         Ok(found)
     }
@@ -374,7 +430,7 @@ impl<'a> Attempt<'a> {
     /// The sheets an edit to `file` reaches.
     fn reach(&self, file: FileRef, k: usize) -> Vec<usize> {
         match file {
-            FileRef::Rows => vec![k],
+            FileRef::Rows(_) => vec![k],
             FileRef::Template(t) => self.files.templates[t].sheets.clone(),
         }
     }
@@ -536,11 +592,7 @@ pub(super) fn apply(
         }
 
         let mut prepared: BTreeMap<usize, PreparedSheet> = BTreeMap::new();
-        let rows = at
-            .rows
-            .new_text()
-            .map(|text| text.unwrap_or_else(|| files.rows_text.clone()))
-            .and_then(|text| rows_at(&text, &files.rows_path));
+        let rows = at.rows_now();
         for &k in &touched {
             if failed.contains_key(&k) {
                 continue;
@@ -609,8 +661,10 @@ pub(super) fn apply(
     // What would be written.
     let mut records: Vec<(PathBuf, String)> = Vec::new();
     if !landed.is_empty() {
-        if let Some(text) = attempt.rows.new_text()? {
-            records.push((files.rows_path.clone(), text));
+        for (file, record) in files.rows_files.iter().zip(&attempt.rows) {
+            if let Some(text) = record.new_text()? {
+                records.push((file.path.clone(), text));
+            }
         }
         for (t, file) in attempt.templates.iter().enumerate() {
             if let Some(Ok(file)) = file {
@@ -970,7 +1024,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         let (file, list, sheets, first) = match to {
             AddTo::Sheet(name) => {
                 let k = files.sheet(name).expect("checked before");
-                (FileRef::Rows, ObjectList::Row(k), vec![k], k)
+                let (file, list) = files.row_list(k);
+                (file, list, vec![k], k)
             }
             AddTo::Template(written) => {
                 let t = files.template(written).expect("checked before");
@@ -1032,7 +1087,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         let after = record.object_text(list, index);
         let path = record.path.clone();
         let place = match file {
-            FileRef::Rows => format!("to sheet `{}`, in its row", files.name(first)),
+            FileRef::Rows(_) => format!("to sheet `{}`, in its row", files.name(first)),
             FileRef::Template(t) => format!(
                 "to the template `{}`, so it is on {}",
                 files.templates[t].written,
@@ -1326,7 +1381,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
             every_sheet(&files.names(&reach))
         ),
         FileRef::Template(t) => format!(", in the template `{}`", files.templates[t].written),
-        FileRef::Rows => String::new(),
+        FileRef::Rows(_) => String::new(),
     };
     let mut done = Done {
         record: path,
@@ -1702,8 +1757,10 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         }
         let mut set_values: Vec<RowValueSet> = Vec::new();
         for (name, value) in sets {
-            let was = at.rows.row_value(k, &name).unwrap_or_default();
-            if let Err(e) = at.rows.set_row_value(k, &name, &value) {
+            let row = files.rows[k].index;
+            let (record, _) = at.row_record(k);
+            let was = record.row_value(row, &name).unwrap_or_default();
+            if let Err(e) = record.set_row_value(row, &name, &value) {
                 return fail(refused_on, from_record(e));
             }
             at.values.retain(|(r, n, _)| !(*r == k && *n == name));
@@ -1793,7 +1850,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
             sheets.push(k);
         }
         if sheets == vec![k] && matches!(file, FileRef::Template(_)) {
-            done.record = files.rows_path.clone();
+            done.record = files.rows_path(k).to_owned();
         }
         if matched.is_some() {
             done.row_values = set_values;
@@ -2044,19 +2101,14 @@ fn apply_table(
                     );
                 }
                 for &k in &sheets {
-                    count += at
-                        .rows
-                        .rename_values(ObjectList::Row(k), by, name, to, op.index);
+                    let (f, list) = row_place(files, k);
+                    count += at.rows[f].rename_values(list, by, name, to, op.index);
                 }
                 if table == Table::Layer {
                     for &k in &sheets {
-                        count += at.rows.rename_in_lists(
-                            ObjectList::Row(k),
-                            FROZEN_LAYERS,
-                            name,
-                            to,
-                            op.index,
-                        );
+                        let (f, list) = row_place(files, k);
+                        count +=
+                            at.rows[f].rename_in_lists(list, FROZEN_LAYERS, name, to, op.index);
                     }
                 }
                 format!(
@@ -2080,18 +2132,20 @@ fn apply_table(
                     );
                 }
                 for &k in &sheets {
+                    let (f, list) = row_place(files, k);
                     users.extend(
-                        at.rows
-                            .object_users(ObjectList::Row(k), by, name)
+                        at.rows[f]
+                            .object_users(list, by, name)
                             .into_iter()
                             .map(|id| format!("{}/{id}", files.name(k))),
                     );
                 }
                 if table == Table::Layer {
                     for &k in &sheets {
+                        let (f, list) = row_place(files, k);
                         users.extend(
-                            at.rows
-                                .list_users(ObjectList::Row(k), FROZEN_LAYERS, name)
+                            at.rows[f]
+                                .list_users(list, FROZEN_LAYERS, name)
                                 .into_iter()
                                 .map(|id| format!("{}/{id}", files.name(k))),
                         );
@@ -2763,12 +2817,12 @@ fn sync(
     }
 
     // Each sheet's row's own inserts.
-    let rows_path = files.rows_path.display().to_string();
     for &k in &library.sheets {
-        let list = ObjectList::Row(k);
-        let listed = at.rows.objects(list);
+        let rows_path = files.rows_path(k).display().to_string();
+        let (f, list) = row_place(files, k);
+        let listed = at.rows[f].objects(list);
         let mut edits = Vec::new();
-        for insert in at.rows.inserts(list) {
+        for insert in at.rows[f].inserts(list) {
             if !reaches(&insert.block) {
                 continue;
             }
@@ -2781,7 +2835,7 @@ fn sync(
             }
         }
         for (index, given, n, gone, id) in edits {
-            at.rows
+            at.rows[f]
                 .fit_attribute(list, index, &given.key, n, op.index)
                 .map_err(fail)?;
             let field = list.place(index);
@@ -3105,11 +3159,7 @@ fn apply_dimension_from(
         return refusal;
     }
     // The dimension it is added from, as the sheet it is on stands now.
-    let rows_text = match at.rows.new_text() {
-        Ok(text) => text.unwrap_or_else(|| files.rows_text.clone()),
-        Err(e) => return fail(reach, e),
-    };
-    let rows = match rows_at(&rows_text, &files.rows_path) {
+    let rows = match at.rows_now() {
         Ok(rows) => rows,
         Err(e) => return fail(reach, e),
     };
@@ -3121,7 +3171,7 @@ fn apply_dimension_from(
         .id
         .split_once(ID_SEPARATOR)
         .map_or(found.id.as_str(), |(_, local)| local);
-    let in_row = found.file == FileRef::Rows;
+    let in_row = matches!(found.file, FileRef::Rows(_));
     let base = record
         .objects
         .iter()
@@ -3212,7 +3262,7 @@ fn apply_dimension_from(
         FromOp::Continued => "a continued dimension",
     };
     let place = match found.file {
-        FileRef::Rows => format!("to sheet `{}`, in its row", files.name(first)),
+        FileRef::Rows(_) => format!("to sheet `{}`, in its row", files.name(first)),
         FileRef::Template(t) => format!(
             "to the template `{}`, so it is on {}",
             files.templates[t].written,
@@ -3261,7 +3311,7 @@ fn validate(
         &record,
         &files.templates[t].path,
         &dwg,
-        &files.mark,
+        &files.mark(k),
         true,
         settings,
     )
@@ -3288,11 +3338,7 @@ fn clipped_keys(
     let fail =
         |code: ErrorCode, message: String| op_error(op.index, op.spec.name, code, message, "clip");
     let files = at.files;
-    let rows_text = at
-        .rows
-        .new_text()?
-        .unwrap_or_else(|| files.rows_text.clone());
-    let rows = rows_at(&rows_text, &files.rows_path)?;
+    let rows = at.rows_now()?;
     // The sheet the target is named on: a template's viewport is on every
     // sheet built from it, and its ID names one of them.
     let on = id.split_once(ID_SEPARATOR).map(|(sheet, _)| sheet);
@@ -3389,7 +3435,6 @@ fn sheet_record(
         &text,
         &template.path,
         &rows[k],
-        &files.rows_path,
         files.units,
         notices,
     )?;
@@ -3415,11 +3460,7 @@ fn snapped_points(
         return Ok(Vec::new());
     }
     let files = at.files;
-    let rows_text = at
-        .rows
-        .new_text()?
-        .unwrap_or_else(|| files.rows_text.clone());
-    let rows = rows_at(&rows_text, &files.rows_path)?;
+    let rows = at.rows_now()?;
     let mut records: Vec<SheetRecord> = Vec::with_capacity(sheets.len());
     for &k in sheets {
         records.push(
@@ -3648,7 +3689,7 @@ fn attribute(
 ) -> Error {
     let files = at.files;
     let t = files.template_of[k];
-    let in_rows = error.file.as_deref().map(Path::new) == Some(files.rows_path.as_path());
+    let in_rows = error.file.as_deref().map(Path::new) == Some(files.rows_path(k));
     let in_template =
         error.file.as_deref().map(Path::new) == Some(files.templates[t].path.as_path());
     let field = error.field.clone().unwrap_or_default();
@@ -3695,11 +3736,12 @@ fn attribute(
                 .and_then(|(_, name, i)| within(name).map(|within| (*i, within, None)));
         }
     } else if in_rows {
+        let row = &files.rows[k];
         if let Some((list @ ObjectList::Row(_), index, rest)) = split_place(&field) {
-            if let Some((i, matched)) = at.rows.blame_at(list, index, rest) {
+            if let Some((i, matched)) = at.rows[row.file_index].blame_at(list, index, rest) {
                 cause = Some((i, rest.to_owned(), matched));
             }
-        } else if let Some(value) = field.strip_prefix(&format!("rows[{}].values.", k)) {
+        } else if let Some(value) = field.strip_prefix(&format!("rows[{}].values.", row.index)) {
             let blamed = blame_row_values(at, k, value, &error);
             match blamed.as_slice() {
                 [] => {}
@@ -3854,12 +3896,7 @@ fn blame_row_values(at: &Attempt, k: usize, value: &str, error: &Error) -> Vec<u
             .into_iter()
             .collect();
     }
-    let rows = match at
-        .rows
-        .new_text()
-        .map(|text| text.unwrap_or_else(|| files.rows_text.clone()))
-        .and_then(|text| rows_at(&text, &files.rows_path))
-    {
+    let rows = match at.rows_now() {
         Ok(rows) => rows,
         Err(_) => return contributed,
     };
@@ -3939,14 +3976,21 @@ fn before_change(files: &SetFiles, k: usize, settings: &Settings) -> Result<Resu
         &text,
         &template.path,
         &files.rows[k],
-        &files.rows_path,
         files.units,
         &mut Vec::new(),
     )
     .and_then(|(record, _)| {
         let dwg = files.dwg(k);
         writable(&dwg)?;
-        prepare_sheet(&record, &template.path, &dwg, &files.mark, true, settings).map(|_| ())
+        prepare_sheet(
+            &record,
+            &template.path,
+            &dwg,
+            &files.mark(k),
+            true,
+            settings,
+        )
+        .map(|_| ())
     });
     Ok(outcome)
 }

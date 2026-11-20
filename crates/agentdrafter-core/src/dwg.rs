@@ -60,7 +60,9 @@ const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;
 /// it, written into every DWG AgentDrafter builds. A build replaces an
 /// existing DWG only when it carries it. Its value is [`BUILT`] for a sheet
 /// built on its own, and [`BUILT_FROM_SET`] followed by the drawing set's
-/// folder for a sheet of a set, such as `build; set=..`.
+/// folder for a sheet of a set, such as `build; set=..`. A sheet of a set
+/// whose rows are in more than one rows file names its own after
+/// [`ROWS_IN_MARK`], before the set: `build; rows=rows/areas.yaml; set=..`.
 const BUILD_MARK: &str = "AgentDrafter";
 
 /// The build mark's value for a sheet built on its own.
@@ -70,6 +72,12 @@ const BUILT: &str = "build";
 /// set's folder follows, relative to the DWG's folder, with `/` between
 /// folders, to the end of the value.
 const BUILT_FROM_SET: &str = "build; set=";
+
+/// How the build mark's value starts for a sheet of a drawing set that
+/// names the sheet's rows file: the rows file follows, relative to the
+/// set's folder, up to the first `;`, which it never holds, then `; set=`
+/// and the set's folder, as after [`BUILT_FROM_SET`].
+const ROWS_IN_MARK: &str = "build; rows=";
 
 /// The section of a DWG that holds its drawing properties, DWGPROPS.
 const SUMMARY_SECTION: &str = "AcDb:SummaryInfo";
@@ -81,6 +89,11 @@ pub(crate) struct BuildMark {
     /// the DWG's folder, as the mark writes it: `/` between folders, such
     /// as `..` or `../demo-plant`. None for a sheet built on its own.
     pub set: Option<String>,
+    /// The rows file the sheet's row is in, relative to the set's folder,
+    /// as the set reaches it, such as `rows/areas.yaml`: named only for a
+    /// sheet of a set whose rows are in more than one rows file, and only
+    /// when the path holds no `;`. None otherwise.
+    pub rows: Option<String>,
 }
 
 /// AutoCAD's own knot spacing for a curve through fit points: by the chord
@@ -1412,9 +1425,10 @@ fn custom_properties(section: &[u8]) -> Option<Vec<(String, String)>> {
 
 /// The build mark's value for `mark`.
 fn mark_value(mark: &BuildMark) -> String {
-    match &mark.set {
-        Some(set) => format!("{BUILT_FROM_SET}{set}"),
-        None => BUILT.to_owned(),
+    match (&mark.set, &mark.rows) {
+        (Some(set), Some(rows)) => format!("{ROWS_IN_MARK}{rows}; set={set}"),
+        (Some(set), None) => format!("{BUILT_FROM_SET}{set}"),
+        (None, _) => BUILT.to_owned(),
     }
 }
 
@@ -1426,11 +1440,21 @@ fn mark_in(properties: &[(String, String)]) -> Option<BuildMark> {
         .filter(|(name, _)| name == BUILD_MARK)
         .find_map(|(_, value)| {
             if value == BUILT {
-                return Some(BuildMark { set: None });
+                return Some(BuildMark {
+                    set: None,
+                    rows: None,
+                });
             }
-            let set = value.strip_prefix(BUILT_FROM_SET)?;
-            (!set.is_empty()).then(|| BuildMark {
+            let (rows, set) = match value.strip_prefix(ROWS_IN_MARK) {
+                Some(rest) => {
+                    let (rows, set) = rest.split_once(';')?;
+                    (Some(rows), set.strip_prefix(" set=")?)
+                }
+                None => (None, value.strip_prefix(BUILT_FROM_SET)?),
+            };
+            (!set.is_empty() && rows.is_none_or(|r| !r.is_empty())).then(|| BuildMark {
                 set: Some(set.to_owned()),
+                rows: rows.map(str::to_owned),
             })
         })
 }
@@ -1538,7 +1562,10 @@ mod tests {
         }
     }
 
-    const ON_ITS_OWN: BuildMark = BuildMark { set: None };
+    const ON_ITS_OWN: BuildMark = BuildMark {
+        set: None,
+        rows: None,
+    };
 
     #[test]
     fn a_built_dwg_carries_the_build_mark() {
@@ -1549,13 +1576,23 @@ mod tests {
                 "of-a-set.dwg",
                 BuildMark {
                     set: Some("..".into()),
+                    rows: None,
                 },
                 "build; set=..",
+            ),
+            (
+                "of-a-set-of-rows-files.dwg",
+                BuildMark {
+                    set: Some("../a; set=b".into()),
+                    rows: Some("rows/areas.yaml".into()),
+                },
+                "build; rows=rows/areas.yaml; set=../a; set=b",
             ),
             (
                 "far.dwg",
                 BuildMark {
                     set: Some("../../plants/démo plant; 2".into()),
+                    rows: None,
                 },
                 "build; set=../../plants/démo plant; 2",
             ),
@@ -1599,12 +1636,24 @@ mod tests {
         assert_eq!(
             mark(&[("Client", "x"), ("AgentDrafter", "build; set=../a b")]),
             Some(BuildMark {
-                set: Some("../a b".into())
+                set: Some("../a b".into()),
+                rows: None,
+            })
+        );
+        assert_eq!(
+            mark(&[("AgentDrafter", "build; rows=r/b.yaml; set=../a; rows=c")]),
+            Some(BuildMark {
+                set: Some("../a; rows=c".into()),
+                rows: Some("r/b.yaml".into()),
             })
         );
         for not_a_mark in [
             &[("AgentDrafter", "built")][..],
             &[("AgentDrafter", "build; set=")],
+            &[("AgentDrafter", "build; rows=r.yaml; set=")],
+            &[("AgentDrafter", "build; rows=; set=..")],
+            &[("AgentDrafter", "build; rows=r.yaml")],
+            &[("AgentDrafter", "build; rows=r.yaml;set=..")],
             &[("AgentDrafter", "Build")],
             &[("agentdrafter", "build")],
             &[("Author", "build")],

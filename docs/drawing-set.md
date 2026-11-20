@@ -1,6 +1,6 @@
 # The drawing set
 
-A drawing set is a job's sheets together with the block library, templates and data they share (see [`CONTEXT.md`](../CONTEXT.md)). On disk it is a folder: the set's settings, its templates, its block library and its rows. `agentdrafter build <folder>` builds every sheet in it, one DWG per row, each a template plus that row of data. Building one sheet description on its own works as it always has.
+A drawing set is a job's sheets together with the block library, templates and data they share (see [`CONTEXT.md`](../CONTEXT.md)). On disk it is a folder: the set's settings, its templates, its block library and its rows, in one rows file or [several](#several-rows-files). `agentdrafter build <folder>` builds every sheet in it, one DWG per row, each a template plus that row of data. Building one sheet description on its own works as it always has.
 
 Every file in a set is written in the same [strict subset of YAML](sheet-description.md#the-yaml-subset) as a sheet description, and each kind has its schema: `agentdrafter schema set` for the settings, `agentdrafter schema rows` for the rows and `agentdrafter schema template` for a template. Each schema accepts exactly what the reader accepts, and tests keep the two in step. The rows are YAML, not CSV: Zach decided this on 2026-11-11, so that a set's data is read by the same strict reader, with the same errors, as everything else in it.
 
@@ -69,7 +69,7 @@ The settings are the file `set.yaml` at the top of the set's folder. `agentdraft
 |---|---|---|
 | `units` | yes | The set's declared unit: `mm`, `cm`, `m`, `in` or `ft`. Every template, sheet description and block library in the set is in it, and every DWG the set builds is in it. There is no default. |
 | `output` | yes | The folder the set's outputs go to, relative to the set's folder, such as `dwg` or `../issued`: its DWGs, and its PDFs when it is plotted. A build or a plot makes it if it is not there. Each DWG names the set in its build mark, so a render or a plot of it alone finds the set wherever this folder is ([below](#the-build-mark-names-the-set)). |
-| `rows` | yes | The file the set's rows are in, relative to the set's folder, such as `rows.yaml`. |
+| `rows` | yes | The file the set's rows are in, relative to the set's folder, such as `rows.yaml`; or a folder of rows files, such as `rows`; or a list of such paths, such as `[rows/areas.yaml, rows/schedules.yaml]` ([Several rows files](#several-rows-files)). |
 
 A path in a set is written as a sheet description writes its block library's: relative, with `/` between folders on every system, not starting with `/`, and holding none of `\ : < > " | ? *`.
 
@@ -107,8 +107,41 @@ rows:
 - **They are part of the sheet** for building, rendering, plotting and querying, drawn after the template's objects, in the order the row lists them.
 - **They are written as a sheet description writes its objects**, with the same keys and rules, and the [schema](#the-rows) of the rows takes exactly what the reader takes. They name the layers, linetypes, text styles and hatch patterns the template defines and the blocks of the template's block library.
 - **They write their values themselves.** A value from the row, `{row: NAME}`, belongs in a template; in a row's own object it is an error.
-- **IDs.** Each `id` is given once on the sheet, the template's objects and the row's together, so `DEMO-002/tank` is unique in the set. An object without an `id` takes its place in the rows file, such as `DEMO-002/rows[1].objects[1]`.
-- **Errors** in a row's own object are placed in the rows file, at the object's place, such as `rows[1].objects[0].circle.layer`.
+- **IDs.** Each `id` is given once on the sheet, the template's objects and the row's together, so `DEMO-002/tank` is unique in the set. An object without an `id` takes its place in the rows file its row is in, such as `DEMO-002/rows[1].objects[1]`.
+- **Errors** in a row's own object are placed in the rows file its row is in, at the object's place, such as `rows[1].objects[0].circle.layer`.
+
+### Several rows files
+
+A set's rows may be in more than one rows file, so that each kind of sheet keeps its own rows: the area sheets in one file and the schedules in another, say. This was decided on 2026-11-19 (#103). `examples/two-kinds/` is a made-up set of two kinds of sheet, drawn from two templates, with a rows file for each:
+
+```
+examples/two-kinds/
+  set.yaml                   the set's settings
+  blocks.yaml                the block library
+  rows/areas.yaml            the area sheets' rows
+  rows/schedules.yaml        the schedule sheets' rows
+  templates/area.yaml        the area sheets' template
+  templates/schedule.yaml    the schedules' template
+```
+
+```yaml
+# set.yaml
+units: in
+output: dwg
+rows:
+  - rows/areas.yaml
+  - rows/schedules.yaml
+```
+
+- **`rows` takes one path or a list.** One path, as before, is a rows file or a folder of them; a list holds one or more such paths, and an empty list is refused. Each rows file is written as one always has been, with [its schema](#the-rows), `agentdrafter schema rows`.
+- **A folder gives its `.yaml` files**, not those of the folders in it and no other kind of file, in the byte order of their names, so that Windows, Linux and macOS list them alike: `Z.yaml` before `a-2.yaml` before `a_1.yaml`. `rows: rows` builds the two-kinds set as its list does. A folder that holds no `.yaml` file is refused.
+- **The set's rows are each file's rows in turn**, in the order the settings give them, and that is the order the set builds, plots, checks and shows its sheets in.
+- **A sheet's name is given once in the set**, across its rows files as in one. A name given in two files is the `duplicate_name` error, placed at the second and naming the first: its file, its line and its row.
+- **No file is reached twice**, by two paths or by a path and a folder that holds it: that is the `duplicate_name` error at the second path.
+- **A list's paths and a folder are plain files and folders in the set's folder**, since a change set writes a rows file where it is. One that leads outside it, such as `../shared/rows.yaml`, is refused with `bad_value`, as written or as the file system resolves it. So is a rows file a list or a folder reaches through a link, a symbolic link or a junction on Windows: the file itself, a `.yaml` link in a rows folder, or any folder on its way inside the set, the folder a list or `rows` names among them, whether the link leads outside the set or inside it. One path that names a file, as the settings of a set of one rows file write it, is read wherever it leads, as it always has been.
+- **A path is listed once.** A list that names the same path twice, such as `[rows/areas.yaml, rows/areas.yaml]`, is the `duplicate_name` error at the second, and the schema refuses it too (`uniqueItems`).
+- **Each row belongs to its rows file.** An error in a row names its file and its place there, such as `rows[0].values.REV` in `rows/schedules.yaml`; a row's own object without an `id` takes its place in its file, so the second area's label is `AREA-102/rows[1].objects[1]`; a query says which file an object is written in; a change set writes each edit to the rows file its row is in ([Change sets](change-sets.md#where-a-change-lands)); and a sheet's PNG and PDF are stamped with its own rows file. Its DWG's [build mark](#the-build-mark-names-the-set) names that rows file too, so a render or a plot of the DWG on its own reads that file alone.
+- **A set of one rows file is as it was**, byte for byte: its settings, replies, errors, records, build marks, stamps and journal.
 
 ## Templates
 
@@ -188,6 +221,8 @@ When the settings or the rows cannot be read, the reply is an error alone, as fo
 
 Zach decided on 2026-11-11 that **a DWG's build mark records the folder of the set it was built from, relative to the DWG, and never as a path in full**, since these DWGs go to plants. The mark is the custom drawing property `AgentDrafter` that every build writes ([the sheet description](sheet-description.md)), which AutoCAD shows under DWGPROPS; a sheet of a set gives it the value `build; set=` followed by the set's folder, such as `build; set=..` for `examples/demo-set/dwg/DEMO-001.dwg`, or `build; set=../demo-plant` for a DWG in `../issued` of a set in `demo-plant`. Nothing else is added to the DWG: no registered application, no object.
 
+A sheet of a set whose rows are in [more than one rows file](#several-rows-files) names its own rows file in the mark as well, relative to the set's folder, before the set: `build; rows=rows/schedules.yaml; set=..` for `examples/two-kinds/dwg/SCHED-201.dwg`. A render, a plot and `stale` of that DWG on its own read that rows file alone, so another of the set's rows files that cannot be read does not touch it. The file is found among the set's rows files by the file it leads to, however the settings spell it now, such as `./rows/schedules.yaml`; when it is no longer one of them, every rows file of the set is read, as for a set of one. A path that holds `;`, which would end it in the mark, is not named, and the DWG's set's rows files are read, as for a set of one. A set of one rows file writes the mark as it always has.
+
 - **The path is the way back from the output folder, as the set writes it**, with `/` between folders on every system: `..` for `output: dwg`, `../../..` for `output: out/a/b`, `.` for `output: .`, and for an output folder beside the set, such as `output: ../issued`, `..` and the set's folder's name. It is worked out from two things alone: `output` as the settings write it, each folder name in it a `..` back; and, for a `..` out of the set, the set's own folder's name, the real one, of the folder the set's path leads to through any link, since that is where `..` from the output folder leads. No other part of any path reaches it, whatever path the set was built by or wherever a link leads, so it holds nothing of where the set is on a machine, and a set's DWGs are the same bytes on Windows, Linux and macOS, whether or not the output folder is a link to a folder elsewhere.
 - **A mark never names a folder above the set.** When the way back would, as from `output: ../../issued`, the DWGs name no set: their mark stays `build`, and a render or a plot of one on its own says it was not issued, as before the mark named the set. The build's reply says so under `no_set_in_marks`, with the set's `output`; the set's own plot, stamped from its template, still says whether it was issued. Since a set's paths are relative ([above](#the-settings)), this is the one case.
 - **A sheet built on its own names no set**: its mark stays `build`, even when its sheet description is in a set's folder.
@@ -202,20 +237,19 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 | Code | In a set it means |
 |---|---|
 | `missing_value` | A row lacks a value its template needs. The message names the sheet, the value and where the template puts it; `field` is where the value belongs, such as `rows[1].values.TITLE`. |
-| `bad_value` | Besides a sheet description's meanings: a template in another unit than the set, a sheet's name no system allows, a value's name that is not ASCII letters, digits, `_` and `-`, a path that is not relative, or a row's value that the sheet description refuses where the template puts it. |
-| `duplicate_name` | Two rows name the same sheet, or names that differ only in case. |
+| `bad_value` | Besides a sheet description's meanings: a template in another unit than the set, a sheet's name no system allows, a value's name that is not ASCII letters, digits, `_` and `-`, a path that is not relative, a row's value that the sheet description refuses where the template puts it, a `rows` that lists no file, a folder of rows that holds none, or a list's path or a folder outside the set's folder. |
+| `duplicate_name` | Two rows name the same sheet, or names that differ only in case, in one rows file or in two; or the settings reach one rows file twice. |
 | `sheets_failed` | Some sheets failed and were not written; the others were built. Each sheet's error is under `sheets` in the result. |
-| `read_failed` | The folder holds no `set.yaml`, or a file the set names cannot be read. |
+| `read_failed` | The folder holds no `set.yaml`, or a file or folder the set names cannot be read. |
 
 ## How it is read
 
-`crates/agentdrafter-core/src/description/set.rs` reads the settings and the rows, `template.rs` fills a template in from a row, joining each list of parts as `parts.rs` reads it, and hands it to the sheet description's reader with the row's own objects, and `set_schema.rs` writes the three schemas. `crates/agentdrafter-core/src/set.rs` builds a set, sheet by sheet, through the same code that builds one sheet description, works out the set's folder each DWG's build mark records (`set_in_mark`), and finds the set a DWG's mark names (`set_of_dwg`). `src/dwg.rs` writes the mark, and reads it from the DWG's drawing properties alone, without reading the drawing.
+`crates/agentdrafter-core/src/description/set.rs` reads the settings, finds the rows files they name (`read_rows_files_in`) and reads their rows (`rows_of`), each row with its file, `template.rs` fills a template in from a row, joining each list of parts as `parts.rs` reads it, and hands it to the sheet description's reader with the row's own objects, and `set_schema.rs` writes the three schemas. `crates/agentdrafter-core/src/set.rs` builds a set, sheet by sheet, through the same code that builds one sheet description, works out the set's folder each DWG's build mark records (`set_in_mark`), and finds the set a DWG's mark names (`set_of_dwg`). `src/dwg.rs` writes the mark, and reads it from the DWG's drawing properties alone, without reading the drawing.
 
 ## What is not offered yet
 
-- Stamping an output with its revision. A set's sheets plot to PDF with `agentdrafter plot <folder>` ([plotting](plot.md#where-it-goes)), each stamped with its template, its rows file and its block library.
+- Stamping an output with its revision. A set's sheets plot to PDF with `agentdrafter plot <folder>` ([plotting](plot.md#where-it-goes)), each stamped with its template, its own rows file and its block library.
 - The journal and undo across the set. Stable IDs, [queries](query.md) and [change sets](change-sets.md) across the set are built.
 - Numbering worked out across the set, such as `SHEET {n} OF {m}`; a value from the row put anywhere but an attribute's value or a text's contents, such as a position or a layer; and a default for a value a row leaves out. A row's own values inside other text are [built](#a-rows-value-inside-other-text).
-- More than one rows file in a set.
 - One block library enforced for the whole set: each template names its own, in the set's unit.
 - Rendering a sheet from its template and row to PNG. A set's sheet renders as any DWG does, with `agentdrafter render <output>/<sheet>.dwg` ([Rendering](render.md)), and its PNG's stamp names the DWG; `render` refuses a template, since it holds values from a row.

@@ -28,8 +28,8 @@ use crate::build::{is_same_file, write_beside};
 use crate::change::{fit_library_inserts, AttributeRemoved};
 use crate::description::blocks::{library_hatch_patterns, read_block_library, tag_in_capitals};
 use crate::description::{
-    library_named, one_name, read_file, read_rows, read_set_settings, template_path, RecordFile,
-    LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
+    library_named, one_name, read_file, read_set_rows, read_set_settings, template_path,
+    RecordFile, LAYER_KEYS, LINETYPE_KEYS, TEXT_STYLE_KEYS,
 };
 use crate::error::{Error, ErrorCode};
 use crate::model::{
@@ -1107,7 +1107,7 @@ fn names_library(set: &Path, library: &Path) -> bool {
     let Ok(settings) = read_set_settings(&set.join(SET_SETTINGS_FILE)) else {
         return false;
     };
-    let Ok(rows) = read_rows(&set.join(&settings.rows)) else {
+    let Ok(rows) = read_set_rows(set, &settings) else {
         return false;
     };
     rows.iter().any(|row| {

@@ -31,7 +31,7 @@ pub(crate) fn set_schema() -> Value {
         "description": format!(
             "The settings of a drawing set: the file set.yaml at the top of the set's folder, \
              beside its templates, its block library and its rows. They declare the set's unit, \
-             the folder its DWGs go to and the file its rows are in. Building the folder builds \
+             the folder its DWGs go to and the files its rows are in. Building the folder builds \
              one DWG per row. {SUBSET}"
         ),
         "type": "object",
@@ -50,13 +50,35 @@ pub(crate) fn set_schema() -> Value {
                  sheet's DWG is named after the sheet, with .dwg after it."
                     .to_owned(),
             ),
-            rows_key: relative_path_property(
-                "The file the set's rows are in, relative to the set's folder, with / between \
-                 folders, such as rows.yaml. Its schema is `agentdrafter schema rows`."
-                    .to_owned(),
-            ),
+            rows_key: rows_property(),
         },
     })
+}
+
+/// The settings' `rows`: one path, of a rows file or a folder of them, or
+/// a list of such paths.
+fn rows_property() -> Value {
+    let mut property = relative_path_property(
+        "The files the set's rows are in, relative to the set's folder, with / between \
+         folders: one rows file, such as rows.yaml; a folder of them, such as rows, which gives \
+         the .yaml files in it, not those in its folders, in the byte order of their names; or \
+         a list of such paths, such as [rows/loops.yaml, rows/panels.yaml]. The set builds the \
+         rows of each file in turn, in the order given, and a sheet's name is given once across \
+         them all. No path is listed twice and no file is reached twice, and a folder, or a \
+         path in a list, is a plain folder or file in the set's folder, reached through no link. \
+         Each file's schema is `agentdrafter schema rows`."
+            .to_owned(),
+    );
+    let item = relative_path_property(
+        "The path of a rows file, or of a folder of them, relative to the set's folder, such \
+         as rows/loops.yaml or rows."
+            .to_owned(),
+    );
+    property["anyOf"]
+        .as_array_mut()
+        .expect("a path's schema is a choice")
+        .push(json!({ "type": "array", "minItems": 1, "uniqueItems": true, "items": item }));
+    property
 }
 
 /// The schema of a drawing set's rows file.

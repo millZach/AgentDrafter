@@ -1,0 +1,11 @@
+# The schedule sheets, one row each, drawn from their own template.
+rows:
+  - sheet: SCHED-201
+    template: templates/schedule.yaml
+    values:
+      TITLE: AREA SHEET SCHEDULE
+      DWG_NO: SCHED-201
+      REV: '0'
+      COVERS: |-
+        AREA-101  AREA 101 GENERAL ARRANGEMENT
+        AREA-102  AREA 102 GENERAL ARRANGEMENT
