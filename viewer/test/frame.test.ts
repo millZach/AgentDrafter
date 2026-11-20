@@ -39,6 +39,8 @@ import {
   previewButton,
   previewStep,
   previewSummary,
+  onPreviewDrawing,
+  previewIsCurrent,
   previewTitle,
   previewVerdicts,
   type PreviewReport,
@@ -202,6 +204,30 @@ test('a preview names its edit, its reach and its sheets, and steps round them',
   const partly = previewOf([{ sheet: 'A' }, { sheet: 'B', ok: false, code: 'locked', message: 'locked' }]);
   assert.equal(previewSummary(partly).text, 'A would take it and B would refuse it, which would leave the set inconsistent.');
   assert.deepEqual(previewButton(partly), { label: 'Some sheets would refuse it', disabled: true });
+});
+
+test('nothing is picked or started on a preview, nor on its drawing once it ends until the set as it is is drawn', () => {
+  assert.equal(onPreviewDrawing(true, { preview: true }, { preview: {} }), true);
+  // Cancelled: the band is gone, but the preview's drawing is still the one shown.
+  assert.equal(onPreviewDrawing(false, { preview: true }, { preview: {} }), true);
+  // The live reply has come, but the preview's drawing is still loaded.
+  assert.equal(onPreviewDrawing(false, { preview: false }, { preview: {} }), true);
+  assert.equal(onPreviewDrawing(false, { preview: false }, {}), false);
+  assert.equal(onPreviewDrawing(false, null, null), false);
+});
+
+test('Change all waits for a preview drawn again once a change lands', () => {
+  const shown = { previewing: true, reported: true, reply: { preview: true, generation: '0:*:3' }, reportedAt: '0:*:3', now: '0:*:3' };
+  assert.equal(previewIsCurrent(shown), true);
+  // A change or an undo landed: the set moved on, and the report is old.
+  assert.equal(previewIsCurrent({ ...shown, now: '0:*:4' }), false);
+  // Drawn again, but the report shown is still the old one's.
+  assert.equal(previewIsCurrent({ ...shown, reply: { preview: true, generation: '0:*:4' }, now: '0:*:4' }), false);
+  assert.equal(previewIsCurrent({ ...shown, reply: { preview: true, generation: '0:*:4' }, reportedAt: '0:*:4', now: '0:*:4' }), true);
+  // The journal cut back: a new epoch.
+  assert.equal(previewIsCurrent({ ...shown, now: '1:*:3' }), false);
+  assert.equal(previewIsCurrent({ ...shown, reported: false }), false);
+  assert.equal(previewIsCurrent({ ...shown, previewing: false }), false);
 });
 
 test('while a preview is shown the command bar says nothing has landed and how to step', () => {

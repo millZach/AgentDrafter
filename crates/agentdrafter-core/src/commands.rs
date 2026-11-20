@@ -98,9 +98,15 @@ impl Command {
     /// When the input names a drawing set, or a file in one, an entry of
     /// the set's journal that a commit that never finished left pending is
     /// rolled back first, and the reply says so; when it cannot be, the
-    /// command refuses and does nothing.
+    /// command refuses and does nothing. A `display-list` with a
+    /// `change_set`, a preview, writes nothing: it rolls nothing back, and
+    /// is refused instead on a set whose journal holds such an entry.
     pub fn run(&self, input: Value, settings: &Settings, via: Interface) -> JsonReply {
-        let rolled_back = match set_read(&input).map(|set| recover(&set)) {
+        let previews = self.name == "display-list" && input.get("change_set").is_some();
+        let rolled_back = match set_read(&input)
+            .filter(|_| !previews)
+            .map(|set| recover(&set))
+        {
             Some(Err(error)) => return Reply::from(Err(error)),
             Some(Ok(rolled_back)) => rolled_back,
             None => None,
@@ -506,6 +512,8 @@ fn display_list_input() -> Value {
     }
     let mut schema = display_list_schema(change_set);
     schema["$defs"] = defs;
+    // A change set is drawn on the set as it is, never at an entry.
+    schema["not"] = json!({"required": ["entry", "change_set"]});
     schema
 }
 

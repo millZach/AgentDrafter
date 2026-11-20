@@ -371,3 +371,80 @@ fn a_change_set_is_drawn_only_on_a_drawing_sets_sheet_as_it_is() {
     );
     assert!(display_list_with(&wrong, &Settings::default()).is_err());
 }
+
+/// A made-up set of one sheet, `S-1`, built from a template of `objects`.
+fn one_sheet(test: &str, objects: &str) -> PathBuf {
+    let set = scratch(test);
+    fs::create_dir_all(set.join("templates")).unwrap();
+    fs::write(
+        set.join("set.yaml"),
+        "units: mm\noutput: dwg\nrows: rows.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        set.join("templates/t.yaml"),
+        format!("units: mm\npaper: [100, 80]\nobjects:\n{objects}"),
+    )
+    .unwrap();
+    fs::write(
+        set.join("rows.yaml"),
+        "rows:\n  - sheet: S-1\n    template: templates/t.yaml\n",
+    )
+    .unwrap();
+    set
+}
+
+#[test]
+fn a_change_set_that_repairs_a_sheet_that_does_not_draw_now_is_drawn_with_a_warning() {
+    // A line on a layer the template lacks: the sheet does not draw.
+    let set = one_sheet(
+        "repair",
+        "  - line: {from: [0, 0, 0], to: [100, 80, 0], id: frame}\n  - line: {from: [5, 40, 0], to: [95, 40, 0], id: rule, layer: notes}\n",
+    );
+    assert!(display_list_with(&request(&set, "S-1", None), &Settings::default()).is_err());
+    let before = snapshot::snapshot(&set);
+    let change_set = json!({"operations": [
+        {"op": "add_layer", "template": "templates/t.yaml", "name": "notes"},
+        {"op": "move", "target": {"id": "S-1/rule"}, "by": [0, 5, 0]}
+    ]});
+    let report = draw(&request(&set, "S-1", Some(change_set)));
+    let p = preview(&report);
+    assert!(p.change.sheets.iter().all(|s| s.ok), "{:?}", p.change);
+    assert!(p.checks.is_some());
+    // Without the sheet as it is, there are no old places, and every item
+    // of what it changes is marked.
+    assert_eq!(p.changed, items_of(&report, "S-1/rule"));
+    assert!(p.was.is_empty());
+    let warning = p.warning.as_deref().expect("a warning");
+    assert!(warning.contains("cannot be drawn as it is"), "{warning}");
+    assert!(warning.contains("notes"), "{warning}");
+    assert_eq!(snapshot::snapshot(&set), before);
+
+    // A sheet that draws as it is gives no warning.
+    let set = two_sheets("repair-none");
+    let moved =
+        json!({"operations": [{"op": "move", "target": {"id": "S-1/rule"}, "by": [0, 5, 0]}]});
+    assert!(preview(&draw(&request(&set, "S-1", Some(moved))))
+        .warning
+        .is_none());
+}
+
+#[test]
+fn a_sheet_emptied_by_a_change_set_is_clouded_on_its_paper() {
+    let set = one_sheet(
+        "emptied",
+        "  - circle: {center: [50, 40, 0], radius: 4, id: hole}\n",
+    );
+    let change_set = json!({"operations": [{"op": "delete", "target": {"id": "S-1/hole"}}]});
+    let report = draw(&request(&set, "S-1", Some(change_set)));
+    let p = preview(&report);
+    let cloud = p
+        .clouds
+        .iter()
+        .find(|c| c.rule == Rule::PaperSize)
+        .unwrap_or_else(|| panic!("a cloud for the paper: {:?}", p.checks));
+    assert_eq!(
+        (cloud.bounds.min, cloud.bounds.max),
+        ([0.0, 0.0], [100.0, 80.0])
+    );
+}

@@ -326,3 +326,99 @@ fn a_folder_is_a_drawing_set_whose_outputs_go_where_its_settings_say() {
         "listen_failed"
     );
 }
+
+/// Every file under `folder`, the journal's own among them, with its bytes.
+fn every_file(folder: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut found = std::collections::BTreeMap::new();
+    let mut stack = vec![folder.to_owned()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                found.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn a_preview_through_the_registry_writes_nothing_and_rolls_nothing_back() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("commands-preview-journal");
+    let _ = std::fs::remove_dir_all(&dir);
+    let set = dir.join("demo-set");
+    demo_set::copy_demo_set(&set);
+    let moved = json!({"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]});
+    let landed = run("change", json!({"set": set, "change_set": moved}));
+    assert_eq!(landed["ok"], true, "{landed}");
+    let preview = json!({"source": set, "sheet": "DEMO-001", "change_set": moved});
+
+    // On a set whose journal is finished, the preview is drawn, and every
+    // file, the journal's own among them, is as it was.
+    let before = every_file(&set);
+    assert!(before.contains_key(&set.join(agentdrafter_core::JOURNAL_FILE)));
+    let reply = run("display-list", preview.clone());
+    assert_eq!(reply["ok"], true, "{}", reply["error"]);
+    assert!(reply["result"]["preview"].is_object());
+    assert_eq!(every_file(&set), before);
+
+    // Left with a last line written in part, as a process killed while it
+    // wrote it leaves it; and with a commit that never finished, the line
+    // that marks it done taken away, as one killed before it wrote that.
+    let journal = set.join(agentdrafter_core::JOURNAL_FILE);
+    let text = std::fs::read_to_string(&journal).unwrap();
+    let (rest, last) = text.trim_end().rsplit_once('\n').unwrap();
+    assert!(last.contains(r#""state":"done""#), "{last}");
+    let torn = format!("{text}{{\"entry\":2,\"kind\":\"chan");
+    for (journal_text, says) in [
+        (torn, "written only in part"),
+        (format!("{rest}\n"), "is pending"),
+    ] {
+        std::fs::write(&journal, &journal_text).unwrap();
+        let before = every_file(&set);
+        let reply = run("display-list", preview.clone());
+        assert_eq!(reply["ok"], false, "{reply}");
+        assert_eq!(reply["error"]["code"], "rollback_failed", "{reply}");
+        let message = reply["error"]["message"].as_str().unwrap();
+        assert!(message.contains(says), "{message}");
+        assert!(message.contains("does not roll that back"), "{message}");
+        assert!(reply.get("rolled_back").is_none(), "{reply}");
+        assert_eq!(
+            every_file(&set),
+            before,
+            "nothing restored, nothing cut off"
+        );
+    }
+    // Without a change set, the display list rolls it back, as before.
+    let reply = run("display-list", json!({"source": set, "sheet": "DEMO-001"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["rolled_back"]["entry"], 1, "{reply}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_change_set_given_as_null_or_with_an_entry_is_refused_by_the_schema_and_the_command() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("commands-preview-null");
+    let _ = std::fs::remove_dir_all(&dir);
+    let set = dir.join("demo-set");
+    demo_set::copy_demo_set(&set);
+    let validator =
+        jsonschema::validator_for(&find_command("display-list").unwrap().input_schema()).unwrap();
+    let moved = json!({"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]});
+    let taken = json!({"source": set, "change_set": moved});
+    assert!(validator.is_valid(&taken));
+    assert!(validator.is_valid(&json!({"source": set, "entry": 1})));
+    let null = json!({"source": set, "change_set": null});
+    assert!(!validator.is_valid(&null));
+    let reply = run("display-list", null);
+    assert_eq!(reply["ok"], false, "null is not read as left out: {reply}");
+    assert_eq!(reply["error"]["code"], "wrong_type", "{reply}");
+    let both = json!({"source": set, "change_set": moved, "entry": 1});
+    assert!(!validator.is_valid(&both));
+    let reply = run("display-list", both);
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(reply["error"]["field"], "change_set", "{reply}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

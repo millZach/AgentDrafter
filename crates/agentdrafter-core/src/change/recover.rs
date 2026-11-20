@@ -318,6 +318,40 @@ fn changed_since(folder: &Path, entry: &Entry) -> Result<Vec<String>, Error> {
 }
 
 /// What an entry is, in words.
+/// For a preview, which writes nothing (#154): refuses when the journal of
+/// the set in `folder` holds an entry a commit has not finished, or a last
+/// line written in part, since rolling either back writes, and draws
+/// nothing on the set as it would be after it. Only the journal is read.
+pub(crate) fn refuse_unfinished(folder: &Path) -> Result<(), Error> {
+    let Some(read) = read_journal_file(folder)? else {
+        return Ok(());
+    };
+    let what = match (pending(&read.entries), &read.torn) {
+        (Some(entry), _) => format!(
+            "entry {}, {}, of its journal is pending: its commit has not finished, since another \
+              process is still writing it or the one that was stopped",
+            entry.entry,
+            kind_words(entry.kind)
+        ),
+        (None, Some(torn)) => format!(
+            "line {} of its journal was written only in part, by a process that stopped while it \
+              wrote it",
+            torn.line
+        ),
+        (None, None) => return Ok(()),
+    };
+    Err(Error::new(
+        ErrorCode::RollbackFailed,
+        format!(
+            "a change set cannot be drawn on the drawing set `{}` before it lands: {what}. A \
+              preview writes nothing, so it does not roll that back; nothing was changed. Any \
+              other command on the set, such as `journal`, rolls it back first; then ask again",
+            folder.display()
+        ),
+    )
+    .in_file(&folder.join(JOURNAL_FILE)))
+}
+
 fn kind_words(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::ChangeSet => "a change set",

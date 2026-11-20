@@ -76,6 +76,8 @@ import {
   editsHere,
   previewStep,
   previewTitle,
+  onPreviewDrawing,
+  previewIsCurrent,
   previewVerdicts,
   type PreviewReport,
   type TemplateEdit,
@@ -146,8 +148,9 @@ interface Drawn {
 /** A change set to a template's objects, drawn before it lands (#154). */
 interface Previewing {
   send: ToolSend & { template: TemplateEdit };
-  /** The sheet it was made on, which Cancel and Change all go back to. */
+  /** The sheet it was made on, and its layout, which Cancel and Change all go back to. */
   home: string;
+  homeLayout: string | null;
   /** Moves on to ask for its drawings again, as Check again does. */
   key: number;
   /** The object selected when it was made, as from quick properties: selected again once it ends. */
@@ -289,6 +292,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // latest reply gave it, which every sheet's reply carries.
   const [preview, setPreview] = useState<Previewing | null>(null);
   const [previewReport, setPreviewReport] = useState<PreviewReport | null>(null);
+  // The generation of the set the report was drawn on: a change landing
+  // since makes it old until the preview is drawn again.
+  const [previewGeneration, setPreviewGeneration] = useState('');
   const previewKeys = useRef(0);
   // A text whose contents are edited on the drawing, or in a phone's box,
   // by its place; and a count that moves on when an edit in quick
@@ -410,6 +416,20 @@ export function App({ token, source, sheet, layout }: AppProps) {
     entry === null
       ? `${epochNow.current}:${key || ANY}:${versionsNow.current[key || ANY] ?? 0}`
       : `${epochNow.current}`;
+  // Whether the drawing shown, or the one on its way, is a preview's: while
+  // it is, even once the preview has ended, nothing is picked, snapped or
+  // started on it, only on the set as it is once that is drawn.
+  const onPreview = onPreviewDrawing(!!preview, reply, summary);
+  // Whether the preview's report is of the set as it is now: a change
+  // landing, or an undo, makes it old until the preview is drawn again,
+  // and Change all waits for that.
+  const previewCurrent = previewIsCurrent({
+    previewing: !!preview,
+    reported: !!previewReport,
+    reply,
+    reportedAt: previewGeneration,
+    now: generationOf(null, ''),
+  });
 
   // Each sheet asked for is drawn by the server once, then kept, until an
   // entry of the journal touches it: then the set as it is now is asked
@@ -442,7 +462,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (at === null && !preview) input.values = true;
     // A preview: the sheet as the change set would leave it.
     const previewed = preview;
-    if (previewed) (input as Record<string, unknown>).change_set = previewed.send.change_set;
+    if (previewed && at === null) (input as Record<string, unknown>).change_set = previewed.send.change_set;
     const generation = generationOf(at, generationKey);
     run('display-list', input, token).then(
       (text) => {
@@ -459,7 +479,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
         if (previewed) {
           // A change set the core refuses whole cannot be drawn: it says
           // why, as a change set that does not land does, and nothing lands.
-          endPreview(previewed.home, previewed.picked);
+          endPreview(previewed.home, previewed.homeLayout, previewed.picked);
           setPropsReset((n) => n + 1);
           say('warn', `${previewed.send.what}: not landed`, why(e, token));
           return;
@@ -479,8 +499,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cacheKey, version, epoch, source, token]);
 
+  // The text the summary shown was read from: a reply of the same text is
+  // not drawn again, and its summary is that one's.
+  const summaryText = useRef<string | null>(null);
   const loaded = useCallback(
     (shown: Summary) => {
+      summaryText.current = reply?.text ?? null;
       setSummary(shown);
       setStatus({ kind: 'shown' });
       // Kept by its sheet's own name too, while it is still current; a
@@ -719,6 +743,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const touched = [...sheetsTouched(entry, journal), ...(entry.failed_on ?? []).map((f) => f.sheet)];
     const current = summary?.sheet ?? wanted ?? '';
     const target = touched.some((s) => upper(s) === upper(current)) ? current : (firstSheet(entry, journal) ?? current);
+    // A preview ends first, landing nothing: an entry is drawn as it was, never with a change set.
+    if (preview) {
+      endPreview('', null);
+      setPropsReset((n) => n + 1);
+      log(`${preview.send.what}: cancelled, nothing changed`);
+    }
     setAt(asItWas ? number : null);
     setFocused(number);
     setPulseSince(null);
@@ -962,8 +992,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
     return sent;
   };
   const startTool = (word: string, fromSelection = true) => {
-    if (preview) {
-      log('Change all or Cancel the preview first');
+    if (onPreview) {
+      log(preview ? 'Change all or Cancel the preview first' : 'Drawing the sheet as it is first');
       return;
     }
     setToolsOpen(false);
@@ -1112,34 +1142,37 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setToolsOpen(false);
     setPreviewReport(null);
     const home = summary?.sheet ?? wanted ?? '';
-    setPreview({ send: { ...s, template: s.template }, home, key: previewKeys.current, picked });
+    const homeLayout = summary?.layout ?? wantedLayout ?? null;
+    setPreview({ send: { ...s, template: s.template }, home, homeLayout, key: previewKeys.current, picked });
+    // The command bar's field lets go, so the arrow keys step through the sheets.
+    field.current?.blur();
     log(`Preview: ${s.template.edit} ${previewTitle(s.template).reach}. Nothing has landed.`);
   }
   // Its drawings go, and the sheet it was made on comes back, with the
   // object selected when it was made, as quick properties had it, once
   // that sheet is drawn as it is.
   const restorePick = useRef<{ picked: Picked; home: string } | null>(null);
-  function endPreview(home: string, was: Picked | null = null) {
+  function endPreview(home: string, layout: string | null, was: Picked | null = null) {
     restorePick.current = was ? { picked: was, home } : null;
     setPreview(null);
     setPreviewReport(null);
     for (const key of [...replies.current.keys()]) if (key.startsWith('pv')) replies.current.delete(key);
-    if (home && upper(home) !== upper(wanted ?? '')) {
+    if (home && (upper(home) !== upper(wanted ?? '') || upper(layout ?? '') !== upper(wantedLayout ?? ''))) {
       setWanted(home);
-      setWantedLayout(null);
+      setWantedLayout(layout);
     }
   }
   const cancelPreview = () => {
     const was = preview;
     if (!was) return;
-    endPreview(was.home, was.picked);
+    endPreview(was.home, was.homeLayout, was.picked);
     setPropsReset((n) => n + 1);
     log(`${was.send.what}: cancelled, nothing changed`);
   };
   const confirmPreview = () => {
     const was = preview;
-    if (!was) return;
-    endPreview(was.home, was.picked);
+    if (!was || !previewCurrent) return;
+    endPreview(was.home, was.homeLayout, was.picked);
     // An edit in quick properties that did not land shows its value again.
     void sendChange(was.send).then((ok) => ok || setPropsReset((n) => n + 1));
   };
@@ -1171,12 +1204,15 @@ export function App({ token, source, sheet, layout }: AppProps) {
   useEffect(() => {
     if (!preview || !summary?.preview) return;
     setPreviewReport(summary.preview as PreviewReport);
+    // Drawn again on the set as it now is: a reply of the same text as the
+    // one shown is not drawn again, but it is as current.
+    if (reply?.preview && reply.text === summaryText.current) setPreviewGeneration(reply.generation);
     const k = `${preview.key}|${upper(summary.sheet)}`;
     if (previewFocused.current === k) return;
     previewFocused.current = k;
     keys.current += 1;
     setFocus({ key: keys.current, sheet: summary.sheet, places: [], preview: true });
-  }, [preview, summary]);
+  }, [preview, summary, reply]);
   // Its words over the drawing: by each cloud, the check it would fail;
   // round a sheet that would refuse it, or be held back, the paper framed.
   const previewTags: PreviewTag[] = [];
@@ -1682,16 +1718,16 @@ export function App({ token, source, sheet, layout }: AppProps) {
             compact={!wide}
             grid={toggles.grid}
             card={card}
-            marks={preview ? [] : marks}
-            picked={preview ? null : pickedPlace}
+            marks={onPreview ? [] : marks}
+            picked={onPreview ? null : pickedPlace}
             pulseSince={pulseSince}
             focus={focus}
             onLoaded={loaded}
             onError={failed}
             onUnavailable={setUnavailable}
-            onPick={preview ? () => {} : pick}
+            onPick={onPreview ? () => {} : pick}
             onCursor={cursorAt}
-            snapMask={runningMask(toggles.osnap && at === null && !preview, running)}
+            snapMask={runningMask(toggles.osnap && at === null && !onPreview, running)}
             onTakeSnap={takeSnap}
             onNoSnap={noSnap}
             space={`${sheetCovers}:${barHeight}`}
@@ -1703,7 +1739,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             layer={toolLayer}
             handle={drawing}
             editor={editor}
-            onOpen={preview ? () => false : openText}
+            onOpen={onPreview ? () => false : openText}
             previewTags={previewTags}
           />
           {preview && summary?.preview != null && (
@@ -1825,6 +1861,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
                   edit={preview.send.template}
                   sheet={summary?.sheet ?? preview.home}
                   report={previewReport}
+                  refreshing={!!previewReport && !previewCurrent}
                   onStep={stepPreview}
                   onCancel={cancelPreview}
                   onGo={confirmPreview}

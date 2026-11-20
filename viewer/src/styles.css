@@ -504,6 +504,8 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
 
 /* A change set drawn before it lands (#154): the band over the command bar, as the picked prototype's B. */
 .cmdbar[hidden] { display: none; }
+/* The history steps aside while the band is shown, which says what it said: none of it under the band or over the sheet above it. */
+.cmd:has(.pvband) .hist { display: none; }
 .pvband {
   pointer-events: auto; margin: 0 0 4px; padding: 7px 10px 8px; background: rgba(40, 46, 56, .98); border: 1px solid #c98a1c;
   border-top: 3px solid var(--warn); border-radius: 4px; box-shadow: 0 4px 14px rgba(0, 0, 0, .5); font: 13px var(--ui);
@@ -622,6 +624,8 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   .pvacts .btn { flex: 1 1 0; }
   .pvacts .btn[data-pv=go] { flex-basis: 100%; }
   .pvacts .btn[data-pv=go]:not(:disabled) { flex-basis: auto; }
+  /* Clear of Fit, beside it. */
+  .cmd:has(.pvband) { width: calc(100% - 76px); }
   .pvtitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pvnav button { min-width: 44px; height: 34px; font-size: 14px; }
   .pvhead { right: 10px; }

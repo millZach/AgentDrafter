@@ -463,6 +463,8 @@ export interface PreviewReport {
   objects: { id: string; how: 'added' | 'changed' | 'deleted' }[];
   /** On the sheet drawn, a box round each check it would fail, `{min, max}` in drawing units. */
   clouds?: { rule: string; bounds: { min: [number, number]; max: [number, number] } }[];
+  /** Said when the sheet as it is cannot be drawn, as for one the change set repairs: its old places are not shown. */
+  warning?: string;
 }
 
 /** What would become of one sheet: it would land, land but fail a check, refuse it, or be held back by another that refuses a template edit. */
@@ -573,6 +575,38 @@ export function previewStep(sheets: readonly string[], sheet: string, by: number
   const n = sheets.length;
   const i = Math.max(0, sheets.findIndex((s) => s.toUpperCase() === sheet.toUpperCase()));
   return sheets[(((i + by) % n) + n) % n] ?? sheet;
+}
+
+/**
+ * Whether the drawing shown, or the one on its way, is a preview's: while
+ * a preview is shown, and after it ends until the set as it is has been
+ * drawn in its place. Nothing is picked, snapped or started on it.
+ */
+export function onPreviewDrawing(
+  previewing: boolean,
+  reply: { preview: boolean } | null,
+  summary: { preview?: unknown } | null,
+): boolean {
+  return previewing || !!reply?.preview || summary?.preview != null;
+}
+
+/**
+ * Whether a preview's report is of the set as it is now, so Change all may
+ * send it: its drawing is the one shown, drawn at the generation the set
+ * is at now. A change or an undo landing since makes it old until the
+ * preview is drawn again.
+ */
+export function previewIsCurrent(p: {
+  previewing: boolean;
+  reported: boolean;
+  /** The drawing shown: whether it is a preview's, and the generation it was asked at. */
+  reply: { preview: boolean; generation: string } | null;
+  /** The generation the report was drawn at. */
+  reportedAt: string;
+  /** The generation the set is at now. */
+  now: string;
+}): boolean {
+  return p.previewing && p.reported && !!p.reply?.preview && p.reply.generation === p.reportedAt && p.reportedAt === p.now;
 }
 
 /** A sheet's template and the sheets built from it, as `display-list --origins` gives them. */

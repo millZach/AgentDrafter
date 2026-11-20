@@ -2462,11 +2462,13 @@ const checks = {
         await cameToIt();
         await page.screenshot({ path: join(out, 'preview-laptop-101.png') });
 
-        // Stepped: ▶, the arrow key, a tab; a sheet it does not reach stays shut.
-        await page.click('[data-pv="next"]');
-        await shows(page, 'DP-LD-102');
-        assert((await band(page)).includes('2 of 7'), `▶ steps on: ${await band(page)}`);
+        // Stepped: the arrow key straight after Move's last point was typed,
+        // nothing clicked first, as the command bar's field lets go; ▶; a
+        // tab; a sheet it does not reach stays shut.
         await page.keyboard.press('ArrowRight');
+        await shows(page, 'DP-LD-102');
+        assert((await band(page)).includes('2 of 7'), `→ steps on: ${await band(page)}`);
+        await page.click('[data-pv="next"]');
         await shows(page, 'DP-LD-104');
         await page.keyboard.press('ArrowLeft');
         await shows(page, 'DP-LD-102');
@@ -2543,6 +2545,43 @@ const checks = {
           seen.laptop.refused = 'DP-LD-202';
         } finally {
           chmodSync(locked, 0o644);
+        }
+
+        // A change landing while it is shown makes it old: the band says it
+        // is drawn again, and Change all waits for that.
+        {
+          const asked = [];
+          page.on('request', (r) => {
+            if (r.url().includes('/display-list')) asked.push(JSON.parse(r.postData() ?? '{}'));
+          });
+          await moveService(page);
+          await page.waitForSelector('[data-pv-summary]');
+          await page.waitForFunction(() => !document.querySelector('[data-pv="go"]').disabled);
+          await page.evaluate(() => {
+            window.pvSeen = [];
+            const watch = () =>
+              window.pvSeen.push({ refreshing: !!document.querySelector('[data-pv-refreshing]'), off: !!document.querySelector('[data-pv="go"]')?.disabled });
+            new MutationObserver(watch).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+          });
+          assert(sendChange(folder, move('DP-LD-104/io-channel', 0.001)).ok, 'a change lands from the command line');
+          await page.waitForFunction(() => window.pvSeen.some((s) => s.refreshing), null, { timeout: 15000 });
+          await page.waitForFunction(() => !document.querySelector('[data-pv-refreshing]') && !document.querySelector('[data-pv="go"]').disabled, null, { timeout: 30000 });
+          assert(await page.evaluate(() => window.pvSeen.every((s) => !s.refreshing || s.off)), 'Change all is off while it is drawn again');
+          seen.laptop.refreshed = true;
+
+          // A journal entry clicked while it is shown: it ends, landing
+          // nothing, and the entry is drawn as it was, never with the change set.
+          const n = journal().length;
+          const last = journal().at(-1).entry;
+          await page.click(`li[data-entry="${last}"] .je-head`);
+          await page.waitForFunction(() => !document.querySelector('[data-preview]'));
+          await page.waitForFunction((e) => window.agentdrafterViewer.summary?.entry === e && !window.agentdrafterViewer.summary.preview, last, { timeout: 15000 });
+          await sleep(500);
+          assert(!asked.some((input) => input.entry !== undefined && input.change_set !== undefined), 'no drawing is asked for at an entry with a change set');
+          const toast = await page.evaluate(() => document.querySelector('.va-toast')?.textContent ?? '');
+          assert(!toast.includes('not landed'), `nothing is refused: ${toast}`);
+          assert(journal().length === n, 'nothing lands');
+          seen.laptop.entry = last;
         }
         assert(problems.length === 0, problems.join('; '));
         await context.close();

@@ -328,6 +328,8 @@ export function CommandBar({
           ref={field}
           className="cmdin"
           hidden={touch && !fieldShown}
+          // While a preview is shown nothing is typed: the arrow keys step through its sheets.
+          disabled={!!band}
           autoComplete="off"
           autoCapitalize="off"
           spellCheck={false}
@@ -369,6 +371,8 @@ export interface PreviewBandProps {
   sheet: string;
   /** The core's preview, once the first sheet's reply has come; null before. */
   report: PreviewReport | null;
+  /** That the set changed since the report was drawn: it is drawn again before Change all can send it. */
+  refreshing?: boolean;
   onStep(by: number): void;
   onCancel(): void;
   onGo(): void;
@@ -384,15 +388,17 @@ const TONE: Record<PreviewState, string> = { land: 'ok', check: 'warn', refused:
  * reach, steps through the sheets it reaches, says what would become of
  * the sheet shown and of them all, and lands it on all of them or cancels.
  */
-export function PreviewBand({ edit, sheet, report, onStep, onCancel, onGo, onCheckAgain }: PreviewBandProps) {
+export function PreviewBand({ edit, sheet, report, refreshing = false, onStep, onCancel, onGo, onCheckAgain }: PreviewBandProps) {
   const t = previewTitle(edit);
   const n = edit.sheets.length;
   const i = Math.max(0, edit.sheets.findIndex((s) => s.toUpperCase() === sheet.toUpperCase()));
   const verdict = report ? previewVerdicts(report).get(sheet.toUpperCase()) : undefined;
   const summary = report ? previewSummary(report) : null;
-  const button = report ? previewButton(report) : { label: n > 1 ? `Change all ${n} sheets` : 'Change the template', disabled: true };
+  const button = report ? { ...previewButton(report) } : { label: n > 1 ? `Change all ${n} sheets` : 'Change the template', disabled: true };
+  // A change landed since it was drawn: nothing is sent until it is drawn again.
+  if (refreshing) button.disabled = true;
   return (
-    <div className="pvband" role="region" aria-label="Preview" data-preview>
+    <div className="pvband" role="region" aria-label="Preview" data-preview data-pv-refreshing={refreshing || undefined}>
       <div className="pvtop">
         <span className="pvhd">
           <span className="pvchip">{t.chip}</span>
@@ -419,7 +425,7 @@ export function PreviewBand({ edit, sheet, report, onStep, onCancel, onGo, onChe
           <button type="button" className="btn" data-pv="cancel" onClick={onCancel}>
             Cancel
           </button>
-          {report && checkAgainOffered(report) && (
+          {report && !refreshing && checkAgainOffered(report) && (
             <button type="button" className="btn" data-pv="recheck" onClick={onCheckAgain}>
               Closed it: check again
             </button>
@@ -429,8 +435,10 @@ export function PreviewBand({ edit, sheet, report, onStep, onCancel, onGo, onChe
           </button>
         </span>
       </div>
-      <div className={`pvline ${verdict ? TONE[verdict.state] : ''}`} data-pv-verdict>
-        {verdict ? (
+      <div className={`pvline ${verdict && !refreshing ? TONE[verdict.state] : ''}`} data-pv-verdict>
+        {refreshing ? (
+          <span className="muted">The set changed: drawing {sheet} as it would be again…</span>
+        ) : verdict ? (
           <>
             <i className={`vd ${TONE[verdict.state]}`} aria-hidden="true">
               {verdict.icon}
@@ -443,9 +451,14 @@ export function PreviewBand({ edit, sheet, report, onStep, onCancel, onGo, onChe
           <span className="muted">Drawing {sheet} as it would be…</span>
         )}
       </div>
-      {summary && (
+      {summary && !refreshing && (
         <div className={`pvsum ${summary.tone}`} data-pv-summary>
           {summary.text}
+        </div>
+      )}
+      {report?.warning && !refreshing && (
+        <div className="pvsum warn" data-pv-warning>
+          {report.warning}
         </div>
       )}
     </div>

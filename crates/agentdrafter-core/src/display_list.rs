@@ -100,9 +100,19 @@ pub struct DisplayListRequest {
     /// same JSON `change` takes, applied in memory to the set as it is, as
     /// a dry run applies it. Nothing is written and nothing goes in the
     /// journal. The reply then gives its `preview`. Without it, the set as
-    /// it is, and the reply is as it was.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// it is, and the reply is as it was. Given as `null`, it is refused, as
+    /// `change` refuses it, not read as left out.
+    #[serde(
+        default,
+        deserialize_with = "given",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub change_set: Option<Value>,
+}
+
+/// A value given, even `null`, as itself: only a key left out is none.
+fn given<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(value).map(Some)
 }
 
 impl DisplayListRequest {
@@ -158,6 +168,12 @@ pub struct Preview {
     /// drawing units: what the viewer clouds.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub clouds: Vec<Cloud>,
+    /// Said when the sheet as it is cannot be drawn, such as a line on a
+    /// layer the template lacks, which the change set repairs: why, and that
+    /// `was` is then empty and every item of what it changes is marked.
+    /// Left out when the sheet draws as it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// What one object a change set would change or delete draws now, where it
@@ -601,6 +617,8 @@ struct Drew<'a> {
 /// `files`, the set as it would leave it. The sheet as it is now is drawn
 /// too, its same layout at the same tolerance, so an item an object would
 /// draw the same is the same, and only what would draw otherwise is marked.
+/// When it cannot be, as for a sheet the change set repairs, the preview is
+/// still given, without the old places, and says why.
 fn preview_of(
     p: Previewed,
     files: Option<Arc<dyn ReadFiles + Send + Sync>>,
@@ -609,25 +627,18 @@ fn preview_of(
     settings: &Settings,
 ) -> Result<Preview, Error> {
     let name = drew.drawn.name.as_str();
-    let now = read(
-        source,
-        Some(name),
-        None,
-        None,
-        &DisplayListRequest::new(source),
-    )?;
-    let pages = now.sheet.pages();
-    let layout = drew.sheet.layout.as_ref().map(|l| l.name.to_lowercase());
-    let page = pages
-        .iter()
-        .find(|p| p.layout.as_ref().map(|l| l.name.to_lowercase()) == layout)
-        .unwrap_or(&pages[0]);
-    let was_list = draw::draw_sheet(
-        page,
-        &SheetFonts::find(page, settings),
-        drew.tolerance,
-        draw::MOST_HATCH_DASHES,
-    );
+    let (old, warning) = match drawn_now(name, drew, source, settings) {
+        Ok(old) => (Some(old), None),
+        Err(e) => (
+            None,
+            Some(format!(
+                "sheet `{name}` cannot be drawn as it is ({}), so what the change set would change \
+                  or delete is not shown where it draws now: every item of what it would change is \
+                  marked",
+                e.message
+            )),
+        ),
+    };
     let on_sheet = |id: &str| {
         id.split_once(ID_SEPARATOR)
             .is_some_and(|(s, _)| s.eq_ignore_ascii_case(name))
@@ -635,7 +646,9 @@ fn preview_of(
     let (mut added, mut changed, mut was) = (Vec::new(), Vec::new(), Vec::new());
     for object in p.objects.iter().filter(|o| on_sheet(&o.id)) {
         let after = items_of(drew.list, place(&drew.drawn.objects, &object.id));
-        let before = items_of(&was_list, place(&now.objects, &object.id));
+        let before = old.as_ref().map_or_else(Vec::new, |(now, was_list)| {
+            items_of(was_list, place(&now.objects, &object.id))
+        });
         match object.how {
             HowChanged::Added => added.extend(after.iter().map(|(i, _)| *i)),
             HowChanged::Deleted if !before.is_empty() => was.push(WasDrawn {
@@ -710,7 +723,38 @@ fn preview_of(
         changed,
         was,
         clouds,
+        warning,
     })
+}
+
+/// The sheet `drew` draws as it is now, before the change set: what was
+/// read and its display list, its same layout at the same tolerance.
+fn drawn_now(
+    name: &str,
+    drew: &Drew,
+    source: &Path,
+    settings: &Settings,
+) -> Result<(Drawn, DisplayList), Error> {
+    let now = read(
+        source,
+        Some(name),
+        None,
+        None,
+        &DisplayListRequest::new(source),
+    )?;
+    let pages = now.sheet.pages();
+    let layout = drew.sheet.layout.as_ref().map(|l| l.name.to_lowercase());
+    let page = pages
+        .iter()
+        .find(|p| p.layout.as_ref().map(|l| l.name.to_lowercase()) == layout)
+        .unwrap_or(&pages[0]);
+    let list = draw::draw_sheet(
+        page,
+        &SheetFonts::find(page, settings),
+        drew.tolerance,
+        draw::MOST_HATCH_DASHES,
+    );
+    Ok((now, list))
 }
 
 /// The place among `objects` of the object whose ID is `id`, in any case.
@@ -775,7 +819,9 @@ fn differ(after: &[(usize, &Item)], before: &[(usize, &Item)]) -> (Vec<usize>, V
 /// The box round what fails the check `finding`, on the sheet drawn to
 /// `list`, whose objects are `objects`: what the checker says is drawn, or,
 /// for a text overflowing its cell, which the checker measures in its
-/// block's own coordinates, what the text draws on the sheet.
+/// block's own coordinates, what the text draws on the sheet; or, for a
+/// sheet that would draw nothing and so is not its paper, the paper, where
+/// the page draws it.
 fn cloud_of(finding: &Finding, objects: &[SheetObject], list: &DisplayList) -> Option<Bounds> {
     if finding.rule != Rule::TextOverflow {
         if let Some(drawn) = &finding.drawn {
@@ -784,6 +830,12 @@ fn cloud_of(finding: &Finding, objects: &[SheetObject], list: &DisplayList) -> O
                 max: drawn.max,
             });
         }
+    }
+    if let (Rule::PaperSize, None, Some(paper)) = (finding.rule, &finding.object, &finding.paper) {
+        return Some(Bounds {
+            min: [0.0, 0.0],
+            max: [paper.width, paper.height],
+        });
     }
     let object = finding.object.as_ref()?;
     let at = place(objects, &object.id)?;

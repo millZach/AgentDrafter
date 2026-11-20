@@ -67,8 +67,8 @@ pub use journal::{
     JournalEntry, JournalReport, JournalRequest, ObjectChanged, Refusal, RollBack, SheetFailed,
     UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, LOCK_FILE, UNDO_STATES_FOLDER,
 };
-pub(crate) use recover::recover;
 pub use recover::RolledBack;
+pub(crate) use recover::{recover, refuse_unfinished};
 pub use undo::{undo, FileUndone, UndoAction, UndoReport, UndoRequest};
 
 /// The file, relative to a drawing set's folder, that marks the set
@@ -363,14 +363,16 @@ pub(crate) struct Previewed {
 
 /// Applies `change_set` to the drawing set in `set` as a dry run does, and
 /// keeps what it would write. Nothing is written and nothing goes in the
-/// journal; an entry a commit left pending is not rolled back, as a
-/// display list is drawn without rolling one back. A change set the core
-/// refuses whole gives its error, as `change` would.
+/// journal. An entry a commit left pending, or a journal's last line
+/// written in part, is not rolled back, since that writes: the preview is
+/// refused (`rollback_failed`). A change set the core refuses whole gives
+/// its error, as `change` would.
 pub(crate) fn preview(
     set: &Path,
     change_set: &Value,
     settings: &Settings,
 ) -> Result<Previewed, Error> {
+    refuse_unfinished(set)?;
     let request = ChangeRequest {
         set: set.to_owned(),
         change_set: change_set.clone(),
