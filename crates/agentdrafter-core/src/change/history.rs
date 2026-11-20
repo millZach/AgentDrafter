@@ -1,6 +1,6 @@
 //! A drawing set as it was at an entry of its journal, rebuilt in memory
-//! from the undo states, for the viewer to step back through: nothing is
-//! written.
+//! from the undo states, for the viewer to step back through, or as a
+//! change set would leave it, for a preview: nothing is written.
 //!
 //! The set's files just after an entry are the files as the next entry to
 //! write each of them found it: the bytes `before` it, which the undo
@@ -22,9 +22,9 @@ use crate::description::ReadFiles;
 use crate::error::{Error, ErrorCode};
 use crate::stamp::fingerprint;
 
-/// A drawing set's files as they were just after one entry of its journal:
-/// those that differ from the files on disk, by their place in the set's
-/// folder. A file not held here is read from disk; a file held here never
+/// A drawing set's files as they were just after one entry of its journal,
+/// or as a change set would leave them: those that differ from the files on
+/// disk, by their place in the set's folder. A file not held here is read from disk; a file held here never
 /// is.
 ///
 /// Each file is named as the journal names it: the path the set's reader
@@ -119,6 +119,19 @@ impl FilesAsOf {
             folder: folder.to_owned(),
             files,
         })
+    }
+
+    /// The set in `folder` as a change set would leave it, for a preview:
+    /// each of `records`, a file it would write and its new text, over the
+    /// files on disk. Nothing is written.
+    pub(crate) fn with_records(folder: &Path, records: &[(PathBuf, String)]) -> FilesAsOf {
+        FilesAsOf {
+            folder: folder.to_owned(),
+            files: records
+                .iter()
+                .map(|(path, text)| (relative(folder, path), Some(text.as_bytes().to_vec())))
+                .collect(),
+        }
     }
 
     /// The bytes of the file at `path` as they were, if a later entry wrote

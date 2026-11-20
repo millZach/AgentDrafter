@@ -35,7 +35,19 @@ import {
   LAYER_KEY,
   originWords,
   readCurrentLayer,
-  templateWords,
+  checkAgainOffered,
+  previewButton,
+  previewStep,
+  previewSummary,
+  onPreviewDrawing,
+  previewIsCurrent,
+  previewRedrawnOn,
+  reportGeneration,
+  enteredAs,
+  layoutOn,
+  previewTitle,
+  previewVerdicts,
+  type PreviewReport,
   toolOf,
   writeCurrentLayer,
   type ToolState,
@@ -94,18 +106,175 @@ test('a text edited on the drawing says so in the command bar, as TEXTEDIT, and 
   assert.equal(promptFor({ ...none, at: 3, selected: text, editing: text }).command, null);
 });
 
-test('an attribute the template leaves unset asks before it is set on every sheet', () => {
-  const edit = {
-    title: 'The template leaves CHECKED unset.',
-    detail: 'Setting it sets it on the template, so it lands on all 7 sheets.',
-    path: 'templates/loop-2-wire.yaml',
-    sheets: ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'],
+const SEVEN = ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'];
+
+/** A preview of a template edit on the demo plant's seven loop sheets, as the core gives it. */
+function previewOf(sheets: { sheet: string; ok?: boolean; code?: string; message?: string }[], findings: { sheet: string; rule: string; message: string }[] = []): PreviewReport {
+  const landed = sheets.filter((s) => s.ok !== false).length;
+  return {
+    change: {
+      landed,
+      failed: sheets.length - landed,
+      sheets: sheets.map((s) => ({
+        sheet: s.sheet,
+        ok: s.ok !== false,
+        ...(s.ok === false ? { error: { code: s.code ?? 'bad_value', message: s.message ?? 'no' } } : {}),
+      })),
+    },
+    ...(landed ? { checks: { result: { findings } } } : {}),
+    objects: sheets.filter((s) => s.ok !== false).map((s) => ({ id: `${s.sheet}/service`, how: 'changed' as const })),
   };
-  assert.deepEqual(templateWords(edit), {
-    title: 'The template leaves CHECKED unset.',
-    body: 'Setting it sets it on the template, so it lands on all 7 sheets. The template loop-2-wire.yaml changes, and so does every sheet built from it:',
-    button: 'Change all 7 sheets',
+}
+
+test('a preview says sheet by sheet whether the edit would land, fail a check, be refused or be held back', () => {
+  // Every sheet would take it, and none fails a check.
+  const clean = previewOf(SEVEN.map((sheet) => ({ sheet })));
+  const v = previewVerdicts(clean);
+  assert.deepEqual(v.get('DP-LD-101'), { state: 'land', icon: '✓', word: 'Would land', why: '1 object changed. No check fails.' });
+  assert.deepEqual(previewSummary(clean), { tone: 'ok', text: 'All 7 would take it, and no check fails.' });
+  assert.deepEqual(previewButton(clean), { label: 'Change all 7 sheets', disabled: false });
+  assert.equal(checkAgainOffered(clean), false);
+
+  // Two would then fail a check: they can still change.
+  const failing = previewOf(
+    SEVEN.map((sheet) => ({ sheet })),
+    ['DP-LD-301', 'DP-LD-302'].map((sheet) => ({ sheet, rule: 'text_on_line', message: `\`${sheet}/objects[4]\` runs through \`${sheet}/service\`` })),
+  );
+  const fails = previewVerdicts(failing).get('DP-LD-301');
+  assert.equal(fails?.state, 'check');
+  assert.equal(fails?.word, 'Would land, but fails a check');
+  assert.equal(fails?.why, 'DP-LD-301/objects[4] runs through DP-LD-301/service (text_on_line)', 'the core’s backquotes go');
+  // Several on one sheet: the first, and how many more, so the band stays short.
+  const several = previewOf([{ sheet: 'S-1' }], [
+    { sheet: 'S-1', rule: 'text_on_line', message: 'a line runs through TERM 1' },
+    { sheet: 'S-1', rule: 'text_on_line', message: 'a line runs through TERM 2' },
+    { sheet: 'S-1', rule: 'off_sheet', message: 'it draws off the paper' },
+  ]);
+  assert.equal(previewVerdicts(several).get('S-1')?.why, 'a line runs through TERM 1 (text_on_line); 2 more checks fail.');
+  assert.deepEqual(previewSummary(failing), {
+    tone: 'warn',
+    text: 'All 7 would take it, but DP-LD-301 and DP-LD-302 would then fail a check. You can still change them; Accept warns of failed checks.',
   });
+  assert.equal(previewButton(failing).disabled, false);
+
+  // One refuses: a template edit lands on all its sheets or none, so the
+  // rest are held back and nothing can land.
+  const refused = previewOf(
+    SEVEN.map((sheet) =>
+      sheet === 'DP-LD-202'
+        ? { sheet, ok: false, code: 'write_failed', message: 'the sheet’s DWG cannot be written (Access is denied); it may be open in AutoCAD. Close it and send the change set again' }
+        : { sheet, ok: false, code: 'shared_edit_failed', message: 'held back: `DP-LD-202` would not take the template edit' },
+    ),
+  );
+  assert.equal(previewVerdicts(refused).get('DP-LD-202')?.state, 'refused');
+  assert.equal(previewVerdicts(refused).get('DP-LD-202')?.icon, '✕');
+  assert.deepEqual(previewVerdicts(refused).get('DP-LD-101'), {
+    state: 'held',
+    icon: '–',
+    word: 'Held back',
+    why: 'held back: DP-LD-202 would not take the template edit',
+  });
+  assert.deepEqual(previewSummary(refused), { tone: 'bad', text: 'Nothing would change. DP-LD-202 would refuse it, so all 7 sheets are held back.' });
+  assert.deepEqual(previewButton(refused), { label: 'Nothing can land', disabled: true });
+  // A DWG that cannot be written may be written a moment later: check again.
+  assert.equal(checkAgainOffered(refused), true);
+  // A refusal of the records' own cannot pass on its own: nothing to check again.
+  const named = previewOf([
+    { sheet: 'S-1', ok: false, code: 'shared_edit_failed' },
+    { sheet: 'S-2', ok: false, code: 'duplicate_name' },
+  ]);
+  assert.equal(checkAgainOffered(named), false);
+  assert.equal(previewSummary(named).text, 'Nothing would change. S-2 would refuse it, so all 2 sheets are held back.');
+});
+
+test('a preview names its edit, its reach and its sheets, and steps round them', () => {
+  const edit = {
+    title: 'This is part of the template.',
+    detail: 'Moving it changes 7 sheets.',
+    path: 'templates/loop-2-wire.yaml',
+    sheets: SEVEN,
+    edit: 'Move service',
+  };
+  assert.deepEqual(previewTitle(edit), { chip: 'Preview', title: 'Move service', reach: 'on 7 sheets' });
+  assert.equal(previewTitle({ ...edit, sheets: ['DP-LD-103'] }).reach, 'on its one sheet');
+  assert.equal(previewStep(SEVEN, 'DP-LD-301', 1), 'DP-LD-302');
+  assert.equal(previewStep(SEVEN, 'DP-LD-302', 1), 'DP-LD-101', 'round from the last to the first');
+  assert.equal(previewStep(SEVEN, 'dp-ld-101', -1), 'DP-LD-302');
+  // One sheet only would take it: its own words.
+  const one = previewOf([{ sheet: 'DP-LD-103' }]);
+  assert.equal(previewSummary(one).text, 'The sheet would take it, and no check fails.');
+  assert.deepEqual(previewButton(one), { label: 'Change the template', disabled: false });
+  // A change set that lands on some and is refused on others would leave the set inconsistent.
+  const partly = previewOf([{ sheet: 'A' }, { sheet: 'B', ok: false, code: 'locked', message: 'locked' }]);
+  assert.equal(previewSummary(partly).text, 'A would take it and B would refuse it, which would leave the set inconsistent.');
+  assert.deepEqual(previewButton(partly), { label: 'Some sheets would refuse it', disabled: true });
+});
+
+test('nothing is picked or started on a preview, nor on its drawing once it ends until the set as it is is drawn', () => {
+  assert.equal(onPreviewDrawing(true, { preview: true }, { preview: {} }), true);
+  // Cancelled: the band is gone, but the preview's drawing is still the one shown.
+  assert.equal(onPreviewDrawing(false, { preview: true }, { preview: {} }), true);
+  // The live reply has come, but the preview's drawing is still loaded.
+  assert.equal(onPreviewDrawing(false, { preview: false }, { preview: {} }), true);
+  assert.equal(onPreviewDrawing(false, { preview: false }, {}), false);
+  assert.equal(onPreviewDrawing(false, null, null), false);
+});
+
+test('Change all waits for a preview drawn again once a change lands', () => {
+  const shown = { previewing: true, reported: true, journalRead: true, reply: { preview: true, generation: '0:*:3' }, reportedAt: '0:*:3', now: '0:*:3' };
+  assert.equal(previewIsCurrent(shown), true);
+  // A change or an undo landed: the set moved on, and the report is old.
+  assert.equal(previewIsCurrent({ ...shown, now: '0:*:4' }), false);
+  // Drawn again, but the report shown is still the old one's.
+  assert.equal(previewIsCurrent({ ...shown, reply: { preview: true, generation: '0:*:4' }, now: '0:*:4' }), false);
+  assert.equal(previewIsCurrent({ ...shown, reply: { preview: true, generation: '0:*:4' }, reportedAt: '0:*:4', now: '0:*:4' }), true);
+  // The journal cut back: a new epoch.
+  assert.equal(previewIsCurrent({ ...shown, now: '1:*:3' }), false);
+  assert.equal(previewIsCurrent({ ...shown, reported: false }), false);
+  assert.equal(previewIsCurrent({ ...shown, previewing: false }), false);
+});
+
+test('a preview opened before the journal is read waits for it, and is drawn again on its first snapshot', () => {
+  const shown = { previewing: true, reported: true, journalRead: false, reply: { preview: true, generation: '0:*:0' }, reportedAt: '0:*:0', now: '0:*:0' };
+  assert.equal(previewIsCurrent(shown), false, 'not current before the first snapshot');
+  assert.equal(previewRedrawnOn(true, true), true, 'the first snapshot draws an open preview again');
+  assert.equal(previewRedrawnOn(true, false), false, 'a later one draws again only what its entries touched');
+  assert.equal(previewRedrawnOn(false, true), false);
+  // Drawn again on it: the version moved on, and the report follows the new reply.
+  assert.equal(previewIsCurrent({ ...shown, journalRead: true, now: '0:*:1' }), false);
+  assert.equal(previewIsCurrent({ ...shown, journalRead: true, reply: { preview: true, generation: '0:*:1' }, reportedAt: '0:*:1', now: '0:*:1' }), true);
+});
+
+test("Enter is refused on a preview's drawing, an empty one too, which would repeat the last tool", () => {
+  assert.equal(enteredAs('', false, true), 'refused', 'Esc, then Enter while the set as it is loads');
+  assert.equal(enteredAs('M', false, true), 'refused');
+  assert.equal(enteredAs('', true, true), 'refused');
+  assert.equal(enteredAs('', false, false), 'input', 'on the set as it is, an empty Enter repeats the last tool');
+  assert.equal(enteredAs(' M ', false, false), 'start');
+  assert.equal(enteredAs('0,0', true, false), 'input');
+});
+
+test('journal navigation to another sheet opens it on its own first layout', () => {
+  assert.equal(layoutOn('DP-LD-101', 'DP-LD-104', 'Wiring'), null);
+  assert.equal(layoutOn('DP-LD-101', 'dp-ld-101', 'Wiring'), 'Wiring');
+  assert.equal(layoutOn('A', 'A', null), null);
+});
+
+test("a preview's report follows the text the renderer loaded, a context restored among it", () => {
+  const reply = { preview: true, text: 'T', generation: '0:*:2' };
+  assert.equal(reportGeneration(reply, 'T', '0:*:1'), '0:*:2', 'a redraw of the same text is current');
+  assert.equal(reportGeneration(reply, 'other', '0:*:1'), '0:*:1', 'not before its own text is loaded');
+  assert.equal(reportGeneration(reply, null, '0:*:1'), '0:*:1');
+  assert.equal(reportGeneration({ ...reply, preview: false }, 'T', '0:*:1'), '0:*:1');
+  assert.equal(reportGeneration(null, 'T', '0:*:1'), '0:*:1');
+});
+
+test('while a preview is shown the command bar says nothing has landed and how to step', () => {
+  assert.deepEqual(promptFor({ ...none, previewing: true }), {
+    command: 'PREVIEW',
+    parts: [{ text: 'Nothing has landed yet. ◀ ▶, the arrow keys or the tabs show each sheet; Esc cancels' }],
+  });
+  assert.equal(words(promptFor({ ...none, previewing: true, touch: true }).parts), 'Nothing has landed. ◀ ▶ or the tabs show each sheet');
 });
 
 test('the command bar prompts for a command or a selection, and offers Move, Erase and Clear on what is selected', () => {
@@ -151,21 +320,6 @@ test('a running tool prompts in the renderer’s words, on its layer, with its o
   assert.equal(words(said.parts), '!“hello” is not a drawing tool [ <OK> ]');
   // The set as it was shows no tool.
   assert.match(words(promptFor({ ...none, at: 3, tool: line }).parts), /^Showing entry 3/);
-});
-
-test('the template dialog names its template and asks to change all its sheets', () => {
-  const edit = {
-    title: 'This is part of the template.',
-    detail: 'Moving it changes 7 sheets.',
-    path: 'templates/loop-2-wire.yaml',
-    sheets: ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'],
-  };
-  assert.deepEqual(templateWords(edit), {
-    title: 'This is part of the template.',
-    body: 'Moving it changes 7 sheets. The template loop-2-wire.yaml changes, and so does every sheet built from it:',
-    button: 'Change all 7 sheets',
-  });
-  assert.equal(templateWords({ ...edit, sheets: ['DP-LD-103'] }).button, 'Change the template');
 });
 
 test('quick properties say where an object comes from', () => {

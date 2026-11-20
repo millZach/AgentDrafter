@@ -293,6 +293,8 @@ failures:
 
 `--dry-run`, or `dry_run` in the request, does everything a change set does but write: it applies the operations in memory, reads and builds every sheet they reach, and reports what would land, what would fail, the records that would be written, each object as its record would write it before and after, the row values that would be set, and the mark as it would stand. It changes nothing on disk: no record, no DWG, no output folder and no mark.
 
+**Drawn before it lands.** `agentdrafter display-list <set> --sheet <sheet> --change-set <change-set.json | ->`, or `change_set` in the request, runs the same dry run and draws the sheet as the change set would leave it, reading the set through the records it would write; nothing is written and nothing goes in the journal. Its reply's `preview` holds the dry run's reply under `change`, the checker's reply on the sheets it would land on under `checks`, read from those records, and the objects it would add, change and delete, with what the sheet drawn would draw otherwise ([viewer.md](viewer.md#a-change-set-drawn-before-it-lands)). The drafting app draws a template edit with it before it lands. A preview writes nothing, so it rolls nothing back: on a set whose journal holds an entry a commit has not finished, or a last line written in part, it is refused with `rollback_failed`, and any other command on the set rolls that back first. A `change_set` of `null` is refused as `change` refuses it, and one with `entry` is refused.
+
 ## The reply
 
 ```json

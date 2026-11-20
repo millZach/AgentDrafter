@@ -9,10 +9,11 @@
 // lands and its objects are marked; the journal steps back through the set
 // as it was; a tap selects an object, whose quick properties open beside
 // it. A drawing tool runs in the renderer: the page passes it the clicks,
-// taps and typing, shows its prompt, asks before an edit to a template's
-// object, and sends the change set it gives through `change`, as an agent
-// would, so it lands in the journal, where Undo and Accept take it; the
-// sheet is asked for again as soon as `change` replies.
+// taps and typing, shows its prompt, and sends the change set it gives
+// through `change`, as an agent would, so it lands in the journal, where
+// Undo and Accept take it; the sheet is asked for again as soon as `change`
+// replies. An edit to a template's object is drawn first, before it lands,
+// on each sheet it reaches (#154), and lands only on Change all.
 //
 // The page learns of every change from the server's event stream, which
 // sends the journal each time it changes on disk, whichever process or
@@ -22,7 +23,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { call, CommandError, run, watch, type StreamState } from './api.ts';
 import { BottomSheet } from './BottomSheet.tsx';
-import { Drawing, type DrawingHandle, type Focus, type Mark } from './Drawing.tsx';
+import { Drawing, type DrawingHandle, type Focus, type Mark, type PreviewTag } from './Drawing.tsx';
 import {
   changedOn,
   entryTitle,
@@ -73,11 +74,22 @@ import {
   type Tool,
   type Toggle,
   editsHere,
+  previewStep,
+  previewTitle,
+  onPreviewDrawing,
+  previewIsCurrent,
+  previewRedrawnOn,
+  reportGeneration,
+  enteredAs,
+  layoutOn,
+  previewVerdicts,
+  type PreviewReport,
+  type TemplateEdit,
   type Committed,
   type PropEdited,
   type PropField,
 } from './frame.ts';
-import { CommandBar, Ribbon, SnapMenu, StatusBar, TemplateDialog, TextBox, TextEditBox, TextOnDrawing } from './Frame.tsx';
+import { CommandBar, PreviewBand, Ribbon, SnapMenu, StatusBar, TextBox, TextEditBox, TextOnDrawing, VerdictMark } from './Frame.tsx';
 import { screen_color } from './wasm/agentdrafter_viewer.js';
 import { Assistant, JournalList, Peek, QuickProperties } from './Panels.tsx';
 import type { Summary } from './probe.ts';
@@ -133,6 +145,20 @@ interface Drawn {
   generation: string;
   /** Whether it came with its object snaps. */
   snaps: boolean;
+  /** Whether it is a preview's: the sheet as a change set would leave it, never kept as the set as it is. */
+  preview: boolean;
+}
+
+/** A change set to a template's objects, drawn before it lands (#154). */
+interface Previewing {
+  send: ToolSend & { template: TemplateEdit };
+  /** The sheet it was made on, and its layout, which Cancel and Change all go back to. */
+  home: string;
+  homeLayout: string | null;
+  /** Moves on to ask for its drawings again, as Check again does. */
+  key: number;
+  /** The object selected when it was made, as from quick properties: selected again once it ends. */
+  picked: Picked | null;
 }
 
 /** The object the reviewer picked: by its ID, so it is followed as the sheet changes; by its place when it has none. */
@@ -265,8 +291,20 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const field = useRef<HTMLInputElement>(null);
   // A phone's field shows when ⌨ Type asks for it.
   const [fieldShown, setFieldShown] = useState(false);
-  // An edit to a template's object, waiting for the drafter's yes.
-  const [templateAsk, setTemplateAsk] = useState<ToolSend | null>(null);
+  // An edit to a template's object, drawn before it lands, waiting for the
+  // drafter's Change all or Cancel; and the core's preview of it as the
+  // latest reply gave it, which every sheet's reply carries.
+  const [preview, setPreview] = useState<Previewing | null>(null);
+  const [previewReport, setPreviewReport] = useState<PreviewReport | null>(null);
+  // The generation of the set the report was drawn on: a change landing
+  // since makes it old until the preview is drawn again.
+  const [previewGeneration, setPreviewGeneration] = useState('');
+  // Whether the journal's first snapshot has come: a preview opened before
+  // it is drawn again on it, and is not current until then.
+  const [journalRead, setJournalRead] = useState(false);
+  const previewOpen = useRef(false);
+  previewOpen.current = !!preview;
+  const previewKeys = useRef(0);
   // A text whose contents are edited on the drawing, or in a phone's box,
   // by its place; and a count that moves on when an edit in quick
   // properties is cancelled, so its fields show their values again.
@@ -368,9 +406,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // The set as it is comes with its object snaps, for the cursor to catch,
   // while Object snap is on; the set as it was, read-only, without. A
   // sheet drawn without them is asked for again when it is turned on.
-  const withSnaps = at === null && toggles.osnap;
-  const cacheKey = `${at ?? 'live'}|${sheetKey}|${layoutKey}|${withSnaps ? 'snaps' : ''}`;
-  const version = at === null ? (versions[sheetKey || ANY] ?? 0) : 0;
+  // A preview is drawn without them: nothing is picked or snapped there.
+  const withSnaps = at === null && toggles.osnap && !preview;
+  const cacheKey = `${preview ? `pv${preview.key}` : (at ?? 'live')}|${sheetKey}|${layoutKey}|${withSnaps ? 'snaps' : ''}`;
+  // A preview is the change set applied to the whole set: any change to
+  // any sheet may change it.
+  const version = preview ? (versions[ANY] ?? 0) : at === null ? (versions[sheetKey || ANY] ?? 0) : 0;
+  const generationKey = preview ? '' : sheetKey;
 
   /**
    * The generation of what the server draws for `sheetKey` at `entry`, now:
@@ -383,6 +425,21 @@ export function App({ token, source, sheet, layout }: AppProps) {
     entry === null
       ? `${epochNow.current}:${key || ANY}:${versionsNow.current[key || ANY] ?? 0}`
       : `${epochNow.current}`;
+  // Whether the drawing shown, or the one on its way, is a preview's: while
+  // it is, even once the preview has ended, nothing is picked, snapped or
+  // started on it, only on the set as it is once that is drawn.
+  const onPreview = onPreviewDrawing(!!preview, reply, summary);
+  // Whether the preview's report is of the set as it is now: a change
+  // landing, or an undo, makes it old until the preview is drawn again,
+  // and Change all waits for that.
+  const previewCurrent = previewIsCurrent({
+    previewing: !!preview,
+    reported: !!previewReport,
+    journalRead,
+    reply,
+    reportedAt: previewGeneration,
+    now: generationOf(null, ''),
+  });
 
   // Each sheet asked for is drawn by the server once, then kept, until an
   // entry of the journal touches it: then the set as it is now is asked
@@ -395,7 +452,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       // A sheet drawn before is shown again at once: whatever another sheet
       // was saying, loading or failing, is not this one's to say. The
       // request for that other sheet, if it is still out, is let go.
-      setReply({ text: kept, at, sheetKey, generation: generationOf(at, sheetKey), snaps: withSnaps });
+      setReply({ text: kept, at, sheetKey, generation: generationOf(at, generationKey), snaps: withSnaps, preview: !!preview });
       setStatus({ kind: 'shown' });
       return;
     }
@@ -411,21 +468,32 @@ export function App({ token, source, sheet, layout }: AppProps) {
     // and quick properties need.
     if (at === null) input.origins = true;
     // And with each object's values, which quick properties edit, and
-    // where each is written.
-    if (at === null) input.values = true;
-    const generation = generationOf(at, sheetKey);
+    // where each is written; a preview's are not edited.
+    if (at === null && !preview) input.values = true;
+    // A preview: the sheet as the change set would leave it.
+    const previewed = preview;
+    if (previewed && at === null) (input as Record<string, unknown>).change_set = previewed.send.change_set;
+    const generation = generationOf(at, generationKey);
     run('display-list', input, token).then(
       (text) => {
         // Kept even when the reviewer has moved on, for when they come
         // back, unless the sheet has changed since it was asked for: then
         // it is the old drawing, and the sheet is asked for again.
-        if (generationOf(at, sheetKey) !== generation) return;
+        if (generationOf(at, generationKey) !== generation) return;
         replies.current.set(cacheKey, text);
         if (!current) return;
-        setReply({ text, at, sheetKey, generation, snaps: withSnaps });
+        setReply({ text, at, sheetKey, generation, snaps: withSnaps, preview: !!previewed });
       },
       (e) => {
         if (!current) return;
+        if (previewed) {
+          // A change set the core refuses whole cannot be drawn: it says
+          // why, as a change set that does not land does, and nothing lands.
+          endPreview(previewed.home, previewed.homeLayout, previewed.picked);
+          setPropsReset((n) => n + 1);
+          say('warn', `${previewed.send.what}: not landed`, why(e, token));
+          return;
+        }
         if (at !== null && e instanceof CommandError && e.status !== 401) {
           setStatus({ kind: 'cannot', message: e.message });
         } else {
@@ -441,12 +509,19 @@ export function App({ token, source, sheet, layout }: AppProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cacheKey, version, epoch, source, token]);
 
+  // The text the summary shown was read from: a reply of the same text is
+  // not drawn again, and its summary is that one's.
+  const summaryText = useRef<string | null>(null);
   const loaded = useCallback(
-    (shown: Summary) => {
+    (shown: Summary, text: string) => {
+      // The text the renderer loaded, as it says: a context restored loads
+      // it again through the callback it was given at mount.
+      summaryText.current = text;
       setSummary(shown);
       setStatus({ kind: 'shown' });
-      // Kept by its sheet's own name too, while it is still current.
-      if (reply && generationOf(reply.at, reply.sheetKey) === reply.generation) {
+      // Kept by its sheet's own name too, while it is still current; a
+      // preview's drawing is never the set as it is.
+      if (reply && !reply.preview && generationOf(reply.at, reply.sheetKey) === reply.generation) {
         replies.current.set(
           `${shown.entry ?? 'live'}|${upper(shown.sheet)}|${upper(shown.layout ?? '')}|${reply.snaps ? 'snaps' : ''}`,
           reply.text,
@@ -483,6 +558,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
     for (const key of staleDrawings(replies.current.keys(), touched)) replies.current.delete(key);
     const next = { ...versionsNow.current };
     for (const s of [...touched, ANY]) next[s] = (next[s] ?? 0) + 1;
+    versionsNow.current = next;
+    setVersions(next);
+  }, []);
+  // An open preview's drawings go, and its version moves on: it is not
+  // current until it is drawn again.
+  const redrawPreview = useCallback(() => {
+    for (const key of [...replies.current.keys()]) if (key.startsWith('pv')) replies.current.delete(key);
+    const next = { ...versionsNow.current, [ANY]: (versionsNow.current[ANY] ?? 0) + 1 };
     versionsNow.current = next;
     setVersions(next);
   }, []);
@@ -564,6 +647,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
       token,
       (text) => {
         const replied = JSON.parse(text) as { ok: boolean; result?: JournalReport; error?: { message: string } };
+        // Heard from, even when it cannot be read: a preview waits for no more.
+        setJournalRead(true);
         if (!replied.ok || !replied.result) {
           setNoJournal(replied.error?.message ?? 'there is no journal');
           setJournal(null);
@@ -584,6 +669,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
           const n = report.entries.length;
           log(`Journal read: ${n} entr${n === 1 ? 'y' : 'ies'}.`);
         }
+        // An open preview is drawn again on the first snapshot, which may
+        // hold a change set that landed before the page read the journal.
+        if (previewRedrawnOn(previewOpen.current, before === null)) redrawPreview();
         if (before === null || replaced) {
           if (replaced) {
             replies.current.clear();
@@ -622,7 +710,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       stop();
       seen.current = null;
     };
-  }, [source, token, check, toastFor, log, drawAgain]);
+  }, [source, token, check, toastFor, log, drawAgain, redrawPreview]);
 
   // The objects the focused entry changed on the sheet shown, marked.
   const focusedEntry = journal?.entries.find((e) => e.entry === focused);
@@ -680,6 +768,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const touched = [...sheetsTouched(entry, journal), ...(entry.failed_on ?? []).map((f) => f.sheet)];
     const current = summary?.sheet ?? wanted ?? '';
     const target = touched.some((s) => upper(s) === upper(current)) ? current : (firstSheet(entry, journal) ?? current);
+    // A preview ends first, landing nothing: an entry is drawn as it was, never with a change set.
+    if (preview) {
+      endPreview('', null);
+      setPropsReset((n) => n + 1);
+      log(`${preview.send.what}: cancelled, nothing changed`);
+    }
     setAt(asItWas ? number : null);
     setFocused(number);
     setPulseSince(null);
@@ -687,6 +781,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
     endTool();
     setSide('journal');
     setWanted(target);
+    // Another sheet may not have the layout shown: it opens on its first.
+    setWantedLayout(layoutOn(current, target, wantedLayout));
     if (asItWas) log(`Showing entry ${number} as it was: read-only`);
     keys.current += 1;
     setFocusWanted({ key: keys.current, sheet: target, ids: changedOn(entry, target).map((o) => o.id) });
@@ -877,7 +973,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       for (const line of o.log) log(line);
       // Each in order: one to a template's object is asked about first.
       for (const s of o.sends ?? []) {
-        if (s.template) setTemplateAsk(s);
+        if (s.template) startPreview(s);
         else void sendChange(s);
       }
     }
@@ -923,6 +1019,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
     return sent;
   };
   const startTool = (word: string, fromSelection = true) => {
+    if (onPreview) {
+      log(preview ? 'Change all or Cancel the preview first' : 'Drawing the sheet as it is first');
+      return;
+    }
     setToolsOpen(false);
     setTaken(null);
     setSnapMenu(null);
@@ -956,7 +1056,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const enter = (text: string) => {
     const v = renderer();
     if (!v) return;
-    if (!toolState?.tool && text.trim()) {
+    const as = enteredAs(text, !!toolState?.tool, onPreview);
+    if (as === 'refused') {
+      log(preview ? 'Change all or Cancel the preview first' : 'Drawing the sheet as it is first');
+      return;
+    }
+    if (as === 'start') {
       // A tool's alias starts it, Move and Erase on what is selected.
       startTool(text.trim());
       return;
@@ -991,7 +1096,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     // Esc drops what is typed, as AutoCAD's does.
     if (field.current) field.current.value = '';
     if (editing) setEditing(null);
-    else if (templateAsk) cancelTemplate();
+    else if (preview) cancelPreview();
     else if (asking) setAsking(null);
     else if (snapMenu) setSnapMenu(null);
     else if (toolsOpen) setToolsOpen(false);
@@ -1006,7 +1111,15 @@ export function App({ token, source, sheet, layout }: AppProps) {
   keys2.current = (e: KeyboardEvent) => {
     const target = e.target as Element | null;
     if (target?.closest?.('input, select, textarea')) return;
-    if (asking || templateAsk) return;
+    if (asking) return;
+    if (preview) {
+      // The arrow keys step through the sheets it reaches; nothing else is typed.
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        stepPreview(e.key === 'ArrowLeft' ? -1 : 1);
+      }
+      return;
+    }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === 'Delete' && !toolState?.tool && pickedPlace !== null) {
       e.preventDefault();
@@ -1047,19 +1160,103 @@ export function App({ token, source, sheet, layout }: AppProps) {
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
   }, [toggle]);
-  // The template dialog: Cancel lands nothing; Change all sends the change set.
-  const cancelTemplate = () => {
-    const was = templateAsk;
-    setTemplateAsk(null);
+  // A change set to a template's objects is drawn before it lands (#154):
+  // the sheet shown as it would leave it, then each sheet it reaches, one
+  // by one. Cancel lands nothing; Change all sends it, and it lands on all
+  // of them or on none.
+  function startPreview(s: ToolSend) {
+    if (!s.template) return;
+    previewKeys.current += 1;
+    setPicked(null);
+    setTaken(null);
+    setEditing(null);
+    setSnapMenu(null);
+    setToolsOpen(false);
+    setPreviewReport(null);
+    const home = summary?.sheet ?? wanted ?? '';
+    const homeLayout = summary?.layout ?? wantedLayout ?? null;
+    setPreview({ send: { ...s, template: s.template }, home, homeLayout, key: previewKeys.current, picked });
+    // The command bar's field lets go, so the arrow keys step through the sheets.
+    field.current?.blur();
+    log(`Preview: ${s.template.edit} ${previewTitle(s.template).reach}. Nothing has landed.`);
+  }
+  // Its drawings go, and the sheet it was made on comes back, with the
+  // object selected when it was made, as quick properties had it, once
+  // that sheet is drawn as it is.
+  const restorePick = useRef<{ picked: Picked; home: string } | null>(null);
+  function endPreview(home: string, layout: string | null, was: Picked | null = null) {
+    restorePick.current = was ? { picked: was, home } : null;
+    setPreview(null);
+    setPreviewReport(null);
+    for (const key of [...replies.current.keys()]) if (key.startsWith('pv')) replies.current.delete(key);
+    if (home && (upper(home) !== upper(wanted ?? '') || upper(layout ?? '') !== upper(wantedLayout ?? ''))) {
+      setWanted(home);
+      setWantedLayout(layout);
+    }
+  }
+  const cancelPreview = () => {
+    const was = preview;
+    if (!was) return;
+    endPreview(was.home, was.homeLayout, was.picked);
     setPropsReset((n) => n + 1);
-    if (was) log(`${was.what}: cancelled, nothing changed`);
+    log(`${was.send.what}: cancelled, nothing changed`);
   };
-  const confirmTemplate = () => {
-    const was = templateAsk;
-    setTemplateAsk(null);
+  const confirmPreview = () => {
+    const was = preview;
+    if (!was || !previewCurrent) return;
+    endPreview(was.home, was.homeLayout, was.picked);
     // An edit in quick properties that did not land shows its value again.
-    if (was) void sendChange(was).then((ok) => ok || setPropsReset((n) => n + 1));
+    void sendChange(was.send).then((ok) => ok || setPropsReset((n) => n + 1));
   };
+  // A sheet whose DWG could not be written may be written now: ask again.
+  const recheckPreview = () => {
+    if (!preview) return;
+    previewKeys.current += 1;
+    for (const key of [...replies.current.keys()]) if (key.startsWith('pv')) replies.current.delete(key);
+    setPreview({ ...preview, key: previewKeys.current });
+    log('Asked again whether each sheet would take it');
+  };
+  const stepPreview = (by: number) => {
+    if (!preview) return;
+    const next = previewStep(preview.send.template.sheets, summary?.sheet ?? wanted ?? preview.home, by);
+    setWanted(next);
+    setWantedLayout(null);
+  };
+  useEffect(() => {
+    const r = restorePick.current;
+    if (!r || preview || !summary || summary.preview != null || summary.entry !== null) return;
+    if (upper(summary.sheet) !== upper(r.home)) return;
+    restorePick.current = null;
+    // By its ID, followed onto the sheet as it is; gone, if it is gone.
+    setPicked({ ...r.picked, summary });
+  }, [summary, preview]);
+  // The core's preview, from each reply of it; and the view comes to what
+  // it marks on each sheet once, as it is first drawn.
+  const previewFocused = useRef('');
+  useEffect(() => {
+    if (!preview || !summary?.preview) return;
+    setPreviewReport(summary.preview as PreviewReport);
+    // Drawn again on the set as it now is: a reply of the same text as the
+    // one shown is not drawn again, but it is as current.
+    setPreviewGeneration((had) => reportGeneration(reply, summaryText.current, had));
+    const k = `${preview.key}|${upper(summary.sheet)}`;
+    if (previewFocused.current === k) return;
+    previewFocused.current = k;
+    keys.current += 1;
+    setFocus({ key: keys.current, sheet: summary.sheet, places: [], preview: true });
+  }, [preview, summary, reply]);
+  // Its words over the drawing: by each cloud, the check it would fail;
+  // round a sheet that would refuse it, or be held back, the paper framed.
+  const previewTags: PreviewTag[] = [];
+  if (preview && previewReport && summary?.preview) {
+    for (const c of (summary.preview as PreviewReport).clouds ?? []) {
+      previewTags.push({ text: `Would fail: ${c.rule}`, tone: 'bad', at: [c.bounds.min[0], c.bounds.min[1], c.bounds.max[0], c.bounds.max[1]] });
+    }
+    const v = previewVerdicts(previewReport).get(upper(summary.sheet));
+    if (v?.state === 'refused') previewTags.push({ text: `Refused on ${summary.sheet}`, tone: 'bad', at: null });
+    if (v?.state === 'held') previewTags.push({ text: `Held back on ${summary.sheet}`, tone: 'held', at: null });
+  }
+  const previewMarks = preview && previewReport ? previewVerdicts(previewReport) : null;
 
   // The sheet's layers, for the Layer box: asked for each sheet, and again
   // when the box is opened, which takes in a layer a change set added. Not
@@ -1134,13 +1331,18 @@ export function App({ token, source, sheet, layout }: AppProps) {
 
   // What the command bar and a phone's peek cover of the drawing: from the
   // command bar's top down, the bar taken as one line tall, so a prompt
-  // that wraps grows over the drawing without moving the fitted sheet.
+  // that wraps grows over the drawing without moving the fitted sheet. A
+  // preview's band covers from its own top, so what it shows is never
+  // under it; on a phone the band is the bar.
+  const previewShown = !!preview;
   useLayoutEffect(() => {
     const vp = viewport.current;
     const b = bar.current;
     if (!vp || !b) return;
+    const band = vp.querySelector('[data-preview]');
     const measure = () => {
-      const covered = vp.getBoundingClientRect().bottom - b.getBoundingClientRect().bottom + BAR_LINE;
+      const bottom = vp.getBoundingClientRect().bottom;
+      const covered = band ? bottom - band.getBoundingClientRect().top : bottom - b.getBoundingClientRect().bottom + BAR_LINE;
       setCovered(Math.max(0, Math.round(covered)));
       // The bar's real height, a wrapped prompt's among it, which quick
       // properties on a phone keep clear of.
@@ -1151,8 +1353,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const resized = new ResizeObserver(measure);
     resized.observe(vp);
     resized.observe(b);
+    if (band) resized.observe(band);
     return () => resized.disconnect();
-  }, [peekHeight, wide]);
+  }, [peekHeight, wide, previewShown]);
 
   // What the header and the tabs say.
   const pending = journal ? notIssued(journal) : [];
@@ -1206,7 +1409,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       return { kind: 'error', message: done.error };
     }
     if (!done.send) return { kind: 'same' };
-    if (done.send.template) setTemplateAsk(done.send);
+    if (done.send.template) startPreview(done.send);
     else void sendChange(done.send).then((ok) => ok || setPropsReset((n) => n + 1));
     return { kind: 'sent' };
   };
@@ -1262,6 +1465,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     taken: taken?.taken ?? null,
     touch: !wide,
     editing: editingField && object ? object : null,
+    previewing: !!preview,
   });
   const act = (a: Act) => {
     if (a === 'clear') pick(null);
@@ -1497,7 +1701,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
       </div>
       <nav className="va-tabs sheettabs" ref={tabs} aria-label="Sheets">
         {sheets.map((s) => {
-          const dot = marked.has(upper(s)) ? (
+          // In a preview, each sheet it reaches says what would become of
+          // it, and a sheet it does not reach is greyed and stays shut.
+          const reaches = !preview || preview.send.template.sheets.some((x) => upper(x) === upper(s));
+          const verdict = previewMarks?.get(upper(s));
+          const dot = preview ? (
+            verdict ? <VerdictMark state={verdict.state} /> : null
+          ) : marked.has(upper(s)) ? (
             <i className="dot warn" title="Inconsistent: a change set failed here">
               !
             </i>
@@ -1510,9 +1720,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
             <button
               key={s}
               type="button"
-              className={`tab${s === summary?.sheet ? ' on' : ''}`}
+              className={`tab${s === summary?.sheet ? ' on' : ''}${reaches ? '' : ' pvoff'}`}
               aria-current={s === summary?.sheet ? 'page' : undefined}
+              aria-disabled={reaches ? undefined : true}
+              title={reaches ? undefined : 'The change does not reach this sheet'}
               onClick={() => {
+                if (!reaches) return;
                 setPicked(null);
                 setWanted(s);
                 setWantedLayout(null);
@@ -1537,16 +1750,16 @@ export function App({ token, source, sheet, layout }: AppProps) {
             compact={!wide}
             grid={toggles.grid}
             card={card}
-            marks={marks}
-            picked={pickedPlace}
+            marks={onPreview ? [] : marks}
+            picked={onPreview ? null : pickedPlace}
             pulseSince={pulseSince}
             focus={focus}
             onLoaded={loaded}
             onError={failed}
             onUnavailable={setUnavailable}
-            onPick={pick}
+            onPick={onPreview ? () => {} : pick}
             onCursor={cursorAt}
-            snapMask={runningMask(toggles.osnap && at === null, running)}
+            snapMask={runningMask(toggles.osnap && at === null && !onPreview, running)}
             onTakeSnap={takeSnap}
             onNoSnap={noSnap}
             space={`${sheetCovers}:${barHeight}`}
@@ -1558,8 +1771,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
             layer={toolLayer}
             handle={drawing}
             editor={editor}
-            onOpen={openText}
+            onOpen={onPreview ? () => false : openText}
+            previewTags={previewTags}
           />
+          {preview && summary?.preview != null && (
+            <div className="pvhead" data-pvhead>
+              {summary.sheet} as it would be &middot; nothing has landed
+            </div>
+          )}
           <div className="va-overlays">
             {toast && (
               <div key={toast.key} className={`va-toast in ${toast.tone}`} role="status">
@@ -1650,7 +1869,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             placeholder={toolState?.placeholder ?? ''}
             touch={!wide}
             fieldShown={fieldShown && !(toolState?.typing_text && !wide)}
-            typeOffered={!toolState?.typing_text && (!!toolState?.tool || !object)}
+            typeOffered={!preview && !toolState?.typing_text && (!!toolState?.tool || !object)}
             onShowField={() => {
               setFieldShown(true);
               setTimeout(() => field.current?.focus(), 0);
@@ -1667,7 +1886,21 @@ export function App({ token, source, sheet, layout }: AppProps) {
               }
             }}
             typingText={!!toolState?.typing_text}
-            warning={toolState?.warning ?? null}
+            warning={preview ? null : (toolState?.warning ?? null)}
+            band={
+              preview ? (
+                <PreviewBand
+                  edit={preview.send.template}
+                  sheet={summary?.sheet ?? preview.home}
+                  report={previewReport}
+                  refreshing={!!previewReport && !previewCurrent}
+                  onStep={stepPreview}
+                  onCancel={cancelPreview}
+                  onGo={confirmPreview}
+                  onCheckAgain={recheckPreview}
+                />
+              ) : null
+            }
             note={
               toolState?.typing_text
                 ? 'Enter: next line · Enter again or Esc: done'
@@ -1725,9 +1958,6 @@ export function App({ token, source, sheet, layout }: AppProps) {
             log('No object snaps ticked');
           }}
         />
-      )}
-      {templateAsk?.template && (
-        <TemplateDialog edit={templateAsk.template} sheet={summary?.sheet ?? ''} onCancel={cancelTemplate} onConfirm={confirmTemplate} />
       )}
       {asking && (
         <div className="va-modal" role="dialog" aria-modal="true" aria-label="Accept the working revision">

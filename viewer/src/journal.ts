@@ -180,6 +180,10 @@ export function staleDrawings(keys: Iterable<string>, touched: readonly string[]
   if (!touched.length) return [];
   return [...keys].filter((key) => {
     const [at, sheet] = key.split('|');
+    // A preview's drawing (`pv…`) is the change set applied to the set as
+    // it was asked for: any change to the set may change what it would do
+    // on every sheet, its verdicts and checks among it.
+    if (at?.startsWith('pv')) return true;
     return at === 'live' && (sheet === '' || touched.includes(sheet ?? ''));
   });
 }

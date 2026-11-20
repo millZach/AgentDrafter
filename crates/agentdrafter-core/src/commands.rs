@@ -37,8 +37,8 @@ use crate::build::{build_with, BuildRequest};
 use crate::change::{accept_with, recover, AcceptRequest, JournalRequest, UndoRequest};
 use crate::change::{change_set_schema, change_with, journal, operations, undo, ChangeRequest};
 use crate::check::{check_with, CheckRequest};
-use crate::display_list::{display_list_with, DisplayListRequest};
-use crate::error::Error;
+use crate::display_list::{display_list_with, DisplayListRequest, NOT_AT_AN_ENTRY};
+use crate::error::{Error, ErrorCode};
 use crate::import::{import_blocks, ImportBlocksRequest};
 use crate::interface::Interface;
 use crate::plot::{plot_set_with, plot_with, PlotRequest, PlotSetRequest, BUILT_IN_PLOT_STYLE};
@@ -98,9 +98,15 @@ impl Command {
     /// When the input names a drawing set, or a file in one, an entry of
     /// the set's journal that a commit that never finished left pending is
     /// rolled back first, and the reply says so; when it cannot be, the
-    /// command refuses and does nothing.
+    /// command refuses and does nothing. A `display-list` with a
+    /// `change_set`, a preview, writes nothing: it rolls nothing back, and
+    /// is refused instead on a set whose journal holds such an entry.
     pub fn run(&self, input: Value, settings: &Settings, via: Interface) -> JsonReply {
-        let rolled_back = match set_read(&input).map(|set| recover(&set)) {
+        let previews = self.name == "display-list" && input.get("change_set").is_some();
+        let rolled_back = match set_read(&input)
+            .filter(|_| !previews)
+            .map(|set| recover(&set))
+        {
             Some(Err(error)) => return Reply::from(Err(error)),
             Some(Ok(rolled_back)) => rolled_back,
             None => None,
@@ -473,12 +479,45 @@ fn display_list_does() -> String {
      sheet it `fills`; `row_values`, by the sheet's row as the row values its template joins \
      with plain text in a list of parts, listing each under `row_values` with its `name` and \
      how many places it `fills`; or `unset`, an attribute the insert gives no value for, which \
-     shows its default. A loop sheet's display list runs to megabytes: it is for the viewer to draw, not \
-     to read."
+     shows its default. With `change_set`, the same JSON `change` takes, a drawing set's sheet is \
+     drawn as the change set would leave it, applied in memory to the set as it is, as a dry run \
+     applies it; nothing is written and nothing goes in the journal. The reply then gives \
+     `preview`: under `change`, the dry run's reply, each sheet it reaches with whether it would \
+     take its part or why not; under `checks`, the checker's reply on the sheets it would land \
+     on, read from the records as it would write them; under `objects`, each object it would \
+     add, change or delete, by its ID and `how`; and on the sheet drawn, the places among the \
+     display list's items it would add (`added`) and change (`changed`), what each object it \
+     would change or delete draws now where it would draw no more (`was`, its `items`), and a \
+     box round each check the sheet would fail (`clouds`). A loop sheet's display list runs to \
+     megabytes: it is for the viewer to draw, not to read."
         .to_owned()
 }
 
 fn display_list_input() -> Value {
+    // The change set's own schema, its definitions moved up beside the
+    // input's, where its references point, as `change` has it.
+    let mut change_set = change_set_schema();
+    let defs = change_set
+        .as_object_mut()
+        .and_then(|schema| {
+            schema.remove("$schema");
+            schema.remove("$defs")
+        })
+        .unwrap_or_else(|| json!({}));
+    if let Some(schema) = change_set.as_object_mut() {
+        schema.insert(
+            "description".to_owned(),
+            json!("Draw the drawing set's sheet as this change set would leave it, the same JSON change takes, applied in memory to the set as it is; nothing is written and nothing goes in the journal, and the reply gives its preview. Without it, the set as it is."),
+        );
+    }
+    let mut schema = display_list_schema(change_set);
+    schema["$defs"] = defs;
+    // A change set is drawn on the set as it is, never at an entry.
+    schema["not"] = json!({"required": ["entry", "change_set"]});
+    schema
+}
+
+fn display_list_schema(change_set: Value) -> Value {
     input(
         json!({
             "source": text("The record to draw: a sheet description, a DWG when the file ends .dwg, or a drawing set's folder."),
@@ -502,6 +541,7 @@ fn display_list_input() -> Value {
                 "description": "Give each object's `values`, what quick properties edit: a text's or an mtext's contents, a circle's or an arc's radius, and an insert's attribute values; and on a drawing set's sheet where each text value is `written`: by the object itself (`own`), by the sheet's row (`row_value`, with the value's name and how many places on the sheet it `fills`), by the row values its template joins with plain text in a list of parts (`row_values`, each with its `name` and how many places it `fills`), or nowhere (`unset`, an attribute that shows its default). Without it, none.",
                 "type": "boolean",
             },
+            "change_set": change_set,
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
         }),
@@ -514,6 +554,11 @@ fn run_display_list(
     base: &Settings,
     _: Interface,
 ) -> Result<JsonReply, Error> {
+    // Both keys given, even `entry: null`, which reads as left out: a change
+    // set is never drawn at an entry, as the schema says.
+    if input.contains_key("entry") && input.contains_key("change_set") {
+        return Err(Error::new(ErrorCode::BadValue, NOT_AT_AN_ENTRY).at_field("change_set"));
+    }
     let settings = take_settings(&mut input, base, false)?;
     let request: DisplayListRequest = parse("display-list", input)?;
     Ok(done_warned(display_list_with(&request, &settings)))

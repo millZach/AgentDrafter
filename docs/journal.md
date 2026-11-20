@@ -191,7 +191,7 @@ An entry cannot be shown once the bytes it needs are gone: when the undo state o
 | `checks_failed` | An accept: checks failed, and it was not told to accept despite them. The reply lists them, and nothing was issued. |
 | `moved_on` | An accept: the journal holds an entry newer than `newest_seen`. |
 | `nothing_to_accept` | An accept: the working revision is the one the last accept issued. |
-| `rollback_failed` | Any command on the set: its journal holds an entry a commit that never finished left pending, and it could not be rolled back. Nothing more was changed. |
+| `rollback_failed` | Any command on the set: its journal holds an entry a commit that never finished left pending, and it could not be rolled back. Nothing more was changed. Also `display-list` with a change set, a preview, which writes nothing and so rolls nothing back, on a set whose journal holds such an entry or a last line written in part. |
 
 ## How it works
 

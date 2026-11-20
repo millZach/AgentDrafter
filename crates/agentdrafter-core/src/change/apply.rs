@@ -476,13 +476,25 @@ fn objects_changed(
     objects
 }
 
+/// What a dry run would write, kept for a preview to draw from: each record
+/// it would write with its new text, and each object it would add, change
+/// or delete on each sheet it would land on, as its journal entry would
+/// name them.
+#[derive(Default)]
+pub(super) struct Kept {
+    pub records: Vec<(PathBuf, String)>,
+    pub objects: Vec<ObjectChanged>,
+}
+
 /// Applies the change set. `attempted` is given what it did to its sheets
 /// before its files are put in place, so a commit that fails is recorded as
-/// a failed attempt with the sheets it touched.
+/// a failed attempt with the sheets it touched. A dry run gives `kept`
+/// what it would write, when it is asked for.
 pub(super) fn apply(
     request: &ChangeRequest,
     settings: &Settings,
     attempted: &mut Option<Landing>,
+    kept: Option<&mut Kept>,
 ) -> Result<ChangeReport, Error> {
     let files = SetFiles::load(&request.set)?;
     let change_set = read_change_set(&request.change_set, files.units)?;
@@ -657,6 +669,11 @@ pub(super) fn apply(
                 operations: part,
             });
         }
+    }
+
+    if let Some(kept) = kept.filter(|_| request.dry_run) {
+        kept.records.clone_from(&records);
+        kept.objects = objects_changed(ops, &included, &done, &op_sheets, &files);
     }
 
     // The records, the DWGs and the mark land together, with the change

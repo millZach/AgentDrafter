@@ -305,6 +305,9 @@ pub struct TemplateEdit {
     pub path: String,
     /// Every sheet built from it, which the edit changes.
     pub sheets: Vec<String>,
+    /// The edit, in a few words, as a preview names it before it lands:
+    /// `Move junction-box`.
+    pub edit: String,
 }
 
 /// A change set a tool has ready to send.
@@ -1540,11 +1543,21 @@ impl Tools {
         } else {
             format!("{verb} {them} changes the template, which only this sheet is built from.")
         };
+        let edit = format!(
+            "{} {}",
+            if kind == ToolKind::Move {
+                "Move"
+            } else {
+                "Erase"
+            },
+            self.picked_words(picked)
+        );
         Some(TemplateEdit {
             title,
             detail,
             path: reach.path.clone(),
             sheets: reach.sheets.clone(),
+            edit,
         })
     }
 

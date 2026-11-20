@@ -189,4 +189,6 @@ test('a change set makes stale every drawing kept of the sheets it touched, each
   const kept = ['live|A|', 'live|A|FRONT', 'live|A|BACK', 'live|B|', 'live||', '3|A|FRONT'];
   assert.deepEqual(staleDrawings(kept, ['A']), ['live|A|', 'live|A|FRONT', 'live|A|BACK', 'live||']);
   assert.deepEqual(staleDrawings(kept, []), []);
+  // A preview's drawings go with any change: the change set would apply to another set.
+  assert.deepEqual(staleDrawings(['pv2|A|', 'pv2|B|', 'live|B|'], ['A']), ['pv2|A|', 'pv2|B|']);
 });

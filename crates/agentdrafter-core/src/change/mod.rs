@@ -42,6 +42,7 @@ mod undo;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -66,8 +67,8 @@ pub use journal::{
     JournalEntry, JournalReport, JournalRequest, ObjectChanged, Refusal, RollBack, SheetFailed,
     UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, LOCK_FILE, UNDO_STATES_FOLDER,
 };
-pub(crate) use recover::recover;
 pub use recover::RolledBack;
+pub(crate) use recover::{recover, refuse_unfinished};
 pub use undo::{undo, FileUndone, UndoAction, UndoReport, UndoRequest};
 
 /// The file, relative to a drawing set's folder, that marks the set
@@ -334,7 +335,7 @@ pub fn change_with(request: &ChangeRequest, settings: &Settings) -> Reply<Change
 
 fn change_set(request: &ChangeRequest, settings: &Settings) -> Reply<ChangeReport> {
     let mut attempted = None;
-    let mut outcome = apply::apply(request, settings, &mut attempted);
+    let mut outcome = apply::apply(request, settings, &mut attempted, None);
     journal::record_failed_attempt(request, &mut outcome, attempted);
     // Once the change set and its journal entry are written, the checker
     // reads the sheets it landed on back from the saved files.
@@ -348,6 +349,42 @@ fn change_set(request: &ChangeRequest, settings: &Settings) -> Reply<ChangeRepor
         }
         outcome => Reply::from(outcome),
     }
+}
+
+/// A change set applied in memory to a drawing set as it is, for a
+/// preview: what its dry run reports, the set's files as it would leave
+/// them, and each object it would add, change or delete on each sheet it
+/// would land on, as its journal entry would name them.
+pub(crate) struct Previewed {
+    pub report: ChangeReport,
+    pub files: Arc<FilesAsOf>,
+    pub objects: Vec<ObjectChanged>,
+}
+
+/// Applies `change_set` to the drawing set in `set` as a dry run does, and
+/// keeps what it would write. Nothing is written and nothing goes in the
+/// journal. An entry a commit left pending, or a journal's last line
+/// written in part, is not rolled back, since that writes: the preview is
+/// refused (`rollback_failed`). A change set the core refuses whole gives
+/// its error, as `change` would.
+pub(crate) fn preview(
+    set: &Path,
+    change_set: &Value,
+    settings: &Settings,
+) -> Result<Previewed, Error> {
+    refuse_unfinished(set)?;
+    let request = ChangeRequest {
+        set: set.to_owned(),
+        change_set: change_set.clone(),
+        dry_run: true,
+    };
+    let mut kept = apply::Kept::default();
+    let report = apply::apply(&request, settings, &mut None, Some(&mut kept))?;
+    Ok(Previewed {
+        report,
+        files: Arc::new(FilesAsOf::with_records(set, &kept.records)),
+        objects: kept.objects,
+    })
 }
 
 /// The checker's reply on the sheets a change set landed on, read back from

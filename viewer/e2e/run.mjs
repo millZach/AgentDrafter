@@ -61,6 +61,12 @@
 //            box moving the selected object, each one change set; Esc and
 //            Cancel landing nothing, Change all landing on every sheet, a
 //            row value on its sheet alone; and Undo last of an edit.
+// - preview: a change set drawn before it lands (#154): a template's Move
+//            drawn as it would leave each sheet it reaches, stepped through
+//            by the arrows, the keys and the tabs, with a check it would
+//            fail clouded and named; cancelled, writing nothing; changed,
+//            landing on every sheet; a sheet whose DWG cannot be written
+//            refusing it until it can; at laptop and phone sizes.
 //
 // It writes results.json, the screenshots and each compared image into
 // --out (target/viewer-e2e by default), and exits 1 when any check fails.
@@ -68,6 +74,8 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { createHash } from 'node:crypto';
+import { chmodSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -185,6 +193,35 @@ async function objectOf(page, id) {
 }
 
 /** Waits until the page's live stream is open. */
+/**
+ * Each sheet's tab and its mark while a preview is shown: `✓`, `!`, `✕` or
+ * `–`, `off` for a sheet it does not reach, or empty.
+ */
+function tabMarks(page) {
+  return page.evaluate(() =>
+    Object.fromEntries(
+      [...document.querySelectorAll('.sheettabs .tab')].map((t) => [
+        t.querySelector('b').textContent,
+        t.classList.contains('pvoff') ? 'off' : (t.querySelector('.vd')?.textContent ?? ''),
+      ]),
+    ),
+  );
+}
+
+/** Every file under `folder`, the journal's own among them, by its path, with a fingerprint of its bytes. */
+function filesIn(folder) {
+  const found = {};
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const at = join(dir, name);
+      if (statSync(at).isDirectory()) walk(at);
+      else found[at.slice(folder.length)] = createHash('sha256').update(readFileSync(at)).digest('hex');
+    }
+  };
+  walk(folder);
+  return found;
+}
+
 async function live(page) {
   await page.waitForSelector('.live.open', { timeout: 30000 });
 }
@@ -2149,23 +2186,27 @@ const checks = {
           await frames(page);
           await page.mouse.click(c[0] + 2, c[1] + 2);
           await typeIn(page, '@0.1,0');
-          await page.waitForSelector('[data-template-dialog]');
-          const asked = await page.textContent('[data-template-dialog]');
+          // Drawn before it lands, the band above the command bar.
+          await page.waitForSelector('[data-preview] [data-pv-summary]');
+          const asked = await page.textContent('[data-preview]');
+          assert(/Move \S+/.test(asked) && asked.includes('on 7 sheets') && asked.includes('Change all 7 sheets'), `the band: ${asked}`);
+          const tabs = await tabMarks(page);
           for (const s of ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302']) {
-            assert(asked.includes(s), `the dialog names ${s}: ${asked}`);
+            // What the check drew on DP-LD-101 before may make it fail a check there: it would still land.
+            assert(['✓', '!'].includes(tabs[s]), `${s}'s tab says it would land: ${JSON.stringify(tabs)}`);
           }
-          assert(!asked.includes('DP-LD-103') && asked.includes('Change all 7 sheets'), `the dialog: ${asked}`);
+          assert(tabs['DP-LD-103'] === 'off', `the sheet it does not reach is greyed: ${JSON.stringify(tabs)}`);
         };
         before = journal().length;
         const templateBefore = template();
         await tryMove();
         await page.screenshot({ path: join(out, 'tools-laptop-template.png') });
-        await page.click('[data-tw="cancel"]');
+        await page.click('[data-pv="cancel"]');
         await sleep(1500);
         assert(journal().length === before && template() === templateBefore, 'Cancel lands nothing');
         const sheetsBuilt = ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'].map((s) => [s, dwg(s)]);
         await tryMove();
-        await page.click('[data-tw="all"]');
+        await page.click('[data-pv="go"]');
         entry = await landed(page, before, 'Move of a template object');
         assert(entry.landed_on.length === 7 && !entry.landed_on.includes('DP-LD-103'), `it lands on every sheet built from the template: ${entry.landed_on}`);
         assert(sheetsBuilt.every(([s, was]) => dwg(s) !== was), 'every sheet named has its DWG built again');
@@ -2292,6 +2333,317 @@ const checks = {
         await context.close();
       }
       return { ...seen, screenshots: ['tools-laptop-line.png', 'tools-laptop-text.png', 'tools-laptop-move.png', 'tools-laptop-template.png', 'tools-laptop-after.png', 'tools-phone-line.png', 'tools-phone-text.png'] };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * A change set drawn before it lands (#154), against a copy of the demo
+   * plant: a template's Move, the service text into the zone line, drawn
+   * as it would leave each sheet it reaches, stepped through by ◀ ▶, the
+   * arrow keys and the tabs, each tab marked, the checks it would fail
+   * clouded and named; nothing written while it is shown; Esc and Cancel
+   * landing nothing; Change all landing on all seven sheets. A sheet whose
+   * DWG cannot be written refuses it and holds back the rest, nothing can
+   * land, and Closed it: check again asks again once it can be. At phone
+   * size, 375 by 812, the band takes the command bar's place, and it is
+   * stepped, cancelled and changed by touch.
+   */
+  async preview() {
+    const folder = freshPlant('preview');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    const seen = { laptop: {}, phone: {} };
+    const set = join(folder, 'demo-plant');
+    const SEVEN = ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'];
+    const journal = () => agentIn(folder, 'journal', 'demo-plant').result?.entries ?? [];
+    const band = (page) => page.textContent('[data-preview]');
+    const bar = (page) => page.evaluate(() => document.querySelector('.cmdbar').textContent);
+    const frames = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    // The sheet shown, drawn as the change set would leave it.
+    const shows = (page, sheet) =>
+      page.waitForFunction((s) => window.agentdrafterViewer.summary?.sheet === s && !!window.agentdrafterViewer.summary.preview, sheet, { timeout: 30000 });
+    const onPage = (page, at) =>
+      page.evaluate(([x, y]) => {
+        const v = window.agentdrafterViewer.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+      }, at);
+    // Shows `at` in the middle of the drawing, `times` the fitted scale.
+    const zoomTo = async (page, at, times) => {
+      await page.click('[aria-label="Fit the sheet"]');
+      await sleep(600);
+      await page.evaluate(([x, y, k]) => {
+        const p = window.agentdrafterViewer;
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        const scale = p.view().scale * k;
+        p.show({ left: x - r.width / 2 / scale, top: y + r.height / 3 / scale, scale });
+      }, [...at, times]);
+      await frames(page);
+    };
+    const typeIn = async (page, ...lines) => {
+      for (const line of lines) {
+        await page.keyboard.type(line);
+        await page.keyboard.press('Enter');
+        await frames(page);
+      }
+    };
+    const nothingWritten = (before, what) => {
+      const now = filesIn(set);
+      assert(JSON.stringify(now) === JSON.stringify(before), `${what}: nothing is written, the journal among it`);
+    };
+    // The service text, a template's object, moved 2.2 in right, into the
+    // zone line on DP-LD-202, DP-LD-301 and DP-LD-302: by the Move tool,
+    // the text picked by a click on its letters, the points typed.
+    const moveService = async (page) => {
+      await zoomTo(page, [1.4, 4.65], 4);
+      await typeIn(page, 'M');
+      const [x, y] = await onPage(page, [1.2, 4.65]);
+      await page.mouse.click(x, y);
+      await frames(page);
+      assert((await bar(page)).includes('1 object picked'), `the service text is picked: ${await bar(page)}`);
+      await typeIn(page, '', '0,0', '@2.2,0');
+      await shows(page, 'DP-LD-101');
+    };
+    const landedOnAll = async (before, what) => {
+      const until = Date.now() + 30000;
+      while (journal().length <= before) {
+        assert(Date.now() < until, `${what}: nothing landed`);
+        await sleep(100);
+      }
+      const entry = journal().at(-1);
+      assert(entry.kind === 'change_set' && JSON.stringify(entry.landed_on) === JSON.stringify(SEVEN), `${what} lands on all seven: ${JSON.stringify(entry.landed_on)}`);
+      return entry;
+    };
+    try {
+      {
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        const files = filesIn(set);
+        const entries = journal().length;
+        // Every loop sheet is ANSI B: one fitted scale.
+        const fitted = await page.evaluate(() => window.agentdrafterViewer.view().scale);
+        // The view comes to what the preview marks, closer than the fit, and rests.
+        const cameToIt = async () => {
+          let last = -1;
+          for (let i = 0; i < 40; i += 1) {
+            const now = await page.evaluate(() => window.agentdrafterViewer.view().scale);
+            if (now === last) break;
+            last = now;
+            await sleep(150);
+          }
+          assert(last > fitted * 1.5, `the view comes to the change: ${last} against the fit's ${fitted}`);
+        };
+
+        // Drawn on the sheet it was made on: the band names it, every tab it reaches says what would become of it.
+        await moveService(page);
+        await page.waitForSelector('[data-pv-summary]');
+        let said = await band(page);
+        assert(said.includes('Preview') && said.includes('Move service') && said.includes('on 7 sheets'), `the band names the edit: ${said}`);
+        assert(said.includes('DP-LD-101') && said.includes('1 of 7') && said.includes('Would land.'), `the sheet shown would take it: ${said}`);
+        assert(
+          said.includes('All 7 would take it, but DP-LD-202, DP-LD-301 and DP-LD-302 would then fail a check.') && said.includes('Change all 7 sheets'),
+          `the summary: ${said}`,
+        );
+        const tabs = await tabMarks(page);
+        assert(
+          JSON.stringify(tabs) ===
+            JSON.stringify({ 'DP-LD-101': '✓', 'DP-LD-102': '✓', 'DP-LD-103': 'off', 'DP-LD-104': '✓', 'DP-LD-201': '✓', 'DP-LD-202': '!', 'DP-LD-301': '!', 'DP-LD-302': '!' }),
+          `each tab's mark: ${JSON.stringify(tabs)}`,
+        );
+        assert((await bar(page)).startsWith('>_PREVIEWNothing has landed yet.'), `the command bar: ${await bar(page)}`);
+        assert((await page.textContent('[data-pvhead]')).includes('DP-LD-101 as it would be'), 'the drawing says what it shows');
+        assert((await page.evaluate(() => window.agentdrafterViewer.summary.preview.change.dry_run)) === true, 'the core drew it as a dry run');
+        nothingWritten(files, 'Shown');
+        assert(journal().length === entries, 'nothing goes in the journal');
+        await cameToIt();
+        await page.screenshot({ path: join(out, 'preview-laptop-101.png') });
+
+        // Stepped: the arrow key straight after Move's last point was typed,
+        // nothing clicked first, as the command bar's field lets go; ▶; a
+        // tab; a sheet it does not reach stays shut.
+        await page.keyboard.press('ArrowRight');
+        await shows(page, 'DP-LD-102');
+        assert((await band(page)).includes('2 of 7'), `→ steps on: ${await band(page)}`);
+        await page.click('[data-pv="next"]');
+        await shows(page, 'DP-LD-104');
+        await page.keyboard.press('ArrowLeft');
+        await shows(page, 'DP-LD-102');
+        await page.click('.sheettabs .tab:has-text("DP-LD-103")', { force: true });
+        await sleep(300);
+        assert((await page.evaluate(() => window.agentdrafterViewer.summary.sheet)) === 'DP-LD-102', 'a sheet it does not reach is not shown');
+        await page.click('.sheettabs .tab:has-text("DP-LD-301")');
+        await shows(page, 'DP-LD-301');
+        await page.waitForFunction(() => document.querySelector('[data-pvtag="check"]')?.textContent === 'Would fail: text_on_line', null, { timeout: 15000 });
+        said = await band(page);
+        assert(said.includes('Would land, but fails a check.') && said.includes('(text_on_line)'), `DP-LD-301 would fail a check: ${said}`);
+        assert((await page.textContent('[data-pvtag="check"]')) === 'Would fail: text_on_line', 'the cloud is named');
+        // The view came to what it changes.
+        const [l, bottom, r, top] = await page.evaluate(() => window.agentdrafterViewer.previewExtent());
+        const [x0, y0] = await onPage(page, [l, top]);
+        const [x1, y1] = await onPage(page, [r, bottom]);
+        const stage = await page.evaluate(() => document.querySelector('.stage').getBoundingClientRect().toJSON());
+        await cameToIt();
+        assert(x0 >= stage.left && x1 <= stage.right && y0 >= stage.top && y1 <= stage.bottom, 'what it marks is in sight');
+        await page.screenshot({ path: join(out, 'preview-laptop-301.png') });
+        seen.laptop.stepped = ['DP-LD-102', 'DP-LD-104', 'DP-LD-102', 'DP-LD-301'];
+
+        // Esc cancels: nothing lands, nothing is written, the sheet it was made on comes back.
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.querySelector('[data-preview]'));
+        await page.waitForFunction(() => window.agentdrafterViewer.summary?.sheet === 'DP-LD-101' && !window.agentdrafterViewer.summary.preview);
+        await sleep(800);
+        nothingWritten(files, 'Esc');
+        assert(journal().length === entries, 'Esc lands nothing');
+
+        // Changed: it lands on every sheet it reaches.
+        await moveService(page);
+        await page.click('[data-pv="go"]');
+        const entry = await landedOnAll(entries, 'Change all');
+        assert(entry.change_set.operations[0].op === 'move' && entry.change_set.operations[0].target.id === 'DP-LD-101/service', `the move: ${JSON.stringify(entry.change_set)}`);
+        await page.waitForFunction(() => !document.querySelector('[data-preview]'));
+        seen.laptop.changed = { entry: entry.entry, sheets: entry.landed_on.length };
+        // Put back, from the command line.
+        assert(agentIn(folder, 'undo', 'demo-plant', String(entry.entry)).ok, 'undone');
+        await page.waitForFunction((n) => document.querySelector('.titlebar button[data-act="undo"]')?.textContent.includes(`(#${n})`) === false, entry.entry);
+
+        // A sheet whose DWG cannot be written refuses it, and holds back the rest.
+        const locked = join(set, 'dwg', 'DP-LD-202.dwg');
+        chmodSync(locked, 0o444);
+        try {
+          const before = filesIn(set);
+          const n = journal().length;
+          await moveService(page);
+          await page.waitForSelector('[data-pv="recheck"]');
+          said = await band(page);
+          assert(said.includes('Nothing would change. DP-LD-202 would refuse it, so all 7 sheets are held back.'), `the summary: ${said}`);
+          assert(said.includes('Held back.'), `DP-LD-101 is held back: ${said}`);
+          assert(await page.evaluate(() => document.querySelector('[data-pv="go"]').disabled), 'Change all is off');
+          assert((await page.textContent('[data-pv="go"]')) === 'Nothing can land', 'it says nothing can land');
+          const marks = await tabMarks(page);
+          assert(marks['DP-LD-202'] === '✕' && marks['DP-LD-101'] === '–', `the tabs: ${JSON.stringify(marks)}`);
+          await page.click('.sheettabs .tab:has-text("DP-LD-202")');
+          await shows(page, 'DP-LD-202');
+          await page.waitForFunction(() => document.querySelector('[data-pvtag="sheet"]')?.textContent === 'Refused on DP-LD-202', null, { timeout: 15000 });
+          assert((await band(page)).includes('Refused.') && (await band(page)).includes('it may be open in AutoCAD'), `why: ${await band(page)}`);
+          await page.screenshot({ path: join(out, 'preview-laptop-refused.png') });
+          // Closed it: check again, once it can be written.
+          chmodSync(locked, 0o644);
+          await page.click('[data-pv="recheck"]');
+          await page.waitForFunction(() => {
+            const go = document.querySelector('[data-pv="go"]');
+            return go && !go.disabled && go.textContent === 'Change all 7 sheets';
+          });
+          await page.click('[data-pv="cancel"]');
+          await page.waitForFunction(() => !document.querySelector('[data-preview]'));
+          await sleep(500);
+          nothingWritten(before, 'A refused preview, then Cancel');
+          assert(journal().length === n, 'nothing lands');
+          seen.laptop.refused = 'DP-LD-202';
+        } finally {
+          chmodSync(locked, 0o644);
+        }
+
+        // A change landing while it is shown makes it old: the band says it
+        // is drawn again, and Change all waits for that.
+        {
+          const asked = [];
+          page.on('request', (r) => {
+            if (r.url().includes('/display-list')) asked.push(JSON.parse(r.postData() ?? '{}'));
+          });
+          await moveService(page);
+          await page.waitForSelector('[data-pv-summary]');
+          await page.waitForFunction(() => !document.querySelector('[data-pv="go"]').disabled);
+          await page.evaluate(() => {
+            window.pvSeen = [];
+            const watch = () =>
+              window.pvSeen.push({ refreshing: !!document.querySelector('[data-pv-refreshing]'), off: !!document.querySelector('[data-pv="go"]')?.disabled });
+            new MutationObserver(watch).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+          });
+          assert(sendChange(folder, move('DP-LD-104/io-channel', 0.001)).ok, 'a change lands from the command line');
+          await page.waitForFunction(() => window.pvSeen.some((s) => s.refreshing), null, { timeout: 15000 });
+          await page.waitForFunction(() => !document.querySelector('[data-pv-refreshing]') && !document.querySelector('[data-pv="go"]').disabled, null, { timeout: 30000 });
+          assert(await page.evaluate(() => window.pvSeen.every((s) => !s.refreshing || s.off)), 'Change all is off while it is drawn again');
+          seen.laptop.refreshed = true;
+
+          // A journal entry clicked while it is shown: it ends, landing
+          // nothing, and the entry is drawn as it was, never with the change set.
+          const n = journal().length;
+          const last = journal().at(-1).entry;
+          await page.click(`li[data-entry="${last}"] .je-head`);
+          await page.waitForFunction(() => !document.querySelector('[data-preview]'));
+          await page.waitForFunction((e) => window.agentdrafterViewer.summary?.entry === e && !window.agentdrafterViewer.summary.preview, last, { timeout: 15000 });
+          await sleep(500);
+          assert(!asked.some((input) => input.entry !== undefined && input.change_set !== undefined), 'no drawing is asked for at an entry with a change set');
+          const toast = await page.evaluate(() => document.querySelector('.va-toast')?.textContent ?? '');
+          assert(!toast.includes('not landed'), `nothing is refused: ${toast}`);
+          assert(journal().length === n, 'nothing lands');
+          seen.laptop.entry = last;
+        }
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+
+      // A phone, 375 by 812: by touch, the band in the command bar's place.
+      {
+        const context = await b.newContext({ ...PHONE, viewport: { width: 375, height: 812 } });
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        const files = filesIn(set);
+        const entries = journal().length;
+        const moveBox = async () => {
+          // The junction box, a template's object: Tools, Move, its edge tapped, Done, two taps.
+          await zoomTo(page, [6.4, 6.5], 3);
+          await page.tap('.toolsbtn');
+          await page.tap('.rb[data-tool="move"]', { force: true });
+          await page.touchscreen.tap(...(await onPage(page, [6.4, 6.6])));
+          await sleep(300);
+          assert((await bar(page)).includes('1 object picked'), `the junction box is picked: ${await bar(page)}`);
+          await page.tap('.opt[data-opt="tool:done"]');
+          await page.touchscreen.tap(...(await onPage(page, [6.4, 6.2])));
+          await sleep(400);
+          await page.touchscreen.tap(...(await onPage(page, [7.4, 5.2])));
+          await shows(page, 'DP-LD-101');
+          await page.waitForSelector('[data-pv-summary]');
+        };
+        await moveBox();
+        assert(await page.evaluate(() => document.querySelector('.cmdbar').hidden), 'the band takes the command bar\'s place');
+        const said = await band(page);
+        assert(said.includes('Move junction-box') && said.includes('1 of 7') && said.includes('Change all 7 sheets'), `the band: ${said}`);
+        const box = await page.evaluate(() => document.querySelector('[data-preview]').getBoundingClientRect().toJSON());
+        assert(box.left >= 0 && box.right <= 375 && box.bottom <= 812, `the band fits the phone: ${JSON.stringify(box)}`);
+        assert(box.height < 812 / 2, `the band leaves the drawing most of the screen: ${box.height}`);
+        const tag = await page.evaluate(() => document.querySelector('[data-pvtag]')?.getBoundingClientRect().toJSON());
+        assert(!tag || tag.right <= 375, `a tag is kept on the screen: ${JSON.stringify(tag)}`);
+        await sleep(1200);
+        await page.screenshot({ path: join(out, 'preview-phone-101.png') });
+        await page.tap('[data-pv="next"]');
+        await shows(page, 'DP-LD-102');
+        await page.tap('.sheettabs .tab:has-text("DP-LD-302")');
+        await shows(page, 'DP-LD-302');
+        assert((await band(page)).includes('7 of 7'), `a tab shows its sheet: ${await band(page)}`);
+        await sleep(1200);
+        await page.screenshot({ path: join(out, 'preview-phone-302.png') });
+        await page.tap('[data-pv="cancel"]');
+        await page.waitForFunction(() => !document.querySelector('[data-preview]'));
+        await page.waitForFunction(() => window.agentdrafterViewer.summary?.sheet === 'DP-LD-101' && !window.agentdrafterViewer.summary.preview);
+        await sleep(800);
+        nothingWritten(files, 'Cancel, by touch');
+        assert(!(await page.evaluate(() => document.querySelector('.cmdbar').hidden)), 'the command bar is back');
+        await moveBox();
+        await page.tap('[data-pv="go"]');
+        const entry = await landedOnAll(entries, 'Change all, by touch');
+        seen.phone.changed = { entry: entry.entry, sheets: entry.landed_on.length };
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      return {
+        ...seen,
+        screenshots: ['preview-laptop-101.png', 'preview-laptop-301.png', 'preview-laptop-refused.png', 'preview-phone-101.png', 'preview-phone-302.png'],
+      };
     } finally {
       await b.close();
       await server.stop();
@@ -2658,19 +3010,21 @@ const checks = {
           assert(said.includes('leaves CHECKED unset') && said.includes('all 7 sheets'), `it says so before it is edited: ${said}`);
           await page.fill(`.qp [data-prop="${checked}"]`, 'ZM');
           await page.keyboard.press('Enter');
-          await page.waitForSelector('[data-template-dialog]');
-          const asked = await page.textContent('[data-template-dialog]');
-          assert(asked.includes('The template leaves CHECKED unset.') && asked.includes('Change all 7 sheets') && SEVEN.every((s) => asked.includes(s)) && !asked.includes('DP-LD-103'), `the dialog: ${asked}`);
+          await page.waitForSelector('[data-preview] [data-pv-summary]');
+          const asked = await page.textContent('[data-preview]');
+          assert(asked.includes('CHECKED') && asked.includes('Change all 7 sheets'), `the band: ${asked}`);
+          const tabs = await tabMarks(page);
+          assert(SEVEN.every((s) => tabs[s] === '✓') && tabs['DP-LD-103'] === 'off', `the tabs: ${JSON.stringify(tabs)}`);
         };
         before = journal().length;
         await ask();
         await page.screenshot({ path: join(out, 'props-laptop-template.png') });
-        await page.click('[data-tw="cancel"]');
+        await page.click('[data-pv="cancel"]');
         await nothingLands(before, 'Cancel');
         assert(template() === templateBefore, 'Cancel writes nothing');
         await waitValue(page, checked, '');
         await ask();
-        await page.click('[data-tw="all"]');
+        await page.click('[data-pv="go"]');
         ({ entry, op } = await landed(page, before, 'An unset attribute, Change all'));
         assert(same(op, { op: 'set_attribute', target: { id: 'DP-LD-101/title-block' }, tag: 'CHECKED', value: 'ZM' }), `set_attribute: ${JSON.stringify(op)}`);
         assert(JSON.stringify(entry.landed_on) === JSON.stringify(SEVEN), `it lands on every sheet built from the template: ${entry.landed_on}`);
@@ -2685,10 +3039,10 @@ const checks = {
         before = journal().length;
         const beforeMove = template();
         await page.selectOption('select[data-layer]', 'wire');
-        await page.waitForSelector('[data-template-dialog]');
-        const asked = await page.textContent('[data-template-dialog]');
-        assert(asked.includes('Changing its layer changes 7 sheets.'), `the dialog: ${asked}`);
-        await page.click('[data-tw="all"]');
+        await page.waitForSelector('[data-preview] [data-pv-summary]');
+        const asked = await page.textContent('[data-preview]');
+        assert(asked.includes('moved to layer wire') && asked.includes('Change all 7 sheets'), `the band: ${asked}`);
+        await page.click('[data-pv="go"]');
         ({ entry, op } = await landed(page, before, 'The Layer box'));
         assert(op.op === 'change' && op.set.layer === 'wire' && entry.landed_on.length === 7, `the Layer box moves it, on every sheet: ${JSON.stringify(op)} ${entry.landed_on}`);
         seen.laptop.layer_box = { entry: entry.entry, sheets: entry.landed_on.length };
@@ -2848,19 +3202,21 @@ const checks = {
           await page.tap('.qp [data-prop="contents"]');
           await page.fill('.qp [data-prop="contents"]', 'JUNCTION BOXES');
           await page.keyboard.press('Enter');
-          await page.waitForSelector('[data-template-dialog]');
-          const asked = await page.textContent('[data-template-dialog]');
-          assert(asked.includes('Changing its text changes 7 sheets.') && asked.includes('Change all 7 sheets'), `the dialog: ${asked}`);
+          await page.waitForSelector('[data-preview] [data-pv-summary]');
+          const asked = await page.textContent('[data-preview]');
+          assert(asked.includes('JUNCTION BOXES') && asked.includes('Change all 7 sheets'), `the band: ${asked}`);
+          // On a phone the band takes the command bar's place.
+          assert(await page.evaluate(() => document.querySelector('.cmdbar').hidden), 'the band replaces the command bar');
         };
         before = journal().length;
         await ask();
         await page.screenshot({ path: join(out, 'props-phone-template.png') });
-        await page.tap('[data-tw="cancel"]');
+        await page.tap('[data-pv="cancel"]');
         await nothingLands(before, 'Cancel, by touch');
         assert(template() === templateBefore, 'Cancel writes nothing');
         await waitValue(page, 'contents', 'JUNCTION BOX');
         await ask();
-        await page.tap('[data-tw="all"]');
+        await page.tap('[data-pv="go"]');
         ({ entry, op } = await landed(page, before, 'A template text, Change all, by touch'));
         assert(op.set.contents === 'JUNCTION BOXES' && JSON.stringify(entry.landed_on) === JSON.stringify(SEVEN), `Change all by touch: ${JSON.stringify(op)} ${entry.landed_on}`);
         seen.phone.template_text = { entry: entry.entry, sheets: entry.landed_on.length };
@@ -2904,7 +3260,7 @@ const checks = {
         const before = panelJournal().length;
         await page.fill('.qp [data-prop="contents"]', 'PANEL P9 SLOT 5');
         await page.keyboard.press('Enter');
-        assert((await page.locator('[data-template-dialog]').count()) === 0, 'no template dialog');
+        assert((await page.locator('[data-preview]').count()) === 0, 'no preview: it lands at once');
         const until = Date.now() + 30000;
         while (panelJournal().length <= before) {
           assert(Date.now() < until, `the joined text lands: ${await bar(page)}`);

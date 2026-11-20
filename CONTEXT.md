@@ -459,10 +459,14 @@ _Avoid_: active layer, default layer
 
 **Rubber band**:
 What a drawing tool draws from its last point to the cursor before the next click, such as the line it would draw or the circle's size, as AutoCAD's rubber band shows it. It is the page's alone: nothing is sent until the tool has what it needs.
-_Avoid_: preview (a proposal is shown before it lands), ghost
+_Avoid_: preview (a change set drawn before it lands), ghost
+
+**Preview**:
+A change set drawn before it lands: each sheet it reaches as it would leave it, applied in memory to the set as it is and written nowhere, the rest of the sheet faded, what it would add, change and delete marked, whether the sheet would take its part, and the checks it would then fail. `display-list` draws one when given a change set. The drafting app shows an edit to a template's object as one before it lands; a proposal is drawn as one.
+_Avoid_: dry run (`change`'s, which draws nothing), ghost, rubber band, proposal (a proposal waits; a preview is how a change set is drawn)
 
 **Template warning**:
-What the drafting app says before an edit to an object that comes from a template lands: that every sheet built from the template changes, naming them, with "Change all N sheets" or Cancel.
+What the drafting app says before an edit to an object that comes from a template lands: that every sheet built from the template changes, drawn as a preview on each of them, with what would become of each, and "Change all N sheets" or Cancel.
 _Avoid_: template prompt, shared-edit warning
 
 **Command bar**:

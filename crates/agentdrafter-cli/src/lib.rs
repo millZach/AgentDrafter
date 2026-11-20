@@ -50,7 +50,7 @@ const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [-
 const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]... [--no-system-fonts]";
-const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--fonts <folder>]... [--no-system-fonts]";
+const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--change-set <change-set.json | ->] [--fonts <folder>]... [--no-system-fonts]";
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
@@ -388,6 +388,16 @@ fn parse_display_list(mut args: Args) -> Result<Value, Error> {
                 }
                 request.values = true;
             }
+            Some("--change-set") => {
+                let file = value("--change-set", args.next())?;
+                if request
+                    .change_set
+                    .replace(read_change_set(&file)?)
+                    .is_some()
+                {
+                    return Err(Error::usage("--change-set is given twice"));
+                }
+            }
             Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
             Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
@@ -549,7 +559,18 @@ fn parse_change(mut args: Args) -> Result<Value, Error> {
             given.len()
         ))
     })?;
-    let text = if change_set == "-" {
+    let request = ChangeRequest {
+        set: PathBuf::from(set),
+        change_set: read_change_set(&change_set)?,
+        dry_run,
+    };
+    input_of(request, fonts)
+}
+
+/// Reads a change set from the file `given` names, or from standard input
+/// for `-`, as `change` and `display-list --change-set` take it.
+fn read_change_set(given: &OsString) -> Result<Value, Error> {
+    let text = if given == "-" {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|e| {
             Error::new(
@@ -559,7 +580,7 @@ fn parse_change(mut args: Args) -> Result<Value, Error> {
         })?;
         text
     } else {
-        let path = PathBuf::from(&change_set);
+        let path = PathBuf::from(given);
         std::fs::read_to_string(&path).map_err(|e| {
             Error::new(
                 ErrorCode::ReadFailed,
@@ -567,18 +588,12 @@ fn parse_change(mut args: Args) -> Result<Value, Error> {
             )
         })?
     };
-    let change_set = serde_json::from_str(&text).map_err(|e| {
+    serde_json::from_str(&text).map_err(|e| {
         Error::new(
             ErrorCode::WrongType,
             format!("the change set is not JSON: {e}"),
         )
-    })?;
-    let request = ChangeRequest {
-        set: PathBuf::from(set),
-        change_set,
-        dry_run,
-    };
-    input_of(request, fonts)
+    })
 }
 
 /// Reads `journal`'s argument: the set's folder.

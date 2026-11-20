@@ -51,6 +51,21 @@ export interface Focus {
   key: number;
   sheet: string;
   places: number[];
+  /** Comes to what a preview marks, as the renderer finds it, in place of `places`. */
+  preview?: boolean;
+}
+
+/**
+ * A word over the drawing of a change set shown before it lands: by a
+ * cloud round a check it would fail, below its box; or, for a sheet that
+ * would refuse it or be held back, at the paper's top left, the paper
+ * framed in its tone.
+ */
+export interface PreviewTag {
+  text: string;
+  tone: 'bad' | 'held';
+  /** `[left, bottom, right, top]` in drawing units; the paper for null. */
+  at: [number, number, number, number] | null;
 }
 
 export interface DrawingProps {
@@ -76,7 +91,10 @@ export interface DrawingProps {
   pulseSince: number | null;
   /** Shows a part of the sheet once it is drawn. */
   focus: Focus | null;
-  onLoaded(summary: Summary): void;
+  /** A preview's words over the drawing, which follow it as the view moves. */
+  previewTags?: PreviewTag[];
+  /** A sheet was drawn: what it is, and the text the renderer loaded, which a restored context loads again. */
+  onLoaded(summary: Summary, text: string): void;
   /** A sheet could not be drawn. */
   onError(message: string): void;
   /** The renderer could not start, as where there is no WebGL2: nothing can be drawn. */
@@ -186,6 +204,7 @@ export function Drawing({
   handle,
   editor,
   onOpen,
+  previewTags = [],
 }: DrawingProps) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -250,6 +269,58 @@ export function Drawing({
   layerNow.current = layer;
   const dyn = useRef<HTMLDivElement>(null);
   const typed = useRef<HTMLDivElement>(null);
+  // The preview focus last come to, and the view it came to.
+  const lastPreviewFocus = useRef<{ focus: Focus; at: number } | null>(null);
+  // A preview's words, placed at each draw.
+  const pvTags = useRef<HTMLDivElement>(null);
+  const pvTagsNow = useRef<PreviewTag[]>(previewTags);
+  pvTagsNow.current = previewTags;
+  const placePreviewTags = () => {
+    const box2 = pvTags.current;
+    const c = canvas.current;
+    if (!box2 || !c) return;
+    const tags = pvTagsNow.current;
+    if (!tags.length) {
+      if (box2.childElementCount) box2.replaceChildren();
+      return;
+    }
+    const v2 = view.current;
+    const width = c.clientWidth;
+    const height = c.clientHeight - covered.current;
+    const kids: HTMLElement[] = [];
+    for (const t of tags) {
+      const b = t.at ?? paper.current;
+      if (!b) continue;
+      const [l, top] = toScreen(v2, b[0], b[3]);
+      const [r, bottom] = toScreen(v2, b[2], b[1]);
+      if (t.at === null) {
+        const frame2 = document.createElement('div');
+        frame2.className = `pvpaper ${t.tone}`;
+        frame2.style.left = `${l}px`;
+        frame2.style.top = `${top}px`;
+        frame2.style.width = `${Math.max(0, r - l)}px`;
+        frame2.style.height = `${Math.max(0, bottom - top)}px`;
+        kids.push(frame2);
+      }
+      const el = document.createElement('div');
+      el.className = `pvtag ${t.tone}`;
+      el.textContent = t.text;
+      el.dataset.pvtag = t.at === null ? 'sheet' : 'check';
+      // Below a cloud, as the prototype puts it; inside the paper's top left.
+      const x = t.at === null ? l + 10 : l;
+      const y = t.at === null ? top + 10 : bottom + 14;
+      el.style.left = `${Math.round(Math.max(4, x))}px`;
+      el.style.top = `${Math.round(Math.max(34, Math.min(height - 28, y)))}px`;
+      kids.push(el);
+    }
+    box2.replaceChildren(...kids);
+    // Kept inside the drawing, however wide its words.
+    for (const el of kids) {
+      if (!el.classList.contains('pvtag')) continue;
+      const left = Number.parseFloat(el.style.left);
+      if (left + el.offsetWidth > width - 4) el.style.left = `${Math.round(Math.max(4, width - el.offsetWidth - 4))}px`;
+    }
+  };
   /** Whether a tool runs that takes the drawing's clicks and taps. */
   // Asked of the renderer, which holds the tool, so a tap made before the
   // page has drawn the tool's new step still goes to it.
@@ -399,6 +470,7 @@ export function Drawing({
     placeCard();
     placeEditor();
     placeToolWords();
+    placePreviewTags();
     const at = pointer.current;
     if (held.current) return;
     const h = hovered.current;
@@ -719,7 +791,7 @@ export function Drawing({
     pendingFocus.current = null;
     const whole = fitted();
     if (!whole) return;
-    const b = f.places.length ? v.bounds_of(Uint32Array.from(f.places)) : [];
+    const b = f.preview ? v.preview_extent() : f.places.length ? v.bounds_of(Uint32Array.from(f.places)) : [];
     if (b.length !== 4) {
       fitSheet(450);
       return;
@@ -727,6 +799,9 @@ export function Drawing({
     followFit.current = false;
     bounds.current = limits(whole);
     const target = focusOn([b[0], b[1], b[2], b[3]] as unknown as Paper, area(), whole);
+    // A preview's is remembered, so a change of room just after, as its
+    // band's words come, comes to it again.
+    lastPreviewFocus.current = f.preview ? { focus: f, at: lastPreviewFocus.current?.focus.key === f.key ? lastPreviewFocus.current.at : performance.now() } : null;
     glide.current?.to(target, 450, middle());
   };
 
@@ -753,7 +828,7 @@ export function Drawing({
       if (held.current) showLoupe(held.current);
       const probe = window.agentdrafterViewer;
       if (probe) probe.summary = summary;
-      onLoaded(summary);
+      onLoaded(summary, text);
       applyMarks();
       applyFocus();
       return true;
@@ -1046,6 +1121,13 @@ export function Drawing({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pulseSince]);
 
+  // A preview's words change with the sheet it shows: placed on the next frame.
+  const tagsKey = JSON.stringify(previewTags);
+  useEffect(() => {
+    redraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tagsKey]);
+
   // A part of a sheet to show, now or once its sheet is drawn.
   useEffect(() => {
     if (!focus) return;
@@ -1054,10 +1136,15 @@ export function Drawing({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.key]);
 
-  // The bottom sheet's peek changes the room the fitted sheet has.
+  // The bottom sheet's peek changes the room the fitted sheet has; and a
+  // preview's band, which grows as its words come, the room the change it
+  // came to has: it is come to again, just after.
   useEffect(() => {
     if (followFit.current) {
       fitSheet(0);
+    } else if (lastPreviewFocus.current && performance.now() - lastPreviewFocus.current.at < 2000) {
+      pendingFocus.current = lastPreviewFocus.current.focus;
+      applyFocus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [coveredBelow]);
@@ -1069,6 +1156,7 @@ export function Drawing({
       <div className="snaptag" ref={tag} aria-live="polite" />
       <div className="dyn" ref={dyn} aria-hidden="true" data-dyn />
       <div className="typed" ref={typed} aria-hidden="true" data-typed />
+      <div className="pvtags" ref={pvTags} data-pvtags />
       <div className="zoombtns">
         {!compact && (
           <>
