@@ -37,8 +37,8 @@ use crate::build::{build_with, BuildRequest};
 use crate::change::{accept_with, recover, AcceptRequest, JournalRequest, UndoRequest};
 use crate::change::{change_set_schema, change_with, journal, operations, undo, ChangeRequest};
 use crate::check::{check_with, CheckRequest};
-use crate::display_list::{display_list_with, DisplayListRequest};
-use crate::error::Error;
+use crate::display_list::{display_list_with, DisplayListRequest, NOT_AT_AN_ENTRY};
+use crate::error::{Error, ErrorCode};
 use crate::import::{import_blocks, ImportBlocksRequest};
 use crate::interface::Interface;
 use crate::plot::{plot_set_with, plot_with, PlotRequest, PlotSetRequest, BUILT_IN_PLOT_STYLE};
@@ -554,6 +554,11 @@ fn run_display_list(
     base: &Settings,
     _: Interface,
 ) -> Result<JsonReply, Error> {
+    // Both keys given, even `entry: null`, which reads as left out: a change
+    // set is never drawn at an entry, as the schema says.
+    if input.contains_key("entry") && input.contains_key("change_set") {
+        return Err(Error::new(ErrorCode::BadValue, NOT_AT_AN_ENTRY).at_field("change_set"));
+    }
     let settings = take_settings(&mut input, base, false)?;
     let request: DisplayListRequest = parse("display-list", input)?;
     Ok(done_warned(display_list_with(&request, &settings)))

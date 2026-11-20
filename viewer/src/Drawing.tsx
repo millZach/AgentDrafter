@@ -93,7 +93,8 @@ export interface DrawingProps {
   focus: Focus | null;
   /** A preview's words over the drawing, which follow it as the view moves. */
   previewTags?: PreviewTag[];
-  onLoaded(summary: Summary): void;
+  /** A sheet was drawn: what it is, and the text the renderer loaded, which a restored context loads again. */
+  onLoaded(summary: Summary, text: string): void;
   /** A sheet could not be drawn. */
   onError(message: string): void;
   /** The renderer could not start, as where there is no WebGL2: nothing can be drawn. */
@@ -827,7 +828,7 @@ export function Drawing({
       if (held.current) showLoupe(held.current);
       const probe = window.agentdrafterViewer;
       if (probe) probe.summary = summary;
-      onLoaded(summary);
+      onLoaded(summary, text);
       applyMarks();
       applyFocus();
       return true;

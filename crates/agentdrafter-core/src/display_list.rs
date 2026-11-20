@@ -132,6 +132,13 @@ impl DisplayListRequest {
     }
 }
 
+/// Why a change set given with an entry is refused: it is drawn where it
+/// would land.
+pub(crate) const NOT_AT_AN_ENTRY: &str = concat!(
+    "a change set is drawn on the drawing set as it is, where it would land, ",
+    "not as it was at an entry of its journal"
+);
+
 /// A change set drawn before it lands: what it would do to the drawing
 /// set, sheet by sheet, and on the sheet drawn what it would add, change
 /// and delete, and the checks the sheet would then fail.
@@ -459,10 +466,7 @@ pub fn display_list_with(
             let refuse =
                 |message: &str| Error::new(ErrorCode::BadValue, message).at_field("change_set");
             if request.entry.is_some() {
-                return Err(refuse(
-                    "a change set is drawn on the drawing set as it is, where it would land, not \
-                     as it was at an entry of its journal",
-                ));
+                return Err(refuse(NOT_AT_AN_ENTRY));
             }
             if !source.is_dir() {
                 return Err(refuse(

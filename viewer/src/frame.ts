@@ -599,6 +599,8 @@ export function onPreviewDrawing(
 export function previewIsCurrent(p: {
   previewing: boolean;
   reported: boolean;
+  /** Whether the journal's first snapshot has come, and the preview was drawn again on it. */
+  journalRead: boolean;
   /** The drawing shown: whether it is a preview's, and the generation it was asked at. */
   reply: { preview: boolean; generation: string } | null;
   /** The generation the report was drawn at. */
@@ -606,7 +608,43 @@ export function previewIsCurrent(p: {
   /** The generation the set is at now. */
   now: string;
 }): boolean {
-  return p.previewing && p.reported && !!p.reply?.preview && p.reply.generation === p.reportedAt && p.reportedAt === p.now;
+  return p.previewing && p.reported && p.journalRead && !!p.reply?.preview && p.reply.generation === p.reportedAt && p.reportedAt === p.now;
+}
+
+/**
+ * Whether a journal snapshot asks for an open preview to be drawn again: the
+ * first valid one, which may already hold a change set that landed before
+ * it was read, and so was never an event; later ones draw again only the
+ * sheets their new entries touched, which the preview's version follows.
+ */
+export function previewRedrawnOn(previewing: boolean, firstSnapshot: boolean): boolean {
+  return previewing && firstSnapshot;
+}
+
+/**
+ * The generation a preview's report is of, once `reply` comes: the reply's,
+ * when the drawing the renderer loaded is its text, since a reply of the
+ * same text is not drawn again; otherwise the one it had. `loadedText` is
+ * the text the renderer said it loaded, never one read at mount.
+ */
+export function reportGeneration(reply: { preview: boolean; text: string; generation: string } | null, loadedText: string | null, had: string): string {
+  return reply?.preview && loadedText !== null && reply.text === loadedText ? reply.generation : had;
+}
+
+/**
+ * What the command bar's entry does with `text`: nothing, while the drawing
+ * shown or on its way is a preview's, so not even an empty Enter repeats
+ * the last tool on it; start the tool `text` names, when none runs; or go
+ * to the running tool, an empty Enter with none running repeating the last.
+ */
+export function enteredAs(text: string, toolRunning: boolean, onPreview: boolean): 'refused' | 'start' | 'input' {
+  if (onPreview) return 'refused';
+  return !toolRunning && text.trim() ? 'start' : 'input';
+}
+
+/** The layout to ask for once `to` is shown in place of `from`: the same, on the same sheet; on another, its first. */
+export function layoutOn(from: string, to: string, layout: string | null): string | null {
+  return from.toUpperCase() === to.toUpperCase() ? layout : null;
 }
 
 /** A sheet's template and the sheets built from it, as `display-list --origins` gives them. */

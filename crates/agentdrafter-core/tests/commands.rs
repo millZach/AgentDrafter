@@ -415,10 +415,14 @@ fn a_change_set_given_as_null_or_with_an_entry_is_refused_by_the_schema_and_the_
     let reply = run("display-list", null);
     assert_eq!(reply["ok"], false, "null is not read as left out: {reply}");
     assert_eq!(reply["error"]["code"], "wrong_type", "{reply}");
-    let both = json!({"source": set, "change_set": moved, "entry": 1});
-    assert!(!validator.is_valid(&both));
-    let reply = run("display-list", both);
-    assert_eq!(reply["ok"], false, "{reply}");
-    assert_eq!(reply["error"]["field"], "change_set", "{reply}");
+    // With an entry, even `null`, which reads as left out.
+    for entry in [json!(1), json!(null)] {
+        let both = json!({"source": set, "change_set": moved, "entry": entry});
+        assert!(!validator.is_valid(&both), "{both}");
+        let reply = run("display-list", both);
+        assert_eq!(reply["ok"], false, "{reply}");
+        assert_eq!(reply["error"]["code"], "bad_value", "{reply}");
+        assert_eq!(reply["error"]["field"], "change_set", "{reply}");
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }

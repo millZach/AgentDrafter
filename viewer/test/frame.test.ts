@@ -41,6 +41,10 @@ import {
   previewSummary,
   onPreviewDrawing,
   previewIsCurrent,
+  previewRedrawnOn,
+  reportGeneration,
+  enteredAs,
+  layoutOn,
   previewTitle,
   previewVerdicts,
   type PreviewReport,
@@ -217,7 +221,7 @@ test('nothing is picked or started on a preview, nor on its drawing once it ends
 });
 
 test('Change all waits for a preview drawn again once a change lands', () => {
-  const shown = { previewing: true, reported: true, reply: { preview: true, generation: '0:*:3' }, reportedAt: '0:*:3', now: '0:*:3' };
+  const shown = { previewing: true, reported: true, journalRead: true, reply: { preview: true, generation: '0:*:3' }, reportedAt: '0:*:3', now: '0:*:3' };
   assert.equal(previewIsCurrent(shown), true);
   // A change or an undo landed: the set moved on, and the report is old.
   assert.equal(previewIsCurrent({ ...shown, now: '0:*:4' }), false);
@@ -228,6 +232,41 @@ test('Change all waits for a preview drawn again once a change lands', () => {
   assert.equal(previewIsCurrent({ ...shown, now: '1:*:3' }), false);
   assert.equal(previewIsCurrent({ ...shown, reported: false }), false);
   assert.equal(previewIsCurrent({ ...shown, previewing: false }), false);
+});
+
+test('a preview opened before the journal is read waits for it, and is drawn again on its first snapshot', () => {
+  const shown = { previewing: true, reported: true, journalRead: false, reply: { preview: true, generation: '0:*:0' }, reportedAt: '0:*:0', now: '0:*:0' };
+  assert.equal(previewIsCurrent(shown), false, 'not current before the first snapshot');
+  assert.equal(previewRedrawnOn(true, true), true, 'the first snapshot draws an open preview again');
+  assert.equal(previewRedrawnOn(true, false), false, 'a later one draws again only what its entries touched');
+  assert.equal(previewRedrawnOn(false, true), false);
+  // Drawn again on it: the version moved on, and the report follows the new reply.
+  assert.equal(previewIsCurrent({ ...shown, journalRead: true, now: '0:*:1' }), false);
+  assert.equal(previewIsCurrent({ ...shown, journalRead: true, reply: { preview: true, generation: '0:*:1' }, reportedAt: '0:*:1', now: '0:*:1' }), true);
+});
+
+test("Enter is refused on a preview's drawing, an empty one too, which would repeat the last tool", () => {
+  assert.equal(enteredAs('', false, true), 'refused', 'Esc, then Enter while the set as it is loads');
+  assert.equal(enteredAs('M', false, true), 'refused');
+  assert.equal(enteredAs('', true, true), 'refused');
+  assert.equal(enteredAs('', false, false), 'input', 'on the set as it is, an empty Enter repeats the last tool');
+  assert.equal(enteredAs(' M ', false, false), 'start');
+  assert.equal(enteredAs('0,0', true, false), 'input');
+});
+
+test('journal navigation to another sheet opens it on its own first layout', () => {
+  assert.equal(layoutOn('DP-LD-101', 'DP-LD-104', 'Wiring'), null);
+  assert.equal(layoutOn('DP-LD-101', 'dp-ld-101', 'Wiring'), 'Wiring');
+  assert.equal(layoutOn('A', 'A', null), null);
+});
+
+test("a preview's report follows the text the renderer loaded, a context restored among it", () => {
+  const reply = { preview: true, text: 'T', generation: '0:*:2' };
+  assert.equal(reportGeneration(reply, 'T', '0:*:1'), '0:*:2', 'a redraw of the same text is current');
+  assert.equal(reportGeneration(reply, 'other', '0:*:1'), '0:*:1', 'not before its own text is loaded');
+  assert.equal(reportGeneration(reply, null, '0:*:1'), '0:*:1');
+  assert.equal(reportGeneration({ ...reply, preview: false }, 'T', '0:*:1'), '0:*:1');
+  assert.equal(reportGeneration(null, 'T', '0:*:1'), '0:*:1');
 });
 
 test('while a preview is shown the command bar says nothing has landed and how to step', () => {

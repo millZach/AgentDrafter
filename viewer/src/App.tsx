@@ -78,6 +78,10 @@ import {
   previewTitle,
   onPreviewDrawing,
   previewIsCurrent,
+  previewRedrawnOn,
+  reportGeneration,
+  enteredAs,
+  layoutOn,
   previewVerdicts,
   type PreviewReport,
   type TemplateEdit,
@@ -295,6 +299,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // The generation of the set the report was drawn on: a change landing
   // since makes it old until the preview is drawn again.
   const [previewGeneration, setPreviewGeneration] = useState('');
+  // Whether the journal's first snapshot has come: a preview opened before
+  // it is drawn again on it, and is not current until then.
+  const [journalRead, setJournalRead] = useState(false);
+  const previewOpen = useRef(false);
+  previewOpen.current = !!preview;
   const previewKeys = useRef(0);
   // A text whose contents are edited on the drawing, or in a phone's box,
   // by its place; and a count that moves on when an edit in quick
@@ -426,6 +435,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const previewCurrent = previewIsCurrent({
     previewing: !!preview,
     reported: !!previewReport,
+    journalRead,
     reply,
     reportedAt: previewGeneration,
     now: generationOf(null, ''),
@@ -503,8 +513,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // not drawn again, and its summary is that one's.
   const summaryText = useRef<string | null>(null);
   const loaded = useCallback(
-    (shown: Summary) => {
-      summaryText.current = reply?.text ?? null;
+    (shown: Summary, text: string) => {
+      // The text the renderer loaded, as it says: a context restored loads
+      // it again through the callback it was given at mount.
+      summaryText.current = text;
       setSummary(shown);
       setStatus({ kind: 'shown' });
       // Kept by its sheet's own name too, while it is still current; a
@@ -546,6 +558,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
     for (const key of staleDrawings(replies.current.keys(), touched)) replies.current.delete(key);
     const next = { ...versionsNow.current };
     for (const s of [...touched, ANY]) next[s] = (next[s] ?? 0) + 1;
+    versionsNow.current = next;
+    setVersions(next);
+  }, []);
+  // An open preview's drawings go, and its version moves on: it is not
+  // current until it is drawn again.
+  const redrawPreview = useCallback(() => {
+    for (const key of [...replies.current.keys()]) if (key.startsWith('pv')) replies.current.delete(key);
+    const next = { ...versionsNow.current, [ANY]: (versionsNow.current[ANY] ?? 0) + 1 };
     versionsNow.current = next;
     setVersions(next);
   }, []);
@@ -627,6 +647,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
       token,
       (text) => {
         const replied = JSON.parse(text) as { ok: boolean; result?: JournalReport; error?: { message: string } };
+        // Heard from, even when it cannot be read: a preview waits for no more.
+        setJournalRead(true);
         if (!replied.ok || !replied.result) {
           setNoJournal(replied.error?.message ?? 'there is no journal');
           setJournal(null);
@@ -647,6 +669,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
           const n = report.entries.length;
           log(`Journal read: ${n} entr${n === 1 ? 'y' : 'ies'}.`);
         }
+        // An open preview is drawn again on the first snapshot, which may
+        // hold a change set that landed before the page read the journal.
+        if (previewRedrawnOn(previewOpen.current, before === null)) redrawPreview();
         if (before === null || replaced) {
           if (replaced) {
             replies.current.clear();
@@ -685,7 +710,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       stop();
       seen.current = null;
     };
-  }, [source, token, check, toastFor, log, drawAgain]);
+  }, [source, token, check, toastFor, log, drawAgain, redrawPreview]);
 
   // The objects the focused entry changed on the sheet shown, marked.
   const focusedEntry = journal?.entries.find((e) => e.entry === focused);
@@ -756,6 +781,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
     endTool();
     setSide('journal');
     setWanted(target);
+    // Another sheet may not have the layout shown: it opens on its first.
+    setWantedLayout(layoutOn(current, target, wantedLayout));
     if (asItWas) log(`Showing entry ${number} as it was: read-only`);
     keys.current += 1;
     setFocusWanted({ key: keys.current, sheet: target, ids: changedOn(entry, target).map((o) => o.id) });
@@ -1029,7 +1056,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const enter = (text: string) => {
     const v = renderer();
     if (!v) return;
-    if (!toolState?.tool && text.trim()) {
+    const as = enteredAs(text, !!toolState?.tool, onPreview);
+    if (as === 'refused') {
+      log(preview ? 'Change all or Cancel the preview first' : 'Drawing the sheet as it is first');
+      return;
+    }
+    if (as === 'start') {
       // A tool's alias starts it, Move and Erase on what is selected.
       startTool(text.trim());
       return;
@@ -1206,7 +1238,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setPreviewReport(summary.preview as PreviewReport);
     // Drawn again on the set as it now is: a reply of the same text as the
     // one shown is not drawn again, but it is as current.
-    if (reply?.preview && reply.text === summaryText.current) setPreviewGeneration(reply.generation);
+    setPreviewGeneration((had) => reportGeneration(reply, summaryText.current, had));
     const k = `${preview.key}|${upper(summary.sheet)}`;
     if (previewFocused.current === k) return;
     previewFocused.current = k;
