@@ -48,7 +48,7 @@ Every answer has the same frame, then what its kind found:
 
 **How each matches.** An ID, a name, a block and an attribute tag are identifiers, and no two of a kind differ only in case, so each matches the whole of it in any case: `--name TITLE-BLOCK` finds `title-block`. A value and a text match the whole of it, case and all. With `--contains`, every option matches a value that holds it, in any case: `--id border --contains` finds the border on every sheet, and `--text made-up --contains` the notes.
 
-Each object found comes with its sheet, its ID, whether the record writes that ID (`id_written`; an ID the record does not write is the object's place and moves when an object is added before it), where it is written (`file`, `field`, `line`, `column`: the rows file and a place such as `rows[1].objects[0]` for a row's own object), and the object as the sheet holds it:
+Each object found comes with its sheet, its ID, whether the record writes that ID (`id_written`; an ID the record does not write is the object's place and moves when an object is added before it), where it is written (`file`, `field`, `line`, `column`: the rows file its row is in and a place such as `rows[1].objects[0]` there for a row's own object), and the object as the sheet holds it:
 
 ```json
 {"ok":true,"result":{"source":"examples/demo-set","units":"in","sheets":["DEMO-002"],"message":"1 object has the ID `DEMO-002/border`, on sheet `DEMO-002`","kind":"find","count":1,"objects":[{"sheet":"DEMO-002","id":"DEMO-002/border","id_written":true,"file":"examples/demo-set/templates/ansi-b.yaml","field":"objects[1]","line":18,"column":5,"object":{"type":"polyline","points":[[0.5,0.5,0.0],[16.5,0.5,0.0],[16.5,10.5,0.0],[0.5,10.5,0.0]],"closed":true,"layer":"border"}}]}}

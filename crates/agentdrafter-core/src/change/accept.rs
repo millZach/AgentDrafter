@@ -36,7 +36,7 @@ use super::journal::{
 use super::recover::recover;
 use crate::build::is_same_file;
 use crate::check::{check_with, CheckReport, CheckRequest};
-use crate::description::{read_set_settings, SavedSet};
+use crate::description::{read_rows_files_in, read_set_settings, Disk, SavedSet};
 use crate::error::{Error, ErrorCode};
 use crate::interface::Interface;
 use crate::reply::Reply;
@@ -345,11 +345,16 @@ fn same_files(a: &[FileIssued], b: &[FileIssued]) -> bool {
 }
 
 /// Each file of the set's working revision, with its fingerprint: its
-/// settings, its rows, each template its rows name and the block library
+/// settings, each of its rows files, each template its rows name and the block library
 /// each names, and the DWG of each sheet built into its output folder.
 fn revision(folder: &Path, set: &SavedSet) -> Result<Vec<FileIssued>, Error> {
     let settings = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
-    let mut paths: Vec<PathBuf> = vec![folder.join(SET_SETTINGS_FILE), folder.join(&settings.rows)];
+    let mut paths: Vec<PathBuf> = vec![folder.join(SET_SETTINGS_FILE)];
+    paths.extend(
+        read_rows_files_in(&Disk, folder, &settings)?
+            .into_iter()
+            .map(|file| file.path),
+    );
     for row in &set.rows {
         let record = set.sheet(row)?;
         paths.push(record.file.clone());

@@ -232,6 +232,10 @@ _Avoid_: prototype, master
 One sheet's data in a drawing set: the sheet's name, the template it is drawn from, the values that template takes from it, and any objects of the sheet's own, which are on that sheet alone. A sheet can be a template plus one row.
 _Avoid_: record (a record is the file that is the truth for a sheet), entry, line
 
+**Rows file**:
+A file of a drawing set's rows, one row per sheet, under the key `rows`. A set has one or more, which its set settings name one by one or as a folder of them, and builds their rows in the order given; a sheet's name is given once across them all. A row's errors, its own objects' places and every edit to it are in the rows file it is written in.
+_Avoid_: data file, CSV, sheet list
+
 **Row value**:
 One of a row's values: the text its template's `{row: NAME}` stands for, on that row's sheet. It may fill several places on the sheet, such as a wire number written four times; an edit to any of them sets the row value, on that sheet alone, and every place it fills changes.
 _Avoid_: field, variable, placeholder (the template's `{row: NAME}` is where a row value goes, not the value)
@@ -241,7 +245,7 @@ A template's text or mtext contents, or an insert's attribute value, written as 
 _Avoid_: format string, interpolation, splice (nothing inside a string is read)
 
 **Set settings**:
-The file at the top of a drawing set's folder, `set.yaml`, that declares the set's unit, where its outputs go and where its rows are.
+The file at the top of a drawing set's folder, `set.yaml`, that declares the set's unit, where its outputs go and which rows files its rows are in.
 _Avoid_: project file, config
 
 **ID**:

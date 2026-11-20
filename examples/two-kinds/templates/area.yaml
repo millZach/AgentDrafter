@@ -1,0 +1,25 @@
+# A made-up 17 x 11 inch area sheet, ANSI B: its trim line, its border, the
+# title block and a heading from the row. A row may hold the area's own
+# objects, which are on its sheet alone.
+units: in
+paper: ANSI B landscape
+block_library: ../blocks.yaml
+layers:
+  trim: {color: 8, lineweight: 0.13}
+  border: {color: white, lineweight: 0.7}
+  notes: {color: cyan}
+  equipment: {color: yellow, lineweight: 0.35}
+text_styles:
+  notes: {font: romans.shx, width_factor: 0.8}
+objects:
+  - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, layer: trim}
+  - polyline: {points: [[0.5, 0.5, 0], [16.5, 0.5, 0], [16.5, 10.5, 0], [0.5, 10.5, 0]], closed: true, layer: border, id: border}
+  - insert:
+      block: KIND_TITLE
+      position: [16.5, 0.5, 0]
+      id: title-block
+      attributes:
+        TITLE: {row: TITLE}
+        DWG_NO: {row: DWG_NO}
+        REV: {row: REV}
+  - text: {contents: {row: TITLE}, position: [1, 10, 0], height: 0.25, style: notes, layer: notes, id: heading}

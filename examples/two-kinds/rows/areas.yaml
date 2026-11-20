@@ -1,0 +1,22 @@
+# The area sheets, one row each. Each area holds its own tank, on its sheet
+# alone; the second's label has no id, so it takes its place in this file,
+# AREA-102/rows[1].objects[1].
+rows:
+  - sheet: AREA-101
+    template: templates/area.yaml
+    values:
+      TITLE: AREA 101 GENERAL ARRANGEMENT
+      DWG_NO: AREA-101
+      REV: '0'
+    objects:
+      - circle: {center: [6, 5.5, 0], radius: 1.5, layer: equipment, id: tank}
+      - text: {contents: TANK 101, position: [5.2, 3.5, 0], height: 0.2, style: notes, layer: notes, id: tank-label}
+  - sheet: AREA-102
+    template: templates/area.yaml
+    values:
+      TITLE: AREA 102 GENERAL ARRANGEMENT
+      DWG_NO: AREA-102
+      REV: A
+    objects:
+      - circle: {center: [9, 5.5, 0], radius: 2, layer: equipment, id: tank}
+      - text: {contents: TANK 102, position: [8.2, 3, 0], height: 0.2, style: notes, layer: notes}

@@ -14,7 +14,7 @@ use super::blocks::Noticed;
 use super::ids::{object_id, ObjectRecord};
 use super::written::{sheet_sources, SheetSources};
 use super::{
-    library_beside, on_its_own_with_records, read_file, read_file_in, read_rows_in,
+    library_beside, on_its_own_with_records, read_file, read_file_in, read_set_rows_in,
     read_set_settings_in, read_template_in, template_in, template_path, Disk, ReadFiles, Row,
 };
 use crate::error::Error;
@@ -35,8 +35,8 @@ pub(crate) struct SheetRecord {
     /// Each of the sheet's objects as its file writes it, in the order of
     /// `sheet.objects`.
     pub objects: Vec<ObjectRecord>,
-    /// The rows file of the drawing set the sheet is in, which holds its
-    /// row's own objects, if it is a sheet of a set.
+    /// The rows file the sheet's row is in, which holds the row's own
+    /// objects, if it is a sheet of a set.
     pub rows_file: Option<PathBuf>,
 }
 
@@ -88,8 +88,7 @@ pub(crate) struct SavedSet {
     folder: PathBuf,
     /// The set's declared unit.
     pub units: Unit,
-    rows_file: PathBuf,
-    /// The set's rows, in its order.
+    /// The set's rows, in its order, each with its rows file.
     pub rows: Vec<Row>,
     /// Where its files are read from.
     files: Arc<dyn ReadFiles + Send + Sync>,
@@ -110,12 +109,10 @@ impl SavedSet {
         files: Arc<dyn ReadFiles + Send + Sync>,
     ) -> Result<SavedSet, Error> {
         let settings = read_set_settings_in(files.as_ref(), &folder.join(SET_SETTINGS_FILE))?;
-        let rows_file = folder.join(&settings.rows);
-        let rows = read_rows_in(files.as_ref(), &rows_file)?;
+        let rows = read_set_rows_in(files.as_ref(), folder, &settings)?;
         Ok(SavedSet {
             folder: folder.to_owned(),
             units: settings.units,
-            rows_file,
             rows,
             files,
         })
@@ -134,7 +131,6 @@ impl SavedSet {
             self.files.as_ref(),
             &template,
             row,
-            &self.rows_file,
             self.units,
             &mut Vec::new(),
         )
@@ -156,7 +152,6 @@ impl SavedSet {
             &text,
             &template,
             row,
-            &self.rows_file,
             self.units,
             &mut Vec::new(),
         )?;

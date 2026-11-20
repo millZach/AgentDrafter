@@ -1,0 +1,31 @@
+# A made-up 11 x 8.5 inch schedule sheet, ANSI A: its trim line, its border,
+# the title block and a list of the area sheets it covers, from the row.
+units: in
+paper: ANSI A landscape
+block_library: ../blocks.yaml
+layers:
+  trim: {color: 8, lineweight: 0.13}
+  border: {color: white, lineweight: 0.7}
+  notes: {color: cyan}
+text_styles:
+  notes: {font: romans.shx, width_factor: 0.8}
+objects:
+  - polyline: {points: [[0, 0, 0], [11, 0, 0], [11, 8.5, 0], [0, 8.5, 0]], closed: true, layer: trim}
+  - polyline: {points: [[0.5, 0.5, 0], [10.5, 0.5, 0], [10.5, 8, 0], [0.5, 8, 0]], closed: true, layer: border, id: border}
+  - insert:
+      block: KIND_TITLE
+      position: [10.5, 0.5, 0]
+      id: title-block
+      attributes:
+        TITLE: {row: TITLE}
+        DWG_NO: {row: DWG_NO}
+        REV: {row: REV}
+  - text: {contents: {row: TITLE}, position: [1, 7.4, 0], height: 0.25, style: notes, layer: notes, id: heading}
+  - mtext:
+      contents: {row: COVERS}
+      position: [1, 6.6, 0]
+      height: 0.14
+      width: 5
+      style: notes
+      layer: notes
+      id: covers

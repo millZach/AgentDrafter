@@ -81,11 +81,10 @@ struct Filled {
 }
 
 /// Reads the template in the file at `path` as the sheet `row` names,
-/// filled in with the row's values. The row is in the rows file at
-/// `rows_file`, and the sheet is built in a drawing set whose declared unit
-/// is `set_units`, which the template must be in.
+/// filled in with the row's values. The sheet is built in a drawing set
+/// whose declared unit is `set_units`, which the template must be in.
 ///
-/// An error about a row's value names the rows file; one in the template
+/// An error about a row's value names the row's rows file; one in the template
 /// names the template, and one in the block library it names, the library.
 /// A value of the row the template has no place for is added to `notices`,
 /// whether or not the sheet is built.
@@ -95,11 +94,10 @@ struct Filled {
 pub(crate) fn read_template(
     path: &Path,
     row: &Row,
-    rows_file: &Path,
     set_units: Unit,
     notices: &mut Vec<Notice>,
 ) -> Result<SheetRecord, Error> {
-    read_template_in(&Disk, path, row, rows_file, set_units, notices)
+    read_template_in(&Disk, path, row, set_units, notices)
 }
 
 /// Reads a template as [`read_template`] does, and the block library it
@@ -108,12 +106,11 @@ pub(crate) fn read_template_in(
     files: &dyn ReadFiles,
     path: &Path,
     row: &Row,
-    rows_file: &Path,
     set_units: Unit,
     notices: &mut Vec<Notice>,
 ) -> Result<SheetRecord, Error> {
     let text = read_file_in(files, path, "the template")?;
-    template_in(files, &text, path, row, rows_file, set_units, notices).map(|(record, _)| record)
+    template_in(files, &text, path, row, set_units, notices).map(|(record, _)| record)
 }
 
 /// Reads `text`, the template in the file at `path`, as [`read_template`]
@@ -124,11 +121,10 @@ pub(crate) fn template_at(
     text: &str,
     path: &Path,
     row: &Row,
-    rows_file: &Path,
     set_units: Unit,
     notices: &mut Vec<Notice>,
 ) -> Result<(SheetRecord, Option<LibraryFile>), Error> {
-    template_in(&Disk, text, path, row, rows_file, set_units, notices)
+    template_in(&Disk, text, path, row, set_units, notices)
 }
 
 /// Reads a template's text as [`template_at`] does, with the block library
@@ -139,7 +135,6 @@ pub(crate) fn template_in(
     text: &str,
     path: &Path,
     row: &Row,
-    rows_file: &Path,
     set_units: Unit,
     notices: &mut Vec<Notice>,
 ) -> Result<(SheetRecord, Option<LibraryFile>), Error> {
@@ -148,7 +143,7 @@ pub(crate) fn template_in(
     let (sheet, objects) = fill_with_records(
         text,
         row,
-        rows_file,
+        &row.file,
         set_units,
         &mut library_beside_in(files, path, &mut library),
         notices,
@@ -166,7 +161,7 @@ pub(crate) fn template_in(
         file: path.to_owned(),
         sheet,
         objects,
-        rows_file: Some(rows_file.to_owned()),
+        rows_file: Some(row.file.clone()),
     };
     Ok((record, library))
 }

@@ -29,7 +29,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::description::{read_set_settings, rows_at, template_at, template_path};
+use crate::description::{
+    read_rows_files_in, read_set_settings, rows_of, template_at, template_path, Disk,
+};
 use crate::draw::{self, Bounds, HatchCutShort, PageFrom};
 use crate::error::{Error, ErrorCode};
 use crate::model::Sheet;
@@ -309,9 +311,8 @@ pub fn plot_set_with(request: &PlotSetRequest, settings: &Settings) -> Reply<Plo
 fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetReport, Error> {
     let folder = request.set.as_path();
     let set = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
-    let rows_file = folder.join(&set.rows);
-    let (rows_bytes, rows_text) = read_text(&rows_file, "the drawing set's rows")?;
-    let rows = rows_at(&rows_text, &rows_file)?;
+    let rows_files = read_rows_files_in(&Disk, folder, &set)?;
+    let rows = rows_of(&rows_files)?;
     let style = plot_style(request.plot_style.as_deref(), settings)?;
     let output = folder.join(&set.output);
     fs::create_dir_all(&output).map_err(|e| {
@@ -328,12 +329,16 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
             let pdf = output.join(format!("{}.pdf", row.sheet));
             let mut notices = Vec::new();
             let plotted = read_text(&template, "the template").and_then(|(bytes, text)| {
-                let (read, library) =
-                    template_at(&text, &template, row, &rows_file, set.units, &mut notices)?;
+                let (read, library) = template_at(&text, &template, row, set.units, &mut notices)?;
                 let sheet = read.sheet;
+                let rows_file = &rows_files[row.file_index];
                 let mut files = vec![
                     (SourceKind::Template, template.clone(), bytes),
-                    (SourceKind::Rows, rows_file.clone(), rows_bytes.clone()),
+                    (
+                        SourceKind::Rows,
+                        rows_file.path.clone(),
+                        rows_file.text.clone().into_bytes(),
+                    ),
                 ];
                 if let Some(library) = library {
                     files.push((SourceKind::BlockLibrary, library.path, library.bytes));

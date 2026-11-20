@@ -71,8 +71,8 @@ pub(crate) use mark::{mark_text, parse_mark, MarkFailure};
 pub(crate) use objects::article;
 pub(crate) use records::{read_sheet_record, read_sheet_record_noting, SavedSet, SheetRecord};
 pub(crate) use set::{
-    read_rows, read_rows_in, read_set_settings, read_set_settings_in, rows_at, template_path,
-    value_name_problem, Row,
+    read_rows_files_in, read_set_rows, read_set_rows_in, read_set_settings, read_set_settings_in,
+    rows_of, template_path, value_name_problem, Row, RowsFile,
 };
 pub(crate) use set_schema::{rows_schema, set_schema, template_schema, VALUE_NAME};
 pub(crate) use table::CELL_KEYS;

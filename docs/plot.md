@@ -78,7 +78,7 @@ The PDF carries the same stamp as the PNG ([the stamp](render.md#the-stamp)), as
 
 - A sheet description's PDF lists the sheet description, and the block library it names.
 - A DWG's PDF lists the DWG. Its revision is read from the set the DWG's build mark names, wherever the DWG is ([the build mark](drawing-set.md#the-build-mark-names-the-set)).
-- A drawing set's sheet lists its template (`kind` `template`), the rows file (`rows`) and the template's block library. A change to any row makes every sheet of the set stale, since a stamp fingerprints whole files.
+- A drawing set's sheet lists its template (`kind` `template`), the rows file its row is in (`rows`) and the template's block library. A change to any row of that file makes every sheet whose row is in it stale, since a stamp fingerprints whole files; a sheet whose row is in another of the set's [rows files](drawing-set.md#several-rows-files) is not.
 
 Fonts and the plot style are not in it: they belong to the machine that plots, as fonts do for a render. Its `revision` says whether the files were read from an issued revision, and which accept issued it, as a PNG's does ([the stamp](render.md#the-stamp)): a set's sheet plotted after an accept, from the files it issued, says so; the page is drawn the same either way. `agentdrafter stale <pdf>` checks a PDF as it checks a PNG, and reports the revision too; `--source` says where the first file, the record, is now.
 

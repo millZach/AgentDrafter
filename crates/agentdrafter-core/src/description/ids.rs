@@ -17,7 +17,7 @@
 //! and a place that is another object's written `id` is refused.
 //!
 //! A row of a drawing set may hold objects of its own; one without an `id`
-//! takes its place in the rows file, such as `rows[1].objects[0]`.
+//! takes its place in its row's rows file, such as `rows[1].objects[0]`.
 //!
 //! Every object may also carry a `name`, a label an agent selects it by,
 //! given once on a sheet. It is never a tag.

@@ -2,8 +2,8 @@
 //! plus that row of data.
 //!
 //! A drawing set is a folder. Its settings, in [`SET_SETTINGS_FILE`],
-//! declare its unit, the folder its DWGs go to and the file its rows are
-//! in. Each row names a sheet, its template and the values the template
+//! declare its unit, the folder its DWGs go to and the rows files its rows
+//! are in, built in the order given. Each row names a sheet, its template and the values the template
 //! takes from it, and builds the DWG `<output>/<sheet>.dwg`.
 //!
 //! Each sheet is built fully or not at all (ADR-0005): a sheet that fails
@@ -27,7 +27,8 @@ use serde::{Deserialize, Serialize};
 use crate::build::{build_sheet, is_same_file, BuildReport};
 use crate::change::relative_to;
 use crate::description::{
-    read_rows, read_set_settings, read_template, rows_at, template_at, template_path,
+    read_rows_files_in, read_set_rows, read_set_settings, read_template, rows_of, template_at,
+    template_path, Disk,
 };
 use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
@@ -174,8 +175,7 @@ pub fn build_set_with(request: &SetBuildRequest, settings: &Settings) -> Reply<S
 fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetReport, Error> {
     let folder = request.set.as_path();
     let set = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
-    let rows_file = folder.join(&set.rows);
-    let rows = read_rows(&rows_file)?;
+    let rows = read_set_rows(folder, &set)?;
     let output = folder.join(&set.output);
     fs::create_dir_all(&output).map_err(|e| {
         Error::new(
@@ -193,10 +193,9 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
             let template = template_path(folder, row);
             let dwg = output.join(format!("{}.dwg", row.sheet));
             let mut notices = Vec::new();
-            let built = read_template(&template, row, &rows_file, set.units, &mut notices)
-                .and_then(|record| {
-                    build_sheet(&record, &template, &dwg, &mark, request.overwrite, settings)
-                });
+            let built = read_template(&template, row, set.units, &mut notices).and_then(|record| {
+                build_sheet(&record, &template, &dwg, &mark, request.overwrite, settings)
+            });
             let (result, error) = match built {
                 Ok(report) => (Some(report), None),
                 Err(error) => (None, Some(error)),
@@ -406,32 +405,28 @@ pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<DwgPaper> {
     let set = set_of_dwg(dwg).ok()?;
     let settings_file = set.folder.join(SET_SETTINGS_FILE);
     let settings = read_set_settings(&settings_file).ok()?;
-    let rows_file = set.folder.join(&settings.rows);
-    let rows_bytes = fs::read(&rows_file).ok()?;
-    let rows = rows_at(std::str::from_utf8(&rows_bytes).ok()?, &rows_file).ok()?;
+    let rows_files = read_rows_files_in(&Disk, &set.folder, &settings).ok()?;
+    let rows = rows_of(&rows_files).ok()?;
     let output = set.folder.join(&settings.output);
     let row = rows
         .iter()
         .find(|r| is_same_file(&output.join(format!("{}.dwg", r.sheet)), dwg))?;
+    let rows_file = &rows_files[row.file_index];
     let template = template_path(&set.folder, row);
     let template_bytes = fs::read(&template).ok()?;
     let text = std::str::from_utf8(&template_bytes).ok()?;
     let mut notices = Vec::new();
-    let (record, _) = template_at(
-        text,
-        &template,
-        row,
-        &rows_file,
-        settings.units,
-        &mut notices,
-    )
-    .ok()?;
+    let (record, _) = template_at(text, &template, row, settings.units, &mut notices).ok()?;
     Some(DwgPaper {
         paper: record.sheet.paper,
         units: settings.units,
         read: vec![
             (SourceKind::Template, template, template_bytes),
-            (SourceKind::Rows, rows_file, rows_bytes),
+            (
+                SourceKind::Rows,
+                rows_file.path.clone(),
+                rows_file.text.clone().into_bytes(),
+            ),
         ],
     })
 }
