@@ -401,10 +401,14 @@ fn render_page(
     // What lies off the paper is cut away, where the image is larger than
     // the paper it fits. Through a plot style, ink is cut at the plot's
     // page, its extents on a sheet with no paper, as the PDF's page cuts it,
-    // and the margin round it stays white.
+    // and the margin round it stays white. A page with no width or no
+    // height, such as the extents of one straight line, has nothing to cut
+    // at, and a plot refuses it; the render draws it uncut.
     if sheet.paper.is_some() || through.is_some() {
         if let Some((paper, _)) = draw::page_of(sheet, &list) {
-            raster::blank_outside(&mut pixmap, &view, paper);
+            if paper.width() > 0.0 && paper.height() > 0.0 {
+                raster::blank_outside(&mut pixmap, &view, paper);
+            }
         }
     }
     let stamp = Stamp::new(&record.read(), &output);

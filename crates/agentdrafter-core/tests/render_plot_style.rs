@@ -555,3 +555,25 @@ objects:
         assert!((ink - 1.0).abs() < 0.15, "in colour at {y}: {ink} px");
     }
 }
+
+#[test]
+fn a_sheet_of_one_straight_line_still_draws_through_a_plot_style() {
+    // No paper and one line: the extents have no height, or no width, so a
+    // plot has no page to cut at, and the render draws the line uncut.
+    for (name, line) in [
+        ("across", "{from: [0, 0, 0], to: [100, 0, 0]}"),
+        ("up", "{from: [0, 0, 0], to: [0, 100, 0]}"),
+    ] {
+        let dir = scratch(&format!("one-line-{name}"));
+        let source = dir.join("sheet.yaml");
+        fs::write(&source, format!("units: mm\nobjects:\n  - line: {line}\n")).unwrap();
+        let image = render(&source, &Settings::default(), |r| r.monochrome = true);
+        // 100 mm at ten pixels to the millimetre, 0.25 mm wide.
+        let inked = image
+            .rgb
+            .chunks(3)
+            .filter(|p| p.iter().all(|&c| c < 128))
+            .count();
+        assert!(inked >= 1000, "{name}: {inked} pixels inked");
+    }
+}
