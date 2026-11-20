@@ -53,7 +53,7 @@ const PROPOSALS_USAGE: &str = "agentdrafter proposals <drawing-set-folder>";
 const KEEP_USAGE: &str = "agentdrafter keep <drawing-set-folder> <proposal> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
 const DISCARD_USAGE: &str = "agentdrafter discard <drawing-set-folder> <proposal> [--by <who>]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]";
-const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]... [--no-system-fonts]";
+const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--plot-style <ctb> | --monochrome] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--change-set <change-set.json | -> [--all-or-none]] [--fonts <folder>]... [--no-system-fonts]";
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const STALE_USAGE: &str =
@@ -237,6 +237,7 @@ fn parse_render(mut args: Args) -> Result<Value, Error> {
     let mut source: Option<PathBuf> = None;
     let mut request = RenderRequest::new(PathBuf::new());
     let mut fonts = FontOptions::default();
+    let mut plot_styles: Vec<PathBuf> = Vec::new();
     let value = |flag: &str, value: Option<OsString>| -> Result<OsString, Error> {
         value.ok_or_else(|| Error::usage(format!("{flag} needs a value; usage: {RENDER_USAGE}")))
     };
@@ -260,6 +261,16 @@ fn parse_render(mut args: Args) -> Result<Value, Error> {
                 }
             }
             Some("--overwrite") => request.overwrite = true,
+            Some("--monochrome") => request.monochrome = true,
+            Some("--plot-style") => {
+                let name = value("--plot-style", args.next())?
+                    .into_string()
+                    .map_err(|_| Error::usage("the plot style's name is not valid text"))?;
+                if request.plot_style.replace(name).is_some() {
+                    return Err(once("--plot-style"));
+                }
+            }
+            Some("--plot-styles") => plot_styles.push(value("--plot-styles", args.next())?.into()),
             Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
             Some("--dpi") => {
@@ -319,7 +330,23 @@ fn parse_render(mut args: Args) -> Result<Value, Error> {
     if let Some(margin) = margin {
         request.margin = margin;
     }
-    input_of(request, fonts)
+    input_of(
+        RenderArgs {
+            request,
+            plot_styles,
+        },
+        fonts,
+    )
+}
+
+/// What the command line's `render` gives the core: the request, and the
+/// plot style folders `--plot-styles` names, which go to the settings.
+#[derive(Serialize)]
+struct RenderArgs {
+    #[serde(flatten)]
+    request: RenderRequest,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    plot_styles: Vec<PathBuf>,
 }
 
 fn parse_display_list(mut args: Args) -> Result<Value, Error> {

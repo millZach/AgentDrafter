@@ -364,7 +364,8 @@ impl DisplayList {
 
 /// What an output is for, which decides whether a layer that does not
 /// plot is drawn: on a screen, a PNG or the viewer, it is, as AutoCAD's
-/// screen shows it; on paper, a PDF, it is not.
+/// screen shows it; on paper, a PDF or a PNG drawn through a plot style to
+/// show what prints, it is not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Purpose {
     Screen,

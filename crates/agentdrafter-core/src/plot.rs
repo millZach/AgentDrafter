@@ -53,8 +53,10 @@ use crate::units::Unit;
 pub const BUILT_IN_PLOT_STYLE: &str = "monochrome (built in)";
 
 /// How far a curve's chords may stray from it, in millimetres of paper:
-/// finer than any plotter draws.
-const CHORD_TOLERANCE_MM: f64 = 0.005;
+/// finer than any plotter draws. A render through a plot style draws its
+/// curves to it too, so a linetype repeats as often round them as in the
+/// PDF.
+pub(crate) const CHORD_TOLERANCE_MM: f64 = 0.005;
 
 /// The largest page a PDF reader opens: 200 inches a side.
 pub const MOST_PAGE_POINTS: f64 = 14_400.0;
@@ -417,8 +419,9 @@ fn read_text(path: &Path, what: &str) -> Result<(Vec<u8>, String), Error> {
 }
 
 /// The plot style `name` names, read from the plot style folders, or the
-/// built-in monochrome style when there is no name.
-fn plot_style(
+/// built-in monochrome style when there is no name. A render through a
+/// plot style finds it here too.
+pub(crate) fn plot_style(
     name: Option<&str>,
     settings: &Settings,
 ) -> Result<(PlotStyle, PlotStyleUsed), Error> {

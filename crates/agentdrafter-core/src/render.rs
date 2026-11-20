@@ -13,6 +13,13 @@
 //! the caller gives. Lineweights are widths on paper, so they draw at
 //! the render's dots per inch whatever its scale, as AutoCAD's plot fitted
 //! to paper keeps them.
+//!
+//! A render draws each object in its own colour unless it is asked to draw
+//! through a plot style, to show what prints: a CTB found as a plot finds
+//! it, or the built-in monochrome style a plot draws with when none is
+//! named. The pens are then the plot's, applied by the rasteriser through
+//! the same [`PlotStyle`] the PDF is written through, and a layer that does
+//! not plot is left out, as it is on paper.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +33,8 @@ use crate::model::Sheet;
 use crate::output::{
     object_counts, read_record, refuse_to_replace, write_whole, OutputKind, Record,
 };
+use crate::plot::{self, PlotStyleUsed};
+use crate::plot_style::PlotStyle;
 use crate::raster::{self, View};
 use crate::settings::Settings;
 use crate::stamp::Stamp;
@@ -97,6 +106,17 @@ pub struct RenderRequest {
     /// The margin round the drawing's extents, in millimetres of paper.
     #[serde(default = "default_margin")]
     pub margin: f64,
+    /// The CTB plot style to draw through, to show what prints, by its file
+    /// name, such as `monochrome.ctb`, found in the plot style folders as a
+    /// plot finds it. Not given with `monochrome`. Without either, each
+    /// object draws in its own colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_style: Option<String>,
+    /// Draw through the built-in monochrome style, exactly as a plot draws
+    /// with no plot style named: every pen black at its object's own
+    /// lineweight. Not given with `plot_style`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub monochrome: bool,
 }
 
 impl RenderRequest {
@@ -112,8 +132,26 @@ impl RenderRequest {
             width: None,
             height: None,
             margin: DEFAULT_MARGIN,
+            plot_style: None,
+            monochrome: false,
         }
     }
+}
+
+/// What a render drew its pens through.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrawnThrough {
+    /// Each object in its own colour and lineweight, or its layer's: the
+    /// render's default, `"colour"`.
+    Colour,
+    /// The built-in monochrome style, as a plot with no plot style named
+    /// draws with: `"monochrome"`.
+    Monochrome,
+    /// A CTB plot style, with the file it was read from and the settings it
+    /// sets that are not followed yet, as a plot reports it: `{"plot_style":
+    /// {"name": ..., "file": ..., "not_followed": [...]}}`.
+    PlotStyle(PlotStyleUsed),
 }
 
 /// What a render wrote.
@@ -149,6 +187,9 @@ pub struct RenderReport {
     /// What the image covers: the paper the sheet declares, with no margin,
     /// or, when it declares none, its extents with the margin round them.
     pub page: PageFrom,
+    /// What the pens were drawn through: each object's own colour, the
+    /// built-in monochrome style, or a CTB plot style.
+    pub drawn_through: DrawnThrough,
     /// How many objects of each type were drawn, such as `{"line": 1}`.
     pub objects: BTreeMap<String, usize>,
     /// How many objects of a DWG were not drawn because the core has no
@@ -191,6 +232,7 @@ fn render_within(
     most_dashes: usize,
 ) -> Result<RenderReport, Error> {
     check(request)?;
+    let through = through(request, settings)?;
     let source = request.source.as_path();
     let record = read_record(source)?;
     let output = request
@@ -218,7 +260,15 @@ fn render_within(
         .iter()
         .zip(&outputs)
         .map(|(page, output)| {
-            let mut report = render_page(request, &record, page, output, settings, most_dashes)?;
+            let mut report = render_page(
+                request,
+                &record,
+                page,
+                output,
+                settings,
+                through.as_ref(),
+                most_dashes,
+            )?;
             if several {
                 report.layout = page.layout.as_ref().map(|l| l.name.clone());
             }
@@ -228,6 +278,26 @@ fn render_within(
     let mut first = reports.remove(0);
     first.other_layouts = reports;
     Ok(first)
+}
+
+/// The plot style a render draws through, with what the reply says of it:
+/// none for each object's own colour.
+fn through(
+    request: &RenderRequest,
+    settings: &Settings,
+) -> Result<Option<(PlotStyle, DrawnThrough)>, Error> {
+    if request.plot_style.is_none() && !request.monochrome {
+        return Ok(None);
+    }
+    // Found, read and refused as a plot finds, reads and refuses it, so a
+    // name that plots draws, and one that a plot refuses is refused alike.
+    let (style, used) = plot::plot_style(request.plot_style.as_deref(), settings)?;
+    let drawn = if request.monochrome {
+        DrawnThrough::Monochrome
+    } else {
+        DrawnThrough::PlotStyle(used)
+    };
+    Ok(Some((style, drawn)))
 }
 
 /// Where a render of `output` writes the PNG of the layout named `layout`,
@@ -244,13 +314,15 @@ pub(crate) fn layout_output(output: &Path, layout: &str) -> PathBuf {
 }
 
 /// Renders the sheet `record` holds, as `sheet`, one of its layouts, prints
-/// it, to a PNG at `output`, written whole or not at all.
+/// it, to a PNG at `output`, written whole or not at all, through the plot
+/// style `through` holds, or with none in each object's own colour.
 fn render_page(
     request: &RenderRequest,
     record: &Record,
     sheet: &Sheet,
     output: &Path,
     settings: &Settings,
+    through: Option<&(PlotStyle, DrawnThrough)>,
     most_dashes: usize,
 ) -> Result<RenderReport, Error> {
     let source = request.source.as_path();
@@ -264,6 +336,13 @@ fn render_page(
         request.margin * pixels_per_millimetre
     };
     let millimetres_per_unit = sheet.units.convert(1.0, Unit::Mm);
+    // Through a plot style the render shows what prints, so a layer that
+    // does not plot is left out, as a plot leaves it out.
+    let purpose = if through.is_some() {
+        draw::Purpose::Plot
+    } else {
+        draw::Purpose::Screen
+    };
     let area = |list: &draw::DisplayList| {
         draw::page_of(sheet, list).map_or(
             Bounds {
@@ -275,8 +354,10 @@ fn render_page(
     };
     // A coarse list first, curves to within a drawing unit, for the scale;
     // then the list drawn to a quarter of a pixel, finer than the eye sees,
-    // whose extents the image covers.
-    let coarse = draw::draw_sheet(sheet, &fonts, 1.0, most_dashes);
+    // whose extents the image covers. Through a plot style the list is drawn
+    // to the plot's own tolerance instead, so each curve is as long as in
+    // the PDF and a linetype lays out as many dashes round it.
+    let coarse = draw::draw_sheet_for(sheet, &fonts, 1.0, most_dashes, purpose);
     let (rough, _) = fit(
         request,
         area(&coarse),
@@ -284,7 +365,12 @@ fn render_page(
         millimetres_per_unit,
         margin,
     )?;
-    let list = draw::draw_sheet(sheet, &fonts, 0.25 / rough, most_dashes);
+    let tolerance = if through.is_some() {
+        plot::CHORD_TOLERANCE_MM / millimetres_per_unit
+    } else {
+        0.25 / rough
+    };
+    let list = draw::draw_sheet_for(sheet, &fonts, tolerance, most_dashes, purpose);
     let extents = list.extents();
     let (pixels_per_unit, size) = fit(
         request,
@@ -302,7 +388,8 @@ fn render_page(
     );
     check_size(view.width, view.height)?;
 
-    let mut pixmap = raster::rasterize(&list, &view).ok_or_else(|| {
+    let style = through.map(|(style, _)| style);
+    let mut pixmap = raster::rasterize(&list, &view, style).ok_or_else(|| {
         Error::new(
             ErrorCode::WriteFailed,
             format!(
@@ -312,14 +399,35 @@ fn render_page(
         )
     })?;
     // What lies off the paper is cut away, where the image is larger than
-    // the paper it fits.
-    if sheet.paper.is_some() {
+    // the paper it fits. Through a plot style, ink is cut at the plot's
+    // page, its extents on a sheet with no paper, as the PDF's page cuts it,
+    // and the margin round it stays white. A page with no width or no
+    // height, such as the extents of one straight line, has nothing to cut
+    // at, and a plot refuses it; the render draws it uncut.
+    if sheet.paper.is_some() || through.is_some() {
         if let Some((paper, _)) = draw::page_of(sheet, &list) {
-            raster::blank_outside(&mut pixmap, &view, paper);
+            if paper.width() > 0.0 && paper.height() > 0.0 {
+                raster::blank_outside(&mut pixmap, &view, paper);
+            }
         }
     }
     let stamp = Stamp::new(&record.read(), &output);
-    let png = raster::png(&pixmap, &stamp.to_json(), pixels_per_millimetre).map_err(|e| {
+    // The stamp holds no plot style, as a PDF's holds none; the PNG names
+    // it as the PDF's `Creator` does, in its `Software` text chunk.
+    let drawn_through = through.map_or(DrawnThrough::Colour, |(_, drawn)| drawn.clone());
+    let software = match &drawn_through {
+        DrawnThrough::Colour => None,
+        DrawnThrough::Monochrome => Some(plot::BUILT_IN_PLOT_STYLE),
+        DrawnThrough::PlotStyle(used) => Some(used.name.as_str()),
+    }
+    .map(|name| format!("agentdrafter render, plot style {name}"));
+    let png = raster::png(
+        &pixmap,
+        &stamp.to_json(),
+        software.as_deref(),
+        pixels_per_millimetre,
+    )
+    .map_err(|e| {
         Error::new(
             ErrorCode::WriteFailed,
             format!("could not encode the PNG: {e}"),
@@ -345,6 +453,7 @@ fn render_page(
         } else {
             PageFrom::Extents
         },
+        drawn_through,
         objects: object_counts(sheet),
         objects_not_drawn: record.objects_not_drawn,
         bytes: png.len(),
@@ -381,6 +490,13 @@ fn check(request: &RenderRequest) -> Result<(), Error> {
                 "give a plot scale or an image size (width, height), not both",
             ));
         }
+    }
+    if request.monochrome && request.plot_style.is_some() {
+        return Err(Error::usage(
+            "draw through a plot style (plot_style) or monochrome, not both: monochrome is the \
+             built-in style a plot draws with when no plot style is named",
+        )
+        .at_field("monochrome"));
     }
     for (field, value) in [("width", request.width), ("height", request.height)] {
         if let Some(pixels) = value {

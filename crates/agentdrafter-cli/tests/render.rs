@@ -20,6 +20,7 @@ fn agentdrafter(args: &[&str], cwd: &Path) -> (i32, Value) {
         .args(args)
         .current_dir(cwd)
         .env_remove("AGENTDRAFTER_FONTS")
+        .env_remove("AGENTDRAFTER_PLOT_STYLES")
         .env("AGENTDRAFTER_SYSTEM_FONTS", "0")
         .output()
         .unwrap();
@@ -84,6 +85,45 @@ fn render_writes_a_stamped_png_and_stale_checks_it() {
 }
 
 #[test]
+fn render_draws_through_a_plot_style_from_the_folders_it_is_given_or_monochrome() {
+    let dir = scratch("plot-style");
+    fs::write(
+        dir.join("sheet.yaml"),
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [100, 50, 0], color: 1}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("styles")).unwrap();
+    // The folder --plot-styles names is where the plot style is looked for.
+    let (code, json) = agentdrafter(
+        &[
+            "render",
+            "sheet.yaml",
+            "--plot-style",
+            "nowhere.ctb",
+            "--plot-styles",
+            "styles",
+        ],
+        &dir,
+    );
+    assert_eq!(code, 1, "{json}");
+    assert_eq!(json["error"]["code"], "read_failed");
+    assert_eq!(json["error"]["field"], "plot_style");
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("none of the plot style folders: styles"),
+        "{message}"
+    );
+    assert!(!dir.join("sheet.png").exists());
+
+    let (code, json) = agentdrafter(&["render", "sheet.yaml", "--monochrome"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["drawn_through"], "monochrome");
+    let (code, json) = agentdrafter(&["render", "sheet.yaml", "--overwrite"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["drawn_through"], "colour");
+}
+
+#[test]
 fn render_and_stale_refuse_wrong_arguments() {
     let dir = scratch("usage");
     for args in [
@@ -91,6 +131,16 @@ fn render_and_stale_refuse_wrong_arguments() {
         &["render", "a.yaml", "--dpi"],
         &["render", "a.yaml", "--dpi", "many"],
         &["render", "a.yaml", "--colour"],
+        &["render", "a.yaml", "--plot-style"],
+        &[
+            "render",
+            "a.yaml",
+            "--plot-style",
+            "a.ctb",
+            "--plot-style",
+            "b.ctb",
+        ],
+        &["render", "a.yaml", "--monochrome", "--plot-style", "a.ctb"],
         &["render", "a.yaml", "b.yaml"],
         &["stale"],
         &["stale", "a.png", "--source"],
