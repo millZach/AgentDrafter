@@ -31,7 +31,7 @@ use crate::build::{build_sheet, is_same_file, BuildReport};
 use crate::change::relative_to;
 use crate::description::{
     read_rows_file_in, read_rows_files_in, read_set_settings, read_template, rows_of, rows_paths,
-    template_at, template_path, Disk, Row, RowsFile,
+    template_at, template_path, Disk, Row, RowsFile, SetSettings,
 };
 use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
@@ -436,18 +436,7 @@ pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<DwgPaper> {
     let set = set_of_dwg(dwg).ok()?;
     let settings_file = set.folder.join(SET_SETTINGS_FILE);
     let settings = read_set_settings(&settings_file).ok()?;
-    // The rows file the mark names, alone, when it names one that is still
-    // one of the set's; otherwise every rows file of the set.
-    let rows_files = match &set.rows {
-        Some(written) => {
-            let found = rows_paths(&set.folder, &settings)
-                .ok()?
-                .into_iter()
-                .find(|found| found.written == *written)?;
-            vec![read_rows_file_in(&Disk, found).ok()?]
-        }
-        None => read_rows_files_in(&Disk, &set.folder, &settings).ok()?,
-    };
+    let rows_files = marked_rows_files(&set.folder, &settings, set.rows.as_deref())?;
     let rows = rows_of(&rows_files).ok()?;
     let output = set.folder.join(&settings.output);
     let row = rows
@@ -471,6 +460,34 @@ pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<DwgPaper> {
             ),
         ],
     })
+}
+
+/// The rows files the sheet of a DWG whose build mark names `marked` is
+/// read from, in the set whose folder is `folder` and whose settings are
+/// `settings`: the rows file the mark names, alone, when it is one of the
+/// set's rows files, found by the file it leads to, however the settings
+/// spell it now; otherwise, when the mark names none or one that is no
+/// longer the set's, every rows file of the set, as for a set of one. None
+/// when they cannot be found or read.
+fn marked_rows_files(
+    folder: &Path,
+    settings: &SetSettings,
+    marked: Option<&str>,
+) -> Option<Vec<RowsFile>> {
+    if let Some(written) = marked {
+        let wanted = folder.join(written);
+        let plain = relative_to(folder, &wanted);
+        let found = rows_paths(folder, settings)
+            .ok()?
+            .into_iter()
+            .find(|found| {
+                relative_to(folder, &found.path) == plain || is_same_file(&found.path, &wanted)
+            });
+        if let Some(found) = found {
+            return read_rows_file_in(&Disk, found).ok().map(|file| vec![file]);
+        }
+    }
+    read_rows_files_in(&Disk, folder, settings).ok()
 }
 
 /// A file read to draw an output, with what it is and its bytes, for the
@@ -579,6 +596,82 @@ mod tests {
                 fs::copy(&path, &target).unwrap();
             }
         }
+    }
+
+    /// The rows file a DWG's build mark names is found among the set's
+    /// however the settings spell it now, and read alone; when it is no
+    /// longer one of them, every rows file of the set is read, so the
+    /// sheet still finds its paper and its row's file.
+    #[test]
+    fn a_marked_rows_file_is_found_however_the_settings_spell_it_and_else_all_are_read() {
+        let set = std::env::temp_dir()
+            .join(format!(
+                "agentdrafter-set-marked-rows-{}",
+                std::process::id()
+            ))
+            .join("two-kinds");
+        let _ = fs::remove_dir_all(&set);
+        copy_yaml(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/two-kinds"),
+            &set,
+        );
+        let reply = build_set_with(
+            &SetBuildRequest {
+                set: set.clone(),
+                overwrite: false,
+            },
+            &Settings::default(),
+        );
+        assert!(reply.ok, "{:#?}", reply.error);
+        let dwg = set.join("dwg").join("SCHED-201.dwg");
+        assert_eq!(
+            dwg::build_mark(&dwg).and_then(|mark| mark.rows).as_deref(),
+            Some("rows/schedules.yaml")
+        );
+        // The rows files the DWG's paper is read from, under `rows`.
+        let rows_read = |rows: &str| -> Vec<String> {
+            fs::write(
+                set.join(SET_SETTINGS_FILE),
+                format!("units: in\noutput: dwg\nrows: {rows}\n"),
+            )
+            .unwrap();
+            let found = paper_of_dwg(&dwg).expect("the sheet's paper is found");
+            assert!(found.paper.is_some(), "{rows}");
+            found
+                .read
+                .into_iter()
+                .filter(|(kind, ..)| *kind == SourceKind::Rows)
+                .map(|(_, path, _)| relative_to(&set, &path))
+                .collect()
+        };
+
+        // Respelled, and read alone: another rows file that cannot be read
+        // does not touch it.
+        let areas = set.join("rows").join("areas.yaml");
+        let areas_text = fs::read_to_string(&areas).unwrap();
+        fs::write(&areas, "rows: [\n").unwrap();
+        assert_eq!(
+            rows_read("[rows/areas.yaml, ./rows/schedules.yaml]"),
+            ["rows/schedules.yaml"]
+        );
+        assert_eq!(
+            rows_read("[rows/areas.yaml, rows/../rows/schedules.yaml]"),
+            ["rows/schedules.yaml"]
+        );
+        fs::write(&areas, areas_text).unwrap();
+
+        // The marked file is no longer one of the set's: every rows file is
+        // read, and the sheet's row is found in the file it is in now.
+        fs::rename(
+            set.join("rows").join("schedules.yaml"),
+            set.join("rows").join("sched.yaml"),
+        )
+        .unwrap();
+        assert_eq!(
+            rows_read("[rows/areas.yaml, rows/sched.yaml]"),
+            ["rows/sched.yaml"]
+        );
+        let _ = fs::remove_dir_all(set.parent().unwrap());
     }
 
     /// Built on this system's own paths, on Windows as on the others: each
