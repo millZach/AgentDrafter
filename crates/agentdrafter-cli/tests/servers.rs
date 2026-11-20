@@ -509,7 +509,37 @@ fn every_command_of_the_registry_is_reachable_through_every_interface_with_the_s
                 .collect::<BTreeMap<_, _>>(),
             "every file of the set is the same after the same commands"
         );
+        // The proposals, which the snapshot leaves out with the journal's
+        // own files, are the same apart from when each was proposed.
+        assert_eq!(
+            proposals_of(&dir.join("demo-set")),
+            proposals_of(&cli_dir.join("demo-set")),
+            "every proposal's record is the same, apart from its time"
+        );
     }
+    assert_eq!(
+        proposals_of(&cli_dir.join("demo-set")).len(),
+        2,
+        "the calls proposed two"
+    );
+}
+
+/// Each proposal's record in the set, by its file's name, without the time
+/// it was proposed.
+fn proposals_of(set: &Path) -> BTreeMap<String, Value> {
+    fs::read_dir(set.join(agentdrafter_core::PROPOSALS_FOLDER))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .map(|path| {
+            let text = fs::read_to_string(&path).unwrap();
+            let record: Value = serde_json::from_str(&text).unwrap();
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                without_times(&record),
+            )
+        })
+        .collect()
 }
 
 #[test]
