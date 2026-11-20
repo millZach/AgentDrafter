@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::journal::{self, commit_discard, listed, now, Entry, EntryKind, Keeping};
+use super::recover::{refuse_unfinished, Unfinished};
 use super::{apply, land, ChangeReport, ChangeRequest};
 use crate::description::read_set_settings;
 use crate::error::{Error, ErrorCode};
@@ -81,7 +82,11 @@ pub struct ProposeRequest {
     pub change_set: Value,
     /// Who proposes it, in the caller's words, such as `Assistant`; with
     /// none, the interface it came through.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "text_given",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub by: Option<String>,
 }
 
@@ -156,7 +161,11 @@ pub struct KeepRequest {
     pub proposal: u64,
     /// Who keeps it, in the caller's words; with none, the interface it
     /// came through.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "text_given",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub by: Option<String>,
 }
 
@@ -181,7 +190,11 @@ pub struct DiscardRequest {
     pub proposal: u64,
     /// Who discards it, in the caller's words; with none, the interface it
     /// came through.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "text_given",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub by: Option<String>,
 }
 
@@ -198,8 +211,24 @@ pub struct DiscardReport {
     pub message: String,
 }
 
+/// `by` as given: text, never `null`, which the input's schema refuses
+/// too; left out, it is `None`.
+fn text_given<'de, D: serde::Deserializer<'de>>(given: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(given).map(Some)
+}
+
+/// The pattern of `by` in the input's schema, which [`who`] holds it to:
+/// no control character, and something besides spaces.
+pub(crate) const BY_PATTERN: &str =
+    r"^[^\x00-\x1f\x7f-\x9f]*[^\s\x00-\x1f\x7f-\x9f][^\x00-\x1f\x7f-\x9f]*$";
+
+/// The most characters `by` may hold, spaces round it among them.
+pub(crate) const BY_LONGEST: usize = MOST_BY;
+
 /// Who a request is recorded as made by: its own `by`, trimmed, or the
-/// interface it came through.
+/// interface it came through. `by` is refused as the input's schema
+/// refuses it: more than [`MOST_BY`] characters, a control character, or
+/// nothing but spaces.
 fn who(by: Option<&str>, via: Interface) -> Result<String, Error> {
     let Some(by) = by else {
         return Ok(match via {
@@ -211,14 +240,23 @@ fn who(by: Option<&str>, via: Interface) -> Result<String, Error> {
         }
         .to_owned());
     };
-    let by = by.trim();
-    if by.is_empty() || by.chars().count() > MOST_BY || by.chars().any(char::is_control) {
+    if by.chars().count() > MOST_BY || by.chars().any(char::is_control) || by.trim().is_empty() {
         return Err(Error::usage(format!(
             "`by` is who it is, in up to {MOST_BY} characters on one line, such as `Assistant`"
         ))
         .at_field("by"));
     }
-    Ok(by.to_owned())
+    Ok(by.trim().to_owned())
+}
+
+/// Refuses a proposal's number below 1, as the input's schema does.
+fn numbered(proposal: u64) -> Result<(), Error> {
+    if proposal == 0 {
+        return Err(
+            Error::usage("`proposal` is a proposal's number, counted from 1").at_field("proposal"),
+        );
+    }
+    Ok(())
 }
 
 /// Records a change set as a proposal of the drawing set in `request.set`,
@@ -233,18 +271,25 @@ pub fn propose_with(
 ) -> Result<ProposeReport, Error> {
     let by = who(request.by.as_deref(), via)?;
     let folder = &request.set;
+    // It writes nothing to the set, so it rolls nothing back: a set whose
+    // journal holds an unfinished commit is refused, as a preview is.
+    refuse_unfinished(folder, Unfinished::Proposals)?;
     let dry = ChangeRequest {
         set: folder.clone(),
         change_set: request.change_set.clone(),
         dry_run: true,
     };
     let would = apply::apply(&dry, settings, &mut None, None, None)?;
+    // What its records would be is checked, not whether each output can be
+    // written now: a DWG open in AutoCAD, and the sheets of its template it
+    // holds back, which would take a template edit with it, do not stop it.
     let refused: Vec<String> = would
         .sheets
         .iter()
         .filter_map(|s| {
             let e = s.error.as_ref()?;
-            (e.code != ErrorCode::WriteFailed).then(|| format!("`{}`: {}", s.sheet, e.message))
+            (!matches!(e.code, ErrorCode::WriteFailed | ErrorCode::SharedEditFailed))
+                .then(|| format!("`{}`: {}", s.sheet, e.message))
         })
         .collect();
     if !refused.is_empty() {
@@ -310,19 +355,34 @@ pub fn propose_with(
         [one] => format!("`{one}`"),
         more => format!("{} sheets", more.len()),
     };
-    let unwritable = would.sheets.iter().filter(|s| !s.ok).count();
-    let note = if unwritable == 0 {
-        String::new()
-    } else {
-        format!(
-            " ({} cannot be written now, such as a DWG open in AutoCAD, and must be by the time \
-             it is kept)",
-            if unwritable == 1 {
-                "1 sheet's DWG".to_owned()
+    let failing = |code: ErrorCode| -> Vec<String> {
+        would
+            .sheets
+            .iter()
+            .filter(|s| s.error.as_ref().is_some_and(|e| e.code == code))
+            .map(|s| format!("`{}`", s.sheet))
+            .collect()
+    };
+    let (unwritable, held) = (
+        failing(ErrorCode::WriteFailed),
+        failing(ErrorCode::SharedEditFailed),
+    );
+    let note = match (unwritable.as_slice(), held.len()) {
+        ([], _) => String::new(),
+        (one, held) => format!(
+            " ({} cannot be written now, such as a DWG open in AutoCAD{}, and must be by the \
+             time it is kept)",
+            if one.len() == 1 {
+                format!("the DWG of {}", one[0])
             } else {
-                format!("{unwritable} sheets' DWGs")
+                format!("the DWGs of {}", one.join(", "))
+            },
+            match held {
+                0 => String::new(),
+                1 => ", which holds back 1 other sheet of its template".to_owned(),
+                n => format!(", which holds back {n} other sheets of its template"),
             }
-        )
+        ),
     };
     Ok(ProposeReport {
         set: folder.display().to_string(),
@@ -345,6 +405,7 @@ pub fn propose_with(
 pub fn proposals(request: &ProposalsRequest) -> Result<ProposalsReport, Error> {
     let folder = &request.set;
     read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
+    refuse_unfinished(folder, Unfinished::Proposals)?;
     let entries = journal::read_entries(folder)?;
     let ended = ended(&entries);
     let store = folder.join(PROPOSALS_FOLDER);
@@ -393,7 +454,10 @@ pub fn proposals(request: &ProposalsRequest) -> Result<ProposalsReport, Error> {
 /// `change` records one, and the proposal goes on waiting. A proposal that
 /// has ended is refused (`proposal_ended`), and nothing is recorded.
 pub fn keep_with(request: &KeepRequest, settings: &Settings, via: Interface) -> Reply<KeepReport> {
-    let kept_by = match who(request.by.as_deref(), via) {
+    let kept_by = match who(request.by.as_deref(), via).and_then(|by| {
+        numbered(request.proposal)?;
+        Ok(by)
+    }) {
         Ok(by) => by,
         Err(error) => return Reply::from(Err(error)),
     };
@@ -432,6 +496,7 @@ pub fn keep_with(request: &KeepRequest, settings: &Settings, via: Interface) -> 
 /// is refused (`proposal_ended`).
 pub fn discard(request: &DiscardRequest, via: Interface) -> Result<DiscardReport, Error> {
     let by = who(request.by.as_deref(), via)?;
+    numbered(request.proposal)?;
     let folder = &request.set;
     let proposal = waiting(folder, request.proposal)?;
     let locked = journal::lock(folder)?;

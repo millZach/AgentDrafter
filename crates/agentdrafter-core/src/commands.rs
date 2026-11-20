@@ -38,7 +38,7 @@ use crate::change::{accept_with, recover, AcceptRequest, JournalRequest, UndoReq
 use crate::change::{change_set_schema, change_with, journal, operations, undo, ChangeRequest};
 use crate::change::{
     discard, keep_with, proposals, propose_with, DiscardRequest, KeepRequest, ProposalsRequest,
-    ProposeRequest, DRAFTER, PROPOSALS_FOLDER,
+    ProposeRequest, BY_LONGEST, BY_PATTERN, DRAFTER, PROPOSALS_FOLDER,
 };
 use crate::check::{check_with, CheckRequest};
 use crate::display_list::{display_list_with, DisplayListRequest, NOT_AT_AN_ENTRY};
@@ -103,10 +103,15 @@ impl Command {
     /// the set's journal that a commit that never finished left pending is
     /// rolled back first, and the reply says so; when it cannot be, the
     /// command refuses and does nothing. A `display-list` with a
-    /// `change_set`, a preview, writes nothing: it rolls nothing back, and
-    /// is refused instead on a set whose journal holds such an entry.
+    /// `change_set`, a preview, and `propose` and `proposals`, write nothing
+    /// to the set: they roll nothing back, and are refused instead on a set
+    /// whose journal holds such an entry.
     pub fn run(&self, input: Value, settings: &Settings, via: Interface) -> JsonReply {
-        let previews = self.name == "display-list" && input.get("change_set").is_some();
+        // A preview, and `propose` and `proposals`, write nothing to the
+        // set, so they roll nothing back; each refuses a set whose journal
+        // holds an unfinished commit instead.
+        let previews = (self.name == "display-list" && input.get("change_set").is_some())
+            || matches!(self.name, "propose" | "proposals");
         let rolled_back = match set_read(&input)
             .filter(|_| !previews)
             .map(|set| recover(&set))
@@ -1227,7 +1232,8 @@ fn by(does: &str, example: &str) -> Value {
         ),
         "type": "string",
         "minLength": 1,
-        "maxLength": 80,
+        "maxLength": BY_LONGEST,
+        "pattern": BY_PATTERN,
     })
 }
 

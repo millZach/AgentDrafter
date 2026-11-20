@@ -84,6 +84,7 @@ import {
   previewIsCurrent,
   previewRedrawnOn,
   reportGeneration,
+  drawnFor,
   enteredAs,
   layoutOn,
   previewVerdicts,
@@ -168,6 +169,8 @@ interface Drawn {
   snaps: boolean;
   /** Whether it is a preview's: the sheet as a change set would leave it, never kept as the set as it is. */
   preview: boolean;
+  /** The preview it was asked for, by its key: a proposal opened is shown only from its own drawing. */
+  pvKey: number | null;
 }
 
 /** A change set to a template's objects, drawn before it lands (#154). */
@@ -354,6 +357,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const [chipOpen, setChipOpen] = useState<number | null>(null);
   // While a keep or a discard is on its way.
   const [proposalBusy, setProposalBusy] = useState(false);
+  // Why the core refuses a proposal opened whole, by the preview's key.
+  const [previewRefusal, setPreviewRefusal] = useState<{ key: number; message: string } | null>(null);
+  // Moves on to ask for a proposal's drawing again, as after a keep the set refused.
+  const [ghostNonce, setGhostNonce] = useState(0);
   // The time, for how long ago each proposal was made.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -507,7 +514,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       // A sheet drawn before is shown again at once: whatever another sheet
       // was saying, loading or failing, is not this one's to say. The
       // request for that other sheet, if it is still out, is let go.
-      setReply({ text: kept, at, sheetKey, generation: generationOf(at, generationKey), snaps: withSnaps, preview: !!preview });
+      setReply({ text: kept, at, sheetKey, generation: generationOf(at, generationKey), snaps: withSnaps, preview: !!preview, pvKey: preview?.key ?? null });
       setStatus({ kind: 'shown' });
       return;
     }
@@ -537,10 +544,19 @@ export function App({ token, source, sheet, layout }: AppProps) {
         if (generationOf(at, generationKey) !== generation) return;
         replies.current.set(cacheKey, text);
         if (!current) return;
-        setReply({ text, at, sheetKey, generation, snaps: withSnaps, preview: !!previewed });
+        setReply({ text, at, sheetKey, generation, snaps: withSnaps, preview: !!previewed, pvKey: previewed?.key ?? null });
       },
       (e) => {
         if (!current) return;
+        if (previewed?.proposal) {
+          // A proposal the core now refuses whole, such as one naming an
+          // object since deleted, cannot be drawn: its band stays open and
+          // says why in the core's words, with Keep off and Discard there.
+          setPreviewRefusal({ key: previewed.key, message: why(e, token) });
+          // The sheet as it is stays shown: nothing is on its way.
+          setStatus({ kind: 'shown' });
+          return;
+        }
         if (previewed) {
           // A change set the core refuses whole cannot be drawn: it says
           // why, as a change set that does not land does, and nothing lands.
@@ -1288,6 +1304,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   function endPreview(home: string, layout: string | null, was: Picked | null = null) {
     restorePick.current = was ? { picked: was, home } : null;
     setPreview(null);
+    setPreviewRefusal(null);
     setPreviewReport(null);
     for (const key of [...replies.current.keys()]) if (key.startsWith('pv')) replies.current.delete(key);
     if (home && (upper(home) !== upper(wanted ?? '') || upper(layout ?? '') !== upper(wantedLayout ?? ''))) {
@@ -1305,7 +1322,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   };
   const confirmPreview = () => {
     const was = preview;
-    if (!was || !previewCurrent) return;
+    if (!was || !previewCurrent || !previewDrawn) return;
     if (was.proposal) {
       keepProposal(was.proposal);
       return;
@@ -1326,7 +1343,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // shown as it would leave it, on the sheet it was opened on when it
   // reaches it, or its first.
   function openProposal(p: Proposal, on?: string) {
+    // From the set as it was, as from a toast's Show: back to live first,
+    // since a proposal is drawn on the set as it is.
+    if (at !== null) backToLive();
     if (toolState?.tool) endTool();
+    setPreviewRefusal(null);
     setChipOpen(null);
     setToast(null);
     const title = proposalTitle(p);
@@ -1368,9 +1389,20 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (preview?.proposal) endPreview(preview.home, preview.homeLayout, preview.picked);
     setChipOpen(null);
     setProposalBusy(true);
-    void sendChange({ change_set: p.change_set as ToolSend['change_set'], what: `Proposal ${p.proposal}`, sheets: p.sheets }, p.proposal).finally(() =>
-      setProposalBusy(false),
-    );
+    void sendChange({ change_set: p.change_set as ToolSend['change_set'], what: `Proposal ${p.proposal}`, sheets: p.sheets }, p.proposal)
+      .then((landed) => (landed ? endedHere(p.proposal) : redrawProposal(p.proposal)))
+      .finally(() => setProposalBusy(false));
+  }
+  // Kept or discarded: its card goes on the command's reply, not waiting
+  // for the stream. Refused: what it was drawn as is old, so it is asked
+  // for again, and its card says how it stands now.
+  function endedHere(n: number) {
+    setProposals((ps) => ps.filter((x) => x.proposal !== n));
+  }
+  function redrawProposal(n: number) {
+    for (const key of [...ghostAsked.current]) if (key.startsWith(`${n}|`)) ghostAsked.current.delete(key);
+    setGhostReplies((m) => new Map([...m].filter(([key]) => !key.startsWith(`${n}|`))));
+    setGhostNonce((k) => k + 1);
   }
   function discardProposal(p: Proposal) {
     if (preview?.proposal) endPreview(preview.home, preview.homeLayout, preview.picked);
@@ -1378,7 +1410,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setProposalBusy(true);
     call('discard', { set: source, proposal: p.proposal, by: DRAFTER }, token)
       .then(
-        () => log(`Proposal ${p.proposal} discarded: nothing changed`),
+        () => {
+          endedHere(p.proposal);
+          log(`Proposal ${p.proposal} discarded: nothing changed`);
+        },
         (e) => say('warn', `Proposal ${p.proposal} was not discarded`, why(e, token)),
       )
       .finally(() => setProposalBusy(false));
@@ -1400,8 +1435,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // The core's preview, from each reply of it; and the view comes to what
   // it marks on each sheet once, as it is first drawn.
   const previewFocused = useRef('');
+  // Only the drawing asked for with this preview, once the renderer has
+  // loaded it, says what this one would do: one opened while another's
+  // drawing is still shown says nothing of it.
+  const previewDrawn = !!preview && drawnFor(preview.key, reply, summaryText.current) && summary?.preview != null;
   useEffect(() => {
-    if (!preview || !summary?.preview) return;
+    if (!preview || !summary?.preview || !previewDrawn) return;
     setPreviewReport(summary.preview as PreviewReport);
     // Drawn again on the set as it now is: a reply of the same text as the
     // one shown is not drawn again, but it is as current.
@@ -1411,11 +1450,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
     previewFocused.current = k;
     keys.current += 1;
     setFocus({ key: keys.current, sheet: summary.sheet, places: [], preview: true });
-  }, [preview, summary, reply]);
+  }, [preview, summary, reply, previewDrawn]);
   // Its words over the drawing: by each cloud, the check it would fail;
   // round a sheet that would refuse it, or be held back, the paper framed.
   const previewTags: PreviewTag[] = [];
-  if (preview && previewReport && summary?.preview) {
+  if (preview && previewReport && summary?.preview && previewDrawn) {
     for (const c of (summary.preview as PreviewReport).clouds ?? []) {
       previewTags.push({ text: `Would fail: ${c.rule}`, tone: 'bad', at: [c.bounds.min[0], c.bounds.min[1], c.bounds.max[0], c.bounds.max[1]] });
     }
@@ -1475,7 +1514,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ghostsOn, wantedGhosts, source, token]);
+  }, [ghostsOn, wantedGhosts, source, token, ghostNonce]);
   const ghostSpecs: GhostSpec[] = [];
   const cardViews: { p: Proposal; title: string; standing: Standing | null; lines: CardLine[] }[] = here.map((p) => {
     const got = ghostReplies.get(ghostKey(p));
@@ -2191,6 +2230,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
                           number: openProposalNow.proposal,
                           proposed: proposedWords(openProposalNow, clock(openProposalNow.at).replace(/:\d\d(?=\s|$)/, ''), now),
                           stale: staleWords(openProposalNow, journal),
+                          refused: previewRefusal?.key === preview.key ? previewRefusal.message : null,
                           onDiscard: () => discardProposal(openProposalNow),
                         }
                       : undefined

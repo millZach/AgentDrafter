@@ -50,6 +50,8 @@ export interface Entry {
   files?: { path: string; before: string | null; after: string | null }[];
   /** The proposal a change set or a failed attempt kept, or a discard ended (#155). */
   proposal?: number;
+  /** How a commit that never finished was rolled back: it changed nothing. */
+  rolled_back?: unknown;
   proposed_by?: string;
   kept_by?: string;
   discarded_by?: string;
@@ -122,7 +124,14 @@ export const capital = (text: string): string => text.charAt(0).toUpperCase() + 
 export function entryByline(entry: Entry): string {
   if (entry.proposal === undefined) return '';
   if (entry.kind === 'discard') return `by ${whoWords(entry.discarded_by)} · proposed by ${whoWords(entry.proposed_by)}`;
+  // A keep the set refused is an attempt: it kept nothing.
+  if (entry.kind === 'failed_attempt') return `proposed by ${whoWords(entry.proposed_by)} · keep attempted by ${whoWords(entry.kept_by)} · refused`;
   return `proposed by ${whoWords(entry.proposed_by)} · kept by ${whoWords(entry.kept_by)}`;
+}
+
+/** Whether proposal `n` has ended: a change set kept it, or a discard ended it, and was not rolled back. */
+export function proposalEnded(report: JournalReport, n: number): boolean {
+  return report.entries.some((e) => e.proposal === n && (e.kind === 'change_set' || e.kind === 'discard') && !e.rolled_back);
 }
 
 /** What an entry is, in a few words, for its line in the journal and its toast. */

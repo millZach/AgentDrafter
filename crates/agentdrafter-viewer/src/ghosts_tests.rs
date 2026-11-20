@@ -143,3 +143,28 @@ fn a_run_is_dashed_along_its_lines_and_a_short_one_drawn_whole() {
     let apart = [[0.0, 0.0, 5.0, 0.0], [20.0, 0.0, 30.0, 0.0]];
     assert_eq!(dash_run(&apart, 4.0, 2.0)[1], [20.0, 0.0, 24.0, 0.0]);
 }
+
+#[test]
+fn a_run_is_dashed_at_a_fractional_pixel_ratio_and_always_ends() {
+    // At 110%, as a Windows laptop shows, a pen of 7 by 4 CSS pixels is
+    // 7.7 by 4.4 device pixels, which rounding made the old loop stop on.
+    let ratio = 1.1;
+    let (dash, gap) = (7.0 * ratio, 4.0 * ratio);
+    for pieces in [1usize, 3, 7, 100, 1000] {
+        // A 100-pixel stroke, in `pieces` lines end to end.
+        let step = 100.0 / pieces as f64;
+        let run: Vec<[f64; 4]> = (0..pieces)
+            .map(|i| [i as f64 * step, 0.0, (i + 1) as f64 * step, 0.0])
+            .collect();
+        let dashes = dash_run(&run, dash, gap);
+        let drawn: f64 = dashes.iter().map(|[x0, _, x1, _]| x1 - x0).sum();
+        // 100 / 12.1 is 8 whole periods and 3.2 into a dash: 64.8 drawn.
+        assert!((drawn - 64.8).abs() < 1e-6, "{pieces} pieces: {drawn}");
+        assert!(dashes.iter().all(|[x0, _, x1, _]| x1 - x0 <= dash + 1e-9));
+        assert!(dashes.iter().all(|[x0, _, x1, _]| x1 >= x0));
+    }
+    // Lengths that are not whole numbers of anything, and a diagonal.
+    let odd = [[0.3, 0.1, 37.31, 52.77], [37.31, 52.77, 101.999, 52.77]];
+    let dashes = dash_run(&odd, 7.0 * 1.25, 4.0 * 1.25);
+    assert!(!dashes.is_empty() && dashes.len() < 20, "{}", dashes.len());
+}

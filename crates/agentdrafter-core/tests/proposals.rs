@@ -469,3 +469,140 @@ fn a_proposal_waits_through_an_accept() {
         [kept.result.unwrap().change.journal_entry.unwrap()]
     );
 }
+
+#[test]
+fn a_keep_lands_nothing_when_any_sheet_it_reaches_would_refuse_it() {
+    // Two independent edits: a circle on DEMO-001's row, and a move of a
+    // circle on DEMO-002's row, whose layer is then locked.
+    let set = demo_set("keep-whole");
+    lands(
+        &set,
+        json!({"operations": [{"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "notes", "id": "washer"}]}),
+    );
+    let both = json!({"operations": [
+        {"op": "add_circle", "sheet": "DEMO-001", "center": [7, 5, 0], "radius": 0.4},
+        {"op": "move", "target": {"id": "DEMO-002/washer"}, "by": [0.5, 0, 0]}
+    ]});
+    let proposal = propose(&set, both.clone(), Some("Assistant"));
+    lands(
+        &set,
+        json!({"operations": [{"op": "change_layer", "sheet": "DEMO-001", "name": "notes", "set": {"locked": true}}]}),
+    );
+    let before = snapshot::snapshot(&set);
+    let kept = keep(&set, proposal);
+    assert!(!kept.ok);
+    assert_eq!(kept.error.as_ref().unwrap().code, ErrorCode::SheetsFailed);
+    let report = kept.result.unwrap().change;
+    assert_eq!((report.landed, report.failed), (0, 2), "{report:#?}");
+    let one = report
+        .sheets
+        .iter()
+        .find(|s| s.sheet == "DEMO-001")
+        .unwrap();
+    assert_eq!(
+        one.error.as_ref().unwrap().code,
+        ErrorCode::SharedEditFailed
+    );
+    assert!(one
+        .error
+        .as_ref()
+        .unwrap()
+        .message
+        .contains("`DEMO-002` would refuse it"));
+    let two = report
+        .sheets
+        .iter()
+        .find(|s| s.sheet == "DEMO-002")
+        .unwrap();
+    assert_eq!(two.error.as_ref().unwrap().code, ErrorCode::Locked);
+    assert_eq!(
+        snapshot::snapshot(&set),
+        before,
+        "nothing landed on DEMO-001 either"
+    );
+    assert_eq!(numbers(&set), [proposal], "it still waits");
+    let last = serde_json::to_value(journal_of(&set).entries.last().unwrap()).unwrap();
+    assert_eq!(last["kind"], "failed_attempt", "{last}");
+    assert_eq!(last["proposal"], proposal);
+    assert_eq!(last["failed_on"].as_array().unwrap().len(), 2, "{last}");
+    assert!(last.get("landed_on").is_none());
+    // A change set sent as one still lands where it can, as before.
+    let partly = change_with(
+        &ChangeRequest {
+            set: set.clone(),
+            change_set: both,
+            dry_run: false,
+        },
+        &Settings::default(),
+    );
+    assert_eq!(partly.result.unwrap().landed, 1);
+}
+
+#[test]
+fn a_dwg_open_elsewhere_does_not_stop_a_template_edit_being_proposed() {
+    // DEMO-002's DWG cannot be written, as one open in AutoCAD: a template
+    // edit fails there and holds back DEMO-001 and DEMO-003. The records
+    // would take it, so it is proposed, and the reply says what holds it.
+    let set = demo_set("dwg-open");
+    let dwg = set.join("dwg/DEMO-002.dwg");
+    let mut permissions = fs::metadata(&dwg).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&dwg, permissions.clone()).unwrap();
+    let reply = propose_with(
+        &ProposeRequest {
+            set: set.clone(),
+            change_set: move_border(),
+            by: Some("Assistant".to_owned()),
+        },
+        &Settings::default(),
+        Interface::Mcp,
+    )
+    .expect("proposed, though a DWG cannot be written now");
+    assert_eq!(reply.sheets, ["DEMO-001", "DEMO-002", "DEMO-003"]);
+    assert!(
+        reply
+            .message
+            .contains("the DWG of `DEMO-002` cannot be written now")
+            && reply
+                .message
+                .contains("holds back 2 other sheets of its template"),
+        "{}",
+        reply.message
+    );
+    // Kept while it cannot be written: refused whole, still waiting.
+    assert!(!keep(&set, reply.proposal).ok);
+    assert_eq!(numbers(&set), [reply.proposal]);
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&dwg, permissions).unwrap();
+    let kept = keep(&set, reply.proposal);
+    assert!(kept.ok, "{:#?}", kept.error);
+    assert_eq!(kept.result.unwrap().change.landed, 3);
+}
+
+#[test]
+fn by_and_the_proposal_number_are_refused_as_the_schema_refuses_them() {
+    let set = demo_set("by");
+    let long = "x".repeat(79);
+    for (by, ok) in [
+        (format!(" {long}"), true),
+        (format!("  {long}"), false),
+        ("tab\there".to_owned(), false),
+        ("\u{85}next".to_owned(), false),
+        ("\u{a0}".to_owned(), false),
+    ] {
+        let reply = propose_with(
+            &ProposeRequest {
+                set: set.clone(),
+                change_set: add_circle("DEMO-001"),
+                by: Some(by.clone()),
+            },
+            &Settings::default(),
+            Interface::Cli,
+        );
+        assert_eq!(reply.is_ok(), ok, "{by:?}: {reply:?}");
+    }
+    let zero = keep(&set, 0);
+    assert_eq!(zero.error.unwrap().code, ErrorCode::Usage);
+    assert_eq!(discarded(&set, 0).unwrap_err().code, ErrorCode::Usage);
+}

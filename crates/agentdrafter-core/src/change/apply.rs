@@ -653,11 +653,37 @@ pub(super) fn apply(
     };
 
     touched.extend(failed.keys());
-    let landed: Vec<usize> = touched
+    let mut landed: Vec<usize> = touched
         .iter()
         .copied()
         .filter(|k| !failed.contains_key(k))
         .collect();
+    // A proposal is kept whole or not at all: when any sheet it reaches
+    // would refuse it, the others are left as they are too, nothing lands,
+    // and the attempt is recorded as a failed one, as the viewer's "Nothing
+    // can land" says beforehand.
+    if keeping.is_some() && !failed.is_empty() && !landed.is_empty() {
+        let refusing: Vec<String> = failed
+            .keys()
+            .map(|&k| format!("`{}`", files.name(k)))
+            .collect();
+        let why = match refusing.as_slice() {
+            [one] => format!("{one} would refuse it"),
+            [rest @ .., last] => format!("{} and {last} would refuse it", rest.join(", ")),
+            [] => unreachable!("a sheet refuses it"),
+        };
+        for k in landed.drain(..) {
+            failed.insert(
+                k,
+                Error::new(
+                    ErrorCode::SharedEditFailed,
+                    format!(
+                        "left as it was: a proposal is kept on every sheet it reaches or on none,                          and {why}"
+                    ),
+                ),
+            );
+        }
+    }
 
     // What would be written.
     let mut records: Vec<(PathBuf, String)> = Vec::new();

@@ -73,8 +73,9 @@ pub use proposals::{
     KeepRequest, ProposalListed, ProposalsReport, ProposalsRequest, ProposeReport, ProposeRequest,
     DRAFTER, PROPOSALS_FOLDER,
 };
+pub(crate) use proposals::{BY_LONGEST, BY_PATTERN};
 pub use recover::RolledBack;
-pub(crate) use recover::{recover, refuse_unfinished};
+pub(crate) use recover::{recover, refuse_unfinished, Unfinished};
 pub use undo::{undo, FileUndone, UndoAction, UndoReport, UndoRequest};
 
 /// The file, relative to a drawing set's folder, that marks the set
@@ -389,7 +390,7 @@ pub(crate) fn preview(
     change_set: &Value,
     settings: &Settings,
 ) -> Result<Previewed, Error> {
-    refuse_unfinished(set)?;
+    refuse_unfinished(set, Unfinished::Preview)?;
     let request = ChangeRequest {
         set: set.to_owned(),
         change_set: change_set.clone(),

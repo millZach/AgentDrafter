@@ -133,44 +133,48 @@ impl Ghost {
 /// long with gaps of `gap`, the pattern carried on where one line joins
 /// the next, as a dashed pen runs along a polyline. A run shorter than
 /// three dashes, such as a letter's stroke, is drawn whole.
+///
+/// The pen steps from one end of a dash or a gap to the next, each step
+/// at least a hair long, so it always moves on, whatever the rounding of a
+/// fractional device-pixel ratio's lengths.
 pub fn dash_run(run: &[Segment], dash: f64, gap: f64) -> Vec<Segment> {
     let length: f64 = run
         .iter()
         .map(|[x0, y0, x1, y1]| (x1 - x0).hypot(y1 - y0))
         .sum();
-    if dash <= 0.0 || length < 3.0 * dash {
+    if !(dash > 0.0 && gap > 0.0 && length.is_finite()) || length < 3.0 * dash {
         return run.to_vec();
     }
-    let period = dash + gap;
+    // Shorter than this is no length at all.
+    let hair = 1e-9 * (dash + gap).max(1.0);
     let mut out = Vec::new();
-    // How far along the pattern the pen is.
-    let mut phase = 0.0_f64;
+    // Whether the pen is down, and how much of this dash or gap is left.
+    let (mut down, mut left) = (true, dash);
     let mut last: Option<(f64, f64)> = None;
     for &[x0, y0, x1, y1] in run {
         // A line that does not start where the last ended starts the
         // pattern again.
         if last.is_some_and(|(x, y)| (x - x0).abs() > 0.5 || (y - y0).abs() > 0.5) {
-            phase = 0.0;
+            (down, left) = (true, dash);
         }
+        last = Some((x1, y1));
         let l = (x1 - x0).hypot(y1 - y0);
         let at = |d: f64| (x0 + (x1 - x0) * d / l, y0 + (y1 - y0) * d / l);
         let mut t = 0.0;
-        while t < l {
-            let into = phase % period;
-            if into < dash {
-                let end = (t + dash - into).min(l);
+        while l - t > hair {
+            let step = left.min(l - t);
+            if down {
                 let (ax, ay) = at(t);
-                let (bx, by) = at(end);
+                let (bx, by) = at(t + step);
                 out.push([ax, ay, bx, by]);
-                phase += end - t;
-                t = end;
-            } else {
-                let end = (t + period - into).min(l);
-                phase += end - t;
-                t = end;
+            }
+            t += step;
+            left -= step;
+            if left <= hair {
+                down = !down;
+                left = if down { dash } else { gap };
             }
         }
-        last = Some((x1, y1));
     }
     out
 }

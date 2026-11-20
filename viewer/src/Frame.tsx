@@ -383,10 +383,13 @@ export interface PreviewBandProps {
    * made it and when, what has landed since, and Discard. Its Keep is the
    * band's go, and × or Esc closes it, leaving it waiting.
    */
-  proposal?: { number: number; proposed: string; stale: string | null; onDiscard(): void };
+  proposal?: { number: number; proposed: string; stale: string | null; refused?: string | null; onDiscard(): void };
 }
 
 const TONE: Record<PreviewState, string> = { land: 'ok', check: 'warn', refused: 'bad', held: 'held' };
+
+/** The core's words as a sentence, ending in a full stop. */
+const sentence = (text: string) => (/[.!?]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`);
 
 /**
  * A change set drawn before it lands (#154), variant B of the prototype
@@ -406,6 +409,12 @@ export function PreviewBand({ edit, sheet, report, refreshing = false, onStep, o
     : { label: proposal ? 'Keep' : n > 1 ? `Change all ${n} sheets` : 'Change the template', disabled: true };
   // A change landed since it was drawn: nothing is sent until it is drawn again.
   if (refreshing) button.disabled = true;
+  // A proposal the core now refuses whole cannot be drawn: nothing can land.
+  const refused = proposal?.refused ?? null;
+  if (refused) {
+    button.label = 'Nothing can land';
+    button.disabled = true;
+  }
   const fails = !!report && !report.change.failed && [...previewVerdicts(report).values()].some((v) => v.state === 'check');
   return (
     <div
@@ -482,8 +491,17 @@ export function PreviewBand({ edit, sheet, report, refreshing = false, onStep, o
           {proposal.stale}
         </div>
       )}
-      <div className={`pvline ${verdict && !refreshing ? TONE[verdict.state] : ''}`} data-pv-verdict>
-        {refreshing ? (
+      <div className={`pvline ${refused ? 'bad' : verdict && !refreshing ? TONE[verdict.state] : ''}`} data-pv-verdict>
+        {refused ? (
+          <>
+            <i className="vd bad" aria-hidden="true">
+              ✕
+            </i>
+            <span data-pv-refused>
+              <b>Refused now.</b> {sentence(refused.replace(/`/g, ''))} It cannot be drawn on the set as it stands; Discard ends it.
+            </span>
+          </>
+        ) : refreshing ? (
           <span className="muted">The set changed: drawing {sheet} as it would be again…</span>
         ) : verdict ? (
           <>
@@ -498,7 +516,7 @@ export function PreviewBand({ edit, sheet, report, refreshing = false, onStep, o
           <span className="muted">Drawing {sheet} as it would be…</span>
         )}
       </div>
-      {summary && !refreshing && (
+      {summary && !refreshing && !refused && (
         <div className={`pvsum ${summary.tone}`} data-pv-summary>
           {summary.text}
         </div>

@@ -3824,12 +3824,33 @@ const checks = {
         assert(said.includes('Move service') && said.includes('proposed by Assistant · kept by you'), `J1: ${said}`);
         await page.waitForFunction(() => !document.querySelector('[data-pcard="1"]'), null, { timeout: 30000 });
 
+        // A keep the set refuses: DP-LD-202's DWG made read-only, as one
+        // open in AutoCAD, after the card said it would land. Nothing lands,
+        // the journal labels it an attempt, and the card asks again and says
+        // it is refused now.
+        const dwg202 = join(set, 'dwg', 'DP-LD-202.dwg');
+        // Its card, asked for again on the set as it now is, offers Keep.
+        await page.waitForFunction(() => !document.querySelector('[data-pcard="2"] [data-pc="keep"]')?.disabled, null, { timeout: 30000 });
+        chmodSync(dwg202, 0o444);
+        // The title block's card can sit under the laptop's command bar
+        // (#212): clicked on the button itself.
+        await page.locator('[data-pcard="2"] [data-pc="keep"]').dispatchEvent('click');
+        const attempt = await grows(folder, 3, 'A refused keep');
+        assert(attempt.kind === 'failed_attempt' && attempt.proposal === 2 && attempt.kept_by === 'drafter', `the attempt: ${JSON.stringify(attempt)}`);
+        assert(!attempt.landed_on, `nothing landed: ${JSON.stringify(attempt.landed_on)}`);
+        await says(page, 2, 'Refused now');
+        assert(await page.locator('[data-pcard="2"] [data-pc="keep"]').isDisabled(), 'Keep is off once it is refused');
+        await page.waitForSelector(`.va-journal [data-entry="${attempt.entry}"]`);
+        said = await journalLine(page, attempt.entry);
+        assert(said.includes('keep attempted by you · refused') && !said.includes('kept by'), `the attempt's line: ${said}`);
+        chmodSync(dwg202, 0o644);
+
         // The one made before the set changed, kept from its band: applied to the set as it stands.
         await page.click('[data-pcard="2"] [data-pc="show"]');
         await page.waitForSelector('[data-proposal="2"] [data-pv-summary]', { timeout: 30000 });
         await page.waitForFunction(() => !document.querySelector('[data-pv="keep"]')?.disabled, null, { timeout: 30000 });
         await page.click('[data-pv="keep"]');
-        const second = await grows(folder, 3, 'Keep from the band');
+        const second = await grows(folder, 4, 'Keep from the band');
         assert(second.kind === 'change_set' && second.proposal === 2 && second.kept_by === 'drafter', `kept from the band: ${JSON.stringify(second)}`);
         await page.waitForSelector(`.va-journal [data-entry="${second.entry}"]`);
         await page.waitForFunction(() => document.querySelectorAll('[data-pcard]').length === 0, null, { timeout: 30000 });
@@ -3841,11 +3862,59 @@ const checks = {
 
         // Undone as any change set, as one, and the proposal does not come back.
         await page.click('[data-act="undo"]');
-        const undone = await grows(folder, 4, 'Undo last');
+        const undone = await grows(folder, 5, 'Undo last');
         assert(undone.kind === 'undo' && JSON.stringify(undone.undid) === JSON.stringify([second.entry]), `undone: ${JSON.stringify(undone)}`);
         await sleep(500);
         assert(waiting(folder).length === 0 && (await page.locator('[data-pcard]').count()) === 0, 'the proposal does not come back');
-        assert(problems.length === 0, problems.join('; '));
+
+        // Show from a toast while the set is shown as it was: back to live,
+        // and the band draws it.
+        const ring = sendChange(folder, {
+          operations: [{ op: 'add_circle', sheet: 'DP-LD-101', center: [2, 8, 0], radius: 0.2, id: 'spare-ring', name: 'spare-ring' }],
+        });
+        assert(ring.ok, `the ring: ${JSON.stringify(ring.error)}`);
+        await page.waitForSelector(`.va-journal [data-entry="${ring.result.journal_entry}"]`);
+        await page.click(`.va-journal [data-entry="${ring.result.journal_entry}"] .je-head`);
+        await page.waitForSelector('.va-vp.past', { timeout: 30000 });
+        const p4 = await http(server.base, 'propose', {
+          set: 'demo-plant',
+          change_set: { operations: [{ op: 'move', target: { name: 'spare-ring' }, by: [0.2, 0, 0] }] },
+          by: 'Assistant',
+        });
+        assert(p4.ok && p4.result.proposal === 4, `the fourth: ${JSON.stringify(p4.error)}`);
+        await page.waitForSelector('[data-toast="show-proposal"]', { timeout: 30000 });
+        await page.click('[data-toast="show-proposal"]');
+        await page.waitForSelector('[data-proposal="4"] [data-pv-summary]', { timeout: 30000 });
+        assert((await page.locator('.va-vp.past').count()) === 0, 'back to live');
+        await page.click('[data-pv="close"]');
+        await page.waitForSelector('[data-pcard="4"]', { timeout: 30000 });
+
+        // A proposal the core now refuses whole, the circle it names
+        // deleted: its card and its band say why, Keep is off, Discard ends it.
+        const gone = sendChange(folder, { operations: [{ op: 'delete', target: { id: 'DP-LD-101/spare-ring' } }] });
+        assert(gone.ok, `deleted: ${JSON.stringify(gone.error)}`);
+        await says(page, 4, 'Refused now');
+        said = await cardText(page, 4);
+        assert(said.includes('no object on any sheet of the set has the name spare-ring'), `the card says why, in the core's words: ${said}`);
+        assert(await page.locator('[data-pcard="4"] [data-pc="keep"]').isDisabled(), 'its Keep is off');
+        await page.click('[data-pcard="4"] [data-pc="show"]');
+        await page.waitForSelector('[data-proposal="4"] [data-pv-refused]', { timeout: 30000 });
+        said = await band(page);
+        assert(said.includes('Refused now.') && said.includes('spare-ring') && said.includes('Discard'), `the band stays open and says why: ${said}`);
+        const keep4 = page.locator('[data-pv="keep"]');
+        assert((await keep4.textContent()) === 'Nothing can land' && (await keep4.isDisabled()), `Keep: ${await keep4.textContent()}`);
+        await page.waitForFunction(() => !document.body.textContent.includes('Drawing DP-LD'), null, { timeout: 30000 });
+        await sleep(300);
+        await page.screenshot({ path: join(out, 'proposals-laptop-refused-band.png') });
+        shots.push('proposals-laptop-refused-band.png');
+        const entries = journalOf(folder).length;
+        await page.click('[data-pv="discard"]');
+        const ended = await grows(folder, entries, 'Discard of a refused one');
+        assert(ended.kind === 'discard' && ended.proposal === 4, `discarded: ${JSON.stringify(ended)}`);
+        await page.waitForFunction(() => !document.querySelector('[data-preview]') && !document.querySelector('[data-pcard]'), null, { timeout: 30000 });
+        // The refusals this check makes are the 422s the browser logs: the
+        // refused keep, and the fourth's drawing asked for by its card and its band.
+        assert(problems.filter((p) => !p.includes('422')).length === 0, problems.join('; '));
         await context.close();
         await server.stop();
       }

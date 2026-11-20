@@ -524,8 +524,9 @@ fn every_command_of_the_registry_is_reachable_through_every_interface_with_the_s
     );
 }
 
-/// Each proposal's record in the set, by its file's name, without the time
-/// it was proposed.
+/// Each proposal's record in the set, the numbered files, by name, without
+/// the time it was proposed, its top-level `at`: the one thing two
+/// interfaces may record differently.
 fn proposals_of(set: &Path) -> BTreeMap<String, Value> {
     fs::read_dir(set.join(agentdrafter_core::PROPOSALS_FOLDER))
         .unwrap()
@@ -533,10 +534,11 @@ fn proposals_of(set: &Path) -> BTreeMap<String, Value> {
         .filter(|path| path.extension().is_some_and(|e| e == "json"))
         .map(|path| {
             let text = fs::read_to_string(&path).unwrap();
-            let record: Value = serde_json::from_str(&text).unwrap();
+            let mut record: Value = serde_json::from_str(&text).unwrap();
+            assert!(record.as_object_mut().unwrap().remove("at").is_some());
             (
                 path.file_name().unwrap().to_string_lossy().into_owned(),
-                without_times(&record),
+                record,
             )
         })
         .collect()
@@ -873,6 +875,58 @@ fn killed_mid_commit(dir: &Path) {
     assert!(said.contains("stopped the commit at step 16"), "{said}");
     child.kill().unwrap();
     child.wait().unwrap();
+}
+
+/// Every file under `folder`, the journal's own among them, with its bytes.
+fn every_file(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut found = BTreeMap::new();
+    let mut stack = vec![folder.to_owned()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                found.insert(path.clone(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn propose_and_proposals_refuse_a_set_a_commit_left_unfinished_and_write_nothing() {
+    // They write nothing to the set, so, as a preview, they roll nothing
+    // back: through the registry, by the command line, each is refused
+    // and every file, the journal and its undo states among them, stays
+    // byte for byte.
+    let dir = interface_folder("proposals-unfinished", "cli");
+    let (code, built) = cli(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{built}");
+    killed_mid_commit(&dir);
+    let set = dir.join("demo-set");
+    let before = every_file(&set);
+    for args in [
+        &["propose", "demo-set", "circle.json"][..],
+        &["proposals", "demo-set"][..],
+    ] {
+        let (code, refused) = cli(args, &dir);
+        assert_eq!(code, 1, "{refused}");
+        assert_eq!(refused["error"]["code"], "rollback_failed", "{refused}");
+        assert!(refused.get("rolled_back").is_none(), "{refused}");
+        assert!(
+            every_file(&set) == before,
+            "{}: every file as it was",
+            args[0]
+        );
+    }
+    assert!(!set.join(agentdrafter_core::PROPOSALS_FOLDER).exists());
+    // The next other command rolls it back, and then a proposal is made.
+    let (code, read) = cli(&["journal", "demo-set"], &dir);
+    assert_eq!(code, 0, "{read}");
+    assert_eq!(read["rolled_back"]["entry"], 1, "{read}");
+    let (code, proposed) = cli(&["propose", "demo-set", "circle.json"], &dir);
+    assert_eq!(code, 0, "{proposed}");
 }
 
 #[test]

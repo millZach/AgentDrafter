@@ -70,8 +70,8 @@ def interface_folder(scratch, interface):
 def snapshot(set_folder):
     """Every file and folder of the set, each file with its bytes, but the
     journal's own, which is compared entry by entry, and each proposal's
-    record, compared without the time it was proposed, as a journal entry
-    is."""
+    record, compared without the time it was proposed, its top-level `at`,
+    as a journal entry is."""
     found = {}
     for path in set_folder.rglob("*"):
         relative = path.relative_to(set_folder)
@@ -81,7 +81,9 @@ def snapshot(set_folder):
             if relative != JOURNAL_FILE.parent:
                 found[relative] = None
         elif relative.is_relative_to(PROPOSALS_FOLDER) and relative.suffix == ".json":
-            found[relative] = without_times(json.loads(path.read_text(encoding="utf-8")))
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record.pop("at")
+            found[relative] = record
         else:
             found[relative] = path.read_bytes()
     return found

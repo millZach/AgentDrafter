@@ -13,6 +13,7 @@ import {
   clock,
   entryByline,
   entryState,
+  proposalEnded,
   entryTitle,
   operationWords,
   undoneWith,
@@ -201,10 +202,15 @@ export function JournalList({ journal, failing, at, focused, busy, onStep, onSho
                       undoes a discard.
                     </p>
                   )}
-                  {e.kind !== 'discard' && e.proposal !== undefined && (
+                  {e.kind === 'failed_attempt' && e.proposal !== undefined && (
                     <p className="note">
-                      Proposal {e.proposal}, proposed by {whoWords(e.proposed_by)}
-                      {e.kind === 'failed_attempt' ? `; ${whoWords(e.kept_by)} tried to keep it, and it is still waiting.` : `; kept by ${whoWords(e.kept_by)}.`}
+                      Proposal {e.proposal}, proposed by {whoWords(e.proposed_by)}: a keep attempted by {whoWords(e.kept_by)}, which the set refused, so
+                      nothing landed.{proposalEnded(journal, e.proposal) ? ' The proposal has ended since.' : ' It is still waiting.'}
+                    </p>
+                  )}
+                  {e.kind === 'change_set' && e.proposal !== undefined && (
+                    <p className="note">
+                      Proposal {e.proposal}, proposed by {whoWords(e.proposed_by)}; kept by {whoWords(e.kept_by)}.
                     </p>
                   )}
                   {e.issued_by && <p className="note">Issued by the accept in entry {e.issued_by}: it cannot be undone.</p>}

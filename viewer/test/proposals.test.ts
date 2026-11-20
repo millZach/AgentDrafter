@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { readEvents } from '../src/api.ts';
-import { keepButton, previewTitle, promptFor, type PreviewReport } from '../src/frame.ts';
-import { entryByline, entryState, entryTitle, sheetsTouched, whoWords, type Entry, type JournalReport } from '../src/journal.ts';
+import { drawnFor, keepButton, previewTitle, promptFor, type PreviewReport } from '../src/frame.ts';
+import { entryByline, entryState, entryTitle, proposalEnded, sheetsTouched, whoWords, type Entry, type JournalReport } from '../src/journal.ts';
 import {
   ago,
   cardLines,
@@ -170,4 +170,43 @@ test('each card goes beside its change, clear of the others, and a leader joins 
   // Kept inside the drawing.
   const low = placeCards([{ w: 200, h: 80, box: [100, 690, 140, 699] }], 1000, 700);
   assert.ok((low[0]?.y ?? 0) + 80 <= 700);
+});
+
+test('a keep lands on every sheet or none: one refusing sheet means nothing can land', () => {
+  const partly = report([
+    { sheet: 'DP-LD-101', ok: true },
+    { sheet: 'DP-LD-102', ok: false, code: 'locked', message: 'layer `notes` is locked' },
+  ]);
+  assert.deepEqual(keepButton(partly), { label: 'Nothing can land', disabled: true });
+  assert.equal(standing(partly), 'bad');
+});
+
+test('a proposal opened says what it would do only from its own drawing, once it is loaded', () => {
+  const a = { pvKey: 3, text: 'drawing of A' };
+  assert.equal(drawnFor(3, a, 'drawing of A'), true);
+  assert.equal(drawnFor(4, a, 'drawing of A'), false, 'B opened while A is still shown');
+  assert.equal(drawnFor(4, { pvKey: 4, text: 'drawing of B' }, 'drawing of A'), false, 'B asked for, A still loaded');
+  assert.equal(drawnFor(4, { pvKey: 4, text: 'drawing of B' }, 'drawing of B'), true);
+  assert.equal(drawnFor(4, null, null), false);
+});
+
+test('a keep the set refused is labelled an attempt, and says it waits only while it does', () => {
+  const attempt: Entry = {
+    entry: 5,
+    kind: 'failed_attempt',
+    at: '2026-11-19T20:50:00Z',
+    proposal: 2,
+    proposed_by: 'Assistant',
+    kept_by: 'drafter',
+    change_set: { operations: [{ op: 'move', target: { id: 'DP-LD-101/service' } }] },
+  };
+  assert.equal(entryByline(attempt), 'proposed by Assistant · keep attempted by you · refused');
+  assert.ok(!entryByline(attempt).includes('kept by'));
+  const j = journal([]);
+  j.entries = [attempt];
+  assert.equal(proposalEnded(j, 2), false, 'still waiting');
+  j.entries = [attempt, { entry: 6, kind: 'discard', at: '2026-11-19T20:51:00Z', proposal: 2, discarded_by: 'drafter' }];
+  assert.equal(proposalEnded(j, 2), true, 'a later discard ended it');
+  j.entries = [attempt, { entry: 6, kind: 'change_set', at: '2026-11-19T20:51:00Z', proposal: 2, rolled_back: { at: '' } }];
+  assert.equal(proposalEnded(j, 2), false, 'a keep rolled back ended nothing');
 });
