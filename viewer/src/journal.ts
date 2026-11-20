@@ -32,7 +32,7 @@ export interface CheckFailed {
   message: string;
 }
 
-export type EntryKind = 'change_set' | 'failed_attempt' | 'undo' | 'accept';
+export type EntryKind = 'change_set' | 'failed_attempt' | 'undo' | 'accept' | 'discard';
 
 export interface Entry {
   entry: number;
@@ -48,6 +48,13 @@ export interface Entry {
   issued?: number[];
   failed_checks?: CheckFailed[];
   files?: { path: string; before: string | null; after: string | null }[];
+  /** The proposal a change set or a failed attempt kept, or a discard ended (#155). */
+  proposal?: number;
+  /** How a commit that never finished was rolled back: it changed nothing. */
+  rolled_back?: unknown;
+  proposed_by?: string;
+  kept_by?: string;
+  discarded_by?: string;
   undo_state?: 'kept' | 'pruned' | 'undone';
   undone_by?: number;
   pruned_by?: number;
@@ -91,9 +98,47 @@ export function operationWords(op: Operation): string {
   return name;
 }
 
+/** The name the page gives the drafter when it keeps or discards a proposal, which it shows as `you`. */
+export const DRAFTER = 'drafter';
+
+/** Who proposed, kept or discarded, as the drafter reads it: `you` for the drafter's own. */
+export const whoWords = (by: string | undefined): string => (!by ? 'someone' : by === DRAFTER ? 'you' : by);
+
+/** What a change set's operations do, in a few words: `move service, set CHECKED = JK on title-block`. */
+export function operationsTitle(operations: Operation[] | undefined, fixes?: string[]): string {
+  const ops = operations ?? [];
+  const first = ops.slice(0, 2).map(operationWords).join(', ');
+  const more = ops.length > 2 ? ` and ${ops.length - 2} more` : '';
+  const fixed = fixes?.length ? `fixes ${fixes.join(', ')}` : '';
+  return [first + more, fixed].filter(Boolean).join('; ') || 'An empty change set';
+}
+
+/** The same words with a capital, as a proposal is named: `Move service`. */
+export const capital = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
+
+/**
+ * Who a kept proposal or a discard came from, as its line in the journal
+ * says it beside its title (Zach's J1, 2026-11-19): `proposed by Assistant
+ * · kept by you`, or `by you · proposed by Assistant`. Empty for any other.
+ */
+export function entryByline(entry: Entry): string {
+  if (entry.proposal === undefined) return '';
+  if (entry.kind === 'discard') return `by ${whoWords(entry.discarded_by)} · proposed by ${whoWords(entry.proposed_by)}`;
+  // A keep the set refused is an attempt: it kept nothing.
+  if (entry.kind === 'failed_attempt') return `proposed by ${whoWords(entry.proposed_by)} · keep attempted by ${whoWords(entry.kept_by)} · refused`;
+  return `proposed by ${whoWords(entry.proposed_by)} · kept by ${whoWords(entry.kept_by)}`;
+}
+
+/** Whether proposal `n` has ended: a change set kept it, or a discard ended it, and was not rolled back. */
+export function proposalEnded(report: JournalReport, n: number): boolean {
+  return report.entries.some((e) => e.proposal === n && (e.kind === 'change_set' || e.kind === 'discard') && !e.rolled_back);
+}
+
 /** What an entry is, in a few words, for its line in the journal and its toast. */
 export function entryTitle(entry: Entry): string {
   switch (entry.kind) {
+    case 'discard':
+      return `Discarded proposal ${entry.proposal ?? '?'}`;
     case 'undo':
       return `Undo of change set${(entry.undid?.length ?? 0) > 1 ? 's' : ''} ${(entry.undid ?? []).join(', ')}`;
     case 'accept':
@@ -101,22 +146,21 @@ export function entryTitle(entry: Entry): string {
         ? `Accept: issued change set${entry.issued.length > 1 ? 's' : ''} ${entry.issued.join(', ')}`
         : 'Accept: issued the set as it stood';
     default: {
-      const ops = entry.change_set?.operations ?? [];
-      const first = ops.slice(0, 2).map(operationWords).join(', ');
-      const more = ops.length > 2 ? ` and ${ops.length - 2} more` : '';
-      const fixes = entry.change_set?.fixes?.length ? `fixes ${entry.change_set.fixes.join(', ')}` : '';
-      return [first + more, fixes].filter(Boolean).join('; ') || 'An empty change set';
+      const title = operationsTitle(entry.change_set?.operations, entry.change_set?.fixes);
+      // A kept proposal is named as its card named it.
+      return entry.proposal !== undefined ? capital(title) : title;
     }
   }
 }
 
-export type StateClass = 'landed' | 'failed' | 'undone' | 'issued' | 'inconsistent' | 'undo' | 'accept' | 'check';
+export type StateClass = 'landed' | 'failed' | 'undone' | 'issued' | 'inconsistent' | 'undo' | 'accept' | 'check' | 'discard';
 
 /** An entry's badge: what has become of it. */
 export function entryState(entry: Entry, report: JournalReport, failing: ReadonlySet<string>): { cls: StateClass; label: string } {
   if (entry.kind === 'failed_attempt') return { cls: 'failed', label: 'Failed attempt' };
   if (entry.kind === 'undo') return { cls: 'undo', label: 'Undo' };
   if (entry.kind === 'accept') return { cls: 'accept', label: `Accept, ${viaWords(entry.via)}` };
+  if (entry.kind === 'discard') return { cls: 'discard', label: 'Discarded' };
   if (entry.undone_by) return { cls: 'undone', label: 'Undone' };
   if (entry.issued_by) return { cls: 'issued', label: 'Issued' };
   const marked = report.inconsistent?.failures ?? [];

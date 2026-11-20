@@ -1,5 +1,6 @@
 {
   "change_sets": {
+    "circle.json": {"operations": [{"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5}]},
     "move.json": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]},
     "partial.json": {"operations": [{"op": "add_circle", "sheet": "DEMO-001", "center": [5, 5, 0], "radius": 0.5}, {"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5, "layer": "nope"}]},
     "snap.json": {"operations": [{"op": "add_line", "sheet": "DEMO-002", "from": {"snap": {"id": "DEMO-002/border", "snap": "endpoint", "which": "points[0]"}}, "to": {"snap": {"id": "DEMO-002/border", "snap": "midpoint", "which": "segments[1]"}}}, {"op": "move", "target": {"id": "DEMO-002/heading"}, "from": {"snap": {"id": "DEMO-002/heading", "snap": "insertion"}}, "to": [1, 9.5, 0]}]},
@@ -59,6 +60,22 @@
       "args": ["accept", "demo-set", "--newest-seen", "2"],
       "input": {"set": "demo-set", "newest_seen": 2}
     },
+    "propose": {
+      "args": ["propose", "demo-set", "move.json", "--by", "Assistant"],
+      "input": {"set": "demo-set", "change_set": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]}, "by": "Assistant"}
+    },
+    "proposals": {
+      "args": ["proposals", "demo-set"],
+      "input": {"set": "demo-set"}
+    },
+    "keep": {
+      "args": ["keep", "demo-set", "1", "--by", "drafter"],
+      "input": {"set": "demo-set", "proposal": 1, "by": "drafter"}
+    },
+    "discard": {
+      "args": ["discard", "demo-set", "2", "--by", "drafter"],
+      "input": {"set": "demo-set", "proposal": 2, "by": "drafter"}
+    },
     "check": {
       "args": ["check", "demo-set", "--sheet", "DEMO-002"],
       "input": {"source": "demo-set", "sheets": ["DEMO-002"]}
@@ -69,6 +86,12 @@
     }
   },
   "also": [
+    {
+      "command": "propose",
+      "after": "propose",
+      "args": ["propose", "demo-set", "circle.json"],
+      "input": {"set": "demo-set", "change_set": {"operations": [{"op": "add_circle", "sheet": "DEMO-002", "center": [5, 5, 0], "radius": 0.5}]}, "by": "agent (command line)"}
+    },
     {
       "command": "display-list",
       "args": ["display-list", "demo-set", "--sheet", "demo-002", "--snaps"],
@@ -88,6 +111,11 @@
       "command": "display-list",
       "args": ["display-list", "demo-set", "--sheet", "demo-002", "--change-set", "move.json"],
       "input": {"source": "demo-set", "sheet": "demo-002", "change_set": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]}}
+    },
+    {
+      "command": "display-list",
+      "args": ["display-list", "demo-set", "--sheet", "demo-002", "--change-set", "move.json", "--all-or-none"],
+      "input": {"source": "demo-set", "sheet": "demo-002", "change_set": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]}, "all_or_none": true}
     },
     {
       "command": "query",

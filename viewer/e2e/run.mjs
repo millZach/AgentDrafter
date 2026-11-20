@@ -67,6 +67,14 @@
 //            fail clouded and named; cancelled, writing nothing; changed,
 //            landing on every sheet; a sheet whose DWG cannot be written
 //            refusing it until it can; at laptop and phone sizes.
+// - proposals: proposals (#155): an agent proposes through the HTTP API
+//            and the command line while the page is open, and each is drawn
+//            dashed with a card at the change and counted on its sheets'
+//            tabs; the set changes under them, which the cards say, and
+//            one is refused now; opened in the band's PROPOSAL form, closed
+//            leaving it waiting, discarded, and kept from a card and from
+//            the band, the journal reading J1; Undo last of a kept one;
+//            and on a phone, chips that open into cards, and the peek.
 //
 // It writes results.json, the screenshots and each compared image into
 // --out (target/viewer-e2e by default), and exits 1 when any check fails.
@@ -3669,6 +3677,325 @@ const checks = {
   },
 
   /** Screenshots at phone and laptop sizes. */
+  async proposals() {
+    const b = await browser();
+    const SEVEN = ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'];
+    const frames = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    // An agent's command through the HTTP API, as the page's own are not.
+    const http = async (base, command, input) => {
+      const r = await fetch(`${base}/commands/${command}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+      return r.json();
+    };
+    // From the command line, another process, with no `by`.
+    const proposeIn = (folder, changeSet) => {
+      const file = join(folder, 'proposal.json');
+      writeFileSync(file, JSON.stringify(changeSet));
+      return agentIn(folder, 'propose', 'demo-plant', file);
+    };
+    const journalOf = (folder) => agentIn(folder, 'journal', 'demo-plant').result?.entries ?? [];
+    const waiting = (folder) => (agentIn(folder, 'proposals', 'demo-plant').result?.proposals ?? []).map((p) => p.proposal);
+    const grows = async (folder, from, what) => {
+      const until = Date.now() + 30000;
+      while (journalOf(folder).length <= from) {
+        assert(Date.now() < until, `${what}: the journal did not grow`);
+        await sleep(100);
+      }
+      return journalOf(folder).at(-1);
+    };
+    const cardText = (page, n) => page.locator(`[data-pcard="${n}"]`).textContent();
+    const says = (page, n, words) =>
+      page.waitForFunction(([k, w]) => document.querySelector(`[data-pcard="${k}"]`)?.textContent.includes(w), [n, words], { timeout: 30000 });
+    const band = (page) => page.textContent('[data-preview]');
+    const bar = (page) => page.evaluate(() => document.querySelector('.cmdbar').textContent);
+    const counts = (page) =>
+      page.evaluate(() => Object.fromEntries([...document.querySelectorAll('.sheettabs .tab')].map((t) => [t.querySelector('b').textContent, t.querySelector('.pcount')?.textContent ?? ''])));
+    const journalLine = (page, entry) => page.textContent(`.va-journal [data-entry="${entry}"]`);
+    // The service text moved into the zone line, which fails text_on_line on three sheets; CHECKED set on the title block; the junction box moved.
+    const moveService = { operations: [{ op: 'move', target: { id: 'DP-LD-101/service' }, by: [2.2, 0, 0] }] };
+    const checked = { operations: [{ op: 'set_attribute', target: { id: 'DP-LD-101/title-block' }, tag: 'CHECKED', value: 'JK' }] };
+    const moveBox = { operations: [{ op: 'move', target: { id: 'DP-LD-101/junction-box' }, by: [0.3, 0, 0] }] };
+    const lock = { operations: [{ op: 'change_layer', sheet: 'DP-LD-101', name: 'enclosure', set: { locked: true } }] };
+    const shots = [];
+    try {
+      {
+        const folder = freshPlant('proposals-laptop');
+        const set = join(folder, 'demo-plant');
+        const server = await serve('127.0.0.1:0', folder);
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        const files = filesIn(set);
+
+        // An agent proposes through the HTTP API while the page is open: a
+        // toast names it, its card comes at the change, joined by a leader,
+        // it is drawn dashed, and each sheet it reaches counts it.
+        const p1 = await http(server.base, 'propose', { set: 'demo-plant', change_set: moveService, by: 'Assistant' });
+        assert(p1.ok && p1.result.proposal === 1, `proposed: ${JSON.stringify(p1.error)}`);
+        await page.waitForSelector('[data-pcard="1"]', { timeout: 30000 });
+        await says(page, 1, 'would fail a check');
+        let said = await cardText(page, 1);
+        assert(said.includes('Assistant') && said.includes('Move service') && said.includes('7 sheets'), `the card: ${said}`);
+        assert(said.includes('All 7 would take it, but DP-LD-202, DP-LD-301 and DP-LD-302 would fail a check.'), `the card says how it stands: ${said}`);
+        const toast = await page.textContent('.va-toast');
+        assert(toast.includes('Assistant proposes: Move service') && toast.includes('Show'), `a toast names it: ${toast}`);
+        await frames(page);
+        assert((await page.locator('[data-pleaders] line').count()) === 1, 'a leader joins the card to its change');
+        const ghost = await page.evaluate(() => window.agentdrafterViewer.ghostExtent(1));
+        assert(ghost.length === 4 && ghost[0] > 2.5 && ghost[0] < 3.5, `drawn dashed where the service text would go: ${JSON.stringify(ghost)}`);
+        const tabs = await counts(page);
+        assert(
+          JSON.stringify(tabs) === JSON.stringify({ 'DP-LD-101': '1', 'DP-LD-102': '1', 'DP-LD-103': '', 'DP-LD-104': '1', 'DP-LD-201': '1', 'DP-LD-202': '1', 'DP-LD-301': '1', 'DP-LD-302': '1' }),
+          `each tab counts the proposals reaching it: ${JSON.stringify(tabs)}`,
+        );
+        const proposed = filesIn(set);
+        const added = Object.keys(proposed).filter((f) => !(f in files));
+        assert(
+          added.every((f) => f.replaceAll('\\', '/').includes('.agentdrafter/proposals/')) && Object.keys(files).every((f) => proposed[f] === files[f]),
+          `nothing is written but the proposal: ${JSON.stringify(added)}`,
+        );
+        assert(journalOf(folder).length === 0, 'nothing goes in the journal');
+
+        // A second from the command line, and a third through the HTTP API, each with no `by`: its interface.
+        const p2 = proposeIn(folder, checked);
+        assert(p2.ok && p2.result.by === 'agent (command line)', `the second: ${JSON.stringify(p2)}`);
+        const p3 = await http(server.base, 'propose', { set: 'demo-plant', change_set: moveBox });
+        assert(p3.ok && p3.result.by === 'agent (HTTP API)', `the third: ${JSON.stringify(p3)}`);
+        await says(page, 2, 'All 7 would take it.');
+        await says(page, 3, 'All 7 would take it.');
+        assert((await counts(page))['DP-LD-101'] === '3', 'three wait on DP-LD-101');
+        await frames(page);
+        await page.screenshot({ path: join(out, 'proposals-laptop-cards.png') });
+        shots.push('proposals-laptop-cards.png');
+
+        // The set changes under them: the enclosure layer locked. The second
+        // was made before it; the third is refused now, in the core's words.
+        const locked = sendChange(folder, lock);
+        assert(locked.ok, `locked: ${JSON.stringify(locked.error)}`);
+        await says(page, 3, 'Refused now');
+        said = await cardText(page, 3);
+        assert(said.includes('locked') && said.includes('Can’t keep'), `the third is refused now: ${said}`);
+        assert(await page.locator('[data-pcard="3"] [data-pc="keep"]').isDisabled(), 'Keep is off');
+        await says(page, 2, 'Set changed since: change set 1 landed after it.');
+
+        // Opened: the band's PROPOSAL form, over the drawing as it would leave the sheet.
+        await page.click('[data-pcard="2"] [data-pc="show"]');
+        await page.waitForSelector('[data-proposal="2"] [data-pv-summary]', { timeout: 30000 });
+        said = await band(page);
+        assert(said.includes('Proposal 2') && said.includes('Set CHECKED = JK on title-block') && said.includes('on 7 sheets'), `the band names it: ${said}`);
+        assert(said.includes('Proposed by agent (command line) at') && said.includes('Nothing lands until you keep it.'), `who and when: ${said}`);
+        assert(said.includes('The set has changed since it was proposed: change set 1 landed after it.'), `what landed since: ${said}`);
+        assert(said.includes('Keep') && said.includes('Discard'), `Keep and Discard: ${said}`);
+        assert((await bar(page)).startsWith('>_PROPOSALNothing has landed yet.') && (await bar(page)).includes('Esc closes it, and it keeps waiting'), `the command bar: ${await bar(page)}`);
+        assert((await page.textContent('[data-pvhead]')).includes('as proposal 2 would leave it'), 'the drawing says what it shows');
+        assert((await page.locator('[data-pcard]').count()) === 0, 'no card over the band');
+        await page.screenshot({ path: join(out, 'proposals-laptop-opened.png') });
+        shots.push('proposals-laptop-opened.png');
+        // Closed by ×, and by Esc: it keeps waiting.
+        await page.click('[data-pv="close"]');
+        await page.waitForSelector('[data-pcard="2"]', { timeout: 30000 });
+        assert((await page.locator('[data-preview]').count()) === 0, '× closes it');
+        await page.click('[data-pcard="2"] [data-pc="show"]');
+        await page.waitForSelector('[data-proposal="2"]');
+        await page.keyboard.press('Escape');
+        await page.waitForSelector('[data-pcard="2"]', { timeout: 30000 });
+        assert(JSON.stringify(waiting(folder)) === '[1,2,3]', `closing ends nothing: ${waiting(folder)}`);
+        assert(journalOf(folder).length === 1, 'closing writes nothing');
+
+        // A refused one opened: Keep reads Nothing can land; Discard still works, and the journal says so (J1).
+        await page.click('[data-pcard="3"] [data-pc="show"]');
+        await page.waitForSelector('[data-proposal="3"] [data-pv-summary]', { timeout: 30000 });
+        const keep3 = page.locator('[data-pv="keep"]');
+        assert((await keep3.textContent()) === 'Nothing can land' && (await keep3.isDisabled()), `Keep: ${await keep3.textContent()}`);
+        await page.click('[data-pv="discard"]');
+        const discarded = await grows(folder, 1, 'Discard');
+        assert(discarded.kind === 'discard' && discarded.proposal === 3 && discarded.discarded_by === 'drafter' && discarded.proposed_by === 'agent (HTTP API)', `the discard: ${JSON.stringify(discarded)}`);
+        await page.waitForFunction(() => !document.querySelector('[data-pcard="3"]'), null, { timeout: 30000 });
+        await page.waitForSelector(`.va-journal [data-entry="${discarded.entry}"]`);
+        said = await journalLine(page, discarded.entry);
+        assert(said.includes('Discarded proposal 3') && said.includes('by you · proposed by agent (HTTP API)') && said.includes('Discarded'), `the journal's line: ${said}`);
+
+        // Kept from its card, though it fails a check: one entry, which says who proposed it and who kept it.
+        await page.click('[data-pcard="1"] [data-pc="keep"]');
+        const kept = await grows(folder, 2, 'Keep');
+        assert(kept.kind === 'change_set' && kept.proposal === 1 && kept.proposed_by === 'Assistant' && kept.kept_by === 'drafter', `kept: ${JSON.stringify(kept)}`);
+        assert(JSON.stringify(kept.landed_on) === JSON.stringify(SEVEN), `it lands on all seven: ${JSON.stringify(kept.landed_on)}`);
+        await page.waitForSelector(`.va-journal [data-entry="${kept.entry}"]`);
+        said = await journalLine(page, kept.entry);
+        assert(said.includes('Move service') && said.includes('proposed by Assistant · kept by you'), `J1: ${said}`);
+        await page.waitForFunction(() => !document.querySelector('[data-pcard="1"]'), null, { timeout: 30000 });
+
+        // A keep the set refuses: DP-LD-202's DWG made read-only, as one
+        // open in AutoCAD, after the card said it would land. Nothing lands,
+        // the journal labels it an attempt, and the card asks again and says
+        // it is refused now.
+        const dwg202 = join(set, 'dwg', 'DP-LD-202.dwg');
+        // Its card, asked for again on the set as it now is, offers Keep.
+        await page.waitForFunction(() => !document.querySelector('[data-pcard="2"] [data-pc="keep"]')?.disabled, null, { timeout: 30000 });
+        chmodSync(dwg202, 0o444);
+        // The title block's card can sit under the laptop's command bar
+        // (#212): clicked on the button itself.
+        await page.locator('[data-pcard="2"] [data-pc="keep"]').dispatchEvent('click');
+        const attempt = await grows(folder, 3, 'A refused keep');
+        assert(attempt.kind === 'failed_attempt' && attempt.proposal === 2 && attempt.kept_by === 'drafter', `the attempt: ${JSON.stringify(attempt)}`);
+        assert(!attempt.landed_on, `nothing landed: ${JSON.stringify(attempt.landed_on)}`);
+        await says(page, 2, 'Refused now');
+        assert(await page.locator('[data-pcard="2"] [data-pc="keep"]').isDisabled(), 'Keep is off once it is refused');
+        await page.waitForSelector(`.va-journal [data-entry="${attempt.entry}"]`);
+        said = await journalLine(page, attempt.entry);
+        assert(said.includes('keep attempted by you · refused') && !said.includes('kept by'), `the attempt's line: ${said}`);
+        chmodSync(dwg202, 0o644);
+
+        // The one made before the set changed, kept from its band: applied to the set as it stands.
+        await page.click('[data-pcard="2"] [data-pc="show"]');
+        await page.waitForSelector('[data-proposal="2"] [data-pv-summary]', { timeout: 30000 });
+        await page.waitForFunction(() => !document.querySelector('[data-pv="keep"]')?.disabled, null, { timeout: 30000 });
+        await page.click('[data-pv="keep"]');
+        const second = await grows(folder, 4, 'Keep from the band');
+        assert(second.kind === 'change_set' && second.proposal === 2 && second.kept_by === 'drafter', `kept from the band: ${JSON.stringify(second)}`);
+        await page.waitForSelector(`.va-journal [data-entry="${second.entry}"]`);
+        await page.waitForFunction(() => document.querySelectorAll('[data-pcard]').length === 0, null, { timeout: 30000 });
+        assert(Object.values(await counts(page)).every((c) => c === ''), 'no tab counts one');
+        await page.waitForFunction(() => !document.body.textContent.includes('Drawing DP-LD'), null, { timeout: 30000 });
+        await sleep(400);
+        await page.screenshot({ path: join(out, 'proposals-laptop-journal.png') });
+        shots.push('proposals-laptop-journal.png');
+
+        // Undone as any change set, as one, and the proposal does not come back.
+        await page.click('[data-act="undo"]');
+        const undone = await grows(folder, 5, 'Undo last');
+        assert(undone.kind === 'undo' && JSON.stringify(undone.undid) === JSON.stringify([second.entry]), `undone: ${JSON.stringify(undone)}`);
+        await sleep(500);
+        assert(waiting(folder).length === 0 && (await page.locator('[data-pcard]').count()) === 0, 'the proposal does not come back');
+
+        // Show from a toast while the set is shown as it was: back to live,
+        // and the band draws it.
+        const ring = sendChange(folder, {
+          operations: [{ op: 'add_circle', sheet: 'DP-LD-101', center: [2, 8, 0], radius: 0.2, id: 'spare-ring', name: 'spare-ring' }],
+        });
+        assert(ring.ok, `the ring: ${JSON.stringify(ring.error)}`);
+        await page.waitForSelector(`.va-journal [data-entry="${ring.result.journal_entry}"]`);
+        await page.click(`.va-journal [data-entry="${ring.result.journal_entry}"] .je-head`);
+        await page.waitForSelector('.va-vp.past', { timeout: 30000 });
+        const p4 = await http(server.base, 'propose', {
+          set: 'demo-plant',
+          change_set: { operations: [{ op: 'move', target: { name: 'spare-ring' }, by: [0.2, 0, 0] }] },
+          by: 'Assistant',
+        });
+        assert(p4.ok && p4.result.proposal === 4, `the fourth: ${JSON.stringify(p4.error)}`);
+        await page.waitForSelector('[data-toast="show-proposal"]', { timeout: 30000 });
+        await page.click('[data-toast="show-proposal"]');
+        await page.waitForSelector('[data-proposal="4"] [data-pv-summary]', { timeout: 30000 });
+        assert((await page.locator('.va-vp.past').count()) === 0, 'back to live');
+        await page.click('[data-pv="close"]');
+        await page.waitForSelector('[data-pcard="4"]', { timeout: 30000 });
+
+        // A proposal the core now refuses whole, the circle it names
+        // deleted: its card and its band say why, Keep is off, Discard ends it.
+        const gone = sendChange(folder, { operations: [{ op: 'delete', target: { id: 'DP-LD-101/spare-ring' } }] });
+        assert(gone.ok, `deleted: ${JSON.stringify(gone.error)}`);
+        await says(page, 4, 'Refused now');
+        said = await cardText(page, 4);
+        assert(said.includes('no object on any sheet of the set has the name spare-ring'), `the card says why, in the core's words: ${said}`);
+        assert(await page.locator('[data-pcard="4"] [data-pc="keep"]').isDisabled(), 'its Keep is off');
+        await page.click('[data-pcard="4"] [data-pc="show"]');
+        await page.waitForSelector('[data-proposal="4"] [data-pv-refused]', { timeout: 30000 });
+        said = await band(page);
+        assert(said.includes('Refused now.') && said.includes('spare-ring') && said.includes('Discard'), `the band stays open and says why: ${said}`);
+        const keep4 = page.locator('[data-pv="keep"]');
+        assert((await keep4.textContent()) === 'Nothing can land' && (await keep4.isDisabled()), `Keep: ${await keep4.textContent()}`);
+        await page.waitForFunction(() => !document.body.textContent.includes('Drawing DP-LD'), null, { timeout: 30000 });
+        await sleep(300);
+        await page.screenshot({ path: join(out, 'proposals-laptop-refused-band.png') });
+        shots.push('proposals-laptop-refused-band.png');
+        const entries = journalOf(folder).length;
+        await page.click('[data-pv="discard"]');
+        const ended = await grows(folder, entries, 'Discard of a refused one');
+        assert(ended.kind === 'discard' && ended.proposal === 4, `discarded: ${JSON.stringify(ended)}`);
+        await page.waitForFunction(() => !document.querySelector('[data-preview]') && !document.querySelector('[data-pcard]'), null, { timeout: 30000 });
+        // The refusals this check makes are the 422s the browser logs: the
+        // refused keep, and the fourth's drawing asked for by its card and its band.
+        assert(problems.filter((p) => !p.includes('422')).length === 0, problems.join('; '));
+        await context.close();
+        await server.stop();
+      }
+      {
+        // A phone: each waiting proposal a chip, which a tap opens into its card.
+        const folder = freshPlant('proposals-phone');
+        const server = await serve('127.0.0.1:0', folder);
+        const context = await b.newContext({ ...PHONE, viewport: { width: 375, height: 812 } });
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        for (const [changeSet, by] of [
+          [moveService, 'Assistant'],
+          [checked, 'agent (MCP)'],
+        ]) {
+          const p = await http(server.base, 'propose', { set: 'demo-plant', change_set: changeSet, by });
+          assert(p.ok, `proposed: ${JSON.stringify(p.error)}`);
+        }
+        await page.waitForFunction(() => document.querySelectorAll('[data-pchip]').length === 2 && [...document.querySelectorAll('[data-pchip] .vd')].length === 2, null, {
+          timeout: 30000,
+        });
+        await page.waitForSelector('[data-act="proposals"]');
+        assert((await page.textContent('[data-act="proposals"]')).includes('2 proposals on this sheet, 2 in all'), 'the peek counts them');
+        await sleep(300);
+        await page.screenshot({ path: join(out, 'proposals-phone-chips.png') });
+        shots.push('proposals-phone-chips.png');
+        await page.tap('[data-pchip][data-pcard="1"]');
+        await page.waitForSelector('.pcard.compact[data-pcard="1"]');
+        const said = await cardText(page, 1);
+        assert(said.includes('Move service') && said.includes('Fails a check') && said.includes('Keep') && said.includes('Discard'), `the card: ${said}`);
+        await frames(page);
+        await page.screenshot({ path: join(out, 'proposals-phone-card.png') });
+        shots.push('proposals-phone-card.png');
+        await page.tap('[data-pcard="1"] [data-pc="show"]');
+        await page.waitForSelector('[data-proposal="1"] [data-pv-summary]', { timeout: 30000 });
+        assert((await band(page)).includes('Proposed by Assistant'), 'the band says who');
+        await sleep(400);
+        await page.screenshot({ path: join(out, 'proposals-phone-opened.png') });
+        shots.push('proposals-phone-opened.png');
+        await page.tap('[data-pv="keep"]');
+        const kept = await grows(folder, 0, 'Keep on a phone');
+        assert(kept.proposal === 1 && kept.kept_by === 'drafter', `kept: ${JSON.stringify(kept)}`);
+        // The other, opened from the peek, discarded from its band.
+        await page.waitForFunction(() => document.querySelector('[data-act="proposals"]')?.textContent.includes('1 proposal on this sheet'), null, { timeout: 30000 });
+        await page.tap('[data-act="proposals"]');
+        await page.waitForSelector('[data-proposal="2"] [data-pv-summary]', { timeout: 30000 });
+        await page.tap('[data-pv="discard"]');
+        const gone = await grows(folder, 1, 'Discard on a phone');
+        assert(gone.kind === 'discard' && gone.proposal === 2, `discarded: ${JSON.stringify(gone)}`);
+        await page.waitForFunction(() => !document.querySelector('[data-act="proposals"]') && !document.querySelector('[data-pcard]'), null, { timeout: 30000 });
+        // The journal, raised: the kept proposal's entry and the discard's line.
+        const history = () => page.evaluate(() => document.querySelector('.cmd')?.textContent ?? '');
+        assert(!(await page.textContent('body')).includes('Showing entry'), `still live before the journal is raised: ${await history()}`);
+        // Dragged up, as a finger raises it: a tap's click would land on the
+        // list sliding up under it (a follow-up of its own).
+        const cdp = await context.newCDPSession(page);
+        const [gx, gy] = await page.evaluate(() => {
+          const r = document.querySelector('.va-grab').getBoundingClientRect();
+          return [r.left + r.width / 2, r.top + r.height / 2];
+        });
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: gx, y: gy }] });
+        for (let i = 1; i <= 10; i += 1) {
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: gx, y: gy - i * 30 }] });
+          await sleep(16);
+        }
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await page.waitForSelector(`.va-journal [data-entry="${gone.entry}"]`, { timeout: 30000 });
+        assert(!(await page.textContent('body')).includes('Showing entry'), `still live with the journal raised: ${await history()}`);
+        assert((await journalLine(page, kept.entry)).includes('proposed by Assistant · kept by you'), 'J1 on a phone');
+        assert((await journalLine(page, gone.entry)).includes('Discarded proposal 2'), 'the discard on a phone');
+        await sleep(500);
+        await page.screenshot({ path: join(out, 'proposals-phone-journal.png') });
+        shots.push('proposals-phone-journal.png');
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+        await server.stop();
+      }
+      return { screenshots: shots };
+    } finally {
+      await b.close();
+    }
+  },
   async look() {
     const server = await serve('127.0.0.1:0');
     const b = await browser();

@@ -84,6 +84,9 @@ pub enum EntryKind {
     /// The reviewer's accept, or an agent's on their behalf: every change
     /// set still in place is issued, and can no longer be undone.
     Accept,
+    /// A proposal discarded: it ended without landing, and changed no file
+    /// of the set. Nothing undoes it, and an undo passes over it.
+    Discard,
 }
 
 /// Where the commit of a change set, an undo or an accept, written ahead of
@@ -189,6 +192,19 @@ pub struct Entry {
     /// the set's folder, and the SHA-256 of its bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revision: Vec<FileIssued>,
+    /// The proposal a change set or a failed attempt kept, or a discard
+    /// discarded, by its number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<u64>,
+    /// Who proposed it, as the proposal records them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<String>,
+    /// Who kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_by: Option<String>,
+    /// Who discarded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discarded_by: Option<String>,
     /// How it was rolled back, when it was: read from the line that marks
     /// it so, not from its own.
     #[serde(skip)]
@@ -217,7 +233,24 @@ impl Entry {
             issued: Vec::new(),
             failed_checks: Vec::new(),
             revision: Vec::new(),
+            proposal: None,
+            proposed_by: None,
+            kept_by: None,
+            discarded_by: None,
             rolled_back: None,
+        }
+    }
+
+    /// The entry as one that keeps the proposal `keeping` names, if any.
+    fn keeping(self, keeping: Option<&Keeping>) -> Self {
+        match keeping {
+            Some(k) => Self {
+                proposal: Some(k.proposal),
+                proposed_by: Some(k.proposed_by.clone()),
+                kept_by: Some(k.kept_by.clone()),
+                ..self
+            },
+            None => self,
         }
     }
 
@@ -401,11 +434,20 @@ fn read_journal(folder: &Path) -> Result<JournalReport, Error> {
         "the journal is empty: no change set has been applied to the set".to_owned()
     } else {
         let undos = counted(count(EntryKind::Undo), "undo");
+        let mut more = Vec::new();
         let accepts = count(EntryKind::Accept);
-        let rest = if accepts == 0 {
-            format!(" and {undos}")
-        } else {
-            format!(", {undos} and {}", counted(accepts, "accept"))
+        if accepts > 0 {
+            more.push(counted(accepts, "accept"));
+        }
+        let discards = count(EntryKind::Discard);
+        if discards > 0 {
+            more.push(counted(discards, "discarded proposal"));
+        }
+        let rest = match more.as_slice() {
+            [] => format!(" and {undos}"),
+            [one] => format!(", {undos} and {one}"),
+            [one, two] => format!(", {undos}, {one} and {two}"),
+            _ => unreachable!("two kinds at most"),
         };
         let mut rolled = match rolled_back.as_slice() {
             [] => String::new(),
@@ -834,6 +876,43 @@ fn next_number(entries: &[Entry]) -> u64 {
     entries.iter().map(|e| e.entry).max().unwrap_or(0) + 1
 }
 
+/// The proposal a change set keeps, for its entry: its number, who
+/// proposed it and who keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Keeping {
+    pub proposal: u64,
+    pub proposed_by: String,
+    pub kept_by: String,
+}
+
+/// Adds a proposal's discard to the journal, while the caller holds the
+/// journal lock, `_locked`, and gives its entry's number. It writes no file
+/// of the set, so it is written whole, as a failed attempt is.
+pub(super) fn commit_discard(
+    folder: &Path,
+    _locked: &File,
+    proposal: u64,
+    proposed_by: &str,
+    discarded_by: &str,
+) -> Result<u64, Error> {
+    let (text, entries) = read_text(folder)?.unzip();
+    let entries = entries.unwrap_or_default();
+    if let Some(entry) = pending(&entries) {
+        return Err(left_pending(entry));
+    }
+    super::proposals::refuse_ended(&entries, proposal)?;
+    let number = next_number(&entries);
+    let entry = Entry {
+        proposal: Some(proposal),
+        proposed_by: Some(proposed_by.to_owned()),
+        discarded_by: Some(discarded_by.to_owned()),
+        ..Entry::new(number, EntryKind::Discard)
+    };
+    let line = line_of(text.as_deref(), &entry);
+    add_line(&folder.join(JOURNAL_FILE), &line, "a proposal's discard")?;
+    Ok(number)
+}
+
 /// What a change set did to its sheets, for its entry.
 #[derive(Clone)]
 pub(super) struct Landing {
@@ -852,12 +931,18 @@ pub(super) fn commit_change_set(
     change_set: &Value,
     landing: Landing,
     replacements: Vec<Replacement>,
+    keeping: Option<&Keeping>,
 ) -> Result<u64, Error> {
     let _lock = lock(folder)?;
     let (text, entries_before) = read_text(folder)?.unzip();
     let entries_before = entries_before.unwrap_or_default();
     if let Some(entry) = pending(&entries_before) {
         return Err(left_pending(entry));
+    }
+    // A proposal ended while it was being applied, by another process,
+    // is not kept twice.
+    if let Some(keeping) = keeping {
+        super::proposals::refuse_ended(&entries_before, keeping.proposal)?;
     }
     let number = next_number(&entries_before);
 
@@ -921,7 +1006,7 @@ pub(super) fn commit_change_set(
         folders_made,
         pruned,
         objects: landing.objects,
-        ..Entry::new(number, EntryKind::ChangeSet)
+        ..Entry::new(number, EntryKind::ChangeSet).keeping(keeping)
     };
     let written = Written {
         text: text.as_deref(),
@@ -989,8 +1074,13 @@ pub(super) fn record_failed_attempt(
     request: &ChangeRequest,
     outcome: &mut Result<ChangeReport, Error>,
     attempted: Option<Landing>,
+    keeping: Option<&Keeping>,
 ) {
     if request.dry_run {
+        return;
+    }
+    // A keep of a proposal that has ended was refused before it was tried.
+    if matches!(outcome, Err(e) if e.code == ErrorCode::ProposalEnded) {
         return;
     }
     let folder = &request.set;
@@ -1057,7 +1147,7 @@ pub(super) fn record_failed_attempt(
         landed_on: landing.landed_on,
         failed_on: landing.failed_on,
         error,
-        ..Entry::new(number, EntryKind::FailedAttempt)
+        ..Entry::new(number, EntryKind::FailedAttempt).keeping(keeping)
     };
     let line = line_of(text.as_deref(), &entry);
     if add_line(&folder.join(JOURNAL_FILE), &line, "a failed attempt").is_ok() {

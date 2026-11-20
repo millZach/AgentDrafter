@@ -16,7 +16,7 @@
 // this component shows what the renderer says at the cursor and the text a
 // Text tool is typing where it will go.
 
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 
 import { freeBeside, newlyHidden, placeBeside, secondTap, snapTag, type Box, type Hovered, type Named, type Tapped, type ToolState } from './frame.ts';
 
@@ -38,6 +38,7 @@ import {
   type View,
 } from './view.ts';
 import { installProbe, type Draw, type Summary } from './probe.ts';
+import { placeCards } from './proposals.ts';
 
 /** An object a halo marks: its place in the sheet's objects, and whether it was added. */
 export interface Mark {
@@ -68,6 +69,18 @@ export interface PreviewTag {
   at: [number, number, number, number] | null;
 }
 
+/**
+ * A proposal waiting on the sheet shown (#155), drawn dashed over it: the
+ * text of `display-list`'s reply with its change set, and whether the set
+ * would refuse it now, which draws it fainter. A new `key` loads it again.
+ */
+export interface GhostSpec {
+  proposal: number;
+  reply: string;
+  refused: boolean;
+  key: string;
+}
+
 export interface DrawingProps {
   /** The text of the `display-list` reply to draw; null before one comes. */
   reply: string | null;
@@ -93,6 +106,15 @@ export interface DrawingProps {
   focus: Focus | null;
   /** A preview's words over the drawing, which follow it as the view moves. */
   previewTags?: PreviewTag[];
+  /** The proposals waiting on the sheet shown, drawn dashed over it (#155). */
+  ghosts?: GhostSpec[];
+  /**
+   * Their cards, each an element with `data-pcard` holding its proposal's
+   * number: placed at each draw beside what it marks, with a leader to it.
+   */
+  cards?: ReactNode;
+  /** Changes when the cards do, to place them again. */
+  cardsKey?: string;
   /** A sheet was drawn: what it is, and the text the renderer loaded, which a restored context loads again. */
   onLoaded(summary: Summary, text: string): void;
   /** A sheet could not be drawn. */
@@ -205,6 +227,9 @@ export function Drawing({
   editor,
   onOpen,
   previewTags = [],
+  ghosts = [],
+  cards = null,
+  cardsKey = '',
 }: DrawingProps) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -271,6 +296,68 @@ export function Drawing({
   const typed = useRef<HTMLDivElement>(null);
   // The preview focus last come to, and the view it came to.
   const lastPreviewFocus = useRef<{ focus: Focus; at: number } | null>(null);
+  // The proposals waiting, drawn by the renderer, and their cards, placed
+  // at each draw with a leader to what each marks.
+  const ghostsNow = useRef<GhostSpec[]>(ghosts);
+  ghostsNow.current = ghosts;
+  const pcards = useRef<HTMLDivElement>(null);
+  const leaders = useRef<SVGSVGElement>(null);
+  const loadGhosts = () => {
+    const v = viewer.current;
+    if (!v) return;
+    v.clear_ghosts();
+    for (const g of ghostsNow.current) {
+      try {
+        v.add_ghost(g.proposal, g.reply, g.refused);
+      } catch {
+        // A reply the renderer cannot read draws no ghost; its card still says why.
+      }
+    }
+  };
+  const placeProposalCards = () => {
+    const holder = pcards.current;
+    const lines = leaders.current;
+    const c = canvas.current;
+    const v = viewer.current;
+    if (!holder || !lines || !c || !v) return;
+    const els = [...holder.querySelectorAll<HTMLElement>(':scope > [data-pcard]')];
+    if (!els.length) {
+      if (lines.childElementCount) lines.replaceChildren();
+      return;
+    }
+    const width = c.clientWidth;
+    const height = c.clientHeight - covered.current;
+    const boxes = els.map((el) => {
+      const e = v.ghost_extent(Number(el.dataset.pcard));
+      if (e.length !== 4) return null;
+      const [l, t] = toScreen(view.current, e[0] as number, e[3] as number);
+      const [r, b] = toScreen(view.current, e[2] as number, e[1] as number);
+      return [l, t, r, b] as [number, number, number, number];
+    });
+    // One whose change is not drawn here, as one the set refuses whole,
+    // goes at the drawing's top right.
+    const placed = placeCards(
+      els.map((el, i) => ({ w: el.offsetWidth, h: el.offsetHeight, box: boxes[i] ?? [width - 24, 40, width - 24, 40] })),
+      width,
+      height,
+    );
+    const drawn: SVGLineElement[] = [];
+    els.forEach((el, i) => {
+      const p = placed[i];
+      if (!p) return;
+      el.style.transform = `translate(${p.x}px, ${p.y}px)`;
+      if (!boxes[i]) return;
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      const [x1, y1, x2, y2] = p.leader;
+      line.setAttribute('x1', String(x1));
+      line.setAttribute('y1', String(y1));
+      line.setAttribute('x2', String(x2));
+      line.setAttribute('y2', String(y2));
+      line.dataset.leader = el.dataset.pcard;
+      drawn.push(line);
+    });
+    lines.replaceChildren(...drawn);
+  };
   // A preview's words, placed at each draw.
   const pvTags = useRef<HTMLDivElement>(null);
   const pvTagsNow = useRef<PreviewTag[]>(previewTags);
@@ -471,6 +558,7 @@ export function Drawing({
     placeEditor();
     placeToolWords();
     placePreviewTags();
+    placeProposalCards();
     const at = pointer.current;
     if (held.current) return;
     const h = hovered.current;
@@ -951,6 +1039,7 @@ export function Drawing({
     const lost = (e: Event) => e.preventDefault();
     const restored = () => {
       if (start() && loadedReply.current) load(loadedReply.current);
+      loadGhosts();
       redraw();
     };
     c.addEventListener('webglcontextlost', lost);
@@ -1121,6 +1210,20 @@ export function Drawing({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pulseSince]);
 
+  // The proposals waiting change as they are made, kept and discarded, and
+  // as the set changes under them: loaded again and drawn; their cards,
+  // placed on the next frame.
+  const ghostsKey = ghosts.map((g) => g.key).join('|');
+  useEffect(() => {
+    loadGhosts();
+    redraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ghostsKey]);
+  useEffect(() => {
+    redraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cardsKey]);
+
   // A preview's words change with the sheet it shows: placed on the next frame.
   const tagsKey = JSON.stringify(previewTags);
   useEffect(() => {
@@ -1157,6 +1260,10 @@ export function Drawing({
       <div className="dyn" ref={dyn} aria-hidden="true" data-dyn />
       <div className="typed" ref={typed} aria-hidden="true" data-typed />
       <div className="pvtags" ref={pvTags} data-pvtags />
+      <svg className="pleaders" ref={leaders} aria-hidden="true" data-pleaders />
+      <div className="pcards" ref={pcards} data-pcards>
+        {cards}
+      </div>
       <div className="zoombtns">
         {!compact && (
           <>

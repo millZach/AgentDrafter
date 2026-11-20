@@ -13,9 +13,10 @@ demo-set/
     journal.lock           held, by the process adding to the journal, while it does; it holds nothing
     undo-states/           the bytes each file had before a change set wrote it, named by their SHA-256
     inconsistent.yaml      the inconsistent mark, while the set is marked
+    proposals/             the proposals, one file each, <number>.json, and the lock a proposal is numbered under
 ```
 
-The journal sits beside the [inconsistent mark](change-sets.md#an-inconsistent-set). Once a set has a journal, the `.agentdrafter` folder stays when the mark is taken away.
+The journal sits beside the [inconsistent mark](change-sets.md#an-inconsistent-set) and the [proposals](change-sets.md#proposals) waiting. Once a set has a journal, the `.agentdrafter` folder stays when the mark is taken away.
 
 ## What it records
 
@@ -31,7 +32,7 @@ A change set's entry, an undo's and an accept's are **written ahead** of their f
 | Key | What it is |
 |---|---|
 | `entry` | The entry's number; on a line that marks an entry, the entry it marks. |
-| `kind` | `change_set`, `failed_attempt`, `undo` or `accept`. A line that marks an entry has none. |
+| `kind` | `change_set`, `failed_attempt`, `undo`, `accept` or `discard`. A line that marks an entry has none. |
 | `state` | Where the commit of a change set, an undo or an accept got to: `pending` on the entry's own line, and `done` or `rolled_back` on the line that marks it. `agentdrafter journal` gives each entry the state it came to. An entry written before entries were written ahead has none: it was written once its files were in place. |
 | `at` | When it was added, in UTC. |
 | `change_set` | The change set as it was sent, with its operations and its `fixes`. |
@@ -47,6 +48,8 @@ A change set's entry, an undo's and an accept's are **written ahead** of their f
 | `issued` | The change sets an accept issued. |
 | `failed_checks` | The failed checks an accept was told to accept despite: each one's sheet, rule, object's ID and message. |
 | `revision` | Each file of the set as an accept issued it: its path, relative to the set's folder, and the SHA-256 of its bytes. |
+| `proposal` | The [proposal](change-sets.md#proposals) a change set kept, a failed attempt tried to keep, or a discard discarded, by its number. |
+| `proposed_by`, `kept_by`, `discarded_by` | Who proposed it, who kept it, or tried to, and who discarded it, as `by` gave each, or the interface it came through. |
 | `files`, on a line that marks an entry `rolled_back` | Each file the rollback put back: its SHA-256 as the rollback found it, `before`, and as it put it back, `after`. |
 
 Keys with nothing to say are left out.
@@ -56,6 +59,8 @@ Keys with nothing to say are left out.
 - **A dry run** changes nothing on disk, the journal included, so it is not recorded.
 - **An undo** is recorded with the change sets it undid and the files it put back. The bytes it replaces are saved as undo states first, as a change set's are, so that an undo that never finished can be rolled back; once it is done they are pruned.
 - **An accept** is recorded with the interface it came through, the change sets it issued and the files it issued. It writes no file of the set.
+- **A proposal kept** is recorded as the change set it lands as, with `proposal`, `proposed_by` and `kept_by`: one entry, undone and accepted as any change set (Zach's decision of 2026-11-19, J1, from a prototype card). One the set refused, on any sheet it reaches, is a failed attempt with the same keys that landed nothing, and the proposal goes on waiting; the viewer reads it as an attempt, `keep attempted by you · refused`.
+- **A discard** ends a proposal without landing, and is written whole, with no state, as a failed attempt is: `{"entry":8,"kind":"discard","at":"…","proposal":3,"proposed_by":"agent (HTTP API)","discarded_by":"drafter"}`. It writes no file of the set, so nothing undoes it and an undo passes over it (J1). The viewer reads it `Discarded proposal 3 · by you`.
 - **An entry rolled back** changed nothing: a rolled-back change set is not in place and cannot be undone, a rolled-back undo undid nothing, and a rolled-back accept issued nothing.
 
 `agentdrafter journal` reads the journal back with what has become of each change set since: `undo_state` is `kept`, `pruned` or `undone`, with `undone_by` or `pruned_by` naming the entry that did it, and `issued_by` names the accept that issued it. `state` is the state each entry's commit came to, and an entry rolled back has `rolled_back`, with when (`at`) and the `files` it put back. `can_undo` lists the change sets an undo can take now: those that landed, keep their undo state and are not issued.
@@ -103,7 +108,7 @@ A commit that fails while its process runs on, such as on a full disk, puts ever
 
 ## Undo
 
-**Undo is a stack** (Zach's decision on [#16](https://github.com/millZach/AgentDrafter/issues/16)). Undoing a change set undoes every later change set still in place too, the newest first; there is no undo of one change set out of order. Each file goes back to how it was before the oldest of them that wrote it, byte for byte: records, each of the set's [rows files](drawing-set.md#several-rows-files) a change set wrote among them, DWGs, the inconsistent mark, and a file a change set made is taken away, with each folder it made once that folder is empty. The files are put back through the same all-or-nothing step a change set lands through, with the undo's entry in the journal.
+**Undo is a stack** (Zach's decision on [#16](https://github.com/millZach/AgentDrafter/issues/16)). Undoing a change set undoes every later change set still in place too, the newest first; there is no undo of one change set out of order. A discard between them changed no file, and is passed over; it is not undone itself (`bad_value`), and undoing the change set that kept a proposal does not bring the proposal back. Each file goes back to how it was before the oldest of them that wrote it, byte for byte: records, each of the set's [rows files](drawing-set.md#several-rows-files) a change set wrote among them, DWGs, the inconsistent mark, and a file a change set made is taken away, with each folder it made once that folder is empty. The files are put back through the same all-or-nothing step a change set lands through, with the undo's entry in the journal.
 
 ```json
 {"ok":true,"result":{"set":"demo-set","dry_run":false,"journal_entry":3,"message":"undid change sets 2 and 1, the newest first, since an undo takes every later change set too: 6 files put back as they were before change set 1, byte for byte","undid":[2,1],"files":[{"file":"demo-set/templates/ansi-b.yaml","action":"restored"},"...",{"file":"demo-set/.agentdrafter/inconsistent.yaml","action":"removed"}],"folders_removed":[]}}
@@ -180,7 +185,7 @@ An entry cannot be shown once the bytes it needs are gone: when the undo state o
 | Code | In the journal and undo it means |
 |---|---|
 | `unknown_name` | The journal has no entry of that number. The message lists the change sets an undo can take. |
-| `bad_value` | The entry is a failed attempt, an undo or an accept, or was rolled back, or the change set was undone already. |
+| `bad_value` | The entry is a failed attempt, an undo, an accept or a discard, or was rolled back, or the change set was undone already. |
 | `issued` | A change set the undo would take was issued by an accept. |
 | `pruned` | A change set the undo needs has had its undo state pruned; or, drawing the set as it was at an entry, a file it needs is no longer kept. |
 | `changed_by_hand` | A file the undo would put back was changed since the change sets left it; or, for any command on the set, a file the rollback of an entry left pending would put back was changed since its commit stopped. |

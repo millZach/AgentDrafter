@@ -37,6 +37,7 @@ mod from_dimension;
 mod history;
 mod journal;
 mod operations;
+mod proposals;
 mod recover;
 mod undo;
 
@@ -67,8 +68,14 @@ pub use journal::{
     JournalEntry, JournalReport, JournalRequest, ObjectChanged, Refusal, RollBack, SheetFailed,
     UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, LOCK_FILE, UNDO_STATES_FOLDER,
 };
+pub use proposals::{
+    discard, keep_with, proposals, propose_with, DiscardReport, DiscardRequest, KeepReport,
+    KeepRequest, ProposalListed, ProposalsReport, ProposalsRequest, ProposeReport, ProposeRequest,
+    DRAFTER, PROPOSALS_FOLDER,
+};
+pub(crate) use proposals::{BY_LONGEST, BY_PATTERN};
 pub use recover::RolledBack;
-pub(crate) use recover::{recover, refuse_unfinished};
+pub(crate) use recover::{recover, refuse_unfinished, Unfinished};
 pub use undo::{undo, FileUndone, UndoAction, UndoReport, UndoRequest};
 
 /// The file, relative to a drawing set's folder, that marks the set
@@ -334,9 +341,27 @@ pub fn change_with(request: &ChangeRequest, settings: &Settings) -> Reply<Change
 }
 
 fn change_set(request: &ChangeRequest, settings: &Settings) -> Reply<ChangeReport> {
+    land(request, settings, None)
+}
+
+/// Applies a change set, as `change` does, keeping the proposal `keeping`
+/// names, if any: its entry in the journal records the proposal's number,
+/// who proposed it and who kept it, as a failed attempt's does.
+fn land(
+    request: &ChangeRequest,
+    settings: &Settings,
+    keeping: Option<&journal::Keeping>,
+) -> Reply<ChangeReport> {
     let mut attempted = None;
-    let mut outcome = apply::apply(request, settings, &mut attempted, None);
-    journal::record_failed_attempt(request, &mut outcome, attempted);
+    let mut outcome = apply::apply(
+        request,
+        settings,
+        &mut attempted,
+        None,
+        keeping,
+        keeping.is_some(),
+    );
+    journal::record_failed_attempt(request, &mut outcome, attempted, keeping);
     // Once the change set and its journal entry are written, the checker
     // reads the sheets it landed on back from the saved files.
     if let Ok(report) = &mut outcome {
@@ -371,15 +396,16 @@ pub(crate) fn preview(
     set: &Path,
     change_set: &Value,
     settings: &Settings,
+    whole: bool,
 ) -> Result<Previewed, Error> {
-    refuse_unfinished(set)?;
+    refuse_unfinished(set, Unfinished::Preview)?;
     let request = ChangeRequest {
         set: set.to_owned(),
         change_set: change_set.clone(),
         dry_run: true,
     };
     let mut kept = apply::Kept::default();
-    let report = apply::apply(&request, settings, &mut None, Some(&mut kept))?;
+    let report = apply::apply(&request, settings, &mut None, Some(&mut kept), None, whole)?;
     Ok(Previewed {
         report,
         files: Arc::new(FilesAsOf::with_records(set, &kept.records)),

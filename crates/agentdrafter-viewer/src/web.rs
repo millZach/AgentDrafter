@@ -75,6 +75,7 @@ use agentdrafter_core::{
     object_bounds, outlines, pick, Bounds, Color, DisplayList, DisplaySnap, Outline, Shape,
 };
 
+use crate::ghosts::{self, Ghost};
 use crate::grid::{first_line, grid};
 use crate::mesh::{read_reply, screen_rgba, Kind, Mesh, Run, Span};
 use crate::overlay::{crosshair, marker, triangles, Segment};
@@ -456,6 +457,11 @@ pub struct Viewer {
     /// Where a held finger is, in drawing units, which a tool aims at on a
     /// phone, where there is no crosshair.
     tool_pointer: Option<[f64; 2]>,
+    /// The proposals waiting on the sheet shown, drawn dashed over it.
+    ghosts: Vec<Ghost>,
+    /// The sheet loaded and its layout, which a ghost is drawn over only
+    /// when it is its own.
+    shown: (String, Option<String>),
 }
 
 #[wasm_bindgen]
@@ -566,6 +572,8 @@ impl Viewer {
             tools: Tools::default(),
             layer_color: CROSSHAIR,
             tool_pointer: None,
+            ghosts: Vec::new(),
+            shown: (String::new(), None),
         })
     }
 
@@ -592,6 +600,7 @@ impl Viewer {
                 }
             }
         }
+        self.shown = (sheet.sheet.clone(), sheet.layout.clone());
         self.tools.load(Context {
             sheet: sheet.sheet.clone(),
             units: sheet.units.clone(),
@@ -814,6 +823,46 @@ impl Viewer {
             .unwrap_or_default()
     }
 
+    /// Draws proposal `proposal` waiting, dashed over the sheet shown, from
+    /// the text of `display-list`'s reply with its change set on that
+    /// sheet; fainter when `refused`, as the set would refuse it now. It
+    /// takes the place of one of the same number. Gives the box round what
+    /// it marks, `[left, bottom, right, top]` in drawing units, which its
+    /// card is put by; empty when it marks nothing there.
+    pub fn add_ghost(
+        &mut self,
+        proposal: u32,
+        reply: &str,
+        refused: bool,
+    ) -> Result<Vec<f64>, JsError> {
+        let ghost = Ghost::of(proposal, reply, refused).map_err(|m| JsError::new(&m))?;
+        let extent = ghost
+            .extent()
+            .map(|b| vec![b.min[0], b.min[1], b.max[0], b.max[1]])
+            .unwrap_or_default();
+        self.ghosts.retain(|g| g.proposal != proposal);
+        self.ghosts.push(ghost);
+        Ok(extent)
+    }
+
+    /// Draws none of the proposals waiting.
+    pub fn clear_ghosts(&mut self) {
+        self.ghosts.clear();
+    }
+
+    /// The box round what proposal `proposal` marks on the sheet shown,
+    /// `[left, bottom, right, top]` in drawing units; empty when it is not
+    /// drawn there, or marks nothing.
+    pub fn ghost_extent(&self, proposal: u32) -> Vec<f64> {
+        let (sheet, layout) = &self.shown;
+        self.ghosts
+            .iter()
+            .find(|g| g.proposal == proposal && g.on(sheet, layout.as_deref()))
+            .and_then(Ghost::extent)
+            .map(|b| vec![b.min[0], b.min[1], b.max[0], b.max[1]])
+            .unwrap_or_default()
+    }
+
     /// Draws as the PNG plots the sheet, white all round and each colour
     /// index in the colour it plots in, or, as the page shows it, as dark
     /// model space. A test draws as the PNG, to compare the canvas with one.
@@ -979,9 +1028,12 @@ impl Viewer {
         gl.disable(Gl::DEPTH_TEST);
         gl.bind_vertex_array(None);
 
-        // A preview's marks, over the ink, on screen.
+        // A preview's marks, over the ink, on screen; or, on the sheet as
+        // it is, the proposals waiting on it.
         if let (Some(preview), Look::Screen) = (&sheet.preview, self.look) {
             self.draw_preview(sheet, preview, &device, (pixels, ratio), size);
+        } else if self.look == Look::Screen && !self.ghosts.is_empty() {
+            self.draw_ghosts(sheet, &device, (pixels, ratio), size);
         }
 
         // The halos, over the ink, blended.
@@ -1438,6 +1490,78 @@ impl Viewer {
             .flat_map(|b| preview::cloud(corners(*b, 6.0 * ratio), 12.0 * ratio))
             .collect();
         self.lines(&clouds, 1.8 * ratio, preview::FAILS, size);
+        gl.disable(Gl::BLEND);
+    }
+
+    /// The proposals waiting on the sheet shown, over its ink: what each
+    /// would add and change in the proposal's colour at its pen's width,
+    /// strokes dashed and fills solid; a dashed box round each object; what
+    /// it would delete boxed and struck; and a guide where an object only
+    /// moves. One the set would refuse now is fainter.
+    fn draw_ghosts(
+        &self,
+        sheet: &Loaded,
+        device: &dyn Fn(f64, f64) -> (f64, f64),
+        (pixels, ratio): (f64, f64),
+        size: (f32, f32),
+    ) {
+        let gl = &self.gl;
+        gl.enable(Gl::BLEND);
+        gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
+        let seg = |[a, b]: preview::Line| -> Segment {
+            let (x0, y0) = device(a[0], a[1]);
+            let (x1, y1) = device(b[0], b[1]);
+            [x0, y0, x1, y1]
+        };
+        let corners = |bounds: Bounds, pad: f64| -> [f64; 4] {
+            let (l, t) = device(bounds.min[0], bounds.max[1]);
+            let (r, b) = device(bounds.max[0], bounds.min[1]);
+            [l - pad, t - pad, r + pad, b + pad]
+        };
+        let per_mm = pixels / sheet.millimetres_per_unit.max(f64::MIN_POSITIVE);
+        let (name, layout) = &self.shown;
+        for ghost in self.ghosts.iter().filter(|g| g.on(name, layout.as_deref())) {
+            let fade = if ghost.refused {
+                ghosts::REFUSED_ALPHA
+            } else {
+                1.0
+            };
+            let [r, g, b, a] = ghosts::PROPOSAL;
+            let color = [r, g, b, a * fade];
+            let [r, g, b, a] = ghosts::PROPOSAL_DIM;
+            let dim = [r, g, b, a * fade];
+            for run in &ghost.runs {
+                let lines: Vec<Segment> = run.lines.iter().copied().map(seg).collect();
+                let width = run.pen.map_or(0.0, |mm| mm * per_mm).max(1.4 * ratio);
+                if run.fill {
+                    self.lines(&lines, ratio.max(1.0), color, size);
+                } else {
+                    let dashed = ghosts::dash_run(&lines, 7.0 * ratio, 4.0 * ratio);
+                    self.lines(&dashed, width, color, size);
+                }
+            }
+            let dash = 4.0 * ratio;
+            let boxes: Vec<Segment> = ghost
+                .boxes
+                .iter()
+                .chain(&ghost.struck)
+                .flat_map(|b| preview::sides(corners(*b, 4.0 * ratio)))
+                .flat_map(|side| preview::dashed(side, dash, 0.75 * dash))
+                .collect();
+            self.lines(&boxes, ratio.max(1.0), dim, size);
+            let strikes: Vec<Segment> = ghost
+                .struck
+                .iter()
+                .flat_map(|b| preview::strike(corners(*b, 4.0 * ratio)))
+                .collect();
+            self.lines(&strikes, 1.4 * ratio, color, size);
+            let guides: Vec<Segment> = ghost
+                .moves
+                .iter()
+                .flat_map(|m| preview::dashed(seg(*m), 3.0 * ratio, 4.0 * ratio))
+                .collect();
+            self.lines(&guides, ratio.max(1.0), dim, size);
+        }
         gl.disable(Gl::BLEND);
     }
 

@@ -33,6 +33,7 @@ SHARED = json.loads(
 )
 JOURNAL_FILE = Path(".agentdrafter", "journal.jsonl")
 UNDO_STATES_FOLDER = Path(".agentdrafter", "undo-states")
+PROPOSALS_FOLDER = Path(".agentdrafter", "proposals")
 
 
 def installed_command():
@@ -68,7 +69,9 @@ def interface_folder(scratch, interface):
 
 def snapshot(set_folder):
     """Every file and folder of the set, each file with its bytes, but the
-    journal's own, which is compared entry by entry."""
+    journal's own, which is compared entry by entry, and each proposal's
+    record, compared without the time it was proposed, its top-level `at`,
+    as a journal entry is."""
     found = {}
     for path in set_folder.rglob("*"):
         relative = path.relative_to(set_folder)
@@ -77,6 +80,10 @@ def snapshot(set_folder):
         if path.is_dir():
             if relative != JOURNAL_FILE.parent:
                 found[relative] = None
+        elif relative.is_relative_to(PROPOSALS_FOLDER) and relative.suffix == ".json":
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record.pop("at")
+            found[relative] = record
         else:
             found[relative] = path.read_bytes()
     return found
@@ -262,14 +269,24 @@ class Interfaces(unittest.TestCase):
         )
 
         # Each command, run through each interface, gives the same reply; then
-        # the further calls of a command whose kinds one call cannot cover.
+        # the further calls of a command whose kinds one call cannot cover,
+        # each straight after the command it names under "after", if any.
         calls = SHARED["calls"]
         runs = []
+
+        def then(after):
+            runs.extend(
+                (call["command"], call["args"], call["input"])
+                for call in SHARED["also"]
+                if call.get("after") == after
+            )
+
         for command in registry:
             name = command["name"]
             self.assertIn(name, calls, f"`{name}` is in the registry: add a call of it to calls.json")
             runs.append((name, calls[name]["args"], calls[name]["input"]))
-        runs.extend((call["command"], call["args"], call["input"]) for call in SHARED["also"])
+            then(name)
+        then(None)
         for name, args, input in runs:
             by_library = library(name, input, self.folders["library"])
             code, by_cli = cli(args, self.folders["cli"])

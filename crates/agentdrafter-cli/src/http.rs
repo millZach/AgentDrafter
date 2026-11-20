@@ -17,7 +17,9 @@
 //!   the set, `{"set": "..."}`, and the response is a stream of
 //!   Server-Sent Events that stays open, each event the `journal`
 //!   command's reply, sent when the stream opens and again each time the
-//!   set's journal changes on disk, whichever process changed it. Every
+//!   set's journal changes on disk, whichever process changed it, or the
+//!   `proposals` command's, sent when the stream opens and again each time
+//!   a proposal is made, kept or discarded. Every
 //!   change set and undo, and every accept, adds to the journal, so a
 //!   change set an agent sends from another process, through any
 //!   interface, reaches an open viewer without a reload. It is a POST with
@@ -68,6 +70,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use agentdrafter_core::{
     commands, find_command, Error, ErrorCode, Interface, Reply, Settings, JOURNAL_FILE,
+    PROPOSALS_FOLDER,
 };
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
@@ -441,25 +444,42 @@ fn stream_journal(
                 X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
     Deadline::after(limit).write(stream, head.as_bytes())?;
     let journal = find_command("journal").expect("the registry holds `journal`");
-    let mut seen: Option<Option<(u64, SystemTime)>> = None;
-    let mut sent: Option<String> = None;
+    let proposals = find_command("proposals").expect("the registry holds `proposals`");
+    type Seen = (Option<(u64, SystemTime)>, Vec<String>);
+    let mut seen: Option<Seen> = None;
+    let (mut sent, mut sent_proposals): (Option<String>, Option<String>) = (None, None);
     let mut said = Instant::now();
     loop {
-        let now = journal_state(set);
-        if seen != Some(now) {
+        // A proposal adds a file beside the journal; a keep or a discard
+        // adds to the journal, which ends it.
+        let now = (journal_state(set), proposals_state(set));
+        if seen.as_ref() != Some(&now) {
+            let journal_moved = seen.as_ref().is_none_or(|s| s.0 != now.0);
             seen = Some(now);
-            let reply = journal.run(serde_json::json!({ "set": set }), settings, Interface::Http);
-            // A reply holds only strings, numbers, lists and string-keyed
-            // maps, which always serialize, and JSON escapes every line
-            // break, so it is one line of data.
+            let input = serde_json::json!({ "set": set });
+            if journal_moved {
+                let reply = journal.run(input.clone(), settings, Interface::Http);
+                // A reply holds only strings, numbers, lists and
+                // string-keyed maps, which always serialize, and JSON
+                // escapes every line break, so it is one line of data.
+                let data = serde_json::to_string(&reply).expect("a reply serializes to JSON");
+                // A change set's entry is written pending and then marked
+                // done: a look between the two waits for the commit, and its
+                // reply already holds the entry done, so the second says
+                // nothing new.
+                if sent.as_ref() != Some(&data) {
+                    let event = format!("event: journal\ndata: {data}\n\n");
+                    Deadline::after(limit).write(stream, event.as_bytes())?;
+                    sent = Some(data);
+                    said = Instant::now();
+                }
+            }
+            let reply = proposals.run(input, settings, Interface::Http);
             let data = serde_json::to_string(&reply).expect("a reply serializes to JSON");
-            // A change set's entry is written pending and then marked done:
-            // a look between the two waits for the commit, and its reply
-            // already holds the entry done, so the second says nothing new.
-            if sent.as_ref() != Some(&data) {
-                let event = format!("event: journal\ndata: {data}\n\n");
+            if sent_proposals.as_ref() != Some(&data) {
+                let event = format!("event: proposals\ndata: {data}\n\n");
                 Deadline::after(limit).write(stream, event.as_bytes())?;
-                sent = Some(data);
+                sent_proposals = Some(data);
                 said = Instant::now();
             }
         } else if said.elapsed() >= KEEP_ALIVE {
@@ -471,6 +491,21 @@ fn stream_journal(
         }
         std::thread::sleep(WATCH_EVERY);
     }
+}
+
+/// The files of the set's proposals, which change when one is proposed;
+/// none when it has none.
+fn proposals_state(set: &Path) -> Vec<String> {
+    let Ok(listing) = fs::read_dir(set.join(PROPOSALS_FOLDER)) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = listing
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".json"))
+        .collect();
+    names.sort();
+    names
 }
 
 /// The journal's length and when it was last written, which change when an
@@ -1424,7 +1459,8 @@ mod tests {
         // No drawing logic lives in a server (ADR-0007): all it takes from
         // the core is the registry, the reply and its error, the settings
         // and the interface it hands on, and, for the HTTP API's event
-        // stream, where a set keeps its journal, which it watches.
+        // stream, where a set keeps its journal and its proposals, which it
+        // watches.
         // The crate's name, written so that this test's own lines do not
         // hold it.
         let core = concat!("agentdrafter", "_core");
@@ -1452,7 +1488,8 @@ mod tests {
                         "Interface",
                         "Reply",
                         "Settings",
-                        "JOURNAL_FILE"
+                        "JOURNAL_FILE",
+                        "PROPOSALS_FOLDER"
                     ]
                     .contains(&item),
                     "a server uses `{item}` from the core"

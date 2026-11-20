@@ -24,7 +24,7 @@ use serde_json::Value;
 
 use super::commit::Replacement;
 use super::from_dimension::dimension_from;
-use super::journal::{commit_change_set, HowChanged, Landing, ObjectChanged, SheetFailed};
+use super::journal::{commit_change_set, HowChanged, Keeping, Landing, ObjectChanged, SheetFailed};
 use super::operations::{
     op_error, read_change_set, AddTo, BlockOp, Body, FromOp, Import, Kind, Motion, OpPoint,
     Operation, PointSnap, Table, TableOp, Target, ROW_VALUE_KEY,
@@ -551,6 +551,8 @@ pub(super) fn apply(
     settings: &Settings,
     attempted: &mut Option<Landing>,
     kept: Option<&mut Kept>,
+    keeping: Option<&Keeping>,
+    whole: bool,
 ) -> Result<ChangeReport, Error> {
     let files = SetFiles::load(&request.set)?;
     let change_set = read_change_set(&request.change_set, files.units)?;
@@ -567,7 +569,7 @@ pub(super) fn apply(
     let mut failed: BTreeMap<usize, Error> = BTreeMap::new();
     let mut notices: BTreeMap<usize, Vec<Notice>> = BTreeMap::new();
     let mut touched: BTreeSet<usize> = fixes.iter().copied().collect();
-    let (attempt, prepared) = loop {
+    let (attempt, mut prepared) = loop {
         let mut at = Attempt::new(&files)?;
         for op in ops.iter().filter(|op| included[op.index]) {
             let applied = apply_op(&mut at, op, settings);
@@ -652,11 +654,48 @@ pub(super) fn apply(
     };
 
     touched.extend(failed.keys());
-    let landed: Vec<usize> = touched
+    let mut landed: Vec<usize> = touched
         .iter()
         .copied()
         .filter(|k| !failed.contains_key(k))
         .collect();
+    // A proposal is kept whole or not at all (`whole`): when any sheet it
+    // reaches would refuse it, the others are left as they are too, held
+    // back, nothing lands and no operation does, and a keep is recorded as
+    // a failed attempt. Its dry run, and its preview, say so beforehand.
+    if whole && !failed.is_empty() && !landed.is_empty() {
+        let refusing: Vec<String> = failed
+            .keys()
+            .map(|&k| format!("`{}`", files.name(k)))
+            .collect();
+        let why = match refusing.as_slice() {
+            [one] => format!("{one} would refuse it"),
+            [rest @ .., last] => format!("{} and {last} would refuse it", rest.join(", ")),
+            [] => unreachable!("a sheet refuses it"),
+        };
+        let held = format!(
+            "left as it was: a proposal is kept on every sheet it reaches or on none, and {why}"
+        );
+        for k in landed.drain(..) {
+            // Held back: nothing of it is built or written.
+            prepared.remove(&k);
+            failed.insert(k, Error::new(ErrorCode::SharedEditFailed, held.clone()));
+        }
+        // And no operation lands: each that would have is held back too.
+        for op in ops {
+            if !std::mem::replace(&mut included[op.index], false) {
+                continue;
+            }
+            done[op.index] = None;
+            op_errors[op.index] = Some(op_error(
+                op.index,
+                op.spec.name,
+                ErrorCode::SharedEditFailed,
+                held.clone(),
+                "",
+            ));
+        }
+    }
 
     // What would be written.
     let mut records: Vec<(PathBuf, String)> = Vec::new();
@@ -774,6 +813,7 @@ pub(super) fn apply(
             &request.change_set,
             landing,
             replacements,
+            keeping,
         )?);
     }
 

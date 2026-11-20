@@ -190,6 +190,8 @@ export interface PromptState {
   touch?: boolean;
   /** Whether a change set is shown before it lands, which the band above the bar holds. */
   previewing?: boolean;
+  /** Whether what is shown before it lands is a proposal opened, which Esc closes and leaves waiting (#155). */
+  proposal?: boolean;
   /** A text whose contents are being edited on the drawing, or in a phone's box. */
   editing?: Named | null;
 }
@@ -213,14 +215,15 @@ const options = (...acts: [string, Act][]): Part[] => [
 /** What the command bar says now: the tool running's prompt, or the frame's. */
 export function promptFor(s: PromptState): Prompt {
   if (s.previewing) {
-    // The band above says what would happen; the bar says how to step.
+    // The band above says what would happen; the bar says how to step. A
+    // proposal opened is closed, not cancelled: it keeps waiting.
     return {
-      command: 'PREVIEW',
+      command: s.proposal ? 'PROPOSAL' : 'PREVIEW',
       parts: [
         {
           text: s.touch
             ? 'Nothing has landed. ◀ ▶ or the tabs show each sheet'
-            : 'Nothing has landed yet. ◀ ▶, the arrow keys or the tabs show each sheet; Esc cancels',
+            : `Nothing has landed yet. ◀ ▶, the arrow keys or the tabs show each sheet; ${s.proposal ? 'Esc closes it, and it keeps waiting' : 'Esc cancels'}`,
         },
       ],
     };
@@ -564,10 +567,18 @@ export function checkAgainOffered(p: PreviewReport): boolean {
   return p.change.sheets.some((s) => !s.ok && s.error?.code === 'write_failed');
 }
 
-/** The band's heading: its chip, the edit, and its reach. */
-export function previewTitle(edit: TemplateEdit): { chip: string; title: string; reach: string } {
+/** The band's heading: its chip, the edit, and its reach; for a proposal opened (#155), its number. */
+export function previewTitle(edit: TemplateEdit, proposal?: number): { chip: string; title: string; reach: string } {
   const n = edit.sheets.length;
+  if (proposal !== undefined) return { chip: `Proposal ${proposal}`, title: edit.edit, reach: n > 1 ? `on ${n} sheets` : `on ${edit.sheets[0] ?? 'its sheet'}` };
   return { chip: 'Preview', title: edit.edit, reach: n > 1 ? `on ${n} sheets` : 'on its one sheet' };
+}
+
+/** A proposal's band's Keep: Keep, or Nothing can land while any sheet would refuse it, since a keep lands on all of them or none. */
+export function keepButton(p: PreviewReport): { label: string; disabled: boolean } {
+  // A proposal is kept on every sheet it reaches or on none (#155).
+  if (p.change.failed) return { label: 'Nothing can land', disabled: true };
+  return { label: 'Keep', disabled: false };
 }
 
 /** The sheet `by` steps on from `sheet` among `sheets`, round from the last to the first. */
@@ -629,6 +640,16 @@ export function previewRedrawnOn(previewing: boolean, firstSnapshot: boolean): b
  */
 export function reportGeneration(reply: { preview: boolean; text: string; generation: string } | null, loadedText: string | null, had: string): string {
   return reply?.preview && loadedText !== null && reply.text === loadedText ? reply.generation : had;
+}
+
+/**
+ * Whether the drawing shown is the one asked for with the preview keyed
+ * `key`, loaded by the renderer: its reply was asked for with that key, and
+ * its text is the one loaded. Until it is, a proposal opened after another
+ * says nothing of what it would do, and its Keep stays off.
+ */
+export function drawnFor(key: number, reply: { pvKey: number | null; text: string } | null, loadedText: string | null): boolean {
+  return !!reply && reply.pvKey === key && loadedText !== null && reply.text === loadedText;
 }
 
 /**

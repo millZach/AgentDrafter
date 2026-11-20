@@ -322,7 +322,17 @@ fn changed_since(folder: &Path, entry: &Entry) -> Result<Vec<String>, Error> {
 /// the set in `folder` holds an entry a commit has not finished, or a last
 /// line written in part, since rolling either back writes, and draws
 /// nothing on the set as it would be after it. Only the journal is read.
-pub(crate) fn refuse_unfinished(folder: &Path) -> Result<(), Error> {
+/// Who refuses a set whose journal a commit left unfinished, since it writes
+/// nothing to the set and so rolls nothing back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unfinished {
+    /// `display-list` with a change set: a preview.
+    Preview,
+    /// `propose` and `proposals`.
+    Proposals,
+}
+
+pub(crate) fn refuse_unfinished(folder: &Path, who: Unfinished) -> Result<(), Error> {
     let Some(read) = read_journal_file(folder)? else {
         return Ok(());
     };
@@ -340,16 +350,22 @@ pub(crate) fn refuse_unfinished(folder: &Path) -> Result<(), Error> {
         ),
         (None, None) => return Ok(()),
     };
-    Err(Error::new(
-        ErrorCode::RollbackFailed,
-        format!(
+    let message = match who {
+        Unfinished::Preview => format!(
             "a change set cannot be drawn on the drawing set `{}` before it lands: {what}. A \
               preview writes nothing, so it does not roll that back; nothing was changed. Any \
               other command on the set, such as `journal`, rolls it back first; then ask again",
             folder.display()
         ),
-    )
-    .in_file(&folder.join(JOURNAL_FILE)))
+        Unfinished::Proposals => format!(
+            "the proposals of the drawing set `{}` cannot be read or added to: {what}. `propose` \
+              and `proposals` write nothing to the set, so they do not roll that back; nothing \
+              was changed. Any other command on the set, such as `journal`, rolls it back first; \
+              then ask again",
+            folder.display()
+        ),
+    };
+    Err(Error::new(ErrorCode::RollbackFailed, message).in_file(&folder.join(JOURNAL_FILE)))
 }
 
 fn kind_words(kind: EntryKind) -> &'static str {
@@ -358,6 +374,7 @@ fn kind_words(kind: EntryKind) -> &'static str {
         EntryKind::FailedAttempt => "a failed attempt",
         EntryKind::Undo => "an undo",
         EntryKind::Accept => "an accept",
+        EntryKind::Discard => "a proposal's discard",
     }
 }
 

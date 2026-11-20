@@ -36,6 +36,10 @@ use serde_json::{json, Map, Value};
 use crate::build::{build_with, BuildRequest};
 use crate::change::{accept_with, recover, AcceptRequest, JournalRequest, UndoRequest};
 use crate::change::{change_set_schema, change_with, journal, operations, undo, ChangeRequest};
+use crate::change::{
+    discard, keep_with, proposals, propose_with, DiscardRequest, KeepRequest, ProposalsRequest,
+    ProposeRequest, BY_LONGEST, BY_PATTERN, DRAFTER, PROPOSALS_FOLDER,
+};
 use crate::check::{check_with, CheckRequest};
 use crate::display_list::{display_list_with, DisplayListRequest, NOT_AT_AN_ENTRY};
 use crate::error::{Error, ErrorCode};
@@ -99,10 +103,15 @@ impl Command {
     /// the set's journal that a commit that never finished left pending is
     /// rolled back first, and the reply says so; when it cannot be, the
     /// command refuses and does nothing. A `display-list` with a
-    /// `change_set`, a preview, writes nothing: it rolls nothing back, and
-    /// is refused instead on a set whose journal holds such an entry.
+    /// `change_set`, a preview, and `propose` and `proposals`, write nothing
+    /// to the set: they roll nothing back, and are refused instead on a set
+    /// whose journal holds such an entry.
     pub fn run(&self, input: Value, settings: &Settings, via: Interface) -> JsonReply {
-        let previews = self.name == "display-list" && input.get("change_set").is_some();
+        // A preview, and `propose` and `proposals`, write nothing to the
+        // set, so they roll nothing back; each refuses a set whose journal
+        // holds an unfinished commit instead.
+        let previews = (self.name == "display-list" && input.get("change_set").is_some())
+            || matches!(self.name, "propose" | "proposals");
         let rolled_back = match set_read(&input)
             .filter(|_| !previews)
             .map(|set| recover(&set))
@@ -231,6 +240,30 @@ const COMMANDS: &[Command] = &[
         does: accept_does,
         input: accept_input,
         run: run_accept,
+    },
+    Command {
+        name: "propose",
+        does: propose_does,
+        input: propose_input,
+        run: run_propose,
+    },
+    Command {
+        name: "proposals",
+        does: proposals_does,
+        input: proposals_input,
+        run: run_proposals,
+    },
+    Command {
+        name: "keep",
+        does: keep_does,
+        input: keep_input,
+        run: run_keep,
+    },
+    Command {
+        name: "discard",
+        does: discard_does,
+        input: discard_input,
+        run: run_discard,
     },
     Command {
         name: "check",
@@ -512,8 +545,10 @@ fn display_list_input() -> Value {
     }
     let mut schema = display_list_schema(change_set);
     schema["$defs"] = defs;
-    // A change set is drawn on the set as it is, never at an entry.
+    // A change set is drawn on the set as it is, never at an entry; and
+    // all_or_none says how it is applied, so it goes with one.
     schema["not"] = json!({"required": ["entry", "change_set"]});
+    schema["dependentRequired"] = json!({"all_or_none": ["change_set"]});
     schema
 }
 
@@ -542,6 +577,10 @@ fn display_list_schema(change_set: Value) -> Value {
                 "type": "boolean",
             },
             "change_set": change_set,
+            "all_or_none": {
+                "description": "With change_set: apply it as a proposal is kept, on every sheet it reaches or on none, so a sheet that would take its part while another refuses is shown held back. Without it, as change applies it.",
+                "type": "boolean",
+            },
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
         }),
@@ -558,6 +597,12 @@ fn run_display_list(
     // set is never drawn at an entry, as the schema says.
     if input.contains_key("entry") && input.contains_key("change_set") {
         return Err(Error::new(ErrorCode::BadValue, NOT_AT_AN_ENTRY).at_field("change_set"));
+    }
+    if input.contains_key("all_or_none") && !input.contains_key("change_set") {
+        return Err(Error::usage(
+            "`all_or_none` says how a change set is applied: it goes with `change_set`",
+        )
+        .at_field("all_or_none"));
     }
     let settings = take_settings(&mut input, base, false)?;
     let request: DisplayListRequest = parse("display-list", input)?;
@@ -1066,6 +1111,151 @@ fn run_accept(
     let settings = take_settings(&mut input, base, false)?;
     let request: AcceptRequest = parse("accept", input)?;
     Ok(sent_warned(accept_with(&request, &settings, via)))
+}
+
+// proposals
+
+fn propose_does() -> String {
+    format!(
+        "Proposes a change set, `change_set`, as `change` takes it, to the drawing set in the \
+         folder `set`, where `change` would land it at once: it waits, drawn for the drafter to \
+         keep or discard, and nothing changes until it is kept. It is checked as `change` \
+         checks it, by a dry run on the set as it is, and refused, unrecorded, when the set \
+         would refuse it. It is recorded in the set's folder ({PROPOSALS_FOLDER}), numbered, \
+         with who proposed it, `by`, in the caller's words (by default the interface it came \
+         through), when, and the journal's newest entry it was made against. The reply gives \
+         its number and what keeping it would do now."
+    )
+}
+
+fn propose_input() -> Value {
+    let mut schema = change_input();
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("change's input has properties");
+    properties.remove("dry_run");
+    properties.insert("by".to_owned(), by("proposes it", "Assistant"));
+    schema
+}
+
+fn run_propose(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    via: Interface,
+) -> Result<JsonReply, Error> {
+    let settings = take_settings(&mut input, base, false)?;
+    let request: ProposeRequest = parse("propose", input)?;
+    Ok(done_warned(propose_with(&request, &settings, via)))
+}
+
+fn proposals_does() -> String {
+    "Lists the proposals of the drawing set in the folder `set` that are waiting, the oldest \
+     first: each one's number, who proposed it and when, the journal's entry it was made \
+     against and the change sets and undos that landed since, its change set, and the sheets \
+     it reaches. A proposal kept or discarded is no longer listed; the journal records it."
+        .to_owned()
+}
+
+fn proposals_input() -> Value {
+    input(
+        json!({ "set": text("The drawing set's folder.") }),
+        &["set"],
+    )
+}
+
+fn run_proposals(
+    input: Map<String, Value>,
+    _: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
+    let request: ProposalsRequest = parse("proposals", input)?;
+    Ok(done(proposals(&request)))
+}
+
+fn keep_does() -> String {
+    "Keeps a proposal of the drawing set in the folder `set`, by its number, `proposal`: its \
+     change set lands as `change` lands one, on the set as it stands now, each sheet fully or \
+     not at all, and the reply is `change`'s. Its journal entry says who proposed it and who \
+     kept it, `by`, in the caller's words (by default the interface it came through); it is \
+     undone and accepted as any change set, and undoing it does not bring the proposal back. \
+     When the set refuses it, the attempt is recorded as `change` records one and the \
+     proposal goes on waiting. A proposal kept or discarded already is refused."
+        .to_owned()
+}
+
+fn keep_input() -> Value {
+    input(
+        json!({
+            "set": text("The drawing set's folder."),
+            "proposal": proposal_number("keep"),
+            "by": by("keeps it", DRAFTER),
+            "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
+        }),
+        &["set", "proposal"],
+    )
+}
+
+fn run_keep(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    via: Interface,
+) -> Result<JsonReply, Error> {
+    let settings = take_settings(&mut input, base, false)?;
+    let request: KeepRequest = parse("keep", input)?;
+    Ok(sent_warned(keep_with(&request, &settings, via)))
+}
+
+fn discard_does() -> String {
+    "Discards a proposal of the drawing set in the folder `set`, by its number, `proposal`: it \
+     ends without landing, and the journal records who discarded it, `by`, in the caller's \
+     words (by default the interface it came through). No file of the set changes, so there \
+     is nothing to undo, and an undo passes over the discard. A proposal kept or discarded \
+     already is refused."
+        .to_owned()
+}
+
+fn discard_input() -> Value {
+    input(
+        json!({
+            "set": text("The drawing set's folder."),
+            "proposal": proposal_number("discard"),
+            "by": by("discards it", DRAFTER),
+        }),
+        &["set", "proposal"],
+    )
+}
+
+fn run_discard(
+    input: Map<String, Value>,
+    _: &Settings,
+    via: Interface,
+) -> Result<JsonReply, Error> {
+    let request: DiscardRequest = parse("discard", input)?;
+    Ok(done(discard(&request, via)))
+}
+
+/// The schema of who proposes, keeps or discards.
+fn by(does: &str, example: &str) -> Value {
+    json!({
+        "description": format!(
+            "Who {does}, in the caller's words, such as `{example}`, which the journal and the \
+             viewer show; by default the interface it came through, such as `agent (MCP)`."
+        ),
+        "type": "string",
+        "minLength": 1,
+        "maxLength": BY_LONGEST,
+        "pattern": BY_PATTERN,
+    })
+}
+
+/// The schema of the proposal a keep or a discard takes.
+fn proposal_number(does: &str) -> Value {
+    json!({
+        "description": format!("The proposal to {does}, by its number, such as 2."),
+        "type": "integer",
+        "minimum": 1,
+    })
 }
 
 // check

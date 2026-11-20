@@ -206,15 +206,30 @@ impl Events {
     }
 
     /// The next journal the stream sends, as the `journal` command replies,
-    /// passing over comments.
+    /// passing over comments and the proposals.
     fn next_journal(&mut self, within: Duration) -> Value {
+        self.next("journal", within)
+    }
+
+    /// The next proposals the stream sends, as the `proposals` command
+    /// replies, passing over comments and the journal.
+    fn next_proposals(&mut self, within: Duration) -> Value {
+        self.next("proposals", within)
+    }
+
+    /// The next event named `name`, passing over comments and the others.
+    fn next(&mut self, name: &str, within: Duration) -> Value {
         loop {
             let event = self.until("\n\n", within);
             if event.starts_with(':') {
                 continue;
             }
             let mut lines = event.lines();
-            assert_eq!(lines.next(), Some("event: journal"), "{event}");
+            let named = lines.next().unwrap().strip_prefix("event: ").unwrap();
+            assert!(["journal", "proposals"].contains(&named), "{event}");
+            if named != name {
+                continue;
+            }
             let data = lines.next().unwrap().strip_prefix("data: ").unwrap();
             return serde_json::from_str(data).unwrap();
         }
@@ -385,11 +400,15 @@ fn calls() -> BTreeMap<String, (Vec<String>, Value)> {
         .collect()
 }
 
-/// Further calls of commands, made after each command's own, as the
-/// command name, the command line's arguments and the input the servers
-/// take: the kinds of a command one call cannot cover, such as each kind of
-/// query.
-fn also() -> Vec<(String, Vec<String>, Value)> {
+/// Further calls of commands, as the command name, the command line's
+/// arguments and the input the servers take, each with the command whose
+/// own call it comes straight after (`after`), or with none, after every
+/// command's own: the kinds of a command one call cannot cover, such as
+/// each kind of query, and what a later command's call needs, such as a
+/// second proposal for `discard`.
+type Also = (String, Vec<String>, Value, Option<String>);
+
+fn also() -> Vec<Also> {
     shared()["also"]
         .as_array()
         .unwrap()
@@ -399,6 +418,7 @@ fn also() -> Vec<(String, Vec<String>, Value)> {
                 call["command"].as_str().unwrap().to_owned(),
                 serde_json::from_value(call["args"].clone()).unwrap(),
                 call["input"].clone(),
+                call.get("after").map(|a| a.as_str().unwrap().to_owned()),
             )
         })
         .collect()
@@ -438,15 +458,22 @@ fn every_command_of_the_registry_is_reachable_through_every_interface_with_the_s
     // Each command, run through each interface, gives the same reply; then
     // the further calls of a command whose kinds one call cannot cover.
     let calls = calls();
+    let also = also();
     let mut runs: Vec<(String, Vec<String>, Value)> = Vec::new();
+    let then = |runs: &mut Vec<(String, Vec<String>, Value)>, after: Option<&str>| {
+        for (name, args, input, _) in also.iter().filter(|a| a.3.as_deref() == after) {
+            runs.push((name.clone(), args.clone(), input.clone()));
+        }
+    };
     for command in registry {
         let name = command.name();
         let Some((args, input)) = calls.get(name) else {
             panic!("`{name}` is in the registry: add a call of it to tests/calls.json");
         };
         runs.push((name.to_owned(), args.clone(), input.clone()));
+        then(&mut runs, Some(name));
     }
-    runs.extend(also());
+    then(&mut runs, None);
     for (name, args, input) in &runs {
         let (name, input) = (name.as_str(), input);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -482,7 +509,39 @@ fn every_command_of_the_registry_is_reachable_through_every_interface_with_the_s
                 .collect::<BTreeMap<_, _>>(),
             "every file of the set is the same after the same commands"
         );
+        // The proposals, which the snapshot leaves out with the journal's
+        // own files, are the same apart from when each was proposed.
+        assert_eq!(
+            proposals_of(&dir.join("demo-set")),
+            proposals_of(&cli_dir.join("demo-set")),
+            "every proposal's record is the same, apart from its time"
+        );
     }
+    assert_eq!(
+        proposals_of(&cli_dir.join("demo-set")).len(),
+        2,
+        "the calls proposed two"
+    );
+}
+
+/// Each proposal's record in the set, the numbered files, by name, without
+/// the time it was proposed, its top-level `at`: the one thing two
+/// interfaces may record differently.
+fn proposals_of(set: &Path) -> BTreeMap<String, Value> {
+    fs::read_dir(set.join(agentdrafter_core::PROPOSALS_FOLDER))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .map(|path| {
+            let text = fs::read_to_string(&path).unwrap();
+            let mut record: Value = serde_json::from_str(&text).unwrap();
+            assert!(record.as_object_mut().unwrap().remove("at").is_some());
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                record,
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -725,6 +784,78 @@ fn an_open_event_stream_sends_the_journal_when_another_process_changes_the_set()
     assert_eq!(refused["error"]["code"], "usage");
 }
 
+#[test]
+fn an_open_event_stream_reports_a_proposal_made_kept_and_discarded() {
+    let dir = interface_folder("proposal-events", "http");
+    let (code, built) = cli(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{built}");
+    let http = Http::start(&dir, &["--listen", "127.0.0.1:0"]);
+    let mut events = http.events("demo-set");
+    let first = events.next_proposals(Duration::from_secs(30));
+    assert_eq!(first["result"]["proposals"], json!([]), "{first}");
+
+    // Proposed by the command line, another process, and through the HTTP
+    // API, as an agent would: with no `by`, each is its interface.
+    let (code, proposed) = cli(&["propose", "demo-set", "move.json"], &dir);
+    assert_eq!(code, 0, "{proposed}");
+    let next = events.next_proposals(Duration::from_secs(10));
+    let waiting = next["result"]["proposals"].as_array().unwrap();
+    assert_eq!(waiting.len(), 1, "{next}");
+    assert_eq!(waiting[0]["proposal"], 1);
+    assert_eq!(waiting[0]["by"], "agent (command line)");
+    assert_eq!(
+        waiting[0]["sheets"],
+        json!(["DEMO-001", "DEMO-002", "DEMO-003"])
+    );
+    let (status, proposed) = http.run(
+        "propose",
+        &json!({"set": "demo-set", "change_set": change_set("circle.json")}),
+    );
+    assert_eq!(status, 200, "{proposed}");
+    assert_eq!(proposed["result"]["by"], "agent (HTTP API)");
+    let next = events.next_proposals(Duration::from_secs(10));
+    assert_eq!(
+        next["result"]["proposals"].as_array().unwrap().len(),
+        2,
+        "{next}"
+    );
+
+    // Kept, as the page keeps it: the journal gains the change set, which
+    // names the proposal, and the proposal no longer waits.
+    let (status, kept) = http.run_as_viewer(
+        "keep",
+        &json!({"set": "demo-set", "proposal": 1, "by": "drafter"}),
+    );
+    assert_eq!(status, 200, "{kept}");
+    let journal = events.next_journal(Duration::from_secs(10));
+    let entry = &journal["result"]["entries"][0];
+    assert_eq!(entry["kind"], "change_set", "{journal}");
+    assert_eq!(entry["proposal"], 1);
+    assert_eq!(entry["proposed_by"], "agent (command line)");
+    assert_eq!(entry["kept_by"], "drafter");
+    let next = events.next_proposals(Duration::from_secs(10));
+    let waiting = next["result"]["proposals"].as_array().unwrap();
+    assert_eq!(waiting.len(), 1, "{next}");
+    assert_eq!(waiting[0]["proposal"], 2);
+    assert_eq!(waiting[0]["changed_since"], json!([1]));
+
+    // Discarded by the viewer with no `by`: the drafter.
+    let (status, gone) = http.run_as_viewer("discard", &json!({"set": "demo-set", "proposal": 2}));
+    assert_eq!(status, 200, "{gone}");
+    let journal = events.next_journal(Duration::from_secs(10));
+    let entry = &journal["result"]["entries"][1];
+    assert_eq!(entry["kind"], "discard", "{journal}");
+    assert_eq!(entry["discarded_by"], "drafter");
+    assert_eq!(entry["proposed_by"], "agent (HTTP API)");
+    let next = events.next_proposals(Duration::from_secs(10));
+    assert_eq!(next["result"]["proposals"], json!([]), "{next}");
+
+    // Kept again: refused, with its own code.
+    let (status, again) = http.run("keep", &json!({"set": "demo-set", "proposal": 1}));
+    assert_eq!(status, 422, "{again}");
+    assert_eq!(again["error"]["code"], "proposal_ended");
+}
+
 /// Starts `agentdrafter change demo-set move.json` in `dir`, waits for the
 /// core's test-only seam to stop its commit with the template and one DWG
 /// in place and the others not, and kills it there.
@@ -744,6 +875,58 @@ fn killed_mid_commit(dir: &Path) {
     assert!(said.contains("stopped the commit at step 16"), "{said}");
     child.kill().unwrap();
     child.wait().unwrap();
+}
+
+/// Every file under `folder`, the journal's own among them, with its bytes.
+fn every_file(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut found = BTreeMap::new();
+    let mut stack = vec![folder.to_owned()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                found.insert(path.clone(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn propose_and_proposals_refuse_a_set_a_commit_left_unfinished_and_write_nothing() {
+    // They write nothing to the set, so, as a preview, they roll nothing
+    // back: through the registry, by the command line, each is refused
+    // and every file, the journal and its undo states among them, stays
+    // byte for byte.
+    let dir = interface_folder("proposals-unfinished", "cli");
+    let (code, built) = cli(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{built}");
+    killed_mid_commit(&dir);
+    let set = dir.join("demo-set");
+    let before = every_file(&set);
+    for args in [
+        &["propose", "demo-set", "circle.json"][..],
+        &["proposals", "demo-set"][..],
+    ] {
+        let (code, refused) = cli(args, &dir);
+        assert_eq!(code, 1, "{refused}");
+        assert_eq!(refused["error"]["code"], "rollback_failed", "{refused}");
+        assert!(refused.get("rolled_back").is_none(), "{refused}");
+        assert!(
+            every_file(&set) == before,
+            "{}: every file as it was",
+            args[0]
+        );
+    }
+    assert!(!set.join(agentdrafter_core::PROPOSALS_FOLDER).exists());
+    // The next other command rolls it back, and then a proposal is made.
+    let (code, read) = cli(&["journal", "demo-set"], &dir);
+    assert_eq!(code, 0, "{read}");
+    assert_eq!(read["rolled_back"]["entry"], 1, "{read}");
+    let (code, proposed) = cli(&["propose", "demo-set", "circle.json"], &dir);
+    assert_eq!(code, 0, "{proposed}");
 }
 
 #[test]

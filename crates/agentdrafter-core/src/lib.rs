@@ -107,6 +107,11 @@ pub use change::{
     RowValueSet, SheetChange, SnapResolved, MARK_FILE,
 };
 pub use change::{
+    discard, keep_with, proposals, propose_with, DiscardReport, DiscardRequest, KeepReport,
+    KeepRequest, ProposalListed, ProposalsReport, ProposalsRequest, ProposeReport, ProposeRequest,
+    DRAFTER, PROPOSALS_FOLDER,
+};
+pub use change::{
     journal, undo, CommitState, Entry, EntryKind, FileState, FileUndone, JournalEntry,
     JournalReport, JournalRequest, Refusal, RollBack, RolledBack, SheetFailed, UndoAction,
     UndoReport, UndoRequest, UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, LOCK_FILE,

@@ -11,11 +11,14 @@ import { useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, typ
 import {
   changedBy,
   clock,
+  entryByline,
   entryState,
+  proposalEnded,
   entryTitle,
   operationWords,
   undoneWith,
   viaWords,
+  whoWords,
   type Entry,
   type JournalReport,
 } from './journal.ts';
@@ -39,9 +42,11 @@ export interface PeekProps {
   onShow(entry: number): void;
   onUndo(): void;
   onAccept(): void;
+  /** The proposals waiting (#155): how many, in words, and what opens the first on the sheet shown; null for none. */
+  proposals?: { count: number; words: string; onOpen(): void } | null;
 }
 
-export function Peek({ line, live, journal, failing, undoable, blocked, busy, stepping, onShow, onUndo, onAccept }: PeekProps) {
+export function Peek({ line, live, journal, failing, undoable, blocked, busy, stepping, onShow, onUndo, onAccept, proposals = null }: PeekProps) {
   const last = journal?.entries.at(-1);
   const state = last && journal ? entryState(last, journal, failing) : null;
   return (
@@ -50,6 +55,15 @@ export function Peek({ line, live, journal, failing, undoable, blocked, busy, st
         <i />
         <span>{line}</span>
       </div>
+      {proposals && (
+        <button type="button" className="peekprop" data-act="proposals" onClick={proposals.onOpen}>
+          <span className="pdot">{proposals.count}</span>
+          <span className="t">{proposals.words}</span>
+          <span className="go" aria-hidden="true">
+            &rsaquo;
+          </span>
+        </button>
+      )}
       {last && state ? (
         <button type="button" className="va-last" onClick={() => onShow(last.entry)}>
           <span className="je-n">{last.entry}</span>
@@ -150,6 +164,11 @@ export function JournalList({ journal, failing, at, focused, busy, onStep, onSho
                 <span className="je-n">{e.entry}</span>
                 <span className="je-main">
                   <span className="je-t">{entryTitle(e)}</span>
+                  {entryByline(e) && (
+                    <span className="je-by" data-je-by>
+                      {entryByline(e)}
+                    </span>
+                  )}
                   <span className="je-m">
                     {sheets.map(({ s, ok }) => (
                       <span key={`${s}${ok}`} className={`sh ${ok ? 'sh-landed' : 'sh-failed'}`}>
@@ -175,6 +194,23 @@ export function JournalList({ journal, failing, at, focused, busy, onStep, onSho
                       {e.failed_checks?.length
                         ? ` Accepted despite ${e.failed_checks.length} failed check${e.failed_checks.length > 1 ? 's' : ''}.`
                         : ''}
+                    </p>
+                  )}
+                  {e.kind === 'discard' && (
+                    <p className="note">
+                      Proposal {e.proposal}, proposed by {whoWords(e.proposed_by)}, discarded by {whoWords(e.discarded_by)}. Nothing changed, and nothing
+                      undoes a discard.
+                    </p>
+                  )}
+                  {e.kind === 'failed_attempt' && e.proposal !== undefined && (
+                    <p className="note">
+                      Proposal {e.proposal}, proposed by {whoWords(e.proposed_by)}: a keep attempted by {whoWords(e.kept_by)}, which the set refused, so
+                      nothing landed.{proposalEnded(journal, e.proposal) ? ' The proposal has ended since.' : ' It is still waiting.'}
+                    </p>
+                  )}
+                  {e.kind === 'change_set' && e.proposal !== undefined && (
+                    <p className="note">
+                      Proposal {e.proposal}, proposed by {whoWords(e.proposed_by)}; kept by {whoWords(e.kept_by)}.
                     </p>
                   )}
                   {e.issued_by && <p className="note">Issued by the accept in entry {e.issued_by}: it cannot be undone.</p>}

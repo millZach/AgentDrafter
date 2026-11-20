@@ -75,6 +75,19 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({"set": "missing", "despite_failed_checks": true, "newest_seen": 4, "dry_run": true, "fonts": ["f"], "no_system_fonts": true}),
         ),
         (
+            "propose",
+            json!({"set": "missing", "change_set": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [1, 0, 0]}]}, "by": "Assistant", "fonts": ["f"], "no_system_fonts": true}),
+        ),
+        ("proposals", json!({"set": "missing"})),
+        (
+            "keep",
+            json!({"set": "missing", "proposal": 1, "by": "drafter", "fonts": ["f"], "no_system_fonts": true}),
+        ),
+        (
+            "discard",
+            json!({"set": "missing", "proposal": 2, "by": "drafter"}),
+        ),
+        (
             "check",
             json!({"source": "missing", "sheets": ["DEMO-001"], "fonts": ["f"], "no_system_fonts": true}),
         ),
@@ -425,4 +438,59 @@ fn a_change_set_given_as_null_or_with_an_entry_is_refused_by_the_schema_and_the_
         assert_eq!(reply["error"]["field"], "change_set", "{reply}");
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_proposal_s_schema_and_its_command_refuse_the_same_who_and_number() {
+    // Each input the schema refuses, the command refuses as `usage`, and
+    // each it takes, the command reads whole.
+    let cases = [
+        (
+            "propose",
+            json!({"set": "missing", "change_set": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [1, 0, 0]}]}, "by": null}),
+            false,
+        ),
+        (
+            "propose",
+            json!({"set": "missing", "change_set": {"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [1, 0, 0]}]}, "by": "two\nlines"}),
+            false,
+        ),
+        (
+            "keep",
+            json!({"set": "missing", "proposal": 1, "by": "   "}),
+            false,
+        ),
+        (
+            "keep",
+            json!({"set": "missing", "proposal": 1, "by": "x".repeat(81)}),
+            false,
+        ),
+        ("keep", json!({"set": "missing", "proposal": 0}), false),
+        ("discard", json!({"set": "missing", "proposal": 0}), false),
+        (
+            "discard",
+            json!({"set": "missing", "proposal": 1, "by": "Assistant (MCP)"}),
+            true,
+        ),
+        (
+            "keep",
+            json!({"set": "missing", "proposal": 2, "by": " drafter "}),
+            true,
+        ),
+    ];
+    for (name, input, takes) in cases {
+        let command = find_command(name).unwrap();
+        let validator = jsonschema::validator_for(&command.input_schema()).unwrap();
+        assert_eq!(
+            validator.is_valid(&input),
+            takes,
+            "{name}'s schema with {input}"
+        );
+        let reply = run(name, input.clone());
+        assert_eq!(
+            reply["error"]["code"] == "usage",
+            !takes,
+            "`{name}` with {input}: {reply}"
+        );
+    }
 }
