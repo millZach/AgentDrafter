@@ -86,6 +86,11 @@ pub struct SheetReply {
     /// drawn on the page goes in.
     #[serde(default)]
     pub space: Option<String>,
+    /// With a change set, its preview: what it would do, and on the sheet
+    /// drawn what it would add, change and delete and the checks it would
+    /// fail ([`crate::preview`]).
+    #[serde(default)]
+    pub preview: Option<serde_json::Value>,
     pub display_list: DisplayList,
 }
 
@@ -211,6 +216,10 @@ pub struct Summary {
     pub snaps: usize,
     /// With `origins`, its template and the sheets built from it.
     pub template: Option<Reach>,
+    /// With a change set, its preview as the core gives it, for the page's
+    /// words, without what the renderer alone draws: the items it adds and
+    /// changes and what the sheet draws now.
+    pub preview: Option<serde_json::Value>,
 }
 
 /// Reads a `display-list` reply. A reply that is not ok gives its error's
@@ -430,6 +439,15 @@ impl Mesh {
             objects: sheet.objects.clone(),
             snaps: sheet.snaps.len(),
             template: sheet.template.clone(),
+            preview: sheet.preview.as_ref().map(|preview| {
+                let mut words = preview.clone();
+                if let Some(map) = words.as_object_mut() {
+                    for drawn in ["added", "changed", "was"] {
+                        map.remove(drawn);
+                    }
+                }
+                words
+            }),
         }
     }
 }
@@ -514,6 +532,7 @@ mod tests {
             edges: Vec::new(),
             template: None,
             space: None,
+            preview: None,
             display_list,
         }
     }

@@ -510,7 +510,7 @@ pub fn edit(context: &Context, place: usize, key: &str, typed: &str) -> Edited {
     };
     let (sheets, template) = match &lands {
         Lands::Template(reach) | Lands::Unset(Some(reach)) => {
-            (reach.sheets.clone(), Some(asked.ask(reach)))
+            (reach.sheets.clone(), Some(asked.ask(reach, &what)))
         }
         _ => (vec![context.sheet.clone()], None),
     };
@@ -537,7 +537,7 @@ enum Asked {
 }
 
 impl Asked {
-    fn ask(&self, reach: &Reach) -> TemplateEdit {
+    fn ask(&self, reach: &Reach, edit: &str) -> TemplateEdit {
         let n = reach.sheets.len();
         let (title, detail) = match self {
             Asked::Unset(tag) => (
@@ -573,6 +573,7 @@ impl Asked {
             detail,
             path: reach.path.clone(),
             sheets: reach.sheets.clone(),
+            edit: edit.to_owned(),
         }
     }
 }

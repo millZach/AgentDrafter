@@ -208,6 +208,10 @@ fn a_templates_value_asks_first_naming_every_sheet() {
     let ask = send.template.as_ref().expect("asked first");
     assert_eq!(ask.title, "This is part of the template.");
     assert_eq!(ask.detail, "Changing its text changes 3 sheets.");
+    assert_eq!(
+        ask.edit, send.what,
+        "a preview names the edit as the history does"
+    );
     assert_eq!(ask.path, "templates/loop-2-wire.yaml");
     assert_eq!(send.what, "title text set to \u{201c}FIELD DEVICES\u{201d}");
 

@@ -56,6 +56,13 @@
 //!   picked prototype marks them; the page fades the change set's halos in
 //!   and out as it lands. A halo is a box round what the object draws,
 //!   found by the core from the display list, as a pick is.
+//! - A change set drawn before it lands, when the reply is a preview
+//!   ([`crate::preview`]): over the ink, the sheet faded with model space's
+//!   colour, as REFEDIT fades what is not edited; then what the change set
+//!   would add in green and change in amber, each in a dashed box, the old
+//!   place of what it changes faint with a dashed guide where it only
+//!   moves, what it deletes faint red and struck, and a red revision cloud
+//!   round each check the sheet would fail.
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -71,6 +78,7 @@ use agentdrafter_core::{
 use crate::grid::{first_line, grid};
 use crate::mesh::{read_reply, screen_rgba, Kind, Mesh, Run, Span};
 use crate::overlay::{crosshair, marker, triangles, Segment};
+use crate::preview::{self, Preview};
 use crate::snapping::{candidates, Candidate};
 use crate::tools::{tool_for, Context, ObjectInfo, SnapRef, Taken, Tools};
 
@@ -385,6 +393,8 @@ struct Loaded {
     snaps: Vec<DisplaySnap>,
     /// The outlines of the fills the nearest snap finds a point on.
     outlines: Vec<Outline>,
+    /// With a change set, how its preview is marked.
+    preview: Option<Preview>,
     origin: [f64; 2],
     paper: [f64; 4],
     millimetres_per_unit: f64,
@@ -591,7 +601,14 @@ impl Viewer {
             space: sheet.space.clone(),
             layout: sheet.layout.clone(),
         });
+        let ids: Vec<Option<String>> = sheet
+            .objects
+            .iter()
+            .map(|o| o.get("id").and_then(|id| id.as_str()).map(str::to_owned))
+            .collect();
+        let shown = Preview::of(sheet.preview.as_ref(), &sheet.display_list, &ids);
         let mut loaded = self.upload(&mesh, sheet.millimetres_per_unit, sheet.display_list)?;
+        loaded.preview = shown;
         loaded.snaps = snaps;
         loaded.outlines = outlines(&loaded.list, &edges);
         self.bind_colors(&loaded);
@@ -786,6 +803,17 @@ impl Viewer {
         vec![all.min[0], all.min[1], all.max[0], all.max[1]]
     }
 
+    /// The box round everything a preview marks, `[left, bottom, right,
+    /// top]` in drawing units, for the view to come to; empty when the
+    /// sheet is no preview, or it marks nothing.
+    pub fn preview_extent(&self) -> Vec<f64> {
+        self.sheet
+            .as_ref()
+            .and_then(|sheet| sheet.preview.as_ref()?.extent(&sheet.list))
+            .map(|b| vec![b.min[0], b.min[1], b.max[0], b.max[1]])
+            .unwrap_or_default()
+    }
+
     /// Draws as the PNG plots the sheet, white all round and each colour
     /// index in the colour it plots in, or, as the page shows it, as dark
     /// model space. A test draws as the PNG, to compare the canvas with one.
@@ -950,6 +978,11 @@ impl Viewer {
         gl.disable(Gl::STENCIL_TEST);
         gl.disable(Gl::DEPTH_TEST);
         gl.bind_vertex_array(None);
+
+        // A preview's marks, over the ink, on screen.
+        if let (Some(preview), Look::Screen) = (&sheet.preview, self.look) {
+            self.draw_preview(sheet, preview, &device, (pixels, ratio), size);
+        }
 
         // The halos, over the ink, blended.
         if !self.marks.is_empty() {
@@ -1309,6 +1342,105 @@ impl Viewer {
         gl.disable(Gl::BLEND);
     }
 
+    /// A change set's preview over the sheet as it would leave it: the rest
+    /// faded, the old places faint, what it deletes struck, what it adds
+    /// and changes in their colours in dashed boxes, a guide where an
+    /// object only moves, and a cloud round each check it would fail.
+    /// `pixels` is device pixels to a drawing unit.
+    fn draw_preview(
+        &self,
+        sheet: &Loaded,
+        p: &Preview,
+        device: &dyn Fn(f64, f64) -> (f64, f64),
+        (pixels, ratio): (f64, f64),
+        size: (f32, f32),
+    ) {
+        let gl = &self.gl;
+        gl.enable(Gl::BLEND);
+        gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
+        let [r, g, b] = MODEL_SPACE;
+        self.rect(
+            [0.0, 0.0, f64::from(size.0), f64::from(size.1)],
+            [r, g, b, preview::FADE],
+            size,
+        );
+        let seg = |[a, b]: preview::Line| -> Segment {
+            let (x0, y0) = device(a[0], a[1]);
+            let (x1, y1) = device(b[0], b[1]);
+            [x0, y0, x1, y1]
+        };
+        let corners = |bounds: Bounds, pad: f64| -> [f64; 4] {
+            let (l, t) = device(bounds.min[0], bounds.max[1]);
+            let (r, b) = device(bounds.max[0], bounds.min[1]);
+            [l - pad, t - pad, r + pad, b + pad]
+        };
+        // A pen's width on the screen, never finer than one and a half CSS
+        // pixels, so a mark reads over the faded ink.
+        let per_mm = pixels / sheet.millimetres_per_unit.max(f64::MIN_POSITIVE);
+        let width = |item: &agentdrafter_core::Item| {
+            preview::pen(item)
+                .map_or(0.0, |mm| mm * per_mm)
+                .max(1.5 * ratio)
+        };
+        // The old places, and what it deletes, struck through.
+        for was in &p.was {
+            let lines: Vec<Segment> = was
+                .items
+                .iter()
+                .flat_map(preview::outline)
+                .map(seg)
+                .collect();
+            let color = if was.deleted {
+                preview::DELETED
+            } else {
+                preview::OLD_PLACE
+            };
+            self.lines(&lines, ratio.max(1.0), color, size);
+            if was.deleted {
+                if let Some(bounds) = preview::bounds_of(was.items.iter()) {
+                    let strike = preview::strike(corners(bounds, 5.0 * ratio));
+                    self.lines(&strike, 1.6 * ratio, preview::DELETED, size);
+                }
+            }
+        }
+        // What it adds and changes, item by item, at its pen's width.
+        for (places, color) in [(&p.added, preview::ADDED), (&p.changed, preview::CHANGED)] {
+            for &i in places {
+                let item = &sheet.list.items[i];
+                let lines: Vec<Segment> = preview::outline(item).into_iter().map(seg).collect();
+                self.lines(&lines, width(item), color, size);
+            }
+        }
+        // A dashed box round each object it adds or changes.
+        let dash = 4.0 * ratio;
+        for (added, bounds) in p.marked_objects(&sheet.list) {
+            let [r, g, b, _] = if added {
+                preview::ADDED
+            } else {
+                preview::CHANGED
+            };
+            let lines: Vec<Segment> = preview::sides(corners(bounds, 4.0 * ratio))
+                .into_iter()
+                .flat_map(|side| preview::dashed(side, dash, 0.75 * dash))
+                .collect();
+            self.lines(&lines, ratio.max(1.0), [r, g, b, 0.75], size);
+        }
+        let guides: Vec<Segment> = p
+            .moves
+            .iter()
+            .flat_map(|m| preview::dashed(seg(*m), 3.0 * ratio, 4.0 * ratio))
+            .collect();
+        self.lines(&guides, ratio.max(1.0), preview::OLD_PLACE, size);
+        // A cloud round each check it would fail.
+        let clouds: Vec<Segment> = p
+            .clouds
+            .iter()
+            .flat_map(|b| preview::cloud(corners(*b, 6.0 * ratio), 12.0 * ratio))
+            .collect();
+        self.lines(&clouds, 1.8 * ratio, preview::FAILS, size);
+        gl.disable(Gl::BLEND);
+    }
+
     /// Draws `segments`, device pixels, `width` device pixels wide in `color`.
     fn lines(&self, segments: &[Segment], width: f64, color: [f32; 4], size: (f32, f32)) {
         if segments.is_empty() {
@@ -1522,6 +1654,7 @@ impl Viewer {
             list,
             snaps: Vec::new(),
             outlines: Vec::new(),
+            preview: None,
             origin: mesh.origin,
             paper: mesh.paper,
             millimetres_per_unit,

@@ -339,6 +339,11 @@ fn moving_a_templates_object_warns_and_names_its_sheets_with_row_snaps_as_coordi
     assert_eq!(edit.path, "templates/loop-2-wire.yaml");
     assert_eq!(edit.sheets, ["DP-LD-101", "DP-LD-102", "DP-LD-104"]);
     assert_eq!(edit.detail, "Moving it changes 3 sheets.");
+    assert_eq!(
+        edit.edit,
+        format!("Move {}", send.what.trim_start_matches("Moved ")),
+        "a preview names the edit"
+    );
     assert_eq!(send.sheets, edit.sheets);
     let op = &send.change_set["operations"][0];
     assert_eq!(
