@@ -11,9 +11,14 @@ use tiny_skia::{
 };
 
 use crate::draw::{Bounds, DisplayList, FillRule, Point2, Shape};
+use crate::plot_style::PlotStyle;
 
 /// The PNG text chunk an output's stamp is written in.
 pub(crate) const STAMP_KEYWORD: &str = "AgentDrafter";
+
+/// The PNG text chunk that names what made the image, as a PDF's `Creator`
+/// does: written only for a PNG drawn through a plot style.
+pub(crate) const SOFTWARE_KEYWORD: &str = "Software";
 
 /// Where a drawing sits on the image.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -109,8 +114,6 @@ fn outline_mask(view: &View, outline: &[Point2]) -> Option<Mask> {
 /// viewport within it, by its place among the list's boundaries.
 type CutAt = (Bounds, Option<usize>);
 
-/// Draws a display list onto white paper. None when the image cannot be
-/// made, such as one with no pixels.
 /// Paints white everything in `pixmap`, drawn through `view`, that lies
 /// outside `keep`, in drawing units: what lies off a sheet's paper, where
 /// an image is larger than the paper it fits.
@@ -132,7 +135,16 @@ pub(crate) fn blank_outside(pixmap: &mut Pixmap, view: &View, keep: Bounds) {
     }
 }
 
-pub(crate) fn rasterize(list: &DisplayList, view: &View) -> Option<Pixmap> {
+/// Draws a display list onto white paper, each item in the colour and
+/// lineweight its colour index plots in through `style`, the pens the PDF
+/// draws with ([`crate::pdf`]), or with none in its own colour and
+/// lineweight. None when the image cannot be made, such as one with no
+/// pixels.
+pub(crate) fn rasterize(
+    list: &DisplayList,
+    view: &View,
+    style: Option<&PlotStyle>,
+) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(view.width, view.height)?;
     pixmap.fill(tiny_skia::Color::WHITE);
     // A mask for each box or boundary an item's ink is cut at, made once.
@@ -159,7 +171,7 @@ pub(crate) fn rasterize(list: &DisplayList, view: &View) -> Option<Pixmap> {
             // A box no pixel is inside draws nothing.
             continue;
         }
-        let [r, g, b] = item.color.on_paper();
+        let [r, g, b] = style.map_or_else(|| item.color.on_paper(), |s| s.color(item.color));
         let mut paint = Paint::default();
         paint.set_color_rgba8(r, g, b, 255);
         paint.anti_alias = true;
@@ -167,6 +179,8 @@ pub(crate) fn rasterize(list: &DisplayList, view: &View) -> Option<Pixmap> {
             Shape::Stroke { lineweight, runs } => {
                 // The finest a pen draws is one pixel, as a plotter draws
                 // lineweight 0 with its finest line.
+                let lineweight =
+                    style.map_or(*lineweight, |s| s.lineweight(item.color, *lineweight));
                 let width = (lineweight * view.pixels_per_millimetre).max(1.0) as f32;
                 let stroke = Stroke {
                     width,
@@ -230,10 +244,12 @@ pub(crate) fn rasterize(list: &DisplayList, view: &View) -> Option<Pixmap> {
 }
 
 /// The bytes of a PNG of `pixmap`, opaque RGB, with `stamp` in a text chunk
-/// and the image's resolution in dots per metre.
+/// and the image's resolution in dots per metre, and `software`, when
+/// there is one, in a `Software` text chunk.
 pub(crate) fn png(
     pixmap: &Pixmap,
     stamp: &str,
+    software: Option<&str>,
     pixels_per_millimetre: f64,
 ) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
@@ -250,6 +266,11 @@ pub(crate) fn png(
         encoder
             .add_itxt_chunk(STAMP_KEYWORD.to_owned(), stamp.to_owned())
             .map_err(|e| e.to_string())?;
+        if let Some(software) = software {
+            encoder
+                .add_itxt_chunk(SOFTWARE_KEYWORD.to_owned(), software.to_owned())
+                .map_err(|e| e.to_string())?;
+        }
         let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
         // The paper is opaque, so the premultiplied pixels are the colours.
         let rgb: Vec<u8> = pixmap
@@ -306,12 +327,12 @@ objects:
         let list = draw_sheet(&sheet, &fonts, 0.01, MOST_HATCH_DASHES);
         assert_eq!(list.text.len(), 3);
         let view = View::around(list.extents().unwrap(), 20.0, 6.0, 10.0, None);
-        let with = rasterize(&list, &view).unwrap();
+        let with = rasterize(&list, &view, None).unwrap();
         let without = DisplayList {
             text: Vec::new(),
             ..list.clone()
         };
-        let without = rasterize(&without, &view).unwrap();
+        let without = rasterize(&without, &view, None).unwrap();
         assert_eq!(with.data(), without.data());
         assert!(
             with.data().iter().any(|&c| c < 128),

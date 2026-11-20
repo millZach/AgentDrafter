@@ -404,7 +404,7 @@ What an output records about the files it came from: the record and the files it
 _Avoid_: watermark, signature, build mark (a build mark tells that AgentDrafter built a DWG, not what from)
 
 **Render**:
-Drawing a sheet to a PNG, through the display list, so an agent can look at its own work.
+Drawing a sheet to a PNG, through the display list, so an agent can look at its own work: in each object's own colour, or through a plot style, or monochrome, to show what a plot will print.
 _Avoid_: screenshot, export, build (a build produces a DWG)
 
 **Plot**:

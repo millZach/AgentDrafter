@@ -172,7 +172,7 @@ pub use query::{
     Query, QueryReport, QueryRequest, Selection, SelectionBox, SheetBlocks, SheetExtents,
     SheetLayers, SheetLayout, SnapObject, SnappedFrom, ViewportFound, WrittenAt, EXTENTS_TOLERANCE,
 };
-pub use render::{render, render_with, HatchCutShort, RenderReport, RenderRequest};
+pub use render::{render, render_with, DrawnThrough, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;
 pub use set::{
     build_set, build_set_with, Notice, NoticeCode, SetBuildRequest, SetReport, SheetOutcome,

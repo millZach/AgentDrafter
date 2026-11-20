@@ -417,8 +417,9 @@ fn read_text(path: &Path, what: &str) -> Result<(Vec<u8>, String), Error> {
 }
 
 /// The plot style `name` names, read from the plot style folders, or the
-/// built-in monochrome style when there is no name.
-fn plot_style(
+/// built-in monochrome style when there is no name. A render through a
+/// plot style finds it here too.
+pub(crate) fn plot_style(
     name: Option<&str>,
     settings: &Settings,
 ) -> Result<(PlotStyle, PlotStyleUsed), Error> {

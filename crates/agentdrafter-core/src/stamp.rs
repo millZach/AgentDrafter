@@ -417,7 +417,7 @@ mod tests {
         };
         let png = |stamp: &Stamp| {
             let pixmap = tiny_skia::Pixmap::new(2, 2).unwrap();
-            raster::png(&pixmap, &stamp.to_json(), 1.0).unwrap()
+            raster::png(&pixmap, &stamp.to_json(), None, 1.0).unwrap()
         };
         assert_eq!(stamp_of(&png(&stamp)), Ok(stamp.clone()));
         stamp.stamp = 2;

@@ -4,7 +4,8 @@
 
 ```
 agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>]
-                    [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]... [--no-system-fonts]
+                    [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>]
+                    [--plot-style <ctb> | --monochrome] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]
 agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]
 ```
 
@@ -12,7 +13,7 @@ Both print one line of JSON, as `build` does. Rendering needs no window and no G
 
 ## What it draws
 
-What is drawn follows AutoCAD's plot of the same DWG, through a plot style that keeps each object's own colour. The rules below were read from AutoCAD 2026's plots of made-up sheets; the comparison is under [Measured against AutoCAD](#measured-against-autocad).
+What is drawn follows AutoCAD's plot of the same DWG, through a plot style that keeps each object's own colour, unless the render is asked to [draw through a plot style](#through-a-plot-style-to-show-what-prints). The rules below were read from AutoCAD 2026's plots of made-up sheets; the comparison is under [Measured against AutoCAD](#measured-against-autocad).
 
 - **Layers.** An object on a layer that is off, or frozen, draws nothing; one on a layer that does not plot draws in the PNG, as AutoCAD's screen shows it, and is left out of a [plot](plot.md). See [the sheet description's layers](sheet-description.md#layers).
 - **Paper and colour.** The PNG is white paper. Each object draws in its own colour, or its layer's where it is `ByLayer` ([an object's own colour](sheet-description.md#an-objects-own-colour-linetype-and-lineweight)), in the colour AutoCAD plots that colour index in; index 7, white on a dark screen, plots black. Its linetype and lineweight are taken the same way, and a linetype's lengths are enlarged by the sheet's `ltscale` times the object's `linetype_scale`.
@@ -29,6 +30,21 @@ What is drawn follows AutoCAD's plot of the same DWG, through a plot style that 
 - **Seen from above.** `z` is dropped: a line straight up draws as a dot.
 
 A sheet description that names a block library is drawn with it, found from the sheet description's folder. A DWG is drawn from what the core reads of it (`read_dwg`), its block definitions and inserts among it: model space, and every layout it holds, each on its layout's paper, whatever tab it was saved on: a DWG left on its Model tab renders a PNG for each layout as one saved on a layout does. Objects the core has no model for yet are counted under `objects_not_drawn`.
+
+## Through a plot style, to show what prints
+
+By default a PNG draws each object in its own colour, or its layer's, as a screen shows it. A plot ([plotting](plot.md)) draws through a plot style, and with none named through the built-in monochrome style, so the PNG and the issued sheet can look different. To see what will print, a render draws through a plot style too:
+
+| Option | What it draws |
+|---|---|
+| `--plot-style <ctb>` | Through the CTB plot style of that name, found in the plot style folders exactly as a plot finds it: the folders `--plot-styles` names, then those `AGENTDRAFTER_PLOT_STYLES` lists, the name matched ignoring case, and a path refused ([the plot style](plot.md#the-plot-style)). A name a plot cannot find or read is refused in the same words, and nothing is written. |
+| `--monochrome` | Through the built-in monochrome style, exactly as a plot draws with no plot style named: every pen black at its object's own lineweight. |
+
+The two are not given together: a render asked for both is refused (`usage`, at `monochrome`). With neither, a render draws in colour, as it always has, and its PNG is the same, byte for byte.
+
+Through either, the pens are the plot's: each colour index draws in the colour and lineweight the plot style gives it, applied where the PDF applies them, to the same display list (ADR-0011), so a PNG through a CTB draws each pen as the PDF through that CTB does. The settings a plot does not follow yet, such as screening, the PNG does not follow either: a screened pen draws at full strength in both. A layer that does not plot is left out, as it is on paper; it still counts towards the extents, so the PNG covers what the PDF's page covers.
+
+The reply's `drawn_through` says which it drew through: `"colour"`, `"monochrome"`, or `{"plot_style": {"name": ..., "file": ..., "not_followed": [...]}}`, the plot style as a plot's reply gives it under `plot_style`, with the file it was read from and the settings it sets that are not followed. The stamp holds no plot style, as a PDF's holds none ([the stamp](#the-stamp)); a PNG drawn through one names it in a `Software` text chunk, `agentdrafter render, plot style made-up.ctb`, as a PDF's `Creator` names it, and the built-in style as `monochrome (built in)`. A PNG drawn in colour has no such chunk.
 
 ## Size and scale
 
@@ -49,7 +65,7 @@ The PNG goes beside the source with a `.png` extension unless `--output` names a
 
 ## The stamp
 
-Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of JSON; a PDF carries the same stamp in its document information ([plotting](plot.md#the-stamp)). It lists the drawing set's files the sheet is drawn from: the record first, then the files it draws on. Fonts are not in it: they belong to the machine that renders (AutoCAD's `Fonts` folder on one, a look-alike on another), not to the drawing set, so the same PNG checked on another machine is not stale for that.
+Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of JSON, whatever its pens were drawn through; a PDF carries the same stamp in its document information ([plotting](plot.md#the-stamp)). It lists the drawing set's files the sheet is drawn from: the record first, then the files it draws on. Fonts are not in it: they belong to the machine that renders (AutoCAD's `Fonts` folder on one, a look-alike on another), not to the drawing set, so the same PNG checked on another machine is not stale for that.
 
 ```json
 {"stamp":1,"produced_by":"agentdrafter 0.0.0","sources":[{"kind":"sheet_description","path":"sheet-1.yaml","sha256":"…"},{"kind":"block_library","path":"blocks.yaml","sha256":"…"}],"revision":{"issued":false}}
@@ -68,7 +84,7 @@ Every PNG carries a stamp, in a text chunk keyed `AgentDrafter`, as one line of 
 ## The pipeline
 
 - `crates/agentdrafter-core/src/draw/` turns a sheet into a display list: strokes with their colour index, lineweight and dashes already laid out, and fills, in drawing units, with each line of text also as a run of its characters along its baseline, which draws nothing and lets the PDF keep the text searchable. `curves.rs` turns arcs, circles, ellipses and splines into chords (a spline through fit points is fitted as AutoCAD fits it), `linetype.rs` lays out linetypes, `hatch.rs` hatches, `text.rs` text, and `color.rs` holds the colour each index plots in. `src/text/outline.rs` gives what each character of a font draws.
-- `src/raster.rs` draws the display list on the CPU with [tiny-skia](https://crates.io/crates/tiny-skia) (BSD-3-Clause) and writes the PNG with [png](https://crates.io/crates/png) (MIT or Apache-2.0). `src/stamp.rs` makes and checks stamps, with [sha2](https://crates.io/crates/sha2) (MIT or Apache-2.0). `src/render.rs` is the entry point, and `src/output.rs` holds what it shares with the PDF: reading the record and writing the output safely.
+- `src/raster.rs` draws the display list on the CPU, each item in its colour index's colour and its lineweight, or through a plot style with the pens `src/plot_style.rs` gives, the ones the PDF is written with, with [tiny-skia](https://crates.io/crates/tiny-skia) (BSD-3-Clause) and writes the PNG with [png](https://crates.io/crates/png) (MIT or Apache-2.0). `src/stamp.rs` makes and checks stamps, with [sha2](https://crates.io/crates/sha2) (MIT or Apache-2.0). `src/render.rs` is the entry point, and `src/output.rs` holds what it shares with the PDF: reading the record and writing the output safely.
 
 - The viewer draws the same display list in the page ([viewer.md](viewer.md)): the `display-list` command gives it as JSON, and `crates/agentdrafter-viewer`, compiled to WebAssembly, draws it with WebGL2; held to the PNG pixel for pixel, its ink lies within one pixel of the PNG's.
 

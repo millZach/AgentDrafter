@@ -87,6 +87,12 @@
   },
   "also": [
     {
+      "command": "render",
+      "after": "render",
+      "args": ["render", "demo-set/dwg/DEMO-001.dwg", "--width", "320", "--height", "200", "--monochrome", "--output", "demo-set/dwg/DEMO-001-monochrome.png"],
+      "input": {"source": "demo-set/dwg/DEMO-001.dwg", "width": 320, "height": 200, "monochrome": true, "output": "demo-set/dwg/DEMO-001-monochrome.png"}
+    },
+    {
       "command": "propose",
       "after": "propose",
       "args": ["propose", "demo-set", "circle.json"],

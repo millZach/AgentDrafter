@@ -448,7 +448,13 @@ fn render_does() -> String {
      existing file is never replaced without `overwrite`, and `overwrite` replaces only a PNG \
      AgentDrafter rendered. A sheet drawn in several layouts renders each to a PNG of its own, \
      named after the PNG with `-` and the layout's name, such as panel-Details.png; the reply is \
-     the first layout's, with the others' under `other_layouts`."
+     the first layout's, with the others' under `other_layouts`. To show what prints, it draws \
+     through the CTB plot style `plot_style` names, found in the plot style folders as plot \
+     finds it, or with `monochrome` exactly as plot draws with no plot style named, every pen \
+     black at its object's own lineweight; either way a layer that does not plot is left out, \
+     and the two are not given together. The reply's `drawn_through` says which it drew \
+     through: `colour`, `monochrome`, or the plot style, its file and the settings it does not \
+     follow yet, as plot reports it."
         .to_owned()
 }
 
@@ -463,6 +469,9 @@ fn render_input() -> Value {
             "width": pixels("How many pixels wide the image is, the drawing fitted inside it."),
             "height": pixels("How many pixels high the image is, the drawing fitted inside it."),
             "margin": number("The margin round the drawing's extents, in millimetres of paper. Without it, 5."),
+            "plot_style": text("The CTB plot style to draw through, to show what prints, by its file name, such as `monochrome.ctb`, found in the plot style folders as plot finds it. Not given with `monochrome`. Without either, each object draws in its own colour."),
+            "monochrome": flag("Draw exactly as plot draws with no plot style named: every pen black at its object's own lineweight. Not given with `plot_style`."),
+            "plot_styles": plot_styles(),
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
         }),
@@ -475,7 +484,7 @@ fn run_render(
     base: &Settings,
     _: Interface,
 ) -> Result<JsonReply, Error> {
-    let settings = take_settings(&mut input, base, false)?;
+    let settings = take_settings(&mut input, base, true)?;
     let request: RenderRequest = parse("render", input)?;
     Ok(done_warned(render_with(&request, &settings)))
 }
@@ -1398,9 +1407,10 @@ fn is_set(source: &Path, output: Option<&Path>, outputs: &str, one: &str) -> Res
 
 /// The settings for one command: the font folders the input's `fonts`
 /// names, then those of `base`, then the system's font folders of `base`
-/// unless its `no_system_fonts` is true; and, when the command plots, the
-/// plot style folders its `plot_styles` names, then those of `base`. All
-/// are taken out of the input.
+/// unless its `no_system_fonts` is true; and, when the command reads plot
+/// styles, as `plot` and `render` do, the plot style folders its
+/// `plot_styles` names, then those of `base`. All are taken out of the
+/// input.
 fn take_settings(
     input: &mut Map<String, Value>,
     base: &Settings,

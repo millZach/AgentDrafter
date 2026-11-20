@@ -44,6 +44,8 @@ A CTB file, AutoCAD's colour-dependent plot style table, sets each pen: for each
 
 **With no plot style named**, a plot draws with the built-in monochrome style: every pen black, at its object's own lineweight. That is what AutoCAD's `monochrome.ctb` sets for every one of its pens, and what a plant's issued sheets usually are, so a machine without AutoCAD plots the usual case exactly. The reply names it `monochrome (built in)`.
 
+A [render](render.md#through-a-plot-style-to-show-what-prints) draws through the same plot styles, to show in a PNG what will print: `--plot-style` and `--plot-styles` as here, found the same way, or `--monochrome` for the built-in style. Its pens are the ones the PDF draws with, and a layer that does not plot is left out of it too. Without either, a render draws each object in its own colour.
+
 What a CTB's pen sets, and what the plot follows:
 
 | A pen's setting | What the plot does |
