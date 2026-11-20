@@ -135,6 +135,12 @@ fn settings_may_list_rows_files_and_folders_of_them() {
             "rows[0]",
             "a rows file or of a folder",
         ),
+        (
+            "[a.yaml, b, a.yaml]",
+            ErrorCode::DuplicateName,
+            "rows[2]",
+            "named twice, by `rows[0]` and by `rows[2]`",
+        ),
     ] {
         let text = format!("units: in\noutput: dwg\nrows: {rows}\n");
         let e = error(parse_set_settings(&text));
@@ -585,6 +591,18 @@ fn the_set_schema_accepts_exactly_the_settings_the_reader_accepts() {
         (&ROWS, "[a.yaml, null]", json!(["a.yaml", null]), false),
         (&ROWS, "[[a.yaml]]", json!([["a.yaml"]]), false),
         (&ROWS, "{a: b}", json!({"a": "b"}), false),
+        (
+            &ROWS,
+            "[rows/a.yaml, rows/a.yaml]",
+            json!(["rows/a.yaml", "rows/a.yaml"]),
+            false,
+        ),
+        (
+            &ROWS,
+            "[rows/a.yaml, rows/b.yaml, rows/a.yaml]",
+            json!(["rows/a.yaml", "rows/b.yaml", "rows/a.yaml"]),
+            false,
+        ),
     ];
     assert_reader_and_schema_agree(&set_schema(), cases, |yaml| {
         parse_set_settings(yaml).map(|_| ())

@@ -198,19 +198,19 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
             names: "a folder",
         },
     )?;
-    let named = fields.require("rows")?;
-    let rows_listed = matches!(named.kind, Kind::Sequence(_));
+    let given = fields.require("rows")?;
+    let rows_listed = matches!(given.kind, Kind::Sequence(_));
     let rows = if rows_listed {
-        let items = sequence(named, "rows", "a list of rows files and folders of them")?;
+        let items = sequence(given, "rows", "a list of rows files and folders of them")?;
         if items.is_empty() {
             return Err(bad_value(
-                named,
+                given,
                 "rows",
                 "`rows` lists no rows file; list one or more, each the path of a rows file or \
                  of a folder of them, such as `rows/loops.yaml` or `rows`",
             ));
         }
-        items
+        let named = items
             .iter()
             .enumerate()
             .map(|(i, item)| {
@@ -233,7 +233,22 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
                 )?;
                 Ok(rows_named(written, field, item.at))
             })
-            .collect::<Result<Vec<_>, Error>>()?
+            .collect::<Result<Vec<_>, Error>>()?;
+        for (i, later) in named.iter().enumerate() {
+            if let Some(first) = named[..i].iter().find(|n| n.written == later.written) {
+                return Err(Error::new(
+                    ErrorCode::DuplicateName,
+                    format!(
+                        "the rows file `{}` is named twice, by `{}` and by `{}`; each rows file \
+                         is named once, so that each of its rows is one sheet",
+                        later.written, first.field, later.field
+                    ),
+                )
+                .at_field(&later.field)
+                .at_position(later.line, later.column));
+            }
+        }
+        named
     } else {
         let written = relative_path(
             fields.require_text("rows")?,
@@ -245,7 +260,7 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
                 names: "a file",
             },
         )?;
-        vec![rows_named(written, "rows".to_owned(), named.at)]
+        vec![rows_named(written, "rows".to_owned(), given.at)]
     };
     Ok(SetSettings {
         units,
@@ -267,22 +282,54 @@ fn rows_named(written: &str, field: String, at: Pos) -> RowsNamed {
 /// The extension of the rows files a folder `rows` names gives.
 const ROWS_FILE_EXTENSION: &str = ".yaml";
 
+/// A rows file the settings of a drawing set reach.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RowsPath {
+    /// Its path relative to the set's folder, as the settings reach it,
+    /// with `/` between folders, such as `rows/areas.yaml`.
+    pub written: String,
+    /// Its path joined onto the set's folder.
+    pub path: PathBuf,
+}
+
 /// Reads the rows files of the drawing set whose folder is `folder` and
-/// whose settings are `settings`, in the order the set builds them: each
-/// path `rows` names in turn, a rows file itself or a folder's `.yaml`
-/// files, not those of the folders in it, in the byte order of their names,
-/// so that every system lists them alike.
-///
-/// Refused, at the path in the settings: a folder that holds no rows file;
-/// a file reached twice, by two paths or a path and a folder; and a list's
-/// path or a folder outside the set's folder. One path that names a file,
-/// as settings that name one rows file write it, is read wherever it leads,
-/// as it always has been.
+/// whose settings are `settings`, as [`rows_paths`] finds them, in the
+/// order the set builds them.
 pub(crate) fn read_rows_files_in(
     files: &dyn ReadFiles,
     folder: &Path,
     settings: &SetSettings,
 ) -> Result<Vec<RowsFile>, Error> {
+    rows_paths(folder, settings)?
+        .into_iter()
+        .map(|found| read_rows_file_in(files, found))
+        .collect()
+}
+
+/// Reads the rows file `found`, from `files`.
+pub(crate) fn read_rows_file_in(files: &dyn ReadFiles, found: RowsPath) -> Result<RowsFile, Error> {
+    let text = read_file_in(files, &found.path, "the drawing set's rows")?;
+    Ok(RowsFile {
+        written: found.written,
+        path: found.path,
+        text,
+    })
+}
+
+/// The rows files of the drawing set whose folder is `folder` and whose
+/// settings are `settings`, in the order the set builds them, without
+/// reading them: each path `rows` names in turn, a rows file itself or a
+/// folder's `.yaml` files, not those of the folders in it, in the byte
+/// order of their names, so that every system lists them alike.
+///
+/// Refused, at the path in the settings: a folder that holds no rows file;
+/// a file reached twice, by two paths or a path and a folder; and a list's
+/// path, a folder or a folder's file that leads outside the set's folder,
+/// as written or as the file system resolves it, or through a link, the
+/// file itself or a folder on its way in the set. One path that names a
+/// file, as settings that name one rows file write it, is read wherever it
+/// leads, as it always has been.
+pub(crate) fn rows_paths(folder: &Path, settings: &SetSettings) -> Result<Vec<RowsPath>, Error> {
     let settings_file = folder.join(SET_SETTINGS_FILE);
     // Each file reached, with the path in the settings that reached it.
     let mut reached: Vec<(String, PathBuf, &RowsNamed)> = Vec::new();
@@ -295,8 +342,11 @@ pub(crate) fn read_rows_files_in(
         };
         let path = folder.join(&named.written);
         let is_folder = fs::metadata(&path).is_ok_and(|m| m.is_dir());
+        // A list's paths and a folder are plain files and folders in the
+        // set; one path that names a file is read as it always has been.
+        let kept_in_set = is_folder || settings.rows_listed;
         let outside = relative_to(folder, &path).split('/').next() == Some("..");
-        if outside && (is_folder || settings.rows_listed) {
+        if outside && kept_in_set {
             return Err(place(Error::new(
                 ErrorCode::BadValue,
                 format!(
@@ -305,6 +355,9 @@ pub(crate) fn read_rows_files_in(
                     named.written
                 ),
             )));
+        }
+        if kept_in_set {
+            plain_in_set(folder, &named.written).map_err(place)?;
         }
         let members = if is_folder {
             let members = folder_members(&path, &named.written).map_err(|e| {
@@ -323,6 +376,9 @@ pub(crate) fn read_rows_files_in(
                         named.written
                     ),
                 )));
+            }
+            for (written, _) in &members {
+                plain_in_set(folder, written).map_err(place)?;
             }
             members
         } else {
@@ -354,17 +410,48 @@ pub(crate) fn read_rows_files_in(
             reached.push((written, path, named));
         }
     }
-    reached
+    Ok(reached
         .into_iter()
-        .map(|(written, path, _)| {
-            let text = read_file_in(files, &path, "the drawing set's rows")?;
-            Ok(RowsFile {
-                written,
-                path,
-                text,
-            })
-        })
-        .collect()
+        .map(|(written, path, _)| RowsPath { written, path })
+        .collect())
+}
+
+/// Refuses the rows file `written`, relative to the set's `folder`, that a
+/// list or a folder reaches, when the file itself or a folder on its way in
+/// the set is a link, a symbolic link or a junction, or when it leads
+/// outside the set's folder as the file system resolves it: a change set
+/// writes a rows file where it is, so it is a plain file in the set.
+fn plain_in_set(folder: &Path, written: &str) -> Result<(), Error> {
+    let mut at = folder.to_owned();
+    for part in written.split('/') {
+        at.push(part);
+        if part == "." || part == ".." {
+            continue;
+        }
+        if fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "`{written}` leads through a link, `{}`; a rows file a list or a folder names \
+                     is a plain file in the drawing set's folder, reached through plain folders, \
+                     so that a change set writes it where it is",
+                    relative_to(folder, &at)
+                ),
+            ));
+        }
+    }
+    if let (Ok(set), Ok(file)) = (fs::canonicalize(folder), fs::canonicalize(&at)) {
+        if !file.starts_with(&set) {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "`{written}` is outside the drawing set's folder as the file system resolves \
+                     it; the rows files a list or a folder names are in the set's folder"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The rows files of the folder at `path`, which the settings write as

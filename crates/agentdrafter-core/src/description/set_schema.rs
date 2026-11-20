@@ -64,8 +64,9 @@ fn rows_property() -> Value {
          the .yaml files in it, not those in its folders, in the byte order of their names; or \
          a list of such paths, such as [rows/loops.yaml, rows/panels.yaml]. The set builds the \
          rows of each file in turn, in the order given, and a sheet's name is given once across \
-         them all. No file is reached twice, and a folder, or a path in a list, is in the set's \
-         folder. Each file's schema is `agentdrafter schema rows`."
+         them all. No path is listed twice and no file is reached twice, and a folder, or a \
+         path in a list, is a plain folder or file in the set's folder, reached through no link. \
+         Each file's schema is `agentdrafter schema rows`."
             .to_owned(),
     );
     let item = relative_path_property(
@@ -76,7 +77,7 @@ fn rows_property() -> Value {
     property["anyOf"]
         .as_array_mut()
         .expect("a path's schema is a choice")
-        .push(json!({ "type": "array", "minItems": 1, "items": item }));
+        .push(json!({ "type": "array", "minItems": 1, "uniqueItems": true, "items": item }));
     property
 }
 

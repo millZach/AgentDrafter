@@ -10,9 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, change_with, plot_set_with, query_with, undo, Answer, ChangeRequest, ErrorCode,
-    PlotSetRequest, Query, QueryRequest, Reply, Selection, SetBuildRequest, SetReport, Settings,
-    SourceKind, UndoRequest,
+    build_set_with, change_with, plot_set_with, plot_with, query_with, undo, Answer, ChangeRequest,
+    ErrorCode, PageFrom, PlotRequest, PlotSetRequest, Query, QueryRequest, Reply, Selection,
+    SetBuildRequest, SetReport, Settings, SourceKind, UndoRequest,
 };
 use serde_json::json;
 
@@ -410,4 +410,147 @@ fn a_change_set_on_sheets_of_two_rows_files_writes_each_and_undoes_byte_for_byte
     });
     assert!(undone.ok, "{:#?}", undone.error);
     assert!(snapshot(&set) == before, "the undo puts every file back");
+}
+
+/// Makes a link at `link` to the folder or file `target`; false, with a
+/// note, when this system will not let the test make one, such as Windows
+/// without the privilege to make symbolic links.
+fn link(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let made = if target.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    };
+    match made {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("skipped: this system will not make a link here: {e}");
+            false
+        }
+    }
+}
+
+/// Asserts that the set's build stops with `bad_value` at `field`, saying
+/// that the rows file leads through the link `through`.
+#[track_caller]
+fn refused_through_a_link(set: &Path, field: &str, through: &str) {
+    let e = refused(set);
+    assert_eq!(e.code, ErrorCode::BadValue, "{e:?}");
+    assert_eq!(e.field.as_deref(), Some(field), "{e:?}");
+    assert!(
+        e.message
+            .contains(&format!("leads through a link, `{through}`")),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn a_rows_file_a_list_or_a_folder_reaches_through_a_link_is_refused() {
+    let set = two_kinds("links");
+    let elsewhere = set.parent().unwrap().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::copy(
+        set.join("rows/schedules.yaml"),
+        elsewhere.join("schedules.yaml"),
+    )
+    .unwrap();
+
+    // A folder in the set linked to a folder outside it.
+    if !link(&elsewhere, &set.join("linked")) {
+        return;
+    }
+    rows_are(&set, "[rows/areas.yaml, linked/schedules.yaml]");
+    refused_through_a_link(&set, "rows[1]", "linked");
+    rows_are(&set, "[rows/areas.yaml, linked]");
+    refused_through_a_link(&set, "rows[1]", "linked");
+    rows_are(&set, "linked");
+    refused_through_a_link(&set, "rows", "linked");
+
+    // A folder in the set linked to another in the set.
+    assert!(link(&set.join("rows"), &set.join("inner")));
+    rows_are(&set, "[inner/areas.yaml]");
+    refused_through_a_link(&set, "rows[0]", "inner");
+
+    // A rows file in a rows folder that is a link, and the same named in
+    // a list.
+    fs::create_dir_all(set.join("more")).unwrap();
+    assert!(link(
+        &elsewhere.join("schedules.yaml"),
+        &set.join("more/schedules.yaml")
+    ));
+    rows_are(&set, "[rows/areas.yaml, more]");
+    refused_through_a_link(&set, "rows[1]", "more/schedules.yaml");
+    rows_are(&set, "[more/schedules.yaml]");
+    refused_through_a_link(&set, "rows[0]", "more/schedules.yaml");
+
+    // One path that names a file is read wherever it leads, as before.
+    rows_are(&set, "linked/schedules.yaml");
+    assert_eq!(sheets(&built(&set)), ["SCHED-201"]);
+}
+
+#[test]
+fn a_sheets_dwg_names_its_own_rows_file_and_is_plotted_from_it_alone() {
+    let set = two_kinds("mark");
+    built(&set);
+    // Another of the set's rows files that cannot be read.
+    fs::write(set.join("rows/areas.yaml"), "rows: [\n").unwrap();
+    let plot = |sheet: &str| {
+        plot_with(
+            &PlotRequest {
+                source: set.join("dwg").join(format!("{sheet}.dwg")),
+                output: Some(set.join(format!("{sheet}-alone.pdf"))),
+                overwrite: false,
+                plot_style: None,
+            },
+            &Settings::default(),
+        )
+    };
+    let rows_of = |report: &agentdrafter_core::PlotReport| -> Vec<String> {
+        report
+            .stamp
+            .sources
+            .iter()
+            .filter(|source| source.kind == SourceKind::Rows)
+            .map(|source| source.path.clone())
+            .collect()
+    };
+
+    // The schedule's DWG names its own rows file, which is read alone: its
+    // page is its template's paper, and its stamp names that file.
+    let report = plot("SCHED-201").unwrap_or_else(|e| panic!("{e:#?}"));
+    assert_eq!(report.page, PageFrom::Paper);
+    assert_eq!(rows_of(&report), ["rows/schedules.yaml"]);
+
+    // The area's rows file cannot be read, so its DWG plots to its extents.
+    let report = plot("AREA-101").unwrap_or_else(|e| panic!("{e:#?}"));
+    assert_eq!(report.page, PageFrom::Extents);
+    assert!(rows_of(&report).is_empty());
+}
+
+#[test]
+fn a_sole_rows_file_that_is_not_utf8_is_refused_by_a_plot_as_it_was() {
+    let set = two_kinds("not-utf8");
+    rows_are(&set, "rows/areas.yaml");
+    let rows = set.join("rows/areas.yaml");
+    fs::write(&rows, b"rows:\n  - sheet: \xff\n").unwrap();
+    let reply = plot_set_with(
+        &PlotSetRequest {
+            set: set.clone(),
+            overwrite: false,
+            plot_style: None,
+        },
+        &Settings::default(),
+    );
+    assert!(reply.result.is_none(), "{:#?}", reply.result);
+    let e = reply.error.unwrap();
+    assert_eq!(e.code, ErrorCode::ReadFailed);
+    assert_eq!(
+        e.message,
+        "could not read the drawing set's rows: it is not UTF-8 text"
+    );
+    assert_eq!(e.file.as_deref(), Some(rows.display().to_string().as_str()));
+    assert_eq!(e.field, None);
 }

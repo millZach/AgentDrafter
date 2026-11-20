@@ -48,7 +48,7 @@ use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
 use crate::geometry::SnapRef;
 use crate::import::{drawing_unit, is_dxf, plan, write_plan, BlocksImported, Existing};
-use crate::set::{set_in_mark, Notice, SET_SETTINGS_FILE};
+use crate::set::{set_in_mark, sheet_mark, Notice, SET_SETTINGS_FILE};
 use crate::settings::Settings;
 use crate::units::Unit;
 
@@ -60,9 +60,9 @@ struct SetFiles {
     folder: PathBuf,
     units: Unit,
     output: PathBuf,
-    /// The build mark the set's DWGs carry, naming the set as `build`
+    /// The set as the build marks of its DWGs name it, as `build` names it
     /// names it.
-    mark: BuildMark,
+    marked: Option<String>,
     /// The set's rows files, in the order it builds their rows.
     rows_files: Vec<RowsFile>,
     rows: Vec<Row>,
@@ -177,9 +177,7 @@ impl SetFiles {
             folder: folder.to_owned(),
             units: settings.units,
             output: folder.join(&settings.output),
-            mark: BuildMark {
-                set: set_in_mark(folder, &settings.output),
-            },
+            marked: set_in_mark(folder, &settings.output),
             rows_files,
             rows,
             templates,
@@ -281,6 +279,11 @@ impl SetFiles {
 
     fn dwg(&self, k: usize) -> PathBuf {
         self.output.join(format!("{}.dwg", self.rows[k].sheet))
+    }
+
+    /// The build mark sheet `k`'s DWG carries, as `build` writes it.
+    fn mark(&self, k: usize) -> BuildMark {
+        sheet_mark(self.marked.as_deref(), &self.rows_files, &self.rows[k])
     }
 
     /// Where sheet `k`'s own objects are written: its row's rows file, and
@@ -3308,7 +3311,7 @@ fn validate(
         &record,
         &files.templates[t].path,
         &dwg,
-        &files.mark,
+        &files.mark(k),
         true,
         settings,
     )
@@ -3979,7 +3982,15 @@ fn before_change(files: &SetFiles, k: usize, settings: &Settings) -> Result<Resu
     .and_then(|(record, _)| {
         let dwg = files.dwg(k);
         writable(&dwg)?;
-        prepare_sheet(&record, &template.path, &dwg, &files.mark, true, settings).map(|_| ())
+        prepare_sheet(
+            &record,
+            &template.path,
+            &dwg,
+            &files.mark(k),
+            true,
+            settings,
+        )
+        .map(|_| ())
     });
     Ok(outcome)
 }

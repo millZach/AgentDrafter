@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::description::{
-    read_rows_files_in, read_set_settings, rows_of, template_at, template_path, Disk,
+    read_rows_files_in, read_set_settings, rows_of, template_at, template_path, ReadFiles,
 };
 use crate::draw::{self, Bounds, HatchCutShort, PageFrom};
 use crate::error::{Error, ErrorCode};
@@ -311,7 +311,7 @@ pub fn plot_set_with(request: &PlotSetRequest, settings: &Settings) -> Reply<Plo
 fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetReport, Error> {
     let folder = request.set.as_path();
     let set = read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
-    let rows_files = read_rows_files_in(&Disk, folder, &set)?;
+    let rows_files = read_rows_files_in(&PlotFiles, folder, &set)?;
     let rows = rows_of(&rows_files)?;
     let style = plot_style(request.plot_style.as_deref(), settings)?;
     let output = folder.join(&set.output);
@@ -387,6 +387,21 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
 
 /// The bytes of the file at `path` and its text. `what` names it in the
 /// error, such as "the template".
+/// The files as a set's plot reads its rows: as the disk holds them, with
+/// a file that is not UTF-8 text refused in the words [`read_text`] refuses
+/// the plot's other files in.
+struct PlotFiles;
+
+impl ReadFiles for PlotFiles {
+    fn text(&self, path: &Path) -> std::io::Result<String> {
+        String::from_utf8(fs::read(path)?)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, NOT_UTF8))
+    }
+}
+
+/// Why the plot refuses a file it reads as text that is not UTF-8.
+const NOT_UTF8: &str = "it is not UTF-8 text";
+
 fn read_text(path: &Path, what: &str) -> Result<(Vec<u8>, String), Error> {
     let bytes = fs::read(path).map_err(|e| {
         Error::new(ErrorCode::ReadFailed, format!("could not read {what}: {e}")).in_file(path)
@@ -394,7 +409,7 @@ fn read_text(path: &Path, what: &str) -> Result<(Vec<u8>, String), Error> {
     let text = String::from_utf8(bytes.clone()).map_err(|_| {
         Error::new(
             ErrorCode::ReadFailed,
-            format!("could not read {what}: it is not UTF-8 text"),
+            format!("could not read {what}: {NOT_UTF8}"),
         )
         .in_file(path)
     })?;

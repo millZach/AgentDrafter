@@ -89,7 +89,10 @@ pub fn build_with(request: &BuildRequest, settings: &Settings) -> Result<BuildRe
         .output
         .clone()
         .unwrap_or_else(|| description.with_extension("dwg"));
-    let alone = BuildMark { set: None };
+    let alone = BuildMark {
+        set: None,
+        rows: None,
+    };
     let mut report = build_sheet(
         &record,
         description,
