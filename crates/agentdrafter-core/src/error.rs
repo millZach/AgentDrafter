@@ -121,6 +121,12 @@ pub enum ErrorCode {
     /// A keep or a discard of a proposal that has ended already: it was
     /// kept or discarded before.
     ProposalEnded,
+    /// A message to the drafter's assistant while it is still working on
+    /// the last one: it answers one at a time.
+    AssistantBusy,
+    /// A message to the drafter's assistant, or a pick of its agent, when
+    /// that agent, or any, was not found on the PATH.
+    NoAgent,
 }
 
 /// An error from the core, ready to report through any interface.

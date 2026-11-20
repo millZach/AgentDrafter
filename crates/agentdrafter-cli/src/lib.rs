@@ -18,6 +18,7 @@
 //! such as a sheet of a drawing set that failed, 2 when the arguments are
 //! wrong.
 
+mod assistant;
 mod http;
 mod mcp;
 mod page;
@@ -52,6 +53,9 @@ const PROPOSE_USAGE: &str = "agentdrafter propose <drawing-set-folder> <change-s
 const PROPOSALS_USAGE: &str = "agentdrafter proposals <drawing-set-folder>";
 const KEEP_USAGE: &str = "agentdrafter keep <drawing-set-folder> <proposal> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
 const DISCARD_USAGE: &str = "agentdrafter discard <drawing-set-folder> <proposal> [--by <who>]";
+const LOOK_AT_USAGE: &str =
+    "agentdrafter look-at <drawing-set-folder> <sheet> [--layout <layout>] [--selected <id>]...";
+const LOOKING_AT_USAGE: &str = "agentdrafter looking-at <drawing-set-folder>";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--plot-style <ctb> | --monochrome] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--change-set <change-set.json | -> [--all-or-none]] [--fonts <folder>]... [--no-system-fonts]";
@@ -108,6 +112,8 @@ fn cli_form(command: &str) -> Option<(&'static str, Parse)> {
         "proposals" => (PROPOSALS_USAGE, parse_proposals),
         "keep" => (KEEP_USAGE, parse_keep),
         "discard" => (DISCARD_USAGE, parse_discard),
+        "look-at" => (LOOK_AT_USAGE, parse_look_at),
+        "looking-at" => (LOOKING_AT_USAGE, parse_looking_at),
         "check" => (CHECK_USAGE, parse_check),
         "import-blocks" => (IMPORT_BLOCKS_USAGE, parse_import_blocks),
         _ => return None,
@@ -867,6 +873,76 @@ fn parse_proposals(args: Args) -> Result<Value, Error> {
         set: PathBuf::from(set),
     };
     input_of(request, FontOptions::default())
+}
+
+/// Reads `look-at`'s arguments: the set's folder, the sheet, `--layout`
+/// and each `--selected` object's ID.
+fn parse_look_at(mut args: Args) -> Result<Value, Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {LOOK_AT_USAGE}"));
+    let text = |arg: OsString, what: &str| {
+        arg.into_string()
+            .map_err(|_| usage(format!("{what} is text (UTF-8)")))
+    };
+    let mut given: Vec<String> = Vec::new();
+    let mut layout: Option<String> = None;
+    let mut selected: Vec<String> = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--layout") => {
+                let named = args
+                    .next()
+                    .ok_or_else(|| usage("--layout needs the layout's name".into()))?;
+                if layout.replace(text(named, "--layout")?).is_some() {
+                    return Err(usage("--layout is given twice".into()));
+                }
+            }
+            Some("--selected") => {
+                let id = args
+                    .next()
+                    .ok_or_else(|| usage("--selected needs an object's ID".into()))?;
+                selected.push(text(id, "--selected")?);
+            }
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("look-at takes no option `{flag}`")))
+            }
+            _ => given.push(text(arg, "every argument")?),
+        }
+    }
+    let [set, sheet] = <[String; 2]>::try_from(given).map_err(|given| {
+        usage(format!(
+            "look-at takes a drawing set's folder and a sheet, found {} arguments",
+            given.len()
+        ))
+    })?;
+    let mut input = json!({ "set": set, "sheet": sheet, "selected": selected });
+    if let Some(layout) = layout {
+        input["layout"] = Value::String(layout);
+    }
+    Ok(input)
+}
+
+/// Reads `looking-at`'s argument: the set's folder.
+fn parse_looking_at(args: Args) -> Result<Value, Error> {
+    let given: Vec<OsString> = args.collect();
+    if let Some(flag) = given
+        .iter()
+        .filter_map(|a| a.to_str())
+        .find(|a| a.starts_with('-') && a.len() > 1)
+    {
+        return Err(Error::usage(format!(
+            "looking-at takes no option `{flag}`; usage: {LOOKING_AT_USAGE}"
+        )));
+    }
+    let [set] = <[OsString; 1]>::try_from(given).map_err(|given| {
+        Error::usage(format!(
+            "looking-at takes a drawing set's folder, found {} arguments; usage:              {LOOKING_AT_USAGE}",
+            given.len()
+        ))
+    })?;
+    let set = set
+        .into_string()
+        .map_err(|_| Error::usage("every interface takes paths as text (UTF-8)".to_owned()))?;
+    Ok(json!({ "set": set }))
 }
 
 fn parse_query(mut args: Args) -> Result<Value, Error> {

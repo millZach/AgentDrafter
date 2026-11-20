@@ -6,18 +6,21 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use agentdrafter_core::{JOURNAL_FILE, LOCK_FILE, PROPOSALS_FOLDER, UNDO_STATES_FOLDER};
+use agentdrafter_core::{
+    JOURNAL_FILE, LOCK_FILE, LOOKING_AT_FILE, PROPOSALS_FOLDER, UNDO_STATES_FOLDER,
+};
 
 /// Every file and folder of the set, each file with its bytes, but the
 /// journal's own: its file, its lock, the undo states and the folder they
-/// are in, and the proposals beside it, which a change set and an undo
-/// never write.
+/// are in, the proposals beside it, and what the drafter is looking at,
+/// which a change set and an undo never write.
 pub fn snapshot(set: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let own = set.join(".agentdrafter");
     let journal = set.join(JOURNAL_FILE);
     let lock = set.join(LOCK_FILE);
     let states = set.join(UNDO_STATES_FOLDER);
     let proposals = set.join(PROPOSALS_FOLDER);
+    let looking_at = set.join(LOOKING_AT_FILE);
     let mut found = BTreeMap::new();
     let mut stack = vec![set.to_owned()];
     while let Some(dir) = stack.pop() {
@@ -25,6 +28,7 @@ pub fn snapshot(set: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
             let path = entry.unwrap().path();
             if path == journal
                 || path == lock
+                || path == looking_at
                 || path.starts_with(&states)
                 || path.starts_with(&proposals)
             {

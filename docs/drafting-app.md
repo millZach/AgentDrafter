@@ -1,6 +1,6 @@
 # The drafting app
 
-**Status: builds 1 to 7 are done.** The records are written, the [viewer](viewer.md) is in the frame (#150), the ribbon, a tab for each sheet, the command bar, the status bar and quick properties, round dark model space, the cursor catches [object snaps](viewer.md#object-snaps) (#151), and the first [drawing tools](viewer.md#drawing-tools) draw and edit through change sets (#152): Line, Circle, Rectangle, Text, Move and Erase, and [quick properties edit](viewer.md#editing-in-quick-properties) a layer, a text's contents, attribute values and a radius (#153), and an edit to a template's object is [drawn before it lands](viewer.md#a-change-set-drawn-before-it-lands) on each sheet it reaches (#154), and [proposals](viewer.md#proposals) are drawn dashed on the drawing with Keep and Discard (#155). The assistant is not built. This page sets out the drafting app the viewer grows into (issue [#144](https://github.com/millZach/AgentDrafter/issues/144)), in the order it will be built. Its terms are in [`CONTEXT.md`](../CONTEXT.md): drafting app, drafter, drawing tool, command bar, assistant, proposal and guide.
+**Status: builds 1 to 8 are done.** The records are written, the [viewer](viewer.md) is in the frame (#150), the ribbon, a tab for each sheet, the command bar, the status bar and quick properties, round dark model space, the cursor catches [object snaps](viewer.md#object-snaps) (#151), and the first [drawing tools](viewer.md#drawing-tools) draw and edit through change sets (#152): Line, Circle, Rectangle, Text, Move and Erase, and [quick properties edit](viewer.md#editing-in-quick-properties) a layer, a text's contents, attribute values and a radius (#153), and an edit to a template's object is [drawn before it lands](viewer.md#a-change-set-drawn-before-it-lands) on each sheet it reaches (#154), and [proposals](viewer.md#proposals) are drawn dashed on the drawing with Keep and Discard (#155), and the [assistant's panel](viewer.md#the-assistants-panel) runs on the drafter's own agent, Claude Code or Codex, told what the drafter is looking at, its edits always proposals (#156). Guides and the desktop shell are not built. This page sets out the drafting app the viewer grows into (issue [#144](https://github.com/millZach/AgentDrafter/issues/144)), in the order it will be built. Its terms are in [`CONTEXT.md`](../CONTEXT.md): drafting app, drafter, drawing tool, command bar, assistant, proposal and guide.
 
 ## What it is
 
@@ -8,7 +8,7 @@ The viewer with drawing tools and an assistant. A drafter draws and edits in it 
 
 ## Decided
 
-Zach decided these on 2026-11-17, from question cards and a prototype, and the last on 2026-11-19, from a prototype's card.
+Zach decided these on 2026-11-17, from question cards and a prototype, the kept proposal's wording on 2026-11-19, from a prototype's card, and the assistant's panel on 2026-11-20, from another.
 
 - **The stack is ADR-0011's.** The drawing is drawn by the Rust pipeline compiled to WebAssembly, with TypeScript and React around it. An all-Rust UI was put to him again and not chosen.
 - **The desktop shell is Tauri** ([ADR-0011](adr/0011-one-rust-drawing-pipeline-shown-in-the-browser.md)).
@@ -16,6 +16,13 @@ Zach decided these on 2026-11-17, from question cards and a prototype, and the l
 - **The assistant runs on the drafter's own agent first.** The app starts an agent the drafter already has, such as Claude Code or Codex, pointed at `agentdrafter mcp`, and passes the chat to it. A built-in assistant that calls a model's API with the drafter's own key can follow.
 - **The build order.** The first five builds below come after #101. After them, the work alternates: one capability from [the ranking](capabilities.md), one build of the app.
 - **How a kept proposal reads in the journal** (J1, 2026-11-19, from the proposals prototype's card): a kept proposal is one journal entry, `Move service · proposed by Assistant · kept by you`, undone and accepted as any change set, and undoing it does not bring the proposal back. A discard leaves a line, `Discarded proposal N · by you`, with no undo, and an undo passes over it. On the same card he picked the proposals' layout, variant B, on the drawing.
+- **The assistant's panel** (2026-11-20, from the assistant's prototype, kept as the tag [`prototype/drafting-app-assistant-156`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-assistant-156/prototypes/drafting-app-assistant)), its recommended option of each question:
+  - **Its layout** (B): a panel on the right, a sheet that slides up on a phone, with two tabs, Chat and Journal. Each proposal is a card in the chat where the assistant made it, with Keep and Discard there and on the drawing.
+  - **What the drafter is looking at**: every message carries the open sheet and the selection, shown as a chip above the input, `Sheet DP-LD-101 · 1 selected: FT-101`; × leaves it off that one message.
+  - **Which agents get an adapter first, and how the app finds them**: Claude Code and Codex, found on the PATH when the app starts. A picker in the panel's header when both are found; when none is, the panel says how to install one.
+  - **What the assistant's edits do**: they are always proposals, drawn dashed, landing only when the drafter keeps one.
+  - **Words typed in the command bar** that are not a drawing tool's alias go to the assistant: the bar says `Enter: ask the assistant`, and Enter opens the panel, slides it up on a phone, and sends them as a chat message.
+  - **How much of the agent's work shows**: each command it calls, as one compact line, `query · …`, `propose · …`; a tap shows its input and reply.
 
 ## The look
 
@@ -55,7 +62,7 @@ Each addition is a command, or an option of one, in the registry. So every inter
 | 1 | **Object snaps with the display list.** *Built (#151).* `display-list` can give each object's snaps: the snap, which of the object's points it is, and where it is. | The cursor jumps to ends, middles and centres on every move of the mouse, with no round trip. The page finds the nearest snap in reach. The operation is still sent with a [snapped point](change-sets.md#snapped-points), so the core works out the exact place. | The snap code is in the core and reads no files. The page holds a display list, not a sheet. |
 | 2 | **A change set drawn before it lands.** *Built (#154).* `display-list` takes a change set, applies it in memory, and gives the sheet as it would be, with the objects it adds and changes, what it changes and deletes as it draws now, whether each sheet it reaches would take it, and the checks they would fail. Nothing is written. | A proposal shown dashed, and the template warning above. | `change --dry-run` applies in memory and builds, and its reply holds no drawing. |
 | 3 | **Proposals.** *Built (#155).* A proposal is a change set that waits. It is made with `propose`, listed with `proposals`, and ended with `keep` or `discard`. `keep` lands it as a change set, and the journal says who proposed it and who kept it. The event stream reports a proposal as it reports a change set. | An agent that wants its work looked at first calls `propose` where it would call `change`. It works for any agent, through any interface. | A change set lands or it does not. |
-| 4 | **What the drafter is looking at.** A command gives the open sheet and the selected objects. | An agent can answer "what is this?" and act on "move this". | The page knows. The core does not. |
+| 4 | **What the drafter is looking at.** *Built (#156).* `look-at` records the open sheet, its layout and the selected objects, as the page sends them, and `looking-at` gives them to an agent on any interface. | An agent can answer "what is this?" and act on "move this". | The page knows. The core does not. |
 | 5 | **Guides.** A guide is a list of steps as data: what to say, which drawing tool, where to click (a snapped point), and the operation that completes the step. The page runs it: the tool's button pulses, a ring marks the point, and each step is checked against what the drafter does. | The assistant teaches on the drafter's own drawing. | Nothing. |
 
 A proposal is made against the set as it stood. If the set has changed by the time it is kept, `keep` applies it to the set as it stands then, and each sheet takes its part fully or not at all, as with any change set.
@@ -64,14 +71,14 @@ A proposal is made against the set as it stood. If the set has changed by the ti
 
 - **The frame:** the ribbon, a tab for each sheet, the command bar, the status bar, and quick properties in place of the inspector.
 - **Drawing tools in the Rust renderer:** the tool's state, its rubber band, the snap lookup, grips, the crosshair and the size at the cursor. The page's React asks the renderer for the prompt and draws the frame round it.
-- **The command bar.** It takes a drawing tool's AutoCAD alias, typed coordinates and lengths. The aliases are the drawing tools' own, in the renderer, not the operations': `L`, `C`, `REC`, `T` and the rest start tools, which may send operations whose AutoCAD names differ (Rectangle sends `add_polyline`), and `T` starts TEXT here where AutoCAD's starts MTEXT. Words that are not a drawing tool's alias will go to the assistant.
+- **The command bar.** It takes a drawing tool's AutoCAD alias, typed coordinates and lengths. The aliases are the drawing tools' own, in the renderer, not the operations': `L`, `C`, `REC`, `T` and the rest start tools, which may send operations whose AutoCAD names differ (Rectangle sends `add_polyline`), and `T` starts TEXT here where AutoCAD's starts MTEXT. Words that are not a drawing tool's alias go to the assistant.
 - **The assistant's panel:** the chat, proposals with Keep and Discard, the guide's banner, and the journal.
 
 ## The assistant
 
 The assistant is an agent, and it reaches the core through the registry as any agent does. Proposals, guides and what the drafter is looking at are the core's commands, so what runs behind the chat can change without changing them.
 
-- **First: the drafter's own agent.** The app starts an agent's command line, points it at `agentdrafter mcp`, and passes the chat to it. It needs no API key, and it uses whatever the drafter already pays for. A drafter must have an agent installed, and each agent's command line needs its own small adapter.
+- **First: the drafter's own agent.** *Built (#156).* The app starts an agent's command line, points it at `agentdrafter mcp`, and passes the chat to it. It needs no API key, and it uses whatever the drafter already pays for. A drafter must have an agent installed, and each agent's command line needs its own small adapter: Claude Code's and Codex's are built ([servers.md](servers.md#the-assistant)).
 - **Later: built in.** The app calls a model's API itself with the drafter's own key and runs the tool loop on the drafter's machine, with the registry's commands as its tools. It works with nothing else installed, and it is billed by use.
 - **Not chosen: a hosted agent loop.** It would send the session, with drawing content in it, to be kept by the host.
 
@@ -86,7 +93,7 @@ Each is one ticket, proven as [`AGENTS.md`](../AGENTS.md) asks.
 5. **Editing in quick properties:** layer, text, attribute values and radius. *Done (#153): [the viewer](viewer.md#editing-in-quick-properties) sets out what was built. The prototype Zach picked on 2026-11-19 is kept as the tag [`prototype/drafting-app-props-153`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-props-153/prototypes/drafting-app-props). The core gained `display-list --values`, each object's contents, radius and attribute values and where each is written, for the fields and what they say before an edit. One sheet's own value for an attribute the template leaves unset waits on an operation for it.*
 6. **A change set drawn before it lands.** *Done (#154): [the viewer](viewer.md#a-change-set-drawn-before-it-lands) sets out what was built. The prototype Zach picked on 2026-11-19, its variant B, on the drawing, is kept as the tag [`prototype/drafting-app-preview-154`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-preview-154/prototypes/drafting-app-preview). The core gained `display-list --change-set`, the sheet as a change set would leave it, applied in memory by the dry run's code, with its `preview`. The template warning shows it; proposals (build 7) will be drawn with it.*
 7. **Proposals,** shown dashed with Keep and Discard. *Done (#155): [the viewer](viewer.md#proposals) sets out what was built, and [change sets](change-sets.md#proposals) the commands. The prototype Zach picked on 2026-11-19, its variant B, on the drawing, is kept as the tag [`prototype/drafting-app-proposals-155`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-proposals-155/prototypes/drafting-app-proposals). The core gained `propose`, `proposals`, `keep` and `discard`, and the event stream's `proposals`; how a kept proposal reads in the journal is decided below.*
-8. **The assistant's panel,** on the drafter's own agent, with what the drafter is looking at.
+8. **The assistant's panel,** on the drafter's own agent, with what the drafter is looking at. *Done (#156): [the viewer](viewer.md#the-assistants-panel) sets out the panel, and [servers.md](servers.md#the-assistant) the agents' adapters and the routes. The prototype Zach picked on 2026-11-20 is kept as the tag [`prototype/drafting-app-assistant-156`](https://github.com/millZach/AgentDrafter/tree/prototype/drafting-app-assistant-156/prototypes/drafting-app-assistant). The core gained `look-at` and `looking-at`, and the MCP server `--assistant`, which serves only the commands that read and `propose`.*
 9. **Guides.**
 10. **The Tauri shell:** an installed app that runs the core and shows the page, with a folder picker.
 
@@ -97,5 +104,4 @@ Drawing tools join the ribbon as their operations are built: Copy with #66, Rota
 | Question | Waits on |
 |---|---|
 | What the app opens beyond a drawing set: one sheet description, or a plant's own DWG | #70 and #71 for a plant's DWG |
-| Which agents get an adapter first, and how the app finds them | the assistant's panel |
 | Code signing and releases | the app shipping ([plan.md](plan.md)) |

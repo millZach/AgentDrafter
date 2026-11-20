@@ -27,6 +27,14 @@
 //!   command does, because a page reads the stream with `fetch`, which
 //!   sends headers, where `EventSource` sends none.
 //!
+//! - `/assistant` and the routes under it are the drafter's assistant
+//!   (#156, `assistant.rs`): `GET /assistant` lists the agents found on the
+//!   PATH when `serve` started, `POST /assistant/find` looks again,
+//!   `POST /assistant/messages` passes the drafter's message to their agent,
+//!   `POST /assistant/agent` picks the agent, and `POST /assistant/events`
+//!   streams the conversation on a set as it changes, as `/events` streams
+//!   the journal.
+//!
 //! A command the viewer's page sends is recorded as the viewer's, not the
 //! HTTP API's, where it records the interface, as an accept does: the
 //! browser marks a request its page makes to its own server
@@ -75,6 +83,7 @@ use agentdrafter_core::{
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 
+use crate::assistant::{assistant, Choice, Message};
 use crate::{page, send, Args};
 
 /// The port `serve` listens on when `--listen` names none.
@@ -200,6 +209,8 @@ pub fn serve(args: Args) -> ExitCode {
     println!("{line}");
     let _ = std::io::stdout().flush();
     let settings = Settings::from_env();
+    // The agents are looked for on the PATH as the server starts.
+    let _ = assistant();
     // A connection that failed to open is passed over.
     for stream in listener.incoming().flatten() {
         handle(stream, &guard, &settings, DEADLINE);
@@ -334,6 +345,7 @@ fn handle(mut stream: TcpStream, guard: &Guard, settings: &Settings, limit: Dura
             let _ = Deadline::after(limit).write(&mut stream, &response.bytes());
         }
         Some(Answer::Watch(set)) => return watch(stream, set, settings.clone(), limit),
+        Some(Answer::Converse(set)) => return converse(stream, set, limit),
         None => {}
     }
     // A refused request's body is not read: the connection is closed with
@@ -346,6 +358,8 @@ fn handle(mut stream: TcpStream, guard: &Guard, settings: &Settings, limit: Dura
 enum Answer {
     Reply(Response),
     Watch(PathBuf),
+    /// A stream of the assistant's conversation on a set.
+    Converse(PathBuf),
 }
 
 /// The answer to the request on `stream`, or none when the connection
@@ -379,6 +393,11 @@ fn respond(
             Ok(set) => Answer::Watch(set),
             Err(response) => Answer::Reply(response),
         });
+    }
+    if head.route() == "/assistant" || head.route().starts_with("/assistant/") {
+        return Some(
+            converse_route(stream, head, settings, arrive_by).unwrap_or_else(Answer::Reply),
+        );
     }
     Some(Answer::Reply(
         route(stream, head, settings, arrive_by).unwrap_or_else(|response| response),
@@ -414,6 +433,145 @@ fn events(stream: &mut TcpStream, head: Head, arrive_by: Deadline) -> Result<Pat
         ));
     }
     Ok(set)
+}
+
+/// Answers a request to the drafter's assistant.
+fn converse_route(
+    stream: &mut TcpStream,
+    head: Head,
+    settings: &Settings,
+    arrive_by: Deadline,
+) -> Result<Answer, Response> {
+    let route = head.route().to_owned();
+    let post = |head: &Head| -> Result<(), Response> {
+        if head.method != "POST" {
+            return Err(
+                Response::usage(405, format!("POST {route} with a JSON body")).allow("POST"),
+            );
+        }
+        Ok(())
+    };
+    let ok = |result: Value| Response::reply(200, &Reply::from(Ok(result)));
+    let refused =
+        |(status, error): (u16, Error)| Response::reply(status, &Reply::<()>::from(Err(error)));
+    let assistant = assistant();
+    match route.as_str() {
+        "/assistant" => {
+            if head.method != "GET" {
+                return Err(Response::usage(405, "GET /assistant lists the agents").allow("GET"));
+            }
+            Ok(Answer::Reply(ok(assistant.agents())))
+        }
+        "/assistant/find" => {
+            post(&head)?;
+            read_body(stream, head, arrive_by)?;
+            Ok(Answer::Reply(ok(assistant.find_again())))
+        }
+        "/assistant/events" => {
+            post(&head)?;
+            let body = read_body(stream, head, arrive_by)?;
+            let named = serde_json::from_slice::<serde_json::Map<String, Value>>(&body)
+                .ok()
+                .filter(|body| body.len() == 1)
+                .and_then(|body| body.get("set").and_then(Value::as_str).map(PathBuf::from));
+            let Some(set) = named else {
+                return Err(Response::usage(
+                    400,
+                    "the body of POST /assistant/events names the drawing set, {\"set\": \"<folder>\"}, \
+                     and nothing else",
+                ));
+            };
+            if WATCHERS.load(Ordering::SeqCst) >= MOST_WATCHERS {
+                return Err(Response::usage(
+                    503,
+                    format!(
+                        "at most {MOST_WATCHERS} event streams are open at once; close one first"
+                    ),
+                ));
+            }
+            Ok(Answer::Converse(set))
+        }
+        "/assistant/messages" => {
+            post(&head)?;
+            let body = read_body(stream, head, arrive_by)?;
+            let message: Message = serde_json::from_slice(&body).map_err(|e| {
+                Response::usage(
+                    400,
+                    format!(
+                        "the body of POST /assistant/messages is {{\"set\", \"text\", \"via\", \
+                         \"looking_at\"}}: {e}"
+                    ),
+                )
+            })?;
+            Ok(Answer::Reply(match assistant.send(message, settings) {
+                Ok(result) => ok(result),
+                Err(refusal) => refused(refusal),
+            }))
+        }
+        "/assistant/agent" => {
+            post(&head)?;
+            let body = read_body(stream, head, arrive_by)?;
+            let choice: Choice = serde_json::from_slice(&body).map_err(|e| {
+                Response::usage(
+                    400,
+                    format!("the body of POST /assistant/agent is {{\"set\", \"agent\"}}: {e}"),
+                )
+            })?;
+            Ok(Answer::Reply(match assistant.choose(&choice) {
+                Ok(result) => ok(result),
+                Err(refusal) => refused(refusal),
+            }))
+        }
+        other => Err(Response::usage(
+            404,
+            format!(
+                "no route `{other}`: GET /assistant lists the agents, and POST /assistant/find, \
+                 /assistant/messages, /assistant/agent and /assistant/events reach the assistant"
+            ),
+        )),
+    }
+}
+
+/// Streams the assistant's conversation on `set` on `stream`, on a thread
+/// of its own: all of it when the stream opens, and again each time it
+/// changes, until the page lets the stream go.
+fn converse(mut stream: TcpStream, set: PathBuf, limit: Duration) {
+    WATCHERS.fetch_add(1, Ordering::SeqCst);
+    let spawned = std::thread::Builder::new()
+        .name("agentdrafter-assistant-events".into())
+        .spawn(move || {
+            let _ = stream_conversation(&mut stream, &set, limit);
+            let _ = stream.shutdown(Shutdown::Both);
+            WATCHERS.fetch_sub(1, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        WATCHERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn stream_conversation(stream: &mut TcpStream, set: &Path, limit: Duration) -> io::Result<()> {
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\
+                X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
+    Deadline::after(limit).write(stream, head.as_bytes())?;
+    let assistant = assistant();
+    let mut sent: Option<u64> = None;
+    let mut said = Instant::now();
+    loop {
+        let (version, data) = assistant.snapshot(set);
+        if sent != Some(version) {
+            let event = format!("event: assistant\ndata: {data}\n\n");
+            Deadline::after(limit).write(stream, event.as_bytes())?;
+            sent = Some(version);
+            said = Instant::now();
+        } else if said.elapsed() >= KEEP_ALIVE {
+            Deadline::after(limit).write(stream, b": still watching\n\n")?;
+            said = Instant::now();
+        }
+        if closed(stream) {
+            return Ok(());
+        }
+        assistant.wait(set, version, WATCH_EVERY * 5);
+    }
 }
 
 /// Streams the journal of the drawing set in `set` on `stream`, on a
@@ -753,7 +911,8 @@ fn route(
             404,
             format!(
                 "no route `{path}`: GET /commands lists the commands, POST /commands/<name> \
-                 runs one, POST /events watches a drawing set's journal, and GET / is the viewer"
+                 runs one, POST /events watches a drawing set's journal, GET /assistant and the \
+                 routes under it reach the drafter's assistant, and GET / is the viewer"
             ),
         ));
     };
@@ -899,6 +1058,7 @@ impl Response {
     fn bytes(&self) -> Vec<u8> {
         let reason = match self.status {
             200 => "OK",
+            409 => "Conflict",
             400 => "Bad Request",
             401 => "Unauthorized",
             403 => "Forbidden",
@@ -1460,11 +1620,17 @@ mod tests {
         // the core is the registry, the reply and its error, the settings
         // and the interface it hands on, and, for the HTTP API's event
         // stream, where a set keeps its journal and its proposals, which it
-        // watches.
+        // watches; and, for the MCP server the drafter's assistant is given,
+        // the commands the core gives the assistant and the name its
+        // proposals are made under.
         // The crate's name, written so that this test's own lines do not
         // hold it.
         let core = concat!("agentdrafter", "_core");
-        for source in [include_str!("http.rs"), include_str!("mcp.rs")] {
+        for source in [
+            include_str!("http.rs"),
+            include_str!("mcp.rs"),
+            include_str!("assistant/mod.rs"),
+        ] {
             let uses: Vec<&str> = source
                 .lines()
                 .filter(|line| line.contains(core))
@@ -1489,7 +1655,11 @@ mod tests {
                         "Reply",
                         "Settings",
                         "JOURNAL_FILE",
-                        "PROPOSALS_FOLDER"
+                        "PROPOSALS_FOLDER",
+                        "assistant_commands",
+                        "Access",
+                        "Command",
+                        "ASSISTANT"
                     ]
                     .contains(&item),
                     "a server uses `{item}` from the core"

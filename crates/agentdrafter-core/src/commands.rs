@@ -45,6 +45,9 @@ use crate::display_list::{display_list_with, DisplayListRequest, NOT_AT_AN_ENTRY
 use crate::error::{Error, ErrorCode};
 use crate::import::{import_blocks, ImportBlocksRequest};
 use crate::interface::Interface;
+use crate::looking_at::{
+    look_at, looking_at, LookAtRequest, LookingAtRequest, LOOKING_AT_FILE, MOST_SELECTED,
+};
 use crate::plot::{plot_set_with, plot_with, PlotRequest, PlotSetRequest, BUILT_IN_PLOT_STYLE};
 use crate::query::{query_with, QueryRequest};
 use crate::render::{render_with, RenderRequest};
@@ -73,6 +76,22 @@ pub struct Command {
     does: fn() -> String,
     input: fn() -> Value,
     run: Run,
+    access: Access,
+}
+
+/// What a command does to the files it names: only reads them, records a
+/// proposal and nothing else, or writes, as a change set, an undo, a build
+/// or a plot does. The drafter's assistant gets only the commands that read
+/// or propose (#156): what it changes waits as a proposal for the drafter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Reads and writes nothing.
+    Reads,
+    /// Records a proposal, which changes nothing until it is kept.
+    Proposes,
+    /// Writes files: a drawing set's records, its outputs, or a file beside
+    /// them.
+    Writes,
 }
 
 impl Command {
@@ -112,8 +131,12 @@ impl Command {
         // holds an unfinished commit instead.
         let previews = (self.name == "display-list" && input.get("change_set").is_some())
             || matches!(self.name, "propose" | "proposals");
+        // What the drafter is looking at is kept beside the set's records,
+        // not in them: recording or reading it neither rolls back nor waits
+        // on an unfinished commit.
+        let beside = matches!(self.name, "look-at" | "looking-at");
         let rolled_back = match set_read(&input)
-            .filter(|_| !previews)
+            .filter(|_| !previews && !beside)
             .map(|set| recover(&set))
         {
             Some(Err(error)) => return Reply::from(Err(error)),
@@ -131,6 +154,11 @@ impl Command {
         outcome
             .unwrap_or_else(|error| Reply::from(Err(error)))
             .after(rolled_back)
+    }
+
+    /// What the command does to the files it names.
+    pub fn access(&self) -> Access {
+        self.access
     }
 
     /// The command as plain data, to list it: its name, what it does and
@@ -157,6 +185,15 @@ pub fn commands() -> &'static [Command] {
     COMMANDS
 }
 
+/// The commands the drafter's assistant gets (#156): those that only read,
+/// and `propose`, so that what it would change waits as a proposal, drawn
+/// for the drafter to keep or discard. It never changes a set itself.
+pub fn assistant_commands() -> impl Iterator<Item = &'static Command> {
+    COMMANDS
+        .iter()
+        .filter(|command| command.access != Access::Writes)
+}
+
 /// The command of this name, if there is one.
 pub fn find_command(name: &str) -> Option<&'static Command> {
     COMMANDS.iter().find(|command| command.name == name)
@@ -168,114 +205,147 @@ const COMMANDS: &[Command] = &[
         does: build_does,
         input: build_input,
         run: run_build,
+        access: Access::Writes,
     },
     Command {
         name: "schema",
         does: schema_does,
         input: schema_input,
         run: run_schema,
+        access: Access::Reads,
     },
     Command {
         name: "measure-text",
         does: measure_does,
         input: measure_input,
         run: run_measure,
+        access: Access::Reads,
     },
     Command {
         name: "render",
         does: render_does,
         input: render_input,
         run: run_render,
+        access: Access::Writes,
     },
     Command {
         name: "display-list",
         does: display_list_does,
         input: display_list_input,
         run: run_display_list,
+        access: Access::Reads,
     },
     Command {
         name: "plot",
         does: plot_does,
         input: plot_input,
         run: run_plot,
+        access: Access::Writes,
     },
     Command {
         name: "stale",
         does: stale_does,
         input: stale_input,
         run: run_stale,
+        access: Access::Reads,
     },
     Command {
         name: "query",
         does: query_does,
         input: query_input,
         run: run_query,
+        access: Access::Reads,
     },
     Command {
         name: "operations",
         does: operations_does,
         input: operations_input,
         run: run_operations,
+        access: Access::Reads,
     },
     Command {
         name: "change",
         does: change_does,
         input: change_input,
         run: run_change,
+        access: Access::Writes,
     },
     Command {
         name: "journal",
         does: journal_does,
         input: journal_input,
         run: run_journal,
+        access: Access::Reads,
     },
     Command {
         name: "undo",
         does: undo_does,
         input: undo_input,
         run: run_undo,
+        access: Access::Writes,
     },
     Command {
         name: "accept",
         does: accept_does,
         input: accept_input,
         run: run_accept,
+        access: Access::Writes,
     },
     Command {
         name: "propose",
         does: propose_does,
         input: propose_input,
         run: run_propose,
+        access: Access::Proposes,
     },
     Command {
         name: "proposals",
         does: proposals_does,
         input: proposals_input,
         run: run_proposals,
+        access: Access::Reads,
     },
     Command {
         name: "keep",
         does: keep_does,
         input: keep_input,
         run: run_keep,
+        access: Access::Writes,
     },
     Command {
         name: "discard",
         does: discard_does,
         input: discard_input,
         run: run_discard,
+        access: Access::Writes,
+    },
+    Command {
+        name: "look-at",
+        does: look_at_does,
+        input: look_at_input,
+        run: run_look_at,
+        access: Access::Writes,
+    },
+    Command {
+        name: "looking-at",
+        does: looking_at_does,
+        input: looking_at_input,
+        run: run_looking_at,
+        access: Access::Reads,
     },
     Command {
         name: "check",
         does: check_does,
         input: check_input,
         run: run_check,
+        access: Access::Reads,
     },
     Command {
         name: "import-blocks",
         does: import_blocks_does,
         input: import_blocks_input,
         run: run_import_blocks,
+        access: Access::Writes,
     },
 ];
 
@@ -1242,6 +1312,60 @@ fn run_discard(
 ) -> Result<JsonReply, Error> {
     let request: DiscardRequest = parse("discard", input)?;
     Ok(done(discard(&request, via)))
+}
+
+// what the drafter is looking at
+
+fn look_at_does() -> String {
+    format!(
+        "Records what the drafter is looking at in the drawing set in the folder `set`: the          sheet open, `sheet`, the layout shown, `layout`, and the objects selected on it, by          their IDs, `selected` (at most {MOST_SELECTED}). The viewer's page sends it as the          drafter moves about, so an agent can read it with `looking-at`. It is kept beside the          journal ({LOOKING_AT_FILE}), not in the set's records: a change set, an undo and an          accept never see it. The sheet must be one of the set's. The reply is `looking-at`'s."
+    )
+}
+
+fn look_at_input() -> Value {
+    input(
+        json!({
+            "set": text("The drawing set's folder."),
+            "sheet": text("The sheet open, by its name, in any case."),
+            "layout": {
+                "description": "The layout shown, for a sheet drawn in several.",
+                "type": ["string", "null"],
+            },
+            "selected": {
+                "description": "The objects selected on the sheet, by their IDs; empty when nothing is.",
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": MOST_SELECTED,
+            },
+        }),
+        &["set", "sheet"],
+    )
+}
+
+fn run_look_at(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<JsonReply, Error> {
+    let request: LookAtRequest = parse("look-at", input)?;
+    Ok(sent(look_at(&request)))
+}
+
+fn looking_at_does() -> String {
+    "Gives what the drafter is looking at in the viewer, in the drawing set in the folder `set`:      the sheet open, the layout shown, if one was named, the objects selected on it by their IDs,      and when the viewer recorded it. Ask it when the drafter says \"this\" or asks \"what is      this?\", then `query` the objects by their IDs. Before the viewer has recorded anything,      the sheet is null and nothing is selected."
+        .to_owned()
+}
+
+fn looking_at_input() -> Value {
+    input(
+        json!({ "set": text("The drawing set's folder.") }),
+        &["set"],
+    )
+}
+
+fn run_looking_at(
+    input: Map<String, Value>,
+    _: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
+    let request: LookingAtRequest = parse("looking-at", input)?;
+    Ok(sent(looking_at(&request)))
 }
 
 /// The schema of who proposes, keeps or discards.

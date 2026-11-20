@@ -19,8 +19,16 @@ A person who draws and edits in the drafting app. The same person is the reviewe
 _Avoid_: user, operator, designer
 
 **Assistant**:
-The agent that drafts with a drafter in the drafting app: it answers in the app's panel, proposes, guides and checks. It is an agent like any other and reaches the core through an interface.
+The agent that drafts with a drafter in the drafting app: it answers in the app's panel, proposes, guides and checks. It is an agent like any other and reaches the core through an interface. It runs on the drafter's own agent, Claude Code or Codex, which `agentdrafter serve` starts pointed at `agentdrafter mcp --assistant`, the MCP server that serves only the commands that read and `propose`: what it would change is always a proposal.
 _Avoid_: copilot, bot, AI
+
+**Agent adapter**:
+The small part of `agentdrafter serve` that runs one agent's command line for the assistant: how it is started for a message, given the assistant's MCP server and kept from writing, and how what it prints is read back as its words and the commands it calls. Claude Code and Codex each have one.
+_Avoid_: driver, plugin, connector, integration
+
+**What the drafter is looking at**:
+The sheet open in the drafting app, the layout shown and the objects selected on it, by their IDs. The page records it with `look-at` as the drafter moves about, beside the set's journal and outside its records, and an agent on any interface reads it with `looking-at`. Each message to the assistant carries it, shown as a chip above the input, unless the drafter leaves it off that message.
+_Avoid_: context, focus, the selection (it is more than the selection)
 
 **Generator**:
 A program outside AgentDrafter that knows a trade, such as controls, and turns project data into sheet descriptions. AgentDrafter knows drawings; a generator knows the trade.
@@ -450,7 +458,7 @@ The browser window where the reviewer watches a drawing set change, steps throug
 _Avoid_: app, editor, UI
 
 **Drafting app**:
-The viewer with drawing tools and an assistant, in a browser or in its desktop shell, where a drafter draws and edits the way they use AutoCAD. Every edit made in it is a change set. Its frame and its first drawing tools are built round the viewer; its assistant is not yet ([`docs/drafting-app.md`](docs/drafting-app.md)).
+The viewer with drawing tools and an assistant, in a browser or in its desktop shell, where a drafter draws and edits the way they use AutoCAD. Every edit made in it is a change set. Its frame, its first drawing tools and its assistant's panel are built round the viewer ([`docs/drafting-app.md`](docs/drafting-app.md)).
 _Avoid_: editor, CAD program, GUI
 
 **Drawing tool**:

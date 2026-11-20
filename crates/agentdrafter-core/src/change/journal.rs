@@ -1367,7 +1367,7 @@ fn code_text(code: ErrorCode) -> String {
 }
 
 /// The time now in UTC, to the second, such as `2026-11-11T18:57:46Z`.
-pub(super) fn now() -> String {
+pub(crate) fn now() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
