@@ -19,10 +19,11 @@ mod ink;
 mod rules;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::description::{read_sheet_record, SavedSet, SheetRecord};
+use crate::description::{read_sheet_record, ReadFiles, SavedSet, SheetRecord};
 use crate::error::{Error, ErrorCode};
 use crate::model::Paper;
 use crate::query::{Extents, WrittenAt};
@@ -247,8 +248,20 @@ pub fn check(request: &CheckRequest) -> Result<CheckReport, Error> {
 /// A sheet that cannot be read stops the check with its error, placed in
 /// its file: a report that left a sheet out could say it passed.
 pub fn check_with(request: &CheckRequest, settings: &Settings) -> Result<CheckReport, Error> {
+    check_in(request, settings, None)
+}
+
+/// Checks a drawing set from its files as `files` reads them, such as the
+/// records as a change set would write them, for a preview: the checker
+/// reads them with its own reader, as it reads the saved files, never the
+/// records the change set held. With none, from the saved files.
+pub(crate) fn check_in(
+    request: &CheckRequest,
+    settings: &Settings,
+    files: Option<Arc<dyn ReadFiles + Send + Sync>>,
+) -> Result<CheckReport, Error> {
     let source = request.source.as_path();
-    let (units, records) = load(source, &request.sheets)?;
+    let (units, records) = load(source, &request.sheets, files)?;
     let tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units);
     let mut findings = Vec::new();
     let mut substitutions: Vec<FontSubstitution> = Vec::new();
@@ -301,7 +314,11 @@ pub fn check_with(request: &CheckRequest, settings: &Settings) -> Result<CheckRe
 /// unit: every sheet of the drawing set whose folder is `source`, or the
 /// one sheet description `source` is; or only those `wanted` names, in any
 /// case. A sheet that cannot be read stops the check.
-fn load(source: &Path, wanted: &[String]) -> Result<(Unit, Vec<SheetRecord>), Error> {
+fn load(
+    source: &Path,
+    wanted: &[String],
+    files: Option<Arc<dyn ReadFiles + Send + Sync>>,
+) -> Result<(Unit, Vec<SheetRecord>), Error> {
     let named = |name: &str| wanted.is_empty() || wanted.iter().any(|w| same_name(w, name));
     let missing = |names: &[&str]| {
         wanted
@@ -316,7 +333,10 @@ fn load(source: &Path, wanted: &[String]) -> Result<(Unit, Vec<SheetRecord>), Er
         }
         return Ok((record.sheet.units, vec![record]));
     }
-    let set = SavedSet::read(source)?;
+    let set = match files {
+        Some(files) => SavedSet::read_from(source, files)?,
+        None => SavedSet::read(source)?,
+    };
     if let Some(error) = missing(&set.names()) {
         return Err(error);
     }

@@ -473,12 +473,43 @@ fn display_list_does() -> String {
      sheet it `fills`; `row_values`, by the sheet's row as the row values its template joins \
      with plain text in a list of parts, listing each under `row_values` with its `name` and \
      how many places it `fills`; or `unset`, an attribute the insert gives no value for, which \
-     shows its default. A loop sheet's display list runs to megabytes: it is for the viewer to draw, not \
-     to read."
+     shows its default. With `change_set`, the same JSON `change` takes, a drawing set's sheet is \
+     drawn as the change set would leave it, applied in memory to the set as it is, as a dry run \
+     applies it; nothing is written and nothing goes in the journal. The reply then gives \
+     `preview`: under `change`, the dry run's reply, each sheet it reaches with whether it would \
+     take its part or why not; under `checks`, the checker's reply on the sheets it would land \
+     on, read from the records as it would write them; under `objects`, each object it would \
+     add, change or delete, by its ID and `how`; and on the sheet drawn, the places among the \
+     display list's items it would add (`added`) and change (`changed`), what each object it \
+     would change or delete draws now where it would draw no more (`was`, its `items`), and a \
+     box round each check the sheet would fail (`clouds`). A loop sheet's display list runs to \
+     megabytes: it is for the viewer to draw, not to read."
         .to_owned()
 }
 
 fn display_list_input() -> Value {
+    // The change set's own schema, its definitions moved up beside the
+    // input's, where its references point, as `change` has it.
+    let mut change_set = change_set_schema();
+    let defs = change_set
+        .as_object_mut()
+        .and_then(|schema| {
+            schema.remove("$schema");
+            schema.remove("$defs")
+        })
+        .unwrap_or_else(|| json!({}));
+    if let Some(schema) = change_set.as_object_mut() {
+        schema.insert(
+            "description".to_owned(),
+            json!("Draw the drawing set's sheet as this change set would leave it, the same JSON change takes, applied in memory to the set as it is; nothing is written and nothing goes in the journal, and the reply gives its preview. Without it, the set as it is."),
+        );
+    }
+    let mut schema = display_list_schema(change_set);
+    schema["$defs"] = defs;
+    schema
+}
+
+fn display_list_schema(change_set: Value) -> Value {
     input(
         json!({
             "source": text("The record to draw: a sheet description, a DWG when the file ends .dwg, or a drawing set's folder."),
@@ -502,6 +533,7 @@ fn display_list_input() -> Value {
                 "description": "Give each object's `values`, what quick properties edit: a text's or an mtext's contents, a circle's or an arc's radius, and an insert's attribute values; and on a drawing set's sheet where each text value is `written`: by the object itself (`own`), by the sheet's row (`row_value`, with the value's name and how many places on the sheet it `fills`), by the row values its template joins with plain text in a list of parts (`row_values`, each with its `name` and how many places it `fills`), or nowhere (`unset`, an attribute that shows its default). Without it, none.",
                 "type": "boolean",
             },
+            "change_set": change_set,
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
         }),
