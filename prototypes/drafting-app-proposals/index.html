@@ -458,6 +458,14 @@ input,textarea,pre{-webkit-user-select:text;user-select:text;-webkit-touch-callo
 }
 
 /* build 7: proposals */
+#proto .jchoice{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;border:1px dashed #ffd84a;border-radius:4px;padding:3px 8px;white-space:normal;max-width:760px}
+#proto .jlabel{font-weight:700;color:#000;background:#ffd84a;border-radius:3px;padding:0 6px}
+#proto .jline{flex-basis:100%;color:#ffe9a0;line-height:1.3}
+#proto .jline b{font-weight:600}
+#proto .jrec{color:#fff}
+.b-wait{border-color:#8c6bd6;color:#d9ccff;border-style:dashed}
+.je-wait,.je-proposed{}
+.jrestore{padding:0 8px 6px 36px}
 .stab .pcount{font:700 11px/1 var(--ui);padding:2px 6px;border-radius:8px;background:#b48cff;color:#170d2a}
 .stab .pcount.wait{background:none;border:1px dashed #8c6bd6;color:#d9ccff;font-weight:600}
 .pnote{margin:0 0 10px;color:var(--dim);font-size:12px;line-height:1.4}
@@ -523,6 +531,10 @@ input,textarea,pre{-webkit-user-select:text;user-select:text;-webkit-touch-callo
 .dialog.notes ul{margin:0;padding-left:18px}.dialog.notes li{margin:3px 0}
 .dialog.notes code{font:12px var(--mono);background:#3a4250;padding:0 4px;border-radius:2px}
 @media (max-width:860px){
+  #proto .jchoice{max-width:none;width:100%}
+  #proto .jchoice .seg{flex-direction:column;width:100%}
+  #proto .jchoice .seg button{text-align:left;padding:7px 8px}
+  #proto .jchoice .seg button+button{border-left:0;border-top:1px solid #806c25}
   .pvhd{order:1}#pvband .pvwho{order:2}.pvnav{order:3}#pvband .pvstale{order:4}#pvband .pvline{order:5}#pvband .pvsum{order:6}.pvacts{order:7}
   .pvx{position:absolute;right:4px;top:5px;font-size:24px;padding:0 6px}
   #pvband.prop .pvhd{padding-right:28px}
@@ -618,6 +630,20 @@ const VLINE={A:'A Proposals tab beside Journal, with a count. Show draws one das
 // Build 5's choices, as Zach picked them on 2026-11-19 (docs/viewer.md, Editing in quick properties)
 const CH={land:'enter',text:'inplace',attrs:'qp',laybox:'moves',pv:'drawing'}; // build 6: variant B, on the drawing, as built
 {const q=new URLSearchParams(location.search);for(const c of CHOICES){const v=q.get(c.k);CH[c.k]=c.opts.some(o=>o[0]===v)?v:c.sug}}
+// How a kept or discarded proposal reads in the journal, and whether a discard can be undone: still open, Zach picks.
+// It changes the journal in whichever variant is showing.
+const JOPTS=[
+ ['J1','J1 · One entry; discard leaves a line',
+  'A kept proposal is one entry: “Move service · proposed by Assistant · kept by you”. A discard leaves “Discarded proposal N · by you”, with no Undo.',
+  'For the drafter: one line per change, as for their own edits, and a trace of what was turned down.'],
+ ['J2','J2 · Two entries; discard leaves nothing',
+  'A kept proposal is two entries, “Proposed by Assistant” and then “Kept by you”, undone together. A discard leaves no journal line; it is only gone from the proposals list.',
+  'For the drafter: the agent’s step and their own are apart, but a discard leaves nothing to look back on.'],
+ ['J3','J3 · As J1, and a discard can be restored',
+  'As J1, but a discard’s line has Restore, which brings the proposal back to waiting: a discard can be undone.',
+  'For the drafter: a discard tapped by mistake is not lost; the journal holds a Restore line too.']];
+const JREC='J1: one change, one entry, so Undo and Accept count a kept proposal as any change set, and a discard still leaves a trace.';
+{const v=new URLSearchParams(location.search).get('j');CH.j=JOPTS.some(o=>o[0]===v)?v:'J1'}
 // the scenarios to try, each a change set to a template's objects, as the drafter's tool or quick properties would give it
 const SCENARIOS=[
  {k:'p2',label:'1 · Fails a check (proposal 2)'},
@@ -694,6 +720,7 @@ function seed(){
   S={sheet:'DP-LD-101',at:null,sel:null,focused:null,pulseT:0,grid:true,osnap:true,ortho:false,
      side:CH.v==='A'?'proposals':'journal',open:new Set(),log:['Journal read: 6 entries, and 3 proposals waiting. Live: changes and proposals show as they come.','Open a proposal, or try one in the top strip.'],edit:null,dirty:{},
      snap:'peek',cannot:null,kinds:new Set(DEFAULT_SNAPS),cursor:null,hover:null,cands:[],candI:0,taken:null,loupe:null,flash:null,menu:false,
+     acts:[],replay:false,
      tool:null,lastCmd:null,curLayer:'0',textH:0.12,lastPt:null,hoverObj:-1,warnHidden:false,kbd:false,err:null,pv:null,acadOpen:null,nextVia:null};
 }
 const entry=n=>J.find(e=>e.n===n);
@@ -722,6 +749,11 @@ function opWords(o){
   return o.op}
 function entryTitle(e){
   if(e.kind==='discard')return `Discarded proposal ${e.proposal}`;
+  if(e.kind==='restore')return `Restored proposal ${e.proposal}`;
+  if(e.kind==='proposed')return `Proposed by ${e.proposedBy}: ${e.title}`;
+  if(e.title&&e.kind==='change_set'&&CH.j!=='J2')return e.title;
+  if(e.kind==='change_set'&&e.proposal&&CH.j==='J2')return `Kept by you: ${e.title}`;
+  if(e.kind==='undo'&&e.withProposal)return `Undo of change set ${e.undid.join(', ')} and its proposal, entry ${e.withProposal.join(', ')}`;
   if(e.kind==='undo')return `Undo of change set${e.undid.length>1?'s':''} ${e.undid.join(', ')}`;
   if(e.kind==='accept')return `Accept: issued change set${e.issued.length>1?'s':''} ${e.issued.join(', ')}`;
   const words=e.ops.map(opWords),seen=[];for(const w of words){const f=seen.find(x=>x.w===w);if(f)f.n++;else seen.push({w,n:1})}
@@ -729,7 +761,9 @@ function entryTitle(e){
 function entryState(e){
   if(e.kind==='undo')return ['undo','Undo'];
   if(e.kind==='accept')return ['accept',`Accept, ${viaWords(e.via)}`];
-  if(e.kind==='discard')return ['discarded','Discarded'];
+  if(e.kind==='discard')return e.restoredBy?['discarded','Restored']:['discarded','Discarded'];
+  if(e.kind==='restore')return ['undo','Restore'];
+  if(e.kind==='proposed')return e.undoneBy?['undone','Undone']:['wait','Proposed'];
   if(e.undoneBy)return ['undone','Undone'];
   if(e.issuedBy)return ['issued','Issued'];
   return ['landed','Landed']}
@@ -1179,12 +1213,12 @@ function landText(lines){
   land(ops,eff,[S.sheet],ops.length>1?`${ops.length} lines of text added`:`Text “${lines[0].s}” added`)}
 // The faked landing: the change set the page would send through `change`, recorded in the journal and drawn
 function land(ops,eff,sheets,what,opt={}){
-  const n=newest()+1,e={n,kind:'change_set',via:opt.via||S.nextVia||'drafting app',at:new Date(),landed:DP.sheets.filter(s=>sheets.includes(s)),ops,eff,proposal:opt.proposal,proposedBy:opt.proposedBy,keptBy:opt.proposal?'you':undefined};
+  const n=newest()+1,e={n,kind:'change_set',via:opt.via||S.nextVia||'drafting app',at:new Date(),landed:DP.sheets.filter(s=>sheets.includes(s)),ops,eff,proposal:opt.proposal,proposedBy:opt.proposedBy,keptBy:opt.proposal?'you':undefined,title:opt.title,proposedEntry:opt.proposedEntry};
   J.push(e);jver++;S.focused=n;S.pulseT=performance.now();S.open=new Set([n]);if(!opt.keep)S.sel=null;$('tbox').hidden=true;
   log(`Change set ${n} sent: ${what}. change replied; ${e.landed.length>1?plural(e.landed.length,'sheet')+' drawn again':'the sheet drawn again'}.`);
   const tm=e.landed.length>1||eff.some(f=>f.kind!=='add'&&current().objects.find(o=>tailOf(o.id)===f.tail)?.from==='template');
   const where=opt.where??(e.landed.length>1?`Landed on ${plural(e.landed.length,'sheet')}: ${listed(e.landed)}. The template changed.`:`Landed on ${e.landed[0]}${eff.every(f=>f.kind==='add')?', in its row':tm?', in its template':', in its row'}.`);
-  toast('ok',opt.proposal?`Kept proposal ${opt.proposal}: change set ${n}`:`${what}: change set ${n}`,opt.proposal?`Proposed by ${opt.proposedBy}, kept by you. ${where}`:where,n,ops);
+  if(!S.replay)toast('ok',opt.proposal?`Kept proposal ${opt.proposal}: change set ${n}`:`${what}: change set ${n}`,opt.proposal?`Proposed by ${opt.proposedBy}, kept by you.${opt.proposedEntry?` The journal holds both: entry ${opt.proposedEntry}, proposed, and entry ${n}, kept; they are undone together.`:''} ${where}`:where,n,ops);
   refresh()}
 function csText(ops){return '{"operations": [\n'+ops.map(o=>'  '+JSON.stringify(o).replace(/,"/g,', "').replace(/":/g,'": ')).join(',\n')+'\n]}'}
 
@@ -1389,13 +1423,19 @@ function openProposal(n,sheet){const p=P.find(x=>x.n===n);if(!p)return;
   if(sheet&&p.sheets.includes(sheet))S.sheet=sheet;else if(!p.sheets.includes(S.sheet))S.sheet=p.sheets[0];
   askTemplate(planOf(p),()=>keepProposal(n),null,p)}
 function keepProposal(n){const p=P.find(x=>x.n===n);if(!p||statusOf(p).bad.length)return;if(S.pv?.prop?.n===n){S.pv=null}
-  P=P.filter(x=>x!==p);log(`Proposal ${n} kept: keep sent it as a change set, on the set as it stands`);
-  land(p.ops,p.eff,p.sheets,`${p.verb} ${p.obj}`,{via:'drafting app',proposal:n,proposedBy:p.by,keep:true})}
+  P=P.filter(x=>x!==p);log(`Proposal ${n} kept: keep sent it as a change set, on the set as it stands`);if(!S.replay)S.acts.push(['keep',n]);
+  let pe;if(CH.j==='J2'){pe=newest()+1;J.push({n:pe,kind:'proposed',via:'drafting app',at:new Date(),proposedAt:p.at,proposal:n,proposedBy:p.by,title:`${p.verb} ${p.obj}`,ops:p.ops,landed:[],keptIn:pe+1});jver++}
+  land(p.ops,p.eff,p.sheets,`${p.verb} ${p.obj}`,{via:'drafting app',proposal:n,proposedBy:p.by,keep:true,title:`${p.verb} ${p.obj}`,proposedEntry:pe})}
 function discardProposal(n){const p=P.find(x=>x.n===n);if(!p)return;if(S.pv?.prop?.n===n)pvCancel(true);
-  P=P.filter(x=>x!==p);
-  J.push({n:newest()+1,kind:'discard',via:'drafting app',at:new Date(),proposal:n,proposedBy:p.by,by:'you',ops:p.ops});jver++;
+  P=P.filter(x=>x!==p);if(!S.replay)S.acts.push(['discard',n]);
+  if(CH.j!=='J2'){J.push({n:newest()+1,kind:'discard',via:'drafting app',at:new Date(),proposal:n,proposedBy:p.by,by:'you',ops:p.ops,prop:p});jver++}
   log(`Proposal ${n} discarded: nothing changed`);
-  toast('info',`Discarded proposal ${n}`,`${p.verb} ${p.obj}, proposed by ${p.by}. Nothing changed. The journal records it, with nothing to undo.`);refresh()}
+  if(!S.replay)toast('info',`Discarded proposal ${n}`,`${p.verb} ${p.obj}, proposed by ${p.by}. Nothing changed. ${CH.j==='J1'?'The journal records it, with nothing to undo.':CH.j==='J3'?'The journal records it; Restore on its line brings it back.':'The journal records nothing: it is only gone from the proposals list.'}`);refresh()}
+// J3: a discard's line brings the proposal back to waiting
+function restoreProposal(d){const e=entry(d);if(!e||e.kind!=='discard'||e.restoredBy)return;if(!S.replay)S.acts.push(['restore',e.proposal]);
+  const r={n:newest()+1,kind:'restore',via:'drafting app',at:new Date(),proposal:e.proposal,proposedBy:e.proposedBy,by:'you',restores:d};
+  e.restoredBy=r.n;J.push(r);jver++;P.push(e.prop);log(`Proposal ${e.proposal} restored: it waits again`);
+  if(!S.replay)toast('info',`Restored proposal ${e.proposal}`,`It waits again, as ${e.proposedBy} proposed it. Nothing changed.`);refresh()}
 // the event stream: an agent proposes while the drafter works
 function arrive(){const n=pnext++,s='DP-LD-104',x=3+.9*(n-4),id=`circle-${n}`;
   const p={n,by:'Assistant',at:new Date(),after:newest(),title:'add_circle r 0.3 on notes',verb:'Add',obj:id,
@@ -1632,6 +1672,7 @@ function undo(n,via='viewer'){
   if(S.tool)endTool('quiet');
   const e={n:newest()+1,kind:'undo',via,at:new Date(),undid};
   for(const m of undid)entry(m).undoneBy=e.n;
+  const pes=undid.map(m=>entry(m).proposedEntry).filter(Boolean);for(const m of pes)entry(m).undoneBy=e.n;if(pes.length)e.withProposal=pes;
   J.push(e);jver++;S.focused=null;
   const sheets=[...new Set(undid.flatMap(m=>entry(m).landed))];
   toast('info',`Undid change set${undid.length>1?'s':''} ${listed(undid)}`,`${listed(sheets)} ${sheets.length>1?'are':'is'} back to how ${sheets.length>1?'they were':'it was'} before change set ${undid[0]}.`);log(`Undo of ${listed(undid.map(x=>'#'+x))}`);refresh()}
@@ -1969,16 +2010,24 @@ function journalBody(){
       const [cls,label]=entryState(e),shown=S.open.has(e.n),later=canUndo().filter(m=>m>e.n).length;
       return h('li',{class:`je je-${cls}${S.focused===e.n?' on':''}${S.at===e.n?' at':''}`,'data-entry':e.n},
         h('button',{class:'je-head',onclick:()=>{if(S.focused===e.n&&shown){S.open.delete(e.n);refresh()}else showEntry(e.n)}},
-          h('span',{class:'je-n'},e.n),h('span',{},h('span',{class:'je-t'},entryTitle(e)),h('span',{class:'je-m'},e.proposedBy?h('span',{class:'jprop'},`proposed by ${e.proposedBy} · ${e.kind==='discard'?'discarded':'kept'} by you`):null,(e.landed||[]).length>3?h('span',{class:'sh-landed'},`${e.landed.length} sheets ✓`):(e.landed||[]).map(s=>h('span',{class:'sh-landed'},`${s} ✓`)),h('span',{class:'muted'},clock(e.at)))),
+          h('span',{class:'je-n'},e.n),h('span',{},h('span',{class:'je-t'},entryTitle(e)),h('span',{class:'je-m'},e.proposedBy?h('span',{class:'jprop'},jpropWords(e)):null,(e.landed||[]).length>3?h('span',{class:'sh-landed'},`${e.landed.length} sheets ✓`):(e.landed||[]).map(s=>h('span',{class:'sh-landed'},`${s} ✓`)),h('span',{class:'muted'},clock(e.at)))),
           h('span',{class:`badge b-${cls}`},label)),
         shown?h('div',{class:'je-det'},
           e.kind==='change_set'?h('p',{class:'muted'},`${e.proposal?`Proposal ${e.proposal}, proposed by ${e.proposedBy}; kept by you, in the drafting app.`:`Through ${viaWords(e.via)}.`}${e.landed.length>3?' Landed on '+listed(e.landed)+'.':''}`):null,
-          e.kind==='discard'?h('p',{class:'muted'},`Proposal ${e.proposal}, proposed by ${e.proposedBy}; discarded by you, in the drafting app. Nothing changed, so there is nothing to undo. What it proposed:`):null,
+          e.kind==='discard'?h('p',{class:'muted'},`Proposal ${e.proposal}, proposed by ${e.proposedBy}; discarded by you, in the drafting app. Nothing changed.${CH.j==='J3'?(e.restoredBy?` Restored by entry ${e.restoredBy}.`:' Restore brings it back to waiting.'):' There is nothing to undo.'} What it proposed:`):null,
+          e.kind==='proposed'?h('p',{class:'muted'},`Proposal ${e.proposal}, proposed by ${e.proposedBy} at ${clock(e.proposedAt)}; kept by you in entry ${e.keptIn}. The two are undone together.`):null,
           e.issuedBy?h('p',{},`Issued by the accept in entry ${e.issuedBy}: it cannot be undone.`):null,
           e.undoneBy?h('p',{class:'muted'},`Undone by entry ${e.undoneBy}.`):null,
           e.ops?.length?h('pre',{class:'cs'},csText(e.ops)):null,
-          canUndo().includes(e.n)?h('div',{},h('button',{class:'btn sm danger',disabled:S.at!==null,onclick:()=>undo(e.n)},`Undo${later?` this and ${later} later`:''}`)):null):null)}),
+          canUndo().includes(e.n)?h('div',{},h('button',{class:'btn sm danger',disabled:S.at!==null,onclick:()=>undo(e.n)},`Undo${e.proposedEntry&&CH.j==='J2'?` this and entry ${e.proposedEntry}`:''}${later?` and ${later} later`:''}`)):null,
+          e.kind==='proposed'&&canUndo().includes(e.keptIn)?h('div',{},h('button',{class:'btn sm danger',disabled:S.at!==null,onclick:()=>undo(e.keptIn)},`Undo this and entry ${e.keptIn}`)):null):null,
+        CH.j==='J3'&&e.kind==='discard'&&!e.restoredBy?h('div',{class:'jrestore'},h('button',{class:'btn sm','data-act':'restore',disabled:S.at!==null,onclick:ev=>{ev.stopPropagation();restoreProposal(e.n)}},'↶ Restore')):null)}),
       h('li',{class:'revsep'},'The start of the journal'))]}
+function jpropWords(e){
+  if(e.kind==='discard')return `by you · proposed by ${e.proposedBy}${e.restoredBy?` · restored in entry ${e.restoredBy}`:''}`;
+  if(e.kind==='restore')return `by you · brings back the discard in entry ${e.restores}; it waits again`;
+  if(e.kind==='proposed')return `proposed ${clock(e.proposedAt)} · kept in entry ${e.keptIn}`;
+  return CH.j==='J2'?`kept by you · proposed in entry ${e.proposedEntry}`:`proposed by ${e.proposedBy} · kept by you`}
 function peek(){
   const [cls,line]=streamLine(),last=J.at(-1),u=lastUndoable(),stepping=S.at!==null,blocked=!!lastAccept()&&!pending().length;
   if(S.pv&&CH.pv==='panel'){put($('peek'),pvCard(true));return}
@@ -2079,8 +2128,19 @@ function refresh(){if(S.sel&&selIndex()<0)S.sel=null;if(!S.sel)S.taken=null;upda
 function switches(){
   put($('switches'),CHOICES.map(c=>h('span',{class:'choice'},h('span',{},c.label),h('span',{class:'seg',role:'group','aria-label':c.label},c.opts.map(([v,l])=>h('button',{'data-ch':c.k,'data-v':v,'aria-pressed':String(CH[c.k]===v),title:v===c.sug?'Suggested':null,onclick:()=>setChoice(c.k,v)},l,v===c.sug?' ★':''))))),
     h('span',{class:'choice'},h('span',{},'Try'),h('span',{class:'seg tries',role:'group','aria-label':'Scenarios'},SCENARIOS.map(x=>h('button',{'data-sc':x.k,onclick:()=>runScenario(x.k)},x.label)))),
-    h('span',{class:'vline'},VLINE[CH.v]),h('span',{class:'choice'},h('button',{class:'notesbtn',onclick:showNotes},'Notes: AutoCAD, decisions, pick')),
+    h('span',{class:'vline'},VLINE[CH.v]),
+    h('span',{class:'jchoice',role:'group','aria-label':'Journal: still open, Zach picks'},h('span',{class:'jlabel'},'Journal: still open, Zach picks'),
+      h('span',{class:'seg'},JOPTS.map(([v,l])=>h('button',{'data-ch':'j','data-v':v,'aria-pressed':String(CH.j===v),title:v==='J1'?'Recommended':null,onclick:()=>setJournal(v)},l,v==='J1'?' ★':''))),
+      h('span',{class:'jline'},h('b',{},JOPTS.find(o=>o[0]===CH.j)[2]),' ',JOPTS.find(o=>o[0]===CH.j)[3],CH.j==='J1'?h('span',{class:'jrec'},' ★ Recommended: one change, one entry, so Undo and Accept count a kept proposal as any change set, and a discard still leaves a trace.'):null)),
+    h('span',{class:'choice'},h('button',{class:'notesbtn',onclick:showNotes},'Notes: AutoCAD, decisions, pick')),
     h('span',{class:'choice'},h('button',{class:'acad','aria-pressed':String(!!S.acadOpen),title:'A sheet whose DWG is open in AutoCAD cannot be written, so a change set is refused there',onclick:()=>{S.acadOpen=S.acadOpen?null:'DP-LD-202';if(S.pv)Object.assign(S.pv,previewOf(S.pv.plan));refresh()}},S.acadOpen?`${S.acadOpen}.dwg open in AutoCAD ✓`:'DP-LD-202.dwg open in AutoCAD ✗')))}
+// the journal choice: the set is read again from the start, and the drafter's keeps, discards and restores are made again under it
+function setJournal(v){if(CH.j===v)return;const acts=S.acts,v0=CH.v,side=S.side,sheet=S.sheet,open=S.pv?.prop?.n;if(S.pv)pvCancel(true);
+  CH.j=v;const q=new URLSearchParams(location.search);q.set('j',v);history.replaceState(null,'',`${location.pathname}?${q}`);
+  seed();cache.clear();S.side=side;S.sheet=sheet;S.replay=true;
+  for(const [k,x] of acts){if(k==='keep')keepProposal(x);else if(k==='discard')discardProposal(x);else if(k==='restore'){const d=J.find(e=>e.kind==='discard'&&e.proposal===x);d?restoreProposal(d.n):null}}
+  S.replay=false;S.acts=acts.filter(([k])=>v==='J3'||k!=='restore');S.focused=null;S.open=new Set();$('toast').hidden=true;touched=false;fit();
+  log(`Prototype: journal ${v}. Your keeps and discards were made again under it.`);refresh();if(open&&P.some(p=>p.n===open))openProposal(open)}
 function setChoice(k,v){if(CH[k]===v)return;const open=S.pv?.prop?.n;if(S.pv)pvCancel(true);
   CH[k]=v;if(S.tool)endTool('quiet');$('tbox').hidden=true;closeInplace();if(!$('modal').hidden)$('modal').hidden=true;
   S.side=v==='A'?'proposals':'journal';
@@ -2097,11 +2157,14 @@ function showNotes(){const m=$('modal');m._cancel=()=>m.hidden=true;setSw(false)
       h('li',{},'An opened proposal is drawn with build 6’s preview, as built: REFEDIT’s fade (XFADECTL), what it adds in green and changes in amber, dashed, and DWG Compare’s revision clouds round a check it would fail.')),
     h('h4',{},'In every variant'),
     h('ul',{},
-      h('li',{},'Kept, its journal entry reads ',h('code',{},'proposed by Assistant · kept by you'),'. Discarded, the journal records ',h('code',{},'Discarded proposal N'),', proposed by whom and discarded by you, with no Undo.'),
       h('li',{},'× and Esc close an opened proposal, and it keeps waiting. Only Discard ends it.'),
       h('li',{},'A proposal made before the set changed says so, and what Keep would do now (proposal 1). Keep applies it to the set as it stands then, each sheet fully or not at all.'),
       h('li',{},'Refusals are the core’s own: a move of an object on a locked layer, ',h('code',{},'locked'),' (proposal 3: change set 6 locked layer enclosure after it was proposed); a DWG that cannot be written, os error 13 (the strip’s DP-LD-202.dwg switch); a failed check is a warning, and Keep still lands it (proposal 2).'),
       h('li',{},'The proposer’s name is what the agent gives: Assistant, agent (MCP), agent (HTTP API).')),
+    h('h4',{},'Still open, Zach picks: the journal'),
+    h('p',{},'How a kept or discarded proposal reads in the journal, and whether a discard can be undone, is the Journal switch, apart from A, B and C. It changes the journal in whichever variant is showing.'),
+    h('ul',{},JOPTS.map(([v,l,what,note])=>h('li',{},h('b',{},l+(v==='J1'?' ★':'')),': ',what,' ',h('i',{},note)))),
+    h('p',{},'★ ',JREC),
     h('h4',{},'Recommended: A ★'),
     h('p',{},'Several proposals can wait at once, across several sheets. A tab with a count says there is something to look at from any sheet, and lists each with who, when, what and where, as Markup Import’s palette does. Opened, it is build 6’s band, so a drafter learns one way to read a change before it lands. B is quickest on one proposal, but three on DP-LD-101 crowd it, and on a phone the cards cover the drawing. C mixes what waits with what happened: the journal is the record.'),
     h('div',{class:'dialog-acts'},h('button',{class:'btn primary',onclick:()=>m.hidden=true},'Close'))));
@@ -2156,7 +2219,7 @@ seed();
 {const q=new URLSearchParams(location.search).get('sheet');if(q&&DP.sheets.includes(q))S.sheet=q}
 buildRibbon();resize();refresh();
 {const o=new URLSearchParams(location.search).get('open');if(o)runScenario(o==='arrive'?'arrive':'p'+o)}
-window.__proto={setSnap,refresh,pvGo,openProposal,keepProposal,discardProposal,arrive,showNotes,get P(){return P},runScenario,pvStep,pvShow,pvGo,pvCancel,get S(){return S},get CH(){return CH},openInplace,openAttEditor,pick,get J(){return J},V,draw,sx,sy,wx,wy,current,objBox,startTool,setChoice,
+window.__proto={undo,setJournal,restoreProposal,setSnap,refresh,pvGo,openProposal,keepProposal,discardProposal,arrive,showNotes,get P(){return P},runScenario,pvStep,pvShow,pvGo,pvCancel,get S(){return S},get CH(){return CH},openInplace,openAttEditor,pick,get J(){return J},V,draw,sx,sy,wx,wy,current,objBox,startTool,setChoice,
   idx:tail=>current().objects.findIndex(o=>!o.gone&&tailOf(o.id)===tail),
   client:(x,y)=>{const r=cv.getBoundingClientRect();return [r.left+sx(x),r.top+sy(y)]}};
 </script>
