@@ -3,8 +3,8 @@
 // the Layer box that sets the current layer; the command bar under the
 // drawing, which prompts and takes what is typed; the status bar, with the
 // cursor's place, the paper, Grid, Object snap, Ortho and the connection;
-// the dialog an edit to a template's object asks first in; and a phone's
-// small box for text. Plain components: what they do is the page's (App.tsx), and
+// the band a change set to a template's objects is shown in before it
+// lands (#154); and a phone's small box for text. Plain components: what they do is the page's (App.tsx), and
 // what they say is worked out in frame.ts.
 
 import { forwardRef, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
@@ -15,8 +15,14 @@ import {
   TOGGLES,
   fieldKey,
   pastedLines,
-  templateWords,
+  checkAgainOffered,
+  previewButton,
+  previewSummary,
+  previewTitle,
+  previewVerdicts,
   type Act,
+  type PreviewReport,
+  type PreviewState,
   type LayerEntry,
   type LiveState,
   type Prompt,
@@ -230,6 +236,8 @@ export interface CommandBarProps {
   typingText: boolean;
   /** That the objects picked are part of the template, said while the tool runs. */
   warning: TemplateEdit | null;
+  /** A change set shown before it lands: above the bar on a laptop, in its place on a phone. */
+  band?: ReactNode;
   /** What the keys do now. */
   note: string;
 }
@@ -252,6 +260,7 @@ export function CommandBar({
   typingText,
   warning,
   note,
+  band = null,
 }: CommandBarProps) {
   return (
     <div className="cmd" data-ui>
@@ -268,7 +277,14 @@ export function CommandBar({
           </span>
         </div>
       )}
-      <div className="cmdbar" ref={bar} aria-label="Command bar">
+      {band && touch ? (
+        <div className="pvwrap" ref={bar}>
+          {band}
+        </div>
+      ) : (
+        band
+      )}
+      <div className="cmdbar" ref={band && touch ? undefined : bar} aria-label="Command bar" hidden={!!band && touch}>
         <span className="chev">&gt;_</span>
         <span className="cmdline" role="status">
           {prompt.command && <span className="cmdname">{prompt.command}</span>}
@@ -346,49 +362,103 @@ export function CommandBar({
   );
 }
 
-export interface TemplateDialogProps {
+export interface PreviewBandProps {
+  /** The edit, as the renderer names it, with the template and every sheet it reaches. */
   edit: TemplateEdit;
-  /** The sheet shown, marked among them. */
+  /** The sheet shown. */
   sheet: string;
+  /** The core's preview, once the first sheet's reply has come; null before. */
+  report: PreviewReport | null;
+  onStep(by: number): void;
   onCancel(): void;
-  onConfirm(): void;
+  onGo(): void;
+  onCheckAgain(): void;
 }
 
-/** An edit to a template's object asks first, naming every sheet it changes (Zach, 2026-11-19). */
-export function TemplateDialog({ edit, sheet, onCancel, onConfirm }: TemplateDialogProps) {
-  const words = templateWords(edit);
-  // Change all takes the focus once, as the dialog opens: not again on a
-  // later render, which would take it back from Cancel.
-  const all = useRef<HTMLButtonElement>(null);
-  useEffect(() => all.current?.focus(), []);
+const TONE: Record<PreviewState, string> = { land: 'ok', check: 'warn', refused: 'bad', held: 'held' };
+
+/**
+ * A change set drawn before it lands (#154), variant B of the prototype
+ * Zach picked on 2026-11-19: a band above the command bar, the drawing
+ * itself showing the sheet as it would be. It names the edit and its
+ * reach, steps through the sheets it reaches, says what would become of
+ * the sheet shown and of them all, and lands it on all of them or cancels.
+ */
+export function PreviewBand({ edit, sheet, report, onStep, onCancel, onGo, onCheckAgain }: PreviewBandProps) {
+  const t = previewTitle(edit);
+  const n = edit.sheets.length;
+  const i = Math.max(0, edit.sheets.findIndex((s) => s.toUpperCase() === sheet.toUpperCase()));
+  const verdict = report ? previewVerdicts(report).get(sheet.toUpperCase()) : undefined;
+  const summary = report ? previewSummary(report) : null;
+  const button = report ? previewButton(report) : { label: n > 1 ? `Change all ${n} sheets` : 'Change the template', disabled: true };
   return (
-    <div className="va-modal" role="dialog" aria-modal="true" aria-label="Template warning" data-template-dialog>
-      <div className="dialog tw">
-        <h3>{words.title}</h3>
-        <p>{words.body}</p>
-        <div className="sheets">
-          {edit.sheets.map((s) => (
-            <span key={s} className={s.toUpperCase() === sheet.toUpperCase() ? 'here' : ''}>
-              {s}
-            </span>
-          ))}
-        </div>
-        <div className="dialog-acts">
-          <button type="button" className="btn" data-tw="cancel" onClick={onCancel}>
+    <div className="pvband" role="region" aria-label="Preview" data-preview>
+      <div className="pvtop">
+        <span className="pvhd">
+          <span className="pvchip">{t.chip}</span>
+          <span className="pvtitle">
+            <b>{t.title}</b> {t.reach}
+          </span>
+        </span>
+        <span className="pvnav">
+          <button type="button" aria-label="Previous sheet" data-pv="prev" disabled={n < 2} onClick={() => onStep(-1)}>
+            &#9664;
+          </button>
+          <span data-pv-sheet>
+            <b>{edit.sheets[i] ?? sheet}</b>
+            <small>
+              {' '}
+              {i + 1} of {n}
+            </small>
+          </span>
+          <button type="button" aria-label="Next sheet" data-pv="next" disabled={n < 2} onClick={() => onStep(1)}>
+            &#9654;
+          </button>
+        </span>
+        <span className="pvacts">
+          <button type="button" className="btn" data-pv="cancel" onClick={onCancel}>
             Cancel
           </button>
-          <button
-            type="button"
-            className="btn warn"
-            data-tw="all"
-            ref={all}
-            onClick={onConfirm}
-          >
-            {words.button}
+          {report && checkAgainOffered(report) && (
+            <button type="button" className="btn" data-pv="recheck" onClick={onCheckAgain}>
+              Closed it: check again
+            </button>
+          )}
+          <button type="button" className="btn warn" data-pv="go" disabled={button.disabled} onClick={onGo}>
+            {button.label}
           </button>
-        </div>
+        </span>
       </div>
+      <div className={`pvline ${verdict ? TONE[verdict.state] : ''}`} data-pv-verdict>
+        {verdict ? (
+          <>
+            <i className={`vd ${TONE[verdict.state]}`} aria-hidden="true">
+              {verdict.icon}
+            </i>
+            <span>
+              <b>{verdict.word}.</b> {verdict.why}
+            </span>
+          </>
+        ) : (
+          <span className="muted">Drawing {sheet} as it would be…</span>
+        )}
+      </div>
+      {summary && (
+        <div className={`pvsum ${summary.tone}`} data-pv-summary>
+          {summary.text}
+        </div>
+      )}
     </div>
+  );
+}
+
+/** A tab's mark in a preview: what would become of its sheet. */
+export function VerdictMark({ state }: { state: PreviewState }) {
+  const icon = { land: '✓', check: '!', refused: '✕', held: '–' }[state];
+  return (
+    <i className={`vd ${TONE[state]}`} aria-label={{ land: 'Would land', check: 'Would fail a check', refused: 'Refused', held: 'Held back' }[state]}>
+      {icon}
+    </i>
   );
 }
 

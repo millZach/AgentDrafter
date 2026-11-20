@@ -188,6 +188,8 @@ export interface PromptState {
   taken?: Taken | null;
   /** A phone's words: a finger taps and holds where a mouse clicks. */
   touch?: boolean;
+  /** Whether a change set is shown before it lands, which the band above the bar holds. */
+  previewing?: boolean;
   /** A text whose contents are being edited on the drawing, or in a phone's box. */
   editing?: Named | null;
 }
@@ -210,6 +212,19 @@ const options = (...acts: [string, Act][]): Part[] => [
 
 /** What the command bar says now: the tool running's prompt, or the frame's. */
 export function promptFor(s: PromptState): Prompt {
+  if (s.previewing) {
+    // The band above says what would happen; the bar says how to step.
+    return {
+      command: 'PREVIEW',
+      parts: [
+        {
+          text: s.touch
+            ? 'Nothing has landed. ◀ ▶ or the tabs show each sheet'
+            : 'Nothing has landed yet. ◀ ▶, the arrow keys or the tabs show each sheet; Esc cancels',
+        },
+      ],
+    };
+  }
   const t = s.tool;
   if (t?.tool && s.at === null) {
     // The renderer's words, with its options to click, and what went wrong.
@@ -273,6 +288,8 @@ export interface TemplateEdit {
   path: string;
   /** Every sheet built from it, which the edit changes. */
   sheets: string[];
+  /** The edit in a few words, as a preview names it: `Move junction-box`. */
+  edit: string;
 }
 
 /** What the renderer says of the drawing tool running (`Viewer.tool_state`). */
@@ -426,14 +443,136 @@ export interface ToolOutcome {
   sends?: ToolSend[];
 }
 
-/** The template dialog's words: its heading, what it says, and its button. */
-export function templateWords(edit: TemplateEdit): { title: string; body: string; button: string } {
-  const file = edit.path.split('/').pop() ?? edit.path;
-  return {
-    title: edit.title,
-    body: `${edit.detail} The template ${file} changes, and so does every sheet built from it:`,
-    button: edit.sheets.length > 1 ? `Change all ${edit.sheets.length} sheets` : 'Change the template',
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const listed = (items: string[]) => (items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`);
+
+/**
+ * A change set drawn before it lands (#154), as `display-list` with the
+ * change set gives it under `preview`, less what the renderer alone draws.
+ */
+export interface PreviewReport {
+  /** The dry run's reply: each sheet the change set reaches, and whether it would take its part. */
+  change: {
+    landed: number;
+    failed: number;
+    sheets: { sheet: string; ok: boolean; error?: { code: string; message: string } }[];
   };
+  /** The checker's reply on the sheets it would land on. */
+  checks?: { result?: { findings: { sheet: string; rule: string; message: string }[] } };
+  /** Each object it would add, change or delete, by its ID. */
+  objects: { id: string; how: 'added' | 'changed' | 'deleted' }[];
+  /** On the sheet drawn, a box round each check it would fail, `{min, max}` in drawing units. */
+  clouds?: { rule: string; bounds: { min: [number, number]; max: [number, number] } }[];
+}
+
+/** What would become of one sheet: it would land, land but fail a check, refuse it, or be held back by another that refuses a template edit. */
+export type PreviewState = 'land' | 'check' | 'refused' | 'held';
+
+export interface SheetVerdict {
+  state: PreviewState;
+  /** Its mark on the band and on its tab. */
+  icon: string;
+  /** `Would land`, `Would land, but fails a check`, `Refused` or `Held back`. */
+  word: string;
+  /** Why, or what it would change. */
+  why: string;
+}
+
+const VERDICTS: Record<PreviewState, [string, string]> = {
+  land: ['✓', 'Would land'],
+  check: ['!', 'Would land, but fails a check'],
+  refused: ['✕', 'Refused'],
+  held: ['–', 'Held back'],
+};
+
+/** The core's words, without the backquotes it puts round names. */
+const plain = (text: string) => text.replace(/`/g, '');
+
+/** What would become of each sheet the change set reaches, by its name in capitals, in the set's order. */
+export function previewVerdicts(p: PreviewReport): Map<string, SheetVerdict> {
+  const findings = p.checks?.result?.findings ?? [];
+  const out = new Map<string, SheetVerdict>();
+  for (const s of p.change.sheets) {
+    const key = s.sheet.toUpperCase();
+    const fails = findings.filter((f) => f.sheet.toUpperCase() === key);
+    const state: PreviewState = !s.ok ? (s.error?.code === 'shared_edit_failed' ? 'held' : 'refused') : fails.length ? 'check' : 'land';
+    let why: string;
+    if (state === 'check') {
+      // The first check it would fail, and how many more: the band stays short.
+      const more = fails.length - 1;
+      why = `${plain(fails[0]?.message ?? '')} (${fails[0]?.rule ?? ''})${more ? `; ${more === 1 ? '1 more check fails' : `${more} more checks fail`}.` : ''}`;
+    }
+    else if (!s.ok) why = plain(s.error?.message ?? 'It would not take its part.');
+    else {
+      const n = { added: 0, changed: 0, deleted: 0 };
+      for (const o of p.objects) if (o.id.toUpperCase().startsWith(`${key}/`)) n[o.how] += 1;
+      const said = [
+        n.added ? `${plural(n.added, 'object')} added` : '',
+        n.changed ? `${plural(n.changed, 'object')} changed` : '',
+        n.deleted ? `${plural(n.deleted, 'object')} erased` : '',
+      ].filter(Boolean);
+      why = `${said.length ? said.join(', ') : 'Nothing on it changes'}. No check fails.`;
+    }
+    const [icon, word] = VERDICTS[state];
+    out.set(key, { state, icon, word, why });
+  }
+  return out;
+}
+
+/** The band's summary of every sheet: its tone and its words. */
+export function previewSummary(p: PreviewReport): { tone: 'ok' | 'warn' | 'bad'; text: string } {
+  const v = previewVerdicts(p);
+  const names = (state: PreviewState) => p.change.sheets.filter((s) => v.get(s.sheet.toUpperCase())?.state === state).map((s) => s.sheet);
+  const n = p.change.sheets.length;
+  const refusing = names('refused');
+  const fails = names('check');
+  if (refusing.length && !p.change.landed) {
+    return {
+      tone: 'bad',
+      text: n > 1 ? `Nothing would change. ${listed(refusing)} would refuse it, so all ${n} sheets are held back.` : 'Nothing would change: the sheet would refuse it.',
+    };
+  }
+  if (refusing.length) {
+    const landing = p.change.sheets.filter((s) => s.ok).map((s) => s.sheet);
+    return { tone: 'bad', text: `${listed(landing)} would take it and ${listed(refusing)} would refuse it, which would leave the set inconsistent.` };
+  }
+  if (fails.length) {
+    const who = fails.length === n ? (n > 1 ? 'every one' : 'it') : listed(fails);
+    return {
+      tone: 'warn',
+      text: `${n > 1 ? `All ${n} would take it` : 'The sheet would take it'}, but ${who} would then fail a check. You can still change ${n > 1 ? 'them' : 'it'}; Accept warns of failed checks.`,
+    };
+  }
+  return { tone: 'ok', text: n > 1 ? `All ${n} would take it, and no check fails.` : 'The sheet would take it, and no check fails.' };
+}
+
+/** The band's button: Change all, or why nothing can land. */
+export function previewButton(p: PreviewReport): { label: string; disabled: boolean } {
+  const n = p.change.sheets.length;
+  if (p.change.failed) return { label: p.change.landed ? 'Some sheets would refuse it' : 'Nothing can land', disabled: true };
+  return { label: n > 1 ? `Change all ${n} sheets` : 'Change the template', disabled: false };
+}
+
+/**
+ * Whether a refusal could pass a moment later, so the band offers to check
+ * again: a sheet whose DWG cannot be written, as when it is open in AutoCAD.
+ * Every other refusal is the records', and asking again changes nothing.
+ */
+export function checkAgainOffered(p: PreviewReport): boolean {
+  return p.change.sheets.some((s) => !s.ok && s.error?.code === 'write_failed');
+}
+
+/** The band's heading: its chip, the edit, and its reach. */
+export function previewTitle(edit: TemplateEdit): { chip: string; title: string; reach: string } {
+  const n = edit.sheets.length;
+  return { chip: 'Preview', title: edit.edit, reach: n > 1 ? `on ${n} sheets` : 'on its one sheet' };
+}
+
+/** The sheet `by` steps on from `sheet` among `sheets`, round from the last to the first. */
+export function previewStep(sheets: readonly string[], sheet: string, by: number): string {
+  const n = sheets.length;
+  const i = Math.max(0, sheets.findIndex((s) => s.toUpperCase() === sheet.toUpperCase()));
+  return sheets[(((i + by) % n) + n) % n] ?? sheet;
 }
 
 /** A sheet's template and the sheets built from it, as `display-list --origins` gives them. */

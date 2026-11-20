@@ -38,6 +38,8 @@ export interface Summary {
   snaps: number;
   /** On a drawing set's sheet as it is, its template and every sheet built from it. */
   template?: { path: string; sheets: string[] } | null;
+  /** With a change set, its preview as the core gives it, less what the renderer alone draws. */
+  preview?: unknown;
 }
 
 /** One of the sheet's objects, as the core says what it is. */
@@ -82,6 +84,8 @@ export interface Probe {
   marked?: Marked;
   /** The box round the objects at these places, [left, bottom, right, top] in drawing units; empty when they draw nothing. */
   bounds(places: number[]): number[];
+  /** The box round what a preview marks, [left, bottom, right, top] in drawing units; empty when the sheet is no preview. */
+  previewExtent(): number[];
   /** The place of the object a click at the drawing point (x, y) picks, within `reach` CSS pixels at the view shown, as a click does; -1 for none. */
   pickAt(x: number, y: number, reach: number): number;
   view(): View;
@@ -125,6 +129,9 @@ export function installProbe(parts: Parts): () => void {
     summary: null,
     bounds(places) {
       return [...(parts.viewer()?.bounds_of(Uint32Array.from(places)) ?? [])];
+    },
+    previewExtent() {
+      return [...(parts.viewer()?.preview_extent() ?? [])];
     },
     pickAt(x, y, reach) {
       return parts.viewer()?.pick(x, y, reach / parts.view().scale) ?? -1;
