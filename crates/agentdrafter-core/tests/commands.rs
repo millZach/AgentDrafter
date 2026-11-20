@@ -167,6 +167,28 @@ fn each_schema_accepts_what_its_command_reads_and_refuses_what_it_refuses() {
             );
         }
     }
+
+    // `plot_style: null` reads as left out, in `plot` and `render` alike,
+    // and both schemas take it; a plot style that is not text or null is
+    // refused by both.
+    for name in ["plot", "render"] {
+        let validator =
+            jsonschema::validator_for(&find_command(name).unwrap().input_schema()).unwrap();
+        let null = json!({"source": "missing.yaml", "plot_style": null});
+        assert!(validator.is_valid(&null), "{name}'s schema takes {null}");
+        let reply = run(name, null);
+        assert_eq!(
+            reply["error"]["code"], "read_failed",
+            "`{name}` reads a null plot style as left out, then fails on the file: {reply}"
+        );
+        assert_eq!(reply["error"]["field"], Value::Null, "{name}: {reply}");
+        let number = json!({"source": "missing.yaml", "plot_style": 1});
+        assert!(
+            !validator.is_valid(&number),
+            "{name}'s schema refuses {number}"
+        );
+        assert_eq!(run(name, number)["ok"], false, "{name}");
+    }
 }
 
 #[test]

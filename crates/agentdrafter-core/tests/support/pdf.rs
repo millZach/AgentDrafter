@@ -279,6 +279,24 @@ impl Pdf {
         pens
     }
 
+    /// How many paths the page starts outside its text: one `m` for each,
+    /// so a stroke of several runs, such as a dashed curve, counts each.
+    pub fn subpaths(&self) -> usize {
+        let mut in_text = false;
+        let mut count = 0;
+        for token in tokens(self.content()) {
+            if let Token::Operator(op) = token {
+                match op.as_str() {
+                    "BT" => in_text = true,
+                    "ET" => in_text = false,
+                    "m" if !in_text => count += 1,
+                    _ => {}
+                }
+            }
+        }
+        count
+    }
+
     /// Every point the page's paths are drawn through, in points, in order.
     pub fn points(&self) -> Vec<[f64; 2]> {
         let mut points = Vec::new();

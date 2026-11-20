@@ -178,10 +178,18 @@ pub(crate) fn rasterize(
         match &item.shape {
             Shape::Stroke { lineweight, runs } => {
                 // The finest a pen draws is one pixel, as a plotter draws
-                // lineweight 0 with its finest line.
+                // lineweight 0 with its finest line. Through a plot style, a
+                // pen with a width draws that width, one thinner than a
+                // pixel as a lighter line, so thin pens differ as they do in
+                // the PDF; lineweight 0 still draws one pixel.
                 let lineweight =
                     style.map_or(*lineweight, |s| s.lineweight(item.color, *lineweight));
-                let width = (lineweight * view.pixels_per_millimetre).max(1.0) as f32;
+                let exact = lineweight * view.pixels_per_millimetre;
+                let width = if style.is_some() && exact > 0.0 {
+                    exact as f32
+                } else {
+                    exact.max(1.0) as f32
+                };
                 let stroke = Stroke {
                     width,
                     line_cap: LineCap::Round,

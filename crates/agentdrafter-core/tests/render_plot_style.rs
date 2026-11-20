@@ -32,7 +32,8 @@ fn scratch(test: &str) -> PathBuf {
 
 /// Four lines 10 mm apart on layers of colours 1, 2, 3 and 4, of
 /// lineweights 0.25, 0.5, the default and 1; the last on a layer that does
-/// not plot.
+/// not plot. A fifth line, 10 mm below the first on that layer too, keeps
+/// the first off the page's edge, where a plot cuts its pen in half.
 const FOUR_PENS: &str = "units: mm
 layers:
   red: {color: 1, lineweight: 0.25}
@@ -44,6 +45,7 @@ objects:
   - line: {from: [0, 10, 0], to: [100, 10, 0], layer: yellow}
   - line: {from: [0, 20, 0], to: [100, 20, 0], layer: green}
   - line: {from: [0, 30, 0], to: [100, 30, 0], layer: trim}
+  - line: {from: [0, -10, 0], to: [100, -10, 0], layer: trim}
 ";
 
 /// The heights of the four lines, in drawing units.
@@ -187,7 +189,13 @@ fn plotted_pens(pdf: &Pdf) -> Vec<([u8; 3], f64)> {
 /// Whether the PNG draws each line that plots with the pen the PDF plots
 /// it with: the same colour, and the same width to within the half a
 /// pixel the anti-aliasing of its two edges can move it.
-fn assert_same_pens(image: &Image, pdf: &Pdf) {
+fn assert_same_pens(image: &Image, report: &PlotReport, pdf: &Pdf) {
+    // The line that does not plot still sets both outputs' upper bound, so
+    // the PNG has room above the last line and "not drawn" below means
+    // left out, not cut off.
+    for extents in [image.report.extents, report.extents] {
+        assert_eq!(extents.map(|e| e.max[1]), Some(LINES[3]), "{extents:?}");
+    }
     let plotted = plotted_pens(pdf);
     // The PDF leaves out the line on the layer that does not plot.
     assert_eq!(plotted.len(), 3, "{plotted:?}");
@@ -225,7 +233,7 @@ fn a_png_through_a_ctb_draws_each_pen_as_the_pdf_through_it_does() {
         r.plot_style = Some("made-up.ctb".into())
     });
     let (report, pdf) = plot(&source, &settings, Some("made-up.ctb"));
-    assert_same_pens(&image, &pdf);
+    assert_same_pens(&image, &report, &pdf);
     // Blue at 1 mm, the object's own yellow at 0.5 mm, and dark green at
     // 0.5 mm at full strength: the screening is followed by neither.
     let pens: Vec<_> = LINES[..3].iter().map(|&y| image.pen(y).unwrap()).collect();
@@ -257,7 +265,7 @@ fn monochrome_draws_exactly_as_a_plot_with_no_plot_style_named() {
     let image = render(&source, &settings, |r| r.monochrome = true);
     let (report, pdf) = plot(&source, &settings, None);
     assert_eq!(report.plot_style.name, BUILT_IN_PLOT_STYLE);
-    assert_same_pens(&image, &pdf);
+    assert_same_pens(&image, &report, &pdf);
     for y in &LINES[..3] {
         assert_eq!(image.pen(*y).unwrap().0, [0, 0, 0], "the line at {y}");
     }
@@ -378,9 +386,172 @@ fn a_plot_style_a_plot_cannot_find_or_read_is_refused_in_the_same_words() {
         )
         .unwrap_err();
         assert_eq!(rendered.code, code, "{name}: {rendered:?}");
+        assert_eq!(plotted.code, rendered.code, "{name}: {plotted:?}");
         assert_eq!(rendered.message, plotted.message, "{name}");
         assert_eq!(rendered.field, plotted.field, "{name}");
         assert_eq!(rendered.file, plotted.file, "{name}");
     }
     assert!(!dir.join("sheet.png").exists(), "nothing was written");
+}
+
+/// The ink down the column at `x`, across `y0` to `y1` in drawing units, in
+/// pixels of full black: each pixel counts as much as it is darkened.
+fn ink_down(image: &Image, x: f64, (y0, y1): (f64, f64)) -> f64 {
+    let [left, top] = image.report.top_left;
+    let k = image.report.pixels_per_unit;
+    let column = ((x - left) * k) as usize;
+    let rows = ((top - y1) * k) as usize..(((top - y0) * k) as usize).min(image.height);
+    rows.map(|row| {
+        let p = image.pixel(column, row);
+        f64::from(255 - p.iter().copied().min().unwrap()) / 255.0
+    })
+    .sum()
+}
+
+#[test]
+fn a_linetype_lays_out_as_many_dashes_round_a_curve_as_the_pdf_does() {
+    let dir = scratch("dashes");
+    let source = dir.join("sheet.yaml");
+    // A circle 62.83 mm round in a pattern 11.415 mm long: 5.504 repeats,
+    // which rounds to 6 on the circle itself and to 5 on chords that cut it
+    // 0.2 mm short, as a render's own tolerance at 150 dots per inch did.
+    // The frame keeps the circle off the page's edge.
+    fs::write(
+        &source,
+        "units: mm
+linetypes:
+  PROBE: {pattern: [5.7, -5.715]}
+objects:
+  - circle: {center: [0, 0, 0], radius: 10, linetype: PROBE}
+  - polyline: {points: [[-20, -20, 0], [20, -20, 0], [20, 20, 0], [-20, 20, 0]], closed: true}
+",
+    )
+    .unwrap();
+    let settings = Settings::default();
+    let image = render(&source, &settings, |r| {
+        r.dpi = 150.0;
+        r.monochrome = true;
+    });
+    // The dashes the PNG draws, walking round the circle's centreline.
+    let [left, top] = image.report.top_left;
+    let k = image.report.pixels_per_unit;
+    let steps = 3600;
+    let inked: Vec<bool> = (0..steps)
+        .map(|i| {
+            let a = std::f64::consts::TAU * f64::from(i) / f64::from(steps);
+            let (x, y) = (10.0 * a.cos(), 10.0 * a.sin());
+            let p = image.pixel(((x - left) * k) as usize, ((top - y) * k) as usize);
+            p.iter().all(|&c| c < 128)
+        })
+        .collect();
+    let drawn = (0..inked.len())
+        .filter(|&i| inked[i] && !inked[(i + inked.len() - 1) % inked.len()])
+        .count();
+    // The PDF's: one path for each dash, and one for each of the frame's
+    // four sides.
+    let (_, pdf) = plot(&source, &settings, None);
+    assert_eq!(drawn, pdf.subpaths() - 4);
+    assert_eq!(drawn, 6);
+}
+
+#[test]
+fn ink_past_the_plot_s_page_is_cut_away_and_the_margin_stays_white() {
+    let dir = scratch("page-edge");
+    let source = dir.join("sheet.yaml");
+    // No paper: the 1 mm trim line sets the extents, so the PDF's page ends
+    // at its centreline and half its pen falls off the page.
+    fs::write(
+        &source,
+        "units: mm
+layers:
+  trim: {lineweight: 1}
+objects:
+  - polyline: {points: [[0, 0, 0], [100, 0, 0], [100, 50, 0], [0, 50, 0]], closed: true, layer: trim}
+",
+    )
+    .unwrap();
+    let settings = Settings::default();
+    let (report, pdf) = plot(&source, &settings, None);
+    let page = pdf.media_box();
+    assert!((page[2] - points(100.0)).abs() < 0.01, "{page:?}");
+    assert!((page[3] - points(50.0)).abs() < 0.01, "{page:?}");
+    assert_eq!(report.sheet_size.width_mm, 100.0);
+    // Ten pixels to the millimetre: the trim line's half inside the page is
+    // five pixels, the margin round the page fifty.
+    let monochrome = render(&source, &settings, |r| r.monochrome = true);
+    let colour = render(&source, &settings, |_| {});
+    for (image, outside) in [(&monochrome, 0.0), (&colour, 5.0)] {
+        // Down the middle of the sheet, across its top edge at y = 50.
+        let above = ink_down(image, 50.0, (50.0, 55.0));
+        let below = ink_down(image, 50.0, (45.0, 50.0));
+        assert!((below - 5.0).abs() < 0.6, "inside the page: {below} px");
+        assert!(
+            (above - outside).abs() < 0.6,
+            "outside the page: {above} px"
+        );
+    }
+    // Through a plot style, nothing in the margin is inked.
+    let [left, top] = monochrome.report.top_left;
+    let k = monochrome.report.pixels_per_unit;
+    let (x0, y0) = (((0.0 - left) * k) as usize, ((top - 50.0) * k) as usize);
+    let (x1, y1) = (((100.0 - left) * k) as usize, ((top - 0.0) * k) as usize);
+    for y in 0..monochrome.height {
+        for x in 0..monochrome.width {
+            if x < x0 || x > x1 || y < y0 || y > y1 {
+                assert_eq!(monochrome.pixel(x, y), [255; 3], "({x}, {y})");
+            }
+        }
+    }
+}
+
+/// The points in `mm` millimetres.
+fn points(mm: f64) -> f64 {
+    mm / 25.4 * 72.0
+}
+
+#[test]
+fn pens_thinner_than_a_pixel_differ_through_a_plot_style() {
+    let dir = scratch("thin-pens");
+    let source = dir.join("sheet.yaml");
+    fs::write(
+        &source,
+        "units: mm
+layers:
+  fine: {lineweight: 0.05}
+  thin: {lineweight: 0.13}
+  hairline: {lineweight: 0}
+  trim: {plot: false}
+objects:
+  - line: {from: [0, 0, 0], to: [100, 0, 0], layer: fine}
+  - line: {from: [0, 10, 0], to: [100, 10, 0], layer: thin}
+  - line: {from: [0, 20, 0], to: [100, 20, 0], layer: hairline}
+  - polyline: {points: [[-10, -10, 0], [110, -10, 0], [110, 30, 0], [-10, 30, 0]], closed: true, layer: trim}
+",
+    )
+    .unwrap();
+    let settings = Settings::default();
+    // At 150 dots per inch a pixel is 0.169 mm: both pens are thinner. The
+    // frame, which does not plot, keeps the lines off the page's edge.
+    let per_mm = 150.0 / 25.4;
+    let across = |image: &Image, y: f64| ink_down(image, 50.0, (y - 2.0, y + 2.0));
+    let monochrome = render(&source, &settings, |r| {
+        r.dpi = 150.0;
+        r.monochrome = true;
+    });
+    let (fine, thin, hairline) = (
+        across(&monochrome, 0.0),
+        across(&monochrome, 10.0),
+        across(&monochrome, 20.0),
+    );
+    assert!((fine - 0.05 * per_mm).abs() < 0.15, "0.05 mm: {fine} px");
+    assert!((thin - 0.13 * per_mm).abs() < 0.15, "0.13 mm: {thin} px");
+    assert!(thin > 2.0 * fine, "{fine} px against {thin} px");
+    // Lineweight 0 still draws a pixel wide.
+    assert!((hairline - 1.0).abs() < 0.15, "lineweight 0: {hairline} px");
+    // In colour, every pen draws at least a pixel wide, as before.
+    let colour = render(&source, &settings, |r| r.dpi = 150.0);
+    for y in [0.0, 10.0, 20.0] {
+        let ink = across(&colour, y);
+        assert!((ink - 1.0).abs() < 0.15, "in colour at {y}: {ink} px");
+    }
 }

@@ -53,8 +53,10 @@ use crate::units::Unit;
 pub const BUILT_IN_PLOT_STYLE: &str = "monochrome (built in)";
 
 /// How far a curve's chords may stray from it, in millimetres of paper:
-/// finer than any plotter draws.
-const CHORD_TOLERANCE_MM: f64 = 0.005;
+/// finer than any plotter draws. A render through a plot style draws its
+/// curves to it too, so a linetype repeats as often round them as in the
+/// PDF.
+pub(crate) const CHORD_TOLERANCE_MM: f64 = 0.005;
 
 /// The largest page a PDF reader opens: 200 inches a side.
 pub const MOST_PAGE_POINTS: f64 = 14_400.0;

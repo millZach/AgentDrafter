@@ -354,7 +354,9 @@ fn render_page(
     };
     // A coarse list first, curves to within a drawing unit, for the scale;
     // then the list drawn to a quarter of a pixel, finer than the eye sees,
-    // whose extents the image covers.
+    // whose extents the image covers. Through a plot style the list is drawn
+    // to the plot's own tolerance instead, so each curve is as long as in
+    // the PDF and a linetype lays out as many dashes round it.
     let coarse = draw::draw_sheet_for(sheet, &fonts, 1.0, most_dashes, purpose);
     let (rough, _) = fit(
         request,
@@ -363,7 +365,12 @@ fn render_page(
         millimetres_per_unit,
         margin,
     )?;
-    let list = draw::draw_sheet_for(sheet, &fonts, 0.25 / rough, most_dashes, purpose);
+    let tolerance = if through.is_some() {
+        plot::CHORD_TOLERANCE_MM / millimetres_per_unit
+    } else {
+        0.25 / rough
+    };
+    let list = draw::draw_sheet_for(sheet, &fonts, tolerance, most_dashes, purpose);
     let extents = list.extents();
     let (pixels_per_unit, size) = fit(
         request,
@@ -392,8 +399,10 @@ fn render_page(
         )
     })?;
     // What lies off the paper is cut away, where the image is larger than
-    // the paper it fits.
-    if sheet.paper.is_some() {
+    // the paper it fits. Through a plot style, ink is cut at the plot's
+    // page, its extents on a sheet with no paper, as the PDF's page cuts it,
+    // and the margin round it stays white.
+    if sheet.paper.is_some() || through.is_some() {
         if let Some((paper, _)) = draw::page_of(sheet, &list) {
             raster::blank_outside(&mut pixmap, &view, paper);
         }
