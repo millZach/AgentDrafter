@@ -535,6 +535,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
     // A preview: the sheet as the change set would leave it.
     const previewed = preview;
     if (previewed && at === null) (input as Record<string, unknown>).change_set = previewed.send.change_set;
+    // A proposal is shown as a keep would land it: on every sheet it reaches or on none.
+    if (previewed?.proposal && at === null) (input as Record<string, unknown>).all_or_none = true;
     const generation = generationOf(at, generationKey);
     run('display-list', input, token).then(
       (text) => {
@@ -1494,7 +1496,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       const key = ghostKey(p);
       if (ghostAsked.current.has(key)) continue;
       ghostAsked.current.add(key);
-      const input: Record<string, unknown> = { source, sheet: summary.sheet, change_set: p.change_set };
+      const input: Record<string, unknown> = { source, sheet: summary.sheet, change_set: p.change_set, all_or_none: true };
       if (summary.layout) input.layout = summary.layout;
       const done = (got: GhostReply) => {
         if (!key.endsWith(`|${ghostGeneration.current}`)) return;

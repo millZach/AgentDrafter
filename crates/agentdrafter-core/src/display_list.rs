@@ -108,6 +108,11 @@ pub struct DisplayListRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub change_set: Option<Value>,
+    /// With `change_set`: apply it as a proposal is kept, on every sheet it
+    /// reaches or on none, so a sheet that would take its part while
+    /// another refuses is shown held back (`shared_edit_failed`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_or_none: bool,
 }
 
 /// A value given, even `null`, as itself: only a key left out is none.
@@ -128,6 +133,7 @@ impl DisplayListRequest {
             origins: false,
             values: false,
             change_set: None,
+            all_or_none: false,
         }
     }
 }
@@ -474,7 +480,7 @@ pub fn display_list_with(
                      records, and a sheet description or a DWG is not a set",
                 ));
             }
-            Some(preview(source, change_set, settings)?)
+            Some(preview(source, change_set, settings, request.all_or_none)?)
         }
     };
     let files: Option<Arc<dyn ReadFiles + Send + Sync>> = match (request.entry, &previewed) {

@@ -14,6 +14,7 @@ use agentdrafter_core::{
     KeepRequest, ProposalsReport, ProposalsRequest, ProposeRequest, SetBuildRequest, Settings,
     UndoRequest, JOURNAL_FILE, LOCK_FILE, PROPOSALS_FOLDER,
 };
+use agentdrafter_core::{display_list_with, DisplayListRequest};
 use serde_json::{json, Value};
 
 #[path = "support/demo_set.rs"]
@@ -483,10 +484,78 @@ fn a_keep_lands_nothing_when_any_sheet_it_reaches_would_refuse_it() {
         {"op": "add_circle", "sheet": "DEMO-001", "center": [7, 5, 0], "radius": 0.4},
         {"op": "move", "target": {"id": "DEMO-002/washer"}, "by": [0.5, 0, 0]}
     ]});
-    let proposal = propose(&set, both.clone(), Some("Assistant"));
+    // Proposed while DEMO-002's DWG cannot be written: its dry run, as a
+    // keep would land it, holds DEMO-001 back too, and no operation lands.
+    let dwg = set.join("dwg/DEMO-002.dwg");
+    let mut permissions = fs::metadata(&dwg).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&dwg, permissions.clone()).unwrap();
+    let proposed = propose_with(
+        &ProposeRequest {
+            set: set.clone(),
+            change_set: both.clone(),
+            by: Some("Assistant".to_owned()),
+        },
+        &Settings::default(),
+        Interface::Mcp,
+    )
+    .unwrap();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&dwg, permissions).unwrap();
+    let would = &proposed.would;
+    assert_eq!((would.landed, would.failed), (0, 2), "{would:#?}");
+    let held = would.sheets.iter().find(|s| s.sheet == "DEMO-001").unwrap();
+    assert_eq!(
+        held.error.as_ref().unwrap().code,
+        ErrorCode::SharedEditFailed
+    );
+    assert!(held.result.is_none(), "nothing of it is built");
+    assert!(
+        would.operations.iter().all(|o| !o.ok),
+        "{:#?}",
+        would.operations
+    );
+    assert!(
+        proposed
+            .message
+            .contains("holds back 1 other sheet it reaches"),
+        "{}",
+        proposed.message
+    );
+    let proposal = proposed.proposal;
     lands(
         &set,
         json!({"operations": [{"op": "change_layer", "sheet": "DEMO-001", "name": "notes", "set": {"locked": true}}]}),
+    );
+    // Its preview, as the viewer asks for a proposal's: DEMO-001 held
+    // back, not would land; without all_or_none, as change applies it.
+    let shown = |all_or_none: bool| {
+        let mut request = DisplayListRequest::new(&set);
+        request.sheet = Some("DEMO-001".to_owned());
+        request.change_set = Some(both.clone());
+        request.all_or_none = all_or_none;
+        let drawn = display_list_with(&request, &Settings::default()).unwrap();
+        let sheet = drawn
+            .preview
+            .unwrap()
+            .change
+            .sheets
+            .into_iter()
+            .find(|s| s.sheet == "DEMO-001")
+            .unwrap();
+        sheet.error.map(|e| (e.code, e.message))
+    };
+    let (code, message) = shown(true).expect("held back");
+    assert_eq!(code, ErrorCode::SharedEditFailed);
+    assert_eq!(
+        message,
+        "left as it was: a proposal is kept on every sheet it reaches or on none, and \
+         `DEMO-002` would refuse it"
+    );
+    assert!(
+        shown(false).is_none(),
+        "as change applies it, DEMO-001 would land"
     );
     let before = snapshot::snapshot(&set);
     let kept = keep(&set, proposal);
@@ -515,6 +584,26 @@ fn a_keep_lands_nothing_when_any_sheet_it_reaches_would_refuse_it() {
         .find(|s| s.sheet == "DEMO-002")
         .unwrap();
     assert_eq!(two.error.as_ref().unwrap().code, ErrorCode::Locked);
+    // DEMO-001 was never built, and no operation landed: the circle's is
+    // held back, the move's refused by the lock.
+    assert!(one.result.is_none() && !one.dwg_written, "{one:#?}");
+    assert!(
+        report.operations.iter().all(|o| !o.ok),
+        "{:#?}",
+        report.operations
+    );
+    let circle = report.operations[0].error.as_ref().unwrap();
+    assert_eq!(circle.code, ErrorCode::SharedEditFailed);
+    assert!(
+        circle.message.contains("`DEMO-002` would refuse it"),
+        "{}",
+        circle.message
+    );
+    assert!(report.operations[0].record.is_none() && report.operations[0].after.is_none());
+    assert_eq!(
+        report.operations[1].error.as_ref().unwrap().code,
+        ErrorCode::Locked
+    );
     assert_eq!(
         snapshot::snapshot(&set),
         before,
@@ -565,7 +654,7 @@ fn a_dwg_open_elsewhere_does_not_stop_a_template_edit_being_proposed() {
             .contains("the DWG of `DEMO-002` cannot be written now")
             && reply
                 .message
-                .contains("holds back 2 other sheets of its template"),
+                .contains("holds back 2 other sheets it reaches"),
         "{}",
         reply.message
     );

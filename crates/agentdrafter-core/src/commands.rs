@@ -545,8 +545,10 @@ fn display_list_input() -> Value {
     }
     let mut schema = display_list_schema(change_set);
     schema["$defs"] = defs;
-    // A change set is drawn on the set as it is, never at an entry.
+    // A change set is drawn on the set as it is, never at an entry; and
+    // all_or_none says how it is applied, so it goes with one.
     schema["not"] = json!({"required": ["entry", "change_set"]});
+    schema["dependentRequired"] = json!({"all_or_none": ["change_set"]});
     schema
 }
 
@@ -575,6 +577,10 @@ fn display_list_schema(change_set: Value) -> Value {
                 "type": "boolean",
             },
             "change_set": change_set,
+            "all_or_none": {
+                "description": "With change_set: apply it as a proposal is kept, on every sheet it reaches or on none, so a sheet that would take its part while another refuses is shown held back. Without it, as change applies it.",
+                "type": "boolean",
+            },
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
         }),
@@ -591,6 +597,12 @@ fn run_display_list(
     // set is never drawn at an entry, as the schema says.
     if input.contains_key("entry") && input.contains_key("change_set") {
         return Err(Error::new(ErrorCode::BadValue, NOT_AT_AN_ENTRY).at_field("change_set"));
+    }
+    if input.contains_key("all_or_none") && !input.contains_key("change_set") {
+        return Err(Error::usage(
+            "`all_or_none` says how a change set is applied: it goes with `change_set`",
+        )
+        .at_field("all_or_none"));
     }
     let settings = take_settings(&mut input, base, false)?;
     let request: DisplayListRequest = parse("display-list", input)?;

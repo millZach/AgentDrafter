@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { readEvents } from '../src/api.ts';
-import { drawnFor, keepButton, previewTitle, promptFor, type PreviewReport } from '../src/frame.ts';
+import { drawnFor, keepButton, previewSummary, previewTitle, previewVerdicts, promptFor, type PreviewReport } from '../src/frame.ts';
 import { entryByline, entryState, entryTitle, proposalEnded, sheetsTouched, whoWords, type Entry, type JournalReport } from '../src/journal.ts';
 import {
   ago,
@@ -209,4 +209,27 @@ test('a keep the set refused is labelled an attempt, and says it waits only whil
   assert.equal(proposalEnded(j, 2), true, 'a later discard ended it');
   j.entries = [attempt, { entry: 6, kind: 'change_set', at: '2026-11-19T20:51:00Z', proposal: 2, rolled_back: { at: '' } }];
   assert.equal(proposalEnded(j, 2), false, 'a keep rolled back ended nothing');
+});
+
+test('a proposal refused on one sheet shows the others held back, in the band and on its card', () => {
+  // As display-list gives a proposal with all_or_none: B refuses, A held back.
+  const held = report([
+    {
+      sheet: 'DP-LD-101',
+      ok: false,
+      code: 'shared_edit_failed',
+      message: 'left as it was: a proposal is kept on every sheet it reaches or on none, and `DP-LD-102` would refuse it',
+    },
+    { sheet: 'DP-LD-102', ok: false, code: 'locked', message: 'layer `notes` is locked' },
+  ]);
+  const a = previewVerdicts(held).get('DP-LD-101');
+  assert.equal(a?.state, 'held');
+  assert.equal(`${a?.word}. ${a?.why}`, 'Held back. left as it was: a proposal is kept on every sheet it reaches or on none, and DP-LD-102 would refuse it');
+  assert.notEqual(a?.word, 'Would land');
+  assert.equal(previewVerdicts(held).get('DP-LD-102')?.word, 'Refused');
+  assert.equal(previewSummary(held).text, 'Nothing would change. DP-LD-102 would refuse it, so all 2 sheets are held back.');
+  assert.deepEqual(keepButton(held), { label: 'Nothing can land', disabled: true });
+  assert.deepEqual(cardLines(proposal({ sheets: ['DP-LD-101', 'DP-LD-102'] }), held, null), [
+    { tone: 'bad', icon: '✕', text: 'Refused now on DP-LD-102: layer notes is locked. Keep can’t land it.' },
+  ]);
 });

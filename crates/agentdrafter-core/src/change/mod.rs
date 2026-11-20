@@ -353,7 +353,14 @@ fn land(
     keeping: Option<&journal::Keeping>,
 ) -> Reply<ChangeReport> {
     let mut attempted = None;
-    let mut outcome = apply::apply(request, settings, &mut attempted, None, keeping);
+    let mut outcome = apply::apply(
+        request,
+        settings,
+        &mut attempted,
+        None,
+        keeping,
+        keeping.is_some(),
+    );
     journal::record_failed_attempt(request, &mut outcome, attempted, keeping);
     // Once the change set and its journal entry are written, the checker
     // reads the sheets it landed on back from the saved files.
@@ -389,6 +396,7 @@ pub(crate) fn preview(
     set: &Path,
     change_set: &Value,
     settings: &Settings,
+    whole: bool,
 ) -> Result<Previewed, Error> {
     refuse_unfinished(set, Unfinished::Preview)?;
     let request = ChangeRequest {
@@ -397,7 +405,7 @@ pub(crate) fn preview(
         dry_run: true,
     };
     let mut kept = apply::Kept::default();
-    let report = apply::apply(&request, settings, &mut None, Some(&mut kept), None)?;
+    let report = apply::apply(&request, settings, &mut None, Some(&mut kept), None, whole)?;
     Ok(Previewed {
         report,
         files: Arc::new(FilesAsOf::with_records(set, &kept.records)),

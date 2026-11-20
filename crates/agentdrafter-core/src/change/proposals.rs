@@ -279,7 +279,8 @@ pub fn propose_with(
         change_set: request.change_set.clone(),
         dry_run: true,
     };
-    let would = apply::apply(&dry, settings, &mut None, None, None)?;
+    // As `keep` would land it: on every sheet it reaches or on none.
+    let would = apply::apply(&dry, settings, &mut None, None, None, true)?;
     // What its records would be is checked, not whether each output can be
     // written now: a DWG open in AutoCAD, and the sheets of its template it
     // holds back, which would take a template edit with it, do not stop it.
@@ -379,8 +380,8 @@ pub fn propose_with(
             },
             match held {
                 0 => String::new(),
-                1 => ", which holds back 1 other sheet of its template".to_owned(),
-                n => format!(", which holds back {n} other sheets of its template"),
+                1 => ", which holds back 1 other sheet it reaches".to_owned(),
+                n => format!(", which holds back {n} other sheets it reaches"),
             }
         ),
     };

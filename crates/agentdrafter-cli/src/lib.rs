@@ -54,7 +54,7 @@ const KEEP_USAGE: &str = "agentdrafter keep <drawing-set-folder> <proposal> [--b
 const DISCARD_USAGE: &str = "agentdrafter discard <drawing-set-folder> <proposal> [--by <who>]";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--fonts <folder>]... [--no-system-fonts]";
-const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--change-set <change-set.json | ->] [--fonts <folder>]... [--no-system-fonts]";
+const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--change-set <change-set.json | -> [--all-or-none]] [--fonts <folder>]... [--no-system-fonts]";
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
@@ -405,6 +405,12 @@ fn parse_display_list(mut args: Args) -> Result<Value, Error> {
                 {
                     return Err(Error::usage("--change-set is given twice"));
                 }
+            }
+            Some("--all-or-none") => {
+                if request.all_or_none {
+                    return Err(Error::usage("--all-or-none is given twice"));
+                }
+                request.all_or_none = true;
             }
             Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),
