@@ -31,10 +31,13 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agentdrafter_core::{find_command, Error, ErrorCode, Interface, Reply, Settings};
+use agentdrafter_core::{
+    find_command, looking_at_left_off, Error, ErrorCode, Interface, Reply, Settings,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -145,6 +148,85 @@ fn program(program: &Path) -> Command {
     command
 }
 
+/// The assistant's MCP server, as an agent starts it: the command that runs
+/// AgentDrafter, then `mcp --assistant`, bound to the conversation's set and
+/// given the message's `looking-at` reply.
+pub(crate) struct McpServer {
+    command: String,
+    args: Vec<String>,
+}
+
+impl McpServer {
+    fn new(own: &[OsString], set: &Path, looking_at: &Path) -> Self {
+        let (program, args) = own.split_first().expect("a command has a program");
+        let mut args: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        args.extend([
+            "mcp".to_owned(),
+            "--assistant".to_owned(),
+            "--set".to_owned(),
+            set.to_string_lossy().into_owned(),
+            "--looking-at".to_owned(),
+            looking_at.to_string_lossy().into_owned(),
+        ]);
+        McpServer {
+            command: program.to_string_lossy().into_owned(),
+            args,
+        }
+    }
+}
+
+/// A folder of the system's temporary folder made for one message's run
+/// alone, private to its user, which holds the files the agent is started
+/// with; removed when the run ends.
+struct TurnFiles {
+    folder: PathBuf,
+}
+
+impl TurnFiles {
+    /// Makes a new folder, with a random name no other folder has: it is
+    /// created only if nothing has that name.
+    fn new() -> std::io::Result<Self> {
+        loop {
+            let mut bytes = [0u8; 12];
+            getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+            let name: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let folder = std::env::temp_dir().join(format!("agentdrafter-assistant-{name}"));
+            #[cfg_attr(not(unix), allow(unused_mut))]
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&folder) {
+                Ok(()) => return Ok(TurnFiles { folder }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Writes `name` in the folder, as a new file.
+    fn write(&self, name: &str, value: &Value) -> std::io::Result<PathBuf> {
+        let path = self.folder.join(name);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(value.to_string().as_bytes())?;
+        Ok(path)
+    }
+}
+
+impl Drop for TurnFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.folder);
+    }
+}
+
 /// The assistant of this `serve`: the agents found and every conversation.
 pub(crate) struct Assistant {
     found: Mutex<Vec<(Agent, PathBuf)>>,
@@ -155,8 +237,10 @@ pub(crate) struct Assistant {
     own: Vec<OsString>,
 }
 
-/// One conversation, on one drawing set.
+/// One conversation, on one drawing set, kept by the set's canonical path.
 struct Talk {
+    /// The set as the page named it first, which the agent is told.
+    named: PathBuf,
     agent: Option<Agent>,
     /// The session the agent's runs continue, once the first has named it.
     session: Option<String>,
@@ -303,34 +387,82 @@ impl Assistant {
     }
 
     /// Looks on the PATH again: `POST /assistant/find`. A conversation with
-    /// no agent goes on the first one found.
+    /// no agent goes on the first one found, and one whose agent is gone on
+    /// another, or none, as a new conversation, so the server and the page
+    /// agree on it. A conversation working on a message is left as it is.
     pub(crate) fn find_again(&self) -> Value {
         let found = find_agents();
         *self.found.lock().unwrap_or_else(|e| e.into_inner()) = found.clone();
+        let first = found.first().map(|(agent, _)| *agent);
         let mut talks = self.lock();
-        for (set, talk) in talks.iter_mut() {
-            if talk.agent.is_none() {
-                if let Some((agent, _)) = found.first() {
-                    talk.agent = Some(*agent);
-                    talk.note(format!(
-                        "Looked on the PATH again: found {}. {}",
-                        agent.name(),
-                        started_words(*agent, set)
-                    ));
-                }
+        for talk in talks.values_mut() {
+            let gone = talk.agent.filter(|a| !found.iter().any(|(f, _)| f == a));
+            if talk.busy || (talk.agent.is_some() && gone.is_none()) {
+                continue;
             }
+            if talk.agent.is_none() && first.is_none() {
+                continue;
+            }
+            talk.agent = first;
+            talk.session = None;
+            let looked = match gone {
+                Some(gone) => format!("Looked on the PATH again: {} is gone.", gone.name()),
+                None => "Looked on the PATH again.".to_owned(),
+            };
+            let now = match first {
+                Some(agent) => format!(
+                    "{looked} Now {} A new conversation.",
+                    started_words(agent, &talk.named).replacen("On ", "on ", 1)
+                ),
+                None => format!("{looked} No agent is found now."),
+            };
+            talk.note(now);
         }
         drop(talks);
         self.changed.notify_all();
         self.agents()
     }
 
-    /// The conversation on `set`, begun on the first agent found if there
-    /// is none yet.
-    fn talk<'a>(&self, talks: &'a mut HashMap<PathBuf, Talk>, set: &Path) -> &'a mut Talk {
-        talks.entry(set.to_owned()).or_insert_with(|| {
+    /// The canonical path of the drawing set `set` names, which keys its
+    /// conversation, begun on the first agent found if there is none yet.
+    /// A folder that is not a drawing set's is refused, as the core's
+    /// `looking-at` refuses it.
+    pub(crate) fn open(&self, set: &Path) -> Result<PathBuf, Refusal> {
+        let command = find_command("looking-at").expect("the registry holds `looking-at`");
+        let reply = command.run(
+            json!({ "set": set }),
+            &Settings::default(),
+            Interface::Viewer,
+        );
+        if !reply.ok {
+            let error = reply.error.unwrap_or_else(|| {
+                Error::new(ErrorCode::ReadFailed, "the drawing set could not be read")
+            });
+            return Err((status_of(&error), error));
+        }
+        let key = std::fs::canonicalize(set).map_err(|e| {
+            let error = Error::new(
+                ErrorCode::ReadFailed,
+                format!("the drawing set `{}` cannot be found: {e}", set.display()),
+            );
+            (422, error)
+        })?;
+        let mut talks = self.lock();
+        self.talk(&mut talks, &key, set);
+        Ok(key)
+    }
+
+    /// The conversation kept by `key`, begun as named `set` if there is none.
+    fn talk<'a>(
+        &self,
+        talks: &'a mut HashMap<PathBuf, Talk>,
+        key: &Path,
+        set: &Path,
+    ) -> &'a mut Talk {
+        talks.entry(key.to_owned()).or_insert_with(|| {
             let agent = self.found().first().map(|(agent, _)| *agent);
             let mut talk = Talk {
+                named: set.to_owned(),
                 agent,
                 session: None,
                 busy: false,
@@ -344,12 +476,13 @@ impl Assistant {
         })
     }
 
-    /// The conversation on `set` as the page shows it, and its version.
-    pub(crate) fn snapshot(&self, set: &Path) -> (u64, String) {
+    /// The conversation kept by `key` as the page shows it, and its
+    /// version.
+    pub(crate) fn snapshot(&self, key: &Path) -> (u64, String) {
         let mut talks = self.lock();
-        let talk = self.talk(&mut talks, set);
+        let talk = self.talk(&mut talks, key, key);
         let reply = Reply::from(Ok(json!({
-            "set": set,
+            "set": talk.named,
             "agent": talk.agent.map(Agent::key),
             "busy": talk.busy,
             "items": talk.items,
@@ -375,6 +508,7 @@ impl Assistant {
     /// The picker: the conversation on the set goes on, anew, with another
     /// agent.
     pub(crate) fn choose(&self, choice: &Choice) -> Result<Value, Refusal> {
+        let key = self.open(&choice.set)?;
         let agent = Agent::of(&choice.agent).ok_or_else(|| {
             (
                 400,
@@ -388,7 +522,7 @@ impl Assistant {
             return Err(no_agent(Some(agent)));
         }
         let mut talks = self.lock();
-        let talk = self.talk(&mut talks, &choice.set);
+        let talk = self.talk(&mut talks, &key, &choice.set);
         if talk.busy {
             return Err(busy(talk));
         }
@@ -397,7 +531,7 @@ impl Assistant {
             talk.session = None;
             talk.note(format!(
                 "Now {} A new conversation.",
-                started_words(agent, &choice.set).replacen("On ", "on ", 1)
+                started_words(agent, &talk.named).replacen("On ", "on ", 1)
             ));
         }
         drop(talks);
@@ -437,9 +571,10 @@ impl Assistant {
                 ))
             }
         };
-        let (agent, path, session, first) = {
+        let key = self.open(&message.set)?;
+        let (agent, path, session, first, named) = {
             let mut talks = self.lock();
-            let talk = self.talk(&mut talks, &message.set);
+            let talk = self.talk(&mut talks, &key, &message.set);
             let Some(agent) = talk.agent else {
                 return Err(no_agent(None));
             };
@@ -455,18 +590,27 @@ impl Assistant {
                 return Err(no_agent(Some(agent)));
             };
             let first = talk.session.is_none();
-            (agent, path, talk.session.clone(), first)
+            (agent, path, talk.session.clone(), first, talk.named.clone())
         };
         // What the drafter is looking at is the core's: recorded through
-        // `look-at`, as the page records it, before the agent is told.
-        let looked = match &message.looking_at {
-            Some(looking) => Some(self.record(&message.set, looking, settings)?),
-            None => None,
+        // `look-at`, as the page records it, before the agent is told. The
+        // agent's `looking-at` gives what this message carried, or that the
+        // drafter left it off, whatever the viewer records meanwhile.
+        let (looked, snapshot) = match &message.looking_at {
+            Some(looking) => {
+                let (looked, reply) = self.record(&named, looking, settings)?;
+                (Some(looked), reply)
+            }
+            None => (
+                None,
+                serde_json::to_value(looking_at_left_off(&named))
+                    .expect("a reply serializes to JSON"),
+            ),
         };
-        let prompt = prompt(&message.set, &text, looked.as_ref(), first);
+        let prompt = prompt(&named, &text, looked.as_ref(), first);
         let item = {
             let mut talks = self.lock();
-            let talk = self.talk(&mut talks, &message.set);
+            let talk = self.talk(&mut talks, &key, &named);
             if talk.busy {
                 return Err(busy(talk));
             }
@@ -498,34 +642,33 @@ impl Assistant {
         };
         self.changed.notify_all();
         let turn = Turn {
-            set: message.set.clone(),
+            set: key.clone(),
             agent,
             program: path,
             session,
             prompt,
+            looking_at: snapshot,
             item: item + 1,
+            limit: LONGEST_TURN,
         };
         if let Err(e) = std::thread::Builder::new()
             .name("agentdrafter-assistant".into())
             .spawn(move || self.run(turn))
         {
-            self.finish(
-                &message.set,
-                item + 1,
-                Some(format!("could not start: {e}")),
-            );
+            self.finish(&key, item + 1, Some(format!("could not start: {e}")));
         }
         Ok(json!({ "item": item }))
     }
 
     /// Records what the drafter is looking at through the core's `look-at`,
-    /// as the viewer does, and gives it back as the core gave it.
+    /// as the viewer does, and gives it back as the core gave it, with the
+    /// core's reply, which is what `looking-at` gives for this message.
     fn record(
         &self,
         set: &Path,
         looking: &LookingAt,
         settings: &Settings,
-    ) -> Result<LookingAt, Refusal> {
+    ) -> Result<(LookingAt, Value), Refusal> {
         let command = find_command("look-at").expect("the registry holds `look-at`");
         let reply = command.run(
             json!({
@@ -544,17 +687,10 @@ impl Assistant {
                     "what the drafter is looking at was not recorded",
                 )
             });
-            let status = if error.code == ErrorCode::Usage {
-                400
-            } else {
-                422
-            };
-            return Err((status, error));
+            return Err((status_of(&error), error));
         }
-        let result: Value = reply
-            .result
-            .and_then(|r| serde_json::from_str(r.get()).ok())
-            .unwrap_or(Value::Null);
+        let whole = serde_json::to_value(&reply).expect("a reply serializes to JSON");
+        let result = whole["result"].clone();
         let selected: Vec<String> = result["selected"]
             .as_array()
             .map(|ids| {
@@ -575,7 +711,7 @@ impl Assistant {
                     .and_then(|i| looking.names.get(i).cloned().flatten())
             })
             .collect();
-        Ok(LookingAt {
+        let looked = LookingAt {
             sheet: result["sheet"]
                 .as_str()
                 .unwrap_or(&looking.sheet)
@@ -583,7 +719,8 @@ impl Assistant {
             layout: result["layout"].as_str().map(str::to_owned),
             selected,
             names,
-        })
+        };
+        Ok((looked, whole))
     }
 
     /// Runs one message on its agent, and streams what it does into the
@@ -594,25 +731,64 @@ impl Assistant {
     }
 
     fn drive(&'static self, turn: &Turn) -> Result<(), String> {
+        let name = turn.agent.name();
+        let unwritten = |e: std::io::Error| format!("{name} could not be given its files: {e}");
+        // The files the agent is started with, in a folder made for this run
+        // alone, which goes when it ends.
+        let files = TurnFiles::new().map_err(unwritten)?;
+        let looking_at = files
+            .write("looking-at.json", &turn.looking_at)
+            .map_err(unwritten)?;
+        let server = McpServer::new(&self.own, &turn.set, &looking_at);
         let mut command = match turn.agent {
             Agent::Claude => {
-                let config = self.claude_config()?;
-                claude::command(&turn.program, &config, turn.session.as_deref())
+                let config = files
+                    .write("claude-mcp.json", &claude::config(&server))
+                    .map_err(unwritten)?;
+                let settings = files
+                    .write("claude-settings.json", &claude::settings())
+                    .map_err(unwritten)?;
+                claude::command(&turn.program, &config, &settings, turn.session.as_deref())
             }
-            Agent::Codex => codex::command(&turn.program, &self.own, turn.session.as_deref()),
+            Agent::Codex => codex::command(&turn.program, &server, turn.session.as_deref()),
         };
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        own_group(&mut command);
         let mut child = command
             .spawn()
-            .map_err(|e| format!("{} could not be started: {e}", turn.agent.name()))?;
-        if let Some(mut stdin) = child.stdin.take() {
+            .map_err(|e| format!("{name} could not be started: {e}"))?;
+        // The run is watched from the moment it starts: an agent that never
+        // reads its prompt, never prints, or never ends is stopped, with
+        // everything it started, at the deadline.
+        let pid = child.id();
+        let done = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let watchdog = {
+            let (done, stopped, limit) = (Arc::clone(&done), Arc::clone(&stopped), turn.limit);
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                while !done.load(Ordering::SeqCst) {
+                    if started.elapsed() >= limit {
+                        stopped.store(true, Ordering::SeqCst);
+                        kill_tree(pid);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            })
+        };
+        let stdin = child.stdin.take();
+        let prompt = turn.prompt.clone();
+        let fed = std::thread::spawn(move || {
             // An agent that stops before reading its prompt says why on its
             // standard error.
-            let _ = stdin.write_all(turn.prompt.as_bytes());
-        }
+            if let Some(mut stdin) = stdin {
+                let _ = stdin.write_all(prompt.as_bytes());
+            }
+        });
         let stdout = child.stdout.take().expect("standard output is piped");
         let stderr = child.stderr.take().expect("standard error is piped");
         let said = std::thread::spawn(move || {
@@ -622,24 +798,6 @@ impl Assistant {
                 .read_to_string(&mut text);
             text
         });
-        let child = Arc::new(Mutex::new(child));
-        let done = Arc::new(Mutex::new(false));
-        let watchdog = {
-            let (child, done) = (Arc::clone(&child), Arc::clone(&done));
-            std::thread::spawn(move || {
-                let started = Instant::now();
-                loop {
-                    std::thread::sleep(Duration::from_millis(250));
-                    if *done.lock().unwrap_or_else(|e| e.into_inner()) {
-                        return false;
-                    }
-                    if started.elapsed() >= LONGEST_TURN {
-                        let _ = child.lock().unwrap_or_else(|e| e.into_inner()).kill();
-                        return true;
-                    }
-                }
-            })
-        };
         let mut parts: HashMap<String, usize> = HashMap::new();
         let mut failed: Option<String> = None;
         for line in BufReader::new(stdout).lines() {
@@ -655,16 +813,16 @@ impl Assistant {
                 self.apply(turn, &mut parts, event);
             }
         }
-        let status = child.lock().unwrap_or_else(|e| e.into_inner()).wait();
-        *done.lock().unwrap_or_else(|e| e.into_inner()) = true;
-        let stopped = watchdog.join().unwrap_or(false);
+        // Its output has ended: the agent is waited for, the watchdog still
+        // watching, which needs nothing the wait holds.
+        let status = child.wait();
+        done.store(true, Ordering::SeqCst);
+        let _ = watchdog.join();
+        let _ = fed.join();
         let said = said.join().unwrap_or_default();
-        let name = turn.agent.name();
-        if stopped {
-            return Err(format!(
-                "{name} was stopped after {} minutes",
-                LONGEST_TURN.as_secs() / 60
-            ));
+        drop(files);
+        if stopped.load(Ordering::SeqCst) {
+            return Err(format!("{name} was stopped after {}", minutes(turn.limit)));
         }
         if let Some(why) = failed {
             return Err(format!("{name} stopped: {why}"));
@@ -686,25 +844,6 @@ impl Assistant {
             }
             Err(e) => Err(format!("{name} could not be waited for: {e}")),
         }
-    }
-
-    /// The MCP configuration Claude Code is given, written to a file once
-    /// for this `serve`.
-    fn claude_config(&self) -> Result<PathBuf, String> {
-        static WRITTEN: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-        WRITTEN
-            .get_or_init(|| {
-                let folder = std::env::temp_dir()
-                    .join(format!("agentdrafter-assistant-{}", std::process::id()));
-                let path = folder.join("claude-mcp.json");
-                std::fs::create_dir_all(&folder)
-                    .and_then(|()| std::fs::write(&path, claude::config(&self.own).to_string()))
-                    .map(|()| path)
-                    .map_err(|e| {
-                        format!("the MCP configuration for Claude Code could not be written: {e}")
-                    })
-            })
-            .clone()
     }
 
     /// Adds what one line of the agent's output said to the conversation.
@@ -775,6 +914,56 @@ impl Assistant {
     }
 }
 
+/// The status a refusal the core gave is sent with: 400 for a wrong
+/// request, 422 for any other.
+fn status_of(error: &Error) -> u16 {
+    if error.code == ErrorCode::Usage {
+        400
+    } else {
+        422
+    }
+}
+
+/// How long `limit` is, in words.
+fn minutes(limit: Duration) -> String {
+    match limit.as_secs() {
+        s if s >= 60 && s % 60 == 0 => format!("{} minutes", s / 60),
+        s => format!("{s} seconds"),
+    }
+}
+
+/// Starts the agent in a process group of its own, on Unix, so the
+/// watchdog can stop it with everything it started.
+fn own_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+/// Stops the process `pid` and every process it started: its process group
+/// on Unix, its tree on Windows. Its pipes close with them, so what reads
+/// its output ends.
+fn kill_tree(pid: u32) {
+    let mut kill = if cfg!(windows) {
+        let mut kill = Command::new("taskkill");
+        kill.args(["/T", "/F", "/PID", &pid.to_string()]);
+        kill
+    } else {
+        let mut kill = Command::new("kill");
+        kill.args(["-KILL", "--", &format!("-{pid}")]);
+        kill
+    };
+    let _ = kill
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 impl Talk {
     fn note(&mut self, text: String) {
         self.items
@@ -785,13 +974,20 @@ impl Talk {
 
 /// One message's run.
 struct Turn {
+    /// The conversation's key: the set's canonical path, which the
+    /// assistant's MCP server is bound to.
     set: PathBuf,
     agent: Agent,
     program: PathBuf,
     session: Option<String>,
     prompt: String,
+    /// The `looking-at` reply for this message: what it carried, or that
+    /// the drafter left it off.
+    looking_at: Value,
     /// The conversation's item it fills.
     item: usize,
+    /// How long it may run before it is stopped.
+    limit: Duration,
 }
 
 /// The note a conversation on `agent` begins with.
@@ -869,10 +1065,10 @@ fn prompt(set: &Path, text: &str, looking: Option<&LookingAt>, first: bool) -> S
                  it too.]\n\n"
             ));
         }
-        None => prompt.push_str(
-            "[The drafter left out what they are looking at for this message: do not assume \
-             a sheet or a selection.]\n\n",
-        ),
+        None => prompt.push_str(&format!(
+            "[The drafter left out what they are looking at for this message, on `{set}`: do \
+             not assume a sheet or a selection.]\n\n"
+        )),
     }
     prompt.push_str("The drafter says:\n");
     prompt.push_str(text);
@@ -958,6 +1154,95 @@ mod tests {
                 ok: true
             }
         );
+    }
+
+    #[test]
+    fn a_hung_agent_is_stopped_with_what_it_started_at_the_deadline() {
+        // A shim that runs the fake agent hung, as Claude Code.
+        let folder = std::env::temp_dir().join(format!("agentdrafter-hung-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fake-agent")
+            .join("fake_agent.py");
+        let shim = if cfg!(windows) {
+            let shim = folder.join("claude.cmd");
+            std::fs::write(
+                &shim,
+                format!(
+                    "@set FAKE_AGENT_HANG=1
+@python \"{}\" claude %*
+",
+                    script.display()
+                ),
+            )
+            .unwrap();
+            shim
+        } else {
+            let shim = folder.join("claude");
+            std::fs::write(
+                &shim,
+                format!(
+                    "#!/bin/sh
+FAKE_AGENT_HANG=1 exec python3 \"{}\" claude \"$@\"
+",
+                    script.display()
+                ),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            shim
+        };
+        let set = folder.join("set");
+        let assistant = assistant();
+        {
+            let mut talks = assistant.lock();
+            talks.insert(
+                set.clone(),
+                Talk {
+                    named: set.clone(),
+                    agent: Some(Agent::Claude),
+                    session: None,
+                    busy: true,
+                    items: vec![
+                        json!({"kind": "drafter", "text": "hello"}),
+                        json!({"kind": "assistant", "parts": [], "done": false, "error": null}),
+                    ],
+                    version: 0,
+                },
+            );
+        }
+        let began = Instant::now();
+        assistant.run(Turn {
+            set: set.clone(),
+            agent: Agent::Claude,
+            program: shim,
+            session: None,
+            prompt: "hello
+"
+            .into(),
+            looking_at: json!({"ok": true}),
+            item: 1,
+            limit: Duration::from_secs(2),
+        });
+        let took = began.elapsed();
+        assert!(
+            took < Duration::from_secs(30),
+            "stopped at the deadline: {took:?}"
+        );
+        let talks = assistant.lock();
+        let talk = &talks[&set];
+        assert!(!talk.busy, "the chat leaves busy");
+        assert_eq!(talk.items[1]["done"], true);
+        let error = talk.items[1]["error"].as_str().unwrap();
+        assert_eq!(error, "Claude Code was stopped after 2 seconds");
+        drop(talks);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

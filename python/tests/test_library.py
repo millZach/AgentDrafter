@@ -101,7 +101,10 @@ class Library(unittest.TestCase):
         done = subprocess.run([COMMAND, "help"], capture_output=True, timeout=60)
         listed = json.loads(done.stdout)["result"]["commands"]
         self.assertEqual(listed["serve"]["usage"], "agentdrafter serve [--listen <address:port>]")
-        self.assertEqual(listed["mcp"]["usage"], "agentdrafter mcp")
+        self.assertEqual(
+            listed["mcp"]["usage"],
+            "agentdrafter mcp [--assistant [--set <drawing-set-folder>] [--looking-at <reply.json>]]",
+        )
 
 
 if __name__ == "__main__":

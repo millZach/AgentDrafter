@@ -39,6 +39,7 @@ import {
   type Conversation,
   type DrafterItem,
   type LookingAt,
+  type ChatCardActs,
 } from './assistant.ts';
 import type { JournalReport } from './journal.ts';
 import { proposalTitle, type CardLine, type Proposal, type Standing } from './proposals.ts';
@@ -51,9 +52,13 @@ export interface ChatCardView {
   lines: CardLine[];
   /** Its preview is on its way, on the sheet shown: Keep waits for it. */
   checking: boolean;
+  /** What Keep and Discard may do now, held as the card on the drawing is. */
+  acts: ChatCardActs;
 }
 
 export interface AssistantPanelProps {
+  /** The drawing set the page shows, whose proposals the chat's cards are. */
+  source: string;
   /** The agents `serve` found, or null until it says. */
   agents: AgentsReport | null;
   /** Why the assistant cannot be reached here; null when it can. */
@@ -342,7 +347,7 @@ function AssistantMessage({ index, item, ...props }: MessageProps) {
         )}
       </div>,
     );
-    const made = proposalMade(part);
+    const made = proposalMade(part, props.source);
     if (made !== null) cards.push({ n: made, part });
   });
   flushLines();
@@ -405,16 +410,21 @@ function ChatProposal({ n, part, proposals, journal, cardView, proposalBusy, onO
           </div>
         ))}
         {view.checking && <div className="pl muted">Checking whether it would land…</div>}
+        {view.acts.note && (
+          <div className="pl muted" data-pc-note>
+            {view.acts.note}
+          </div>
+        )}
       </div>
       <div className="pcc-acts">
-        <button type="button" className="btn sm" data-pc="discard" disabled={proposalBusy} onClick={() => onDiscard(p)}>
+        <button type="button" className="btn sm" data-pc="discard" disabled={proposalBusy || !view.acts.discard} onClick={() => onDiscard(p)}>
           Discard
         </button>
         <button
           type="button"
           className={`btn sm ${view.standing === 'warn' ? 'warn' : 'primary'}`}
           data-pc="keep"
-          disabled={proposalBusy || view.checking || refused}
+          disabled={proposalBusy || !view.acts.keep}
           title={refused ? 'The set would refuse it now' : `Keep it: it lands on ${p.sheets.length > 1 ? `${p.sheets.length} sheets` : (p.sheets[0] ?? 'its sheet')}`}
           onClick={() => onKeep(p)}
         >
@@ -448,8 +458,10 @@ function Composer({
     if (!t || !name || busy) return;
     setText('');
     if (box.current) box.current.style.height = '';
-    // What did not go comes back, so nothing typed is lost.
+    // What did not go comes back, so nothing typed is lost; what went
+    // leaves the input, so a phone's keyboard goes down.
     if (!(await onSend(t))) setText((now) => now || t);
+    else box.current?.blur();
   };
   return (
     <div className="composer" data-composer>

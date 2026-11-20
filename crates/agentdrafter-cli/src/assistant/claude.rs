@@ -3,22 +3,29 @@
 //! Each message is one run of `claude -p`, its prompt on standard input,
 //! printing its work as JSON lines (`--output-format stream-json`). It gets
 //! no built-in tools (`--tools ""`) and one MCP server, the assistant's
-//! (`--mcp-config`, `--strict-mcp-config`), whose tools it may call without
-//! asking (`--allowedTools mcp__agentdrafter`). The next message resumes the
-//! session the first one's lines named (`--resume`).
+//! (`--mcp-config`, `--strict-mcp-config`, so none of the drafter's own
+//! loads), whose tools it may call without asking (`--allowedTools
+//! mcp__agentdrafter`), and runs none of the drafter's hooks (`--settings`,
+//! `disableAllHooks`). Its sign-in is the drafter's own. The next message
+//! resumes the session the first one's lines named (`--resume`).
 
-use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
 use serde_json::{json, Value};
 
-use super::{AgentEvent, SERVER};
+use super::{AgentEvent, McpServer, SERVER};
 
 /// The command that runs one message: `program` is where `claude` was
 /// found, `config` the MCP configuration file naming the assistant's
-/// server, `session` the session to resume.
-pub(super) fn command(program: &Path, config: &Path, session: Option<&str>) -> Command {
+/// server, `settings` the settings file that turns hooks off, `session` the
+/// session to resume.
+pub(super) fn command(
+    program: &Path,
+    config: &Path,
+    settings: &Path,
+    session: Option<&str>,
+) -> Command {
     let mut command = super::program(program);
     command
         .arg("-p")
@@ -26,6 +33,8 @@ pub(super) fn command(program: &Path, config: &Path, session: Option<&str>) -> C
         .arg("--mcp-config")
         .arg(config)
         .arg("--strict-mcp-config")
+        .arg("--settings")
+        .arg(settings)
         .args(["--tools", ""])
         .args(["--allowedTools", &format!("mcp__{SERVER}")]);
     if let Some(session) = session {
@@ -34,20 +43,18 @@ pub(super) fn command(program: &Path, config: &Path, session: Option<&str>) -> C
     command
 }
 
-/// The MCP configuration file's contents: the assistant's server, started
-/// by `own`, the command that runs AgentDrafter.
-pub(super) fn config(own: &[OsString]) -> Value {
-    let (program, args) = own.split_first().expect("a command has a program");
-    let mut args: Vec<String> = args
-        .iter()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
-    args.extend(["mcp".to_owned(), "--assistant".to_owned()]);
+/// The MCP configuration file's contents: the assistant's server alone.
+pub(super) fn config(server: &McpServer) -> Value {
     json!({
         "mcpServers": {
-            SERVER: { "command": program.to_string_lossy(), "args": args }
+            SERVER: { "command": server.command, "args": server.args }
         }
     })
+}
+
+/// The settings file's contents: none of the drafter's hooks runs.
+pub(super) fn settings() -> Value {
+    json!({ "disableAllHooks": true })
 }
 
 /// What one line of `claude`'s output says.
@@ -204,6 +211,7 @@ mod tests {
         let command = command(
             Path::new("/bin/claude"),
             Path::new("/tmp/mcp.json"),
+            Path::new("/tmp/settings.json"),
             Some("s-1"),
         );
         let args: Vec<String> = command
@@ -222,10 +230,22 @@ mod tests {
         assert_eq!(args[tools + 1], "", "no built-in tool");
         let resume = args.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(args[resume + 1], "s-1");
-        let config = config(&[OsString::from("/bin/agentdrafter")]);
+        let settings = args.iter().position(|a| a == "--settings").unwrap();
+        assert_eq!(args[settings + 1], "/tmp/settings.json");
+        assert_eq!(super::settings(), json!({"disableAllHooks": true}));
+        let server = McpServer {
+            command: "/bin/agentdrafter".into(),
+            args: vec![
+                "mcp".into(),
+                "--assistant".into(),
+                "--set".into(),
+                "/sets/a".into(),
+            ],
+        };
         assert_eq!(
-            config["mcpServers"]["agentdrafter"],
-            json!({"command": "/bin/agentdrafter", "args": ["mcp", "--assistant"]})
+            config(&server)["mcpServers"],
+            json!({"agentdrafter": {"command": "/bin/agentdrafter", "args": ["mcp", "--assistant", "--set", "/sets/a"]}}),
+            "the assistant's server alone"
         );
     }
 }

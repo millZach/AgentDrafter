@@ -489,7 +489,11 @@ fn converse_route(
                     ),
                 ));
             }
-            Ok(Answer::Converse(set))
+            // A drawing set's alone, kept by its canonical path.
+            match assistant.open(&set) {
+                Ok(key) => Ok(Answer::Converse(key)),
+                Err(refusal) => Ok(Answer::Reply(refused(refusal))),
+            }
         }
         "/assistant/messages" => {
             post(&head)?;
@@ -1656,6 +1660,7 @@ mod tests {
                         "Settings",
                         "JOURNAL_FILE",
                         "PROPOSALS_FOLDER",
+                        "looking_at_left_off",
                         "assistant_commands",
                         "Access",
                         "Command",

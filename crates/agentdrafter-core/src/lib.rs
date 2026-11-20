@@ -146,8 +146,8 @@ pub use import::{
 };
 pub use interface::Interface;
 pub use looking_at::{
-    look_at, looking_at, LookAtRequest, LookingAtReport, LookingAtRequest, LOOKING_AT_FILE,
-    MOST_SELECTED,
+    look_at, looking_at, looking_at_left_off, LookAtRequest, LookingAtReport, LookingAtRequest,
+    LOOKING_AT_FILE, MOST_SELECTED,
 };
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use model::{

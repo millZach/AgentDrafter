@@ -10,9 +10,11 @@
 //! set's records: a change set, an undo and an accept never read or write
 //! it, and the journal never sees it.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -97,6 +99,22 @@ pub fn look_at(request: &LookAtRequest) -> Reply<LookingAtReport> {
 /// it.
 pub fn looking_at(request: &LookingAtRequest) -> Reply<LookingAtReport> {
     Reply::from(read(request))
+}
+
+/// What `looking-at` gives the drafter's assistant for a message the
+/// drafter sent with what they are looking at left off: no sheet and
+/// nothing selected, and a line saying they left it off, whatever the
+/// viewer has recorded since.
+pub fn looking_at_left_off(set: &Path) -> Reply<LookingAtReport> {
+    Reply::from(Ok(LookingAtReport {
+        set: set.to_owned(),
+        sheet: None,
+        layout: None,
+        selected: Vec::new(),
+        at: None,
+        message: "the drafter left what they are looking at off this message: do not assume                   a sheet or a selection"
+            .to_owned(),
+    }))
 }
 
 fn record(request: &LookAtRequest) -> Result<LookingAtReport, Error> {
@@ -220,15 +238,47 @@ fn write(set: &Path, record: &Record) -> Result<(), Error> {
     }
     let mut text = serde_json::to_string_pretty(record).expect("a record serializes to JSON");
     text.push('\n');
-    let part = path.with_extension("json.part");
-    let written = fs::File::create(&part)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .and_then(|()| fs::rename(&part, &path));
+    // Each write goes to a file of its own beside it, made new, so two
+    // writes at once never share one, and is moved over it whole.
+    let (part, mut file) = fresh_part(&path).map_err(failed)?;
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            fs::rename(&part, &path)
+        });
     if let Err(e) = written {
         let _ = fs::remove_file(&part);
         return Err(failed(e));
     }
     Ok(())
+}
+
+/// A new file beside `path`, made for this write alone: its name holds the
+/// process, the time and a count, and it is created only if no file has
+/// that name, so it is never another write's.
+fn fresh_part(path: &Path) -> std::io::Result<(PathBuf, fs::File)> {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    loop {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let count = COUNT.fetch_add(1, Ordering::Relaxed);
+        let part = path.with_file_name(format!(
+            ".{name}.{}.{nanos}.{count}.part",
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&part) {
+            Ok(file) => return Ok((part, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 fn report(set: &Path, record: Option<Record>) -> LookingAtReport {

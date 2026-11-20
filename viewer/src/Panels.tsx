@@ -73,7 +73,9 @@ export function Peek({ line, live, journal, failing, undoable, blocked, busy, st
           </span>
         </button>
       )}
-      {last && state ? (
+      {/* The way into the chat takes the newest entry's place, as the
+          prototype's peek has it: the Journal tab holds every entry. */}
+      {ask ? null : last && state ? (
         <button type="button" className="va-last" onClick={() => onShow(last.entry)}>
           <span className="je-n">{last.entry}</span>
           <span className="va-last-t">{entryTitle(last)}</span>

@@ -233,6 +233,9 @@ function filesIn(folder) {
   const walk = (dir) => {
     for (const name of readdirSync(dir)) {
       const at = join(dir, name);
+      // What the drafter is looking at is kept beside the journal, not in
+      // the set's records, and the page writes it as the selection changes.
+      if (dir.endsWith('.agentdrafter') && (name === 'looking-at.json' || name.startsWith('.looking-at.json.'))) continue;
       if (statSync(at).isDirectory()) walk(at);
       else found[at.slice(folder.length)] = createHash('sha256').update(readFileSync(at)).digest('hex');
     }
@@ -1859,8 +1862,8 @@ const checks = {
         seen.phone = { toggles, placed, raised };
         await context.close();
       }
-      // A small phone, 320 by 568: a long prompt, a word typed that is not a
-      // tool, wraps the command bar, and quick properties stay above it, at
+      // A small phone, 320 by 568: a long prompt, a number typed with no tool
+      // running, wraps the command bar, and quick properties stay above it, at
       // its real height.
       {
         const context = await b.newContext({ ...PHONE, viewport: { width: 320, height: 568 } });
@@ -1869,7 +1872,7 @@ const checks = {
         await page.touchscreen.tap(...middle(device.box));
         await page.waitForSelector('.qp');
         // A selected object's options fill the bar; a keyboard types into the field all the same.
-        await page.keyboard.type('zz');
+        await page.keyboard.type('12');
         await page.keyboard.press('Enter');
         await sleep(600);
         assert((await bar(page)).includes('is not a drawing tool'), `the word is not a tool: ${await bar(page)}`);
@@ -1899,7 +1902,7 @@ const checks = {
         await page.waitForSelector('.qp');
         await sleep(500);
         // A selected object's options fill the bar; a keyboard types into the field all the same.
-        await page.keyboard.type('zz');
+        await page.keyboard.type('12');
         await page.keyboard.press('Enter');
         await sleep(400);
         const stage = await page.evaluate(() => {
@@ -4173,7 +4176,8 @@ const checks = {
         await page.waitForFunction(() => !document.querySelector('[data-pcc="1"] [data-pc="keep"]')?.disabled, null, { timeout: 30000 });
         said = await page.textContent('[data-pcc="1"]');
         assert(said.includes('Proposal 1, dashed on the drawing. Nothing changes until you keep it.') && said.includes('DP-LD-101 ›'), `the chat's card: ${said}`);
-        assert(said.includes('It would land.') && said.includes('Keep') && said.includes('Discard'), `how it stands: ${said}`);
+        // Moved an inch, FT-101 lands, and the sheet then fails a check: its card says so, Keep in amber.
+        assert(said.includes('It would land') && said.includes('Keep') && said.includes('Discard'), `how it stands: ${said}`);
         await page.waitForSelector('[data-pcard="1"]', { timeout: 30000 });
         assert(waiting(folder).length === 1 && journalOf(folder).length === 0, 'it waits, and nothing landed');
         await shot(page, 'assistant-laptop-proposed.png');
@@ -4304,6 +4308,11 @@ const checks = {
         await page.waitForSelector('.va-sheet[data-snap="full"]', { timeout: 15000 });
         await page.fill('[data-chatin]', 'move this 1 to the right');
         await page.press('[data-chatin]', 'Enter');
+        // Once the server takes it, the input lets go, so the keyboard goes
+        // down, and the sheet comes down to half: the reply and the drawing show.
+        await page.waitForSelector('.va-sheet[data-snap="half"]', { timeout: 15000 });
+        assert(await page.evaluate(() => !document.activeElement?.matches?.('[data-chatin]')), 'the input lets go once the message is sent');
+        await shot(page, 'assistant-phone-sent-half.png');
         await page.waitForSelector('[data-pcc="1"]', { timeout: 60000 });
         await replied(page, 1);
         await page.waitForFunction(() => !document.querySelector('[data-pcc="1"] [data-pc="keep"]')?.disabled, null, { timeout: 30000 });

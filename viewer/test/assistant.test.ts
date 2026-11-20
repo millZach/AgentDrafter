@@ -7,6 +7,7 @@ import {
   agentName,
   askHint,
   carriedWords,
+  chatCardActs,
   chipWords,
   commandLine,
   cut,
@@ -25,6 +26,7 @@ import {
   proposalsMade,
   proposedSheets,
   proposedTitle,
+  sameSet,
   sheetsLink,
   spaceIsEnter,
   typedRoute,
@@ -186,19 +188,24 @@ test('an input or reply opened is pretty JSON, a short list of numbers on one li
 });
 
 test('which proposal a part made: a propose whose reply is ok', () => {
-  const made = command('propose', { change_set: { operations: [{ op: 'move', target: { id: 'DP-LD-101/device' } }] } }, { ok: true, result: { proposal: 4, sheets: ['DP-LD-101'] } });
-  assert.equal(proposalMade(made), 4);
+  const SET = 'examples/demo-plant';
+  const made = command('propose', { set: SET, change_set: { operations: [{ op: 'move', target: { id: 'DP-LD-101/device' } }] } }, { ok: true, result: { proposal: 4, sheets: ['DP-LD-101'] } });
+  assert.equal(proposalMade(made, SET), 4);
+  assert.equal(proposalMade(made, './examples/demo-plant/'), 4, 'the same set, however it is spelled');
+  assert.equal(proposalMade(made, 'examples/other-plant'), null, 'another set’s proposal 4 is not this one’s');
   assert.equal(proposedTitle(made), 'Move device');
   assert.deepEqual(proposedSheets(made), ['DP-LD-101']);
-  assert.equal(proposalMade(command('propose', {}, { ok: false, error: { code: 'usage' } })), null);
-  assert.equal(proposalMade(command('propose', {}, null)), null);
-  assert.equal(proposalMade(command('query', {}, { ok: true, result: { proposal: 1 } })), null);
-  assert.equal(proposalMade({ kind: 'words', text: 'proposal 1' }), null);
+  assert.equal(proposalMade(command('propose', { set: SET }, { ok: false, error: { code: 'usage' } }), SET), null);
+  assert.equal(proposalMade(command('propose', { set: SET }, null), SET), null);
+  assert.equal(proposalMade(command('propose', {}, { ok: true, result: { proposal: 1 } }), SET), null, 'no set, no card');
+  assert.equal(proposalMade(command('query', { source: SET }, { ok: true, result: { proposal: 1 } }), SET), null);
+  assert.equal(proposalMade({ kind: 'words', text: 'proposal 1' }, SET), null);
   const items: Conversation['items'] = [
     { kind: 'note', text: 'On Claude Code', at: '' },
     { kind: 'assistant', agent: 'claude', name: 'Claude Code', at: '', parts: [made, { kind: 'words', text: 'Proposed.' }], done: true, error: null },
   ];
-  assert.deepEqual(proposalsMade(items), [4]);
+  assert.deepEqual(proposalsMade(items, SET), [4]);
+  assert.deepEqual(proposalsMade(items, 'examples/other-plant'), []);
   assert.equal(hasMessages(items), true);
   assert.equal(hasMessages([{ kind: 'note', text: 'On Claude Code', at: '' }]), false);
 });
@@ -329,4 +336,40 @@ test('the assistant’s routes carry the token, and its stream’s events are re
   assert.equal(assistantRequest('events', { set: 'demo-plant' }, null).url, '/assistant/events');
   const { events } = readEvents(': still watching\n\nevent: assistant\ndata: {"ok":true,"result":{"busy":false}}\n\n');
   assert.deepEqual(events, [{ event: 'assistant', data: '{"ok":true,"result":{"busy":false}}' }]);
+});
+
+test('a set is the same however its folder is spelled', () => {
+  assert.equal(sameSet('examples/demo-plant', './examples/demo-plant/'), true);
+  assert.equal(sameSet('examples\\demo-plant', 'examples/demo-plant'), true);
+  assert.equal(sameSet('examples/demo-plant', 'examples/demo-plant-2'), false);
+});
+
+test('a tool input of any shape gives a line, never a crash', () => {
+  const odd: unknown[] = [null, 'text', 7, [], { change_set: null }, { change_set: { operations: [null, 'x', 3] } }, { change_set: { operations: [{ op: 5, target: 'x', tag: {}, value: [] }] } }, { query: 'find' }];
+  for (const input of odd) {
+    for (const name of ['propose', 'change', 'query', 'look-at', 'check', 'display-list', 'keep', 'other']) {
+      const line = commandLine(command(name, input, { ok: false, error: { message: { not: 'text' } } as never }));
+      assert.equal(typeof line.words, 'string', `${name} ${JSON.stringify(input)}`);
+      assert.equal(line.command, name);
+    }
+  }
+  const garbled = command('propose', { set: 'examples/demo-plant', change_set: { operations: [null, { op: 'move', target: { id: 'DP-LD-101/device' } }] } }, { ok: true, result: { proposal: 2 } });
+  assert.equal(typeof proposedTitle(garbled), 'string');
+  assert.equal(commandLine(command('propose', { change_set: { operations: [null] } }, null)).words, '?', 'a malformed operation reads as ?');
+});
+
+test('the chat card keeps and discards only as the card on the drawing would', () => {
+  assert.deepEqual(chatCardActs({ stepping: true, drawn: true, checking: false, refused: false }), {
+    keep: false,
+    discard: false,
+    note: 'Go back to live to keep or discard it.',
+  });
+  assert.deepEqual(chatCardActs({ stepping: false, drawn: false, checking: false, refused: false }), {
+    keep: false,
+    discard: true,
+    note: 'Open it to see how it stands before you keep it.',
+  });
+  assert.deepEqual(chatCardActs({ stepping: false, drawn: true, checking: true, refused: false }), { keep: false, discard: true, note: null });
+  assert.deepEqual(chatCardActs({ stepping: false, drawn: true, checking: false, refused: true }), { keep: false, discard: true, note: null });
+  assert.deepEqual(chatCardActs({ stepping: false, drawn: true, checking: false, refused: false }), { keep: true, discard: true, note: null });
 });

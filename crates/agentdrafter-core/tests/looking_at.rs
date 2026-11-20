@@ -218,3 +218,44 @@ fn the_assistant_gets_the_commands_that_read_and_propose_and_none_that_write() {
             .count()
     );
 }
+
+#[test]
+fn writes_at_once_each_land_whole_and_leave_no_file_behind() {
+    let set = demo_set("at-once");
+    let writers: Vec<_> = (0..8)
+        .map(|i| {
+            let set = set.clone();
+            std::thread::spawn(move || {
+                for _ in 0..10 {
+                    let id = format!("DEMO-001/object-{i}");
+                    let reply = look(&set, "DEMO-001", None, &[id.as_str()]);
+                    assert_eq!(reply["ok"], true, "{reply}");
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+    let read = asked(&set);
+    assert_eq!(read["ok"], true, "the record is whole: {read}");
+    let left: Vec<_> = fs::read_dir(set.join(LOOKING_AT_FILE).parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["looking-at.json"], "no write's own file is left");
+}
+
+#[test]
+fn a_message_with_what_the_drafter_looks_at_left_off_says_so() {
+    let set = demo_set("left-off");
+    look(&set, "DEMO-001", None, &["DEMO-001/border"]);
+    let reply = serde_json::to_value(agentdrafter_core::looking_at_left_off(&set)).unwrap();
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["result"]["sheet"], Value::Null);
+    assert_eq!(reply["result"]["selected"], json!([]));
+    assert!(reply["result"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("left what they are looking at off"));
+}

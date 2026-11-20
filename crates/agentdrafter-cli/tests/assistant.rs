@@ -533,3 +533,125 @@ fn one_message_at_a_time_and_the_picker_starts_a_new_conversation() {
     );
     assert_eq!(status, 400, "{reply}");
 }
+
+#[test]
+fn the_assistants_server_answers_for_the_message_and_for_its_set_alone() {
+    let dir = scratch("bound");
+    demo_set(&dir);
+    // Another set beside it, which the assistant's server must not reach.
+    fs::create_dir_all(dir.join("other")).unwrap();
+    demo_set::copy_demo_set(&dir.join("other").join("demo-set"));
+    let shims = shims(&dir, &["claude"]);
+    let serve = Serve::start(
+        &dir,
+        &path_with(&shims),
+        &[("FAKE_AGENT_DELAY", "1".to_owned())],
+    );
+    let mut conversation = serve.conversation("demo-set");
+    conversation.next(Duration::from_secs(10));
+
+    // What the message carried, though the viewer records another sheet
+    // before the agent asks.
+    let (status, _) = serve.post(
+        "/assistant/messages",
+        json!({"set": "demo-set", "text": "what do I see", "looking_at": {"sheet": "DEMO-001", "selected": ["DEMO-001/border"]}}),
+    );
+    assert_eq!(status, 200);
+    let moved = cli(&["look-at", "demo-set", "DEMO-002"], &dir);
+    assert_eq!(moved["ok"], true, "{moved}");
+    let state = conversation.settled(3);
+    let said = words_of(&state["items"][2]);
+    assert!(
+        said.contains("DEMO-001") && said.contains("DEMO-001/border"),
+        "{said}: {}",
+        state["items"][2]
+    );
+
+    // Left off: the agent is told so, whatever the viewer records.
+    let (status, _) = serve.post(
+        "/assistant/messages",
+        json!({"set": "demo-set", "text": "what do I see", "looking_at": null}),
+    );
+    assert_eq!(status, 200);
+    let state = conversation.settled(5);
+    let said = words_of(&state["items"][4]);
+    assert!(said.contains("You were looking at None with []"), "{said}");
+    assert!(said.contains("left what they are looking at off"), "{said}");
+    let live = cli(&["looking-at", "demo-set"], &dir);
+    assert_eq!(
+        live["result"]["sheet"], "DEMO-002",
+        "the live record is the viewer's"
+    );
+
+    // Another set is refused by the server bound to this one.
+    let (status, _) = serve.post(
+        "/assistant/messages",
+        json!({"set": "demo-set", "text": "look at other/demo-set", "looking_at": null}),
+    );
+    assert_eq!(status, 200);
+    let state = conversation.settled(7);
+    let answer = &state["items"][6];
+    assert_eq!(answer["parts"][0]["command"], "looking-at");
+    assert_eq!(answer["parts"][0]["ok"], false, "{answer}");
+    assert!(words_of(answer).contains("Refused: true"), "{answer}");
+}
+
+#[test]
+fn each_route_takes_a_drawing_set_alone_and_one_set_has_one_conversation() {
+    let dir = scratch("sets");
+    demo_set(&dir);
+    let shims = shims(&dir, &["claude"]);
+    let serve = Serve::start(&dir, &path_with(&shims), &[]);
+    for set in ["nowhere", "demo-set/templates"] {
+        let (status, reply) = serve.post(
+            "/assistant/messages",
+            json!({"set": set, "text": "hello", "looking_at": null}),
+        );
+        assert_eq!(status, 422, "{set}: {reply}");
+        assert_eq!(reply["error"]["code"], "read_failed", "{reply}");
+        let (status, reply) =
+            serve.post("/assistant/agent", json!({"set": set, "agent": "claude"}));
+        assert_eq!(status, 422, "{set}: {reply}");
+        let (status, reply) = serve.post("/assistant/events", json!({"set": set}));
+        assert_eq!(status, 422, "{set}: {reply}");
+    }
+    // Two names of one set are one conversation, shown as first named.
+    let mut conversation = serve.conversation("./demo-set");
+    let state = conversation.next(Duration::from_secs(10));
+    assert_eq!(state["set"], "./demo-set");
+    let (status, _) = serve.post(
+        "/assistant/messages",
+        json!({"set": "demo-set", "text": "hello there"}),
+    );
+    assert_eq!(status, 200);
+    let state = conversation.settled(3);
+    assert!(words_of(&state["items"][2]).contains("You said: hello there"));
+}
+
+#[test]
+fn looking_again_follows_the_agents_on_the_path() {
+    let dir = scratch("look-again");
+    demo_set(&dir);
+    let shims = shims(&dir, &["claude", "codex"]);
+    let serve = Serve::start(&dir, &path_with(&shims), &[]);
+    let mut conversation = serve.conversation("demo-set");
+    conversation.next(Duration::from_secs(10));
+    let (status, _) = serve.post(
+        "/assistant/agent",
+        json!({"set": "demo-set", "agent": "codex"}),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(conversation.settled(2)["agent"], "codex");
+    let codex = if cfg!(windows) { "codex.cmd" } else { "codex" };
+    fs::remove_file(shims.join(codex)).unwrap();
+    let (status, reply) = serve.post("/assistant/find", json!({}));
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["result"]["agents"][1]["found"], false);
+    let state = conversation.settled(3);
+    assert_eq!(state["agent"], "claude", "the server and the page agree");
+    let note = state["items"][2]["text"].as_str().unwrap();
+    assert!(
+        note.starts_with("Looked on the PATH again: Codex is gone. Now on Claude Code"),
+        "{note}"
+    );
+}

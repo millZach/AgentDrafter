@@ -14,10 +14,16 @@ It knows a few things the drafter may say:
 - `what is this`: `looking-at` and `query`, and says what it is;
 - `change it directly`: tries the `change` tool, which the assistant's
   server withholds, and says it could not;
+- `what do I see`: `looking-at` alone, and says the sheet and selection it
+  gave;
+- `look at <folder>`: `looking-at` on another folder, which the assistant's
+  server, bound to the conversation's set, refuses;
 - anything else: says what it heard.
 
 FAKE_AGENT_DELAY, in seconds, waits before each step. FAKE_AGENT_LOG names a
 file each run appends its arguments and prompt to, as one JSON line.
+FAKE_AGENT_HANG=1 makes it start a process of its own that holds its output
+open and then never end, as a hung agent would.
 """
 
 import json
@@ -38,6 +44,11 @@ def main():
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps({"agent": kind, "args": args, "prompt": prompt}) + "\n")
     delay = float(os.environ.get("FAKE_AGENT_DELAY", "0"))
+    if os.environ.get("FAKE_AGENT_HANG") == "1":
+        print(json.dumps({"type": "system", "subtype": "init", "session_id": "hung"}), flush=True)
+        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        time.sleep(600)
+        return
     server = Server(server_command(kind, args))
     out = Claude(args) if kind == "claude" else Codex(args)
     out.begin()
@@ -230,6 +241,19 @@ def act(prompt, server, out, delay):
             kind = objects[0].get("type", "object") if objects else "object"
             layer = objects[0].get("layer", "?") if objects else "?"
             out.words(f"{id} is {'an' if kind[:1] in 'aeiou' else 'a'} {kind} on layer {layer}.")
+        return
+    if re.search(r"what do I see", said, re.I):
+        looking, _ = call("looking-at", {"set": folder})
+        result = (looking or {}).get("result", {})
+        time.sleep(delay)
+        out.words(f"You were looking at {result.get('sheet')} with {result.get('selected')}: "
+                  f"{result.get('message')}")
+        return
+    other = re.search(r"look at (\S+)", said, re.I)
+    if other:
+        reply, refused = call("looking-at", {"set": other.group(1)})
+        time.sleep(delay)
+        out.words(f"Refused: {str(refused).lower()}")
         return
     if re.search(r"change it directly", said, re.I):
         text, refused = server.call("change", {"set": folder, "change_set": {"operations": []}})

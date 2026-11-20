@@ -5,28 +5,45 @@
 //! reading (`--sandbox read-only`), it asks no one (`approval_policy`
 //! `never`), and it gets the assistant's MCP server by configuration
 //! (`-c mcp_servers.agentdrafter...`), whose tools it calls without asking
-//! (`default_tools_approval_mode`): they only read, or propose. The next message resumes the thread
-//! the first one's lines named (`exec resume <thread>`).
+//! (`default_tools_approval_mode`): they only read, or propose. The
+//! drafter's own configuration, `config.toml`, with the MCP servers it
+//! names, is not loaded (`--ignore-user-config`), so the assistant's server
+//! is the only one; the drafter's sign-in still is. Its apps, browser,
+//! computer use and hooks are off (`--disable`). The next message resumes
+//! the thread the first one's lines named (`exec resume <thread>`).
 
-use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
 use serde_json::{json, Value};
 
-use super::{AgentEvent, SERVER};
+use super::{AgentEvent, McpServer, SERVER};
+
+/// The features of Codex the assistant runs without: those that reach
+/// beyond its MCP server and its read-only shell.
+const DISABLED: [&str; 5] = [
+    "apps",
+    "browser_use",
+    "computer_use",
+    "in_app_browser",
+    "hooks",
+];
 
 /// The command that runs one message: `program` is where `codex` was found,
-/// `own` the command that runs AgentDrafter, `thread` the thread to resume.
-pub(super) fn command(program: &Path, own: &[OsString], thread: Option<&str>) -> Command {
+/// `server` the assistant's MCP server, `thread` the thread to resume.
+pub(super) fn command(program: &Path, server: &McpServer, thread: Option<&str>) -> Command {
     let mut command = super::program(program);
     command
         .arg("exec")
         .arg("--json")
         .arg("--skip-git-repo-check")
+        .arg("--ignore-user-config")
         .args(["--sandbox", "read-only"])
         .args(["-c", "approval_policy=never"]);
-    for setting in config(own) {
+    for feature in DISABLED {
+        command.args(["--disable", feature]);
+    }
+    for setting in config(server) {
         command.arg("-c").arg(setting);
     }
     if let Some(thread) = thread {
@@ -36,11 +53,10 @@ pub(super) fn command(program: &Path, own: &[OsString], thread: Option<&str>) ->
     command
 }
 
-/// The `-c` settings that give Codex the assistant's MCP server, started by
-/// `own`, as TOML values: literal strings, which take a Windows path's
-/// backslashes as they are.
-fn config(own: &[OsString]) -> Vec<String> {
-    let (program, args) = own.split_first().expect("a command has a program");
+/// The `-c` settings that give Codex the assistant's MCP server, as TOML
+/// values: literal strings, which take a Windows path's backslashes as they
+/// are.
+fn config(server: &McpServer) -> Vec<String> {
     let literal = |text: &str| -> String {
         if text.contains('\'') || text.contains('\n') {
             // A literal string cannot hold a quote; a basic string, escaped,
@@ -50,13 +66,9 @@ fn config(own: &[OsString]) -> Vec<String> {
             format!("'{text}'")
         }
     };
-    let mut listed: Vec<String> = args.iter().map(|a| literal(&a.to_string_lossy())).collect();
-    listed.extend([literal("mcp"), literal("--assistant")]);
+    let listed: Vec<String> = server.args.iter().map(|a| literal(a)).collect();
     vec![
-        format!(
-            "mcp_servers.{SERVER}.command={}",
-            literal(&program.to_string_lossy())
-        ),
+        format!("mcp_servers.{SERVER}.command={}", literal(&server.command)),
         format!("mcp_servers.{SERVER}.args=[{}]", listed.join(",")),
         format!("mcp_servers.{SERVER}.default_tools_approval_mode=approve"),
     ]
@@ -205,13 +217,26 @@ mod tests {
 
     #[test]
     fn its_shell_only_reads_and_it_gets_the_assistants_server() {
-        let own = [OsString::from(r"C:\Program Files\agentdrafter.exe")];
-        let command = command(Path::new("codex"), &own, Some("th-1"));
+        let server = McpServer {
+            command: r"C:\Program Files\agentdrafter.exe".into(),
+            args: vec!["mcp".into(), "--assistant".into()],
+        };
+        let command = command(Path::new("codex"), &server, Some("th-1"));
         let args: Vec<String> = command
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(args[0], "exec");
+        assert!(
+            args.contains(&"--ignore-user-config".to_owned()),
+            "none of the drafter's own MCP servers"
+        );
+        for feature in DISABLED {
+            assert!(
+                args.windows(2).any(|w| w == ["--disable", feature]),
+                "{feature}"
+            );
+        }
         let sandbox = args.iter().position(|a| a == "--sandbox").unwrap();
         assert_eq!(args[sandbox + 1], "read-only");
         assert!(args.contains(

@@ -170,22 +170,29 @@ const str = (x: unknown): string | undefined => (typeof x === 'string' && x ? x 
 const num = (x: unknown): number | undefined => (typeof x === 'number' && Number.isFinite(x) ? x : undefined);
 const arr = (x: unknown): unknown[] => (Array.isArray(x) ? x : []);
 
-/** An operation's target, whole: `move DP-LD-101/device`. */
-function operationLine(op: Operation): string {
-  const name = op.op ?? '?';
-  const target = op.target?.id ?? op.target?.name;
-  if (name === 'set_attribute') return `set ${op.tag ?? '?'} = ${op.value ?? ''}${target ? ` on ${target}` : ''}`;
+/** A value as a short word: text or a number, or nothing for anything else. */
+const word = (x: unknown): string | undefined => str(x) ?? (num(x) !== undefined ? String(x) : undefined);
+
+/** An operation's target, whole: `move DP-LD-101/device`. Whatever the agent sent, of any shape. */
+function operationLine(op: unknown): string {
+  const o = obj(op);
+  const name = str(o.op) ?? '?';
+  const target = str(obj(o.target).id) ?? str(obj(o.target).name);
+  if (name === 'set_attribute') return `set ${word(o.tag) ?? '?'} = ${word(o.value) ?? ''}${target ? ` on ${target}` : ''}`;
   if (target) return `${name} ${target}`;
-  if (op.sheet) return `${name} on ${op.sheet}`;
+  if (str(o.sheet)) return `${name} on ${o.sheet}`;
   return name;
 }
 
 /** A change set's operations in a line: the first, and how many more. */
 function operationsLine(changeSet: unknown): string {
-  const ops = arr(obj(changeSet).operations) as Operation[];
+  const ops = arr(obj(changeSet).operations);
   if (!ops.length) return 'an empty change set';
-  return `${operationLine(ops[0] as Operation)}${ops.length > 1 ? ` and ${ops.length - 1} more` : ''}`;
+  return `${operationLine(ops[0])}${ops.length > 1 ? ` and ${ops.length - 1} more` : ''}`;
 }
+
+/** A change set's operations as the journal reads them, only those of the shape it reads. */
+const wellFormed = (ops: unknown): Operation[] => arr(ops).filter((o): o is Operation => typeof obj(o).op === 'string');
 
 /** What a query asks, in a few words: `find DP-LD-101/device`, `attributes block TRANSMITTER`. */
 function queryWords(input: Record<string, unknown>): string {
@@ -221,6 +228,16 @@ function shortJson(input: unknown): string {
  * the core refused says why, in its words.
  */
 export function commandLine(part: CommandPart): CommandLine {
+  try {
+    return commandLineOf(part);
+  } catch {
+    // An input or a reply of a shape the page does not read: its JSON, short.
+    const running = part.reply === null || part.ok === null;
+    return { command: typeof part.command === 'string' ? part.command : 'tool', words: shortJson(part.input), refused: part.ok === false && !running, running };
+  }
+}
+
+function commandLineOf(part: CommandPart): CommandLine {
   const input = obj(part.input);
   const reply = part.reply;
   const result = obj(reply?.result);
@@ -276,10 +293,11 @@ export function commandLine(part: CommandPart): CommandLine {
       words = shortJson(part.input);
   }
   if (refused && !running) {
-    const why = reply?.error?.message ?? reply?.error?.code ?? 'refused';
+    const error = obj(reply?.error);
+    const why = str(error.message) ?? str(error.code) ?? 'refused';
     words = `${words ? `${words}: ` : ''}refused, ${cut(why.replace(/`/g, ''), 80)}`;
   }
-  return { command: part.command, words, refused: refused && !running, running };
+  return { command: typeof part.command === 'string' ? part.command : 'tool', words, refused: refused && !running, running };
 }
 
 /** An input or a reply as the line opened shows it: JSON, two spaces in, a short list of numbers on one line. */
@@ -288,16 +306,33 @@ export function pretty(value: unknown): string {
   return JSON.stringify(value, null, 2).replace(/\[\s+([-\d.,\se]+?)\s+\]/g, (_m, inner: string) => `[${inner.replace(/\s+/g, ' ')}]`);
 }
 
-/** The proposal a part made: a `propose` whose reply is ok, by its number; null for any other part. */
-export function proposalMade(part: Part): number | null {
+/** A drawing set's folder as written, the same however it is spelled: `./a/b/`, `a\\b` and `a/b` are one. */
+export function sameSet(a: string, b: string): boolean {
+  const plain = (s: string) =>
+    s
+      .replace(/\\/g, '/')
+      .split('/')
+      .filter((p) => p !== '' && p !== '.')
+      .join('/');
+  return plain(a) === plain(b);
+}
+
+/**
+ * The proposal a part made on the drawing set `set`: a `propose` of that
+ * set whose reply is ok, by its number; null for any other part, so a
+ * proposal is matched by its set and its number, never its number alone.
+ */
+export function proposalMade(part: Part, set: string): number | null {
   if (part.kind !== 'command' || part.command !== 'propose' || !part.reply?.ok) return null;
+  const on = str(obj(part.input).set) ?? str(obj(part.reply.result).set);
+  if (!on || !sameSet(on, set)) return null;
   return num(obj(part.reply.result).proposal) ?? null;
 }
 
 /** What a proposal the assistant made does, from its `propose`, for its card once it is no longer waiting: `Move device`. */
 export function proposedTitle(part: CommandPart): string {
   const cs = obj(obj(part.input).change_set);
-  return capital(operationsTitle(arr(cs.operations) as Operation[], arr(cs.fixes) as string[]));
+  return capital(operationsTitle(wellFormed(cs.operations), arr(cs.fixes).filter((f): f is string => typeof f === 'string')));
 }
 
 /** The sheets a proposal reached when it was made, from its `propose`'s reply. */
@@ -464,16 +499,38 @@ export function notSentWords(code: string, message: string, name: string | null)
 }
 
 /** The proposals a conversation's assistant made, by number, in the order it made them. */
-export function proposalsMade(items: readonly Item[]): number[] {
+export function proposalsMade(items: readonly Item[], set: string): number[] {
   const out: number[] = [];
   for (const item of items) {
     if (item.kind !== 'assistant') continue;
     for (const part of item.parts) {
-      const n = proposalMade(part);
+      const n = proposalMade(part, set);
       if (n !== null) out.push(n);
     }
   }
   return out;
+}
+
+/** What a proposal's card in the chat lets the drafter do now, and why not. */
+export interface ChatCardActs {
+  keep: boolean;
+  discard: boolean;
+  /** Why Keep or Discard is off, in a line; null when both are on. */
+  note: string | null;
+}
+
+/**
+ * The chat card's Keep and Discard, held to what the card on the drawing
+ * holds to: neither while the journal is stepped through, since they act
+ * on the set as it is; Keep only with a current verdict from the
+ * proposal's own drawing, which says the set would take it, so a proposal
+ * not drawn on the sheet shown is opened to check it first.
+ */
+export function chatCardActs(state: { stepping: boolean; drawn: boolean; checking: boolean; refused: boolean }): ChatCardActs {
+  if (state.stepping) return { keep: false, discard: false, note: 'Go back to live to keep or discard it.' };
+  if (!state.drawn) return { keep: false, discard: true, note: 'Open it to see how it stands before you keep it.' };
+  if (state.checking) return { keep: false, discard: true, note: null };
+  return { keep: !state.refused, discard: true, note: null };
 }
 
 /** Whether the conversation has a message yet: the intro shows until it has. */

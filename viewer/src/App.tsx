@@ -35,6 +35,7 @@ import {
   peekAskWords,
   spaceIsEnter,
   typedRoute,
+  chatCardActs,
   type AgentsReport,
   type Conversation,
 } from './assistant.ts';
@@ -1448,6 +1449,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // Keep lands it as a change set, on the set as it stands; Discard ends
   // it, with a line in the journal. Either ends it if it is open.
   function keepProposal(p: Proposal) {
+    // Keep and Discard act on the set as it is, never on the set as it was.
+    if (at !== null) {
+      log('Go back to live to keep or discard a proposal');
+      return;
+    }
     if (preview?.proposal) endPreview(preview.home, preview.homeLayout, preview.picked);
     setChipOpen(null);
     setProposalBusy(true);
@@ -1467,6 +1473,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setGhostNonce((k) => k + 1);
   }
   function discardProposal(p: Proposal) {
+    if (at !== null) {
+      log('Go back to live to keep or discard a proposal');
+      return;
+    }
     if (preview?.proposal) endPreview(preview.home, preview.homeLayout, preview.picked);
     setChipOpen(null);
     setProposalBusy(true);
@@ -1926,6 +1936,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
     try {
       await assistantCall('messages', { set: source, text, via, looking_at: chipOff ? null : look }, token);
       setChipOff(false);
+      // On a phone the sheet comes down to half, its keyboard gone, so the
+      // reply and the drawing both show.
+      if (!wide) snapSheet('half');
       return true;
     } catch (e) {
       say('warn', 'Not sent to the assistant', notSentWords(e instanceof CommandError ? e.code : '', why(e, token), runningAgent));
@@ -1937,7 +1950,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setSide('chat');
     setRaise((r) => r + 1);
     log(`To the assistant: “${text}”`);
-    void ask(text, 'command_bar');
+    void ask(text, 'command_bar').then((sent) => {
+      // What did not go stays in the bar, as the chat keeps its draft.
+      const f = field.current;
+      if (!sent && f && !f.value) {
+        f.value = text;
+        setTyped(text);
+      }
+    });
   }
   const pickAgent = (agent: string) => {
     assistantCall('agent', { set: source, agent }, token).catch((e: unknown) =>
@@ -1960,8 +1980,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // drawing does, from the same preview, when it reaches the sheet shown.
   const chatCard = (p: Proposal): ChatCardView => {
     const c = cardViews.find((v) => v.p.proposal === p.proposal);
-    if (c) return { standing: c.standing, lines: c.lines, checking: c.standing === null };
-    return { standing: null, lines: cardLines(p, null, journal), checking: false };
+    const stepping = at !== null;
+    if (c) {
+      const checking = c.standing === null;
+      return { standing: c.standing, lines: c.lines, checking, acts: chatCardActs({ stepping, drawn: true, checking, refused: c.standing === 'bad' }) };
+    }
+    return { standing: null, lines: cardLines(p, null, journal), checking: false, acts: chatCardActs({ stepping, drawn: false, checking: false, refused: false }) };
   };
 
   const undoLabel = `Undo last${undoable ? ` (#${undoable})` : ''}`;
@@ -2024,6 +2048,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // The assistant's panel: its Chat, and the Journal beside it.
   const body = (
     <AssistantPanel
+      source={source}
       agents={agents}
       unreachable={unreachable}
       conversation={conversation}
