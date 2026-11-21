@@ -341,6 +341,9 @@ impl At<'_> {
         let scaled = k != 1.0;
         let mut changed: Vec<String> = Vec::new();
         let solid = hatch_is_solid(keys);
+        if kind == "dimension" && self.clear_angular_location(keys, path) {
+            changed.push("location".to_owned());
+        }
         for entry in keys.iter_mut() {
             let field = key_path(path, &entry.key);
             let did = match (kind, entry.key.as_str()) {
@@ -405,7 +408,7 @@ impl At<'_> {
                 }
                 _ => false,
             };
-            if did {
+            if did && !changed.contains(&entry.key) {
                 changed.push(entry.key.clone());
             }
         }
@@ -547,6 +550,113 @@ impl At<'_> {
             changed.push("end_angle".to_owned());
         }
         Ok(changed)
+    }
+
+    /// Puts an angular dimension's location midway round the sector it
+    /// measures when it lies on, or a hair off, one of its rays, and says
+    /// whether it did. The sheet's reader takes a location on a ray as in
+    /// the sector anticlockwise from it, which a mirror runs the other way,
+    /// and a turn may leave it a hair either side; one midway lands inside
+    /// the sector the transformed dimension measures, so it measures the
+    /// sector transformed. A location clear of its rays is left as written.
+    fn clear_angular_location(&self, keys: &mut [Entry], path: &str) -> bool {
+        use crate::model::{Dimension, Measured, Point3};
+        let read = |key: &str| -> Option<Point3> {
+            let node = &keys.iter().find(|e| e.key == key)?.value;
+            let [x, y, z] = self.read_point(node, path).ok()?;
+            Some(Point3 { x, y, z })
+        };
+        let pair = |node: &Node| -> Option<[Point3; 2]> {
+            let Kind::Sequence(points) = &node.kind else {
+                return None;
+            };
+            let [a, b] = points.as_slice() else {
+                return None;
+            };
+            let [a, b] = [a, b].map(|p| self.read_point(p, path).ok());
+            let ([ax, ay, az], [bx, by, bz]) = (a?, b?);
+            Some([
+                Point3 {
+                    x: ax,
+                    y: ay,
+                    z: az,
+                },
+                Point3 {
+                    x: bx,
+                    y: by,
+                    z: bz,
+                },
+            ])
+        };
+        let measured = match scalar_of(keys, "kind") {
+            Some("angular") => {
+                let node = keys.iter().find(|e| e.key == "lines").map(|e| &e.value);
+                let Some(Kind::Sequence(lines)) = node.map(|n| &n.kind) else {
+                    return false;
+                };
+                let [first, second] = lines.as_slice() else {
+                    return false;
+                };
+                let (Some(first), Some(second)) = (pair(first), pair(second)) else {
+                    return false;
+                };
+                Measured::Angular {
+                    lines: [first, second],
+                }
+            }
+            Some("three_point_angular") => {
+                let points = keys.iter().find(|e| e.key == "points").map(|e| &e.value);
+                let (Some(center), Some(points)) = (read("center"), points.and_then(pair)) else {
+                    return false;
+                };
+                Measured::ThreePointAngular { center, points }
+            }
+            _ => return false,
+        };
+        let Some(location) = read("location") else {
+            return false;
+        };
+        let probe = Dimension {
+            measured,
+            location,
+            dimension_style: String::new(),
+            text: None,
+            continued: false,
+            layer: String::new(),
+            properties: Default::default(),
+        };
+        let Some(sector) = probe.sector() else {
+            return false;
+        };
+        if sector.holds_clear(location) {
+            return false;
+        }
+        let (dx, dy) = (location.x - sector.vertex.x, location.y - sector.vertex.y);
+        let middle = sector.middle((dx * dx + dy * dy).sqrt(), location.z);
+        let Some(entry) = keys.iter_mut().find(|e| e.key == "location") else {
+            return false;
+        };
+        entry.value = Node::new(Kind::Sequence(
+            [middle.x, middle.y, middle.z]
+                .map(|c| Node::scalar(number_text(c)))
+                .to_vec(),
+        ));
+        true
+    }
+
+    /// Reads a point `[x, y, z]` in the declared unit.
+    fn read_point(&self, node: &Node, field: &str) -> Result<[f64; 3], Error> {
+        let Kind::Sequence(coordinates) = &node.kind else {
+            return Err(self.not_a_point(field));
+        };
+        if coordinates.len() != 3 {
+            return Err(self.not_a_point(field));
+        }
+        let mut p = [0.0; 3];
+        for (axis, c) in p.iter_mut().enumerate() {
+            *c = self.coordinate(coordinates, axis, field)?;
+        }
+        Ok(p)
     }
 
     /// A length the object draws with that its record does not write.
@@ -1367,6 +1477,54 @@ objects:
             "text: {contents: A, position: [0.3, 0.1, 0], height: 1}",
             Transform::mirror([0.0, 0.0, 0.0], [0.7, 0.7, 0.0]).unwrap(),
             "text: {contents: A, position: [0.1, 0.3, 0], height: 1, rotation: 90}",
+        );
+    }
+
+    /// The sector a dimension's record measures once the sheet's reader
+    /// reads it: its first ray's angle and its sweep.
+    fn sector_of(object: &str) -> (f64, f64) {
+        let sheet = format!("units: mm\nobjects:\n  - {object}\n");
+        let sheet = crate::description::parse_sheet_description(&sheet).unwrap();
+        let crate::model::Object::Dimension(d) = &sheet.objects[0] else {
+            panic!("a dimension")
+        };
+        let s = d.sector().unwrap();
+        (s.start, s.sweep)
+    }
+
+    #[test]
+    fn a_mirrored_angular_dimension_measures_the_mirrored_sector() {
+        let across = Transform::mirror([0.0; 3], [1.0, 0.0, 0.0]).unwrap();
+        // Its location on its first ray: the quarter from 0 to 90.
+        let three = "dimension: {kind: three_point_angular, center: [0, 0, 0], points: [[10, 0, 0], [0, 10, 0]], location: [5, 0, 0]}";
+        assert_eq!(sector_of(three), (0.0, 90.0));
+        let landed = transformed(three, across, &Resolved::default()).unwrap();
+        // Mirrored across the X axis it measures the quarter from 270 to 360,
+        // not the three quarters from 0 to 270.
+        let (start, sweep) = sector_of(&landed);
+        assert!(
+            (start - 270.0).abs() < 1e-9 && (sweep - 90.0).abs() < 1e-9,
+            "{landed}: {start} {sweep}"
+        );
+        // Two lines, the location on one of them, mirrored up the sheet.
+        let lines = "dimension: {kind: angular, lines: [[[0, 0, 0], [10, 0, 0]], [[0, 0, 0], [10, 10, 0]]], location: [5, 0, 0]}";
+        assert_eq!(sector_of(lines), (0.0, 45.0));
+        let landed = transformed(lines, mirrored(), &Resolved::default()).unwrap();
+        let (start, sweep) = sector_of(&landed);
+        assert!(
+            (start - 135.0).abs() < 1e-9 && (sweep - 45.0).abs() < 1e-9,
+            "{landed}: {start} {sweep}"
+        );
+        // Turned an odd angle, the location on a ray stays in its sector.
+        let turned = Transform::rotate([3.0, 1.0, 0.0], 33.0);
+        let landed = transformed(three, turned, &Resolved::default()).unwrap();
+        let (_, sweep) = sector_of(&landed);
+        assert!((sweep - 90.0).abs() < 1e-9, "{landed}: {sweep}");
+        // A location clear of its rays is left as written, moved.
+        lands(
+            "dimension: {kind: three_point_angular, center: [0, 0, 0], points: [[10, 0, 0], [0, 10, 0]], location: [3, 4, 0]}",
+            across,
+            "dimension: {kind: three_point_angular, center: [0, 0, 0], points: [[10, 0, 0], [0, -10, 0]], location: [3, -4, 0]}",
         );
     }
 
