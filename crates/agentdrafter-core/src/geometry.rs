@@ -41,7 +41,7 @@ pub(crate) struct Reader<'a> {
 /// first. Empty for an object of the sheet's own.
 #[derive(Clone, Default)]
 pub(crate) struct Chain {
-    placements: Vec<(Placement, f64)>,
+    placements: Vec<Placement>,
     /// The blocks the chain passes into, outermost first.
     pub(crate) blocks: Vec<String>,
 }
@@ -49,10 +49,7 @@ pub(crate) struct Chain {
 impl Chain {
     /// The chain into `block`, which `insert`, placed by this chain, inserts.
     fn within(&self, insert: &Insert, block: &Block) -> Chain {
-        let mut placements = vec![(
-            Placement::of(insert, block.base_point),
-            insert.rotation.to_radians(),
-        )];
+        let mut placements = vec![Placement::of(insert, block.base_point)];
         placements.extend(self.placements.iter().cloned());
         let mut blocks = self.blocks.clone();
         blocks.push(block.name.clone());
@@ -61,7 +58,7 @@ impl Chain {
 
     pub(crate) fn point(&self, p: P3) -> P3 {
         let mut at = Point3::new(p[0], p[1], p[2]);
-        for (placement, _) in &self.placements {
+        for placement in &self.placements {
             at = placement.point(at);
         }
         [at.x, at.y, at.z]
@@ -71,9 +68,10 @@ impl Chain {
         if self.placements.is_empty() {
             return c.clone();
         }
-        let scale = self.placements.iter().map(|(p, _)| p.scale()).product();
-        let turn = self.placements.iter().map(|(_, t)| t).sum();
-        c.placed(&|p| self.point(p), scale, turn)
+        let scale = self.placements.iter().map(Placement::scale).product();
+        let mirrored = self.placements.iter().filter(|p| p.mirrored()).count() % 2 == 1;
+        let angle = |radians: f64| self.placements.iter().fold(radians, |a, p| p.radians(a));
+        c.placed(&|p| self.point(p), scale, &angle, mirrored)
     }
 }
 

@@ -162,6 +162,10 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                     "$ref": "#/$defs/angle",
                     "description": "Degrees anticlockwise from the X axis. Without it, 0.",
                 },
+                "mirrored": {
+                    "description": "Whether the block is mirrored, its X axis reversed before                                     it is turned, as AutoCAD's MIRROR leaves an insert, which a                                     DWG keeps as a negative X scale: true or false. Its                                     attributes still read forwards. Without it, false.",
+                    "type": "boolean",
+                },
                 "attributes": {
                     "description": "The values of the block's attributes, from tag to value. A \
                                     tag the block defines more than once takes a list of values, \

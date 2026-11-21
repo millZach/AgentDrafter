@@ -169,6 +169,7 @@ fn an_insert_reads_every_key_and_fills_in_attributes_it_leaves_out() {
             position: Point3::new(100.0, 50.0, 0.0),
             scale: 2.0,
             rotation: 270.0,
+            mirrored: false,
             attributes: vec![
                 Attribute {
                     tag: "TAG".into(),
@@ -338,7 +339,7 @@ fn an_inserts_values_are_checked() {
             "insert: {block: MARKER, position: [0, 0, 0], colour: red}",
             ErrorCode::UnknownKey,
             "objects[0].insert.colour",
-            &["an insert takes block, position, scale, rotation, attributes, layer, color, linetype, lineweight, linetype_scale, id, name"],
+            &["an insert takes block, position, scale, rotation, mirrored, attributes, layer, color, linetype, lineweight, linetype_scale, id, name"],
         ),
         (
             "insert: {position: [0, 0, 0]}",

@@ -1540,6 +1540,9 @@ fn object_value(object: &Object, names: &Names) -> Value {
             if degrees(insert.rotation) != 0.0 {
                 put("rotation", json!(degrees(insert.rotation)));
             }
+            if insert.mirrored {
+                put("mirrored", json!(true));
+            }
             // A tag the block defines more than once takes its values as a
             // list, in the block's order.
             let mut values: Vec<(String, Vec<String>)> = Vec::new();

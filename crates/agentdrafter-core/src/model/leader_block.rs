@@ -900,6 +900,7 @@ mod tests {
             position: p(32.0, 14.0),
             scale: 1.0,
             rotation: 0.0,
+            mirrored: false,
             attributes: Vec::new(),
             name: None,
             layer: "0".into(),

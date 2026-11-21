@@ -625,6 +625,22 @@ pub(crate) fn normalize_degrees(degrees: f64) -> f64 {
     }
 }
 
+/// The sine and cosine of `degrees`: exact for a multiple of 90°, with no
+/// platform sine or cosine, so that a quarter turn writes the same bytes on
+/// every system (#243); the platform's elsewhere.
+pub(crate) fn sin_cos_degrees(degrees: f64) -> (f64, f64) {
+    let quarter = degrees / 90.0;
+    if quarter.fract() == 0.0 && quarter.is_finite() {
+        return match quarter.rem_euclid(4.0) as u8 {
+            0 => (0.0, 1.0),
+            1 => (1.0, 0.0),
+            2 => (0.0, -1.0),
+            _ => (-1.0, 0.0),
+        };
+    }
+    degrees.to_radians().sin_cos()
+}
+
 fn boolean(node: &Node, path: &str) -> Result<bool, Error> {
     match scalar(node, path, "`true` or `false`")? {
         "true" => Ok(true),

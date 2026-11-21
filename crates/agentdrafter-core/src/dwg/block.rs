@@ -142,7 +142,15 @@ pub(super) fn dwg_insert(
     start_of: &dyn Fn(&Text) -> Point3,
 ) -> Result<DwgInsert, Error> {
     let mut dwg = DwgInsert::new(insert.block.clone(), vector(insert.position))
-        .with_uniform_scale(insert.scale)
+        .with_scale(
+            if insert.mirrored {
+                -insert.scale
+            } else {
+                insert.scale
+            },
+            insert.scale,
+            insert.scale,
+        )
         .with_rotation(insert.rotation.to_radians());
     let definitions: Vec<&AttributeDefinition> = block.carried_attributes().collect();
     let tags: Vec<&str> = insert.attributes.iter().map(|a| a.tag.as_str()).collect();
@@ -245,17 +253,19 @@ pub(super) fn read_attribute_definition(
 }
 
 /// An insert the core can read back exactly: of a block it read, flat, not
-/// an array, scaled the same along every axis, with one attribute for each
-/// of the block's attribute definitions but the constant ones, each where
-/// the block puts it.
+/// an array, scaled the same along every axis, or mirrored as AutoCAD's
+/// MIRROR leaves one, its X scale the negative of the others (#242), with
+/// one attribute for each of the block's attribute definitions but the
+/// constant ones, each where the block puts it.
 pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> Option<Insert> {
-    let scale = dwg.x_scale();
+    let scale = dwg.y_scale();
+    let mirrored = dwg.x_scale() == -scale;
     let plain = dwg.normal == Vector3::UNIT_Z
         && !dwg.is_array()
         && !dwg.is_minsert()
         && dwg.view_rep_handle.is_none()
         && scale > 0.0
-        && dwg.y_scale() == scale
+        && (dwg.x_scale() == scale || mirrored)
         && dwg.z_scale() == scale;
     if !plain {
         return None;
@@ -270,6 +280,7 @@ pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> O
         position: point(dwg.insert_point),
         scale,
         rotation: normalize_degrees(dwg.rotation.to_degrees()),
+        mirrored,
         attributes: Vec::with_capacity(definitions.len()),
         name: super::ids::read_name(&dwg.common),
         layer,
@@ -422,6 +433,7 @@ mod tests {
             position: Point3::new(40.0, 30.0, 0.0),
             scale: 2.0,
             rotation: 33.3,
+            mirrored: false,
             attributes: vec![
                 Attribute {
                     tag: "TAG".into(),
@@ -467,6 +479,30 @@ mod tests {
             },
             insert
         );
+    }
+
+    #[test]
+    fn a_mirrored_insert_is_written_with_a_negative_x_scale_and_reads_back() {
+        let block = block();
+        let mut insert = insert();
+        insert.mirrored = true;
+        insert.rotation = 180.0;
+        let written = dwg_insert(&insert, &block, &|t| t.position).unwrap();
+        assert_eq!(
+            (written.x_scale(), written.y_scale(), written.z_scale()),
+            (-2.0, 2.0, 2.0)
+        );
+        // Its attributes read forwards: upright, though the insert is
+        // mirrored and turned a half turn.
+        assert_eq!(written.attributes[0].rotation, 0.0);
+        let read = read_insert(&written, "symbols".into(), &[block.clone()]).unwrap();
+        assert!(read.mirrored);
+        assert_eq!(read.scale, 2.0);
+        assert!(same_angle(read.rotation, 180.0), "{read:?}");
+        // Any other negative scale is not one the core holds.
+        let mut stretched = written.clone();
+        stretched.set_scale_unchecked(2.0, -2.0, 2.0);
+        assert!(read_insert(&stretched, "symbols".into(), &[block]).is_none());
     }
 
     #[test]

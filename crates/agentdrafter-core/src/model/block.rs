@@ -180,6 +180,11 @@ pub struct Insert {
     /// Degrees anticlockwise from the X axis, in `[0, 360)`.
     #[serde(default)]
     pub rotation: f64,
+    /// Whether the block is mirrored: its X axis reversed before it is
+    /// turned, as AutoCAD's MIRROR leaves an insert, which a DWG keeps as a
+    /// negative X scale (#242).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mirrored: bool,
     /// A value for each of the block's attributes, in the order the block
     /// defines them.
     #[serde(default)]
@@ -219,6 +224,11 @@ pub struct BlockLibrary {
 ///
 /// As in AutoCAD, an attribute defined on layer `0` sits on the insert's
 /// layer, and one defined on any other layer on that layer.
+///
+/// On a mirrored insert the attribute sits where the mirror puts it but
+/// still reads forwards, as AutoCAD's MIRRTEXT 0 leaves it: its direction is
+/// the mirrored one, or that turned a half turn, whichever reads left to
+/// right or upwards ([`readable`]), and its justification is its own.
 pub fn attribute_text(
     insert: &Insert,
     block: &Block,
@@ -236,10 +246,27 @@ pub fn attribute_text(
         height: definition.height * insert.scale,
         style: definition.style.clone(),
         width_factor: definition.width_factor,
-        rotation: normalize_degrees(definition.rotation + insert.rotation),
+        rotation: if insert.mirrored {
+            readable(insert.rotation + 180.0 - definition.rotation)
+        } else {
+            normalize_degrees(definition.rotation + insert.rotation)
+        },
         justify: definition.justify,
         layer,
         properties: definition.properties.clone(),
+    }
+}
+
+/// Of a direction of text that a mirror leaves reading backwards, `degrees`,
+/// and that turned a half turn, the one that reads left to right or
+/// upwards: in `[0, 90]` or `(270, 360)`, as AutoCAD's MIRRTEXT 0 keeps
+/// mirrored text reading forwards.
+pub(crate) fn readable(degrees: f64) -> f64 {
+    let direction = normalize_degrees(degrees);
+    if direction <= 90.0 || direction > 270.0 {
+        direction
+    } else {
+        normalize_degrees(direction + 180.0)
     }
 }
 
@@ -251,13 +278,16 @@ pub(crate) fn place(insert: &Insert, base: Point3, point: Point3) -> Point3 {
 }
 
 /// Where an insert puts its block's points: moved so that the block's base
-/// point sits at the insert's position, scaled about it and turned about the
-/// Z axis. The one home of that rule, for the DWG and the drawing pipeline.
+/// point sits at the insert's position, its X reversed when it is mirrored,
+/// scaled about it and turned about the Z axis. The one home of that rule,
+/// for the DWG and the drawing pipeline.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Placement {
     base: Point3,
     position: Point3,
     scale: f64,
+    mirrored: bool,
+    rotation: f64,
     sin: f64,
     cos: f64,
 }
@@ -268,20 +298,47 @@ impl Placement {
         self.scale
     }
 
+    /// Whether the insert mirrors its block.
+    pub(crate) fn mirrored(&self) -> bool {
+        self.mirrored
+    }
+
+    /// The direction, in radians anticlockwise, that a direction of the
+    /// block's own, `radians`, takes on the sheet.
+    pub(crate) fn radians(&self, radians: f64) -> f64 {
+        let rotation = self.rotation.to_radians();
+        if self.mirrored {
+            rotation + std::f64::consts::PI - radians
+        } else {
+            rotation + radians
+        }
+    }
+
     pub(crate) fn of(insert: &Insert, base: Point3) -> Placement {
-        let (sin, cos) = insert.rotation.to_radians().sin_cos();
+        let (sin, cos) = crate::description::sin_cos_degrees(insert.rotation);
         Placement {
             base,
             position: insert.position,
             scale: insert.scale,
+            mirrored: insert.mirrored,
+            rotation: insert.rotation,
             sin,
             cos,
         }
     }
 
+    /// The X scale: negative when the insert is mirrored.
+    fn x_scale(&self) -> f64 {
+        if self.mirrored {
+            -self.scale
+        } else {
+            self.scale
+        }
+    }
+
     /// Where a point in the block's own coordinates lands.
     pub(crate) fn point(&self, point: Point3) -> Point3 {
-        let x = (point.x - self.base.x) * self.scale;
+        let x = (point.x - self.base.x) * self.x_scale();
         let y = (point.y - self.base.y) * self.scale;
         let z = (point.z - self.base.z) * self.scale;
         Point3::new(
@@ -296,7 +353,7 @@ impl Placement {
         let x = x - self.position.x;
         let y = y - self.position.y;
         [
-            self.base.x + (x * self.cos + y * self.sin) / self.scale,
+            self.base.x + (x * self.cos + y * self.sin) / self.x_scale(),
             self.base.y + (y * self.cos - x * self.sin) / self.scale,
         ]
     }
@@ -349,6 +406,7 @@ mod tests {
             position: Point3::new(100.0, 50.0, 1.0),
             scale,
             rotation,
+            mirrored: false,
             attributes: Vec::new(),
             name: None,
             layer: "symbols".into(),
@@ -385,6 +443,40 @@ mod tests {
         assert_eq!(text.width_factor, 0.8);
         assert_eq!(text.contents, "A-1");
         assert_eq!(text.layer, "tags");
+    }
+
+    #[test]
+    fn a_mirrored_inserts_attribute_sits_mirrored_and_reads_forwards() {
+        let base = Point3::new(2.0, 1.0, 0.0);
+        let mut definition = definition(Point3::new(5.0, 3.0, 0.5), "tags");
+        definition.rotation = 0.0;
+        // Mirrored across the block's Y axis: 3 along X lands 3 back, exactly.
+        let mut mirrored = insert(0.0, 2.0);
+        mirrored.mirrored = true;
+        let text = attribute_text(&mirrored, &block(base), &definition, "A-1");
+        assert_eq!(text.position, Point3::new(94.0, 54.0, 2.0));
+        assert_eq!(text.rotation, 0.0, "it reads forwards, not backwards");
+        assert_eq!(text.justify, Justify::MiddleCenter);
+        // Mirrored and turned a half turn, as a mirror across a horizontal
+        // line leaves an insert: the attribute lands below, still upright.
+        let mut flipped = insert(180.0, 1.0);
+        flipped.mirrored = true;
+        let text = attribute_text(&flipped, &block(base), &definition, "A-1");
+        assert_eq!(text.position, Point3::new(103.0, 48.0, 1.5));
+        assert_eq!(text.rotation, 0.0);
+        // A definition turned 30 degrees reads along its mirrored line.
+        definition.rotation = 30.0;
+        let text = attribute_text(&mirrored, &block(base), &definition, "A-1");
+        assert_eq!(text.rotation, 330.0);
+    }
+
+    #[test]
+    fn readable_keeps_text_reading_left_to_right_or_upwards() {
+        assert_eq!(readable(180.0), 0.0);
+        assert_eq!(readable(150.0), 330.0);
+        assert_eq!(readable(90.0), 90.0);
+        assert_eq!(readable(270.0), 90.0);
+        assert_eq!(readable(-30.0), 330.0);
     }
 
     #[test]
