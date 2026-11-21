@@ -61,6 +61,12 @@
 //            as one change set, one journal entry; Esc landing them; and a
 //            template's object warned of and asked about once, Change all
 //            landing on every sheet built from it.
+// - array:   the Array tool (#66), at laptop and phone sizes: rectangular
+//            and polar arrays set up in the panel and typed in the command
+//            bar, the copies drawn dashed and tagged, the total toggle, Esc
+//            and Cancel sending nothing, Enter and Array landing one change
+//            set, one journal entry; and a template's object warned of and
+//            asked about in the band, Change all landing on its seven sheets.
 // - props:   editing in quick properties, by mouse and keyboard and by
 //            touch: a layer, a text's contents in the panel and on the
 //            drawing, an attribute, a radius and a diameter, and the Layer
@@ -1657,7 +1663,7 @@ const checks = {
           [...document.querySelectorAll('.ribbon .panel')].map((p) => [p.querySelector('h3').textContent.trim(), [...p.querySelectorAll('.rb')].map((t) => t.textContent)]),
         );
         assert(
-          JSON.stringify(ribbon) === JSON.stringify([['Draw', ['Line', 'Circle', 'Rectangle', 'Text']], ['Modify', ['Move', 'Copy', 'Erase']], ['Layer', []]]),
+          JSON.stringify(ribbon) === JSON.stringify([['Draw', ['Line', 'Circle', 'Rectangle', 'Text']], ['Modify', ['Move', 'Copy', 'Array', 'Erase']], ['Layer', []]]),
           `the ribbon: ${JSON.stringify(ribbon)}`,
         );
         assert(
@@ -1787,7 +1793,7 @@ const checks = {
         const apart = card[0] >= device.box[2] || card[2] <= device.box[0];
         assert(apart && card[1] < device.box[3] + 1, `quick properties sit beside the device: ${JSON.stringify({ card, device: device.box })}`);
         assert((await page.inputValue('select[data-layer]')) === '0', 'the Layer box shows its layer');
-        assert((await bar(page)).includes('FT-101 selected [ Move Copy Erase Clear ]'), `the command bar names it: ${await bar(page)}`);
+        assert((await bar(page)).includes('FT-101 selected [ Move Copy Array Erase Clear ]'), `the command bar names it: ${await bar(page)}`);
         assert((await page.textContent('.qp')).includes('Comes from'), 'quick properties say where it comes from');
         await page.screenshot({ path: join(out, 'frame-laptop-selected.png') });
         // They follow it as the view moves.
@@ -2547,9 +2553,9 @@ const checks = {
         const context = await b.newContext(LAPTOP);
         const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
         await live(page);
-        // The ribbon: Copy in Modify, between Move and Erase, CO and CP in its tip.
+        // The ribbon: Copy in Modify, between Move and Array, CO and CP in its tip.
         const modify = await page.evaluate(() => [...document.querySelectorAll('.ribbon .rb[data-tool]')].map((x) => x.dataset.tool));
-        assert(JSON.stringify(modify.slice(-3)) === '["move","copy","erase"]', `Copy sits between Move and Erase: ${modify}`);
+        assert(JSON.stringify(modify.slice(-4)) === '["move","copy","array","erase"]', `Copy sits between Move and Array: ${modify}`);
         await page.hover('.rb[data-tool="copy"]');
         const tip = await page.textContent('.tip');
         assert(tip.includes('CO') && tip.includes('CP') && tip.includes('keeps placing copies'), `Copy's tip: ${tip}`);
@@ -2705,12 +2711,12 @@ const checks = {
         entry = await landed(page, before, 'A field edited, then Clear');
         assert(entry.change_set.operations[0].op === 'set_attribute' && entry.change_set.operations[0].value === 'FQ', `the edit lands: ${JSON.stringify(entry.change_set.operations)}`);
         assert(!(await page.isVisible('.qp')), 'Clear clears the selection');
-        // AR is no tool here: Enter sends it to the assistant, as any other word.
-        await page.keyboard.type('AR');
+        // ARRAYPATH is no tool here (#66): Enter sends it to the assistant, as any other word.
+        await page.keyboard.type('ARRAYPATH');
         const hint = await page.textContent('.cmdbar');
-        assert(hint.includes('ask the assistant'), `AR is for the assistant: ${hint}`);
+        assert(hint.includes('ask the assistant'), `ARRAYPATH is for the assistant: ${hint}`);
         await page.keyboard.press('Enter');
-        await page.waitForFunction(() => document.querySelector('.cmd .hist')?.textContent.includes('To the assistant: “AR”'), null, { timeout: 15000 });
+        await page.waitForFunction(() => document.querySelector('.cmd .hist')?.textContent.includes('To the assistant: “ARRAYPATH”'), null, { timeout: 15000 });
         assert(await page.isVisible('.stab[data-side="chat"].on'), 'the chat is shown');
         assert(!(await bar(page)).includes('ARRAY'), `no tool starts: ${await bar(page)}`);
         // Not sent, with no agent here, the words go back in the bar: cleared.
@@ -2861,6 +2867,469 @@ const checks = {
         await shot(page, 'copy-phone-5-change-all.png');
         await page.tap('[data-pv="go"]');
         const entry = await landed(page, before, 'Copy of a template object, by touch');
+        assert(entry.landed_on.length === 7, `on every sheet built from the template: ${entry.landed_on}`);
+        seen.phone.template = { entry: entry.entry, sheets: entry.landed_on.length };
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      return { ...seen, screenshots: shots };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * The Array tool (#66), against a copy of the demo plant, with a circle
+   * and a short tick on it added in DP-LD-101's row for a polar array. At
+   * laptop size: Array between Copy and Erase, AR in its tip; FT-101
+   * selected, Array from its options, its panel beside it; rows, columns and
+   * spacings typed in the panel, the copies drawn dashed in the proposal's
+   * purple and tagged; the total toggle; Esc sending nothing; AR typed with
+   * rows,columns, TO and @dx,dy in the command bar, a button pressed and
+   * Enter landing one change set, one `array`, one journal entry; leaving
+   * for an entry dropping it; ARRAYPOLAR on the tick, its centre clicked on
+   * the circle's Centre snap, eight round a whole turn, drawn, landing with
+   * a snapped centre; and terminal-2, a template's, warned of, its band on
+   * Enter, no tool starting while it asks, Change all landing on the seven
+   * sheets. At phone size, by touch: Array from Tools, the panel docked
+   * above the command bar with the device in sight above it, Cancel sending
+   * nothing, the total toggle, Array landing; a polar array's centre typed;
+   * and terminal-2's band and Change all.
+   */
+  async array() {
+    const folder = freshPlant('array');
+    // A circle and a short tick on its top, in DP-LD-101's row, as the
+    // prototype's entry 4 drew them, to array round the circle's centre.
+    const seeded = sendChange(folder, {
+      operations: [
+        { op: 'add_circle', sheet: 'DP-LD-101', layer: 'notes', center: [3, 8.8, 0], radius: 0.3 },
+        { op: 'add_line', sheet: 'DP-LD-101', layer: 'notes', from: [3, 9.14, 0], to: [3, 9.32, 0] },
+      ],
+    });
+    assert(seeded.ok, `the circle and the tick are added: ${JSON.stringify(seeded.error ?? seeded)}`);
+    const [circleId, tickId] = seeded.result.operations.map((o) => o.ids_written?.[0] ?? /`(DP-LD-101\/[^`]+)`/.exec(o.message)?.[1]);
+    assert(circleId && tickId, `the circle's and the tick's IDs: ${JSON.stringify(seeded.result.operations)}`);
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    const seen = { laptop: {}, phone: {} };
+    const shots = [];
+    const journal = () => agentIn(folder, 'journal', 'demo-plant').result.entries;
+    const template = () => readFileSync(join(folder, 'demo-plant', 'templates', 'loop-2-wire.yaml'), 'utf8');
+    const bar = (page) => page.evaluate(() => document.querySelector('.cmdbar')?.textContent ?? '');
+    const panelText = (page) => page.evaluate(() => document.querySelector('[data-arraypanel]')?.textContent ?? '');
+    const count = (page) => page.evaluate(() => document.querySelector('[data-acount]')?.textContent ?? '');
+    const tag = (page) => page.evaluate(() => {
+      const t = document.querySelector('[data-arraytag]');
+      return t && !t.hidden ? t.textContent : null;
+    });
+    const fieldValue = (page, key) => page.inputValue(`[data-arraypanel] input[data-k="${key}"]`);
+    const frames = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    const onPage = (page, at) =>
+      page.evaluate(([x, y]) => {
+        const v = window.agentdrafterViewer.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+      }, at);
+    const shot = async (page, name) => {
+      await frames(page);
+      await page.screenshot({ path: join(out, name) });
+      shots.push(name);
+    };
+    const landed = async (page, before, what, sheet = 'DP-LD-101') => {
+      const until = Date.now() + 30000;
+      let entries = journal();
+      while (entries.length <= before) {
+        assert(Date.now() < until, `${what}: no change set landed: ${await bar(page)}`);
+        await sleep(100);
+        entries = journal();
+      }
+      assert(entries.length === before + 1, `${what}: one journal entry, not ${entries.length - before}`);
+      const entry = entries.at(-1);
+      assert(entry.kind === 'change_set' && entry.landed_on?.includes(sheet), `${what} landed: ${JSON.stringify(entry)}`);
+      const added = (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith(`${sheet}/`)).map((o) => o.id);
+      for (const id of added) {
+        await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+      }
+      return entry;
+    };
+    const typeIn = async (page, ...lines) => {
+      for (const line of lines) {
+        await page.keyboard.type(line);
+        await page.keyboard.press('Enter');
+        await frames(page);
+      }
+    };
+    const fitAll = async (page) => {
+      await page.click('[aria-label="Fit the sheet"]');
+      await sleep(600);
+    };
+    const journalLine = async (page, n, how) => {
+      await sideTab(page, 'journal', how);
+      await page.waitForSelector(`[data-entry="${n}"] .je-t`, { timeout: 15000 });
+      return page.textContent(`[data-entry="${n}"] .je-t`);
+    };
+    // How many pixels in the drawing-unit box `[left, bottom, right, top]`
+    // are the proposal's purple, the tag and a laptop's panel hidden: the
+    // copies are drawn, not only tagged.
+    const purpleIn = async (page, [l, bottom, r, t]) => {
+      const [x0, y0] = await onPage(page, [l, t]);
+      const [x1, y1] = await onPage(page, [r, bottom]);
+      const hide = (v) =>
+        page.evaluate((how) => {
+          for (const el of document.querySelectorAll('.ctags, .arr:not(.docked)')) el.style.visibility = how;
+        }, v);
+      await hide('hidden');
+      await frames(page);
+      const png = decodePng(await page.screenshot({ clip: { x: Math.floor(x0) - 2, y: Math.floor(y0) - 2, width: Math.ceil(x1 - x0) + 4, height: Math.ceil(y1 - y0) + 4 } }));
+      await hide('');
+      await frames(page);
+      let n = 0;
+      for (let i = 0; i < png.rgba.length; i += 4) {
+        const [red, green, blue] = [png.rgba[i], png.rgba[i + 1], png.rgba[i + 2]];
+        if (Math.abs(red - 0xc9) + Math.abs(green - 0xa8) + Math.abs(blue - 0xff) < 60) n += 1;
+      }
+      return n;
+    };
+    const shifted = (box, dx, dy) => [box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy];
+    // The live sheet, whole, and a point on the page that picks `id`.
+    const pointOn = async (page, id) => {
+      await page.waitForFunction(
+        () => {
+          const p = window.agentdrafterViewer;
+          return !document.querySelector('[data-preview]') && p.summary && p.summary.preview == null && p.summary.entry === null;
+        },
+        null,
+        { timeout: 30000 },
+      );
+      await fitAll(page);
+      const { place, box } = await page.evaluate((wanted) => {
+        const p = window.agentdrafterViewer;
+        const at = p.summary.objects.findIndex((o) => o.id === wanted);
+        return { place: at, box: at >= 0 ? p.bounds([at]) : [] };
+      }, id);
+      assert(place >= 0 && box.length === 4, `${id} is on the sheet`);
+      const [x0, y0, x1, y1] = box;
+      for (let j = 1; j < 8; j++) {
+        for (let i = 1; i < 12; i++) {
+          const at = [x0 + ((x1 - x0) * i) / 12, y0 + ((y1 - y0) * j) / 8];
+          if ((await page.evaluate(([x, y]) => window.agentdrafterViewer.pickAt(x, y, 16), at)) === place) return { place, box, at: await onPage(page, at) };
+        }
+      }
+      throw new Error(`no point on the page picks ${id}`);
+    };
+    const arrayOp = (entry) => {
+      const ops = entry.change_set.operations;
+      assert(ops.length === 1 && ops[0].op === 'array', `one array operation: ${JSON.stringify(ops)}`);
+      return ops[0];
+    };
+    const panelBox = (page) =>
+      page.evaluate(() => {
+        const r = document.querySelector('[data-arraypanel]').getBoundingClientRect();
+        return [r.left, r.top, r.right, r.bottom];
+      });
+    const screenBox = async (page, box) => {
+      const [l, t] = await onPage(page, [box[0], box[3]]);
+      const [r, bottom] = await onPage(page, [box[2], box[1]]);
+      return [l, t, r, bottom];
+    };
+    try {
+      // A laptop: the mouse, and typing.
+      {
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        // The ribbon: Array in Modify, between Copy and Erase, AR in its tip.
+        const modify = await page.evaluate(() => [...document.querySelectorAll('.ribbon .rb[data-tool]')].map((x) => x.dataset.tool));
+        assert(JSON.stringify(modify.slice(-4)) === '["move","copy","array","erase"]', `Array sits between Copy and Erase: ${modify}`);
+        await page.hover('.rb[data-tool="array"]');
+        const tip = await page.textContent('.tip');
+        assert(tip.includes('AR') && tip.includes('Esc sends nothing'), `Array's tip: ${tip}`);
+        await page.mouse.move(700, 500);
+        // FT-101 selected first, then Array from its options: the panel.
+        let before = journal().length;
+        let target = await pointOn(page, 'DP-LD-101/device');
+        const device = target.box;
+        await page.keyboard.press('F3');
+        await page.mouse.click(...target.at);
+        await page.keyboard.press('F3');
+        assert((await bar(page)).includes('FT-101 selected'), `the device is selected: ${await bar(page)}`);
+        assert(/Move.*Copy.*Array.*Erase.*Clear/.test(await bar(page)), `a selected object's options hold Array: ${await bar(page)}`);
+        await page.click('.opt[data-opt="array-objects"]');
+        await page.waitForSelector('[data-arraypanel]');
+        await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-arraypanel]')).visibility === 'visible');
+        await sleep(600);
+        assert((await bar(page)).includes('ARRAYRECT'), `Array runs, rectangular: ${await bar(page)}`);
+        assert((await panelText(page)).includes('of FT-101'), `the panel names it: ${await panelText(page)}`);
+        // Rows, columns and spacing typed in the panel: the copies follow.
+        await page.fill('[data-arraypanel] input[data-k="rows"]', '3');
+        await page.fill('[data-arraypanel] input[data-k="columns"]', '1');
+        await page.fill('[data-arraypanel] input[data-k="row_spacing"]', '-1.2');
+        // The view comes to a small array as the panel opens: let it settle.
+        await sleep(600);
+        assert((await count(page)) === '3 × 1: 2 copies', `the panel counts them: ${await count(page)}`);
+        assert((await tag(page)) === '3 × 1 · waits for Enter', `the copies are tagged: ${await tag(page)}`);
+        const panel = await panelBox(page);
+        const deviceOnPage = await screenBox(page, device);
+        assert(panel[0] >= deviceOnPage[2] || panel[2] <= deviceOnPage[0], `the panel sits beside the device: ${JSON.stringify({ panel, deviceOnPage })}`);
+        const drawn = [await purpleIn(page, shifted(device, 0, -1.2)), await purpleIn(page, shifted(device, 0, -2.4)), await purpleIn(page, shifted(device, 0, 1.2))];
+        assert(drawn[0] > 40 && drawn[1] > 40 && drawn[2] < 5, `the copies are drawn in purple where they go, and nowhere else: ${drawn}`);
+        seen.laptop.purple = drawn;
+        // The total, divided evenly: the field's words, and the spacing it gives.
+        await page.click('[data-arraypanel] [data-hold="total"]');
+        assert((await fieldValue(page, 'row_total')) === '-2.4', `the total follows the spacing: ${await fieldValue(page, 'row_total')}`);
+        assert((await panelText(page)).includes('Rows, first to last, in'), `the field is the total's: ${await panelText(page)}`);
+        await page.fill('[data-arraypanel] input[data-k="row_total"]', '-2');
+        await frames(page);
+        assert((await bar(page)).includes('rows 1.000 in apart down'), `2 over 2 gaps is 1 apart: ${await bar(page)}`);
+        await shot(page, 'array-laptop-1-total.png');
+        // Esc sends nothing.
+        await page.keyboard.press('Escape');
+        await page.keyboard.press('Escape');
+        await sleep(1000);
+        assert(journal().length === before, 'Esc sends nothing');
+        assert(!(await page.$('[data-arraypanel]')), 'the panel goes');
+        assert((await page.textContent('.cmd .hist')).includes('ARRAY: cancelled, nothing sent'), `the history says so: ${await page.textContent('.cmd .hist')}`);
+        // AR typed with the device selected, then values in the command bar:
+        // rows,columns, TO and the totals; Between pressed, then Enter lands it.
+        target = await pointOn(page, 'DP-LD-101/device');
+        await page.keyboard.press('F3');
+        await page.mouse.click(...target.at);
+        await page.keyboard.press('F3');
+        await typeIn(page, 'AR');
+        await page.waitForSelector('[data-arraypanel]');
+        await typeIn(page, '2,2', 'TO', '@1.5,-1.2');
+        assert((await count(page)) === '2 × 2: 3 copies', `typed rows and columns: ${await count(page)}`);
+        assert((await fieldValue(page, 'column_total')) === '1.5' && (await fieldValue(page, 'row_total')) === '-1.2', 'typed totals');
+        await page.click('[data-arraypanel] [data-hold="between"]');
+        assert(!(await page.evaluate(() => document.activeElement?.closest?.('[data-arraypanel] button'))), 'a button pressed keeps no focus');
+        assert(journal().length === before, 'nothing lands while it is set up');
+        await page.keyboard.press('Enter');
+        let entry = await landed(page, before, 'Array, Enter');
+        let op = arrayOp(entry);
+        assert(
+          op.target?.id === 'DP-LD-101/device' && op.kind === 'rectangular' && op.rows === 2 && op.columns === 2 && op.row_spacing === -1.2 && op.column_spacing === 1.5,
+          `one rectangular array: ${JSON.stringify(op)}`,
+        );
+        assert(entry.objects.filter((o) => o.how === 'added').length === 3, `three copies added: ${JSON.stringify(entry.objects)}`);
+        assert(JSON.stringify(entry.landed_on) === '["DP-LD-101"]', `the row's own object's copies land on its sheet alone: ${entry.landed_on}`);
+        assert((await tag(page)) === null, 'the tag goes when it lands');
+        seen.laptop.rectangular = entry.entry;
+        let line = await journalLine(page, entry.entry);
+        assert(line.includes('array device, 2 × 2'), `one journal line: ${line}`);
+        await sideTab(page, 'chat');
+        // Set up, then a journal entry opened: dropped, nothing sent.
+        before = journal().length;
+        target = await pointOn(page, 'DP-LD-101/device');
+        await page.keyboard.press('F3');
+        await page.mouse.click(...target.at);
+        await page.keyboard.press('F3');
+        await page.click('.opt[data-opt="array-objects"]');
+        await page.waitForSelector('[data-arraypanel]');
+        await sideTab(page, 'journal');
+        await page.click(`[data-entry="${seen.laptop.rectangular}"] .je-head`);
+        await page.waitForFunction(() => document.querySelector('.cmdbar')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
+        await sleep(1500);
+        assert(journal().length === before, `a journal entry opened sends nothing: ${JSON.stringify(journal().at(-1))}`);
+        assert(!(await page.$('[data-arraypanel]')), 'the array is dropped');
+        await page.click('.opt[data-opt="live"]');
+        await page.waitForFunction(() => !document.querySelector('.cmdbar')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
+        await sideTab(page, 'chat');
+        // Polar: ARRAYPOLAR on the tick, its centre on the circle's Centre snap.
+        before = journal().length;
+        target = await pointOn(page, tickId);
+        await page.keyboard.press('F3');
+        await page.mouse.click(...target.at);
+        await page.keyboard.press('F3');
+        await typeIn(page, 'ARRAYPOLAR');
+        await page.waitForSelector('[data-arraypanel]');
+        assert((await bar(page)).includes('ARRAYPOLAR') && (await bar(page)).includes('Click the centre the items go round'), `it asks for the centre: ${await bar(page)}`);
+        const center = await onPage(page, [3, 8.8]);
+        await page.mouse.move(center[0] + 3, center[1] + 3);
+        await page.mouse.move(center[0], center[1]);
+        await frames(page);
+        await page.mouse.click(center[0], center[1]);
+        await page.waitForFunction(() => document.querySelector('[data-acenter]')?.textContent.startsWith('Centre of'), null, { timeout: 15000 });
+        const centerWords = await page.textContent('[data-acenter]');
+        assert(centerWords.includes('3.000, 8.800'), `the centre is the circle's: ${centerWords}`);
+        await page.fill('[data-arraypanel] input[data-k="items"]', '8');
+        await page.mouse.move(700, 300);
+        await sleep(600);
+        assert((await fieldValue(page, 'angle_between')) === '45', `eight round a whole turn are 45 apart: ${await fieldValue(page, 'angle_between')}`);
+        assert((await count(page)) === '8 round: 7 copies', `the panel counts them: ${await count(page)}`);
+        // The copy half a turn round is drawn below the circle, upside down.
+        const tick = await objectOf(page, tickId);
+        const below = [tick.bounds[0] - 0.02, 2 * 8.8 - tick.bounds[3] - 0.02, tick.bounds[2] + 0.02, 2 * 8.8 - tick.bounds[1] + 0.02];
+        const polarDrawn = await purpleIn(page, below);
+        assert(polarDrawn > 5, `the copy half a turn round is drawn: ${polarDrawn}`);
+        seen.laptop.polarPurple = polarDrawn;
+        await shot(page, 'array-laptop-2-polar.png');
+        await page.click('[data-arraypanel] [data-act="array"]');
+        entry = await landed(page, before, 'Array, polar');
+        op = arrayOp(entry);
+        assert(
+          op.kind === 'polar' && op.count === 8 && op.angle === undefined && JSON.stringify(op.center) === JSON.stringify({ snap: { id: circleId, snap: 'center' } }),
+          `one polar array round a snapped centre: ${JSON.stringify(op)}`,
+        );
+        assert(entry.objects.filter((o) => o.how === 'added').length === 7, `seven copies added: ${JSON.stringify(entry.objects)}`);
+        seen.laptop.polar = entry.entry;
+        line = await journalLine(page, entry.entry);
+        assert(line.includes(`array ${tickId.split('/')[1]}, 8 round`), `its journal line: ${line}`);
+        await shot(page, 'array-laptop-3-polar-journal.png');
+        await sideTab(page, 'chat');
+        // terminal-2, a template's: picked from the ribbon, warned of, asked about in the band.
+        before = journal().length;
+        const templateBefore = template();
+        target = await pointOn(page, 'DP-LD-101/terminal-2');
+        await page.click('.rb[data-tool="array"]');
+        assert((await bar(page)).includes('Click the objects to array'), `Array picks first: ${await bar(page)}`);
+        await page.keyboard.press('F3');
+        await page.mouse.click(...target.at);
+        await page.keyboard.press('F3');
+        assert((await bar(page)).includes('1 object picked'), `terminal-2 is picked: ${await bar(page)}`);
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('[data-arraypanel]');
+        const warned = await page.textContent('[data-warning]');
+        assert(
+          warned.includes('This is part of the template.') && warned.includes('This arrays it on every sheet built from this template: 7 sheets.') && warned.includes('You will be asked before it lands.'),
+          `the command bar warns: ${warned}`,
+        );
+        await page.fill('[data-arraypanel] input[data-k="rows"]', '3');
+        await page.fill('[data-arraypanel] input[data-k="columns"]', '2');
+        await page.fill('[data-arraypanel] input[data-k="row_spacing"]', '-0.5');
+        await page.fill('[data-arraypanel] input[data-k="column_spacing"]', '1');
+        await page.mouse.move(700, 120);
+        await sleep(600);
+        assert((await count(page)) === '3 × 2: 5 copies', `the panel counts them: ${await count(page)}`);
+        assert((await tag(page)) === '3 × 2 · waits for Enter', `the tag: ${await tag(page)}`);
+        const terminalDrawn = await purpleIn(page, shifted(target.box, 1, -0.5));
+        assert(terminalDrawn > 20, `terminal-2's copies are drawn: ${terminalDrawn}`);
+        await shot(page, 'array-laptop-4-template-panel.png');
+        // Enter in a field lands it: the band asks first.
+        await page.focus('[data-arraypanel] input[data-k="column_spacing"]');
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
+        const asked = await page.textContent('[data-preview]');
+        assert(asked.includes('Array terminal-2, 3 × 2') && asked.includes('Change all 7 sheets'), `the band: ${asked}`);
+        // No tool starts while it asks: Circle's clicks draw nothing.
+        await page.click('.rb[data-tool="circle"]');
+        assert(!(await bar(page)).includes('CIRCLE'), `Circle does not start: ${await bar(page)}`);
+        await sleep(1000);
+        assert(journal().length === before, 'nothing lands before Change all');
+        await shot(page, 'array-laptop-5-change-all.png');
+        await page.click('[data-pv="go"]');
+        entry = await landed(page, before, 'Array of a template object');
+        op = arrayOp(entry);
+        assert(op.target?.id === 'DP-LD-101/terminal-2' && op.rows === 3 && op.columns === 2 && op.row_spacing === -0.5 && op.column_spacing === 1, `one array: ${JSON.stringify(op)}`);
+        assert(entry.landed_on.length === 7 && !entry.landed_on.includes('DP-LD-103'), `it lands on every sheet built from the template: ${entry.landed_on}`);
+        assert(template() !== templateBefore, 'the template changes');
+        seen.laptop.template = { entry: entry.entry, sheets: entry.landed_on.length };
+        await page.mouse.move(700, 600);
+        await shot(page, 'array-laptop-6-landed.png');
+        line = await journalLine(page, entry.entry);
+        assert(line.includes('array terminal-2, 3 × 2'), `its journal line: ${line}`);
+        await shot(page, 'array-laptop-7-journal.png');
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      // A phone: Tools, taps, the panel docked above the command bar.
+      {
+        const context = await b.newContext(PHONE);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        // Snapping off, so each tap is the point itself.
+        await page.tap('.toolsbtn');
+        await page.tap('.ribbon [data-toggle="osnap"]');
+        let before = journal().length;
+        await page.tap('.rb[data-tool="array"]', { force: true });
+        assert((await bar(page)).includes('Tap the objects to array'), `the phone's words: ${await bar(page)}`);
+        let target = await pointOn(page, 'DP-LD-101/device');
+        await page.touchscreen.tap(...target.at);
+        await sleep(300);
+        assert((await bar(page)).includes('1 object picked'), `the device is picked: ${await bar(page)}`);
+        await page.tap('.opt[data-opt="tool:done"]');
+        await page.waitForSelector('[data-arraypanel].arr.docked');
+        await sleep(600);
+        // Docked above the command bar, the device in sight above it.
+        const docked = await panelBox(page);
+        const barTop = await page.evaluate(() => document.querySelector('.cmdbar').getBoundingClientRect().top);
+        const deviceOnPage = await screenBox(page, target.box);
+        assert(docked[3] <= barTop + 1, `the panel sits above the command bar: ${JSON.stringify({ docked, barTop })}`);
+        assert(deviceOnPage[3] <= docked[1] && deviceOnPage[1] >= 0, `the device is in sight above the panel: ${JSON.stringify({ deviceOnPage, docked })}`);
+        // Cancel sends nothing.
+        await page.tap('[data-arraypanel] [data-act="cancel"]');
+        await sleep(1000);
+        assert(journal().length === before && !(await page.$('[data-arraypanel]')), 'Cancel sends nothing');
+        // Again, from the selection: 2 by 2, the total toggled, then Array.
+        target = await pointOn(page, 'DP-LD-101/device');
+        await page.touchscreen.tap(...target.at);
+        await sleep(300);
+        await page.tap('.opt[data-opt="array-objects"]');
+        await page.waitForSelector('[data-arraypanel].arr.docked');
+        await page.fill('[data-arraypanel] input[data-k="rows"]', '2');
+        await page.fill('[data-arraypanel] input[data-k="columns"]', '2');
+        await page.fill('[data-arraypanel] input[data-k="row_spacing"]', '-1.2');
+        await page.fill('[data-arraypanel] input[data-k="column_spacing"]', '1.5');
+        await page.tap('[data-arraypanel] [data-hold="total"]');
+        assert((await panelText(page)).includes('Columns, first to last'), `the total's fields: ${await panelText(page)}`);
+        assert((await fieldValue(page, 'column_total')) === '1.5', 'the total of two columns is their spacing');
+        await page.evaluate(() => document.activeElement?.blur?.());
+        await sleep(600);
+        assert((await tag(page)) === '2 × 2', `a phone's tag: ${await tag(page)}`);
+        await shot(page, 'array-phone-1-panel.png');
+        await page.tap('[data-arraypanel] [data-act="array"]');
+        let entry = await landed(page, before, 'Array, by touch');
+        let op = arrayOp(entry);
+        assert(op.rows === 2 && op.columns === 2 && op.row_spacing === -1.2 && op.column_spacing === 1.5, `one array: ${JSON.stringify(op)}`);
+        seen.phone.rectangular = entry.entry;
+        await shot(page, 'array-phone-2-landed.png');
+        // Polar, its centre typed with ⌨ Type.
+        before = journal().length;
+        target = await pointOn(page, tickId);
+        await page.tap('.toolsbtn');
+        await page.tap('.rb[data-tool="array"]', { force: true });
+        await page.touchscreen.tap(...target.at);
+        await sleep(300);
+        await page.tap('.opt[data-opt="tool:done"]');
+        await page.waitForSelector('[data-arraypanel].arr.docked');
+        await page.tap('[data-arraypanel] [data-kind="polar"]');
+        assert((await bar(page)).includes('Tap the centre the items go round'), `it asks for the centre: ${await bar(page)}`);
+        await page.tap('[data-type]');
+        await page.keyboard.type('3,8.8');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(() => document.querySelector('[data-acenter]')?.textContent.includes('3.000, 8.800'), null, { timeout: 15000 });
+        await page.fill('[data-arraypanel] input[data-k="items"]', '8');
+        await page.evaluate(() => document.activeElement?.blur?.());
+        await sleep(600);
+        assert((await count(page)) === '8 round: 7 copies', `eight round: ${await count(page)}`);
+        await shot(page, 'array-phone-3-polar.png');
+        await page.tap('[data-arraypanel] [data-act="array"]');
+        entry = await landed(page, before, 'Array, polar, by touch');
+        op = arrayOp(entry);
+        assert(op.kind === 'polar' && op.count === 8 && JSON.stringify(op.center) === '[3,8.8,0]', `a polar array round the centre typed: ${JSON.stringify(op)}`);
+        seen.phone.polar = entry.entry;
+        // terminal-2: the warning, the band in the command bar's place, Change all.
+        before = journal().length;
+        target = await pointOn(page, 'DP-LD-101/terminal-2');
+        await page.tap('.toolsbtn');
+        await page.tap('.rb[data-tool="array"]', { force: true });
+        await page.touchscreen.tap(...target.at);
+        await sleep(300);
+        await page.tap('.opt[data-opt="tool:done"]');
+        await page.waitForSelector('[data-arraypanel].arr.docked');
+        const warned = await page.textContent('[data-warning]');
+        assert(warned.includes('Part of the template:') && warned.includes('the copies land on all 7 sheets'), `the warning on a phone: ${warned}`);
+        await page.fill('[data-arraypanel] input[data-k="columns"]', '2');
+        await page.evaluate(() => document.activeElement?.blur?.());
+        await sleep(600);
+        await shot(page, 'array-phone-4-template-panel.png');
+        await page.tap('[data-arraypanel] [data-act="array"]');
+        await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
+        const asked = await page.textContent('[data-preview]');
+        assert(asked.includes('Change all 7 sheets'), `the band on a phone: ${asked}`);
+        await shot(page, 'array-phone-5-change-all.png');
+        await page.tap('[data-pv="go"]');
+        entry = await landed(page, before, 'Array of a template object, by touch');
         assert(entry.landed_on.length === 7, `on every sheet built from the template: ${entry.landed_on}`);
         seen.phone.template = { entry: entry.entry, sheets: entry.landed_on.length };
         assert(problems.length === 0, problems.join('; '));
