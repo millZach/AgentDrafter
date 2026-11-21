@@ -188,7 +188,8 @@ pub struct Insert {
     /// Whether its attributes read forwards, left to right or upwards,
     /// however it is turned, as a mirror leaves them: a mirrored insert's
     /// always do, and one mirrored back keeps them so, as AutoCAD's MIRRTEXT
-    /// 0 does on every mirror.
+    /// 0 does on every mirror. A constant attribute is part of the block,
+    /// which the insert carries no attribute for, so it turns with the block.
     #[serde(default, skip_serializing_if = "is_false")]
     pub readable_attributes: bool,
     /// A value for each of the block's attributes, in the order the block
@@ -236,7 +237,8 @@ pub struct BlockLibrary {
 /// the mirrored one, or that turned a half turn, whichever reads left to
 /// right or upwards ([`readable`]), and its justification is its own. On an
 /// insert mirrored back, with [`Insert::readable_attributes`], it reads
-/// along its turned direction, or that turned a half turn, by the same rule.
+/// along its turned direction, or that turned a half turn, by the same rule,
+/// but for a constant one, which is part of the block and turns with it.
 pub fn attribute_text(
     insert: &Insert,
     block: &Block,
@@ -256,7 +258,7 @@ pub fn attribute_text(
         width_factor: definition.width_factor,
         rotation: if insert.mirrored {
             readable(insert.rotation + 180.0 - definition.rotation)
-        } else if insert.readable_attributes {
+        } else if insert.readable_attributes && !definition.constant {
             readable(definition.rotation + insert.rotation)
         } else {
             normalize_degrees(definition.rotation + insert.rotation)
@@ -508,6 +510,12 @@ mod tests {
         twice.readable_attributes = true;
         let text = attribute_text(&twice, &block(base), &definition, "A-1");
         assert!((text.rotation - 60.0).abs() < 1e-9, "{}", text.rotation);
+        // A constant one is part of the block, so it turns with it, at 240,
+        // as AutoCAD draws it from the DWG.
+        let mut constant = definition.clone();
+        constant.constant = true;
+        let text = attribute_text(&twice, &block(base), &constant, "K");
+        assert_eq!(text.rotation, 240.0);
         // Without the key, an insert turned 240 turns its attribute with it.
         twice.readable_attributes = false;
         let text = attribute_text(&twice, &block(base), &definition, "A-1");

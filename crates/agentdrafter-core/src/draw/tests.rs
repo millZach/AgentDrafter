@@ -872,6 +872,30 @@ fn a_constant_attribute_draws_its_value_on_every_insert() {
     assert_eq!(read, [(Some(2), "X".into()), (Some(3), "K-1".into())]);
 }
 
+/// On an insert mirrored back, `readable_attributes`, a carried attribute
+/// reads forwards but a constant one turns with its block, as AutoCAD draws
+/// it from the DWG.
+#[test]
+fn a_constant_attribute_turns_with_its_block_on_an_insert_mirrored_back() {
+    let library = LIBRARY.replace(
+        "      - attdef: {tag: HIDDEN,",
+        "      - attdef: {tag: FIXED, position: [0, 8, 0], height: 2, default: K-1, constant: true}\n      - attdef: {tag: HIDDEN,",
+    );
+    let sheet = "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {block: B, position: [100, 50, 0], rotation: 240, readable_attributes: true, attributes: {TAG: X}}\n";
+    let list = draw_with_library("constant-readable", &library, sheet);
+    let run = |part: usize| list.text.iter().find(|r| r.part == Some(part)).unwrap();
+    let angle = |r: &TextRun| {
+        r.across[1]
+            .atan2(r.across[0])
+            .to_degrees()
+            .rem_euclid(360.0)
+    };
+    // The carried attribute reads at 60, forwards.
+    assert!((angle(run(2)) - 60.0).abs() < 1e-6, "{:?}", run(2));
+    // The constant one runs at 240, with the block.
+    assert!((angle(run(3)) - 240.0).abs() < 1e-6, "{:?}", run(3));
+}
+
 /// On a mirrored insert a constant attribute draws with its block,
 /// mirrored, as AutoCAD draws it from the DWG: reading backwards and
 /// running the other way from where its definition sits. A carried
