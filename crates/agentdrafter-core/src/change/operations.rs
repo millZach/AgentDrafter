@@ -692,8 +692,9 @@ fn does(spec: &Spec) -> String {
                          angle. A multileader's and a leader's text stays level, laid out again \
                          where its landing puts it, and a dimension's text reads as its rules \
                          lay it out. A turn by a multiple of 90 degrees lands exactly. A table, \
-                         which has no rotation, and a viewport are not turned. Each keeps its \
-                         ID. AutoCAD's ROTATE."
+                         which has no rotation, and a viewport are not turned, nor an ordinate \
+                         dimension but by a multiple of 90 degrees, which swaps its axis at a \
+                         quarter turn. Each keeps its ID. AutoCAD's ROTATE."
             .to_owned(),
         Kind::Scale => "Scales objects in place, target or targets as rotate takes them, by \
                         factor, a number more than 0, about base_point, a point or a snapped \
@@ -723,8 +724,11 @@ fn does(spec: &Spec) -> String {
                          one mirrored back keeps them so with readable_attributes: true. A \
                          hatch's pattern keeps its direction, as AutoCAD's MIRRHATCH 0 keeps it. \
                          A line across or up the sheet, or at 45 degrees, mirrors exactly. A \
-                         table is mirrored only across a line across or up the sheet, and a \
-                         multileader with block content and a viewport are not mirrored. \
+                         table is mirrored only across a line across or up the sheet, an \
+                         ordinate dimension only across one across or up the sheet or at 45 \
+                         degrees, a leader only when its landing goes to its mirror image's \
+                         side, and a multileader with block content and a viewport are not \
+                         mirrored. \
                          AutoCAD's MIRROR."
             .to_owned(),
         Kind::Table(op, table) => {
