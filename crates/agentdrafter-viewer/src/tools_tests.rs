@@ -96,6 +96,9 @@ fn the_aliases_start_their_tools_in_any_case() {
         ("T", ToolKind::Text),
         ("dt", ToolKind::Text),
         ("M", ToolKind::Move),
+        ("co", ToolKind::Copy),
+        ("CP", ToolKind::Copy),
+        ("copy", ToolKind::Copy),
         ("e", ToolKind::Erase),
         ("erase", ToolKind::Erase),
     ] {
@@ -103,6 +106,11 @@ fn the_aliases_start_their_tools_in_any_case() {
     }
     assert_eq!(tool_for("PLINE"), None);
     assert_eq!(tool_for("X"), None);
+    // No Array tool yet: its words are no tool's, so they go to the
+    // assistant.
+    for word in ["AR", "ARRAY", "ARRAYRECT"] {
+        assert_eq!(tool_for(word), None, "{word}");
+    }
 }
 
 #[test]
@@ -651,4 +659,344 @@ fn another_layout_of_the_sheet_drops_the_tool_running_with_nothing_sent() {
     assert_eq!(t.running(), None);
     // Enter then sends nothing of what was taken on Assembly.
     assert!(t.input("", None).sends.is_empty());
+}
+
+#[test]
+fn copy_picks_takes_a_base_and_places_copies_until_enter_as_one_copy_with_offsets() {
+    let mut t = tools();
+    t.input("co", None);
+    assert_eq!(t.running(), Some(ToolKind::Copy));
+    let state = t.state(false);
+    assert!(state.selecting);
+    assert_eq!(state.prompt, "Click the objects to copy, then Enter");
+    t.pick(Some(2));
+    t.input("", None);
+    assert_eq!(
+        t.state(false).prompt,
+        "Click a point to copy it from: the base point"
+    );
+    t.point(snapped(2.0, 6.5, SnapKind::Insertion, 2, None));
+    let state = t.state(false);
+    assert_eq!(
+        state.prompt,
+        "Click where the copy goes, or type @dx,dy or a length"
+    );
+    assert_eq!(state.options.len(), 1, "{:?}", state.options);
+    assert_eq!(state.options[0].label, "Done");
+    // Each point places a copy, and the tool goes on from the same base.
+    let outcome = t.point(at(2.0, 7.7));
+    assert!(outcome.sends.is_empty(), "the copies wait for Enter");
+    assert_eq!(
+        outcome.log,
+        ["COPY 1: 0.0000, 1.2000 in from the base point, dashed until Enter"]
+    );
+    // A typed displacement is from the base point, not the last copy.
+    t.input("@0,-1.2", None);
+    let state = t.state(false);
+    assert_eq!(state.placed, 2);
+    assert_eq!(state.points, [[2.0, 6.5]], "the base point stays");
+    assert_eq!(
+        state.prompt,
+        "2 copies placed, dashed until you finish. Click where the next goes, or type @dx,dy \
+         or a length"
+    );
+    let labels: Vec<&str> = state.options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(labels, ["Undo", "Done: copy 2"]);
+    assert_eq!(
+        t.placed_tags(false),
+        [
+            ("copy 1 · waits for Enter".to_owned(), [0.0, 1.2]),
+            ("copy 2 · waits for Enter".to_owned(), [0.0, -1.2]),
+        ]
+    );
+    assert_eq!(t.placed_tags(true)[1].0, "copy 2");
+    let outcome = t.input("", None);
+    let ops = operations(&outcome);
+    assert_eq!(
+        ops,
+        [json!({"op": "copy", "target": {"id": "DP-LD-101/device"},
+                "offsets": [[0.0, 1.2, 0], [0.0, -1.2, 0]]})],
+        "one copy operation, its offsets cleared of subtraction's noise"
+    );
+    let send = outcome.sends.last().cloned().unwrap();
+    assert_eq!(send.what, "Copied device, 2 copies");
+    assert_eq!(send.sheets, ["DP-LD-101"]);
+    assert!(send.template.is_none());
+    assert_eq!(t.running(), None);
+}
+
+#[test]
+fn one_copy_goes_from_and_to_with_its_snapped_points() {
+    let mut t = tools();
+    t.start(ToolKind::Copy, &[2]);
+    t.point(snapped(2.0, 6.5, SnapKind::Insertion, 2, None));
+    t.point(snapped(0.5, 0.5, SnapKind::Endpoint, 0, Some("points[0]")));
+    let outcome = t.option("done");
+    assert_eq!(
+        operations(&outcome),
+        [json!({"op": "copy", "target": {"id": "DP-LD-101/device"},
+                "from": {"snap": {"id": "DP-LD-101/device", "snap": "insertion"}},
+                "to": {"snap": {"id": "DP-LD-101/border", "snap": "endpoint", "which": "points[0]"}}})]
+    );
+    assert_eq!(outcome.sends[0].what, "Copied device");
+}
+
+#[test]
+fn copy_undo_takes_back_the_last_placed_and_esc_lands_the_rest() {
+    let mut t = tools();
+    t.start(ToolKind::Copy, &[2]);
+    t.input("1,1", None);
+    assert!(
+        t.input("u", None).sends.is_empty(),
+        "with none placed, U takes nothing back"
+    );
+    assert_eq!(
+        t.state(false).error.as_deref(),
+        Some("No copy is placed yet to take back.")
+    );
+    t.input("@1,0", None);
+    t.input("@2,0", None);
+    t.input("@3,0", None);
+    let outcome = t.option("undo");
+    assert_eq!(outcome.log, ["COPY: last copy taken back, 2 copies placed"]);
+    assert!(outcome.sends.is_empty());
+    t.input("U", None);
+    assert_eq!(t.state(false).placed, 1);
+    // A copy placed on the base point would sit on the original.
+    t.input("1,1", None);
+    assert!(t.state(false).error.unwrap().contains("base point"));
+    assert_eq!(t.state(false).placed, 1);
+    t.input("@0,2", None);
+    // Esc lands the copies placed, as AutoCAD's COPY keeps them.
+    let outcome = t.escape();
+    assert_eq!(
+        operations(&outcome)[0]["offsets"],
+        json!([[1.0, 0.0, 0], [0.0, 2.0, 0]])
+    );
+    assert_eq!(t.running(), None);
+    // With none placed, Esc just ends the tool.
+    t.start(ToolKind::Copy, &[2]);
+    t.input("1,1", None);
+    let outcome = t.escape();
+    assert!(outcome.sends.is_empty());
+    assert_eq!(outcome.log, ["COPY: cancelled, nothing changed"]);
+    assert_eq!(t.running(), None);
+}
+
+#[test]
+fn copy_takes_a_length_towards_the_cursor_and_ortho() {
+    let mut t = tools();
+    t.ortho = true;
+    t.start(ToolKind::Copy, &[2]);
+    t.input("1,1", None);
+    assert_eq!(
+        t.aim([3.0, 1.4], None).at,
+        [3.0, 1.0],
+        "Ortho holds it level"
+    );
+    t.input("2", Some([1.2, 5.0]));
+    let band = t.band(Some(&at(4.0, 1.0)));
+    let (picked, offsets) = band.placed.clone().expect("the copy placed shows");
+    assert_eq!(picked, [2]);
+    assert_eq!(offsets, [[0.0, 2.0]], "upright, held by Ortho, 2 long");
+    assert_eq!(band.copying, Some((vec![2], [3.0, 0.0])));
+    assert_eq!(band.guides, [[[1.0, 1.0], [4.0, 1.0]]]);
+    assert!(band.moving.is_none(), "the objects stay where they are");
+    let words = t.cursor_words(&at(4.0, 1.0)).unwrap();
+    assert_eq!(words.0, "3.000 in");
+}
+
+#[test]
+fn copying_a_templates_object_warns_and_asks_once_when_the_copies_land() {
+    let mut t = tools();
+    t.input("cp", None);
+    t.pick(Some(0));
+    t.input("", None);
+    let warning = t.state(false).warning.unwrap();
+    assert_eq!(warning.title, "This is part of the template.");
+    assert_eq!(
+        warning.detail,
+        "This copies it on every sheet built from this template: 3 sheets. You will be asked \
+         before it lands."
+    );
+    t.point(snapped(0.5, 0.5, SnapKind::Endpoint, 0, Some("points[0]")));
+    // Each copy placed asks nothing: the change set waits for Enter.
+    assert!(t.point(at(0.5, 2.0)).sends.is_empty());
+    assert!(t.point(at(0.5, 3.0)).sends.is_empty());
+    assert_eq!(
+        t.state(false).warning.unwrap().edit,
+        "Copy border, 2 copies"
+    );
+    let outcome = t.input("", None);
+    assert_eq!(outcome.sends.len(), 1, "one change set, asked about once");
+    let send = outcome.sends[0].clone();
+    let edit = send.template.unwrap();
+    assert_eq!(edit.sheets, ["DP-LD-101", "DP-LD-102", "DP-LD-104"]);
+    assert_eq!(
+        edit.detail,
+        "This copies it on every sheet built from this template: 3 sheets."
+    );
+    assert_eq!(edit.edit, "Copy border, 2 copies");
+    assert_eq!(send.sheets, edit.sheets);
+    // One copy of a template's object keeps a snap on the template's
+    // object, and a snap on a row's own object goes as its coordinates.
+    t.start(ToolKind::Copy, &[0]);
+    t.point(snapped(0.5, 0.5, SnapKind::Endpoint, 0, Some("points[0]")));
+    t.point(snapped(2.0, 6.5, SnapKind::Insertion, 2, None));
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(
+        op["from"],
+        json!({"snap": {"id": "DP-LD-101/border", "snap": "endpoint", "which": "points[0]"}})
+    );
+    assert_eq!(op["to"], json!([2.0, 6.5, 0]));
+}
+
+#[test]
+fn copy_of_several_names_its_targets_and_another_tool_lands_the_copies_first_and_waits() {
+    let mut t = tools();
+    t.start(ToolKind::Copy, &[]);
+    t.pick(Some(1));
+    t.pick(Some(2));
+    t.input("", None);
+    assert_eq!(
+        t.state(false).prompt,
+        "Click a point to copy them from: the base point"
+    );
+    t.input("0,0", None);
+    t.input("@5,0", None);
+    let warning = t.state(false).warning.unwrap();
+    assert_eq!(warning.title, "One of these is part of the template.");
+    // Another tool lands the copies placed; as one is the template's,
+    // they are asked about first, and Line waits.
+    let outcome = t.input("L", None);
+    assert_eq!(t.running(), None);
+    let ops = operations(&outcome);
+    assert_eq!(
+        ops[0]["targets"],
+        json!([{"id": "DP-LD-101/title"}, {"id": "DP-LD-101/device"}])
+    );
+    assert_eq!(ops[0]["from"], json!([0.0, 0.0, 0]));
+    assert_eq!(ops[0]["to"], json!([5.0, 0.0, 0]));
+    let send = &outcome.sends[0];
+    assert_eq!(send.what, "Copied 2 objects");
+    assert_eq!(send.sheets, ["DP-LD-101", "DP-LD-102", "DP-LD-104"]);
+}
+
+#[test]
+fn a_sheet_drawn_again_mid_copy_keeps_the_copies_placed_by_their_objects_ids() {
+    let mut t = tools();
+    t.start(ToolKind::Copy, &[2]);
+    t.input("1,1", None);
+    t.input("@1,0", None);
+    // An object landing before the device moves its place.
+    let mut again = context();
+    again.objects.insert(
+        0,
+        ObjectInfo {
+            id: Some("DP-LD-101/new".to_owned()),
+            kind: "line".to_owned(),
+            ..ObjectInfo::default()
+        },
+    );
+    t.load(again);
+    assert_eq!(t.state(false).picked, [3]);
+    assert_eq!(t.state(false).placed, 1);
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["target"], json!({"id": "DP-LD-101/device"}));
+    // Another sheet drops the tool, with nothing sent.
+    t.start(ToolKind::Copy, &[2]);
+    t.input("1,1", None);
+    t.input("@1,0", None);
+    let mut other = context();
+    other.sheet = "DP-LD-102".to_owned();
+    t.load(other);
+    assert_eq!(t.running(), None);
+}
+
+#[test]
+fn copy_leaves_what_a_viewport_shows_as_move_does() {
+    let mut t = tools();
+    let mut c = context();
+    c.objects[2].through_viewport = true;
+    t.load(c);
+    t.start(ToolKind::Copy, &[]);
+    t.pick(Some(2));
+    assert!(t
+        .state(false)
+        .error
+        .unwrap()
+        .contains("Copy copies only what is drawn on the paper here"));
+    assert!(t.state(false).picked.is_empty());
+}
+
+#[test]
+fn another_tool_waits_while_the_copies_it_ended_are_asked_about() {
+    let mut t = tools();
+    // Copies of a template's object placed, then Circle picked: the copies
+    // are given to be asked about, and Circle does not start, so nothing
+    // can land before Change all or Cancel.
+    t.start(ToolKind::Copy, &[0]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    let outcome = t.start(ToolKind::Circle, &[]);
+    assert_eq!(outcome.sends.len(), 1);
+    assert!(
+        outcome.sends[0].template.is_some(),
+        "the copies are asked about"
+    );
+    assert_eq!(
+        outcome.log,
+        ["CIRCLE not started: Change all or Cancel first"]
+    );
+    assert_eq!(t.running(), None, "no tool runs while it is asked");
+    assert!(!t.takes_points());
+    // An alias typed is the same, and so is Erase on objects selected,
+    // which would otherwise erase them at once.
+    t.start(ToolKind::Copy, &[0]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    let outcome = t.input("C", None);
+    assert_eq!(outcome.sends.len(), 1);
+    assert_eq!(t.running(), None);
+    t.start(ToolKind::Copy, &[0]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    let outcome = t.start(ToolKind::Erase, &[2]);
+    assert_eq!(outcome.sends.len(), 1, "nothing is erased: {outcome:?}");
+    assert_eq!(operations(&outcome)[0]["op"], "copy");
+    assert_eq!(t.running(), None);
+    // A row's own object's copies are not asked about: the next tool starts.
+    t.start(ToolKind::Copy, &[2]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    let outcome = t.start(ToolKind::Circle, &[]);
+    assert!(outcome.sends[0].template.is_none());
+    assert_eq!(t.running(), Some(ToolKind::Circle));
+}
+
+#[test]
+fn leaving_drops_the_copies_placed_with_nothing_sent() {
+    let mut t = tools();
+    t.start(ToolKind::Copy, &[2]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    t.input("@2,0", None);
+    let outcome = t.leave();
+    assert!(outcome.sends.is_empty(), "nothing is sent");
+    assert_eq!(
+        outcome.log,
+        ["COPY: 2 copies placed dropped, nothing changed"]
+    );
+    assert_eq!(t.running(), None);
+    // With none placed, it ends.
+    t.start(ToolKind::Copy, &[2]);
+    let outcome = t.leave();
+    assert!(outcome.sends.is_empty());
+    assert_eq!(t.running(), None);
+    // Any other tool ends as Esc ends it: Line keeps what it drew.
+    t.start(ToolKind::Line, &[]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    assert_eq!(operations(&t.leave()).len(), 1);
+    assert_eq!(t.running(), None);
 }

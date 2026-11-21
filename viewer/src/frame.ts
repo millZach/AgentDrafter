@@ -16,11 +16,13 @@ export interface Tool {
   command: string;
   /** AutoCAD's alias, which the command bar takes: the renderer reads it (crates/agentdrafter-viewer/src/tools.rs). */
   alias: string;
+  /** AutoCAD's other alias for it, if it has one, such as Copy's `CP`. */
+  also?: string;
   /** What it does, in plain words. */
   tip: string;
 }
 
-export type ToolKey = 'line' | 'circle' | 'rectangle' | 'text' | 'move' | 'erase';
+export type ToolKey = 'line' | 'circle' | 'rectangle' | 'text' | 'move' | 'copy' | 'erase';
 
 /** The ribbon's panels and their tools, in order. */
 export const PANELS: { title: string; tools: Tool[] }[] = [
@@ -37,6 +39,14 @@ export const PANELS: { title: string; tools: Tool[] }[] = [
     title: 'Modify',
     tools: [
       { key: 'move', label: 'Move', command: 'MOVE', alias: 'M', tip: 'Pick objects, a point to hold them by, then where that point goes.' },
+      {
+        key: 'copy',
+        label: 'Copy',
+        command: 'COPY',
+        alias: 'CO',
+        also: 'CP',
+        tip: 'Pick objects, a point to hold them by, then where each copy goes: it keeps placing copies until Enter or Esc. The originals stay.',
+      },
       { key: 'erase', label: 'Erase', command: 'ERASE', alias: 'E', tip: 'Pick objects to remove. Undo brings them back.' },
     ],
   },
@@ -165,7 +175,7 @@ export type Part =
   | { error: string };
 
 /** What an option does: the page's own, or a running tool's (`tool:done`), which the renderer takes. */
-export type Act = 'clear' | 'older' | 'newer' | 'live' | 'copy' | 'move' | 'erase' | `tool:${string}`;
+export type Act = 'clear' | 'older' | 'newer' | 'live' | 'copy' | 'move' | 'copy-objects' | 'erase' | `tool:${string}`;
 
 /** What the command bar prompts: a command's name, when one is named, and its line. */
 export interface Prompt {
@@ -268,8 +278,13 @@ export function promptFor(s: PromptState): Prompt {
     return { command: null, parts: [{ snap: s.taken.label }, { text: `${s.taken.rest} ` }, ...options(...acts)] };
   }
   if (s.selected) {
-    // Move and Erase take what is selected, as AutoCAD's do.
-    return { command: null, parts: [{ text: `${nameOf(s.selected)} selected ` }, ...options(['Move', 'move'], ['Erase', 'erase'], ['Clear', 'clear'])] };
+    // Move, Copy and Erase take what is selected, as AutoCAD's do. A phone
+    // gives the name alone, so its four buttons stay on one line: the halo
+    // and the card say it is selected.
+    return {
+      command: null,
+      parts: [{ text: s.touch ? `${nameOf(s.selected)} ` : `${nameOf(s.selected)} selected ` }, ...options(['Move', 'move'], ['Copy', 'copy-objects'], ['Erase', 'erase'], ['Clear', 'clear'])],
+    };
   }
   return {
     command: null,
@@ -315,6 +330,8 @@ export interface ToolState {
   points: [number, number][];
   /** The text a Text tool is typing: each line where it goes, the one being typed last. */
   text: { height: number; lines: { text: string; at: [number, number] }[] } | null;
+  /** The copies Copy has placed, which wait for Enter, Done or Esc. */
+  placed: number;
 }
 
 /** A change set a tool has ready (`Outcome.send`). */
@@ -1025,4 +1042,40 @@ export function placeBeside(
   x = Math.max(rl + margin, Math.min(rr - margin - card.width, x));
   const y = Math.max(rt + margin, Math.min(rb - margin - card.height, ot));
   return [x, y];
+}
+
+/** The note at the command bar's right: the keys that do something now. */
+export function barNote(t: ToolState | null | undefined): string {
+  if (t?.typing_text) return 'Enter: next line · Enter again or Esc: done';
+  // Copy's copies placed wait for Enter, Done or Esc, which land them all (#66).
+  if (t?.tool === 'copy' && t.placed > 0) return 'Enter or Esc: the copies land · Ctrl+Z: one back';
+  if (t?.tool) return 'Enter or right-click: done · Esc: end · F8: Ortho';
+  return 'F3: snaps · F8: Ortho · Tab: the next snap here';
+}
+
+/** Whether a key is Ctrl+Z, or ⌘Z on a Mac: with copies placed, it takes the last one back, as U does. */
+export function isUndoKey(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }): boolean {
+  return (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z';
+}
+
+/**
+ * Whether a press on a command bar option lets the focus go before the
+ * option acts. The option takes no focus, so Enter after clicking Undo
+ * enters at the prompt; but a field being edited, such as quick
+ * properties', is let go first, so its edit lands as leaving it does; and
+ * an option that has the focus, reached by Tab, gives it up, so Enter
+ * after the click does not press it again. The command bar's own field
+ * keeps it, and its typing (#66).
+ */
+export function letGoOnOptionPress(active: { tag: string; option: boolean; commandField: boolean } | null): boolean {
+  if (!active) return false;
+  if (active.option) return true;
+  if (active.commandField) return false;
+  return active.tag === 'INPUT' || active.tag === 'TEXTAREA' || active.tag === 'SELECT';
+}
+
+/** The template warning the command bar shows above its prompt: the running tool's, but not while a change set is shown before it lands. */
+export function barWarning(s: { tool?: ToolState | null; previewing?: boolean }): TemplateEdit | null {
+  if (s.previewing || !s.tool?.tool) return null;
+  return s.tool.warning ?? null;
 }

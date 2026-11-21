@@ -1,16 +1,17 @@
-//! The drafter's drawing tools: Line, Circle, Rectangle, Text, Move and
-//! Erase, as AutoCAD's LINE, CIRCLE, RECTANG, TEXT, MOVE and ERASE run them,
-//! cut down for beginners (#152). Plain computation, tested natively; `web`
-//! feeds it the drafter's clicks, taps and typing and draws what it says.
+//! The drafter's drawing tools: Line, Circle, Rectangle, Text, Move, Copy
+//! and Erase, as AutoCAD's LINE, CIRCLE, RECTANG, TEXT, MOVE, COPY and ERASE
+//! run them, cut down for beginners (#152, Copy #66). Plain computation,
+//! tested natively; `web` feeds it the drafter's clicks, taps and typing and
+//! draws what it says.
 //!
 //! A tool takes points, a snapped one where the cursor caught a snap, picks
 //! objects and reads what is typed in the command bar: an alias (`L`, `C`,
-//! `REC`, `T`, `M`, `E`), a point (`120,80`, `@40,0`, `@5<30`), a length
+//! `REC`, `T`, `M`, `CO`, `E`), a point (`120,80`, `@40,0`, `@5<30`), a length
 //! alone towards the cursor, or an option's capital letter. While it runs it
 //! says what it wants, in plain words with options to click, and shows its
 //! rubber band. When it has what it needs it gives one change set, with the
 //! operation the core has for what it does (`add_line`, `add_circle`, a
-//! closed `add_polyline`, `add_text`, `move`, `delete`), which the page
+//! closed `add_polyline`, `add_text`, `move`, `copy`, `delete`), which the page
 //! sends through `change`: what the edit means is the core's, not this
 //! module's (ADR-0007). Each point taken on a snap goes as a snapped point,
 //! so the core works out the exact place; a point on a row's own object, in
@@ -34,6 +35,7 @@ pub enum ToolKind {
     Rectangle,
     Text,
     Move,
+    Copy,
     Erase,
 }
 
@@ -50,7 +52,7 @@ pub struct ToolSpec {
 
 /// The tools and their aliases, as AutoCAD's are, but `T`, which starts
 /// AutoCAD's MTEXT, starts TEXT here: a beginner's text is one line.
-pub const TOOLS: [ToolSpec; 6] = [
+pub const TOOLS: [ToolSpec; 7] = [
     ToolSpec {
         kind: ToolKind::Line,
         command: "LINE",
@@ -77,6 +79,11 @@ pub const TOOLS: [ToolSpec; 6] = [
         aliases: &["M", "MOVE"],
     },
     ToolSpec {
+        kind: ToolKind::Copy,
+        command: "COPY",
+        aliases: &["CO", "CP", "COPY"],
+    },
+    ToolSpec {
         kind: ToolKind::Erase,
         command: "ERASE",
         aliases: &["E", "ERASE"],
@@ -98,7 +105,7 @@ impl ToolKind {
 
     /// Whether it draws a new object, on the current layer.
     pub fn draws(self) -> bool {
-        !matches!(self, ToolKind::Move | ToolKind::Erase)
+        !matches!(self, ToolKind::Move | ToolKind::Copy | ToolKind::Erase)
     }
 
     /// Its name, as the page names it.
@@ -109,6 +116,7 @@ impl ToolKind {
             ToolKind::Rectangle => "rectangle",
             ToolKind::Text => "text",
             ToolKind::Move => "move",
+            ToolKind::Copy => "copy",
             ToolKind::Erase => "erase",
         }
     }
@@ -285,6 +293,17 @@ enum Step {
         picked: Vec<usize>,
         base: Taken,
     },
+    CopyBase {
+        picked: Vec<usize>,
+    },
+    /// Copy's second points: each taken places a copy, by how far it is
+    /// from the base point, and the tool goes on from the same base point
+    /// until Enter, Done or Esc lands them all, as one change set.
+    CopySecond {
+        picked: Vec<usize>,
+        base: Taken,
+        placed: Vec<Taken>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -393,6 +412,8 @@ pub struct State {
     pub points: Vec<[f64; 2]>,
     /// The text a Text tool is typing.
     pub text: Option<Typing>,
+    /// The copies Copy has placed, which wait for Enter, Done or Esc.
+    pub placed: usize,
 }
 
 /// What a running tool shows before it lands, in drawing units.
@@ -404,6 +425,12 @@ pub struct Band {
     pub guides: Vec<[[f64; 2]; 2]>,
     /// The objects a move would move, and by how much.
     pub moving: Option<(Vec<usize>, [f64; 2])>,
+    /// The objects a copy would copy, and by how much: the copy following
+    /// the cursor, dashed.
+    pub copying: Option<(Vec<usize>, [f64; 2])>,
+    /// The objects Copy copies, and the offset of each copy placed, which
+    /// waits for Enter: dashed in the proposal's colour.
+    pub placed: Option<(Vec<usize>, Vec<[f64; 2]>)>,
     /// The points taken so far.
     pub points: Vec<[f64; 2]>,
 }
@@ -511,6 +538,22 @@ fn tidy(v: f64) -> f64 {
     }
 }
 
+/// A difference of coordinates cleared of the noise subtracting leaves,
+/// such as 1.2000000000000002 for 1.2.
+fn clean(v: f64) -> f64 {
+    let r = (v * 1e10).round() / 1e10;
+    if r == 0.0 {
+        0.0
+    } else {
+        r
+    }
+}
+
+/// How far `to` is from `from`, across and up.
+fn offset(from: &Taken, to: &Taken) -> [f64; 2] {
+    [clean(to.at[0] - from.at[0]), clean(to.at[1] - from.at[1])]
+}
+
 /// The length from `a` to `b`, and its angle in degrees from the X axis,
 /// from 0 to 360.
 fn length_angle(a: [f64; 2], b: [f64; 2]) -> (f64, f64) {
@@ -569,16 +612,31 @@ impl Tools {
                     follow(at);
                     lines.iter_mut().for_each(|(_, t)| follow(t));
                 }
-                Step::Select { picked } | Step::MoveBase { picked } => follow_picked(picked),
+                Step::Select { picked } | Step::MoveBase { picked } | Step::CopyBase { picked } => {
+                    follow_picked(picked)
+                }
                 Step::MoveSecond { picked, base } => {
                     follow_picked(picked);
                     follow(base);
+                }
+                Step::CopySecond {
+                    picked,
+                    base,
+                    placed,
+                } => {
+                    follow_picked(picked);
+                    follow(base);
+                    placed.iter_mut().for_each(follow);
                 }
                 _ => {}
             }
             // A move or an erase whose objects have all gone has nothing
             // left to do.
-            if let Step::MoveBase { picked } | Step::MoveSecond { picked, .. } = &running.step {
+            if let Step::MoveBase { picked }
+            | Step::MoveSecond { picked, .. }
+            | Step::CopyBase { picked }
+            | Step::CopySecond { picked, .. } = &running.step
+            {
                 if picked.is_empty() {
                     self.running = None;
                 }
@@ -611,6 +669,8 @@ impl Tools {
                     | Step::TextStart
                     | Step::MoveBase { .. }
                     | Step::MoveSecond { .. }
+                    | Step::CopyBase { .. }
+                    | Step::CopySecond { .. }
             )
         )
     }
@@ -699,15 +759,26 @@ impl Tools {
             return Outcome::default();
         }
         let mut outcome = self.end(false);
+        // The tool it ended gave an edit to a template's objects, which the
+        // page asks about first, as Copy's copies placed are: no tool runs
+        // until that is answered, so nothing lands meanwhile, as none runs
+        // while Move's is asked about.
+        if outcome.sends.iter().any(|s| s.template.is_some()) {
+            outcome.log.push(format!(
+                "{} not started: Change all or Cancel first",
+                kind.command()
+            ));
+            return outcome;
+        }
         self.last = Some(kind);
         let mut picked: Vec<usize> = picked
             .iter()
             .copied()
             .filter(|&p| self.nameable(p))
             .collect();
-        if kind == ToolKind::Move {
+        if matches!(kind, ToolKind::Move | ToolKind::Copy) {
             if let Some(&p) = picked.iter().find(|&&p| self.through_viewport(p)) {
-                self.error = Some(self.viewport_words(p));
+                self.error = Some(self.viewport_words(kind, p));
                 picked.retain(|&p| !self.through_viewport(p));
             }
         }
@@ -719,7 +790,10 @@ impl Tools {
             ToolKind::Move if !picked.is_empty() => Step::MoveBase {
                 picked: picked.clone(),
             },
-            ToolKind::Move | ToolKind::Erase => Step::Select {
+            ToolKind::Copy if !picked.is_empty() => Step::CopyBase {
+                picked: picked.clone(),
+            },
+            ToolKind::Move | ToolKind::Copy | ToolKind::Erase => Step::Select {
                 picked: picked.clone(),
             },
         };
@@ -748,11 +822,16 @@ impl Tools {
             .is_some_and(|o| o.through_viewport)
     }
 
-    /// Why Move does not take an object seen through a viewport.
-    fn viewport_words(&self, place: usize) -> String {
+    /// Why Move and Copy do not take an object seen through a viewport.
+    fn viewport_words(&self, kind: ToolKind, place: usize) -> String {
+        let (tool, verb) = if kind == ToolKind::Copy {
+            ("Copy", "copies")
+        } else {
+            ("Move", "moves")
+        };
         format!(
-            "{} is in model space, seen through a viewport: Move moves only what is drawn on \
-             the paper here.",
+            "{} is in model space, seen through a viewport: {tool} {verb} only what is drawn \
+             on the paper here.",
             self.object_words(place)
         )
     }
@@ -781,6 +860,13 @@ impl Tools {
         };
         match running.step {
             Step::LineNext { points } if points.len() >= 2 => self.land_lines(&points),
+            // Copy keeps the copies it placed, as AutoCAD's COPY does: Esc
+            // lands them as Enter does.
+            Step::CopySecond {
+                picked,
+                base,
+                placed,
+            } if !placed.is_empty() => self.land_copy(&picked, &base, &placed),
             Step::TextType {
                 at,
                 mut lines,
@@ -816,6 +902,38 @@ impl Tools {
         self.end(true)
     }
 
+    /// The page leaves what the tool works on: an entry of the journal, or
+    /// a proposal opened over the sheet. Copy's copies placed are dropped,
+    /// with nothing sent, as another sheet drops them: only Enter, Done, a
+    /// right-click or Esc lands them. Any other tool ends as Esc ends it.
+    pub fn leave(&mut self) -> Outcome {
+        let Some(Running {
+            kind: ToolKind::Copy,
+            step,
+        }) = &self.running
+        else {
+            return self.escape();
+        };
+        let placed = match step {
+            Step::CopySecond { placed, .. } => placed.len(),
+            _ => 0,
+        };
+        self.running = None;
+        self.error = None;
+        let line = if placed == 0 {
+            "COPY: cancelled, nothing changed".to_owned()
+        } else {
+            format!(
+                "COPY: {} placed dropped, nothing changed",
+                plural(placed, "copy", "copies")
+            )
+        };
+        Outcome {
+            log: vec![line],
+            sends: Vec::new(),
+        }
+    }
+
     /// Clears what went wrong, as its OK does.
     pub fn clear_error(&mut self) {
         self.error = None;
@@ -833,7 +951,7 @@ impl Tools {
             Step::LineNext { points } => points.last(),
             Step::CircleRadius { center, .. } => Some(center),
             Step::RectangleSecond { first } => Some(first),
-            Step::MoveSecond { base, .. } => Some(base),
+            Step::MoveSecond { base, .. } | Step::CopySecond { base, .. } => Some(base),
             _ => None,
         }
     }
@@ -843,7 +961,7 @@ impl Tools {
         self.ortho
             && matches!(
                 self.running.as_ref().map(|r| &r.step),
-                Some(Step::LineNext { .. } | Step::MoveSecond { .. })
+                Some(Step::LineNext { .. } | Step::MoveSecond { .. } | Step::CopySecond { .. })
             )
     }
 
@@ -998,6 +1116,41 @@ impl Tools {
                     return outcome;
                 }
             }
+            Step::CopyBase { picked } => {
+                log.push(format!("COPY base point {where_}"));
+                Some(Step::CopySecond {
+                    picked,
+                    base: point.clone(),
+                    placed: Vec::new(),
+                })
+            }
+            Step::CopySecond {
+                picked,
+                base,
+                mut placed,
+            } => {
+                if (point.at[0] - base.at[0]).hypot(point.at[1] - base.at[1]) < 1e-9 {
+                    self.error = Some(
+                        "That is the base point: a copy there would sit on the original."
+                            .to_owned(),
+                    );
+                } else {
+                    let [dx, dy] = offset(&base, &point);
+                    placed.push(point.clone());
+                    log.push(format!(
+                        "COPY {}: {}, {}{} from the base point, dashed until Enter",
+                        placed.len(),
+                        f4(dx),
+                        f4(dy),
+                        self.unit()
+                    ));
+                }
+                Some(Step::CopySecond {
+                    picked,
+                    base,
+                    placed,
+                })
+            }
             other => Some(other),
         };
         self.last_point = Some((point.at, point.z));
@@ -1018,7 +1171,6 @@ impl Tools {
         let words = self.object_words(place);
         let nameable = self.nameable(place);
         let viewport = self.through_viewport(place);
-        let viewport_words = self.viewport_words(place);
         let Some(Running {
             kind,
             step: Step::Select { picked },
@@ -1027,8 +1179,9 @@ impl Tools {
             return Outcome::default();
         };
         let command = kind.command();
-        if *kind == ToolKind::Move && viewport {
-            self.error = Some(viewport_words);
+        if matches!(kind, ToolKind::Move | ToolKind::Copy) && viewport {
+            let kind = *kind;
+            self.error = Some(self.viewport_words(kind, place));
             return Outcome::default();
         }
         if !nameable {
@@ -1069,6 +1222,13 @@ impl Tools {
             self.running = Some(Running {
                 kind,
                 step: Step::MoveBase { picked },
+            });
+            return Outcome::default();
+        }
+        if kind == ToolKind::Copy {
+            self.running = Some(Running {
+                kind,
+                step: Step::CopyBase { picked },
             });
             return Outcome::default();
         }
@@ -1159,7 +1319,7 @@ impl Tools {
                 return self.start(kind, &[]);
             }
             self.error = Some(format!(
-                "“{typed}” is not a drawing tool: try L, C, REC, T, M or E."
+                "“{typed}” is not a drawing tool: try L, C, REC, T, M, CO or E."
             ));
             return Outcome {
                 log: vec![format!("“{typed}” is not a drawing tool")],
@@ -1261,6 +1421,34 @@ impl Tools {
                     sends: Vec::new(),
                 };
             }
+            (
+                Step::CopySecond {
+                    picked,
+                    base,
+                    placed,
+                },
+                "U" | "UNDO",
+            ) => {
+                if placed.is_empty() {
+                    self.error = Some("No copy is placed yet to take back.".to_owned());
+                    return Outcome::default();
+                }
+                let mut placed = placed.clone();
+                placed.pop();
+                let left = plural(placed.len(), "copy", "copies");
+                self.running = Some(Running {
+                    kind,
+                    step: Step::CopySecond {
+                        picked: picked.clone(),
+                        base: base.clone(),
+                        placed,
+                    },
+                });
+                return Outcome {
+                    log: vec![format!("COPY: last copy taken back, {left} placed")],
+                    sends: Vec::new(),
+                };
+            }
             (Step::LineNext { points }, "C" | "CLOSE") => {
                 if points.len() < 3 {
                     self.error = Some("Close needs two lines drawn first.".to_owned());
@@ -1333,7 +1521,7 @@ impl Tools {
             }
             if matches!(
                 running.step,
-                Step::LineNext { .. } | Step::MoveSecond { .. }
+                Step::LineNext { .. } | Step::MoveSecond { .. } | Step::CopySecond { .. }
             ) {
                 if let Some(base) = self.base() {
                     // As AutoCAD's direct distance entry: that far towards
@@ -1358,7 +1546,7 @@ impl Tools {
         }
         let lengths = matches!(
             running.step,
-            Step::LineNext { .. } | Step::MoveSecond { .. }
+            Step::LineNext { .. } | Step::MoveSecond { .. } | Step::CopySecond { .. }
         );
         self.error = Some(format!(
             "“{typed}” is not a point. Type x,y, @dx,dy{}, or click an option.",
@@ -1517,7 +1705,12 @@ impl Tools {
 
     /// What an edit by `kind` to the objects at `picked` says when some are
     /// the template's.
-    fn template_edit(&self, kind: ToolKind, picked: &[usize]) -> Option<TemplateEdit> {
+    fn template_edit(
+        &self,
+        kind: ToolKind,
+        picked: &[usize],
+        copies: usize,
+    ) -> Option<TemplateEdit> {
         let (of, reach) = self.template_part(picked)?;
         let n = picked.len();
         let all = of.len() == n;
@@ -1532,26 +1725,36 @@ impl Tools {
         } else {
             format!("{} of these are part of the template.", of.len())
         };
-        let verb = if kind == ToolKind::Move {
-            "Moving"
-        } else {
-            "Erasing"
-        };
         let them = if all && n > 1 { "them" } else { "it" };
-        let detail = if reach.sheets.len() > 1 {
-            format!("{verb} {them} changes {} sheets.", reach.sheets.len())
-        } else {
-            format!("{verb} {them} changes the template, which only this sheet is built from.")
+        let sheets = reach.sheets.len();
+        let detail = match kind {
+            // A copy of a template's object is written in the template.
+            ToolKind::Copy if sheets > 1 => format!(
+                "This copies {them} on every sheet built from this template: {sheets} sheets."
+            ),
+            ToolKind::Copy => {
+                format!("This copies {them} in the template, which only this sheet is built from.")
+            }
+            _ => {
+                let verb = if kind == ToolKind::Move {
+                    "Moving"
+                } else {
+                    "Erasing"
+                };
+                if sheets > 1 {
+                    format!("{verb} {them} changes {sheets} sheets.")
+                } else {
+                    format!(
+                        "{verb} {them} changes the template, which only this sheet is built from."
+                    )
+                }
+            }
         };
-        let edit = format!(
-            "{} {}",
-            if kind == ToolKind::Move {
-                "Move"
-            } else {
-                "Erase"
-            },
-            self.picked_words(picked)
-        );
+        let edit = match kind {
+            ToolKind::Copy => format!("Copy {}", self.copy_words(picked, copies)),
+            ToolKind::Move => format!("Move {}", self.picked_words(picked)),
+            _ => format!("Erase {}", self.picked_words(picked)),
+        };
         Some(TemplateEdit {
             title,
             detail,
@@ -1617,7 +1820,7 @@ impl Tools {
                 change_set: json!({ "operations": operations }),
                 what,
                 sheets: self.reached(picked),
-                template: self.template_edit(ToolKind::Move, picked),
+                template: self.template_edit(ToolKind::Move, picked, 0),
             }],
         }
     }
@@ -1634,9 +1837,94 @@ impl Tools {
                 change_set: json!({ "operations": operations }),
                 what,
                 sheets: self.reached(picked),
-                template: self.template_edit(ToolKind::Erase, picked),
+                template: self.template_edit(ToolKind::Erase, picked, 0),
             }],
         }
+    }
+
+    /// The objects a copy copies, and how many copies when more than one:
+    /// `FT-101, 2 copies`.
+    fn copy_words(&self, picked: &[usize], copies: usize) -> String {
+        let objects = self.picked_words(picked);
+        if copies > 1 {
+            format!("{objects}, {copies} copies")
+        } else {
+            objects
+        }
+    }
+
+    /// The copies Copy placed, as one change set: one `copy` operation.
+    /// One copy goes `from` the base point `to` the second, each a snapped
+    /// point where it was taken on one, as Move sends one object's; several
+    /// go as `offsets`, each how far its point is from the base point, as
+    /// AutoCAD's COPY places several. The core copies each object to each
+    /// place, writing a template's object's copies in the template.
+    fn land_copy(&mut self, picked: &[usize], base: &Taken, placed: &[Taken]) -> Outcome {
+        let template = picked.iter().any(|&p| self.template_object(p));
+        let mut op = json!({"op": "copy"});
+        match picked {
+            [one] => op["target"] = self.target(*one),
+            _ => {
+                op["targets"] = Value::Array(picked.iter().map(|&p| self.target(p)).collect());
+            }
+        }
+        match placed {
+            [to] => {
+                op["from"] = self.point_value(base, template);
+                op["to"] = self.point_value(to, template);
+            }
+            _ => {
+                op["offsets"] = Value::Array(
+                    placed
+                        .iter()
+                        .map(|t| {
+                            let [dx, dy] = offset(base, t);
+                            let dz = clean(t.z - base.z);
+                            if dz == 0.0 {
+                                json!([dx, dy, 0])
+                            } else {
+                                json!([dx, dy, dz])
+                            }
+                        })
+                        .collect(),
+                );
+            }
+        }
+        let what = format!("Copied {}", self.copy_words(picked, placed.len()));
+        Outcome {
+            log: Vec::new(),
+            sends: vec![Send {
+                change_set: json!({ "operations": [op] }),
+                what,
+                sheets: self.reached(picked),
+                template: self.template_edit(ToolKind::Copy, picked, placed.len()),
+            }],
+        }
+    }
+
+    /// The tag over each copy Copy has placed, and how far that copy is
+    /// from its objects: `copy 1 · waits for Enter`, or on a phone `copy 1`.
+    pub fn placed_tags(&self, touch: bool) -> Vec<(String, [f64; 2])> {
+        let Some(Running {
+            step: Step::CopySecond { base, placed, .. },
+            ..
+        }) = &self.running
+        else {
+            return Vec::new();
+        };
+        placed
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let n = i + 1;
+                let words = if touch {
+                    format!("copy {n}")
+                } else {
+                    format!("copy {n} · waits for Enter")
+                };
+                (words, offset(base, t))
+            })
+            .collect()
     }
 
     /// What the command bar shows: `touch` says a phone's words, a tap
@@ -1645,7 +1933,7 @@ impl Tools {
         let mut state = State {
             error: self.error.clone(),
             placeholder: if touch {
-                "L, C, REC, T, M, E".to_owned()
+                "L, C, REC, T, M, CO, E".to_owned()
             } else {
                 String::new()
             },
@@ -1744,10 +2032,10 @@ impl Tools {
             Step::Select { picked } => {
                 state.placeholder = String::new();
                 let n = picked.len();
-                let verb = if kind == ToolKind::Erase {
-                    "erase"
-                } else {
-                    "move"
+                let verb = match kind {
+                    ToolKind::Erase => "erase",
+                    ToolKind::Copy => "copy",
+                    _ => "move",
                 };
                 let enter = if touch { "" } else { " Enter" };
                 if n == 0 {
@@ -1781,15 +2069,49 @@ impl Tools {
                 format!("{click} where that point goes, or type @dx,dy or a length"),
                 vec![cancel],
             ),
+            Step::CopyBase { picked } => (
+                format!(
+                    "{click} a point to copy {} from: the base point{hold}",
+                    if picked.len() > 1 { "them" } else { "it" }
+                ),
+                vec![cancel],
+            ),
+            Step::CopySecond { placed, .. } => {
+                let k = placed.len();
+                if k == 0 {
+                    (
+                        format!("{click} where the copy goes, or type @dx,dy or a length"),
+                        vec![choice("Done", "done", true)],
+                    )
+                } else {
+                    (
+                        format!(
+                            "{} placed, dashed until you finish. {click} where the next goes, or \
+                             type @dx,dy or a length",
+                            plural(k, "copy", "copies")
+                        ),
+                        vec![
+                            choice("Undo", "undo", false),
+                            choice(&format!("Done: copy {k}"), "done", true),
+                        ],
+                    )
+                }
+            }
         };
         state.prompt = prompt;
         state.options = options;
         if let Step::Select { picked }
         | Step::MoveBase { picked }
-        | Step::MoveSecond { picked, .. } = &running.step
+        | Step::MoveSecond { picked, .. }
+        | Step::CopyBase { picked }
+        | Step::CopySecond { picked, .. } = &running.step
         {
+            let copies = match &running.step {
+                Step::CopySecond { placed, .. } => placed.len(),
+                _ => 0,
+            };
             state.picked = picked.clone();
-            state.warning = self.template_edit(kind, picked).map(|mut w| {
+            state.warning = self.template_edit(kind, picked, copies).map(|mut w| {
                 w.detail.push_str(" You will be asked before it lands.");
                 w
             });
@@ -1799,9 +2121,12 @@ impl Tools {
             Step::CircleRadius { center, .. } => vec![center.at],
             Step::RectangleSecond { first } => vec![first.at],
             Step::TextType { at, .. } => vec![at.at],
-            Step::MoveSecond { base, .. } => vec![base.at],
+            Step::MoveSecond { base, .. } | Step::CopySecond { base, .. } => vec![base.at],
             _ => Vec::new(),
         };
+        if let Step::CopySecond { placed, .. } = &running.step {
+            state.placed = placed.len();
+        }
         if let Step::TextType { at, lines, current } = &running.step {
             let mut shown: Vec<TextLine> = lines
                 .iter()
@@ -1836,6 +2161,17 @@ impl Tools {
                 band.lines.push([pair[0].at, pair[1].at]);
             }
         }
+        if let Step::CopySecond {
+            picked,
+            base,
+            placed,
+        } = &running.step
+        {
+            if !placed.is_empty() {
+                let offsets = placed.iter().map(|t| offset(base, t)).collect();
+                band.placed = Some((picked.clone(), offsets));
+            }
+        }
         let (Some(aim), Some(base)) = (aim, self.base()) else {
             return band;
         };
@@ -1862,6 +2198,10 @@ impl Tools {
             }
             Step::MoveSecond { picked, .. } => {
                 band.moving = Some((picked.clone(), [to[0] - base[0], to[1] - base[1]]));
+                band.guides.push([base, to]);
+            }
+            Step::CopySecond { picked, .. } => {
+                band.copying = Some((picked.clone(), [to[0] - base[0], to[1] - base[1]]));
                 band.guides.push([base, to]);
             }
             _ => {}

@@ -554,6 +554,12 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
 }
 .pvtag.held { border-color: #c8d0da; color: #c8d0da; }
 .pvpaper { position: absolute; border: 3px solid var(--bad); box-sizing: border-box; }
+/* Copy's copies placed, which wait for Enter (#66): a tag over each, in a proposal's purple. */
+.ctags { position: absolute; inset: 0; pointer-events: none; z-index: 3; overflow: hidden; }
+.ctag {
+  position: absolute; white-space: nowrap; font: 600 12px var(--ui); padding: 2px 7px; border-radius: 3px;
+  background: rgba(38, 32, 56, .94); border: 1px solid #b48cff; color: #e2d6ff;
+}
 .pvpaper.held { border: 2px dashed #8a8f96; }
 
 /* Proposals (#155), as the picked prototype's B draws them: each waiting proposal dashed on its sheet,

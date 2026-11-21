@@ -49,8 +49,9 @@
 //!   the clicks, taps and typing the page passes on, says what it wants,
 //!   and gives the change set to send; this module draws its rubber band
 //!   in the current layer's colour, its guides dashed, the objects a move
-//!   would move where they would go, the points it has taken, and a halo
-//!   round each object it has picked.
+//!   would move where they would go, a copy following the cursor dashed
+//!   and the copies Copy has placed dashed in the proposal's colour, the
+//!   points it has taken, and a halo round each object it has picked.
 //! - Over the ink, a halo marks each object a change set added or changed,
 //!   green or amber, and the object the reviewer picked, blue, as the
 //!   picked prototype marks them; the page fades the change set's halos in
@@ -1149,6 +1150,13 @@ impl Viewer {
         to_json(&self.tools.escape())
     }
 
+    /// The page leaves what the tool works on, for an entry of the journal
+    /// or a proposal opened: Copy's copies placed are dropped, with nothing
+    /// sent; any other tool ends as Esc ends it.
+    pub fn tool_leave(&mut self) -> String {
+        to_json(&self.tools.leave())
+    }
+
     /// The line of text being typed, as it is typed.
     pub fn tool_typing(&mut self, text: &str) {
         self.tools.typing(text);
@@ -1168,6 +1176,26 @@ impl Viewer {
     /// phone's words when `touch`.
     pub fn tool_state(&self, touch: bool) -> String {
         to_json(&self.tools.state(touch))
+    }
+
+    /// The tag over each copy Copy has placed, which waits for Enter, as
+    /// JSON: `[{"text": "copy 1 · waits for Enter", "at": [x, y]}]`, `at`
+    /// the top right of the box round the copy, in drawing units, for the
+    /// page to put the tag by; in a phone's words, `copy 1`, when `touch`.
+    pub fn tool_copy_tags(&self, touch: bool) -> String {
+        let tags = self.tools.placed_tags(touch);
+        if tags.is_empty() {
+            return "[]".to_owned();
+        }
+        let picked = self.tools.state(touch).picked;
+        let objects: Vec<u32> = picked.iter().map(|&p| p as u32).collect();
+        let b = self.bounds_of(&objects);
+        let tags: Vec<serde_json::Value> = tags
+            .into_iter()
+            .filter(|_| b.len() == 4)
+            .map(|(text, [dx, dy])| serde_json::json!({"text": text, "at": [b[2] + dx, b[3] + dy]}))
+            .collect();
+        to_json(&tags)
     }
 
     /// Whether the tool running takes the drawing's clicks and taps now: it
@@ -1342,32 +1370,64 @@ impl Viewer {
             let (x1, y1) = device(b[0], b[1]);
             [x0, y0, x1, y1]
         };
-        // What a move would move, where it would go.
-        if let Some((picked, [dx, dy])) = &band.moving {
-            let mut moved: Vec<Segment> = Vec::new();
-            for item in sheet
-                .list
-                .items
-                .iter()
-                .filter(|i| picked.contains(&i.object))
-            {
-                let runs = match &item.shape {
-                    Shape::Stroke { runs, .. } => runs,
-                    Shape::Fill { contours, .. } => contours,
-                };
-                for run in runs {
-                    for pair in run.windows(2) {
-                        moved.push(seg([
-                            [pair[0][0] + dx, pair[0][1] + dy],
-                            [pair[1][0] + dx, pair[1][1] + dy],
-                        ]));
+        // What the objects at `picked` draw, shifted by `by`: each run of
+        // each item, device pixels, for a ghost; up to MOST_MOVED pieces
+        // in all, so a big group does not stall a frame.
+        let shifted = |picked: &[usize], by: &[[f64; 2]]| -> Vec<Vec<Segment>> {
+            let mut out: Vec<Vec<Segment>> = Vec::new();
+            let mut count = 0;
+            for &[dx, dy] in by {
+                for item in sheet
+                    .list
+                    .items
+                    .iter()
+                    .filter(|i| picked.contains(&i.object))
+                {
+                    let runs = match &item.shape {
+                        Shape::Stroke { runs, .. } => runs,
+                        Shape::Fill { contours, .. } => contours,
+                    };
+                    for run in runs {
+                        let pieces: Vec<Segment> = run
+                            .windows(2)
+                            .map(|pair| {
+                                seg([
+                                    [pair[0][0] + dx, pair[0][1] + dy],
+                                    [pair[1][0] + dx, pair[1][1] + dy],
+                                ])
+                            })
+                            .collect();
+                        count += pieces.len();
+                        out.push(pieces);
+                    }
+                    if count > MOST_MOVED {
+                        return out;
                     }
                 }
-                if moved.len() > MOST_MOVED {
-                    break;
-                }
             }
+            out
+        };
+        // What a move would move, where it would go.
+        if let Some((picked, by)) = &band.moving {
+            let moved: Vec<Segment> = shifted(picked, &[*by]).concat();
             self.lines(&moved, ratio.max(1.0), MOVING, size);
+        }
+        // Copy: each copy placed, which waits for Enter, dashed in the
+        // proposal's colour, as a proposal's ghost is; and the copy that
+        // follows the cursor dashed pale blue, as Move's ghost, while the
+        // objects themselves stay where they are.
+        let dashed = |runs: Vec<Vec<Segment>>| -> Vec<Segment> {
+            runs.iter()
+                .flat_map(|run| ghosts::dash_run(run, 6.0 * ratio, 4.0 * ratio))
+                .collect()
+        };
+        if let Some((picked, offsets)) = &band.placed {
+            let copies = dashed(shifted(picked, offsets));
+            self.lines(&copies, (1.4 * ratio).max(1.0), ghosts::PROPOSAL, size);
+        }
+        if let Some((picked, by)) = &band.copying {
+            let copy = dashed(shifted(picked, &[*by]));
+            self.lines(&copy, (1.3 * ratio).max(1.0), MOVING, size);
         }
         let lines: Vec<Segment> = band.lines.iter().copied().map(seg).collect();
         self.lines(&lines, (1.5 * ratio).max(1.0), self.layer_color, size);
