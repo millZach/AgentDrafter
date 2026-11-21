@@ -118,6 +118,26 @@ import { CommandBar, PreviewBand, Ribbon, SnapMenu, StatusBar, TextBox, TextEdit
 import { is_tool_word, screen_color } from './wasm/agentdrafter_viewer.js';
 import { JournalList, Peek, QuickProperties } from './Panels.tsx';
 import { ProposalCard } from './Proposals.tsx';
+import { GuideBanner, GuideCard } from './Guide.tsx';
+import {
+  clickNote,
+  endedNote,
+  layerChosen,
+  landed as guideLanded,
+  marked,
+  skipStep,
+  startRun,
+  stepDone,
+  stopRun,
+  toolLabel,
+  toolNote,
+  type Guide,
+  type GuideChecked,
+  type GuideRun,
+  type GuidesReport,
+  type Phase,
+  type RendererNote,
+} from './guides.ts';
 import {
   cardLines,
   onSheet,
@@ -162,6 +182,8 @@ interface Toast {
   entry?: number;
   /** The proposal its Show button opens. */
   proposal?: number;
+  /** The guide its Start button starts (#157). */
+  guide?: number;
 }
 
 interface Finding {
@@ -227,6 +249,8 @@ interface ChangeReply {
   journal_entry?: number;
   sheets?: { sheet: string; ok: boolean }[];
   message?: string;
+  /** For a change set sent for a guide's step, the core's check of it against the step (#157). */
+  guide?: GuideChecked;
 }
 
 interface Asking {
@@ -381,6 +405,18 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // numbers of those seen, so a new one is said in a toast.
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const proposalsSeen = useRef<Set<number> | null>(null);
+  // The guides given on the set (#157), from the event stream, each worked
+  // out on the set as it stands, and those seen, so a new one is said in a
+  // toast; the one running, if any; and the room its banner takes.
+  const [guides, setGuides] = useState<Guide[]>([]);
+  const guidesSeen = useRef<Set<number> | null>(null);
+  const [run, setRun] = useState<GuideRun | null>(null);
+  const runNow = useRef<GuideRun | null>(null);
+  runNow.current = run;
+  const [guideClosed, setGuideClosed] = useState(true);
+  const [guideBusy, setGuideBusy] = useState(false);
+  const guideBanner = useRef<HTMLDivElement>(null);
+  const [bannerHeight, setBannerHeight] = useState(0);
   // Each waiting proposal drawn on the sheet shown as it would leave it,
   // by `proposal|SHEET|LAYOUT|generation`, and those asked for.
   const [ghostReplies, setGhostReplies] = useState<ReadonlyMap<string, GhostReply>>(new Map());
@@ -871,11 +907,33 @@ export function App({ token, source, sheet, layout }: AppProps) {
         });
         log(title);
       },
+      (text) => {
+        // The guides given, each worked out on the set as it stands.
+        const replied = JSON.parse(text) as { ok: boolean; result?: GuidesReport };
+        if (!replied.ok || !replied.result) return;
+        const list = replied.result.guides;
+        setGuides(list);
+        const known = guidesSeen.current;
+        guidesSeen.current = new Set(list.map((g) => g.guide));
+        const given = known ? list.filter((g) => !known.has(g.guide)).at(-1) : undefined;
+        if (!given) return;
+        const title = `${capitalWho(given.by)} gives a guide: ${given.title}`;
+        keys.current += 1;
+        setToast({
+          key: keys.current,
+          tone: 'prop',
+          title,
+          detail: `Guide ${given.guide}: ${given.steps.length} step${given.steps.length === 1 ? '' : 's'} on ${given.sheet}, for you to do on your drawing.`,
+          guide: given.guide,
+        });
+        log(title);
+      },
     );
     return () => {
       stop();
       seen.current = null;
       proposalsSeen.current = null;
+      guidesSeen.current = null;
     };
   }, [source, token, check, toastFor, log, drawAgain, redrawPreview]);
 
@@ -1137,12 +1195,19 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // set sent, or asked about first when it edits a template's object.
   const toolDid = (text: string) => {
     if (text) {
-      const o = JSON.parse(text) as ToolOutcome;
+      const o = JSON.parse(text) as ToolOutcome & { guide?: RendererNote };
       for (const line of o.log) log(line);
+      // A point or a pick a guide's step does not want: a gentle note,
+      // which offers to take it back; nothing is taken back unasked.
+      if (o.guide) {
+        const note = clickNote(o.guide);
+        setRun((r) => (r && !r.end ? { ...r, note } : r));
+        log(`Guide: ${o.guide.words}`);
+      }
       // Each in order: one to a template's object is asked about first.
       for (const s of o.sends ?? []) {
         if (s.template) startPreview(s);
-        else void sendChange(s);
+        else void sendGuided(s);
       }
     }
     refreshTool();
@@ -1151,7 +1216,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // asks for the sheets it landed on as soon as `change` replies, without
   // waiting for the journal.
   // Gives whether it landed on any sheet.
-  const sendOne = async (s: ToolSend, keep?: number): Promise<boolean> => {
+  const sendOne = async (s: ToolSend, keep?: number, onReply?: (reply: ChangeReply) => void): Promise<boolean> => {
     const landed = (reply: ChangeReply | undefined) => {
       const sheets = (reply?.sheets ?? []).filter((x) => x.ok).map((x) => upper(x.sheet));
       const entry = reply?.journal_entry;
@@ -1173,6 +1238,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
           : await call<ChangeReply>('keep', { set: source, proposal: keep, by: DRAFTER }, token);
       landed(reply);
       log(`${s.what}${keep === undefined ? '' : ' kept'}: change set ${reply.journal_entry ?? ''} landed`.replace('  ', ' '));
+      onReply?.(reply);
       return true;
     } catch (e) {
       if (e instanceof CommandError && e.result) landed(e.result as ChangeReply);
@@ -1182,9 +1248,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
   };
   // Undo last and Accept wait while any is on its way: a change set they
   // would take may be about to land.
-  const sendChange = (s: ToolSend, keep?: number) => {
+  const sendChange = (s: ToolSend, keep?: number, onReply?: (reply: ChangeReply) => void) => {
     setSending((n) => n + 1);
-    const sent = sendQueue.current.then(() => sendOne(s, keep)).finally(() => setSending((n) => n - 1));
+    const sent = sendQueue.current.then(() => sendOne(s, keep, onReply)).finally(() => setSending((n) => n - 1));
     sendQueue.current = sent.then(
       () => {},
       () => {},
@@ -1212,6 +1278,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const text = v.tool_start(word, Uint32Array.from(picked));
     const state = JSON.parse(v.tool_state(!wide)) as ToolState;
     if (state.tool) setPicked(null);
+    guideToolStarted(state.tool ?? null);
     if (state.tool === 'text' && !wide) setFieldShown(false);
     toolDid(text);
     if (state.tool && wide) field.current?.focus({ preventScroll: true });
@@ -1233,7 +1300,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
   };
   const endTool = () => {
     const v = renderer();
-    if (v && toolState?.tool) toolDid(v.tool_escape());
+    if (!v || !toolState?.tool) return;
+    const was = toolState.tool;
+    const text = v.tool_escape();
+    toolDid(text);
+    // The step's own tool ended with nothing drawn: the step waits.
+    const sent = text ? ((JSON.parse(text) as ToolOutcome).sends ?? []).length : 0;
+    const step = guideStepHere();
+    if (step && !sent && step.tool === was) setRun((r) => (r ? { ...r, note: endedNote(step) } : r));
   };
   // Enter, Space or a right-click, with what the command bar's field holds.
   const enter = (text: string) => {
@@ -1467,6 +1541,145 @@ export function App({ token, source, sheet, layout }: AppProps) {
     field.current?.blur();
     log(`Proposal ${p.proposal}, by ${whoWords(p.by)}: ${title}. Nothing has landed.`);
   }
+  // Guides (#157). A guide runs on the page: its step's words in the
+  // banner, the tool's button pulsing, the renderer's ring on the point its
+  // next click wants, and each change set the drafter's tools send while
+  // it runs marked with the step, so the core checks it and the journal
+  // marks it. Nothing of the drafter's is undone unless they ask.
+  function runGuide(): Guide | null {
+    const r = runNow.current;
+    return r ? (guides.find((g) => g.guide === r.guide) ?? null) : null;
+  }
+  /** The step running, on its own sheet as it is shown; null otherwise. */
+  function guideStepHere() {
+    const r = runNow.current;
+    const g = runGuide();
+    if (!r || !g || r.end || at !== null || !summary || upper(summary.sheet) !== upper(g.sheet)) return null;
+    return g.steps[r.at] ?? null;
+  }
+  /** A tool started while a step runs: another than the step's gets a note. */
+  function guideToolStarted(tool: string | null) {
+    const step = guideStepHere();
+    if (!step || !tool) return;
+    const note = toolNote(step, tool, currentLayer);
+    setRun((r) => (r ? { ...r, note } : r));
+    if (note) log(`Guide: ${note.words}`);
+  }
+  /** A tool's change set, sent marked with the step running, when one runs on its sheet. */
+  function sendGuided(s: ToolSend) {
+    const cs = marked(s.change_set, runNow.current, runGuide(), summary?.sheet ?? null);
+    if (cs === s.change_set) return sendChange(s);
+    return sendChange({ ...s, change_set: cs }, undefined, guideReplied);
+  }
+  /** The core's check of a change set sent for a step: the guide moves on, or the note offers to undo it. */
+  function guideReplied(reply: ChangeReply) {
+    const g = runGuide();
+    const checked = reply.guide;
+    if (!checked || !g) return;
+    setRun((r) => (r ? guideLanded(r, g, checked, reply.journal_entry) : r));
+    log(`Guide: ${checked.message}`);
+  }
+  function startGuide(n: number) {
+    const g = guides.find((x) => x.guide === n);
+    if (!g) return;
+    if (preview) cancelPreview();
+    if (at !== null) backToLive();
+    const v = renderer();
+    if (v && toolState?.tool) toolDid(v.tool_leave());
+    setPicked(null);
+    setToast(null);
+    const fresh = startRun(g);
+    runNow.current = fresh;
+    setRun(fresh);
+    setGuideClosed(false);
+    if (!summary || upper(summary.sheet) !== upper(g.sheet)) {
+      setWanted(g.sheet);
+      setWantedLayout(null);
+    }
+    if (!wide) snapSheet('peek');
+    log(`Guide started: ${g.title}`);
+  }
+  function skipGuideStep() {
+    const r = runNow.current;
+    const g = runGuide();
+    if (!r || !g) return;
+    const step = g.steps[r.at];
+    const v = renderer();
+    if (v && step?.tool && toolState?.tool === step.tool) toolDid(v.tool_leave());
+    setRun(skipStep(r, g));
+    log(`Guide: step ${r.at + 1} skipped`);
+  }
+  function stopGuide() {
+    const r = runNow.current;
+    if (!r) return;
+    const v = renderer();
+    if (v && toolState?.tool) toolDid(v.tool_leave());
+    setRun(stopRun(r));
+    setGuideClosed(false);
+    log(`Guide: stopped at step ${r.at + 1}`);
+  }
+  function closeGuide() {
+    setGuideClosed(true);
+    log('Guide closed');
+  }
+  /** Do it for me: the step's operation lands as the drafter's would, marked with the step. */
+  function doForMe() {
+    const r = runNow.current;
+    const g = runGuide();
+    const step = guideStepHere();
+    if (!r || !g || !step) return;
+    const v = renderer();
+    if (v && toolState?.tool) toolDid(v.tool_leave());
+    const forMe = { ...r, forMe: true, note: null };
+    runNow.current = forMe;
+    setRun(forMe);
+    if (step.setting) {
+      chooseLayer(step.setting.current_layer);
+      return;
+    }
+    if (!step.operation) return;
+    setGuideBusy(true);
+    void sendChange(
+      {
+        change_set: { operations: [step.operation], guide: { guide: r.guide, step: step.step } } as ToolSend['change_set'],
+        what: `Guide step ${step.step}, done for you`,
+        sheets: [g.sheet],
+      },
+      undefined,
+      guideReplied,
+    ).finally(() => setGuideBusy(false));
+  }
+  /** The note's button: undo the change set, take the point or the pick back, or end the other tool. */
+  function guideNoteAct() {
+    const act = runNow.current?.note?.act;
+    if (!act) return;
+    setRun((r) => (r ? { ...r, note: null } : r));
+    if (act.kind === 'undo') {
+      void undo(act.entry);
+      log(`Guide: change set ${act.entry} undone, as you asked`);
+    } else if (act.kind === 'take_back') {
+      renderer()?.guide_take_back(act.what, act.place);
+      refreshTool();
+      log(`Guide: the ${act.what} taken back, as you asked`);
+    } else {
+      const v = renderer();
+      if (v && toolState?.tool) toolDid(v.tool_leave());
+    }
+  }
+  /** Undo the guide's steps: one undo, of the first and every later one. */
+  async function undoGuide(from: number) {
+    setGuideBusy(true);
+    try {
+      const reply = await call<{ journal_entry?: number }>('undo', { set: source, change_set: from }, token);
+      setRun((r) => (r ? { ...r, undone: reply.journal_entry ?? 0 } : r));
+      log(`Guide: its steps undone, from change set ${from}`);
+    } catch (e) {
+      say('warn', 'The guide’s steps were not undone', why(e, token));
+    } finally {
+      setGuideBusy(false);
+    }
+  }
+
   // Keep lands it as a change set, on the set as it stands; Discard ends
   // it, with a line in the journal. Either ends it if it is open.
   function keepProposal(p: Proposal) {
@@ -1684,6 +1897,17 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setKeptLayer(name);
     writeCurrentLayer(keeps, source, name);
     log(`Current layer: ${name}`);
+    // A setting step that makes a layer current is done when it is the one
+    // the step wants, and says so when it is not.
+    const step = guideStepHere();
+    const r = runNow.current;
+    const g = runGuide();
+    if (!step || !r || !g || !step.setting) return;
+    const chosen = layerChosen(step, name);
+    if (chosen.done) {
+      setRun(stepDone(r, g));
+      log(`Guide: step ${r.at + 1} done`);
+    } else setRun({ ...r, note: chosen.note });
   };
   const toolLayer = useMemo(() => ({ name: currentLayer, color: colorIndex(layerEntry?.color) }), [currentLayer, layerEntry?.color]);
   // The prompt shows the current layer a tool draws on.
@@ -2104,6 +2328,15 @@ export function App({ token, source, sheet, layout }: AppProps) {
       onInputFocus={() => {
         if (!wide) snapSheet('full');
       }}
+      guideCard={(n) => (
+        <GuideCard
+          guide={guides.find((g) => g.guide === n) ?? null}
+          number={n}
+          run={run}
+          onStart={() => startGuide(n)}
+          onStop={stopGuide}
+        />
+      )}
     />
   );
 
@@ -2163,10 +2396,44 @@ export function App({ token, source, sheet, layout }: AppProps) {
 
   const issuedSheets = asking?.report.sheets ?? [];
   const askedFindings = asking?.report.checks.findings ?? [];
+  // The guide running, its step on its own sheet as it is, and what the
+  // step wants next, as the renderer says it (#157).
+  const runningGuide = run ? (guides.find((g) => g.guide === run.guide) ?? null) : null;
+  const bannerShown = !!run && !!runningGuide && !guideClosed && at === null && !preview;
+  const guideElsewhere = !!runningGuide && !!summary && upper(summary.sheet) !== upper(runningGuide.sheet);
+  const stepNow = bannerShown && !run?.end && !guideElsewhere && runningGuide ? (runningGuide.steps[run!.at] ?? null) : null;
+  const phaseText = stepNow && !stepNow.setting ? (renderer()?.guide_phase() ?? '') : '';
+  const phase: Phase | null = phaseText ? (JSON.parse(phaseText) as Phase) : null;
+  const gpulse =
+    !stepNow || run?.note?.tone === 'warn'
+      ? undefined
+      : stepNow.setting
+        ? 'layer'
+        : !phase || phase.phase === 'start'
+          ? stepNow.tool
+          : phase.phase === 'finish' && stepNow.tool !== 'move' && stepNow.tool !== 'copy'
+            ? 'done'
+            : undefined;
+  // The renderer is told the step running, as `guides` works it out on the
+  // set as it stands, so it can say what the step wants and ring its point;
+  // and the drawing, how far down the banner reaches.
+  const stepJson = stepNow && !stepNow.setting ? JSON.stringify(stepNow) : '';
+  useEffect(() => {
+    const v = renderer();
+    if (!v) return;
+    v.guide_step(stepJson);
+    refreshTool();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepJson, summary, refreshTool]);
+  useLayoutEffect(() => {
+    const h = bannerShown ? (guideBanner.current?.offsetHeight ?? 0) + 8 : 0;
+    if (h !== bannerHeight) setBannerHeight(h);
+  });
   return (
     <div
       className={`va${toolsOpen ? ' tools-open' : ''}`}
       style={{ ['--peek' as string]: `${peekHeight}px` }}
+      data-gpulse={gpulse}
     >
       {/* The title bar, and under it the ribbon, which a phone folds behind Tools and opens over the drawing, under the title bar however tall its chips make it. */}
       <div className="topbar">
@@ -2301,7 +2568,33 @@ export function App({ token, source, sheet, layout }: AppProps) {
           ref={viewport}
           onPointerDownCapture={() => toolsOpen && setToolsOpen(false)}
         >
+          {bannerShown && run && runningGuide && (
+            <div className="gwrap" ref={guideBanner}>
+              <GuideBanner
+                guide={runningGuide}
+                run={run}
+                phase={phase}
+                phone={!wide}
+                elsewhere={guideElsewhere}
+                canUndo={journal?.can_undo ?? []}
+                canDoForMe={!!stepNow && (!!stepNow.setting || !!stepNow.operation)}
+                busy={guideBusy || sending > 0}
+                onDoForMe={doForMe}
+                onSkip={skipGuideStep}
+                onStop={stopGuide}
+                onNoteAct={guideNoteAct}
+                onBack={() => {
+                  setWanted(runningGuide.sheet);
+                  setWantedLayout(null);
+                }}
+                onUndoAll={(from) => void undoGuide(from)}
+                onClose={closeGuide}
+              />
+            </div>
+          )}
           <Drawing
+            guide={stepNow && run ? { step: run.at + 1, top: bannerHeight } : null}
+            guideSee={stepNow && run ? `${run.guide}:${run.at}:${summary?.sheet ?? ''}:${stepNow.points.map((p) => (p.at ? p.at.join(',') : (p.object ?? ''))).join(';')}` : ''}
             reply={reply?.text ?? null}
             coveredBelow={covered}
             compact={!wide}
@@ -2359,6 +2652,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
                     }}
                   >
                     Show
+                  </button>
+                )}
+                {toast.guide !== undefined && guides.some((g) => g.guide === toast.guide) && (
+                  <button type="button" className="btn sm guide" data-toast="start-guide" onClick={() => startGuide(toast.guide as number)}>
+                    Start
                   </button>
                 )}
                 {toast.entry !== undefined && journal?.entries.some((e) => e.entry === toast.entry && e.kind === 'change_set') && (

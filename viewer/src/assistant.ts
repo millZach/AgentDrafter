@@ -329,6 +329,14 @@ export function proposalMade(part: Part, set: string): number | null {
   return num(obj(part.reply.result).proposal) ?? null;
 }
 
+/** The guide the assistant gave on the set `set`, by its number, from its `guide` (#157); null for any other part. */
+export function guideMade(part: Part, set: string): number | null {
+  if (part.kind !== 'command' || part.command !== 'guide' || !part.reply?.ok) return null;
+  const on = str(obj(part.input).set) ?? str(obj(part.reply.result).set);
+  if (!on || !sameSet(on, set)) return null;
+  return num(obj(part.reply.result).guide) ?? null;
+}
+
 /** What a proposal the assistant made does, from its `propose`, for its card once it is no longer waiting: `Move device`. */
 export function proposedTitle(part: CommandPart): string {
   const cs = obj(obj(part.input).change_set);
