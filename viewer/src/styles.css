@@ -692,7 +692,9 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   .cmdnote, .hist { display: none; }
   .cmdbar { flex-wrap: wrap; }
   .cmdin { flex: 1 1 100%; font-size: 16px; padding: 6px 4px; background: #1b2129; border: 1px solid #5a6577; border-radius: 3px; }
-  .opt { display: inline-block; background: #2b3a50; border: 1px solid #4f6684; border-radius: 12px; color: #cfe3ff; text-decoration: none; padding: 2px 9px; margin: 1px 2px; font: 13px var(--ui); }
+  /* Tight enough that a selected object's name and its five options, Move, Copy, Array, Erase and Clear,
+     stay on one line on a phone 390 pixels wide (#66). */
+  .opt { display: inline-block; background: #2b3a50; border: 1px solid #4f6684; border-radius: 12px; color: #cfe3ff; text-decoration: none; padding: 2px 7px; margin: 1px; font: 13px var(--ui); }
   .brk, .chev { display: none; }
   .opt.main { background: #1f6fc9; border-color: #3d8fe8; color: #fff; font-weight: 600; }
   /* Above the command bar at its real height (--cmd, which the page measures, a wrapped prompt's among
