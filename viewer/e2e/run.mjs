@@ -2622,12 +2622,12 @@ const checks = {
         assert((await bar(page)).includes('1 copy placed'), `a copy is placed: ${await bar(page)}`);
         await sideTab(page, 'journal');
         await page.click(`[data-entry="${seen.laptop.enter}"] .je-head`);
-        await page.waitForFunction(() => document.querySelector('.cmd')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
+        await page.waitForFunction(() => document.querySelector('.cmdbar')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
         await sleep(1500);
         assert(journal().length === before, `a journal entry opened sends no copy: ${JSON.stringify(journal().at(-1))}`);
         assert(!(await bar(page)).includes('COPY'), `the copy is dropped, the tool ended: ${await bar(page)}`);
         await page.click('.opt[data-opt="live"]');
-        await page.waitForFunction(() => !document.querySelector('.cmd')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
+        await page.waitForFunction(() => !document.querySelector('.cmdbar')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
         await sideTab(page, 'chat');
         // A proposal waiting, then a template's copy placed and the proposal
         // opened: the copy is dropped, not asked about, and the proposal shows.
