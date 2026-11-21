@@ -37,7 +37,10 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled, snap
   const grab = useRef<HTMLDivElement>(null);
   const peekBox = useRef<HTMLDivElement>(null);
   const [snap, setSnap] = useState<Snap>('peek');
-  const drag = useRef<{ y0: number; s0: number; t: number; last: number; v: number; moved: boolean; tap: boolean } | null>(null);
+  const drag = useRef<{ y0: number; s0: number; t: number; last: number; v: number; moved: boolean; tap: boolean; id: number; captured: boolean } | null>(null);
+  // A drag that began on one of the peek's buttons and moved: the click its
+  // lift would make is not the button's.
+  const swallowClick = useRef(0);
   const y = useRef(0);
   const settled = useRef<number | null>(null);
   const settle = useRef(onSettled);
@@ -119,11 +122,19 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled, snap
     const el = sheet.current;
     if (!el) return;
     const down = (e: PointerEvent) => {
-      if (wide || !(e.target as Element).closest('.va-grab, .va-peek, .ahead') || (e.target as Element).closest('button, select, input, textarea')) return;
+      const target = e.target as Element;
+      if (wide || !target.closest('.va-grab, .va-peek, .ahead') || target.closest('select, input, textarea')) return;
+      // A finger on the grip may land on the peek's button just under it, as
+      // a phone steers a touch to what it can tap: the peek's buttons start a
+      // drag too, and are tapped as ever when it does not move. The header's
+      // own buttons, its tabs, are only tapped.
+      const onButton = !!target.closest('button');
+      if (onButton && !target.closest('.va-peek')) return;
       // The panel's header drags it too, but only the grip and the peek toggle it with a tap.
-      const tap = !!(e.target as Element).closest('.va-grab, .va-peek');
-      drag.current = { y0: e.clientY, s0: y.current, t: performance.now(), last: e.clientY, v: 0, moved: false, tap };
-      el.setPointerCapture(e.pointerId);
+      const tap = !onButton && !!target.closest('.va-grab, .va-peek');
+      drag.current = { y0: e.clientY, s0: y.current, t: performance.now(), last: e.clientY, v: 0, moved: false, tap, id: e.pointerId, captured: !onButton };
+      // A button's tap keeps its click: the sheet takes the pointer only once it moves.
+      if (!onButton) el.setPointerCapture(e.pointerId);
     };
     const move = (e: PointerEvent) => {
       const d = drag.current;
@@ -133,12 +144,18 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled, snap
       d.t = now;
       d.last = e.clientY;
       if (Math.abs(e.clientY - d.y0) > 6) d.moved = true;
+      if (!d.moved) return;
+      if (!d.captured) {
+        d.captured = true;
+        el.setPointerCapture(d.id);
+      }
       place(clamp(d.s0 + e.clientY - d.y0, snapY('full'), snapY('peek')), false);
     };
     const up = () => {
       const d = drag.current;
       if (!d) return;
       drag.current = null;
+      if (d.moved && !d.tap) swallowClick.current = performance.now();
       if (!d.moved) {
         if (d.tap) snapTo(snap === 'peek' ? 'half' : 'peek');
         return;
@@ -151,11 +168,21 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled, snap
       if (Math.abs(d.v) > 0.5) best = order[clamp(order.indexOf(snap) + (d.v > 0 ? 1 : -1), 0, 2)] ?? best;
       snapTo(best);
     };
+    // The click a moved drag's lift makes on a peek's button is the drag's.
+    const click = (e: MouseEvent) => {
+      if (performance.now() - swallowClick.current < 400) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      swallowClick.current = 0;
+    };
+    el.addEventListener('click', click, true);
     el.addEventListener('pointerdown', down);
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
     el.addEventListener('pointercancel', up);
     return () => {
+      el.removeEventListener('click', click, true);
       el.removeEventListener('pointerdown', down);
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);

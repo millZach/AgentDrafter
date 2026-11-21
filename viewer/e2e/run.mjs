@@ -248,9 +248,56 @@ async function live(page) {
   await page.waitForSelector('.live.open', { timeout: 30000 });
 }
 
+/**
+ * Opens the side panel's tab `side`, `chat` or `journal`, by a click or a
+ * tap, and waits until it is on; a slow runner's first press that does not
+ * take is pressed once more.
+ */
+async function sideTab(page, side, how = 'click') {
+  const tab = `.stab[data-side="${side}"]`;
+  for (let attempt = 1; ; attempt += 1) {
+    if (how === 'tap') await page.tap(tab);
+    else await page.click(tab);
+    try {
+      await page.waitForSelector(`${tab}.on`, { timeout: 5000 });
+      return;
+    } catch (e) {
+      if (attempt >= 2) throw new Error(`the ${side} tab did not come on after two presses: ${e.message}`);
+    }
+  }
+}
+
+/**
+ * On a phone, waits until the sheet has come to rest, no longer sliding or
+ * moved by its peek changing height; `raised`, above its peek too. Gives
+ * whether it came to rest so within `timeout`.
+ */
+async function sheetAtRest(page, raised, timeout = 30000) {
+  await page.evaluate(() => {
+    window.__sheetTop = undefined;
+  });
+  return page
+    .waitForFunction(
+      (raised) => {
+        const sheet = document.querySelector('.va-sheet');
+        if (!sheet || (raised && sheet.dataset.snap === 'peek')) return false;
+        const top = sheet.getBoundingClientRect().top;
+        const was = window.__sheetTop;
+        window.__sheetTop = top;
+        return was !== undefined && Math.abs(top - was) < 0.5;
+      },
+      raised,
+      { timeout, polling: 150 },
+    )
+    .then(
+      () => true,
+      () => false,
+    );
+}
+
 /** Opens the side panel's Journal tab: it opens on the assistant's Chat (#156). */
 async function journalTab(page) {
-  await page.click('.stab[data-side="journal"]');
+  await sideTab(page, 'journal');
   await page.waitForSelector('.va-jhead');
 }
 
@@ -1752,7 +1799,7 @@ const checks = {
         // The side panel: the assistant's Chat, first, and the Journal.
         assert(await page.isVisible('.stab[data-side="chat"].on'), 'the panel opens on the assistant’s Chat');
         assert((await page.textContent('.ahrow')).startsWith('Assistant'), 'the panel is the assistant’s');
-        await page.click('.stab[data-side="journal"]');
+        await sideTab(page, 'journal');
         await page.waitForSelector('.va-jhead');
         assert(await page.isVisible('.titlebar button[data-act="undo"]') && await page.isVisible('.titlebar button[data-act="accept"]'), 'Undo last and Accept are in the title bar');
         // Last, as it may leave no renderer: a lost WebGL context, restored,
@@ -3993,19 +4040,28 @@ const checks = {
         assert(!(await page.textContent('body')).includes('Showing entry'), `still live before the journal is raised: ${await history()}`);
         // Dragged up, as a finger raises it: a tap's click would land on the
         // list sliding up under it (a follow-up of its own).
+        // The grip is found once the sheet is at rest: the peek just lost
+        // its proposals' line, and the sheet follows its height. A finger
+        // there may be steered to the peek's Ask button, which drags it too.
+        // A drag that did not take on a slow runner is made once more.
         const cdp = await context.newCDPSession(page);
-        const [gx, gy] = await page.evaluate(() => {
-          const r = document.querySelector('.va-grab').getBoundingClientRect();
-          return [r.left + r.width / 2, r.top + r.height / 2];
-        });
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: gx, y: gy }] });
-        for (let i = 1; i <= 10; i += 1) {
-          await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: gx, y: gy - i * 30 }] });
-          await sleep(16);
+        for (let attempt = 1; ; attempt += 1) {
+          assert(await sheetAtRest(page, false), 'the sheet comes to rest at its peek');
+          const [gx, gy] = await page.evaluate(() => {
+            const r = document.querySelector('.va-grab').getBoundingClientRect();
+            return [r.left + r.width / 2, r.top + r.height / 2];
+          });
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: gx, y: gy }] });
+          for (let i = 1; i <= 10; i += 1) {
+            await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: gx, y: gy - i * 30 }] });
+            await sleep(16);
+          }
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+          // Raised and at rest, so the tab is tapped where it stays.
+          if (await sheetAtRest(page, true, attempt >= 2 ? 30000 : 5000)) break;
+          assert(attempt < 2, 'dragged up twice, the sheet is raised');
         }
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-        await sleep(400);
-        await page.tap('.stab[data-side="journal"]');
+        await sideTab(page, 'journal', 'tap');
         await page.waitForSelector(`.va-journal [data-entry="${gone.entry}"]`, { timeout: 30000 });
         assert(!(await page.textContent('body')).includes('Showing entry'), `still live with the journal raised: ${await history()}`);
         assert((await journalLine(page, kept.entry)).includes('proposed by Assistant · kept by you'), 'J1 on a phone');
@@ -4190,11 +4246,11 @@ const checks = {
         said = await page.textContent('[data-pcc="1"]');
         assert(said.includes('Kept') && said.includes(`Kept by you: change set ${kept.entry}, in the journal.`), `the card once kept: ${said}`);
         await page.waitForFunction(() => !document.querySelector('[data-pcard="1"]'), null, { timeout: 30000 });
-        await page.click('.stab[data-side="journal"]');
+        await sideTab(page, 'journal');
         await page.waitForSelector(`.va-journal [data-entry="${kept.entry}"]`, { timeout: 30000 });
         said = await page.textContent(`.va-journal [data-entry="${kept.entry}"]`);
         assert(said.includes('proposed by Assistant · kept by you'), `the journal's line: ${said}`);
-        await page.click('.stab[data-side="chat"]');
+        await sideTab(page, 'chat');
 
         // The command bar: a tool's whole name waits for Enter, so a sentence can follow; other words go to the assistant.
         await page.click('.cmdin');
