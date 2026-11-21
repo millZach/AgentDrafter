@@ -703,6 +703,7 @@ fn two_set(test: &str) -> PathBuf {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -856,6 +857,7 @@ fn a_shared_templates_viewport_is_clipped_through_any_sheet_built_from_it() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );

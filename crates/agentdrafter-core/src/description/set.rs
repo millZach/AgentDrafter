@@ -25,7 +25,7 @@ use crate::set::SET_SETTINGS_FILE;
 use crate::units::Unit;
 
 /// The keys of a drawing set's settings.
-pub(crate) const SETTINGS_KEYS: [&str; 3] = ["units", "output", "rows"];
+pub(crate) const SETTINGS_KEYS: [&str; 4] = ["units", "output", "rows", "clean"];
 
 /// The keys at the top of a set's rows file.
 pub(crate) const ROWS_FILE_KEYS: [&str; 1] = ["rows"];
@@ -67,6 +67,10 @@ pub(crate) struct SetSettings {
     pub rows: Vec<RowsNamed>,
     /// Whether `rows` is written as a list of paths, not as one path.
     pub rows_listed: bool,
+    /// Whether a build or a plot of the set moves its leftover outputs into
+    /// `superseded/` unless a run asks otherwise: `clean: true`. False when
+    /// the settings leave it out.
+    pub clean: bool,
 }
 
 /// A path the settings' `rows` names: a rows file or a folder of them.
@@ -262,11 +266,16 @@ pub(super) fn parse_set_settings(text: &str) -> Result<SetSettings, Error> {
         )?;
         vec![rows_named(written, "rows".to_owned(), given.at)]
     };
+    let clean = match fields.get("clean") {
+        Some(node) => super::boolean(node, "clean")?,
+        None => false,
+    };
     Ok(SetSettings {
         units,
         output: output.to_owned(),
         rows,
         rows_listed,
+        clean,
     })
 }
 

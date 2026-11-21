@@ -41,6 +41,7 @@ fn build(set: &Path, overwrite: bool) {
         &SetBuildRequest {
             set: set.to_owned(),
             overwrite,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -617,6 +618,7 @@ fn a_duplicate_id_is_refused_naming_both_places() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );

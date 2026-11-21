@@ -40,6 +40,7 @@ fn demo_set(test: &str) -> PathBuf {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -347,6 +348,7 @@ fn outputs_made_after_an_accept_say_in_their_stamps_that_they_came_from_an_issue
             &PlotSetRequest {
                 set: set.clone(),
                 overwrite: true,
+                clean: None,
                 plot_style: None,
             },
             &Settings::default(),
@@ -445,6 +447,7 @@ fn build(set: &Path) {
         &SetBuildRequest {
             set: set.to_owned(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -536,6 +539,7 @@ fn a_dwg_in_an_output_folder_outside_its_set_drawn_on_its_own_says_it_was_issued
         &PlotSetRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
             plot_style: None,
         },
         &Settings::default(),
@@ -812,6 +816,7 @@ fn the_newest_accept_of_a_file_counts_whatever_an_older_one_named_it() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: true,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -897,6 +902,7 @@ fn outside_set(test: &str, outside: &str) -> PathBuf {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );

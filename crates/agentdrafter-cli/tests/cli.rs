@@ -400,6 +400,73 @@ fn build_builds_a_drawing_set_from_its_folder() {
 }
 
 #[test]
+fn clean_and_no_clean_say_what_becomes_of_a_set_s_leftover_outputs() {
+    let dir = scratch("leftovers");
+    let set = copy_demo_set(&dir);
+    let (code, json) = agentdrafter(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["leftovers"], serde_json::json!([]));
+    let (code, json) = agentdrafter(&["plot", "demo-set"], &dir);
+    assert_eq!(code, 0, "{json}");
+    // DEMO-003's row taken out: its DWG and PDF are left over.
+    let rows = set.join("rows.yaml");
+    let text = fs::read_to_string(&rows).unwrap();
+    let at = text.find("  - sheet: DEMO-003").unwrap();
+    fs::write(&rows, &text[..at]).unwrap();
+    let names = |json: &Value| -> Vec<(String, bool)> {
+        json["result"]["leftovers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| {
+                let file = Path::new(l["file"].as_str().unwrap());
+                let name = file.file_name().unwrap().to_string_lossy().into_owned();
+                (name, l.get("moved_to").is_some())
+            })
+            .collect()
+    };
+    let (code, json) = agentdrafter(&["plot", "demo-set", "--overwrite", "--no-clean"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(
+        names(&json),
+        [
+            ("DEMO-003.dwg".to_owned(), false),
+            ("DEMO-003.pdf".to_owned(), false)
+        ]
+    );
+    let (code, json) = agentdrafter(&["build", "demo-set", "--overwrite", "--clean"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(
+        names(&json),
+        [
+            ("DEMO-003.dwg".to_owned(), true),
+            ("DEMO-003.pdf".to_owned(), true)
+        ]
+    );
+    assert!(set.join("dwg/superseded/DEMO-003.dwg").is_file());
+    assert!(set.join("dwg/superseded/DEMO-003.pdf").is_file());
+
+    // Both, or one twice, are refused; so is either for one sheet
+    // description, whose build writes one file.
+    for args in [
+        &["build", "demo-set", "--clean", "--no-clean"][..],
+        &["plot", "demo-set", "--clean", "--clean"][..],
+    ] {
+        let (code, json) = agentdrafter(args, &dir);
+        assert_eq!(code, 2, "{args:?}: {json}");
+        assert_eq!(json["error"]["code"], "usage");
+    }
+    copy_example(&dir);
+    let (code, json) = agentdrafter(&["build", "one-line.yaml", "--clean"], &dir);
+    assert_eq!(code, 2, "{json}");
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("drawing set's folder"));
+    assert!(!dir.join("one-line.dwg").exists());
+}
+
+#[test]
 fn a_sheet_of_two_layouts_draws_and_queries_each_by_name() {
     let dir = scratch("layouts");
     fs::copy(

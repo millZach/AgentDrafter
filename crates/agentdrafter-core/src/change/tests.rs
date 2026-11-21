@@ -50,6 +50,7 @@ fn demo_set(test: &str, built: bool) -> PathBuf {
             &SetBuildRequest {
                 set: set.clone(),
                 overwrite: false,
+                clean: None,
             },
             &Settings::default(),
         );
@@ -1100,6 +1101,7 @@ fn a_file_moved_aside_never_vouches_for_another_taken_away_by_hand() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: true,
+            clean: None,
         },
         &Settings::default(),
     );

@@ -35,6 +35,7 @@ use crate::description::{
 };
 use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
+use crate::leftovers::{leftovers, scan_error, Leftover, SetOutputs};
 use crate::model::Paper;
 use crate::reply::Reply;
 use crate::settings::Settings;
@@ -57,6 +58,12 @@ pub struct SetBuildRequest {
     /// DWG is already there fails and its file is never touched.
     #[serde(default)]
     pub overwrite: bool,
+    /// Move the set's leftover outputs into `superseded/` in its output
+    /// folder (true), or only list them (false). Without it, as the set's
+    /// settings say under `clean`, which leave them where they are unless
+    /// they say `clean: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean: Option<bool>,
 }
 
 /// What a drawing set's build did.
@@ -85,6 +92,17 @@ pub struct SetReport {
     /// records are.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inconsistent: Option<crate::change::Inconsistent>,
+    /// The DWGs and PDFs AgentDrafter made for the set in its output folder
+    /// that no row writes any more, each moved into `superseded/` when the
+    /// run cleaned, and any no row writes that could not be read to tell,
+    /// marked `unreadable`. Empty when there are none; left out when the
+    /// output folder could not be listed, which `leftovers_error` says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leftovers: Option<Vec<Leftover>>,
+    /// Why the output folder could not be listed to look for leftovers,
+    /// when it could not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leftovers_error: Option<Error>,
 }
 
 /// What became of one sheet of a drawing set.
@@ -171,7 +189,13 @@ pub fn build_set_with(request: &SetBuildRequest, settings: &Settings) -> Reply<S
             );
             Reply::partly(report, error)
         }
-        outcome => Reply::from(outcome),
+        Ok(report) => {
+            match scan_error(report.leftovers_error.as_ref(), report.leftovers.as_deref()) {
+                Some(error) => Reply::partly(report, error),
+                None => Reply::from(Ok(report)),
+            }
+        }
+        Err(error) => Reply::from(Err(error)),
     }
 }
 
@@ -214,6 +238,16 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         })
         .collect();
     let built = sheets.iter().filter(|s| s.ok).count();
+    let scan = leftovers(
+        &SetOutputs {
+            folder,
+            output: &output,
+            marked: marked.as_deref(),
+            rows_files: &rows_files,
+            sheets: rows.iter().map(|row| row.sheet.as_str()).collect(),
+        },
+        request.clean.unwrap_or(set.clean),
+    );
     Ok(SetReport {
         set: folder.display().to_string(),
         units: set.units,
@@ -223,6 +257,8 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         sheets,
         no_set_in_marks: marked.is_none().then(|| no_set_in_marks(&set.output)),
         inconsistent: crate::change::inconsistent(folder),
+        leftovers: scan.leftovers,
+        leftovers_error: scan.error,
     })
 }
 
@@ -619,6 +655,7 @@ mod tests {
             &SetBuildRequest {
                 set: set.clone(),
                 overwrite: false,
+                clean: None,
             },
             &Settings::default(),
         );
@@ -705,6 +742,7 @@ mod tests {
                 &SetBuildRequest {
                     set: set.clone(),
                     overwrite: true,
+                    clean: None,
                 },
                 &Settings::default(),
             );

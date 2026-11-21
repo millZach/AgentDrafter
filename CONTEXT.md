@@ -411,6 +411,14 @@ _Avoid_: export, artifact, plot
 What an output records about the files it came from: the record and the files it draws on, such as a block library, each by where it was and a fingerprint of its bytes, and the revision once revisions are built. An output any of whose files no longer matches its stamp, or is gone, is stale.
 _Avoid_: watermark, signature, build mark (a build mark tells that AgentDrafter built a DWG, not what from)
 
+**Leftover output**:
+A DWG or PDF in a drawing set's output folder that AgentDrafter made for that set, as its build mark or its stamp shows, and that no row writes any more, since its sheet was renamed, merged or taken out of the rows. Every build and plot of the set lists them; cleaning moves them into the superseded folder.
+_Avoid_: orphan, stale output (a stale output's files have moved on; a leftover's row is gone), dead file
+
+**Superseded folder**:
+The folder `superseded` in a drawing set's output folder that cleaning moves leftover outputs into, keeping their names. Nothing is ever deleted from it or replaced in it.
+_Avoid_: trash, archive, recycle bin
+
 **Render**:
 Drawing a sheet to a PNG, through the display list, so an agent can look at its own work: in each object's own colour, or through a plot style, or monochrome, to show what a plot will print.
 _Avoid_: screenshot, export, build (a build produces a DWG)

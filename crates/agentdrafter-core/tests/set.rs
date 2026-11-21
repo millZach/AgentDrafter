@@ -37,6 +37,7 @@ fn build(set: &Path, overwrite: bool) -> Reply<SetReport> {
         &SetBuildRequest {
             set: set.to_owned(),
             overwrite,
+            clean: None,
         },
         &Settings::default(),
     )

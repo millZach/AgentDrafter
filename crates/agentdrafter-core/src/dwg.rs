@@ -1367,20 +1367,84 @@ pub(crate) fn carries_build_mark(path: &Path) -> Result<bool, Error> {
 /// carries no build mark, or cannot be read as a DWG in a format
 /// AgentDrafter builds in, the 2007 format or later.
 pub(crate) fn build_mark(path: &Path) -> Option<BuildMark> {
-    let properties = catch_unwind(AssertUnwindSafe(|| drawing_properties(path))).ok()??;
-    mark_in(&properties)
+    read_build_mark(path).ok().flatten()
+}
+
+/// What the build mark of the DWG at `path` says, as [`build_mark`] reads
+/// it, telling a file that carries no mark from one whose mark could not
+/// be read:
+///
+/// - `Ok(None)`: the file was read and carries no build mark. That is a
+///   file that is not a DWG, one whose first bytes name no DWG version; a
+///   DWG older than the 2007 format, which AgentDrafter never builds; and
+///   a DWG whose drawing properties hold no mark.
+/// - `Err`: the file could not be opened or read, or it starts as a DWG of
+///   the 2007 format or later but its header or its drawing properties
+///   could not be read, as a file cut short is, so whether it carries the
+///   mark cannot be told. The words say why.
+pub(crate) fn read_build_mark(path: &Path) -> Result<Option<BuildMark>, String> {
+    match catch_unwind(AssertUnwindSafe(|| drawing_properties(path))) {
+        Ok(Ok(Some(properties))) => Ok(mark_in(&properties)),
+        Ok(Ok(None)) => Ok(None),
+        Ok(Err(why)) => Err(why),
+        Err(_) => Err("the DWG library stopped reading its drawing properties".to_owned()),
+    }
 }
 
 /// The custom drawing properties of the DWG at `path`, each its name and
-/// its value, read from its summary section alone.
-fn drawing_properties(path: &Path) -> Option<Vec<(String, String)>> {
-    let mut reader = DwgReader::from_file(path).ok()?;
-    let header = reader.read_file_header().ok()?;
-    if !header.version.r2007_plus() {
-        return None;
+/// its value, read from its summary section alone. None for a file that
+/// is not a DWG of the 2007 format or later, by its first bytes; an error
+/// when the file, or such a DWG's header or summary, cannot be read.
+fn drawing_properties(path: &Path) -> Result<Option<Vec<(String, String)>>, String> {
+    let mut start = [0u8; 6];
+    let read = std::fs::File::open(path)
+        .and_then(|mut file| {
+            use std::io::Read;
+            let mut read = 0;
+            while read < start.len() {
+                match file.read(&mut start[read..])? {
+                    0 => break,
+                    n => read += n,
+                }
+            }
+            Ok(read)
+        })
+        .map_err(|e| format!("could not read the file: {e}"))?;
+    // A DWG starts with its version, such as `AC1032` for the 2018 format;
+    // the 2007 format is `AC1021`. The DWG library reads `AD` for `AC` too.
+    let version = std::str::from_utf8(&start[..read])
+        .ok()
+        .and_then(|text| text.strip_prefix("AC").or_else(|| text.strip_prefix("AD")))
+        .filter(|digits| digits.len() == 4)
+        .and_then(|digits| digits.parse::<u32>().ok());
+    match version {
+        Some(version) if version >= 1021 => {}
+        _ => return Ok(None),
     }
-    let section = reader.get_section_buffer(SUMMARY_SECTION, &header).ok()?;
+    let mut reader = DwgReader::from_file(path)
+        .map_err(|e| format!("the DWG library could not open it: {e}"))?;
+    let header = reader
+        .read_file_header()
+        .map_err(|e| format!("the DWG library could not read its header: {e}"))?;
+    if !header.version.r2007_plus() {
+        return Ok(None);
+    }
+    // The summary section is optional: a DWG without one has no drawing
+    // properties, so no build mark, which is not a failed read.
+    let has_summary = header
+        .section_descriptors
+        .iter()
+        .any(|section| section.name == SUMMARY_SECTION)
+        || header.section_locators.contains_key(SUMMARY_SECTION);
+    if !has_summary {
+        return Ok(Some(Vec::new()));
+    }
+    let section = reader
+        .get_section_buffer(SUMMARY_SECTION, &header)
+        .map_err(|e| format!("the DWG library could not read its drawing properties: {e}"))?;
     custom_properties(&section)
+        .map(Some)
+        .ok_or_else(|| "its drawing properties are cut short or malformed".to_owned())
 }
 
 /// The custom properties in a summary section of the 2007 format or later:
@@ -1618,7 +1682,13 @@ mod tests {
                 "{name}"
             );
             // Read from the drawing properties alone, as from the drawing.
-            assert_eq!(build_mark(&dwg), Some(mark), "{name}");
+            assert_eq!(build_mark(&dwg), Some(mark.clone()), "{name}");
+            // The DWG library reads a version starting `AD` as `AC`, and so
+            // does the mark's reader.
+            let mut bytes = fs::read(&dwg).unwrap();
+            bytes[..2].copy_from_slice(b"AD");
+            fs::write(&dwg, &bytes).unwrap();
+            assert_eq!(build_mark(&dwg), Some(mark), "{name}, as AD");
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1669,11 +1739,26 @@ mod tests {
         let file = dir.join("sheet.dwg");
         fs::write(&file, b"AC1032 but nothing after").unwrap();
         assert_eq!(build_mark(&file), None);
+        // It starts as a 2018 DWG, so whether it carries the mark cannot be
+        // told: it could not be read, which is not a DWG without one.
+        assert!(read_build_mark(&file).is_err());
         assert_eq!(build_mark(&dir.join("gone.dwg")), None);
+        assert!(read_build_mark(&dir.join("gone.dwg")).is_err());
+        // Not a DWG at all, or one of a format AgentDrafter never builds,
+        // carries no mark.
+        for bytes in [&b"someone else's drawing"[..], b"", b"AC1018 of 2004"] {
+            fs::write(&file, bytes).unwrap();
+            assert_eq!(read_build_mark(&file), Ok(None));
+        }
         // A DWG of the 2018 format with no drawing properties of its own.
         let bytes = DwgWriter::write_to_vec(&CadDocument::with_version(NEW_SHEET_VERSION)).unwrap();
-        fs::write(&file, bytes).unwrap();
+        fs::write(&file, &bytes).unwrap();
         assert_eq!(build_mark(&file), None);
+        assert_eq!(read_build_mark(&file), Ok(None));
+        // The same DWG cut short after its first 256 bytes: its header
+        // starts well, and its drawing properties cannot be read.
+        fs::write(&file, &bytes[..256]).unwrap();
+        assert!(read_build_mark(&file).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 

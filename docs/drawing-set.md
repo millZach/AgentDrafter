@@ -70,6 +70,7 @@ The settings are the file `set.yaml` at the top of the set's folder. `agentdraft
 | `units` | yes | The set's declared unit: `mm`, `cm`, `m`, `in` or `ft`. Every template, sheet description and block library in the set is in it, and every DWG the set builds is in it. There is no default. |
 | `output` | yes | The folder the set's outputs go to, relative to the set's folder, such as `dwg` or `../issued`: its DWGs, and its PDFs when it is plotted. A build or a plot makes it if it is not there. Each DWG names the set in its build mark, so a render or a plot of it alone finds the set wherever this folder is ([below](#the-build-mark-names-the-set)). |
 | `rows` | yes | The file the set's rows are in, relative to the set's folder, such as `rows.yaml`; or a folder of rows files, such as `rows`; or a list of such paths, such as `[rows/areas.yaml, rows/schedules.yaml]` ([Several rows files](#several-rows-files)). |
+| `clean` | no | `true` or `false`: whether every build and plot of the set moves its [leftover outputs](#leftover-outputs) into `superseded/` in the output folder. Without it, or `false`, they are only listed. A run's own `--clean` or `--no-clean` overrides it for that run. |
 
 A path in a set is written as a sheet description writes its block library's: relative, with `/` between folders on every system, not starting with `/`, and holding none of `\ : < > " | ? *`.
 
@@ -193,7 +194,7 @@ A change set edits such a value by matching the new text to the fixed parts, and
 
 ## Building
 
-`agentdrafter build <folder> [--overwrite] [--fonts <folder>]...` reads the settings and the rows, makes the output folder, then builds each row's sheet in turn into `<output>/<sheet>.dwg`, in the 2018 format, with the build mark, which names the set ([below](#the-build-mark-names-the-set)). `--output` is refused for a set: its settings say where its DWGs go.
+`agentdrafter build <folder> [--overwrite] [--clean | --no-clean] [--fonts <folder>]...` reads the settings and the rows, makes the output folder, then builds each row's sheet in turn into `<output>/<sheet>.dwg`, in the 2018 format, with the build mark, which names the set ([below](#the-build-mark-names-the-set)). `--output` is refused for a set: its settings say where its DWGs go.
 
 - **Each sheet is built fully or not at all** (ADR-0005). A sheet that fails, because its row lacks a value, its template has a mistake or its DWG cannot be written, writes nothing; a DWG an earlier build left at its path stays as it was.
 - **The other sheets are still built.** One bad row does not stop a long run. The reply says for each sheet what was built and what failed.
@@ -201,21 +202,59 @@ A change set edits such a value by matching the new text to the fixed parts, and
 - **An existing DWG is replaced only when asked.** Without `--overwrite`, a sheet whose DWG is already there fails with `output_exists`. With it, each sheet replaces only a DWG that carries AgentDrafter's build mark; any other file may be an original, so that sheet fails with `not_a_build` and the file is not touched.
 - **A value the template does not use is reported, not refused.** Zach decided this on 2026-11-11. The sheet is built without it, and its outcome's `notices` lists each such value, so a stray or misspelt one stays in sight: `{"code":"unused_value","message":...,"sheet":"DEMO-003","template":"templates/ansi-b.yaml","field":"rows[2].values.CHECKED","line":...,"column":...,"file":...}`, where the message lists the values the template takes. A value the template needs and the row lacks is still the `missing_value` error. An attribute tag written in lowercase, in the block library or an insert, is taken in capitals and reported the same way, with the code `tag_in_capitals` and the file it is written in ([the block library](block-library.md#a-tag-defined-more-than-once)). A sheet with nothing to report has `"notices":[]`.
 - **An inconsistent set is reported.** While a change set has landed on some of the set's sheets and failed on others, the reply carries the set's mark under `inconsistent` ([Change sets](change-sets.md#an-inconsistent-set)). The build builds each sheet as its records are.
+- **Outputs no row writes any more are listed**, and moved aside when asked ([below](#leftover-outputs)).
 - **Building twice gives the same DWGs.** Nothing in a built DWG depends on when, where or on which machine it was built, so the same set builds byte-identical DWGs, in the same folder or another. AutoCAD 2026 read two builds of the demo set as identical. The one thing a DWG holds of where it is, the way back to the set in its build mark, is worked out from the set's `output` as written, so it is the same wherever the set is built; for an output folder beside the set, such as `../issued`, it holds the set's folder's name too ([below](#the-build-mark-names-the-set)).
 
 The reply is one line of JSON. When every sheet was built:
 
 ```json
-{"ok":true,"result":{"set":"examples/demo-set","units":"in","output":"examples/demo-set/dwg","built":3,"failed":0,"sheets":[{"sheet":"DEMO-001","template":"templates/ansi-b.yaml","ok":true,"result":{"dwg":"examples/demo-set/dwg/DEMO-001.dwg","...":"..."},"notices":[]}]}}
+{"ok":true,"result":{"set":"examples/demo-set","units":"in","output":"examples/demo-set/dwg","built":3,"failed":0,"sheets":[{"sheet":"DEMO-001","template":"templates/ansi-b.yaml","ok":true,"result":{"dwg":"examples/demo-set/dwg/DEMO-001.dwg","...":"..."},"notices":[]}],"leftovers":[]}}
 ```
 
 Each sheet's `result` is what building one sheet description reports, with its template as `description`. When some sheets failed, the reply is not `ok`, carries the same `result`, and adds an error; the command exits with 1:
 
 ```json
-{"ok":false,"result":{"built":2,"failed":1,"sheets":[{"sheet":"DEMO-002","template":"templates/ansi-b.yaml","ok":false,"error":{"code":"missing_value","message":"sheet `DEMO-002` has no value `TITLE`, which its template `templates/ansi-b.yaml` fills in at `objects[2].insert.attributes.TITLE`, `objects[3].text.contents`; give it under the row's `values`","field":"rows[1].values.TITLE","line":15,"column":7,"file":"examples/demo-set/rows.yaml"},"notices":[]},"..."]},"error":{"code":"sheets_failed","message":"1 of the set's 3 sheets failed, and nothing was written for them; 2 built. Each sheet's outcome is under `sheets`"}}
+{"ok":false,"result":{"built":2,"failed":1,"sheets":[{"sheet":"DEMO-002","template":"templates/ansi-b.yaml","ok":false,"error":{"code":"missing_value","message":"sheet `DEMO-002` has no value `TITLE`, which its template `templates/ansi-b.yaml` fills in at `objects[2].insert.attributes.TITLE`, `objects[3].text.contents`; give it under the row's `values`","field":"rows[1].values.TITLE","line":15,"column":7,"file":"examples/demo-set/rows.yaml"},"notices":[]},"..."],"leftovers":[]},"error":{"code":"sheets_failed","message":"1 of the set's 3 sheets failed, and nothing was written for them; 2 built. Each sheet's outcome is under `sheets`"}}
 ```
 
 When the settings or the rows cannot be read, the reply is an error alone, as for one sheet description.
+
+### Leftover outputs
+
+When a set's rows change, a sheet can drop out of them: renamed, merged or taken out. Its DWG and PDF would stay in the output folder from the last build, look current, and could be issued by mistake. Zach decided on 2026-11-20 (#109) that every build and every plot of a set lists them, and moves them aside only when asked.
+
+```
+agentdrafter build <folder> [--clean | --no-clean] ...
+agentdrafter plot <folder> [--clean | --no-clean] ...
+```
+
+- **A leftover output is a DWG or a PDF in the set's output folder that AgentDrafter made for this set, and that no row writes any more.** A build and a plot each list every one, DWGs and PDFs both, under `leftovers` in the reply, in the byte order of their names. A row writes `<output>/<sheet>.dwg` and `<output>/<sheet>.pdf`, and a file is the row's when it is the very file at that path, as the file system tells it (by its device and number on Unix, by its path as Windows resolves it), however its name compares: where the file system ignores letter case, or takes two spellings of an accented letter for one, as macOS does, a file left under the old spelling is the row's own and stays; where it tells them apart, as Linux does, the file under the old spelling is another file, and left over. Where a file cannot be told apart that way, a name that is a row's in any letter case is the row's, the safe way round. A row whose sheet failed in this run still writes it, so its file is not a leftover.
+- **Made for this set** is told by what the file carries, never by its name:
+  - a DWG, by its [build mark](#the-build-mark-names-the-set): the mark names the set exactly as this set's own build writes it from the output folder, such as `..` for `output: dwg` or `../demo-plant` for `output: ../issued`. A DWG of another set that shares the output folder names its own set and is not listed. A set whose DWGs name no set in their marks (`no_set_in_marks`) cannot tell its DWGs from another's, so it lists none of them; its PDFs are still listed.
+  - a PDF, by its [stamp](plot.md#the-stamp): the stamp names a rows file of this set, one of its rows files now, or a file in the set's folder, there or gone, that no other set inside it holds, so that the sheets of a whole rows file taken out of the settings are still known.
+- **Anything else is never listed or moved**: a file with no build mark or no stamp, an [original](../CONTEXT.md) among them; a DWG built, or a PDF plotted, from a sheet description on its own; another set's outputs; any other kind of file, such as a PNG; a link, whatever it leads to; and anything in a folder inside the output folder, `superseded/` among them (ADR-0004).
+- **Without cleaning they are only listed**, and stay where they are, as they were.
+- **Cleaning moves each one into `superseded/`** in the output folder, keeping its name, and never deletes it. The build or plot makes the folder when there is a leftover to move and it is not there. Each leftover's `moved_to` says where it went.
+- **A move never replaces a file**, not even one another program makes at that name while the move is made: the leftover takes its new name as a hard link, which every system refuses to make over a file, and loses its old one after; where the file system has no hard links, its bytes are copied into a file made new, which is refused the same way, and the old one goes once the copy is whole. Just before it moves, each leftover is read again: one that is no longer a plain file, or no longer carries the set's mark or stamp, is not moved, and says so.
+- **A `superseded` that is a link, or a junction on Windows, is refused**, since it would move the leftovers to another folder: nothing is moved, and each leftover carries the error. So is a `superseded` that is a file.
+- **Cleaning is asked for by the run, or by the set.** `--clean` (`clean: true` through the HTTP API, the MCP server and the Python library) cleans for that run; `--no-clean` (`clean: false`) only lists for that run, whatever the settings say. Without either (or with `clean: null`), the run does as the set's settings say: `clean: true` cleans, and `clean: false` or no `clean` only lists. `--clean` and `--no-clean` together, or either twice, are refused. `clean` is for a set's folder alone: given for one sheet description or DWG, it is refused, since that run writes one file and leaves every other as it is.
+- **A name already in `superseded/` is kept.** A sheet taken out, cleaned, put back and taken out again finds its first leftover there: that file is never replaced, and the newer one takes the first free name `<sheet> (2).dwg`, then `<sheet> (3).dwg`, and so on, so the plain name is the oldest. The same goes for PDFs.
+- **A leftover that cannot be moved stays where it is**, with its `error`, and the reply is not `ok`, with the error `write_failed`. A sheet name near the longest allowed, 251 characters, that would be too long for the system with its number is such a case.
+- **A look that cannot finish says so.** When the output folder cannot be listed, to its end, the reply has no `leftovers`, so that no one takes an empty list for a folder looked through, and says why under `leftovers_error`, an error `read_failed` naming the folder; the reply is not `ok`, with that error. A DWG or PDF no row writes that cannot be read to tell whether the set made it, its details or its bytes, is listed under `leftovers` with `"unreadable": true` and its `read_failed` error, and never moved; the reply is not `ok`, with a `read_failed` error that counts them. A file that can be read but carries no mark or stamp AgentDrafter can read is not the set's, and is left alone.
+- **Which error a reply carries**: `sheets_failed` when sheets failed; else `read_failed` when the folder could not be listed or a file could not be read; else `write_failed` when a leftover could not be moved. Each leftover carries its own error whatever the reply's is.
+- **When the set cannot be read**, its settings or any of its rows files, nothing is listed or moved, since without every row there is no telling which outputs no row writes.
+
+```json
+{"ok":true,"result":{"set":"examples/demo-set","...":"...","leftovers":[{"file":"examples/demo-set/dwg/DEMO-004.dwg","kind":"dwg","sheet":"DEMO-004","moved_to":"examples/demo-set/dwg/superseded/DEMO-004.dwg"},{"file":"examples/demo-set/dwg/DEMO-004.pdf","kind":"pdf","sheet":"DEMO-004","moved_to":"examples/demo-set/dwg/superseded/DEMO-004.pdf"}]}}
+```
+
+A reply with nothing left over has `"leftovers":[]`. One whose folder could not be listed:
+
+```json
+{"ok":false,"result":{"set":"examples/demo-set","...":"...","leftovers_error":{"code":"read_failed","message":"could not list the set's output folder to look for leftover outputs, so none was looked for or moved: ...","file":"examples/demo-set/dwg"}},"error":{"code":"read_failed","...":"..."}}
+```
+
+Moving a leftover is not a change set: it is not in the [journal](journal.md) and is not undone; the files are in `superseded/`, byte for byte, to be moved back by hand.
 
 ### The build mark names the set
 
@@ -244,7 +283,7 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 
 ## How it is read
 
-`crates/agentdrafter-core/src/description/set.rs` reads the settings, finds the rows files they name (`read_rows_files_in`) and reads their rows (`rows_of`), each row with its file, `template.rs` fills a template in from a row, joining each list of parts as `parts.rs` reads it, and hands it to the sheet description's reader with the row's own objects, and `set_schema.rs` writes the three schemas. `crates/agentdrafter-core/src/set.rs` builds a set, sheet by sheet, through the same code that builds one sheet description, works out the set's folder each DWG's build mark records (`set_in_mark`), and finds the set a DWG's mark names (`set_of_dwg`). `src/dwg.rs` writes the mark, and reads it from the DWG's drawing properties alone, without reading the drawing.
+`crates/agentdrafter-core/src/description/set.rs` reads the settings, finds the rows files they name (`read_rows_files_in`) and reads their rows (`rows_of`), each row with its file, `template.rs` fills a template in from a row, joining each list of parts as `parts.rs` reads it, and hands it to the sheet description's reader with the row's own objects, and `set_schema.rs` writes the three schemas. `crates/agentdrafter-core/src/leftovers.rs` finds a set's leftover outputs and moves them into `superseded/`, for a build and a plot alike. `crates/agentdrafter-core/src/set.rs` builds a set, sheet by sheet, through the same code that builds one sheet description, works out the set's folder each DWG's build mark records (`set_in_mark`), and finds the set a DWG's mark names (`set_of_dwg`). `src/dwg.rs` writes the mark, and reads it from the DWG's drawing properties alone, without reading the drawing.
 
 ## What is not offered yet
 

@@ -367,6 +367,7 @@ objects:
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -550,6 +551,7 @@ objects:
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );

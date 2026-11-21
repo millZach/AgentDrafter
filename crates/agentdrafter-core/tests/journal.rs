@@ -37,6 +37,7 @@ fn demo_set(test: &str, built: bool) -> PathBuf {
             &SetBuildRequest {
                 set: set.clone(),
                 overwrite: false,
+                clean: None,
             },
             &Settings::default(),
         );

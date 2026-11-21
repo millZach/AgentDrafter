@@ -55,6 +55,7 @@ fn an_11x17_sheet_plots_at_exactly_431_8_by_279_4_mm() {
         &PlotSetRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
             plot_style: None,
         },
         &Settings::default(),
@@ -88,6 +89,7 @@ fn an_11x17_sheet_plots_at_exactly_431_8_by_279_4_mm() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -308,6 +310,7 @@ fn the_text_of_a_sheet_can_be_searched_and_copied() {
         &PlotSetRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
             plot_style: None,
         },
         &Settings::default(),
@@ -414,6 +417,7 @@ fn the_pdf_records_what_produced_it_and_goes_stale_when_that_moves_on() {
         &PlotSetRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
             plot_style: None,
         },
         &Settings::default(),
@@ -550,6 +554,7 @@ fn a_set_plots_every_sheet_it_can_and_says_which_failed() {
         &PlotSetRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
             plot_style: None,
         },
         &Settings::default(),

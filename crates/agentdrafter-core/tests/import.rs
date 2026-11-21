@@ -388,6 +388,7 @@ fn a_drawing_set_s_library_is_refused_and_named_to_its_operation() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -427,6 +428,7 @@ fn import_blocks_adds_a_block_to_a_set_s_library_which_undo_takes_back_byte_for_
             &SetBuildRequest {
                 set: set.clone(),
                 overwrite: false,
+                clean: None,
             },
             &Settings::default(),
         )
@@ -509,6 +511,7 @@ fn import_blocks_with_replace_brings_the_inserts_of_a_block_it_replaces_into_lin
             &SetBuildRequest {
                 set: set.clone(),
                 overwrite: false,
+                clean: None,
             },
             &Settings::default(),
         )

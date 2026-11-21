@@ -95,6 +95,18 @@
   },
   "also": [
     {
+      "command": "build",
+      "after": "build",
+      "args": ["build", "demo-set", "--overwrite", "--clean"],
+      "input": {"source": "demo-set", "overwrite": true, "clean": true}
+    },
+    {
+      "command": "plot",
+      "after": "plot",
+      "args": ["plot", "demo-set", "--overwrite", "--no-clean"],
+      "input": {"source": "demo-set", "overwrite": true, "clean": false}
+    },
+    {
       "command": "render",
       "after": "render",
       "args": ["render", "demo-set/dwg/DEMO-001.dwg", "--width", "320", "--height", "200", "--monochrome", "--output", "demo-set/dwg/DEMO-001-monochrome.png"],
