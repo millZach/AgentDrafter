@@ -424,12 +424,15 @@ A block is defined once, in the block library of the drawing set, and inserted o
 | `position` | yes | Where the block's base point sits: a point. |
 | `scale` | no | How much the block is enlarged, the same along every axis: a number more than 0, with no unit. Without it, 1. |
 | `rotation` | no | An angle: degrees anticlockwise from the X axis. Without it, 0. |
+| `mirrored` | no | Whether the block is mirrored, its X axis reversed before it is turned, as AutoCAD's MIRROR leaves an insert: `true` or `false`. Without it, `false`. See below. |
 | `attributes` | no | The values of the block's attributes: a mapping from each attribute's tag to its value. A value is one line of text, as a `text`'s contents are, and may be empty, written `''`. A tag the block defines more than once takes a list of values instead, one for each in the order the block defines them, such as `NOTE: [first, second]` ([below](#a-tag-defined-more-than-once)). An attribute the insert leaves out takes its definition's default, and so does one whose value is a bare null, such as `TAG:` ([the YAML subset](#the-yaml-subset), rule 8). A [constant attribute](block-library.md#attribute-modes) takes no value from an insert. A tag written in lowercase is taken in capitals, as the block keeps it. |
 | `layer` | no | The layer the insert sits on, as for every object. |
 
 An insert takes an `id` and a `name` as every object does ([IDs and names](#ids-and-names)).
 
-A block that is not in the library, or an attribute tag the block does not define, is an error that lists the library's blocks or the block's attribute tags. An insert's attributes draw where the block's attribute definitions are, moved, scaled and turned with the insert. Only uniform, positive scales are offered: a mirrored or stretched insert waits for a later ticket.
+A block that is not in the library, or an attribute tag the block does not define, is an error that lists the library's blocks or the block's attribute tags. An insert's attributes draw where the block's attribute definitions are, moved, scaled and turned with the insert.
+
+A mirrored insert, `mirrored: true`, is AutoCAD's mirrored block reference (#242): its block's X axis is reversed, then it is scaled and turned, so what its block draws, a constant attribute among it, draws mirrored, as in AutoCAD. The DWG keeps it as AutoCAD's MIRROR leaves one, its X scale the negative of its Y and Z scales, and reading a DWG back gives `mirrored: true` for an insert scaled so, and for no other negative scale. Its attributes sit where the mirror puts them but read forwards, as AutoCAD's MIRRTEXT 0 leaves them: each reads along its mirrored direction, or that turned a half turn, whichever reads left to right or upwards, a direction in [0, 90] or between 270 and 360, with its definition's justification. The [`mirror` operation](change-sets.md#rotate-scale-and-mirror) makes one. A scale is the same along every axis and more than 0: a stretched insert waits for a later ticket.
 
 #### A tag defined more than once
 

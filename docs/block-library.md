@@ -161,5 +161,5 @@ A change set adds a block to a drawing set's library with `add_block` (AutoCAD's
 - Cells in a nested block: the checker holds only the cells of the block a sheet inserts.
 - Annotative blocks and attributes.
 - Multiline attributes ([#117](https://github.com/millZach/AgentDrafter/issues/117)), and attributes whose place an insert changes.
-- Mirrored and stretched inserts: an insert's scale is the same along every axis and more than 0.
+- Stretched inserts: an insert's scale is the same along every axis and more than 0. A mirrored insert, `mirrored: true`, nests as one on a sheet does ([Inserts](sheet-description.md#inserts)).
 - Arrays of inserts (AutoCAD's MINSERT).

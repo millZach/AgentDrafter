@@ -332,6 +332,18 @@ _Avoid_: associative array (AutoCAD's, which is not written), pattern, repeat
 The line, polyline, arc, circle, ellipse or spline a path array runs along, from its start as it is drawn; the copies ride along it as the objects sit at its start, turned with its direction unless they are not aligned.
 _Avoid_: curve, guide
 
+**Transform**:
+A rotate, a scale or a mirror of objects, as AutoCAD's ROTATE, SCALE and MIRROR do them: every point an object is drawn through lands where it puts it, every direction it is drawn in turns with it, and, scaled, every length it is drawn with is scaled. A rotate and a scale work in place, and so does a mirror told to erase its source; a mirror otherwise keeps its source and makes mirrored copies. Text a mirror moves reads forwards, as AutoCAD's MIRRTEXT 0 keeps it. What the sheet description cannot hold, such as a table turned, is refused, never approximated.
+_Avoid_: transformation, xform, flip
+
+**Mirror line**:
+The line a mirror reflects objects across, given by two points. The mirror is upright through it, so every point keeps its Z.
+_Avoid_: axis, text mirror (a readable rendering of a DWG)
+
+**Mirrored insert**:
+An insert whose block's X axis is reversed before it is scaled and turned, as AutoCAD's MIRROR leaves one: `mirrored: true`, which a DWG keeps as a negative X scale. What its block draws is mirrored; its attributes read forwards.
+_Avoid_: negative scale, flipped block
+
 **Change set**:
 Operations sent together as one request. Each sheet takes its part of a change set fully or not at all.
 _Avoid_: batch, transaction, commit
