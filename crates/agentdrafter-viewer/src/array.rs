@@ -160,6 +160,12 @@ pub fn shown(v: f64) -> String {
     }
 }
 
+/// A number typed in a field: digits with a point and a sign, as the
+/// command bar reads one; none for anything else, a blank among it.
+fn number_typed(text: &str) -> Option<f64> {
+    crate::tools::number(text)
+}
+
 fn plural(n: f64, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1.0 { one } else { many })
 }
@@ -187,6 +193,12 @@ pub struct Setup {
     pub angle_fill: f64,
     /// Whether each copy turns as it goes round.
     pub rotate: bool,
+    /// How many objects it copies: the core's limit counts every copy of
+    /// every one of them.
+    pub objects: usize,
+    /// The fields whose text does not read as a number, by key, with the
+    /// text: shown as typed, and nothing lands until each reads.
+    pub unread: Vec<(String, String)>,
 }
 
 /// A field of the panel, as the page shows it.
@@ -225,11 +237,26 @@ impl Setup {
             angle_between: 60.0,
             angle_fill: 360.0,
             rotate: true,
+            objects: 1,
+            unread: Vec::new(),
+        }
+    }
+
+    /// Whether a polar array's items go a whole turn, spread evenly: with
+    /// the spacing between them held, when they are that far apart all the
+    /// way round, items times the angle between them a turn; with the total
+    /// held, when it is a turn.
+    pub fn whole(&self) -> bool {
+        match self.spacing {
+            Spacing::Between => whole_turn(self.angle_between * self.items),
+            Spacing::Total => whole_turn(self.angle_fill),
         }
     }
 
     /// The angle a polar array fills, from the angle between its items: a
-    /// whole turn when they go right round, else to the last item.
+    /// whole turn, either way, when they go right round, else to the last
+    /// item, which may come to 360 or more, said as wrong, since the core
+    /// spreads 360 evenly.
     fn fill_of(between: f64, items: f64) -> f64 {
         if whole_turn(between * items) {
             360f64.copysign(between)
@@ -285,6 +312,7 @@ impl Setup {
     /// a polar array that goes a whole turn still go a whole turn when
     /// their number changes, as the prototype keeps them.
     pub fn set(&mut self, key: &str, v: f64) -> bool {
+        self.unread.retain(|(k, _)| k != key);
         match key {
             "rows" => self.rows = v,
             "columns" => self.columns = v,
@@ -293,7 +321,7 @@ impl Setup {
             "row_total" => self.row_total = v,
             "column_total" => self.column_total = v,
             "items" => {
-                if self.spacing == Spacing::Between && whole_turn(self.angle_fill) && v >= 2.0 {
+                if self.spacing == Spacing::Between && self.whole() && v >= 2.0 {
                     self.angle_between = clean(self.angle_fill / v);
                 }
                 self.items = v;
@@ -319,9 +347,49 @@ impl Setup {
         ((self.items_each() - 1.0).max(0.0) * objects as f64) as usize
     }
 
+    /// Takes what is typed in the field `key`: its value when it reads as
+    /// a number, else the text, kept as typed, which nothing lands past.
+    /// False when `key` names no field.
+    pub fn read(&mut self, key: &str, text: &str) -> bool {
+        let number = number_typed(text);
+        if number.is_some() || self.has(key) {
+            self.unread.retain(|(k, _)| k != key);
+        }
+        match number {
+            Some(v) => self.set(key, v),
+            None if self.has(key) => {
+                self.unread.push((key.to_owned(), text.to_owned()));
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn has(&self, key: &str) -> bool {
+        [
+            "rows",
+            "columns",
+            "row_spacing",
+            "column_spacing",
+            "row_total",
+            "column_total",
+            "items",
+            "angle_between",
+            "angle_fill",
+        ]
+        .contains(&key)
+    }
+
     /// What is wrong with the values, in words, if anything: a polar
     /// array's centre aside.
     pub fn problem(&self) -> Option<String> {
+        // A field shown whose text is not a number: nothing lands until it is.
+        for f in self.fields(None) {
+            if self.unread.iter().any(|(k, _)| k == f.key) {
+                let label = f.label.split(',').next().unwrap_or(&f.label).to_owned();
+                return Some(format!("{label} is not a number: type one."));
+            }
+        }
         let whole = |v: f64| v.fract() == 0.0 && v.is_finite();
         let total = self.spacing == Spacing::Total;
         match self.kind {
@@ -377,7 +445,7 @@ impl Setup {
                     if self.angle_between == 0.0 {
                         return Some("The angle between items is other than 0.".to_owned());
                     }
-                    if self.angle_fill.abs() > 360.0 + 1e-9 {
+                    if !self.whole() && self.angle_fill.abs() > 360.0 + 1e-9 {
                         return Some(format!(
                             "{} items {}° apart fill {}°: more than a whole turn.",
                             self.items,
@@ -385,11 +453,26 @@ impl Setup {
                             f1(self.angle_fill.abs())
                         ));
                     }
+                    // The last a whole turn round sits on the objects: the
+                    // core takes 360 as the items spread evenly round.
+                    if !self.whole() && whole_turn(self.angle_fill) {
+                        return Some(format!(
+                            "{} items {}° apart put the last on the objects, a whole turn round: \
+                             give {} items, or {}° apart.",
+                            self.items,
+                            f1(self.angle_between.abs()),
+                            self.items - 1.0,
+                            f1(360.0 / self.items)
+                        ));
+                    }
                 }
             }
         }
-        if self.items_each() - 1.0 > MOST_COPIES {
-            return Some("One array makes at most 10,000 copies of each object.".to_owned());
+        let copies = self.copies(self.objects);
+        if copies as f64 > MOST_COPIES {
+            return Some(format!(
+                "This makes {copies} copies; one array makes at most 10,000."
+            ));
         }
         None
     }
@@ -399,7 +482,7 @@ impl Setup {
     pub fn tag(&self) -> String {
         match self.kind {
             ArrayKind::Rectangular => format!("{} × {}", self.rows, self.columns),
-            ArrayKind::Polar if whole_turn(self.angle_fill) => format!("{} round", self.items),
+            ArrayKind::Polar if self.whole() => format!("{} round", self.items),
             ArrayKind::Polar => format!("{} round, {}°", self.items, f1(self.angle_fill)),
         }
     }
@@ -438,7 +521,9 @@ impl Setup {
                 format!("{w}: {copies}")
             }
             ArrayKind::Polar => {
-                let fill = if whole_turn(self.angle_fill) {
+                let fill = if self.whole() && self.angle_fill < 0.0 {
+                    "a whole turn clockwise".to_owned()
+                } else if self.whole() {
                     "a whole turn".to_owned()
                 } else {
                     let way = if self.angle_fill < 0.0 {
@@ -461,13 +546,15 @@ impl Setup {
     /// The panel's fields, `unit` the sheet's unit, such as `in`.
     pub fn fields(&self, unit: Option<&str>) -> Vec<Field> {
         let unit = unit.map(|u| format!(", {u}")).unwrap_or_default();
+        // A field whose text does not read shows it as typed.
         let field =
             |key: &'static str, label: String, hint: Option<&'static str>, v: f64, whole: bool| {
+                let typed = self.unread.iter().find(|(k, _)| k == key);
                 Field {
                     key,
                     label,
                     hint,
-                    value: shown(v),
+                    value: typed.map_or_else(|| shown(v), |(_, t)| t.clone()),
                     whole,
                 }
             };
@@ -589,8 +676,12 @@ impl Setup {
 
     /// The keys of the core's `array` operation, `center` a polar array's
     /// centre as the operation takes it: the spacing between items, worked
-    /// out from a total held, and the angle it fills, left out for a whole
-    /// turn; `rotate` only when false, as the core turns them by default.
+    /// out from a total held, and the angle it fills, the items placed as
+    /// the preview places them: (items - 1) times the angle between them,
+    /// or, only when they go a whole turn spread evenly, left out, or -360
+    /// clockwise, so the copies go round the way the preview shows and
+    /// keep its order and their IDs; `rotate` only when false, as the core
+    /// turns them by default.
     pub fn keys(&self, center: Value) -> Map<String, Value> {
         let mut k = Map::new();
         match self.kind {
@@ -609,8 +700,10 @@ impl Setup {
                 k.insert("kind".into(), json!("polar"));
                 k.insert("center".into(), center);
                 k.insert("count".into(), json!(self.items as u64));
-                if !whole_turn(self.angle_fill) {
+                if !self.whole() {
                     k.insert("angle".into(), json!(self.angle_fill));
+                } else if self.angle_fill < 0.0 {
+                    k.insert("angle".into(), json!(-360.0));
                 }
                 if !self.rotate {
                     k.insert("rotate".into(), json!(false));

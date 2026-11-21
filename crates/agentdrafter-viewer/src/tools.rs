@@ -686,8 +686,14 @@ impl Tools {
                     follow(base);
                     placed.iter_mut().for_each(follow);
                 }
-                Step::ArraySetup { picked, center, .. } => {
+                Step::ArraySetup {
+                    picked,
+                    center,
+                    setup,
+                    ..
+                } => {
                     follow_picked(picked);
+                    setup.objects = picked.len();
                     if let Some(c) = center {
                         follow(c);
                     }
@@ -1345,7 +1351,8 @@ impl Tools {
         }
         if kind == ToolKind::Array {
             let array_kind = self.array_kind.unwrap_or(ArrayKind::Rectangular);
-            let setup = Setup::new(array_kind, self.picked_bounds(&picked));
+            let mut setup = Setup::new(array_kind, self.picked_bounds(&picked));
+            setup.objects = picked.len();
             self.running = Some(Running {
                 kind,
                 step: Step::ArraySetup {
@@ -1514,10 +1521,10 @@ impl Tools {
             ..
         }) = &mut self.running
         {
-            if let Some(v) = number(text) {
-                if setup.set(key, v) {
-                    self.error = None;
-                }
+            // Text that is not a number, a blank among it, is kept as typed
+            // and lands nothing until it reads, never the value before.
+            if setup.read(key, text) {
+                self.error = None;
             }
         }
     }
@@ -1540,7 +1547,10 @@ impl Tools {
             return None;
         };
         if typed.is_empty() {
-            if center.is_none() && setup.kind == ArrayKind::Polar {
+            // While a centre is picked, a centre taken before is not the one
+            // the copies follow: nothing lands until a centre is taken, as
+            // the prototype has it.
+            if setup.kind == ArrayKind::Polar && (center.is_none() || picking) {
                 self.error = Some(
                     "Pick the centre the items go round first: click it on the drawing, or type x,y."
                         .to_owned(),
@@ -2707,6 +2717,8 @@ impl Tools {
         {
             let problem = if setup.kind == ArrayKind::Polar && center.is_none() {
                 Some("Then the copies show.".to_owned())
+            } else if setup.kind == ArrayKind::Polar && *picking {
+                Some(format!("{click} the new centre on the drawing."))
             } else {
                 setup.problem()
             };
