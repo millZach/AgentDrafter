@@ -199,6 +199,11 @@ pub struct Setup {
     /// The fields whose text does not read as a number, by key, with the
     /// text: shown as typed, and nothing lands until each reads.
     pub unread: Vec<(String, String)>,
+    /// Whether a polar array's items go a whole turn, spread evenly: the
+    /// panel's own state, set by the angle typed, kept as the number of
+    /// items changes, so a count typed a digit at a time, `1` then `10`,
+    /// stays a whole turn.
+    whole_kept: bool,
 }
 
 /// A field of the panel, as the page shows it.
@@ -239,39 +244,15 @@ impl Setup {
             rotate: true,
             objects: 1,
             unread: Vec::new(),
+            whole_kept: true,
         }
     }
 
-    /// Whether a polar array's items go a whole turn, spread evenly: with
-    /// the spacing between them held, when they are that far apart all the
-    /// way round, items times the angle between them a turn; with the total
-    /// held, when it is a turn.
+    /// Whether a polar array's items go a whole turn, spread evenly. It is
+    /// set when an angle is typed, items times the angle between them a
+    /// turn, or the angle to fill a turn, and kept as the items change.
     pub fn whole(&self) -> bool {
-        match self.spacing {
-            Spacing::Between => whole_turn(self.angle_between * self.items),
-            Spacing::Total => whole_turn(self.angle_fill),
-        }
-    }
-
-    /// The angle a polar array fills, from the angle between its items: a
-    /// whole turn, either way, when they go right round, else to the last
-    /// item, which may come to 360 or more, said as wrong, since the core
-    /// spreads 360 evenly.
-    fn fill_of(between: f64, items: f64) -> f64 {
-        if whole_turn(between * items) {
-            360f64.copysign(between)
-        } else {
-            clean(between * (items - 1.0))
-        }
-    }
-
-    /// The angle between a polar array's items, from the angle it fills.
-    fn between_of(fill: f64, items: f64) -> f64 {
-        if whole_turn(fill) {
-            clean(fill / items)
-        } else {
-            clean(fill / (items - 1.0))
-        }
+        self.whole_kept
     }
 
     /// Works out the values not held from those that are.
@@ -284,8 +265,15 @@ impl Setup {
                 if self.columns > 1.0 {
                     self.column_total = clean(self.column_spacing * (self.columns - 1.0));
                 }
+                // A whole turn, either way; else to the last item, which may
+                // come to 360 or more, said as wrong, since the core spreads
+                // 360 evenly.
                 if self.items >= 2.0 {
-                    self.angle_fill = Self::fill_of(self.angle_between, self.items);
+                    self.angle_fill = if self.whole_kept {
+                        360f64.copysign(self.angle_between)
+                    } else {
+                        clean(self.angle_between * (self.items - 1.0))
+                    };
                 }
             }
             Spacing::Total => {
@@ -296,7 +284,11 @@ impl Setup {
                     self.column_spacing = clean(self.column_total / (self.columns - 1.0));
                 }
                 if self.items >= 2.0 {
-                    self.angle_between = Self::between_of(self.angle_fill, self.items);
+                    self.angle_between = if self.whole_kept {
+                        clean(self.angle_fill / self.items)
+                    } else {
+                        clean(self.angle_fill / (self.items - 1.0))
+                    };
                 }
             }
         }
@@ -321,13 +313,21 @@ impl Setup {
             "row_total" => self.row_total = v,
             "column_total" => self.column_total = v,
             "items" => {
-                if self.spacing == Spacing::Between && self.whole() && v >= 2.0 {
-                    self.angle_between = clean(self.angle_fill / v);
+                // A whole turn stays one, whatever the count passes through
+                // as it is typed.
+                if self.spacing == Spacing::Between && self.whole_kept && v >= 2.0 {
+                    self.angle_between = clean(360f64.copysign(self.angle_between) / v);
                 }
                 self.items = v;
             }
-            "angle_between" => self.angle_between = v,
-            "angle_fill" => self.angle_fill = v,
+            "angle_between" => {
+                self.angle_between = v;
+                self.whole_kept = whole_turn(v * self.items);
+            }
+            "angle_fill" => {
+                self.angle_fill = v;
+                self.whole_kept = whole_turn(v);
+            }
             _ => return false,
         }
         self.sync();

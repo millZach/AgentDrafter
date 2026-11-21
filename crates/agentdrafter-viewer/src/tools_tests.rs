@@ -1696,3 +1696,44 @@ fn the_copy_limit_counts_every_objects_copies_as_the_core_does() {
     assert!(panel(&t, false).ready);
     assert_eq!(t.input("", None).sends.len(), 1);
 }
+
+#[test]
+fn a_whole_turn_stays_whole_as_the_item_count_is_typed_a_digit_at_a_time() {
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    // 6 becomes 10, typed 1 then 0: the 1 passes through and the turn holds.
+    t.array_value("items", "1");
+    t.array_value("items", "10");
+    assert_eq!(field(&t, "angle_between"), "36");
+    assert_eq!(panel(&t, false).count, "10 round: 9 copies");
+    let op = &operations(&t.clone().input("", None))[0];
+    assert_eq!(op["count"], json!(10));
+    assert!(op.get("angle").is_none(), "{op}");
+    // Cleared, then 12 typed: still a whole turn, 30° apart.
+    t.array_value("items", "");
+    t.array_value("items", "1");
+    t.array_value("items", "12");
+    assert_eq!(field(&t, "angle_between"), "30");
+    assert_eq!(panel(&t, false).count, "12 round: 11 copies");
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["count"], json!(12));
+    assert!(op.get("angle").is_none(), "{op}");
+    // Clockwise, with the total held: -360 kept through the typing, and sent.
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.option("total");
+    t.array_value("angle_fill", "-360");
+    t.array_value("items", "1");
+    t.array_value("items", "10");
+    assert_eq!(panel(&t, false).count, "10 round: 9 copies");
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["angle"], json!(-360.0));
+    // Less than a turn is still (items - 1) times the angle between them.
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.input("5,45", None);
+    t.array_value("items", "1");
+    t.array_value("items", "4");
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["angle"], json!(135.0));
+}
