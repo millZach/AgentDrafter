@@ -1737,3 +1737,42 @@ fn a_whole_turn_stays_whole_as_the_item_count_is_typed_a_digit_at_a_time() {
     let op = &operations(&t.input("", None))[0];
     assert_eq!(op["angle"], json!(135.0));
 }
+
+#[test]
+fn switching_to_the_total_reads_a_whole_turn_from_the_angle_to_fill() {
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    // Four 120° apart are refused; the total held, 360 is a whole turn,
+    // four spread 90° apart, as the core places them.
+    t.input("4,120", None);
+    assert!(!panel(&t, false).ready);
+    t.option("total");
+    let turns = |t: &Tools| -> Vec<f64> {
+        t.band(None)
+            .arrayed
+            .unwrap()
+            .1
+            .iter()
+            .map(|p| p.turn)
+            .collect()
+    };
+    assert_eq!(turns(&t), [90.0, 180.0, 270.0]);
+    assert_eq!(panel(&t, false).count, "4 round: 3 copies");
+    assert!(operations(&t.clone().input("", None))[0]
+        .get("angle")
+        .is_none());
+    // Back to the spacing between items: still a whole turn, 90° apart.
+    t.option("between");
+    assert_eq!(field(&t, "angle_between"), "90");
+    assert_eq!(turns(&t), [90.0, 180.0, 270.0]);
+    assert!(operations(&t.input("", None))[0].get("angle").is_none());
+    // A partial turn stays one both ways: 5 items 45° apart fill 180°.
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.input("5,45", None);
+    t.option("total");
+    assert_eq!(turns(&t), [45.0, 90.0, 135.0, 180.0]);
+    t.option("between");
+    assert_eq!(turns(&t), [45.0, 90.0, 135.0, 180.0]);
+    assert_eq!(operations(&t.input("", None))[0]["angle"], json!(180.0));
+}

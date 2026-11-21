@@ -26,9 +26,12 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-/// A built copy of the demo plant, made up and public.
-fn plant() -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("viewer-array-core");
+/// A built copy of the demo plant, made up and public, in a folder of the
+/// test's own, as the tests run side by side.
+fn plant(test: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("viewer-array-core")
+        .join(test);
     let _ = fs::remove_dir_all(&dir);
     let set = dir.join("demo-plant");
     copy_dir(
@@ -74,7 +77,7 @@ fn tools() -> Tools {
 
 #[test]
 fn each_polar_copy_lands_where_the_preview_draws_it() {
-    let set = plant();
+    let set = plant("each");
     // What is typed in the command bar, with the total held or not.
     let cases: [(&str, bool); 6] = [
         ("4,100", false),
@@ -127,6 +130,71 @@ fn each_polar_copy_lands_where_the_preview_draws_it() {
             assert!(
                 (a - b).abs() < 1e-6,
                 "{typed}: copy {} shown turned {a}°, landed {b}°; sent {}",
+                k + 1,
+                send.change_set
+            );
+        }
+    }
+}
+
+#[test]
+fn switching_between_items_and_the_total_keeps_the_preview_where_the_core_lands_it() {
+    let set = plant("switching");
+    // Typed in the command bar, then the spacing held switched once or twice.
+    let cases: [(&str, &[&str]); 6] = [
+        // Four 120° apart, refused as they stand: with the total held, a
+        // whole turn spread evenly, 90° apart.
+        ("4,120", &["total"]),
+        ("4,120", &["total", "between"]),
+        // Less than a turn, either way round.
+        ("5,45", &["total"]),
+        ("5,45", &["total", "between"]),
+        ("5,-45", &["total", "between", "total"]),
+        // A whole turn stays one.
+        ("8,45", &["total", "between"]),
+    ];
+    for (typed, switches) in cases {
+        let mut t = tools();
+        t.start_word("ARRAYPOLAR", &[0]);
+        t.point(Taken::typed([2.0, 4.5], 0.0));
+        t.input(typed, None);
+        for s in switches {
+            t.option(s);
+        }
+        let what = format!("{typed} then {}", switches.join(", "));
+        let shown: Vec<f64> = t
+            .band(None)
+            .arrayed
+            .unwrap_or_else(|| panic!("{what}: no copy shown"))
+            .1
+            .iter()
+            .map(|p| p.turn)
+            .collect();
+        let out = t.input("", None);
+        let send = out
+            .sends
+            .first()
+            .unwrap_or_else(|| panic!("{what}: nothing sent"));
+        let reply = change_with(
+            &ChangeRequest {
+                set: set.clone(),
+                change_set: send.change_set.clone(),
+                dry_run: true,
+            },
+            &Settings::default(),
+        );
+        assert!(reply.ok, "{what}: {:#?}", reply.error);
+        let copies = &reply.result.unwrap().operations[0].copies;
+        let landed: Vec<f64> = copies.iter().map(|c| c.turned.unwrap_or(0.0)).collect();
+        assert_eq!(
+            shown.len(),
+            landed.len(),
+            "{what}: as many copies shown as land"
+        );
+        for (k, (a, b)) in shown.iter().zip(&landed).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "{what}: copy {} shown turned {a}°, landed {b}°; sent {}",
                 k + 1,
                 send.change_set
             );

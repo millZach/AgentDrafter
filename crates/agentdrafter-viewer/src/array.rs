@@ -296,6 +296,14 @@ impl Setup {
 
     /// Holds the spacing between items, or the total.
     pub fn hold(&mut self, spacing: Spacing) {
+        // With the total held, the angle to fill says whether it is a whole
+        // turn: 360 either way is one, spread evenly, as the core reads it,
+        // so items that ran a whole turn round to the last one, such as
+        // four 120° apart, go 90° apart, as they land. Held there, it stays
+        // so going back to the spacing between items.
+        if spacing == Spacing::Total && self.items >= 2.0 {
+            self.whole_kept = whole_turn(self.angle_fill);
+        }
         self.spacing = spacing;
         self.sync();
     }
