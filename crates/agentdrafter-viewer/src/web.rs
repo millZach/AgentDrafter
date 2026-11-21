@@ -1863,6 +1863,14 @@ fn link(gl: &Gl, vertex: &str, fragment: &str) -> Result<WebGlProgram, JsError> 
     Err(JsError::new(&format!("a program did not link: {log}")))
 }
 
+/// Whether `word`, typed in the command bar, starts a drawing tool: one of
+/// its aliases, such as `L` or `RECTANG`, or the page's name for it, in any
+/// case. Words that do not go to the drafter's assistant (#156).
+#[wasm_bindgen]
+pub fn is_tool_word(word: &str) -> bool {
+    tool_for(word).is_some()
+}
+
 /// The colour the colour index `index` shows in on the dark model space,
 /// as `#rrggbb`, for the Layer box's swatches.
 #[wasm_bindgen]

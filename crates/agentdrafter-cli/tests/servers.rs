@@ -1041,7 +1041,7 @@ fn serve_listens_on_the_local_machine_and_needs_no_token_there() {
         .starts_with("agentdrafter serve"));
     assert_eq!(
         help["result"]["commands"]["mcp"]["usage"],
-        "agentdrafter mcp"
+        "agentdrafter mcp [--assistant [--set <drawing-set-folder>] [--looking-at <reply.json>]]"
     );
 }
 

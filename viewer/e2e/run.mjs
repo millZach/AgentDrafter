@@ -75,6 +75,17 @@
 //            leaving it waiting, discarded, and kept from a card and from
 //            the band, the journal reading J1; Undo last of a kept one;
 //            and on a phone, chips that open into cards, and the peek.
+// - assistant: the assistant's panel (#156), on the fake agent, which a
+//            shim named claude and one named codex start, first on serve's
+//            PATH: the picker, the intro and the chip; a message about the
+//            object selected, its command lines, one opened, its words and
+//            its proposal's card in the chat and on the drawing, kept from
+//            the chat; words from the command bar, its hint and Space; a
+//            message without what the drafter looks at; what the core holds
+//            of it through `looking-at`; a change the agent cannot make;
+//            the picker moving to Codex; no agent found; and on a phone,
+//            the peek, the sheet raised on the chat, and Keep. Linux and
+//            macOS only: the shims are shell scripts.
 //
 // It writes results.json, the screenshots and each compared image into
 // --out (target/viewer-e2e by default), and exits 1 when any check fails.
@@ -222,6 +233,9 @@ function filesIn(folder) {
   const walk = (dir) => {
     for (const name of readdirSync(dir)) {
       const at = join(dir, name);
+      // What the drafter is looking at is kept beside the journal, not in
+      // the set's records, and the page writes it as the selection changes.
+      if (dir.endsWith('.agentdrafter') && (name === 'looking-at.json' || name.startsWith('.looking-at.json.'))) continue;
       if (statSync(at).isDirectory()) walk(at);
       else found[at.slice(folder.length)] = createHash('sha256').update(readFileSync(at)).digest('hex');
     }
@@ -234,7 +248,59 @@ async function live(page) {
   await page.waitForSelector('.live.open', { timeout: 30000 });
 }
 
-/** `agentdrafter serve` in the scratch folder, or `cwd`, with every line it printed. */
+/**
+ * Opens the side panel's tab `side`, `chat` or `journal`, by a click or a
+ * tap, and waits until it is on; a slow runner's first press that does not
+ * take is pressed once more.
+ */
+async function sideTab(page, side, how = 'click') {
+  const tab = `.stab[data-side="${side}"]`;
+  for (let attempt = 1; ; attempt += 1) {
+    if (how === 'tap') await page.tap(tab);
+    else await page.click(tab);
+    try {
+      await page.waitForSelector(`${tab}.on`, { timeout: 5000 });
+      return;
+    } catch (e) {
+      if (attempt >= 2) throw new Error(`the ${side} tab did not come on after two presses: ${e.message}`);
+    }
+  }
+}
+
+/**
+ * On a phone, waits until the sheet has come to rest, no longer sliding or
+ * moved by its peek changing height; `raised`, above its peek too. Gives
+ * whether it came to rest so within `timeout`.
+ */
+async function sheetAtRest(page, raised, timeout = 30000) {
+  await page.evaluate(() => {
+    window.__sheetTop = undefined;
+  });
+  return page
+    .waitForFunction(
+      (raised) => {
+        const sheet = document.querySelector('.va-sheet');
+        if (!sheet || (raised && sheet.dataset.snap === 'peek')) return false;
+        const top = sheet.getBoundingClientRect().top;
+        const was = window.__sheetTop;
+        window.__sheetTop = top;
+        return was !== undefined && Math.abs(top - was) < 0.5;
+      },
+      raised,
+      { timeout, polling: 150 },
+    )
+    .then(
+      () => true,
+      () => false,
+    );
+}
+
+/** Opens the side panel's Journal tab: it opens on the assistant's Chat (#156). */
+async function journalTab(page) {
+  await sideTab(page, 'journal');
+  await page.waitForSelector('.va-jhead');
+}
+
 /**
  * Every server a check started, stopped when the run ends: at its end, on
  * an error, or on SIGINT, SIGTERM, SIGHUP (its terminal closed), SIGQUIT,
@@ -256,8 +322,9 @@ for (const signal of signals) {
   });
 }
 
-async function serve(listen, cwd = scratch) {
-  const child = spawn(bin, ['serve', '--listen', listen], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+/** `agentdrafter serve` in the scratch folder, or `cwd`, with every line it printed; `env` its environment, by default this one's. */
+async function serve(listen, cwd = scratch, env = process.env) {
+  const child = spawn(bin, ['serve', '--listen', listen], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
   servers.add(child);
   child.on('exit', () => servers.delete(child));
   const lines = [];
@@ -1113,6 +1180,7 @@ const checks = {
           { timeout: 15000 },
         ).then((h) => h.jsonValue());
       // Back one: entry 53, the newest, as it was; then entry 52.
+      await journalTab(page);
       await page.click('button[aria-label="Older"]');
       const at53 = await left(53);
       assert(Math.abs(at53 - now.bounds[0]) < 1e-6, 'entry 53 is the set as it is');
@@ -1728,10 +1796,10 @@ const checks = {
         await page.click('.opt[data-opt="clear"]');
         await page.waitForFunction(() => !document.querySelector('.qp'));
         assert((await page.inputValue('select[data-layer]')) === '0', 'with nothing selected, the Layer box sets the current layer, layer 0');
-        // The side panel: the journal, and the assistant's place.
-        await page.click('.stab:has-text("Assistant")');
-        assert((await page.textContent('.sidebody')).includes('Not here yet'), 'the assistant is coming');
-        await page.click('.stab:has-text("Journal")');
+        // The side panel: the assistant's Chat, first, and the Journal.
+        assert(await page.isVisible('.stab[data-side="chat"].on'), 'the panel opens on the assistant’s Chat');
+        assert((await page.textContent('.ahrow')).startsWith('Assistant'), 'the panel is the assistant’s');
+        await sideTab(page, 'journal');
         await page.waitForSelector('.va-jhead');
         assert(await page.isVisible('.titlebar button[data-act="undo"]') && await page.isVisible('.titlebar button[data-act="accept"]'), 'Undo last and Accept are in the title bar');
         // Last, as it may leave no renderer: a lost WebGL context, restored,
@@ -1841,8 +1909,8 @@ const checks = {
         seen.phone = { toggles, placed, raised };
         await context.close();
       }
-      // A small phone, 320 by 568: a long prompt, a word typed that is not a
-      // tool, wraps the command bar, and quick properties stay above it, at
+      // A small phone, 320 by 568: a long prompt, a number typed with no tool
+      // running, wraps the command bar, and quick properties stay above it, at
       // its real height.
       {
         const context = await b.newContext({ ...PHONE, viewport: { width: 320, height: 568 } });
@@ -1851,7 +1919,7 @@ const checks = {
         await page.touchscreen.tap(...middle(device.box));
         await page.waitForSelector('.qp');
         // A selected object's options fill the bar; a keyboard types into the field all the same.
-        await page.keyboard.type('zz');
+        await page.keyboard.type('12');
         await page.keyboard.press('Enter');
         await sleep(600);
         assert((await bar(page)).includes('is not a drawing tool'), `the word is not a tool: ${await bar(page)}`);
@@ -1881,7 +1949,7 @@ const checks = {
         await page.waitForSelector('.qp');
         await sleep(500);
         // A selected object's options fill the bar; a keyboard types into the field all the same.
-        await page.keyboard.type('zz');
+        await page.keyboard.type('12');
         await page.keyboard.press('Enter');
         await sleep(400);
         const stage = await page.evaluate(() => {
@@ -2581,6 +2649,7 @@ const checks = {
           // nothing, and the entry is drawn as it was, never with the change set.
           const n = journal().length;
           const last = journal().at(-1).entry;
+          await journalTab(page);
           await page.click(`li[data-entry="${last}"] .je-head`);
           await page.waitForFunction(() => !document.querySelector('[data-preview]'));
           await page.waitForFunction((e) => window.agentdrafterViewer.summary?.entry === e && !window.agentdrafterViewer.summary.preview, last, { timeout: 15000 });
@@ -3085,6 +3154,7 @@ const checks = {
           if (route.request().postDataJSON()?.entry !== undefined) await entryHeld;
           await route.continue().catch(() => {});
         });
+        await journalTab(page);
         await page.click('button[aria-label="Older"]');
         await page.waitForFunction(() => document.querySelector('.cmdbar').textContent.includes('as it was'));
         const deviceNow = await placeOf(page, "(o) => o.id === 'DP-LD-101/device'");
@@ -3724,6 +3794,7 @@ const checks = {
         const context = await b.newContext(LAPTOP);
         const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
         await live(page);
+        await journalTab(page);
         const files = filesIn(set);
 
         // An agent proposes through the HTTP API while the page is open: a
@@ -3969,17 +4040,28 @@ const checks = {
         assert(!(await page.textContent('body')).includes('Showing entry'), `still live before the journal is raised: ${await history()}`);
         // Dragged up, as a finger raises it: a tap's click would land on the
         // list sliding up under it (a follow-up of its own).
+        // The grip is found once the sheet is at rest: the peek just lost
+        // its proposals' line, and the sheet follows its height. A finger
+        // there may be steered to the peek's Ask button, which drags it too.
+        // A drag that did not take on a slow runner is made once more.
         const cdp = await context.newCDPSession(page);
-        const [gx, gy] = await page.evaluate(() => {
-          const r = document.querySelector('.va-grab').getBoundingClientRect();
-          return [r.left + r.width / 2, r.top + r.height / 2];
-        });
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: gx, y: gy }] });
-        for (let i = 1; i <= 10; i += 1) {
-          await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: gx, y: gy - i * 30 }] });
-          await sleep(16);
+        for (let attempt = 1; ; attempt += 1) {
+          assert(await sheetAtRest(page, false), 'the sheet comes to rest at its peek');
+          const [gx, gy] = await page.evaluate(() => {
+            const r = document.querySelector('.va-grab').getBoundingClientRect();
+            return [r.left + r.width / 2, r.top + r.height / 2];
+          });
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: gx, y: gy }] });
+          for (let i = 1; i <= 10; i += 1) {
+            await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: gx, y: gy - i * 30 }] });
+            await sleep(16);
+          }
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+          // Raised and at rest, so the tab is tapped where it stays.
+          if (await sheetAtRest(page, true, attempt >= 2 ? 30000 : 5000)) break;
+          assert(attempt < 2, 'dragged up twice, the sheet is raised');
         }
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await sideTab(page, 'journal', 'tap');
         await page.waitForSelector(`.va-journal [data-entry="${gone.entry}"]`, { timeout: 30000 });
         assert(!(await page.textContent('body')).includes('Showing entry'), `still live with the journal raised: ${await history()}`);
         assert((await journalLine(page, kept.entry)).includes('proposed by Assistant · kept by you'), 'J1 on a phone');
@@ -3987,6 +4069,331 @@ const checks = {
         await sleep(500);
         await page.screenshot({ path: join(out, 'proposals-phone-journal.png') });
         shots.push('proposals-phone-journal.png');
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+        await server.stop();
+      }
+      return { screenshots: shots };
+    } finally {
+      await b.close();
+    }
+  },
+  async assistant() {
+    assert(process.platform !== 'win32', 'the assistant check runs on Linux or macOS: its agents are shell scripts');
+    // The fake agent, started by a shim named as each real agent is, first
+    // on serve's PATH, so a real agent further along it is never started.
+    const fake = join(root, 'crates', 'agentdrafter-cli', 'tests', 'fake-agent', 'fake_agent.py');
+    assert(existsSync(fake), `no fake agent at ${fake}`);
+    const shims = join(scratch, 'agents');
+    mkdirSync(shims, { recursive: true });
+    for (const agent of ['claude', 'codex']) {
+      const shim = join(shims, agent);
+      writeFileSync(shim, `#!/bin/sh\nexec python3 ${fake} ${agent} "$@"\n`);
+      chmodSync(shim, 0o755);
+    }
+    // Each step of the fake agent waits a little, so its turn is seen working.
+    const withAgents = { ...process.env, PATH: `${shims}:${process.env.PATH ?? ''}`, FAKE_AGENT_DELAY: '0.3' };
+    // Neither shim, and no real agent: only the system's own folders.
+    const bare = join(scratch, 'no-agents');
+    mkdirSync(bare, { recursive: true });
+    const noAgents = { ...process.env, PATH: `${bare}:/usr/bin:/bin`, FAKE_AGENT_DELAY: '0.3' };
+    for (const dir of ['/usr/bin', '/bin']) {
+      for (const agent of ['claude', 'codex']) assert(!existsSync(join(dir, agent)), `a real ${agent} in ${dir} would be found: the no-agent case cannot be shown here`);
+    }
+    const b = await browser();
+    const shots = [];
+    const shot = async (page, name) => {
+      await sleep(300);
+      await page.screenshot({ path: join(out, name) });
+      shots.push(name);
+    };
+    const http = async (base, command, input) => {
+      const r = await fetch(`${base}/commands/${command}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+      return r.json();
+    };
+    const journalOf = (folder) => agentIn(folder, 'journal', 'demo-plant').result?.entries ?? [];
+    const waiting = (folder) => (agentIn(folder, 'proposals', 'demo-plant').result?.proposals ?? []).map((p) => p.proposal);
+    const grows = async (folder, from, what) => {
+      const until = Date.now() + 30000;
+      while (journalOf(folder).length <= from) {
+        assert(Date.now() < until, `${what}: the journal did not grow`);
+        await sleep(100);
+      }
+      return journalOf(folder).at(-1);
+    };
+    // A point on the page that picks the object `id`, at the view shown.
+    const pointOn = (page, id) =>
+      page.evaluate((wanted) => {
+        const probe = window.agentdrafterViewer;
+        const place = probe.summary.objects.findIndex((o) => o.id === wanted);
+        const [x0, y0, x1, y1] = probe.bounds([place]);
+        const v = probe.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        for (let j = 1; j < 8; j++) {
+          for (let i = 1; i < 12; i++) {
+            const x = x0 + ((x1 - x0) * i) / 12;
+            const y = y0 + ((y1 - y0) * j) / 8;
+            if (probe.pickAt(x, y, 16) === place) return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+          }
+        }
+        return null;
+      }, id);
+    // The newest of the chat's items of a kind, and its text.
+    const newest = (page, kind) => page.evaluate((k) => [...document.querySelectorAll(`[data-chat] [data-kind="${k}"]`)].at(-1)?.textContent ?? '', kind);
+    const count = (page, kind) => page.evaluate((k) => document.querySelectorAll(`[data-chat] [data-kind="${k}"]`).length, kind);
+    // Waits for the assistant's `n`th reply to finish.
+    const replied = (page, n) =>
+      page.waitForFunction(
+        (k) => {
+          const items = document.querySelectorAll('[data-chat] [data-kind="assistant"]');
+          return items.length >= k && !items[k - 1].querySelector('[data-working]') && !document.querySelector('[data-chat] [data-working]');
+        },
+        n,
+        { timeout: 60000 },
+      );
+    // The command lines of the assistant's `n`th reply: each command, its line, and whether it was refused.
+    const lines = (page, n) =>
+      page.evaluate(
+        (k) =>
+          [...([...document.querySelectorAll('[data-chat] [data-kind="assistant"]')][k - 1]?.querySelectorAll('.tl') ?? [])].map((t) => ({
+            command: t.getAttribute('data-tl'),
+            text: t.querySelector('.tl-h').textContent,
+            refused: !!t.querySelector('.tl-c.bad'),
+          })),
+        n,
+      );
+    try {
+      {
+        // A laptop, with both agents found.
+        const folder = freshPlant('assistant-laptop');
+        const server = await serve('127.0.0.1:0', folder, withAgents);
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+
+        // The panel: Assistant, the picker with both agents, Chat first, the intro and the chip.
+        await page.waitForSelector('.agent select[data-act="agent"]', { timeout: 30000 });
+        const options = await page.evaluate(() => [...document.querySelectorAll('.agent select option')].map((o) => o.textContent));
+        assert(JSON.stringify(options) === JSON.stringify(['Claude Code', 'Codex']), `the picker offers both: ${JSON.stringify(options)}`);
+        assert((await page.inputValue('.agent select')) === 'claude', 'it starts on Claude Code');
+        assert((await page.textContent('.ahsub')).includes('Your own agent, started by AgentDrafter, on agentdrafter mcp'), 'the header says whose agent it is');
+        assert(await page.isVisible('.stab[data-side="chat"].on'), 'Chat is shown first');
+        await page.waitForSelector('[data-intro]', { timeout: 30000 });
+        assert((await page.textContent('[data-intro]')).includes('What it changes waits, dashed on the drawing, until you keep it.'), 'the intro');
+        await page.waitForFunction(() => document.querySelector('[data-chip]')?.textContent.includes('Sheet DP-LD-101 · nothing selected'), null, { timeout: 15000 });
+        await shot(page, 'assistant-laptop-intro.png');
+
+        // FT-101 selected: the chip says so, and the core holds it, as `looking-at` gives it through the HTTP API.
+        const at = await pointOn(page, 'DP-LD-101/device');
+        assert(at, 'a point picks FT-101');
+        await page.mouse.click(at[0], at[1]);
+        await page.waitForSelector('.qp');
+        await page.waitForFunction(() => document.querySelector('[data-chip]')?.textContent.includes('Sheet DP-LD-101 · 1 selected: FT-101'), null, { timeout: 15000 });
+        let held = null;
+        for (const until = Date.now() + 15000; Date.now() < until; await sleep(200)) {
+          held = await http(server.base, 'looking-at', { set: 'demo-plant' });
+          if (held.ok && JSON.stringify(held.result.selected) === '["DP-LD-101/device"]') break;
+        }
+        assert(held?.ok && held.result.sheet === 'DP-LD-101' && JSON.stringify(held.result.selected) === '["DP-LD-101/device"]', `looking-at gives what the page recorded: ${JSON.stringify(held)}`);
+        assert(held.result.at, 'and when');
+
+        // A message from the chat, carrying what the drafter looks at.
+        await page.fill('[data-chatin]', 'move this 1 to the right');
+        await page.press('[data-chatin]', 'Enter');
+        await page.waitForSelector('[data-chat] [data-kind="drafter"]', { timeout: 15000 });
+        let said = await newest(page, 'drafter');
+        assert(said.includes('move this 1 to the right') && said.includes('with Sheet DP-LD-101 · 1 selected: FT-101'), `the drafter's message: ${said}`);
+        assert(!said.includes('from the command bar'), 'from the chat');
+        assert((await page.inputValue('[data-chatin]')) === '', 'the input is emptied');
+        await page.waitForSelector('[data-chat] [data-working]', { timeout: 15000 });
+        assert((await page.textContent('[data-chat] [data-working]')).includes('Claude Code is working'), 'the turn is seen working');
+        await page.waitForSelector('[data-pcc="1"]', { timeout: 60000 });
+        await replied(page, 1);
+        const note = await page.textContent('[data-chat] [data-kind="note"]');
+        assert(note.includes('On Claude Code') && note.includes('agentdrafter mcp'), `the note says which agent: ${note}`);
+        const first = await lines(page, 1);
+        assert(
+          JSON.stringify(first.map((l) => l.command)) === JSON.stringify(['looking-at', 'query', 'propose']),
+          `a line for each command: ${JSON.stringify(first)}`,
+        );
+        assert(first[0].text.includes('Sheet DP-LD-101 · 1 selected'), `looking-at's line: ${first[0].text}`);
+        assert(first[1].text.includes('find DP-LD-101/device'), `query's line: ${first[1].text}`);
+        assert(first[2].text.includes('move DP-LD-101/device → proposal 1'), `propose's line: ${first[2].text}`);
+        assert(first.every((l) => !l.refused), 'none refused');
+        // A line opened shows its input and its reply.
+        await page.click('[data-chat] .tl[data-tl="propose"] .tl-h');
+        await page.waitForSelector('[data-chat] [data-tl-reply]');
+        const input = await page.textContent('[data-chat] [data-tl-input]');
+        const reply = await page.textContent('[data-chat] [data-tl-reply]');
+        assert(input.includes('DP-LD-101/device') && reply.includes('"proposal": 1'), `the line opened: ${input} / ${reply}`);
+        said = await newest(page, 'assistant');
+        assert(said.includes('Proposed: move') && said.includes('proposal 1'), `its words: ${said}`);
+        // Its proposal: a card in the chat, and build 7's card on the drawing.
+        await page.waitForFunction(() => !document.querySelector('[data-pcc="1"] [data-pc="keep"]')?.disabled, null, { timeout: 30000 });
+        said = await page.textContent('[data-pcc="1"]');
+        assert(said.includes('Proposal 1, dashed on the drawing. Nothing changes until you keep it.') && said.includes('DP-LD-101 ›'), `the chat's card: ${said}`);
+        // Moved an inch, FT-101 lands, and the sheet then fails a check: its card says so, Keep in amber.
+        assert(said.includes('It would land') && said.includes('Keep') && said.includes('Discard'), `how it stands: ${said}`);
+        await page.waitForSelector('[data-pcard="1"]', { timeout: 30000 });
+        assert(waiting(folder).length === 1 && journalOf(folder).length === 0, 'it waits, and nothing landed');
+        await shot(page, 'assistant-laptop-proposed.png');
+
+        // Kept from the chat: one change set, proposed by Assistant, kept by you; the card says so.
+        await page.click('[data-pcc="1"] [data-pc="keep"]');
+        const kept = await grows(folder, 0, 'Keep from the chat');
+        assert(kept.kind === 'change_set' && kept.proposal === 1 && kept.proposed_by === 'Assistant' && kept.kept_by === 'drafter', `kept: ${JSON.stringify(kept)}`);
+        await page.waitForSelector('[data-pcc="1"][data-ended="kept"]', { timeout: 30000 });
+        said = await page.textContent('[data-pcc="1"]');
+        assert(said.includes('Kept') && said.includes(`Kept by you: change set ${kept.entry}, in the journal.`), `the card once kept: ${said}`);
+        await page.waitForFunction(() => !document.querySelector('[data-pcard="1"]'), null, { timeout: 30000 });
+        await sideTab(page, 'journal');
+        await page.waitForSelector(`.va-journal [data-entry="${kept.entry}"]`, { timeout: 30000 });
+        said = await page.textContent(`.va-journal [data-entry="${kept.entry}"]`);
+        assert(said.includes('proposed by Assistant · kept by you'), `the journal's line: ${said}`);
+        await sideTab(page, 'chat');
+
+        // The command bar: a tool's whole name waits for Enter, so a sentence can follow; other words go to the assistant.
+        await page.click('.cmdin');
+        await page.keyboard.type('move');
+        await page.waitForSelector('[data-askhint]');
+        said = await page.textContent('[data-askhint]');
+        assert(said === 'Enter: Move · keep typing to ask the assistant', `the hint for a tool's name: ${said}`);
+        await page.keyboard.press('Space');
+        assert((await page.inputValue('.cmdin')) === 'move ', 'Space after a whole word is a space');
+        await page.keyboard.press('Escape');
+        assert(!(await page.$('[data-askhint]')), 'Esc empties it, and the hint goes');
+        await page.keyboard.type('m');
+        assert(!(await page.$('[data-askhint]')), 'no hint for a short alias');
+        await page.keyboard.press('Escape');
+        await page.keyboard.type('what is this');
+        await page.waitForSelector('[data-askhint]');
+        assert((await page.textContent('[data-askhint]')) === 'Enter: ask the assistant', 'the hint for other words');
+        await shot(page, 'assistant-laptop-command-bar.png');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(() => document.querySelectorAll('[data-chat] [data-kind="drafter"]').length === 2, null, { timeout: 15000 });
+        said = await newest(page, 'drafter');
+        assert(said.includes('what is this') && said.includes('from the command bar') && said.includes('with Sheet DP-LD-101 · 1 selected: FT-101'), `from the command bar: ${said}`);
+        assert(!(await page.$('[data-askhint]')) && (await page.inputValue('.cmdin')) === '', 'the bar is emptied');
+        await replied(page, 2);
+        const second = await lines(page, 2);
+        assert(second.some((l) => l.command === 'looking-at') && second.some((l) => l.command === 'query'), `what is this: ${JSON.stringify(second)}`);
+        assert((await page.evaluate(() => [...document.querySelectorAll('[data-chat] [data-kind="assistant"]')].at(-1).querySelector('[data-words]')?.textContent ?? '')).length > 0, 'it says what it is');
+
+        // × leaves what the drafter looks at off one message.
+        await page.click('[data-act="ctxoff"]');
+        said = await page.textContent('[data-chip-off]');
+        assert(said.includes('This message won’t say what you’re looking at.') && said.includes('Put it back'), `the chip off: ${said}`);
+        await page.fill('[data-chatin]', 'hello there');
+        await page.press('[data-chatin]', 'Enter');
+        await page.waitForFunction(() => document.querySelectorAll('[data-chat] [data-kind="drafter"]').length === 3, null, { timeout: 15000 });
+        said = await newest(page, 'drafter');
+        assert(said.includes('hello there') && said.includes('without what you’re looking at'), `without it: ${said}`);
+        await page.waitForSelector('[data-chip]', { timeout: 15000 });
+        await replied(page, 3);
+        assert((await newest(page, 'assistant')).includes('(fake agent) You said: hello there'), 'the fake agent heard it');
+
+        // A change it cannot make: the server withholds `change`, so nothing lands.
+        const before = journalOf(folder).length;
+        await page.fill('[data-chatin]', 'change it directly');
+        await page.press('[data-chatin]', 'Enter');
+        await replied(page, 4);
+        said = await newest(page, 'assistant');
+        assert(/can(no|’|')t/i.test(said), `it says it cannot: ${said}`);
+        assert(journalOf(folder).length === before && waiting(folder).length === 0, 'nothing landed, and nothing was proposed');
+        await shot(page, 'assistant-laptop-lines.png');
+
+        // The picker: a new conversation on Codex.
+        await page.selectOption('.agent select', 'codex');
+        await page.waitForFunction(() => [...document.querySelectorAll('[data-chat] [data-kind="note"]')].some((n) => n.textContent.includes('Now on Codex')), null, { timeout: 30000 });
+        assert((await page.inputValue('.agent select')) === 'codex', 'the picker shows Codex');
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+        await server.stop();
+      }
+      {
+        // No agent found, at laptop and phone sizes.
+        const folder = freshPlant('assistant-none');
+        const server = await serve('127.0.0.1:0', folder, noAgents);
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        await page.waitForSelector('[data-noagent]', { timeout: 30000 });
+        let said = await page.textContent('[data-noagent]');
+        assert(said.includes('No agent found') && said.includes('Claude Code (claude) and Codex (codex), and found neither'), `the box: ${said}`);
+        assert(said.includes('npm install -g @anthropic-ai/claude-code') && said.includes('npm install -g @openai/codex') && said.includes('Look again'), `the install lines: ${said}`);
+        assert((await page.textContent('.agent.none')).includes('No agent found'), 'the header says so');
+        assert(await page.isDisabled('[data-chatin]'), 'the input waits');
+        assert((await page.getAttribute('[data-chatin]', 'placeholder')) === 'No agent yet: install one first', 'and says why');
+        await page.click('[data-act="lookagain"]');
+        await page.waitForFunction(() => !document.querySelector('[data-act="lookagain"]')?.disabled, null, { timeout: 15000 });
+        assert(await page.isVisible('[data-noagent]'), 'still none after looking again');
+        await shot(page, 'assistant-laptop-no-agent.png');
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+        const phone = await b.newContext(PHONE);
+        const { page: p2, problems: p2problems } = await open(phone, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await p2.waitForFunction(() => document.querySelector('[data-act="ask"]')?.textContent.includes('No agent found'), null, { timeout: 30000 });
+        await p2.tap('[data-act="ask"]');
+        await p2.waitForSelector('.va-sheet[data-snap="half"] [data-noagent]', { timeout: 15000 });
+        await shot(p2, 'assistant-phone-no-agent.png');
+        assert(p2problems.length === 0, p2problems.join('; '));
+        await phone.close();
+        await server.stop();
+      }
+      {
+        // A phone: the peek, the sheet raised on the chat, a message, its card, and Keep.
+        const folder = freshPlant('assistant-phone');
+        const server = await serve('127.0.0.1:0', folder, withAgents);
+        const context = await b.newContext(PHONE);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        await page.waitForFunction(() => document.querySelector('[data-act="ask"]')?.textContent.includes('Claude Code'), null, { timeout: 30000 });
+        let said = await page.textContent('[data-act="ask"]');
+        assert(said.includes('Ask the assistant…'), `the peek: ${said}`);
+        assert(await page.isVisible('.va-peek [data-act="undo"]') && await page.isVisible('.va-peek [data-act="accept"]'), 'Undo last and Accept stay in the peek');
+        await shot(page, 'assistant-phone-peek.png');
+        const at = await pointOn(page, 'DP-LD-101/device');
+        assert(at, 'a point picks FT-101');
+        await page.touchscreen.tap(at[0], at[1]);
+        await page.waitForSelector('.qp');
+        await page.tap('[data-act="ask"]');
+        await page.waitForSelector('.va-sheet[data-snap="half"] [data-chat]', { timeout: 15000 });
+        assert(await page.isVisible('.stab[data-side="chat"].on'), 'raised on the chat');
+        await page.waitForFunction(() => document.querySelector('[data-chip]')?.textContent.includes('1 selected: FT-101'), null, { timeout: 15000 });
+        await page.tap('[data-chatin]');
+        await page.waitForSelector('.va-sheet[data-snap="full"]', { timeout: 15000 });
+        await page.fill('[data-chatin]', 'move this 1 to the right');
+        await page.press('[data-chatin]', 'Enter');
+        // Once the server takes it, the input lets go, so the keyboard goes
+        // down, and the sheet comes down to half: the reply and the drawing show.
+        await page.waitForSelector('.va-sheet[data-snap="half"]', { timeout: 15000 });
+        assert(await page.evaluate(() => !document.activeElement?.matches?.('[data-chatin]')), 'the input lets go once the message is sent');
+        await shot(page, 'assistant-phone-sent-half.png');
+        await page.waitForSelector('[data-pcc="1"]', { timeout: 60000 });
+        await replied(page, 1);
+        await page.waitForFunction(() => !document.querySelector('[data-pcc="1"] [data-pc="keep"]')?.disabled, null, { timeout: 30000 });
+        await page.locator('[data-pcc="1"]').scrollIntoViewIfNeeded();
+        await shot(page, 'assistant-phone-proposed.png');
+        await page.tap('[data-pcc="1"] [data-pc="keep"]');
+        const kept = await grows(folder, 0, 'Keep on a phone');
+        assert(kept.proposal === 1 && kept.kept_by === 'drafter' && kept.proposed_by === 'Assistant', `kept: ${JSON.stringify(kept)}`);
+        await page.waitForSelector('[data-pcc="1"][data-ended="kept"]', { timeout: 30000 });
+        said = await page.textContent('[data-pcc="1"]');
+        assert(said.includes(`Kept by you: change set ${kept.entry}, in the journal.`), `the card once kept: ${said}`);
+        await shot(page, 'assistant-phone-kept.png');
+        // Words from the command bar, by ⌨ Type: once the server takes
+        // them, the bar's field lets go, so the keyboard goes down.
+        if (await page.isVisible('.qp')) await page.tap('.qp [data-close]');
+        await page.tap('.va-grab');
+        await page.waitForSelector('.va-sheet[data-snap="peek"]', { timeout: 15000 });
+        await page.tap('[data-type]');
+        await page.waitForFunction(() => document.activeElement?.matches?.('.cmdin'), null, { timeout: 15000 });
+        await page.keyboard.type('hello there');
+        await page.keyboard.press('Enter');
+        await replied(page, 2);
+        assert(await page.evaluate(() => !document.activeElement?.matches?.('.cmdin')), 'the bar’s field lets go once its words are sent');
+        assert((await newest(page, 'drafter')).includes('from the command bar'), 'sent from the command bar');
+        await shot(page, 'assistant-phone-command-bar-sent.png');
         assert(problems.length === 0, problems.join('; '));
         await context.close();
         await server.stop();

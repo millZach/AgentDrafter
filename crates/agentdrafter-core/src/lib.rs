@@ -78,6 +78,7 @@ mod error;
 mod geometry;
 mod import;
 mod interface;
+mod looking_at;
 mod model;
 mod output;
 mod pdf;
@@ -109,7 +110,7 @@ pub use change::{
 pub use change::{
     discard, keep_with, proposals, propose_with, DiscardReport, DiscardRequest, KeepReport,
     KeepRequest, ProposalListed, ProposalsReport, ProposalsRequest, ProposeReport, ProposeRequest,
-    DRAFTER, PROPOSALS_FOLDER,
+    ASSISTANT, DRAFTER, PROPOSALS_FOLDER,
 };
 pub use change::{
     journal, undo, CommitState, Entry, EntryKind, FileState, FileUndone, JournalEntry,
@@ -121,7 +122,9 @@ pub use check::{
     check, check_with, BlockPart, CheckReport, CheckRequest, CheckedObject, Finding, Rule, Sides,
     CHECK_TOLERANCE_MM,
 };
-pub use commands::{commands, find_command, Command, CommandInfo, JsonReply};
+pub use commands::{
+    assistant_commands, commands, find_command, Access, Command, CommandInfo, JsonReply,
+};
 pub use description::{parse_block_library, parse_sheet_description, read_sheet_description};
 pub use display_list::{
     display_list, display_list_with, AttributeValue, Cloud, DisplayListReport, DisplayListRequest,
@@ -142,6 +145,10 @@ pub use import::{
     ImportNoticeCode, ImportedBlock, NotCarried, SkippedBlock, TablesAdded,
 };
 pub use interface::Interface;
+pub use looking_at::{
+    look_at, looking_at, looking_at_left_off, LookAtRequest, LookingAtReport, LookingAtRequest,
+    LOOKING_AT_FILE, MOST_SELECTED,
+};
 pub use model::{attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Insert};
 pub use model::{
     AngularUnit, DecimalSeparator, Dimension, DimensionKind, DimensionPart, DimensionStyle,

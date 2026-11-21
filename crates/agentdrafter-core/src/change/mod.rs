@@ -63,6 +63,7 @@ pub use accept::{accept_with, AcceptReport, AcceptRequest, StampRevision};
 pub(crate) use accept::{relative_to, stamp_revision};
 pub(crate) use apply::fit_library_inserts;
 pub(crate) use history::FilesAsOf;
+pub(crate) use journal::now;
 pub use journal::{
     journal, CheckFailed, CommitState, Entry, EntryKind, FileIssued, FileState, HowChanged,
     JournalEntry, JournalReport, JournalRequest, ObjectChanged, Refusal, RollBack, SheetFailed,
@@ -71,7 +72,7 @@ pub use journal::{
 pub use proposals::{
     discard, keep_with, proposals, propose_with, DiscardReport, DiscardRequest, KeepReport,
     KeepRequest, ProposalListed, ProposalsReport, ProposalsRequest, ProposeReport, ProposeRequest,
-    DRAFTER, PROPOSALS_FOLDER,
+    ASSISTANT, DRAFTER, PROPOSALS_FOLDER,
 };
 pub(crate) use proposals::{BY_LONGEST, BY_PATTERN};
 pub use recover::RolledBack;

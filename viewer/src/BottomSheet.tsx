@@ -1,13 +1,13 @@
 // The side panel of the frame: on a phone a sheet that peeks up from the
-// bottom with Undo last and Accept always in reach, and drags up to half or
-// nearly all of the screen for the journal or the assistant's place; on a
-// laptop a panel on the right, with no peek, since the title bar holds Undo
-// last and Accept. What it holds is the page's: the peek and the body come
+// bottom with the way into the assistant, Undo last and Accept always in
+// reach, and drags up to half or nearly all of the screen for the
+// assistant's chat or the journal; on a laptop a panel on the right, with
+// no peek, since the title bar holds Undo last and Accept. What it holds is the page's: the peek and the body come
 // in as they are.
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
-type Snap = 'peek' | 'half' | 'full';
+export type Snap = 'peek' | 'half' | 'full';
 
 export interface BottomSheetProps {
   /** A laptop's width: a panel on the right, not a sheet. */
@@ -20,6 +20,8 @@ export interface BottomSheetProps {
   body: ReactNode;
   /** A new value raises a peeking sheet to half the screen, to show what the body now holds. */
   raise: number;
+  /** A new key snaps the sheet where it says, from wherever it is: full for the chat's input, down to its peek for the drawing. */
+  snapTo?: { key: number; snap: Snap } | null;
   /**
    * The sheet came to rest covering this many pixels of the drawing from
    * the bottom, at a snap or after a change of size, not at each move of a
@@ -30,19 +32,29 @@ export interface BottomSheetProps {
 
 const clamp = (v: number, low: number, high: number) => Math.min(high, Math.max(low, v));
 
-export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled }: BottomSheetProps) {
+export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled, snapTo: asked = null }: BottomSheetProps) {
   const sheet = useRef<HTMLElement>(null);
   const grab = useRef<HTMLDivElement>(null);
   const peekBox = useRef<HTMLDivElement>(null);
   const [snap, setSnap] = useState<Snap>('peek');
-  const drag = useRef<{ y0: number; s0: number; t: number; last: number; v: number; moved: boolean } | null>(null);
+  const drag = useRef<{ y0: number; s0: number; t: number; last: number; v: number; moved: boolean; tap: boolean; id: number; captured: boolean } | null>(null);
+  // A drag that began on one of the peek's buttons and moved: the click its
+  // lift would make is not the button's.
+  const swallowClick = useRef(0);
   const y = useRef(0);
   const settled = useRef<number | null>(null);
   const settle = useRef(onSettled);
   settle.current = onSettled;
 
   const room = () => sheet.current?.parentElement?.clientHeight ?? 0;
-  const peekHeight = () => (grab.current?.offsetHeight ?? 0) + (peekBox.current?.offsetHeight ?? 0);
+  // The peek shows only while the sheet is down (#156): raised, the sheet is
+  // the panel itself. Its height is kept from when it last showed.
+  const peekPx = useRef(0);
+  const peekHeight = () => {
+    const shown = peekBox.current?.offsetHeight ?? 0;
+    if (shown) peekPx.current = (grab.current?.offsetHeight ?? 0) + shown;
+    return peekPx.current || (grab.current?.offsetHeight ?? 0) + shown;
+  };
   const snapY = (name: Snap) => {
     const height = room();
     return name === 'peek' ? height - peekHeight() : name === 'half' ? Math.round(height * 0.45) : Math.round(height * 0.08);
@@ -100,13 +112,29 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled }: Bo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [raise]);
 
+  // The page asks for a snap: the chat's input focused, or a proposal opened from the chat.
+  useEffect(() => {
+    if (asked && !wide && asked.snap !== snap) snapTo(asked.snap);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asked?.key]);
+
   useEffect(() => {
     const el = sheet.current;
     if (!el) return;
     const down = (e: PointerEvent) => {
-      if (wide || !(e.target as Element).closest('.va-grab, .va-peek') || (e.target as Element).closest('button')) return;
-      drag.current = { y0: e.clientY, s0: y.current, t: performance.now(), last: e.clientY, v: 0, moved: false };
-      el.setPointerCapture(e.pointerId);
+      const target = e.target as Element;
+      if (wide || !target.closest('.va-grab, .va-peek, .ahead') || target.closest('select, input, textarea')) return;
+      // A finger on the grip may land on the peek's button just under it, as
+      // a phone steers a touch to what it can tap: the peek's buttons start a
+      // drag too, and are tapped as ever when it does not move. The header's
+      // own buttons, its tabs, are only tapped.
+      const onButton = !!target.closest('button');
+      if (onButton && !target.closest('.va-peek')) return;
+      // The panel's header drags it too, but only the grip and the peek toggle it with a tap.
+      const tap = !onButton && !!target.closest('.va-grab, .va-peek');
+      drag.current = { y0: e.clientY, s0: y.current, t: performance.now(), last: e.clientY, v: 0, moved: false, tap, id: e.pointerId, captured: !onButton };
+      // A button's tap keeps its click: the sheet takes the pointer only once it moves.
+      if (!onButton) el.setPointerCapture(e.pointerId);
     };
     const move = (e: PointerEvent) => {
       const d = drag.current;
@@ -116,14 +144,20 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled }: Bo
       d.t = now;
       d.last = e.clientY;
       if (Math.abs(e.clientY - d.y0) > 6) d.moved = true;
+      if (!d.moved) return;
+      if (!d.captured) {
+        d.captured = true;
+        el.setPointerCapture(d.id);
+      }
       place(clamp(d.s0 + e.clientY - d.y0, snapY('full'), snapY('peek')), false);
     };
     const up = () => {
       const d = drag.current;
       if (!d) return;
       drag.current = null;
+      if (d.moved && !d.tap) swallowClick.current = performance.now();
       if (!d.moved) {
-        snapTo(snap === 'peek' ? 'half' : 'peek');
+        if (d.tap) snapTo(snap === 'peek' ? 'half' : 'peek');
         return;
       }
       const order: Snap[] = ['full', 'half', 'peek'];
@@ -134,11 +168,21 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled }: Bo
       if (Math.abs(d.v) > 0.5) best = order[clamp(order.indexOf(snap) + (d.v > 0 ? 1 : -1), 0, 2)] ?? best;
       snapTo(best);
     };
+    // The click a moved drag's lift makes on a peek's button is the drag's.
+    const click = (e: MouseEvent) => {
+      if (performance.now() - swallowClick.current < 400) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      swallowClick.current = 0;
+    };
+    el.addEventListener('click', click, true);
     el.addEventListener('pointerdown', down);
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
     el.addEventListener('pointercancel', up);
     return () => {
+      el.removeEventListener('click', click, true);
       el.removeEventListener('pointerdown', down);
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);
@@ -148,7 +192,7 @@ export function BottomSheet({ wide, onCovers, peek, body, raise, onSettled }: Bo
   }, [wide, snap]);
 
   return (
-    <section className="va-sheet" ref={sheet} data-snap={snap} aria-label="Journal">
+    <section className="va-sheet" ref={sheet} data-snap={snap} aria-label="Assistant and journal">
       <div className="va-grab" ref={grab}>
         <span />
       </div>

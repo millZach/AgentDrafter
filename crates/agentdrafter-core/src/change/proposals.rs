@@ -55,6 +55,11 @@ const PROPOSALS_LOCK: &str = "proposals.lock";
 /// through the viewer with no `by` is recorded under.
 pub const DRAFTER: &str = "drafter";
 
+/// The name the drafter's assistant proposes under (#156): the MCP server
+/// AgentDrafter starts it on records a proposal with no `by` under it, and
+/// the journal reads `proposed by Assistant`.
+pub const ASSISTANT: &str = "Assistant";
+
 /// The most characters `by` may hold.
 const MOST_BY: usize = 80;
 

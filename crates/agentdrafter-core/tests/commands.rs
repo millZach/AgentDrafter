@@ -88,6 +88,11 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({"set": "missing", "proposal": 2, "by": "drafter"}),
         ),
         (
+            "look-at",
+            json!({"set": "missing", "sheet": "DEMO-001", "layout": "Wiring", "selected": ["DEMO-001/border"]}),
+        ),
+        ("looking-at", json!({"set": "missing"})),
+        (
             "check",
             json!({"source": "missing", "sheets": ["DEMO-001"], "fonts": ["f"], "no_system_fonts": true}),
         ),
@@ -493,6 +498,26 @@ fn a_proposal_s_schema_and_its_command_refuse_the_same_who_and_number() {
             "discard",
             json!({"set": "missing", "proposal": 1, "by": "Assistant (MCP)"}),
             true,
+        ),
+        (
+            "look-at",
+            json!({"set": "missing", "sheet": "DEMO-001", "selected": "DEMO-001/border"}),
+            false,
+        ),
+        (
+            "look-at",
+            json!({"set": "missing", "sheet": "DEMO-001", "selected": [1]}),
+            false,
+        ),
+        (
+            "look-at",
+            json!({"set": "missing", "sheet": "DEMO-001", "layout": null}),
+            true,
+        ),
+        (
+            "look-at",
+            json!({"set": "missing", "sheet": "DEMO-001", "selected": vec!["x"; 1001]}),
+            false,
         ),
         (
             "keep",

@@ -241,6 +241,15 @@ export interface CommandBarProps {
   band?: ReactNode;
   /** What the keys do now. */
   note: string;
+  /**
+   * What Enter does with the words typed, when they go to the assistant
+   * (#156): `Enter: ask the assistant`; empty for nothing to say.
+   */
+  hint?: string;
+  /** Whether Space is Enter for what the field holds; without it, always, but while a text's words are typed. */
+  spaceEnters?(text: string): boolean;
+  /** What the field holds, each time it changes, emptied by Enter or Esc among them: the hint follows it. */
+  onTyped?(text: string): void;
 }
 
 /** The command bar under the drawing: it prompts, with options to click, and takes what is typed. */
@@ -262,6 +271,9 @@ export function CommandBar({
   warning,
   note,
   band = null,
+  hint = '',
+  spaceEnters,
+  onTyped,
 }: CommandBarProps) {
   return (
     <div className="cmd" data-ui>
@@ -285,7 +297,7 @@ export function CommandBar({
       ) : (
         band
       )}
-      <div className="cmdbar" ref={band && touch ? undefined : bar} aria-label="Command bar" hidden={!!band && touch}>
+      <div className={`cmdbar${hint ? ' asking' : ''}`} ref={band && touch ? undefined : bar} aria-label="Command bar" hidden={!!band && touch}>
         <span className="chev">&gt;_</span>
         <span className="cmdline" role="status">
           {prompt.command && <span className="cmdname">{prompt.command}</span>}
@@ -335,15 +347,19 @@ export function CommandBar({
           autoCapitalize="off"
           spellCheck={false}
           enterKeyHint="go"
-          aria-label="Type a command, a point or a length"
+          aria-label="Type a command, a point, a length, or words for the assistant"
           placeholder={placeholder}
-          onChange={(e) => onTyping(e.currentTarget.value)}
+          onChange={(e) => {
+            onTyping(e.currentTarget.value);
+            onTyped?.(e.currentTarget.value);
+          }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' || (e.key === ' ' && !typingText)) {
+            if (e.key === 'Enter' || (e.key === ' ' && !typingText && (spaceEnters?.(e.currentTarget.value) ?? true))) {
               e.preventDefault();
               e.stopPropagation();
               const text = e.currentTarget.value;
               e.currentTarget.value = '';
+              onTyped?.('');
               onEnter(text);
             } else if (e.key === 'Escape') {
               e.preventDefault();
@@ -352,6 +368,7 @@ export function CommandBar({
               // words, it ends the tool too.
               const typed = e.currentTarget.value;
               e.currentTarget.value = '';
+              onTyped?.('');
               if (!typed || typingText) onEscape();
             } else if (e.key !== 'F3' && e.key !== 'F7' && e.key !== 'F8') {
               // The page's own keys stay out of the field's typing.
@@ -359,7 +376,14 @@ export function CommandBar({
             }
           }}
         />
-        <span className="cmdnote">{note}</span>
+        {hint && (
+          <span className="askhint" data-askhint>
+            {hint}
+          </span>
+        )}
+        <span className="cmdnote" hidden={!!hint}>
+          {note}
+        </span>
       </div>
     </div>
   );

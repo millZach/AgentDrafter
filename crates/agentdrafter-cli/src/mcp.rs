@@ -15,23 +15,40 @@
 //! Requests are taken one at a time, in order, and the server stops when
 //! its standard input closes. Nothing but MCP messages goes to standard
 //! output.
+//!
+//! `agentdrafter mcp --assistant` is the server `agentdrafter serve` points
+//! the drafter's own agent at (#156): it serves only the commands the core
+//! gives the assistant, those that read and `propose`, so what the agent
+//! would change waits as a proposal for the drafter to keep or discard; a
+//! proposal it makes with no `by` is the assistant's, and its instructions
+//! say so. `--set` binds it to the drawing set of the drafter's
+//! conversation: a call that names another set, or a file outside it, is
+//! refused. `--looking-at` names a file holding the `looking-at` reply for
+//! the message the agent is answering, as the drafter sent it, which the
+//! server gives in place of the live record.
 
 use std::io::{BufRead, Read, Write};
 use std::process::ExitCode;
 
-use agentdrafter_core::{commands, find_command, Error, Interface, Reply, Settings};
+use agentdrafter_core::{
+    assistant_commands, commands, find_command, Access, Command, Error, Interface, Reply, Settings,
+    ASSISTANT,
+};
 use serde_json::{json, Value};
 
 use crate::{send, Args};
 
-pub const MCP_USAGE: &str = "agentdrafter mcp";
+pub const MCP_USAGE: &str =
+    "agentdrafter mcp [--assistant [--set <drawing-set-folder>] [--looking-at <reply.json>]]";
 
 /// What `mcp` does, for the command line's help.
 pub const MCP_DOES: &str =
     "Serves every command as a tool of an MCP server over standard input and output, one \
      JSON-RPC message to a line, for an agent's MCP client to start. Each tool takes the \
      command's input as its arguments and replies with the JSON the command line prints. Paths \
-     are taken from the folder the server started in. It stops when its standard input closes.";
+     are taken from the folder the server started in. It stops when its standard input closes. \
+     With --assistant it serves only the commands that read and `propose`, for the drafter's \
+     assistant, which proposes what it would change and never changes a set itself.";
 
 /// The revision of the protocol served request by request, with no
 /// handshake.
@@ -55,18 +72,27 @@ const INSTRUCTIONS: &str =
      to a drawing set, `journal` and `undo` read and undo them, and `schema` gives the schema of \
      each kind of file.";
 
+/// What the server tells the drafter's assistant, after [`INSTRUCTIONS`].
+const ASSISTANT_INSTRUCTIONS: &str =
+    "You are the drafter's assistant in AgentDrafter's drafting app, drafting with them on \
+     their drawing set. You never change the set yourself: `change`, `undo`, `accept`, `keep` \
+     and `discard` are not your tools. To change it, call `propose` with the change set \
+     `change` would take: it waits, drawn dashed on the drafter's drawing, and lands only when \
+     the drafter keeps it. `operations` lists what a change set can hold. When the drafter \
+     says \"this\" or asks what something is, `looking-at` gives the sheet they have open and \
+     the objects they selected, by their IDs; `query` tells you about them.";
+
 /// Runs `agentdrafter mcp`: serves messages from standard input until it
 /// closes.
-pub fn serve(mut args: Args) -> ExitCode {
-    if let Some(extra) = args.next() {
-        let error = Error::usage(format!(
-            "mcp takes no argument, found `{}`; usage: {MCP_USAGE}",
-            extra.to_string_lossy()
-        ));
-        let (line, code) = send(Reply::<()>::from(Err(error)));
-        println!("{line}");
-        return code;
-    }
+pub fn serve(args: Args) -> ExitCode {
+    let server = match server_for(args) {
+        Ok(server) => server,
+        Err(error) => {
+            let (line, code) = send(Reply::<()>::from(Err(error)));
+            println!("{line}");
+            return code;
+        }
+    };
     let settings = Settings::from_env();
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -75,8 +101,68 @@ pub fn serve(mut args: Args) -> ExitCode {
         &mut stdout.lock(),
         &settings,
         MOST_MESSAGE,
+        server,
     );
     ExitCode::SUCCESS
+}
+
+/// The server `mcp`'s arguments ask for: the full one, or the assistant's,
+/// bound to a set and given the message's `looking-at` reply.
+fn server_for(mut args: Args) -> Result<Server, Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {MCP_USAGE}"));
+    let mut server = Server::default();
+    let mut snapshot: Option<std::path::PathBuf> = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--assistant") if !server.assistant => server.assistant = true,
+            Some("--set") if server.set.is_none() => {
+                let set = args
+                    .next()
+                    .ok_or_else(|| usage("--set needs a drawing set's folder".into()))?;
+                let set = std::fs::canonicalize(&set).map_err(|e| {
+                    usage(format!(
+                        "--set `{}` cannot be found: {e}",
+                        set.to_string_lossy()
+                    ))
+                })?;
+                server.set = Some(set);
+            }
+            Some("--looking-at") if snapshot.is_none() => {
+                snapshot = Some(
+                    args.next()
+                        .ok_or_else(|| usage("--looking-at needs a file".into()))?
+                        .into(),
+                );
+            }
+            _ => {
+                return Err(usage(format!(
+                    "mcp takes --assistant, --set and --looking-at once each, not `{}`",
+                    arg.to_string_lossy()
+                )))
+            }
+        }
+    }
+    if !server.assistant && (server.set.is_some() || snapshot.is_some()) {
+        return Err(usage(
+            "--set and --looking-at are the assistant's: give --assistant".into(),
+        ));
+    }
+    if let Some(file) = snapshot {
+        let text = std::fs::read_to_string(&file).map_err(|e| {
+            usage(format!(
+                "--looking-at `{}` cannot be read: {e}",
+                file.display()
+            ))
+        })?;
+        let reply: Value = serde_json::from_str(&text).map_err(|e| {
+            usage(format!(
+                "--looking-at `{}` is not a reply: {e}",
+                file.display()
+            ))
+        })?;
+        server.looking_at = Some(reply);
+    }
+    Ok(server)
 }
 
 /// The most one message may hold, as the HTTP API's body may.
@@ -91,8 +177,8 @@ fn answer_lines(
     output: &mut impl Write,
     settings: &Settings,
     most: usize,
+    mut server: Server,
 ) {
-    let mut server = Server::default();
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -148,10 +234,17 @@ fn pass_line(input: &mut impl BufRead) -> std::io::Result<()> {
     }
 }
 
-/// The server's state: the handshake revision a client chose, if one did.
+/// The server's state: the handshake revision a client chose, if one did,
+/// and whether it serves the drafter's assistant, the set it is bound to
+/// and the `looking-at` reply it gives.
 #[derive(Default)]
 struct Server {
     handshake: Option<&'static str>,
+    assistant: bool,
+    /// The drawing set every call must name, canonical.
+    set: Option<std::path::PathBuf>,
+    /// The `looking-at` reply for the message being answered.
+    looking_at: Option<Value>,
 }
 
 /// A JSON-RPC error: its code and message.
@@ -214,9 +307,9 @@ impl Server {
         };
         let outcome = match method {
             "initialize" => Ok(self.initialize(&params)),
-            "server/discover" => Ok(discover()),
+            "server/discover" => Ok(discover(self.assistant)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/list" => Ok(json!({ "tools": tools(self.assistant) })),
             "tools/call" => self.call(&params, modern, settings),
             other => Err((-32601, format!("Method not found: {other}"))),
         };
@@ -245,7 +338,7 @@ impl Server {
             "protocolVersion": version,
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": server_info(),
-            "instructions": INSTRUCTIONS,
+            "instructions": instructions(self.assistant),
         })
     }
 
@@ -257,9 +350,22 @@ impl Server {
                 "Invalid params: tools/call names its tool under `name`".to_owned(),
             )
         })?;
-        let command =
-            find_command(name).ok_or_else(|| (-32602, format!("Unknown tool: {name}")))?;
-        let arguments = match params.get("arguments") {
+        let command = find_command(name)
+            .filter(|command| !self.assistant || command.access() != Access::Writes)
+            .ok_or_else(|| {
+                let withheld = self.assistant && find_command(name).is_some();
+                let message = if withheld {
+                    format!(
+                        "Unknown tool: {name}. The drafter's assistant does not change the set \
+                         itself: call `propose` with the change set, and the drafter keeps or \
+                         discards it"
+                    )
+                } else {
+                    format!("Unknown tool: {name}")
+                };
+                (-32602, message)
+            })?;
+        let mut arguments = match params.get("arguments") {
             None | Some(Value::Null) => json!({}),
             Some(arguments @ Value::Object(_)) => arguments.clone(),
             Some(_) => {
@@ -269,42 +375,107 @@ impl Server {
                 ))
             }
         };
-        let reply = command.run(arguments, settings, Interface::Mcp);
-        // A reply holds only strings, numbers, lists and string-keyed maps,
-        // which always serialize.
-        let text = serde_json::to_string(&reply).expect("a reply serializes to JSON");
+        self.within_set(&arguments)?;
+        // The assistant's proposal is the assistant's when it names no one
+        // else.
+        if self.assistant && command.name() == "propose" {
+            if let Some(arguments) = arguments.as_object_mut() {
+                arguments
+                    .entry("by")
+                    .or_insert_with(|| Value::String(ASSISTANT.to_owned()));
+            }
+        }
+        // What the drafter was looking at when they sent the message is the
+        // reply serve gave this server, not what the viewer records since.
+        let reply: Value = match (&self.looking_at, command.name()) {
+            (Some(snapshot), "looking-at") => snapshot.clone(),
+            // A reply holds only strings, numbers, lists and string-keyed
+            // maps, which always serialize.
+            _ => serde_json::to_value(command.run(arguments, settings, Interface::Mcp))
+                .expect("a reply serializes to JSON"),
+        };
+        let ok = reply.get("ok").and_then(Value::as_bool) == Some(true);
+        let text = reply.to_string();
         let mut result = json!({
             "content": [{ "type": "text", "text": text }],
-            "isError": !reply.ok,
+            "isError": !ok,
         });
         // Structured content came in with revision 2025-06-18.
         let structured = modern || !matches!(self.handshake, Some("2025-03-26" | "2024-11-05"));
         if structured {
-            result["structuredContent"] =
-                serde_json::to_value(&reply).expect("a reply serializes to JSON");
+            result["structuredContent"] = reply;
         }
         Ok(result)
+    }
+
+    /// Refuses a call of the assistant's server bound to a set that names
+    /// another set under `set`, the bound one alone, however it is spelled;
+    /// or a file outside it under `source` or `output`, which may name the
+    /// set or a file in it.
+    fn within_set(&self, arguments: &Value) -> Result<(), Failure> {
+        let Some(bound) = &self.set else {
+            return Ok(());
+        };
+        for key in ["set", "source", "output"] {
+            let Some(named) = arguments.get(key).and_then(Value::as_str) else {
+                continue;
+            };
+            let inside = std::fs::canonicalize(named).is_ok_and(|path| {
+                if key == "set" {
+                    path == *bound
+                } else {
+                    path.starts_with(bound)
+                }
+            });
+            if !inside {
+                return Err((
+                    -32602,
+                    format!(
+                        "Invalid params: the drafter's assistant works on the drawing set `{}` \
+                         alone, and `{key}` names `{named}`",
+                        bound.display()
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
 /// The answer to `server/discover`.
-fn discover() -> Value {
+fn discover(assistant: bool) -> Value {
     json!({
         "supportedVersions": [MODERN],
         "capabilities": { "tools": {} },
         "_meta": { "io.modelcontextprotocol/serverInfo": server_info() },
-        "instructions": INSTRUCTIONS,
+        "instructions": instructions(assistant),
     })
+}
+
+/// What the server tells an agent's model about itself, and, serving the
+/// drafter's assistant, what it may do.
+fn instructions(assistant: bool) -> String {
+    if assistant {
+        format!("{INSTRUCTIONS} {ASSISTANT_INSTRUCTIONS}")
+    } else {
+        INSTRUCTIONS.to_owned()
+    }
 }
 
 fn server_info() -> Value {
     json!({ "name": "agentdrafter", "version": env!("CARGO_PKG_VERSION") })
 }
 
-/// Every command as a tool, in the registry's order.
-fn tools() -> Vec<Value> {
-    commands()
-        .iter()
+/// Every command as a tool, in the registry's order; serving the drafter's
+/// assistant, those the core gives it.
+fn tools(assistant: bool) -> Vec<Value> {
+    let served: Vec<&Command> = if assistant {
+        assistant_commands().collect()
+    } else {
+        commands().iter().collect()
+    };
+    served
+        .into_iter()
         .map(|command| {
             json!({
                 "name": command.name(),
@@ -337,6 +508,8 @@ fn unsupported(id: Value, requested: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn ask(server: &mut Server, message: Value) -> Option<Value> {
@@ -348,7 +521,13 @@ mod tests {
     fn answers(input: impl std::io::Read, most: usize) -> Vec<Value> {
         let mut output = Vec::new();
         let mut input = std::io::BufReader::new(input);
-        answer_lines(&mut input, &mut output, &Settings::default(), most);
+        answer_lines(
+            &mut input,
+            &mut output,
+            &Settings::default(),
+            most,
+            Server::default(),
+        );
         String::from_utf8(output)
             .unwrap()
             .lines()
@@ -357,6 +536,118 @@ mod tests {
     }
 
     const PING: &str = r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#;
+
+    #[test]
+    fn the_assistants_server_takes_its_own_set_alone_not_one_nested_in_it() {
+        let folder =
+            std::env::temp_dir().join(format!("agentdrafter-bound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        let nested = folder.join("set").join("nested-copy");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            folder.join("set").join("set.yaml"),
+            "units: in
+",
+        )
+        .unwrap();
+        std::fs::write(
+            nested.join("set.yaml"),
+            "units: in
+",
+        )
+        .unwrap();
+        std::fs::write(folder.join("set").join("rows.yaml"), "").unwrap();
+        let bound = std::fs::canonicalize(folder.join("set")).unwrap();
+        let server = Server {
+            assistant: true,
+            set: Some(bound),
+            ..Server::default()
+        };
+        let set = folder.join("set");
+        let named = |key: &str, path: &Path| json!({ key: path.to_string_lossy() });
+        // The set itself, however it is spelled.
+        assert!(server.within_set(&named("set", &set)).is_ok());
+        assert!(server.within_set(&named("set", &set.join("."))).is_ok());
+        // A copy of a set nested inside it is another set.
+        let refused = server.within_set(&named("set", &nested)).unwrap_err();
+        assert_eq!(refused.0, -32602);
+        assert!(refused.1.contains("alone"), "{}", refused.1);
+        // A file inside the set may be a source or an output; one outside
+        // may not.
+        assert!(server
+            .within_set(&named("source", &set.join("rows.yaml")))
+            .is_ok());
+        assert!(server.within_set(&named("source", &nested)).is_ok());
+        assert!(server.within_set(&named("source", &folder)).is_err());
+        assert!(server.within_set(&named("set", &folder)).is_err());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn the_assistants_server_lists_and_runs_only_what_reads_and_proposes() {
+        let mut server = Server {
+            assistant: true,
+            ..Server::default()
+        };
+        let init = ask(
+            &mut server,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}),
+        )
+        .unwrap();
+        let instructions = init["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("call `propose`"), "{instructions}");
+        let listed = ask(
+            &mut server,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        )
+        .unwrap();
+        let names: Vec<&str> = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        let given: Vec<&str> = assistant_commands().map(Command::name).collect();
+        assert_eq!(names, given);
+        for name in ["propose", "query", "looking-at"] {
+            assert!(names.contains(&name), "{name}");
+        }
+        for name in [
+            "change", "undo", "accept", "keep", "discard", "look-at", "build",
+        ] {
+            assert!(!names.contains(&name), "{name}");
+            let refused = ask(
+                &mut server,
+                json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": name, "arguments": {"set": "missing"}}}),
+            )
+            .unwrap();
+            assert_eq!(refused["error"]["code"], -32602, "{refused}");
+            let message = refused["error"]["message"].as_str().unwrap();
+            assert!(message.contains("call `propose`"), "{message}");
+        }
+
+        // The full server lists every command, and says nothing of the
+        // assistant.
+        let mut full = Server::default();
+        let init = ask(
+            &mut full,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        )
+        .unwrap();
+        assert!(!init["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("assistant"));
+        let listed = ask(
+            &mut full,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        )
+        .unwrap();
+        assert_eq!(
+            listed["result"]["tools"].as_array().unwrap().len(),
+            commands().len()
+        );
+    }
 
     #[test]
     fn a_message_over_the_cap_is_refused_and_the_next_one_answered() {
