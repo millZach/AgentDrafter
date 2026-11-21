@@ -506,6 +506,51 @@ mod tests {
     }
 
     #[test]
+    fn a_mirrored_insert_whose_attribute_reads_upright_reads_back_through_its_own_dwg() {
+        // Turned 30 degrees with its attribute defined at 120, the attribute
+        // reads straight up, at 90: on the cutoff of the readable rule. Read
+        // back, 120 is 119.99999999999999, which must not flip it to 270.
+        let mut ours = definition("TAG", Justify::MiddleCenter);
+        ours.rotation = 120.0;
+        let block = Block {
+            name: "MARK".into(),
+            base_point: Point3::new(0.0, 0.0, 0.0),
+            objects: vec![crate::model::Object::AttributeDefinition(ours.clone())],
+            cells: Vec::new(),
+        };
+        let written = dwg_attribute_definition(&ours, &|t| t.position);
+        let mut read_block = block.clone();
+        read_block.objects = vec![crate::model::Object::AttributeDefinition(
+            read_attribute_definition(&written, LAYER_ZERO.into()).unwrap(),
+        )];
+        let mut insert = insert();
+        insert.attributes.truncate(1);
+        insert.rotation = 30.0;
+        insert.mirrored = true;
+        let dwg = dwg_insert(&insert, &block, &|t| t.position).unwrap();
+        assert!(same_angle(dwg.attributes[0].rotation.to_degrees(), 90.0));
+        let read = read_insert(&dwg, "symbols".into(), &[read_block]).expect("it reads back");
+        assert!(read.mirrored);
+        assert_eq!(read.attributes, insert.attributes);
+        // And so at the cutoff's other side, where it reads straight down
+        // and is turned to read up.
+        for rotation in [210.0, 300.0, 120.0] {
+            insert.rotation = rotation;
+            let dwg = dwg_insert(&insert, &block, &|t| t.position).unwrap();
+            let read_block = Block {
+                objects: vec![crate::model::Object::AttributeDefinition(
+                    read_attribute_definition(&written, LAYER_ZERO.into()).unwrap(),
+                )],
+                ..block.clone()
+            };
+            assert!(
+                read_insert(&dwg, "symbols".into(), &[read_block]).is_some(),
+                "turned {rotation}"
+            );
+        }
+    }
+
+    #[test]
     fn an_insert_whose_attribute_was_moved_is_not_read() {
         let block = block();
         let mut written = dwg_insert(&insert(), &block, &|t| t.position).unwrap();

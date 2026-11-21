@@ -261,14 +261,25 @@ pub fn attribute_text(
 /// and that turned a half turn, the one that reads left to right or
 /// upwards: in `[0, 90]` or `(270, 360)`, as AutoCAD's MIRRTEXT 0 keeps
 /// mirrored text reading forwards.
+///
+/// Text that reads straight up or down is on the cutoff, so a direction
+/// within [`CUTOFF_NOISE`] of it counts as on it: one that reads up, at 90°,
+/// is kept, and one that reads down, at 270°, is turned to read up. A
+/// direction read back from a DWG, which keeps radians, lands a hair either
+/// side of the degrees it was written in, and must give the same text.
 pub(crate) fn readable(degrees: f64) -> f64 {
     let direction = normalize_degrees(degrees);
-    if direction <= 90.0 || direction > 270.0 {
+    if direction <= 90.0 + CUTOFF_NOISE || direction > 270.0 + CUTOFF_NOISE {
         direction
     } else {
         normalize_degrees(direction + 180.0)
     }
 }
+
+/// How far, in degrees, a direction may lie from the readable rule's
+/// cutoff and count as on it: far more than the round trip through radians
+/// moves one, far less than any direction a drawing means.
+const CUTOFF_NOISE: f64 = 1e-9;
 
 /// Where `point`, in a block's own coordinates, lands on an insert of a
 /// block whose base point is `base`: moved so the base point sits at the
@@ -477,6 +488,12 @@ mod tests {
         assert_eq!(readable(90.0), 90.0);
         assert_eq!(readable(270.0), 90.0);
         assert_eq!(readable(-30.0), 330.0);
+        // A hair off the cutoff, as a DWG's radians bring a direction back,
+        // reads as on it.
+        assert_eq!(readable(90.00000000000001), 90.00000000000001);
+        assert!((readable(269.99999999999994) - 90.0).abs() < 1e-12);
+        assert!((readable(270.00000000000006) - 90.0).abs() < 1e-12);
+        assert_eq!(readable(90.001), 270.001);
     }
 
     #[test]
