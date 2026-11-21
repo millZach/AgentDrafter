@@ -2931,7 +2931,10 @@ const checks = {
         const r = document.querySelector('.stage').getBoundingClientRect();
         return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
       }, at);
-    const shot = async (page, name) => {
+    // A shot of the tool being set up waits for the toast of what landed
+    // before to go, as the prototype's shots show it; one of a landing keeps it.
+    const shot = async (page, name, toast = false) => {
+      if (!toast) await page.waitForFunction(() => !document.querySelector('.va-toast'), null, { timeout: 20000 }).catch(() => {});
       await frames(page);
       await page.screenshot({ path: join(out, name) });
       shots.push(name);
@@ -2975,19 +2978,27 @@ const checks = {
     const purpleIn = async (page, [l, bottom, r, t]) => {
       const [x0, y0] = await onPage(page, [l, t]);
       const [x1, y1] = await onPage(page, [r, bottom]);
-      const hide = (v) =>
-        page.evaluate((how) => {
-          for (const el of document.querySelectorAll('.ctags, .arr:not(.docked)')) el.style.visibility = how;
-        }, v);
-      await hide('hidden');
+      // Each put back as it was: the laptop's panel is placed, and shown, at each draw.
+      const was = await page.evaluate(() =>
+        [...document.querySelectorAll('.ctags, .arr:not(.docked)')].map((el) => {
+          const v = el.style.visibility;
+          el.style.visibility = 'hidden';
+          return v;
+        }),
+      );
       await frames(page);
       const png = decodePng(await page.screenshot({ clip: { x: Math.floor(x0) - 2, y: Math.floor(y0) - 2, width: Math.ceil(x1 - x0) + 4, height: Math.ceil(y1 - y0) + 4 } }));
-      await hide('');
+      await page.evaluate((back) => {
+        [...document.querySelectorAll('.ctags, .arr:not(.docked)')].forEach((el, i) => (el.style.visibility = back[i] ?? ''));
+      }, was);
       await frames(page);
+      // The proposal's purple, #c9a8ff, or a thin dash of it blended into the
+      // dark drawing: blue strongest, then red, green weakest. Grey and white
+      // ink, the blue halo and red wire numbers are none of these.
       let n = 0;
       for (let i = 0; i < png.rgba.length; i += 4) {
         const [red, green, blue] = [png.rgba[i], png.rgba[i + 1], png.rgba[i + 2]];
-        if (Math.abs(red - 0xc9) + Math.abs(green - 0xa8) + Math.abs(blue - 0xff) < 60) n += 1;
+        if (blue > 110 && blue - green > 40 && red - green > 12 && blue > red) n += 1;
       }
       return n;
     };
@@ -3017,6 +3028,27 @@ const checks = {
         }
       }
       throw new Error(`no point on the page picks ${id}`);
+    };
+    // A click that selects the object `target` names, snapping off so the
+    // click picks rather than reads a snap, waiting until the page marks it.
+    // F3 asks for the sheet again, without its snaps and then with them:
+    // each is let settle, so the click lands on the sheet drawn.
+    // Until the drawing itself is under `at`: a toast of what landed sits
+    // over the drawing's top left for a few seconds.
+    const clearAt = (page, at) =>
+      page.waitForFunction(([x, y]) => document.elementFromPoint(x, y)?.classList.contains('stage'), at, { timeout: 20000 });
+    const selectAt = async (page, target) => {
+      await clearAt(page, target.at);
+      await page.keyboard.press('F3');
+      await sleep(800);
+      await page.mouse.click(...target.at);
+      await page
+        .waitForFunction((p) => window.agentdrafterViewer.marked?.picked === p, target.place, { timeout: 15000 })
+        .catch(async () => {
+          throw new Error(`the click at ${target.at} selected nothing: ${await bar(page)}`);
+        });
+      await page.keyboard.press('F3');
+      await sleep(800);
     };
     const arrayOp = (entry) => {
       const ops = entry.change_set.operations;
@@ -3050,9 +3082,7 @@ const checks = {
         let before = journal().length;
         let target = await pointOn(page, 'DP-LD-101/device');
         const device = target.box;
-        await page.keyboard.press('F3');
-        await page.mouse.click(...target.at);
-        await page.keyboard.press('F3');
+        await selectAt(page, target);
         assert((await bar(page)).includes('FT-101 selected'), `the device is selected: ${await bar(page)}`);
         assert(/Move.*Copy.*Array.*Erase.*Clear/.test(await bar(page)), `a selected object's options hold Array: ${await bar(page)}`);
         await page.click('.opt[data-opt="array-objects"]');
@@ -3093,9 +3123,7 @@ const checks = {
         // AR typed with the device selected, then values in the command bar:
         // rows,columns, TO and the totals; Between pressed, then Enter lands it.
         target = await pointOn(page, 'DP-LD-101/device');
-        await page.keyboard.press('F3');
-        await page.mouse.click(...target.at);
-        await page.keyboard.press('F3');
+        await selectAt(page, target);
         await typeIn(page, 'AR');
         await page.waitForSelector('[data-arraypanel]');
         await typeIn(page, '2,2', 'TO', '@1.5,-1.2');
@@ -3121,9 +3149,7 @@ const checks = {
         // Set up, then a journal entry opened: dropped, nothing sent.
         before = journal().length;
         target = await pointOn(page, 'DP-LD-101/device');
-        await page.keyboard.press('F3');
-        await page.mouse.click(...target.at);
-        await page.keyboard.press('F3');
+        await selectAt(page, target);
         await page.click('.opt[data-opt="array-objects"]');
         await page.waitForSelector('[data-arraypanel]');
         await sideTab(page, 'journal');
@@ -3138,13 +3164,15 @@ const checks = {
         // Polar: ARRAYPOLAR on the tick, its centre on the circle's Centre snap.
         before = journal().length;
         target = await pointOn(page, tickId);
-        await page.keyboard.press('F3');
-        await page.mouse.click(...target.at);
-        await page.keyboard.press('F3');
+        await selectAt(page, target);
         await typeIn(page, 'ARRAYPOLAR');
-        await page.waitForSelector('[data-arraypanel]');
+        await page.waitForSelector('[data-arraypanel]', { state: 'attached', timeout: 10000 }).catch(async () => {
+          await page.screenshot({ path: join(out, 'array-laptop-polar-failed.png') });
+          throw new Error(`ARRAYPOLAR opened no panel: ${await bar(page)} | ${await page.textContent('.cmd .hist')}`);
+        });
         assert((await bar(page)).includes('ARRAYPOLAR') && (await bar(page)).includes('Click the centre the items go round'), `it asks for the centre: ${await bar(page)}`);
         const center = await onPage(page, [3, 8.8]);
+        await clearAt(page, center);
         await page.mouse.move(center[0] + 3, center[1] + 3);
         await page.mouse.move(center[0], center[1]);
         await frames(page);
@@ -3160,10 +3188,10 @@ const checks = {
         // The copy half a turn round is drawn below the circle, upside down.
         const tick = await objectOf(page, tickId);
         const below = [tick.bounds[0] - 0.02, 2 * 8.8 - tick.bounds[3] - 0.02, tick.bounds[2] + 0.02, 2 * 8.8 - tick.bounds[1] + 0.02];
-        const polarDrawn = await purpleIn(page, below);
-        assert(polarDrawn > 5, `the copy half a turn round is drawn: ${polarDrawn}`);
-        seen.laptop.polarPurple = polarDrawn;
         await shot(page, 'array-laptop-2-polar.png');
+        const polarDrawn = await purpleIn(page, below);
+        assert(polarDrawn > 5, `the copy half a turn round is drawn: ${polarDrawn} in ${JSON.stringify(below)}, the view ${JSON.stringify(await page.evaluate(() => window.agentdrafterViewer.view()))}`);
+        seen.laptop.polarPurple = polarDrawn;
         await page.click('[data-arraypanel] [data-act="array"]');
         entry = await landed(page, before, 'Array, polar');
         op = arrayOp(entry);
@@ -3175,7 +3203,7 @@ const checks = {
         seen.laptop.polar = entry.entry;
         line = await journalLine(page, entry.entry);
         assert(line.includes(`array ${tickId.split('/')[1]}, 8 round`), `its journal line: ${line}`);
-        await shot(page, 'array-laptop-3-polar-journal.png');
+        await shot(page, 'array-laptop-3-polar-journal.png', true);
         await sideTab(page, 'chat');
         // terminal-2, a template's: picked from the ribbon, warned of, asked about in the band.
         before = journal().length;
@@ -3183,7 +3211,9 @@ const checks = {
         target = await pointOn(page, 'DP-LD-101/terminal-2');
         await page.click('.rb[data-tool="array"]');
         assert((await bar(page)).includes('Click the objects to array'), `Array picks first: ${await bar(page)}`);
+        await clearAt(page, target.at);
         await page.keyboard.press('F3');
+        await sleep(800);
         await page.mouse.click(...target.at);
         await page.keyboard.press('F3');
         assert((await bar(page)).includes('1 object picked'), `terminal-2 is picked: ${await bar(page)}`);
@@ -3225,10 +3255,10 @@ const checks = {
         assert(template() !== templateBefore, 'the template changes');
         seen.laptop.template = { entry: entry.entry, sheets: entry.landed_on.length };
         await page.mouse.move(700, 600);
-        await shot(page, 'array-laptop-6-landed.png');
+        await shot(page, 'array-laptop-6-landed.png', true);
         line = await journalLine(page, entry.entry);
         assert(line.includes('array terminal-2, 3 × 2'), `its journal line: ${line}`);
-        await shot(page, 'array-laptop-7-journal.png');
+        await shot(page, 'array-laptop-7-journal.png', true);
         assert(problems.length === 0, problems.join('; '));
         await context.close();
       }
@@ -3282,7 +3312,7 @@ const checks = {
         let op = arrayOp(entry);
         assert(op.rows === 2 && op.columns === 2 && op.row_spacing === -1.2 && op.column_spacing === 1.5, `one array: ${JSON.stringify(op)}`);
         seen.phone.rectangular = entry.entry;
-        await shot(page, 'array-phone-2-landed.png');
+        await shot(page, 'array-phone-2-landed.png', true);
         // Polar, its centre typed with ⌨ Type.
         before = journal().length;
         target = await pointOn(page, tickId);
