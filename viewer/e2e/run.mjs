@@ -2519,12 +2519,15 @@ const checks = {
         assert((await bar(page)).includes('COPY') && (await bar(page)).includes('the base point'), `Copy takes what is selected: ${await bar(page)}`);
         let before = journal().length;
         // The base point typed; a displacement typed; a length towards the
-        // cursor, which is below the base; a click; then Ctrl+Z takes it back.
+        // cursor, below the base; a click; then Ctrl+Z takes it back.
         await typeIn(page, '2,6.5', '@0,1.2');
         assert((await bar(page)).includes('1 copy placed'), `a copy is placed: ${await bar(page)}`);
-        await page.mouse.move(...(await onPage(page, [2, 3])));
+        // Held upright by Ortho (F8), as the cursor is only nearly below.
+        await page.keyboard.press('F8');
+        await page.mouse.move(...(await onPage(page, [2.05, 3])));
         await frames(page);
         await typeIn(page, '1.2');
+        await page.keyboard.press('F8');
         await page.mouse.click(...(await onPage(page, [4.5, 6.5])));
         await frames(page);
         assert((await bar(page)).includes('3 copies placed'), `three copies placed: ${await bar(page)}`);
