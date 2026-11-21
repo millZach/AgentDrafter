@@ -318,11 +318,7 @@ impl RecordFile {
         }
         let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
         let object_path = key_path(&path, &kind);
-        let at = At {
-            t,
-            units,
-            resolved,
-        };
+        let at = At { t, units, resolved };
         let changed = at.object(&kind, keys, &object_path)?;
         self.touch(list, index, operation, Touch::Keys(changed));
         Ok(())
@@ -392,9 +388,7 @@ impl At<'_> {
                     }
                     _ => self.angle(&mut entry.value, &field, &|a| t.angle(a))?,
                 },
-                ("dimension", "angle") => {
-                    self.angle(&mut entry.value, &field, &|a| t.angle(a))?
-                }
+                ("dimension", "angle") => self.angle(&mut entry.value, &field, &|a| t.angle(a))?,
                 ("hatch", "angle") if !solid && !t.mirrors() => {
                     self.angle(&mut entry.value, &field, &|a| t.angle(a))?
                 }
@@ -440,10 +434,12 @@ impl At<'_> {
                     changed.push("scale".to_owned());
                 }
                 if t.mirrors() {
-                    let was = keys
-                        .iter()
-                        .position(|e| e.key == "mirrored")
-                        .map(|i| (i, matches!(&keys[i].value.kind, Kind::Scalar(s) if s == "true")));
+                    let was = keys.iter().position(|e| e.key == "mirrored").map(|i| {
+                        (
+                            i,
+                            matches!(&keys[i].value.kind, Kind::Scalar(s) if s == "true"),
+                        )
+                    });
                     match was {
                         Some((i, true)) => {
                             keys.remove(i);
@@ -485,7 +481,12 @@ impl At<'_> {
                 }
             }
             "mleader" | "leader" if scaled => {
-                for key in ["arrow_size", "gap", "landing"] {
+                let lengths: &[&str] = if kind == "mleader" {
+                    &["arrow_size", "gap", "landing"]
+                } else {
+                    &["arrow_size", "gap"]
+                };
+                for &key in lengths {
                     if written(keys, key) {
                         continue;
                     }
@@ -675,14 +676,20 @@ impl At<'_> {
         let Kind::Scalar(text) = &node.kind else {
             return Err(Error::new(
                 ErrorCode::WrongType,
-                format!("the record's value here is not a number to {}", self.t.verb()),
+                format!(
+                    "the record's value here is not a number to {}",
+                    self.t.verb()
+                ),
             )
             .at_field(field));
         };
         text.trim().parse::<f64>().map_err(|_| {
             Error::new(
                 ErrorCode::BadNumber,
-                format!("the record's value `{text}` is not a number to {}", self.t.verb()),
+                format!(
+                    "the record's value `{text}` is not a number to {}",
+                    self.t.verb()
+                ),
             )
             .at_field(field)
         })
@@ -700,7 +707,10 @@ impl At<'_> {
         let Kind::Scalar(text) = &node.kind else {
             return Err(Error::new(
                 ErrorCode::WrongType,
-                format!("the record's length here is not a length to {}", self.t.verb()),
+                format!(
+                    "the record's length here is not a length to {}",
+                    self.t.verb()
+                ),
             )
             .at_field(field));
         };
@@ -710,7 +720,10 @@ impl At<'_> {
             Err(_) => {
                 return Err(Error::new(
                     ErrorCode::BadNumber,
-                    format!("the record's length `{text}` is not a length to {}", self.t.verb()),
+                    format!(
+                        "the record's length `{text}` is not a length to {}",
+                        self.t.verb()
+                    ),
                 )
                 .at_field(field))
             }
@@ -724,7 +737,10 @@ impl At<'_> {
         let Kind::Scalar(text) = &node.kind else {
             return Err(Error::new(
                 ErrorCode::WrongType,
-                format!("the record's angle here is not a number of degrees to {}", self.t.verb()),
+                format!(
+                    "the record's angle here is not a number of degrees to {}",
+                    self.t.verb()
+                ),
             )
             .at_field(field));
         };
@@ -820,8 +836,7 @@ impl At<'_> {
                                         _ => false,
                                     };
                                 }
-                                if edge_kind.key == "arc" && !matches!(self.t.how, How::Scale(_))
-                                {
+                                if edge_kind.key == "arc" && !matches!(self.t.how, How::Scale(_)) {
                                     any |= self.arc_angles("arc", keys, &within)?;
                                 }
                             }
@@ -852,10 +867,18 @@ impl At<'_> {
         let y = self.coordinate(coordinates, 1, field)?;
         let z = self.coordinate(coordinates, 2, field)?;
         let [width, height] = self.resolved.size.unwrap_or([0.0, 0.0]);
-        let corners = [[x, y], [x + width, y], [x, y - height], [x + width, y - height]]
-            .map(|[cx, cy]| self.t.point([cx, cy, z]));
+        let corners = [
+            [x, y],
+            [x + width, y],
+            [x, y - height],
+            [x + width, y - height],
+        ]
+        .map(|[cx, cy]| self.t.point([cx, cy, z]));
         let left = corners.iter().map(|c| c[0]).fold(f64::INFINITY, f64::min);
-        let top = corners.iter().map(|c| c[1]).fold(f64::NEG_INFINITY, f64::max);
+        let top = corners
+            .iter()
+            .map(|c| c[1])
+            .fold(f64::NEG_INFINITY, f64::max);
         let mut moved = false;
         for (axis, value) in [(0, left), (1, top)] {
             let was = if axis == 0 { x } else { y };
@@ -939,6 +962,381 @@ impl At<'_> {
 mod tests {
     use super::*;
 
+    /// A quarter turn about the origin.
+    fn turn() -> Transform {
+        Transform::rotate([0.0; 3], 90.0)
+    }
+
+    /// Doubled about the origin.
+    fn doubled() -> Transform {
+        Transform::scale([0.0; 3], 2.0)
+    }
+
+    /// Mirrored across the line x = 10, up the sheet.
+    fn mirrored() -> Transform {
+        Transform::mirror([10.0, 0.0, 0.0], [10.0, 1.0, 0.0]).unwrap()
+    }
+
+    /// `object` as its record writes it once `t` has transformed it, the
+    /// lengths `resolved` gives written as its own; or the error.
+    fn transformed(object: &str, t: Transform, resolved: &Resolved) -> Result<String, Error> {
+        let text = format!("units: mm\nobjects:\n  - {object}\n");
+        let mut file = RecordFile::from_text(Path::new("t.yaml"), text).unwrap();
+        file.transform(ObjectList::Template, 0, &t, resolved, Unit::Mm, 0)?;
+        // The new text reads back as the tree the edit made.
+        file.new_text().unwrap();
+        Ok(file.object_text(ObjectList::Template, 0))
+    }
+
+    #[track_caller]
+    fn lands(object: &str, t: Transform, wanted: &str) {
+        assert_eq!(
+            transformed(object, t, &Resolved::default()).unwrap(),
+            wanted,
+            "{object}"
+        );
+    }
+
+    #[test]
+    fn each_kind_turns_by_a_quarter_exactly() {
+        for (object, wanted) in [
+            (
+                "line: {from: [1, 2, 0], to: [3, 4, 0]}",
+                "line: {from: [-2, 1, 0], to: [-4, 3, 0]}",
+            ),
+            (
+                "polyline: {points: [[0, 0, 0], {point: [4, 0, 0], bulge: 0.5, start_width: 1, end_width: 0}, [4, 4, 0]]}",
+                "polyline: {points: [[0, 0, 0], {point: [0, 4, 0], bulge: 0.5, start_width: 1, end_width: 0}, [-4, 4, 0]]}",
+            ),
+            (
+                "arc: {center: [5, 0, 0], radius: 2, start_angle: 0, end_angle: 90}",
+                "arc: {center: [0, 5, 0], radius: 2, start_angle: 90, end_angle: 180}",
+            ),
+            (
+                "circle: {center: [5, 0, 0], radius: 2}",
+                "circle: {center: [0, 5, 0], radius: 2}",
+            ),
+            (
+                "ellipse: {center: [5, 0, 0], major_axis: [2, 0, 0], ratio: 0.5, start_angle: 10, end_angle: 100}",
+                "ellipse: {center: [0, 5, 0], major_axis: [0, 2, 0], ratio: 0.5, start_angle: 10, end_angle: 100}",
+            ),
+            (
+                "spline: {control_points: [[0, 0, 0], [1, 1, 0], [2, 0, 0], [3, 1, 0]]}",
+                "spline: {control_points: [[0, 0, 0], [-1, 1, 0], [0, 2, 0], [-1, 3, 0]]}",
+            ),
+            (
+                "hatch: {pattern: GRID, angle: 30, boundary: [{polyline: {points: [[1, 0, 0], [2, 0, 0], [2, 2, 0]]}}, {edges: [{line: {from: [5, 0, 0], to: [7, 0, 0]}}, {arc: {center: [6, 0, 0], radius: 1, start_angle: 0, end_angle: 180}}]}]}",
+                "hatch: {pattern: GRID, angle: 120, boundary: [{polyline: {points: [[0, 1, 0], [0, 2, 0], [-2, 2, 0]]}}, {edges: [{line: {from: [0, 5, 0], to: [0, 7, 0]}}, {arc: {center: [0, 6, 0], radius: 1, start_angle: 90, end_angle: 270}}]}]}",
+            ),
+            (
+                "text: {contents: A, position: [1, 2, 0], height: 2.5, rotation: 30}",
+                "text: {contents: A, position: [-2, 1, 0], height: 2.5, rotation: 120}",
+            ),
+            (
+                "mtext: {contents: A, position: [1, 2, 0], height: 2.5}",
+                "mtext: {contents: A, position: [-2, 1, 0], height: 2.5, rotation: 90}",
+            ),
+            (
+                "donut: {center: [1, 0, 0], outside_diameter: 2}",
+                "donut: {center: [0, 1, 0], outside_diameter: 2}",
+            ),
+            (
+                "solid: {corners: [[1, 0, 0], [2, 0, 0], [1, 1, 0]]}",
+                "solid: {corners: [[0, 1, 0], [0, 2, 0], [-1, 1, 0]]}",
+            ),
+            (
+                "insert: {block: B, position: [1, 2, 0], rotation: 300, mirrored: true}",
+                "insert: {block: B, position: [-2, 1, 0], rotation: 30, mirrored: true}",
+            ),
+            (
+                "mleader: {leaders: [[[1, 0, 0], [5, 5, 0]]], content: {text: T}}",
+                "mleader: {leaders: [[[0, 1, 0], [-5, 5, 0]]], content: {text: T}}",
+            ),
+            (
+                "mleader: {leaders: [[[1, 0, 0], [5, 5, 0]]], content: {block: B, rotation: 10}}",
+                "mleader: {leaders: [[[0, 1, 0], [-5, 5, 0]]], content: {block: B, rotation: 100}}",
+            ),
+            (
+                "leader: {points: [[1, 0, 0], [5, 5, 0]], annotation: {text: N}}",
+                "leader: {points: [[0, 1, 0], [-5, 5, 0]], annotation: {text: N}}",
+            ),
+            (
+                "dimension: {kind: linear, angle: 30, points: [[1, 0, 0], [10, 0, 0]], location: [5, -3, 0]}",
+                "dimension: {kind: linear, angle: 120, points: [[0, 1, 0], [0, 10, 0]], location: [3, 5, 0]}",
+            ),
+            (
+                "dimension: {kind: angular, lines: [[[1, 0, 0], [5, 0, 0]], [[1, 0, 0], [1, 5, 0]]], location: [2, 2, 0]}",
+                "dimension: {kind: angular, lines: [[[0, 1, 0], [0, 5, 0]], [[0, 1, 0], [-5, 1, 0]]], location: [-2, 2, 0]}",
+            ),
+        ] {
+            lands(object, turn(), wanted);
+        }
+        // About a point of its own, three quarters clockwise is a quarter
+        // anticlockwise, with no noise of a sine.
+        lands(
+            "line: {from: [0.3, 0.7, 2], to: [0.1, 0.2, 2]}",
+            Transform::rotate([0.1, 0.2, 0.0], -270.0),
+            "line: {from: [-0.4, 0.4, 2], to: [0.1, 0.2, 2]}",
+        );
+    }
+
+    #[test]
+    fn each_kind_scales_its_points_and_lengths() {
+        for (object, wanted) in [
+            (
+                "line: {from: [1, 2, 0], to: [3, 4, 0]}",
+                "line: {from: [2, 4, 0], to: [6, 8, 0]}",
+            ),
+            (
+                "polyline: {points: [[0, 0, 0], {point: [4, 0, 0], bulge: 0.5, start_width: 1, end_width: 0}, [4, 4, 0]]}",
+                "polyline: {points: [[0, 0, 0], {point: [8, 0, 0], bulge: 0.5, start_width: 2, end_width: 0}, [8, 8, 0]]}",
+            ),
+            (
+                "polyline: {points: [[1, 0, 0], [2, 0, 0]], width: 0.5}",
+                "polyline: {points: [[2, 0, 0], [4, 0, 0]], width: 1}",
+            ),
+            (
+                "arc: {center: [5, 0, 0], radius: 2, start_angle: 0, end_angle: 90}",
+                "arc: {center: [10, 0, 0], radius: 4, start_angle: 0, end_angle: 90}",
+            ),
+            (
+                "circle: {center: [5, 0, 0], radius: 2 mm}",
+                "circle: {center: [10, 0, 0], radius: 4}",
+            ),
+            (
+                "ellipse: {center: [5, 0, 0], major_axis: [2, 0, 0], ratio: 0.5}",
+                "ellipse: {center: [10, 0, 0], major_axis: [4, 0, 0], ratio: 0.5}",
+            ),
+            (
+                "hatch: {pattern: GRID, scale: 1.5, boundary: [{edges: [{line: {from: [5, 0, 0], to: [7, 0, 0]}}, {arc: {center: [6, 0, 0], radius: 1, start_angle: 0, end_angle: 180}}]}]}",
+                "hatch: {pattern: GRID, scale: 3, boundary: [{edges: [{line: {from: [10, 0, 0], to: [14, 0, 0]}}, {arc: {center: [12, 0, 0], radius: 2, start_angle: 0, end_angle: 180}}]}]}",
+            ),
+            (
+                "hatch: {pattern: SOLID, boundary: [{polyline: {points: [[1, 0, 0], [2, 0, 0], [2, 2, 0]]}}]}",
+                "hatch: {pattern: SOLID, boundary: [{polyline: {points: [[2, 0, 0], [4, 0, 0], [4, 4, 0]]}}]}",
+            ),
+            (
+                "text: {contents: A, position: [1, 2, 0], height: 2.5, rotation: 30}",
+                "text: {contents: A, position: [2, 4, 0], height: 5, rotation: 30}",
+            ),
+            (
+                "mtext: {contents: A, position: [1, 2, 0], height: 2.5, width: 10}",
+                "mtext: {contents: A, position: [2, 4, 0], height: 5, width: 20}",
+            ),
+            (
+                "donut: {center: [1, 0, 0], outside_diameter: 2, inside_diameter: 1}",
+                "donut: {center: [2, 0, 0], outside_diameter: 4, inside_diameter: 2}",
+            ),
+            (
+                "insert: {block: B, position: [1, 2, 0], scale: 1.5}",
+                "insert: {block: B, position: [2, 4, 0], scale: 3}",
+            ),
+            (
+                "insert: {block: B, position: [1, 2, 0]}",
+                "insert: {block: B, position: [2, 4, 0], scale: 2}",
+            ),
+            (
+                "mleader: {leaders: [[[1, 0, 0], [5, 5, 0]]], content: {block: B}}",
+                "mleader: {leaders: [[[2, 0, 0], [10, 10, 0]]], content: {block: B, scale: 2}}",
+            ),
+            (
+                "dimension: {kind: radius, center: [1, 1, 0], point: [3, 1, 0], location: [5, 5, 0]}",
+                "dimension: {kind: radius, center: [2, 2, 0], point: [6, 2, 0], location: [10, 10, 0]}",
+            ),
+        ] {
+            lands(object, doubled(), wanted);
+        }
+        // A scaling scales Z about the base point's Z, as AutoCAD's does.
+        lands(
+            "line: {from: [1, 2, 3], to: [1, 2, 1]}",
+            Transform::scale([1.0, 2.0, 1.0], 3.0),
+            "line: {from: [1, 2, 7], to: [1, 2, 1]}",
+        );
+    }
+
+    #[test]
+    fn a_leaders_lengths_from_its_style_are_written_as_its_own_when_scaled() {
+        let resolved = Resolved {
+            lengths: vec![
+                ("arrow_size", 2.5),
+                ("landing", 8.0),
+                ("gap", 2.0),
+                ("content.height", 3.0),
+                ("annotation.height", 2.5),
+            ],
+            size: None,
+        };
+        assert_eq!(
+            transformed(
+                "mleader: {leaders: [[[1, 0, 0], [5, 5, 0]]], content: {text: T}, gap: 1}",
+                doubled(),
+                &resolved
+            )
+            .unwrap(),
+            "mleader: {leaders: [[[2, 0, 0], [10, 10, 0]]], content: {text: T, height: 6}, gap: 2, arrow_size: 5, landing: 16}"
+        );
+        assert_eq!(
+            transformed(
+                "leader: {points: [[1, 0, 0], [5, 5, 0]], annotation: {text: N}}",
+                doubled(),
+                &resolved
+            )
+            .unwrap(),
+            "leader: {points: [[2, 0, 0], [10, 10, 0]], annotation: {text: N, height: 5}, arrow_size: 5, gap: 4}"
+        );
+        // Turned, it writes none of them.
+        assert_eq!(
+            transformed(
+                "leader: {points: [[1, 0, 0], [5, 5, 0]]}",
+                turn(),
+                &resolved
+            )
+            .unwrap(),
+            "leader: {points: [[0, 1, 0], [-5, 5, 0]]}"
+        );
+    }
+
+    #[test]
+    fn each_kind_mirrors_with_its_text_reading_forwards() {
+        for (object, wanted) in [
+            (
+                "line: {from: [1, 2, 0], to: [3, 4, 0]}",
+                "line: {from: [19, 2, 0], to: [17, 4, 0]}",
+            ),
+            (
+                "polyline: {points: [[0, 0, 0], {point: [4, 0, 0], bulge: 0.5, start_width: 1, end_width: 0}, {point: [4, 4, 0], arc_angle: -90}, [8, 4, 0]]}",
+                "polyline: {points: [[20, 0, 0], {point: [16, 0, 0], bulge: -0.5, start_width: 1, end_width: 0}, {point: [16, 4, 0], arc_angle: 90}, [12, 4, 0]]}",
+            ),
+            (
+                "arc: {center: [5, 0, 0], radius: 2, start_angle: 0, end_angle: 90}",
+                "arc: {center: [15, 0, 0], radius: 2, start_angle: 90, end_angle: 180}",
+            ),
+            (
+                "ellipse: {center: [5, 0, 0], major_axis: [2, 0, 0], ratio: 0.5, start_angle: 10, end_angle: 100}",
+                "ellipse: {center: [15, 0, 0], major_axis: [-2, 0, 0], ratio: 0.5, start_angle: 260, end_angle: 350}",
+            ),
+            (
+                "spline: {fit_points: [[0, 0, 0], [1, 1, 0], [2, 0, 0]]}",
+                "spline: {fit_points: [[20, 0, 0], [19, 1, 0], [18, 0, 0]]}",
+            ),
+            // A hatch's pattern keeps its direction, as MIRRHATCH 0 keeps
+            // it; its origin goes with its boundary.
+            (
+                "hatch: {pattern: GRID, angle: 30, boundary: [{edges: [{line: {from: [5, 0, 0], to: [7, 0, 0]}}, {arc: {center: [6, 0, 0], radius: 1, start_angle: 0, end_angle: 90}}]}]}",
+                "hatch: {pattern: GRID, angle: 30, boundary: [{edges: [{line: {from: [15, 0, 0], to: [13, 0, 0]}}, {arc: {center: [14, 0, 0], radius: 1, start_angle: 90, end_angle: 180}}]}], origin: [20, 0, 0]}",
+            ),
+            (
+                "text: {contents: A, position: [1, 2, 0], height: 2.5, rotation: 30, justify: right}",
+                "text: {contents: A, position: [19, 2, 0], height: 2.5, rotation: 330, justify: right}",
+            ),
+            (
+                "text: {contents: A, position: [1, 2, 0], height: 2.5}",
+                "text: {contents: A, position: [19, 2, 0], height: 2.5}",
+            ),
+            (
+                "mtext: {contents: A, position: [1, 2, 0], height: 2.5, rotation: 90}",
+                "mtext: {contents: A, position: [19, 2, 0], height: 2.5, rotation: 90}",
+            ),
+            (
+                "donut: {center: [1, 0, 0], outside_diameter: 2}",
+                "donut: {center: [19, 0, 0], outside_diameter: 2}",
+            ),
+            (
+                "solid: {corners: [[1, 0, 0], [2, 0, 0], [1, 1, 0]]}",
+                "solid: {corners: [[19, 0, 0], [18, 0, 0], [19, 1, 0]]}",
+            ),
+            (
+                "insert: {block: B, position: [1, 2, 0], rotation: 30, scale: 1.5}",
+                "insert: {block: B, position: [19, 2, 0], rotation: 330, scale: 1.5, mirrored: true}",
+            ),
+            // Mirrored again, it is not mirrored.
+            (
+                "insert: {block: B, position: [1, 2, 0], rotation: 330, mirrored: true}",
+                "insert: {block: B, position: [19, 2, 0], rotation: 30}",
+            ),
+            (
+                "mleader: {leaders: [[[1, 0, 0], [5, 5, 0]]], content: {text: T}}",
+                "mleader: {leaders: [[[19, 0, 0], [15, 5, 0]]], content: {text: T}}",
+            ),
+            (
+                "leader: {points: [[1, 0, 0], [5, 5, 0]]}",
+                "leader: {points: [[19, 0, 0], [15, 5, 0]]}",
+            ),
+            (
+                "dimension: {kind: linear, angle: 30, points: [[1, 0, 0], [10, 0, 0]], location: [5, -3, 0]}",
+                "dimension: {kind: linear, angle: 150, points: [[19, 0, 0], [10, 0, 0]], location: [15, -3, 0]}",
+            ),
+            (
+                "dimension: {kind: ordinate, feature: [4, 6, 0], axis: x, location: [4, 9, 0]}",
+                "dimension: {kind: ordinate, feature: [16, 6, 0], axis: x, location: [16, 9, 0]}",
+            ),
+        ] {
+            lands(object, mirrored(), wanted);
+        }
+        // Across a line that runs across the sheet, an insert turns a half
+        // turn as well as mirroring, as AutoCAD's MIRROR leaves it.
+        lands(
+            "insert: {block: B, position: [1, 2, 0]}",
+            Transform::mirror([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap(),
+            "insert: {block: B, position: [1, -2, 0], rotation: 180, mirrored: true}",
+        );
+        // Across a line at 45 degrees, exactly, a text reading up.
+        lands(
+            "text: {contents: A, position: [0.3, 0.1, 0], height: 1}",
+            Transform::mirror([0.0, 0.0, 0.0], [0.7, 0.7, 0.0]).unwrap(),
+            "text: {contents: A, position: [0.1, 0.3, 0], height: 1, rotation: 90}",
+        );
+    }
+
+    #[test]
+    fn a_table_mirrors_upright_by_its_box_and_is_not_turned_or_scaled() {
+        let table =
+            "table: {position: [0, 10, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, d]]}";
+        let sized = Resolved {
+            lengths: Vec::new(),
+            size: Some([10.0, 5.0]),
+        };
+        assert_eq!(
+            transformed(table, mirrored(), &sized).unwrap(),
+            "table: {position: [10, 10, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, d]]}"
+        );
+        let across = Transform::mirror([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(
+            transformed(table, across, &sized).unwrap(),
+            "table: {position: [0, -5, 0], columns: [4, 6], rows: [2, 3], cells: [[a, b], [c, d]]}"
+        );
+        for (t, words) in [
+            (turn(), "no rotation of its own"),
+            (doubled(), "is not scaled"),
+            (
+                Transform::mirror([0.0; 3], [1.0, 2.0, 0.0]).unwrap(),
+                "only across a line that runs across",
+            ),
+        ] {
+            let e = transformed(table, t, &sized).unwrap_err();
+            assert_eq!(e.code, ErrorCode::BadValue);
+            assert!(e.message.contains(words), "{}", e.message);
+        }
+    }
+
+    #[test]
+    fn what_the_description_cannot_hold_is_refused() {
+        let e = transformed(
+            "mleader: {leaders: [[[1, 0, 0], [5, 5, 0]]], content: {block: B}}",
+            mirrored(),
+            &Resolved::default(),
+        )
+        .unwrap_err();
+        assert!(e.message.contains("block content"), "{}", e.message);
+        let e = transformed(
+            "viewport: {center: [5, 5, 0], width: 4, height: 3, view_center: [0, 0, 0], scale: 1}",
+            turn(),
+            &Resolved::default(),
+        )
+        .unwrap_err();
+        assert!(e.message.contains("viewport"), "{}", e.message);
+    }
+
     #[test]
     fn a_quarter_turn_and_an_upright_mirror_are_exact() {
         let quarter = Transform::rotate([1.0, 1.0, 0.0], 90.0);
@@ -956,7 +1354,9 @@ mod tests {
             assert_eq!(mirror.point(p), landed, "across the line to {b:?}");
         }
         assert_eq!(
-            Transform::mirror([2.0, 2.0, 0.0], [3.0, 3.0, 0.0]).unwrap().how(),
+            Transform::mirror([2.0, 2.0, 0.0], [3.0, 3.0, 0.0])
+                .unwrap()
+                .how(),
             How::Mirror(45.0)
         );
         assert!(Transform::mirror([2.0, 2.0, 0.0], [2.0, 2.0, 9.0]).is_none());

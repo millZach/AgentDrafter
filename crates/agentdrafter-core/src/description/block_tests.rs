@@ -368,6 +368,27 @@ fn an_inserts_values_are_checked() {
 }
 
 #[test]
+fn an_insert_may_be_mirrored() {
+    let sheet = with_library(&one_object(
+        "insert: {block: MARKER, position: [0, 0, 0], rotation: 180, mirrored: true}",
+    ));
+    let Object::Insert(insert) = &sheet.objects[0] else {
+        panic!("an insert")
+    };
+    assert!(insert.mirrored);
+    assert_eq!(insert.rotation, 180.0);
+    let sheet = with_library(&one_object("insert: {block: MARKER, position: [0, 0, 0]}"));
+    let Object::Insert(insert) = &sheet.objects[0] else {
+        panic!("an insert")
+    };
+    assert!(!insert.mirrored);
+    let e = error_with_library(&one_object(
+        "insert: {block: MARKER, position: [0, 0, 0], mirrored: yes}",
+    ));
+    assert_eq!(e.field.as_deref(), Some("objects[0].insert.mirrored"));
+}
+
+#[test]
 fn a_bare_null_leaves_a_text_field_out_and_quoted_is_the_word() {
     // Zach decided on 2026-11-11: a bare null on an optional text field
     // is the field left out, so an attribute takes its definition's

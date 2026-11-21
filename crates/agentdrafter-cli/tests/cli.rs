@@ -362,6 +362,41 @@ fn operations_are_listed_and_a_change_set_is_applied_from_a_file() {
 }
 
 /// A copy of the demo plant's drawing set in `dir`, as `demo-set`.
+#[test]
+fn rotate_scale_and_mirror_land_through_change_by_their_aliases() {
+    let dir = scratch("transform");
+    let set = copy_demo_set(&dir);
+    let (code, json) = agentdrafter(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{json}");
+    fs::write(
+        dir.join("transform.json"),
+        r#"{"operations": [
+            {"op": "MI", "target": {"id": "DEMO-001/heading"}, "first_point": [8.5, 0, 0], "second_point": [8.5, 1, 0]},
+            {"op": "RO", "target": {"id": "DEMO-001/notes"}, "base_point": [1, 1, 0], "angle": 90},
+            {"op": "SC", "target": {"id": "DEMO-001/heading"}, "base_point": [1, 10, 0], "factor": 2}
+        ]}"#,
+    )
+    .unwrap();
+    let template = fs::read(set.join("templates/ansi-b.yaml")).unwrap();
+    let (code, json) = agentdrafter(&["change", "demo-set", "transform.json", "--dry-run"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(
+        fs::read(set.join("templates/ansi-b.yaml")).unwrap(),
+        template
+    );
+    let (code, json) = agentdrafter(&["change", "demo-set", "transform.json"], &dir);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["result"]["landed"], 3);
+    let ops = &json["result"]["operations"];
+    assert_eq!(ops[0]["op"], "mirror");
+    assert_eq!(ops[0]["copies"][0]["id"], "DEMO-001/heading-1");
+    assert_eq!(ops[1]["op"], "rotate");
+    assert_eq!(ops[1]["transformed"][0], "DEMO-001/notes");
+    assert_eq!(ops[2]["op"], "scale");
+    let written = fs::read_to_string(set.join("templates/ansi-b.yaml")).unwrap();
+    assert!(written.contains("copy_of: heading"), "{written}");
+}
+
 fn copy_demo_set(dir: &Path) -> PathBuf {
     let to = dir.join("demo-set");
     demo_set::copy_demo_set(&to);

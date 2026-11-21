@@ -62,8 +62,8 @@ use crate::units::{parse_length, LengthError, Unit};
 pub use blocks::parse_block_library;
 pub(crate) use dimension::{kind_keys, DIMENSION_STYLE_KEYS};
 pub(crate) use edit::{
-    AttributeSet, Axis, FromRow, GivenValue, LeaderLineEdit, Listed, Matched, ObjectList,
-    RecordFile, TableEdit, Transform, How, Resolved,
+    AttributeSet, Axis, FromRow, GivenValue, How, LeaderLineEdit, Listed, Matched, ObjectList,
+    RecordFile, Resolved, TableEdit, Transform,
 };
 pub(crate) use emit::number_text;
 pub(crate) use ids::{COPY_OF_KEY, ID_SEPARATOR, LONGEST_ID};

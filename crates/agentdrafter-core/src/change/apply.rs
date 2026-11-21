@@ -42,8 +42,9 @@ use crate::description::SheetRecord;
 use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_rows_files_in, read_set_settings,
     rows_of, shown_mtext, template_at, template_in, template_path, AttributeSet, Disk, FromRow,
-    GivenValue, LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile,
-    How, Resolved, Row, RowsFile, TableEdit, Transform, COPY_OF_KEY, ID_SEPARATOR, LONGEST_ID,
+    GivenValue, How, LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles,
+    RecordFile, Resolved, Row, RowsFile, TableEdit, Transform, COPY_OF_KEY, ID_SEPARATOR,
+    LONGEST_ID,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -3787,17 +3788,19 @@ fn resolved_for(
     let mut sheet: Option<SheetRecord> = None;
     for (i, (f, _)) in found.iter().enumerate() {
         if sheet.is_none() {
-            sheet = Some(sheet_record(at, &rows, k, &mut Vec::new()).map_err(|e| Error {
-                message: format!(
-                    "operation {} (`{}`): sheet `{}` cannot be read to work out what its \
+            sheet = Some(
+                sheet_record(at, &rows, k, &mut Vec::new()).map_err(|e| Error {
+                    message: format!(
+                        "operation {} (`{}`): sheet `{}` cannot be read to work out what its \
                      objects draw with: {}",
-                    op.index,
-                    op.spec.name,
-                    at.files.name(k),
-                    e.message
-                ),
-                ..e
-            })?);
+                        op.index,
+                        op.spec.name,
+                        at.files.name(k),
+                        e.message
+                    ),
+                    ..e
+                })?,
+            );
         }
         let record = sheet.as_ref().expect("read above");
         let Some(place) = model_index(record, f) else {

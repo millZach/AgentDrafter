@@ -3922,7 +3922,10 @@ fn read_targets(map: &Map<String, Value>) -> Result<Vec<(Target, String)>, KeyEr
 /// The objects an operation sent as `map` does `verb` to, such as `copy`:
 /// `target`, one, or `targets`, several, each with its key in the
 /// operation.
-fn read_targets_to(map: &Map<String, Value>, verb: &str) -> Result<Vec<(Target, String)>, KeyError> {
+fn read_targets_to(
+    map: &Map<String, Value>,
+    verb: &str,
+) -> Result<Vec<(Target, String)>, KeyError> {
     match (map.get("target"), map.get("targets")) {
         (Some(_), Some(_)) => Err((
             ErrorCode::Usage,
