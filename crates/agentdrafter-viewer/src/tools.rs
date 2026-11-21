@@ -1,7 +1,8 @@
 //! The drafter's drawing tools: Line, Circle, Rectangle, Text, Move, Copy
 //! and Erase, as AutoCAD's LINE, CIRCLE, RECTANG, TEXT, MOVE, COPY and ERASE
-//! run them, cut down for beginners (#152, Copy #66). Plain computation, tested natively; `web`
-//! feeds it the drafter's clicks, taps and typing and draws what it says.
+//! run them, cut down for beginners (#152, Copy #66). Plain computation,
+//! tested natively; `web` feeds it the drafter's clicks, taps and typing and
+//! draws what it says.
 //!
 //! A tool takes points, a snapped one where the cursor caught a snap, picks
 //! objects and reads what is typed in the command bar: an alias (`L`, `C`,
