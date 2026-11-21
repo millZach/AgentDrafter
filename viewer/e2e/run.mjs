@@ -2490,6 +2490,23 @@ const checks = {
       await page.waitForSelector(`[data-entry="${n}"] .je-t`, { timeout: 15000 });
       return page.textContent(`[data-entry="${n}"] .je-t`);
     };
+    // How many pixels in the drawing-unit box `[left, bottom, right, top]`
+    // are the proposal's purple, as the renderer draws the copies placed,
+    // the tags over them hidden: a copy placed is drawn, not only tagged.
+    const purpleIn = async (page, [l, b, r, t]) => {
+      const [x0, y0] = await onPage(page, [l, t]);
+      const [x1, y1] = await onPage(page, [r, b]);
+      await page.evaluate(() => (document.querySelector('[data-copytags]').style.visibility = 'hidden'));
+      await frames(page);
+      const png = decodePng(await page.screenshot({ clip: { x: Math.floor(x0) - 2, y: Math.floor(y0) - 2, width: Math.ceil(x1 - x0) + 4, height: Math.ceil(y1 - y0) + 4 } }));
+      await page.evaluate(() => (document.querySelector('[data-copytags]').style.visibility = ''));
+      let n = 0;
+      for (let i = 0; i < png.rgba.length; i += 4) {
+        const [red, green, blue] = [png.rgba[i], png.rgba[i + 1], png.rgba[i + 2]];
+        if (Math.abs(red - 0xc9) + Math.abs(green - 0xa8) + Math.abs(blue - 0xff) < 60) n += 1;
+      }
+      return n;
+    };
     const copyOp = (entry) => {
       const ops = entry.change_set.operations;
       assert(ops.length === 1 && ops[0].op === 'copy', `one copy operation: ${JSON.stringify(ops)}`);
@@ -2520,7 +2537,12 @@ const checks = {
         let before = journal().length;
         // The base point typed; a displacement typed; a length towards the
         // cursor, below the base; a click; then Ctrl+Z takes it back.
-        await typeIn(page, '2,6.5', '@0,1.2');
+        const above = [device.bounds[0], device.bounds[1] + 1.2, device.bounds[2], device.bounds[3] + 1.2];
+        const below = [device.bounds[0], device.bounds[1] - 1.2, device.bounds[2], device.bounds[3] - 1.2];
+        await typeIn(page, '2,6.5');
+        const bare = [await purpleIn(page, above), await purpleIn(page, below)];
+        assert(bare[0] < 5 && bare[1] < 5, `nothing purple where the copies will go: ${bare}`);
+        await typeIn(page, '@0,1.2');
         assert((await bar(page)).includes('1 copy placed'), `a copy is placed: ${await bar(page)}`);
         // Held upright by Ortho (F8), as the cursor is only nearly below.
         await page.keyboard.press('F8');
@@ -2538,7 +2560,11 @@ const checks = {
         await typeIn(page, '@3,0', 'U');
         assert((await bar(page)).includes('2 copies placed'), `U takes the last back: ${await bar(page)}`);
         await typeIn(page, '@3,0');
+        // Undo reached by Tab, then clicked: it gives the focus up, so the
+        // Enter below lands the copies rather than pressing Undo again.
+        await page.focus('.opt[data-opt="tool:undo"]');
         await page.click('.opt[data-opt="tool:undo"]');
+        assert(!(await page.evaluate(() => document.activeElement?.closest?.('.opt'))), 'Undo clicked keeps no focus');
         assert((await bar(page)).includes('2 copies placed'), `Undo takes the last back: ${await bar(page)}`);
         assert(journal().length === before, 'nothing lands while the copies are placed');
         // The copy that follows the cursor, and the two placed, tagged.
@@ -2547,6 +2573,9 @@ const checks = {
         assert(JSON.stringify(await tags(page)) === JSON.stringify(['copy 1 · waits for Enter', 'copy 2 · waits for Enter']), `the copies placed are tagged: ${await tags(page)}`);
         const note = await page.textContent('.cmdnote');
         assert(note.includes('Enter or Esc: the copies land') && note.includes('Ctrl+Z'), `the note: ${note}`);
+        // Each copy placed is drawn, dashed in the proposal's purple, where it goes.
+        const drawn = [await purpleIn(page, above), await purpleIn(page, below)];
+        assert(drawn[0] > 40 && drawn[1] > 40, `the copies placed are drawn in purple: ${drawn}`);
         await shot(page, 'copy-laptop-1-mid-copy.png');
         // Enter lands them all: one change set, one copy with offsets.
         await page.keyboard.press('Enter');
@@ -2584,10 +2613,69 @@ const checks = {
         await sleep(1000);
         assert(journal().length === before, 'Esc with no copy placed lands nothing');
         assert(!(await bar(page)).includes('COPY'), `Esc ends the tool: ${await bar(page)}`);
-        // AR is no tool here: it goes to the assistant, as any other word.
+        const history = () => page.evaluate(() => document.querySelector('.cmd .hist')?.textContent ?? '');
+        // A copy placed, then a journal entry opened: the copy is dropped, nothing sent.
+        before = journal().length;
+        await typeIn(page, 'CO');
+        await page.mouse.click(...(await onPage(page, [(device.bounds[0] + device.bounds[2]) / 2, device.bounds[3] - 0.02])));
+        await typeIn(page, '', '2,6.5', '@0,-3');
+        assert((await bar(page)).includes('1 copy placed'), `a copy is placed: ${await bar(page)}`);
+        await sideTab(page, 'journal');
+        await page.click(`[data-entry="${seen.laptop.enter}"] .je-head`);
+        await page.waitForFunction(() => document.querySelector('.cmd')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
+        await sleep(1500);
+        assert(journal().length === before, `a journal entry opened sends no copy: ${JSON.stringify(journal().at(-1))}`);
+        assert(!(await bar(page)).includes('COPY'), `the copy is dropped, the tool ended: ${await bar(page)}`);
+        await page.click('.opt[data-opt="live"]');
+        await page.waitForFunction(() => !document.querySelector('.cmd')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
+        await sideTab(page, 'chat');
+        // A proposal waiting, then a template's copy placed and the proposal
+        // opened: the copy is dropped, not asked about, and the proposal shows.
+        const proposalFile = join(folder, 'proposal.json');
+        writeFileSync(proposalFile, JSON.stringify(move('DP-LD-101/device', 0.1)));
+        const proposed = agentIn(folder, 'propose', 'demo-plant', proposalFile);
+        assert(proposed.ok, `a proposal waits: ${JSON.stringify(proposed)}`);
+        const number = proposed.result.proposal;
+        await page.waitForSelector(`[data-pcard="${number}"]`, { timeout: 30000 });
+        before = journal().length;
+        await typeIn(page, 'CO');
+        await page.mouse.click(...(await onPage(page, [6.38, 6.5])));
+        await typeIn(page, '', '6.38,6.5', '@0,-2.2');
+        assert((await bar(page)).includes('1 copy placed'), `a template's copy is placed: ${await bar(page)}`);
+        await page.click(`[data-pcard="${number}"] [data-pc="show"]`);
+        await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
+        const opened = await page.textContent('[data-preview]');
+        assert(!opened.includes('Copy') && /Discard/.test(opened), `the proposal is shown, not the copy: ${opened}`);
+        assert(!(await bar(page)).includes('COPY'), `the copy is dropped, the tool ended: ${await bar(page)}`);
+        await page.click('[data-pv="discard"]');
+        await page.waitForFunction(() => !document.querySelector('[data-preview]'), null, { timeout: 30000 });
+        assert(journal().slice(before).every((e) => e.kind === 'discard'), `only the discard is written: ${JSON.stringify(journal().slice(before))}`);
+        // A quick properties field edited, then Clear: the edit lands, as leaving the field lands it.
+        before = journal().length;
+        await page.mouse.click(...(await onPage(page, [(device.bounds[0] + device.bounds[2]) / 2, device.bounds[3] - 0.02])));
+        await page.waitForSelector('.qp');
+        const funcKey = await page.evaluate(() => {
+          const p = window.agentdrafterViewer;
+          const place = p.summary.objects.findIndex((o) => o.id === 'DP-LD-101/device');
+          return `attribute:${p.summary.objects[place].values.attributes.findIndex((a) => a.tag === 'FUNC')}`;
+        });
+        await page.click(`.qp [data-prop="${funcKey}"]`);
+        await page.fill(`.qp [data-prop="${funcKey}"]`, 'FQ');
+        await page.click('.opt[data-opt="clear"]');
+        entry = await landed(page, before, 'A field edited, then Clear');
+        assert(entry.change_set.operations[0].op === 'set_attribute' && entry.change_set.operations[0].value === 'FQ', `the edit lands: ${JSON.stringify(entry.change_set.operations)}`);
+        assert(!(await page.isVisible('.qp')), 'Clear clears the selection');
+        // AR is no tool here: Enter sends it to the assistant, as any other word.
         await page.keyboard.type('AR');
         const hint = await page.textContent('.cmdbar');
-        assert(hint.includes('ask the assistant'), `AR goes to the assistant: ${hint}`);
+        assert(hint.includes('ask the assistant'), `AR is for the assistant: ${hint}`);
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(() => document.querySelector('.cmd .hist')?.textContent.includes('To the assistant: “AR”'), null, { timeout: 15000 });
+        assert(await page.isVisible('.stab[data-side="chat"].on'), 'the chat is shown');
+        assert(!(await bar(page)).includes('ARRAY'), `no tool starts: ${await bar(page)}`);
+        // Not sent, with no agent here, the words go back in the bar: cleared.
+        await sleep(1000);
+        await page.fill('.cmdin', '');
         await page.keyboard.press('Escape');
         // The junction box, a template's object: warned while Copy runs,
         // asked about once, when the copies land.
@@ -2608,6 +2696,26 @@ const checks = {
         await page.mouse.move(...(await onPage(page, [9.5, 4.0])));
         await shot(page, 'copy-laptop-4-template-warning.png');
         assert(journal().length === before, 'nothing lands, nor is asked, while copies are placed');
+        // Circle picked now: the copies are asked about and Circle does not
+        // start, so two clicks on the drawing draw nothing before the answer.
+        await page.click('.rb[data-tool="circle"]');
+        await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
+        assert(!(await bar(page)).includes('CIRCLE'), `Circle does not start: ${await bar(page)}`);
+        assert((await history()).includes('CIRCLE not started'), `it says so: ${await history()}`);
+        await page.mouse.click(...(await onPage(page, [13, 3.6])));
+        await page.mouse.click(...(await onPage(page, [13.3, 3.6])));
+        await sleep(1500);
+        assert(journal().length === before, `nothing lands before Change all or Cancel: ${JSON.stringify(journal().at(-1))}`);
+        await page.click('[data-pv="cancel"]');
+        await sleep(1000);
+        assert(journal().length === before && template() === templateBefore, 'Cancel lands nothing');
+        // Placed again, and Enter.
+        await page.keyboard.press('F3');
+        await fitAll(page);
+        await page.keyboard.press('F3');
+        await typeIn(page, 'CO');
+        await page.mouse.click(...(await onPage(page, [6.38, 6.5])));
+        await typeIn(page, '', '6.38,6.5', '@0,-2.2', '@0,1.9');
         await page.keyboard.press('Enter');
         await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
         const asked = await page.textContent('[data-preview]');
