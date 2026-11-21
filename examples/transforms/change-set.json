@@ -1,0 +1,11 @@
+{
+  "operations": [
+    {"op": "copy", "targets": [{"id": "TRN-001/strip-a"}, {"id": "TRN-001/strip-b"}, {"id": "TRN-001/tb-label"}, {"id": "TRN-001/wire-bend"}, {"id": "TRN-001/arc-a"}, {"id": "TRN-001/lens"}, {"id": "TRN-001/patch"}], "by": [150, 0, 0]},
+    {"op": "ROTATE", "targets": [{"id": "TRN-001/strip-a-1"}, {"id": "TRN-001/strip-b-1"}, {"id": "TRN-001/tb-label-1"}, {"id": "TRN-001/wire-bend-1"}, {"id": "TRN-001/arc-a-1"}, {"id": "TRN-001/lens-1"}, {"id": "TRN-001/patch-1"}], "base_point": [215, 212, 0], "angle": 90},
+    {"op": "copy", "targets": [{"id": "TRN-001/ring"}, {"id": "TRN-001/dot"}, {"id": "TRN-001/memo"}, {"id": "TRN-001/note-leader"}, {"id": "TRN-001/ring-width"}], "by": [100, 0, 0]},
+    {"op": "SC", "targets": [{"id": "TRN-001/ring-1"}, {"id": "TRN-001/dot-1"}, {"id": "TRN-001/memo-1"}, {"id": "TRN-001/note-leader-1"}, {"id": "TRN-001/ring-width-1"}], "base_point": [125, 50, 0], "factor": 2},
+    {"op": "MIRROR", "targets": [{"id": "TRN-001/ft-101"}, {"id": "TRN-001/ft-note"}, {"id": "TRN-001/cable"}, {"id": "TRN-001/loop"}, {"id": "TRN-001/pad"}, {"id": "TRN-001/callout"}, {"id": "TRN-001/hook"}], "first_point": [355, 0, 0], "second_point": [355, 10, 0]},
+    {"op": "mirror", "target": {"id": "TRN-001/strip-c"}, "first_point": [0, 50, 0], "second_point": [10, 50, 0], "erase_source": true},
+    {"op": "MI", "target": {"id": "TRN-001/diag"}, "first_point": [300, 20, 0], "second_point": [310, 30, 0]}
+  ]
+}
