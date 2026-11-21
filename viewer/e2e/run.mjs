@@ -4325,6 +4325,19 @@ const checks = {
         said = await page.textContent('[data-pcc="1"]');
         assert(said.includes(`Kept by you: change set ${kept.entry}, in the journal.`), `the card once kept: ${said}`);
         await shot(page, 'assistant-phone-kept.png');
+        // Words from the command bar, by ⌨ Type: once the server takes
+        // them, the bar's field lets go, so the keyboard goes down.
+        if (await page.isVisible('.qp')) await page.tap('.qp [data-close]');
+        await page.tap('.va-grab');
+        await page.waitForSelector('.va-sheet[data-snap="peek"]', { timeout: 15000 });
+        await page.tap('[data-type]');
+        await page.waitForFunction(() => document.activeElement?.matches?.('.cmdin'), null, { timeout: 15000 });
+        await page.keyboard.type('hello there');
+        await page.keyboard.press('Enter');
+        await replied(page, 2);
+        assert(await page.evaluate(() => !document.activeElement?.matches?.('.cmdin')), 'the bar’s field lets go once its words are sent');
+        assert((await newest(page, 'drafter')).includes('from the command bar'), 'sent from the command bar');
+        await shot(page, 'assistant-phone-command-bar-sent.png');
         assert(problems.length === 0, problems.join('; '));
         await context.close();
         await server.stop();

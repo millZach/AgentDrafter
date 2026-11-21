@@ -23,7 +23,9 @@ It knows a few things the drafter may say:
 FAKE_AGENT_DELAY, in seconds, waits before each step. FAKE_AGENT_LOG names a
 file each run appends its arguments and prompt to, as one JSON line.
 FAKE_AGENT_HANG=1 makes it start a process of its own that holds its output
-open and then never end, as a hung agent would.
+open and then never end, as a hung agent would. FAKE_AGENT_STRAY=1 makes it
+answer and end, leaving a process of its own running that holds its output
+and its standard error open.
 """
 
 import json
@@ -44,6 +46,14 @@ def main():
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps({"agent": kind, "args": args, "prompt": prompt}) + "\n")
     delay = float(os.environ.get("FAKE_AGENT_DELAY", "0"))
+    if os.environ.get("FAKE_AGENT_STRAY") == "1":
+        out = Claude(args) if kind == "claude" else Codex(args)
+        out.begin()
+        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                         stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr)
+        out.words("(fake agent) I left a helper running.")
+        out.end()
+        return
     if os.environ.get("FAKE_AGENT_HANG") == "1":
         print(json.dumps({"type": "system", "subtype": "init", "session_id": "hung"}), flush=True)
         subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])

@@ -31,7 +31,6 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -47,6 +46,10 @@ pub(crate) const SERVER: &str = "agentdrafter";
 
 /// How long one message may run before its agent is stopped.
 const LONGEST_TURN: Duration = Duration::from_secs(20 * 60);
+
+/// How long an agent that has ended is given for what it printed last to
+/// arrive, before whatever it left running is stopped.
+const AFTER_EXIT: Duration = Duration::from_secs(2);
 
 /// The longest message the drafter may send, in characters.
 const LONGEST_MESSAGE: usize = 20_000;
@@ -764,25 +767,12 @@ impl Assistant {
         // reads its prompt, never prints, or never ends is stopped, with
         // everything it started, at the deadline.
         let pid = child.id();
-        let done = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::new(AtomicBool::new(false));
-        let watchdog = {
-            let (done, stopped, limit) = (Arc::clone(&done), Arc::clone(&stopped), turn.limit);
-            std::thread::spawn(move || {
-                let started = Instant::now();
-                while !done.load(Ordering::SeqCst) {
-                    if started.elapsed() >= limit {
-                        stopped.store(true, Ordering::SeqCst);
-                        kill_tree(pid);
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            })
-        };
         let stdin = child.stdin.take();
         let prompt = turn.prompt.clone();
-        let fed = std::thread::spawn(move || {
+        // Each pipe is fed and read on a thread of its own, and none is
+        // waited for without a bound: a process the agent started may hold
+        // one open after the agent has gone.
+        std::thread::spawn(move || {
             // An agent that stops before reading its prompt says why on its
             // standard error.
             if let Some(mut stdin) = stdin {
@@ -791,37 +781,92 @@ impl Assistant {
         });
         let stdout = child.stdout.take().expect("standard output is piped");
         let stderr = child.stderr.take().expect("standard error is piped");
-        let said = std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = BufReader::new(stderr)
-                .take(1 << 20)
-                .read_to_string(&mut text);
-            text
+        let said = Arc::new(Mutex::new(String::new()));
+        {
+            let said = Arc::clone(&said);
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 4096];
+                let mut stderr = stderr;
+                while let Ok(n) = stderr.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    let mut text = said.lock().unwrap_or_else(|e| e.into_inner());
+                    if text.len() < 1 << 20 {
+                        text.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    }
+                }
+            });
+        }
+        let (lines, heard) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if lines.send(line).is_err() {
+                    break;
+                }
+            }
         });
+        // The run is watched from the moment it starts: an agent that never
+        // reads its prompt, never prints, or never ends is stopped, with
+        // everything it started, at the deadline. One that ends is given a
+        // moment for what is still on its way, then whatever it left
+        // running is stopped too.
+        let started = Instant::now();
         let mut parts: HashMap<String, usize> = HashMap::new();
         let mut failed: Option<String> = None;
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            let events = match turn.agent {
-                Agent::Claude => claude::read(&line),
-                Agent::Codex => codex::read(&line),
-            };
-            for event in events {
-                if let AgentEvent::Failed(why) = &event {
-                    failed = Some(why.clone());
+        let mut stopped = false;
+        let mut status: Option<std::io::Result<std::process::ExitStatus>> = None;
+        let mut ended: Option<Instant> = None;
+        let mut closed = false;
+        loop {
+            if status.is_none() {
+                match child.try_wait() {
+                    Ok(Some(exit)) => {
+                        status = Some(Ok(exit));
+                        ended = Some(Instant::now());
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        status = Some(Err(e));
+                        ended = Some(Instant::now());
+                    }
                 }
-                self.apply(turn, &mut parts, event);
+            }
+            if closed && status.is_some() {
+                break;
+            }
+            if ended.is_some_and(|at| at.elapsed() >= AFTER_EXIT) {
+                break;
+            }
+            if status.is_none() && started.elapsed() >= turn.limit {
+                stopped = true;
+                kill_tree(pid);
+                status = Some(child.wait());
+                break;
+            }
+            if closed {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            match heard.recv_timeout(Duration::from_millis(100)) {
+                Ok(line) => self.read_line(turn, &line, &mut parts, &mut failed),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => closed = true,
             }
         }
-        // Its output has ended: the agent is waited for, the watchdog still
-        // watching, which needs nothing the wait holds.
-        let status = child.wait();
-        done.store(true, Ordering::SeqCst);
-        let _ = watchdog.join();
-        let _ = fed.join();
-        let said = said.join().unwrap_or_default();
+        // Whatever the agent left running, holding its pipes, goes with it;
+        // what it printed before is still read.
+        if !stopped {
+            kill_tree(pid);
+        }
+        while let Ok(line) = heard.try_recv() {
+            self.read_line(turn, &line, &mut parts, &mut failed);
+        }
+        let status = status.unwrap_or_else(|| child.wait());
+        let said = said.lock().unwrap_or_else(|e| e.into_inner()).clone();
         drop(files);
-        if stopped.load(Ordering::SeqCst) {
+        if stopped {
             return Err(format!("{name} was stopped after {}", minutes(turn.limit)));
         }
         if let Some(why) = failed {
@@ -843,6 +888,27 @@ impl Assistant {
                 })
             }
             Err(e) => Err(format!("{name} could not be waited for: {e}")),
+        }
+    }
+
+    /// Reads one line of the agent's output into the conversation, noting a
+    /// failure it reports.
+    fn read_line(
+        &self,
+        turn: &Turn,
+        line: &str,
+        parts: &mut HashMap<String, usize>,
+        failed: &mut Option<String>,
+    ) {
+        let events = match turn.agent {
+            Agent::Claude => claude::read(line),
+            Agent::Codex => codex::read(line),
+        };
+        for event in events {
+            if let AgentEvent::Failed(why) = &event {
+                *failed = Some(why.clone());
+            }
+            self.apply(turn, parts, event);
         }
     }
 
@@ -1154,6 +1220,110 @@ mod tests {
                 ok: true
             }
         );
+    }
+
+    /// A shim in a folder of its own that runs the fake agent as Claude
+    /// Code, with `setting` in its environment, such as `FAKE_AGENT_HANG=1`.
+    fn fake_claude(name: &str, setting: &str) -> (PathBuf, PathBuf) {
+        let folder =
+            std::env::temp_dir().join(format!("agentdrafter-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fake-agent")
+            .join("fake_agent.py");
+        let (key, value) = setting.split_once('=').unwrap();
+        let shim = if cfg!(windows) {
+            let shim = folder.join("claude.cmd");
+            std::fs::write(
+                &shim,
+                format!(
+                    "@set {key}={value}
+@python \"{}\" claude %*
+",
+                    script.display()
+                ),
+            )
+            .unwrap();
+            shim
+        } else {
+            let shim = folder.join("claude");
+            std::fs::write(
+                &shim,
+                format!(
+                    "#!/bin/sh
+{key}={value} exec python3 \"{}\" claude \"$@\"
+",
+                    script.display()
+                ),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            shim
+        };
+        (folder, shim)
+    }
+
+    /// Runs one message on `shim` within `limit`, in a conversation of its
+    /// own, and gives the conversation's answer, whether it is still busy,
+    /// and how long the run took.
+    fn run_on(folder: &Path, shim: PathBuf, limit: Duration) -> (Value, bool, Duration) {
+        let set = folder.join("set");
+        let assistant = assistant();
+        assistant.lock().insert(
+            set.clone(),
+            Talk {
+                named: set.clone(),
+                agent: Some(Agent::Claude),
+                session: None,
+                busy: true,
+                items: vec![
+                    json!({"kind": "drafter", "text": "hello"}),
+                    json!({"kind": "assistant", "parts": [], "done": false, "error": null}),
+                ],
+                version: 0,
+            },
+        );
+        let began = Instant::now();
+        assistant.run(Turn {
+            set: set.clone(),
+            agent: Agent::Claude,
+            program: shim,
+            session: None,
+            prompt: "hello
+"
+            .into(),
+            looking_at: json!({"ok": true}),
+            item: 1,
+            limit,
+        });
+        let took = began.elapsed();
+        let talks = assistant.lock();
+        let talk = &talks[&set];
+        (talk.items[1].clone(), talk.busy, took)
+    }
+
+    #[test]
+    fn an_agent_that_ends_leaving_a_process_holding_its_pipes_ends_its_turn() {
+        let (folder, shim) = fake_claude("stray", "FAKE_AGENT_STRAY=1");
+        let (answer, busy, took) = run_on(&folder, shim, Duration::from_secs(120));
+        assert!(
+            took < Duration::from_secs(30),
+            "the turn ends at once: {took:?}"
+        );
+        assert!(!busy, "the chat leaves busy");
+        assert_eq!(answer["done"], true);
+        assert_eq!(answer["error"], Value::Null, "{answer}");
+        assert_eq!(
+            answer["parts"][0]["text"],
+            "(fake agent) I left a helper running."
+        );
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

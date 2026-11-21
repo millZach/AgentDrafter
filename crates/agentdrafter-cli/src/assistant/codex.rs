@@ -1,15 +1,19 @@
 //! The adapter for Codex's command line, `codex`.
 //!
 //! Each message is one run of `codex exec`, its prompt on standard input
-//! (`-`), printing its work as JSON lines (`--json`). Its shell is held to
-//! reading (`--sandbox read-only`), it asks no one (`approval_policy`
-//! `never`), and it gets the assistant's MCP server by configuration
+//! (`-`), printing its work as JSON lines (`--json`). It has no shell
+//! (`shell_tool` and `unified_exec` off), so no command rule the drafter
+//! saved (`.rules`, which load even without their configuration) can let a
+//! command run; what else could write, such as `apply_patch`, is held by the
+//! read-only sandbox (`--sandbox read-only`), it asks no one
+//! (`approval_policy` `never`), and it gets the assistant's MCP server by configuration
 //! (`-c mcp_servers.agentdrafter...`), whose tools it calls without asking
 //! (`default_tools_approval_mode`): they only read, or propose. The
 //! drafter's own configuration, `config.toml`, with the MCP servers it
 //! names, is not loaded (`--ignore-user-config`), so the assistant's server
 //! is the only one; the drafter's sign-in still is. Its apps, browser,
-//! computer use and hooks are off (`--disable`). The next message resumes
+//! computer use, hooks, image viewing and image making are off too
+//! (`--disable`), so it has no tool that reads a file beyond the set. The next message resumes
 //! the thread the first one's lines named (`exec resume <thread>`).
 
 use std::path::Path;
@@ -19,14 +23,18 @@ use serde_json::{json, Value};
 
 use super::{AgentEvent, McpServer, SERVER};
 
-/// The features of Codex the assistant runs without: those that reach
-/// beyond its MCP server and its read-only shell.
-const DISABLED: [&str; 5] = [
+/// The features of Codex the assistant runs without: its shell, and those
+/// that reach beyond its MCP server. Codex 0.171's names.
+const DISABLED: [&str; 9] = [
+    "shell_tool",
+    "unified_exec",
     "apps",
     "browser_use",
     "computer_use",
     "in_app_browser",
     "hooks",
+    "view_image",
+    "image_generation",
 ];
 
 /// The command that runs one message: `program` is where `codex` was found,

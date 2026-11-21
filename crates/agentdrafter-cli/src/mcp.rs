@@ -409,7 +409,9 @@ impl Server {
     }
 
     /// Refuses a call of the assistant's server bound to a set that names
-    /// another set, or a file outside it, under `set`, `source` or `output`.
+    /// another set under `set`, the bound one alone, however it is spelled;
+    /// or a file outside it under `source` or `output`, which may name the
+    /// set or a file in it.
     fn within_set(&self, arguments: &Value) -> Result<(), Failure> {
         let Some(bound) = &self.set else {
             return Ok(());
@@ -418,7 +420,13 @@ impl Server {
             let Some(named) = arguments.get(key).and_then(Value::as_str) else {
                 continue;
             };
-            let inside = std::fs::canonicalize(named).is_ok_and(|path| path.starts_with(bound));
+            let inside = std::fs::canonicalize(named).is_ok_and(|path| {
+                if key == "set" {
+                    path == *bound
+                } else {
+                    path.starts_with(bound)
+                }
+            });
             if !inside {
                 return Err((
                     -32602,
@@ -500,6 +508,8 @@ fn unsupported(id: Value, requested: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn ask(server: &mut Server, message: Value) -> Option<Value> {
@@ -526,6 +536,52 @@ mod tests {
     }
 
     const PING: &str = r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#;
+
+    #[test]
+    fn the_assistants_server_takes_its_own_set_alone_not_one_nested_in_it() {
+        let folder =
+            std::env::temp_dir().join(format!("agentdrafter-bound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        let nested = folder.join("set").join("nested-copy");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            folder.join("set").join("set.yaml"),
+            "units: in
+",
+        )
+        .unwrap();
+        std::fs::write(
+            nested.join("set.yaml"),
+            "units: in
+",
+        )
+        .unwrap();
+        std::fs::write(folder.join("set").join("rows.yaml"), "").unwrap();
+        let bound = std::fs::canonicalize(folder.join("set")).unwrap();
+        let server = Server {
+            assistant: true,
+            set: Some(bound),
+            ..Server::default()
+        };
+        let set = folder.join("set");
+        let named = |key: &str, path: &Path| json!({ key: path.to_string_lossy() });
+        // The set itself, however it is spelled.
+        assert!(server.within_set(&named("set", &set)).is_ok());
+        assert!(server.within_set(&named("set", &set.join("."))).is_ok());
+        // A copy of a set nested inside it is another set.
+        let refused = server.within_set(&named("set", &nested)).unwrap_err();
+        assert_eq!(refused.0, -32602);
+        assert!(refused.1.contains("alone"), "{}", refused.1);
+        // A file inside the set may be a source or an output; one outside
+        // may not.
+        assert!(server
+            .within_set(&named("source", &set.join("rows.yaml")))
+            .is_ok());
+        assert!(server.within_set(&named("source", &nested)).is_ok());
+        assert!(server.within_set(&named("source", &folder)).is_err());
+        assert!(server.within_set(&named("set", &folder)).is_err());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 
     #[test]
     fn the_assistants_server_lists_and_runs_only_what_reads_and_proposes() {

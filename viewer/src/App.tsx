@@ -1957,6 +1957,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
         f.value = text;
         setTyped(text);
       }
+      // Taken: on a phone the bar's field lets go, as the chat's input
+      // does, so the keyboard goes down and the reply shows.
+      if (sent && !wide) {
+        f?.blur();
+        setFieldShown(false);
+      }
     });
   }
   const pickAgent = (agent: string) => {
