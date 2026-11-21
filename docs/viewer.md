@@ -154,7 +154,7 @@ New objects go on the [current layer](#the-current-layer), in the sheet's row, a
 
 **When it lands.** The page asks for the sheets the change set landed on as soon as `change` replies, without waiting for the journal; the journal's event then names it in a toast and marks its objects, as for any change set, and the sheet is not asked for twice. A change set that does not land, or lands on some sheets only, says why in a toast. After a Move, the moved object's snaps come from the core's next display list.
 
-**On a phone** the options are buttons, without the brackets between them, and **⌨ Type** opens the field and the keyboard, for an alias, a point or a length; it is not offered beside a selected object's Move, Copy, Erase and Clear, so that the bar stays one line there, nor while the Text tool's box is open.
+**On a phone** the options are buttons, without the brackets between them, and **⌨ Type** opens the field and the keyboard, for an alias, a point or a length; it is not offered beside a selected object's Move, Copy, Erase and Clear, which a phone gives after the object's name alone, without `selected`, so that the bar stays one line there, nor while the Text tool's box is open.
 
 **While a change set is on its way**, Undo last and Accept wait, since the change set they would take may be about to land, until every change set the page sent has replied; the page sends them one after another, in the order the tools gave them, as when Erase on an object selected first ends a Text tool that kept its words. Once `change` replies, Undo last names the change set, before the journal's event does. The sheets a change set landed on are asked for once, by `change`'s reply or by the journal's event, whichever comes first.
 

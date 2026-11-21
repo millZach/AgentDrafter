@@ -292,6 +292,9 @@ test('the command bar prompts for a command or a selection, and offers Move, Cop
     selected.parts.filter((p) => 'act' in p).map((p) => ('act' in p ? p.act : '')),
     ['move', 'copy-objects', 'erase', 'clear'],
   );
+  // A phone gives the name alone, so the four options stay on one line.
+  const tapped = promptFor({ ...none, touch: true, selected: { id: 'DP-LD-101/device', name: 'FT-101', type: 'insert', block: 'TRANSMITTER' } });
+  assert.equal(words(tapped.parts), 'FT-101 [ <Move> <Copy> <Erase> <Clear> ]');
 });
 
 test('a running tool prompts in the renderer’s words, on its layer, with its options to click and what went wrong', () => {

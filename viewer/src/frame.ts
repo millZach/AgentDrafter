@@ -278,10 +278,12 @@ export function promptFor(s: PromptState): Prompt {
     return { command: null, parts: [{ snap: s.taken.label }, { text: `${s.taken.rest} ` }, ...options(...acts)] };
   }
   if (s.selected) {
-    // Move, Copy and Erase take what is selected, as AutoCAD's do.
+    // Move, Copy and Erase take what is selected, as AutoCAD's do. A phone
+    // gives the name alone, so its four buttons stay on one line: the halo
+    // and the card say it is selected.
     return {
       command: null,
-      parts: [{ text: `${nameOf(s.selected)} selected ` }, ...options(['Move', 'move'], ['Copy', 'copy-objects'], ['Erase', 'erase'], ['Clear', 'clear'])],
+      parts: [{ text: s.touch ? `${nameOf(s.selected)} ` : `${nameOf(s.selected)} selected ` }, ...options(['Move', 'move'], ['Copy', 'copy-objects'], ['Erase', 'erase'], ['Clear', 'clear'])],
     };
   }
   return {
