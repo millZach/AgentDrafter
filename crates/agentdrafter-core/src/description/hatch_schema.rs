@@ -160,6 +160,15 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                      given with `{SOLID}`."
                 ),
             },
+            "origin": {
+                "$ref": "#/$defs/point",
+                "description": format!(
+                    "The point the pattern is laid from, AutoCAD's hatch origin: each line of \
+                     the pattern runs through it, moved by the line's own origin turned and \
+                     enlarged with the hatch. Its z is not used. Without it, [0, 0, 0]. Not \
+                     given with `{SOLID}`. Moving or turning the hatch moves or turns it too."
+                ),
+            },
             "boundary": {
                 "description": "The closed loops that bound the area, at least one. Every point \
                                 of every loop has the same z.",
@@ -171,8 +180,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
     );
     hatch["if"] =
         json!({ "required": ["pattern"], "properties": { "pattern": { "const": SOLID } } });
-    hatch["then"] =
-        json!({ "not": { "anyOf": [{ "required": ["scale"] }, { "required": ["angle"] }] } });
+    hatch["then"] = json!({ "not": { "anyOf": [{ "required": ["scale"] }, { "required": ["angle"] }, { "required": ["origin"] }] } });
     defs.insert("hatch".into(), hatch);
 
     let [points_key] = BOUNDARY_POLYLINE_KEYS;

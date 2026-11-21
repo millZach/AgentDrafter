@@ -35,9 +35,15 @@ pub(crate) const ID_KEY: &str = "id";
 /// The key of an object's name.
 pub(crate) const NAME_KEY: &str = "name";
 
+/// The key a copy names the object it was copied from by: the ID in its
+/// file of the first object of the copies, its source or its source's own.
+pub(crate) const COPY_OF_KEY: &str = "copy_of";
+
 /// The keys every object on a sheet takes besides its own: its ID, its
-/// name and the space it is in. A block's objects do not take them.
-pub(crate) const SHEET_OBJECT_KEYS: [&str; 3] = [ID_KEY, NAME_KEY, super::layout::SPACE_KEY];
+/// name, the space it is in, and the object it is a copy of. A block's
+/// objects do not take them.
+pub(crate) const SHEET_OBJECT_KEYS: [&str; 4] =
+    [ID_KEY, NAME_KEY, super::layout::SPACE_KEY, COPY_OF_KEY];
 
 /// What joins a sheet's name to the ID its object carries in its file. No
 /// sheet's name and no written ID holds it, so an ID splits back at its
@@ -123,6 +129,23 @@ pub(super) fn object_record(
         line: node.at.line,
         column: node.at.column,
     };
+    // The object a copy was copied from: an ID in the file, as text.
+    if let Some(copy_of) = fields.get(COPY_OF_KEY).filter(|n| !n.is_bare_null()) {
+        let path = fields.path_of(COPY_OF_KEY);
+        let source = scalar(
+            copy_of,
+            &path,
+            "the ID in its file of the object it is a copy of",
+        )?;
+        if source.trim().is_empty() {
+            return Err(bad_value(
+                copy_of,
+                &path,
+                "`copy_of` names the object it is a copy of by its ID in the file, which is not                  empty"
+                    .to_owned(),
+            ));
+        }
+    }
     let Some(id_node) = fields.text(ID_KEY) else {
         // An object without an `id` takes its place, which is no other
         // object's written `id`.

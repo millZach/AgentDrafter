@@ -360,6 +360,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             ("set_frozen_layers", "VPLAYER"),
             ("move", "MOVE"),
             ("delete", "ERASE"),
+            ("copy", "COPY"),
+            ("array", "ARRAY"),
             ("set_attribute", "ATTEDIT"),
             ("set_cell", "TABLEDIT"),
             ("add_row", ""),
@@ -422,6 +424,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"op": "VPLAYER", "target": {"id": "S/view"}, "frozen_layers": ["wiring", "0"]}),
         json!({"op": "move", "target": {"name": "n", "sheet": "S"}, "by": [1, 0, 0]}),
         json!({"op": "erase", "target": {"name": "n"}}),
+        json!({"op": "copy", "targets": [{"id": "S/a"}, {"name": "n"}], "offsets": [[1, 0, 0], ["2 mm", 0, 0]]}),
+        json!({"op": "arraypolar", "target": {"id": "S/a"}, "center": {"snap": {"id": "S/hole", "snap": "center"}}, "count": 6, "angle": 180, "rotate": false, "base_point": [1, 0, 0]}),
         json!({"op": "set_attribute", "target": {"id": "S/objects[2]"}, "tag": "NOTE", "occurrence": 2, "value": "B"}),
         json!({"op": "tabledit", "target": {"id": "S/cables"}, "cell": [2, 1], "set": {"text": "JB-9", "merge": null}}),
         json!({"op": "add_row", "target": {"id": "S/cables"}, "at": 2, "height": "6 mm", "cells": ["A", "", {"text": "B", "justify": "middle_left"}]}),
@@ -496,6 +500,30 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
             "set_frozen_layers",
             json!({"op": "set_frozen_layers", "target": {"id": "S/view"}, "frozen_layers": []}),
         ),
+        (
+            "copy",
+            json!({"op": "COPY", "target": {"id": "S/a"}, "by": [1, 0, 0]}),
+        ),
+        (
+            "copy",
+            json!({"op": "copy", "target": {"id": "S/a"}, "from": {"snap": {"id": "S/a", "snap": "endpoint", "which": "to"}}, "to": [5, 5, 0]}),
+        ),
+        (
+            "array",
+            json!({"op": "array", "kind": "rectangular", "target": {"id": "S/a"}, "rows": 2, "columns": 40, "row_spacing": -5, "column_spacing": "7.5 mm"}),
+        ),
+        (
+            "array",
+            json!({"op": "ARRAYRECT", "targets": [{"id": "S/a"}], "columns": 3, "column_spacing": 2}),
+        ),
+        (
+            "array",
+            json!({"op": "array", "kind": "polar", "target": {"id": "S/a"}, "center": [0, 0, 0], "count": 4}),
+        ),
+        (
+            "array",
+            json!({"op": "ArrayPath", "target": {"id": "S/a"}, "path": {"name": "rail", "sheet": "S"}, "count": 5, "spacing": 2, "align": false}),
+        ),
     ] {
         let info = listed.operations.iter().find(|o| o.name == name).unwrap();
         let validator = jsonschema::validator_for(&info.schema).unwrap();
@@ -519,6 +547,14 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
         json!({"operations": [{"op": "add_column", "target": {"id": "S/a"}, "height": 2}]}),
         json!({"operations": [{"op": "add_leader_line", "target": {"id": "S/a"}, "points": []}]}),
         json!({"operations": [{"op": "delete_leader_line", "target": {"id": "S/a"}, "leader": -1}]}),
+        json!({"operations": [{"op": "copy", "target": {"id": "S/a"}, "by": [1, 0, 0], "offsets": [[1, 0, 0]]}]}),
+        json!({"operations": [{"op": "copy", "target": {"id": "S/a"}, "targets": [{"id": "S/b"}], "by": [1, 0, 0]}]}),
+        json!({"operations": [{"op": "copy", "target": {"id": "S/a"}, "from": [0, 0, 0]}]}),
+        json!({"operations": [{"op": "array", "target": {"id": "S/a"}, "rows": 2, "row_spacing": 1}]}),
+        json!({"operations": [{"op": "arrayrect", "kind": "polar", "target": {"id": "S/a"}, "center": [0, 0, 0], "count": 3}]}),
+        json!({"operations": [{"op": "array", "kind": "rectangular", "target": {"id": "S/a"}, "rows": 2, "count": 3}]}),
+        json!({"operations": [{"op": "arraypolar", "target": {"id": "S/a"}, "center": [0, 0, 0], "count": 0}]}),
+        json!({"operations": [{"op": "arraypath", "target": {"id": "S/a"}, "path": {"id": "S/p"}, "count": 3, "spacing": 0}]}),
     ] {
         assert!(!whole.is_valid(&wrong), "the schema refuses {wrong}");
     }

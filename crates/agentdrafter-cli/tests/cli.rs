@@ -291,8 +291,13 @@ fn operations_are_listed_and_a_change_set_is_applied_from_a_file() {
     let (code, json) = agentdrafter(&["operations"], &dir);
     assert_eq!(code, 0, "{json}");
     let listed = json["result"]["operations"].as_array().unwrap();
-    assert_eq!(listed.len(), 59);
+    assert_eq!(listed.len(), 61);
     assert_eq!(listed[29]["name"], "move");
+    assert_eq!(listed[32]["name"], "array");
+    assert_eq!(
+        listed[32]["other_aliases"],
+        serde_json::json!(["ARRAYRECT", "ARRAYPOLAR", "ARRAYPATH"])
+    );
     assert_eq!(listed[29]["alias"], "MOVE");
     assert!(listed[29]["schema"]["$defs"]["point"].is_object());
     let (code, json) = agentdrafter(&["schema", "change-set"], &dir);

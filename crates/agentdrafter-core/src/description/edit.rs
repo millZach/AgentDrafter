@@ -26,7 +26,7 @@ use serde_json::{Map, Value};
 
 use super::blocks::tag_in_capitals;
 use super::emit::{number_text, scalar_text, Context, Emitter};
-use super::ids::{ID_KEY, NAME_KEY};
+use super::ids::{COPY_OF_KEY, ID_KEY, NAME_KEY};
 use super::leader::{ANNOTATION_KEYS, TEXT_CONTENT_KEYS};
 use super::objects::{article, BLOCK_OBJECT_TYPES, OBJECT_TYPES};
 use super::parts::{parts_of, Part};
@@ -189,6 +189,8 @@ pub(crate) struct RecordFile {
     root: Node,
     lists: Vec<(ObjectList, ListState)>,
     values: Vec<ValueEdit>,
+    /// The row values an edit added, by row and name, in the order added.
+    added_values: Vec<(usize, String)>,
     /// The tables at the top of the file an edit changed, such as
     /// `layers`, each written again whole, one entry to a line, unless
     /// edits only added to it ([`RecordFile::table_append`]).
@@ -273,6 +275,14 @@ pub(crate) struct Matched {
     pub given: Option<String>,
 }
 
+/// Where values added to a row go among the values the file writes there:
+/// before the value at a place, or after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValueAnchor {
+    Before(usize),
+    After(usize),
+}
+
 /// A row's value an edit set: where its old text was written.
 struct ValueEdit {
     row: usize,
@@ -304,6 +314,7 @@ impl RecordFile {
             root,
             lists: Vec::new(),
             values: Vec::new(),
+            added_values: Vec::new(),
             tables: Vec::new(),
             rewritten: Vec::new(),
             blocks: Vec::new(),
@@ -313,6 +324,7 @@ impl RecordFile {
     /// Whether any edit has been made.
     pub(crate) fn changed(&self) -> bool {
         !self.values.is_empty()
+            || !self.added_values.is_empty()
             || !self.tables.is_empty()
             || !self.blocks.is_empty()
             || self.lists.iter().any(|(_, state)| state.dirty())
@@ -1555,11 +1567,203 @@ impl RecordFile {
                     }
                 }
                 ("hatch", "boundary") => move_boundary(&mut entry.value, by, units, &field)?,
+                // A patterned hatch's pattern moves with its boundary.
+                ("hatch", "origin") => move_point(&mut entry.value, by, units, &field)?,
                 _ => continue,
             }
             moved.push(entry.key.clone());
         }
+        // A patterned hatch laid from the origin, written without one,
+        // takes the distance as its origin, so its pattern moves with it.
+        if kind == "hatch"
+            && !hatch_is_solid(keys)
+            && !keys.iter().any(|e| e.key == "origin")
+            && (by[0] != 0.0 || by[1] != 0.0)
+        {
+            let origin = [by[0], by[1], 0.0].map(|c| Node::scalar(number_text(c)));
+            keys.push(new_entry(
+                "origin",
+                Node::new(Kind::Sequence(origin.to_vec())),
+            ));
+            moved.push("origin".to_owned());
+        }
         self.touch(list, index, operation, Touch::Keys(moved));
+        Ok(())
+    }
+
+    /// Adds a copy of the object of `list` at `index` at the end of the
+    /// list, as operation `operation`, and gives its place: every key the
+    /// object has, written as it was, values from the row among them, but
+    /// its name, which is given once on a sheet, its `id`, which is `id`,
+    /// and its `copy_of`, which is `copy_of`, the first object of the
+    /// copies.
+    pub(crate) fn duplicate(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        id: &str,
+        copy_of: &str,
+        operation: usize,
+    ) -> Result<usize, Error> {
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let mut copy = items
+            .get(index)
+            .cloned()
+            .ok_or_else(|| record_shape("object"))?;
+        let kind = object_parts(&copy).0.unwrap_or_default().to_owned();
+        let keys = object_keys_mut(&mut copy).ok_or_else(|| record_shape(&kind))?;
+        keys.retain(|e| e.key != NAME_KEY && e.key != COPY_OF_KEY);
+        match keys.iter_mut().find(|e| e.key == ID_KEY) {
+            Some(entry) => entry.value = Node::scalar(id.to_owned()),
+            None => keys.push(new_entry(ID_KEY, Node::scalar(id.to_owned()))),
+        }
+        keys.push(new_entry(COPY_OF_KEY, Node::scalar(copy_of.to_owned())));
+        items.push(copy);
+        let index = items.len() - 1;
+        self.list_state(list).items.push(Item {
+            origin: None,
+            edited: true,
+            touches: vec![(operation, Touch::Whole)],
+        });
+        Ok(index)
+    }
+
+    /// Gives the object of `list` at `index` the row values `renamed`
+    /// names, each `(old, new)`: every place in it that takes `old` from
+    /// the row, whole or in a list of parts, takes `new` instead, as
+    /// operation `operation`.
+    pub(crate) fn rename_row_values(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        renamed: &[(String, String)],
+        operation: usize,
+    ) -> Result<(), Error> {
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let item = items.get_mut(index).ok_or_else(|| record_shape("object"))?;
+        let mut places: Vec<String> = Vec::new();
+        let rename = |node: &mut Node| -> bool {
+            let Some(name) = row_value_name(node) else {
+                return false;
+            };
+            let Some((_, new)) = renamed.iter().find(|(old, _)| *old == name) else {
+                return false;
+            };
+            *node = Node::new(Kind::Mapping(vec![new_entry(
+                ROW_KEY,
+                Node::scalar(new.clone()),
+            )]));
+            true
+        };
+        super::template::places_in(
+            item,
+            "",
+            &super::template::no_blocks,
+            &mut |node, place, _| {
+                let changed = if let Kind::Sequence(items) = &mut node.kind {
+                    // Every item of a list of parts, not only the first.
+                    items
+                        .iter_mut()
+                        .map(rename)
+                        .filter(|renamed| *renamed)
+                        .count()
+                        > 0
+                } else {
+                    rename(node)
+                };
+                if changed {
+                    let within = place.split_once('.').map_or("", |(_, rest)| rest);
+                    places.push(within.to_owned());
+                }
+                Ok(())
+            },
+        )?;
+        self.touch(list, index, operation, Touch::Keys(places));
+        Ok(())
+    }
+
+    /// Turns the object of `list` at `index` by `degrees`, anticlockwise,
+    /// about the point `about`, in the declared unit `units`, as operation
+    /// `operation`: every point it is drawn through turns about it, and so
+    /// does every direction it is drawn in, an arc's angles, an ellipse's
+    /// major axis, a text's, an mtext's and an insert's rotation and a
+    /// patterned hatch's angle. A coordinate along Z is left as written.
+    /// Only the object types [`TURNED_TYPES`] lists are turned.
+    pub(crate) fn turn_by(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        about: [f64; 3],
+        degrees: f64,
+        units: Unit,
+        operation: usize,
+    ) -> Result<(), Error> {
+        self.state(list);
+        let path = list.place(index);
+        let items = self.items_mut(list)?;
+        let item = &mut items[index];
+        let kind = object_parts(item).0.unwrap_or_default().to_owned();
+        if !TURNED_TYPES.contains(&kind.as_str()) {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!("{} {kind} is not turned", article(&kind)),
+            )
+            .at_field(path));
+        }
+        let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
+        let object_path = key_path(&path, &kind);
+        let turn = Turn::new(about, degrees, units);
+        let solid = hatch_is_solid(keys);
+        let mut turned = Vec::new();
+        for entry in keys.iter_mut() {
+            let field = key_path(&object_path, &entry.key);
+            match (kind.as_str(), entry.key.as_str()) {
+                ("line", "from" | "to")
+                | ("arc" | "circle" | "ellipse" | "donut", "center")
+                | ("text" | "mtext" | "insert", "position") => {
+                    turn.point(&mut entry.value, &field)?;
+                }
+                ("polyline", "points")
+                | ("spline", "fit_points" | "control_points")
+                | ("solid", "corners") => turn.points(&mut entry.value, &field)?,
+                ("ellipse", "major_axis") => turn.vector(&mut entry.value, &field)?,
+                ("arc", "start_angle" | "end_angle")
+                | ("text" | "mtext" | "insert", "rotation") => {
+                    turn.angle(&mut entry.value, &field)?;
+                }
+                ("hatch", "angle") if !solid => turn.angle(&mut entry.value, &field)?,
+                ("hatch", "boundary") => turn.boundary(&mut entry.value, &field)?,
+                ("hatch", "origin") => turn.point(&mut entry.value, &field)?,
+                _ => continue,
+            }
+            turned.push(entry.key.clone());
+        }
+        // A text, an mtext or an insert written without its rotation, and
+        // a patterned hatch without its angle, take the turn as theirs.
+        let unwritten = match kind.as_str() {
+            "text" | "mtext" | "insert" => Some("rotation"),
+            "hatch" if !solid => Some("angle"),
+            _ => None,
+        };
+        if let Some(key) = unwritten.filter(|k| !keys.iter().any(|e| e.key == *k)) {
+            let mut node = Node::scalar("0".to_owned());
+            turn.angle(&mut node, key)?;
+            keys.push(new_entry(key, node));
+            turned.push(key.to_owned());
+        }
+        // A patterned hatch written without an origin is laid from
+        // [0, 0, 0], which turns with it.
+        if kind == "hatch" && !solid && !keys.iter().any(|e| e.key == "origin") {
+            let mut node = Node::new(Kind::Sequence(
+                ["0", "0", "0"].map(|c| Node::scalar(c.to_owned())).to_vec(),
+            ));
+            turn.point(&mut node, "origin")?;
+            keys.push(new_entry("origin", node));
+            turned.push("origin".to_owned());
+        }
+        self.touch(list, index, operation, Touch::Keys(turned));
         Ok(())
     }
 
@@ -1876,7 +2080,12 @@ impl RecordFile {
             )
             .at_field(field.clone())
         };
-        let first = !self.values.iter().any(|v| v.row == row && v.name == name);
+        // A value an edit added is written whole where it goes.
+        let added = self
+            .added_values
+            .iter()
+            .any(|(r, n)| *r == row && n == name);
+        let first = !added && !self.values.iter().any(|v| v.row == row && v.name == name);
         if first {
             let values = self
                 .row_node(row)
@@ -1911,6 +2120,239 @@ impl RecordFile {
             .ok_or_else(missing)?;
         entry.value = Node::scalar(text);
         Ok(())
+    }
+
+    /// Adds the value `name`, `text`, to row `row`'s values, where
+    /// [`RecordFile::value_anchor`] puts it: after the values the row
+    /// gives, or before the first written as a block of lines. The row must
+    /// give values already, and not `name`. When the file would then not
+    /// write, the value is taken away again and the error given, so the
+    /// record stays as it was.
+    pub(crate) fn add_row_value(
+        &mut self,
+        row: usize,
+        name: &str,
+        text: &str,
+    ) -> Result<(), Error> {
+        let field = key_path(&key_path(&index_path("rows", row), "values"), name);
+        let anchor = self.value_anchor(row);
+        let values = self
+            .row_node_mut(row)
+            .and_then(|node| mapping_entry_mut(node, "values"))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::MissingValue,
+                    "the row gives no values to add one to",
+                )
+                .at_field(field.clone())
+            })?;
+        let Kind::Mapping(entries) = &mut values.kind else {
+            return Err(record_shape("row's values"));
+        };
+        if entries.iter().any(|e| e.key == name) {
+            return Err(Error::new(
+                ErrorCode::DuplicateName,
+                format!("the row gives a value `{name}` already"),
+            )
+            .at_field(field));
+        }
+        // After the values added already at the same place, in order.
+        let at = match anchor {
+            Some(ValueAnchor::Before(j)) => j,
+            Some(ValueAnchor::After(j)) => {
+                let mut at = j + 1;
+                while at < entries.len() && entries[at].key_end == 0 {
+                    at += 1;
+                }
+                at
+            }
+            None => entries.len(),
+        };
+        entries.insert(at, new_entry(name, Node::scalar(text.to_owned())));
+        self.added_values.push((row, name.to_owned()));
+        if let Err(e) = self.new_text() {
+            if let Some(Kind::Mapping(entries)) = self
+                .row_node_mut(row)
+                .and_then(|node| mapping_entry_mut(node, "values"))
+                .map(|values| &mut values.kind)
+            {
+                entries.retain(|e| !(e.key_end == 0 && e.key == name));
+            }
+            self.added_values.retain(|(r, n)| !(*r == row && n == name));
+            return Err(e.at_field(field));
+        }
+        Ok(())
+    }
+
+    /// Where values added to row `row` go, among the values the file
+    /// writes there: before the first written as a block of lines, such as
+    /// `NOTES: |`, which a value after it would read as part of; or else
+    /// after the last. None when the row writes no value.
+    fn value_anchor(&self, row: usize) -> Option<ValueAnchor> {
+        let values = self
+            .row_node(row)
+            .and_then(|n| mapping_entry(n, "values"))?;
+        let Kind::Mapping(entries) = &values.kind else {
+            return None;
+        };
+        let style = |e: &Entry| {
+            self.values
+                .iter()
+                .find(|v| v.row == row && v.name == e.key)
+                .map(|v| v.source.style)
+                .or(e.value.source.map(|s| s.style))
+        };
+        let written: Vec<usize> = (0..entries.len())
+            .filter(|&j| entries[j].key_end != 0)
+            .collect();
+        match written
+            .iter()
+            .find(|&&j| style(&entries[j]) == Some(Style::BlockScalar))
+        {
+            Some(&j) => Some(ValueAnchor::Before(j)),
+            None => written.last().map(|&j| ValueAnchor::After(j)),
+        }
+    }
+
+    /// The names of the values row `row` gives.
+    pub(crate) fn row_value_names(&self, row: usize) -> Vec<String> {
+        let Some(values) = self.row_node(row).and_then(|n| mapping_entry(n, "values")) else {
+            return Vec::new();
+        };
+        match &values.kind {
+            Kind::Mapping(entries) => entries.iter().map(|e| e.key.clone()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The splices that write the values edits added to each row, where
+    /// [`RecordFile::value_anchor`] puts them: in the row's braces after the
+    /// last value; or a key to a line, at the values' own indent, at the
+    /// start of the line of the first value written as a block of lines,
+    /// or at the end of the last value's line, after any comment on it.
+    fn added_value_splices(&self, splices: &mut Vec<(usize, usize, String)>) -> Result<(), Error> {
+        let mut rows: Vec<usize> = Vec::new();
+        for (row, _) in &self.added_values {
+            if !rows.contains(row) {
+                rows.push(*row);
+            }
+        }
+        for row in rows {
+            let lost = || self.cannot_write("a row's values are not where the file wrote them");
+            let values = self
+                .row_node(row)
+                .and_then(|n| mapping_entry(n, "values"))
+                .ok_or_else(lost)?;
+            let Kind::Mapping(entries) = &values.kind else {
+                return Err(lost());
+            };
+            let in_flow = values.source.is_some_and(|s| s.style == Style::Flow);
+            let anchor = self.value_anchor(row);
+            // The values added at the anchor, in the order they are given.
+            let added: Vec<&Entry> = match anchor {
+                Some(ValueAnchor::Before(j)) => {
+                    let mut first = j;
+                    while first > 0 && entries[first - 1].key_end == 0 {
+                        first -= 1;
+                    }
+                    entries[first..j].iter().collect()
+                }
+                Some(ValueAnchor::After(j)) => entries[j + 1..]
+                    .iter()
+                    .take_while(|e| e.key_end == 0)
+                    .collect(),
+                None => entries.iter().filter(|e| e.key_end == 0).collect(),
+            };
+            let text_of = |e: &Entry| match &e.value.kind {
+                Kind::Scalar(text) => text.clone(),
+                _ => String::new(),
+            };
+            match (anchor, in_flow) {
+                (Some(ValueAnchor::After(j)), true) => {
+                    let end = self.value_end(row, &entries[j]).ok_or_else(lost)?;
+                    let with: String = added
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                ", {}: {}",
+                                e.key,
+                                scalar_text(&text_of(e), Context::Flow, 0, self.newline)
+                            )
+                        })
+                        .collect();
+                    splices.push((end, end, with));
+                }
+                (None, true) => {
+                    // Braces that hold no value yet: inside them.
+                    let source = values.source.ok_or_else(lost)?;
+                    let close = self.text[..source.end].rfind('}').ok_or_else(lost)?;
+                    let with: Vec<String> = added
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                "{}: {}",
+                                e.key,
+                                scalar_text(&text_of(e), Context::Flow, 0, self.newline)
+                            )
+                        })
+                        .collect();
+                    splices.push((close, close, with.join(", ")));
+                }
+                (Some(ValueAnchor::Before(j)), _) => {
+                    let indent = entries[j].key_at.column.saturating_sub(1);
+                    let start = self.text[..entries[j].key_end]
+                        .rfind('\n')
+                        .map_or(0, |p| p + 1);
+                    let with: String = added
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                "{}{}: {}{}",
+                                " ".repeat(indent),
+                                e.key,
+                                scalar_text(&text_of(e), Context::Block, indent + 2, self.newline),
+                                self.newline
+                            )
+                        })
+                        .collect();
+                    splices.push((start, start, with));
+                }
+                (Some(ValueAnchor::After(j)), false) => {
+                    let indent = entries[j].key_at.column.saturating_sub(1);
+                    let end = self.value_end(row, &entries[j]).ok_or_else(lost)?;
+                    // The end of its line: after a comment on it, before the
+                    // line break.
+                    let line_end = self.text[end..]
+                        .find(['\r', '\n'])
+                        .map_or(self.text.len(), |p| end + p);
+                    let with: String = added
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                "{}{}{}: {}",
+                                self.newline,
+                                " ".repeat(indent),
+                                e.key,
+                                scalar_text(&text_of(e), Context::Block, indent + 2, self.newline)
+                            )
+                        })
+                        .collect();
+                    splices.push((line_end, line_end, with));
+                }
+                (None, false) => return Err(lost()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Where the file wrote the value `entry` of row `row` ends, before an
+    /// edit set it.
+    fn value_end(&self, row: usize, entry: &Entry) -> Option<usize> {
+        self.values
+            .iter()
+            .find(|v| v.row == row && v.name == entry.key)
+            .map(|v| v.source.end)
+            .or(entry.value.source.map(|s| s.end))
     }
 
     /// The places among the template's objects where it puts the row's
@@ -2153,6 +2595,7 @@ impl RecordFile {
             }
         }
         self.block_splices(&mut splices)?;
+        self.added_value_splices(&mut splices)?;
         for edit in &self.values {
             let start = if edit.source.style == Style::BlockScalar {
                 value_start(&self.text, edit.key_end).unwrap_or(edit.source.start)
@@ -2841,6 +3284,217 @@ fn move_boundary(node: &mut Node, by: [f64; 3], units: Unit, field: &str) -> Res
         }
     }
     Ok(())
+}
+
+/// The object types a turn turns: those whose every point and direction
+/// is written where it can be turned. A table, a multileader, an older
+/// leader, a dimension and a viewport are not turned yet (#67).
+pub(crate) const TURNED_TYPES: [&str; 12] = [
+    "line", "polyline", "arc", "circle", "ellipse", "spline", "hatch", "text", "mtext", "donut",
+    "solid", "insert",
+];
+
+/// The hatch pattern that fills solid, which takes no angle.
+const SOLID_PATTERN: &str = "SOLID";
+
+/// Whether a hatch's keys name the solid pattern, which takes no angle and
+/// no origin.
+fn hatch_is_solid(keys: &[Entry]) -> bool {
+    keys.iter().any(|e| {
+        e.key == "pattern"
+            && matches!(&e.value.kind, Kind::Scalar(p) if p.eq_ignore_ascii_case(SOLID_PATTERN))
+    })
+}
+
+/// A turn about a point, in the declared unit, of the points and
+/// directions of a record.
+struct Turn {
+    about: [f64; 3],
+    degrees: f64,
+    sin: f64,
+    cos: f64,
+    units: Unit,
+}
+
+impl Turn {
+    fn new(about: [f64; 3], degrees: f64, units: Unit) -> Self {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        Turn {
+            about,
+            degrees,
+            sin,
+            cos,
+            units,
+        }
+    }
+
+    /// Reads coordinate `axis` of the point `coordinates` holds, at
+    /// `field`, in the declared unit.
+    fn coordinate(&self, coordinates: &[Node], axis: usize, field: &str) -> Result<f64, Error> {
+        let Kind::Scalar(text) = &coordinates[axis].kind else {
+            return Err(not_turned(field));
+        };
+        match parse_length(text) {
+            Ok((value, None)) => Ok(value),
+            Ok((value, Some(own))) => Ok(own.convert(value, self.units)),
+            Err(_) => Err(Error::new(
+                ErrorCode::BadNumber,
+                format!("the record's coordinate `{text}` is not a length to turn"),
+            )
+            .at_field(index_path(field, axis))),
+        }
+    }
+
+    /// Writes `x` and `y` as coordinates 0 and 1 of `coordinates`.
+    fn write(coordinates: &mut [Node], x: f64, y: f64, field: &str) -> Result<(), Error> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(Error::new(
+                ErrorCode::BadNumber,
+                "the coordinate would be too large once turned",
+            )
+            .at_field(field));
+        }
+        coordinates[0] = Node::scalar(number_text(x));
+        coordinates[1] = Node::scalar(number_text(y));
+        Ok(())
+    }
+
+    /// Turns a point `[x, y, z]` about the turn's point.
+    fn point(&self, node: &mut Node, field: &str) -> Result<(), Error> {
+        let Kind::Sequence(coordinates) = &mut node.kind else {
+            return Err(not_turned(field));
+        };
+        if coordinates.len() != 3 {
+            return Err(not_turned(field));
+        }
+        let x = self.coordinate(coordinates, 0, field)? - self.about[0];
+        let y = self.coordinate(coordinates, 1, field)? - self.about[1];
+        Turn::write(
+            coordinates,
+            self.about[0] + x * self.cos - y * self.sin,
+            self.about[1] + x * self.sin + y * self.cos,
+            field,
+        )
+    }
+
+    /// Turns a direction `[dx, dy, dz]`, which has no place to turn about.
+    fn vector(&self, node: &mut Node, field: &str) -> Result<(), Error> {
+        let Kind::Sequence(coordinates) = &mut node.kind else {
+            return Err(not_turned(field));
+        };
+        if coordinates.len() != 3 {
+            return Err(not_turned(field));
+        }
+        let x = self.coordinate(coordinates, 0, field)?;
+        let y = self.coordinate(coordinates, 1, field)?;
+        Turn::write(
+            coordinates,
+            x * self.cos - y * self.sin,
+            x * self.sin + y * self.cos,
+            field,
+        )
+    }
+
+    /// Turns each point of a list, a polyline's point that is a mapping by
+    /// its `point`; its bulge stays as it is.
+    fn points(&self, node: &mut Node, field: &str) -> Result<(), Error> {
+        let Kind::Sequence(points) = &mut node.kind else {
+            return Err(not_turned(field));
+        };
+        for (i, point) in points.iter_mut().enumerate() {
+            let at = index_path(field, i);
+            if let Kind::Mapping(keys) = &mut point.kind {
+                for key in keys.iter_mut().filter(|k| k.key == "point") {
+                    self.point(&mut key.value, &key_path(&at, "point"))?;
+                }
+            } else {
+                self.point(point, &at)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds the turn to an angle in degrees, brought into `[0, 360)`.
+    fn angle(&self, node: &mut Node, field: &str) -> Result<(), Error> {
+        let Kind::Scalar(text) = &node.kind else {
+            return Err(not_turned(field));
+        };
+        let Ok(degrees) = text.trim().parse::<f64>() else {
+            return Err(Error::new(
+                ErrorCode::BadNumber,
+                format!("the record's angle `{text}` is not a number of degrees to turn"),
+            )
+            .at_field(field));
+        };
+        let turned = super::normalize_degrees(degrees + self.degrees);
+        let turned = if number_text(turned) == "360" {
+            0.0
+        } else {
+            turned
+        };
+        *node = Node::scalar(number_text(turned));
+        Ok(())
+    }
+
+    /// Turns each loop of a hatch's boundary: a polyline's points, and
+    /// each edge's ends, centre and angles.
+    fn boundary(&self, node: &mut Node, field: &str) -> Result<(), Error> {
+        let Kind::Sequence(loops) = &mut node.kind else {
+            return Err(not_turned(field));
+        };
+        for (i, boundary_loop) in loops.iter_mut().enumerate() {
+            let loop_path = index_path(field, i);
+            let Kind::Mapping(kinds) = &mut boundary_loop.kind else {
+                continue;
+            };
+            for kind in kinds.iter_mut() {
+                let kind_path = key_path(&loop_path, &kind.key);
+                match (kind.key.as_str(), &mut kind.value.kind) {
+                    ("polyline", Kind::Mapping(keys)) => {
+                        for key in keys.iter_mut().filter(|k| k.key == "points") {
+                            self.points(&mut key.value, &key_path(&kind_path, "points"))?;
+                        }
+                    }
+                    ("edges", Kind::Sequence(edges)) => {
+                        for (j, edge) in edges.iter_mut().enumerate() {
+                            let edge_path = index_path(&kind_path, j);
+                            let Kind::Mapping(edge_kinds) = &mut edge.kind else {
+                                continue;
+                            };
+                            for edge_kind in edge_kinds.iter_mut() {
+                                let Kind::Mapping(keys) = &mut edge_kind.value.kind else {
+                                    continue;
+                                };
+                                let within = key_path(&edge_path, &edge_kind.key);
+                                for key in keys.iter_mut() {
+                                    let path = key_path(&within, &key.key);
+                                    match key.key.as_str() {
+                                        "from" | "to" | "center" => {
+                                            self.point(&mut key.value, &path)?;
+                                        }
+                                        "start_angle" | "end_angle" => {
+                                            self.angle(&mut key.value, &path)?;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn not_turned(field: &str) -> Error {
+    Error::new(
+        ErrorCode::WrongType,
+        "the record's point here is not a list of three lengths, so the object cannot be turned",
+    )
+    .at_field(field)
 }
 
 fn not_a_point(field: &str) -> Error {

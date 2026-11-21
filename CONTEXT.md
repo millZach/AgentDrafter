@@ -172,6 +172,10 @@ _Avoid_: dimstyle alone in prose, dimension format
 An object that fills an area solid or with a hatch pattern, inside a boundary of closed loops, as in AutoCAD. It draws no outline of its own.
 _Avoid_: fill, shading, region (a region is AutoCAD's 2D solid object)
 
+**Hatch origin**:
+The point a patterned hatch's pattern is laid from, AutoCAD's HPORIGIN: each line of the pattern runs through it, moved by the line's own origin. It moves and turns with the hatch's boundary, so a moved or copied hatch keeps its pattern where its boundary is.
+_Avoid_: pattern base point (each line of a pattern has its own), snap base
+
 **Hatch pattern**:
 A named set of families of parallel lines that a hatch fills its area with, as in an AutoCAD `.pat` file. Every hatch pattern but `SOLID` comes from a definition in the sheet description.
 _Avoid_: fill pattern, texture
@@ -315,6 +319,18 @@ _Avoid_: round-trip safe, lossless
 **Operation**:
 A named, typed action on a drawing, such as `insert_block`. Where AutoCAD has the same command, the operation carries the AutoCAD name as an alias. An operation names the object it edits, its target, by ID or name.
 _Avoid_: command (the word for what a person types), tool, call
+
+**Copy**:
+An ordinary object an operation made from another, its source, as AutoCAD's COPY makes one: every key of its source, an insert's attribute values among them, but its name, moved to its place and, in an array, turned. It has an ID of its own, its source's `id` and the first number free on the sheets it reaches, such as `term-3`, and is written where its source is: a copy of a template's object in the template, so on every sheet built from it, and of a row's own object in the row. It names the object it was copied from under `copy_of`, which makes it one of a **copy family** with its source and the source's other copies. A value its source takes from the row it shares until the copy's is set: then that copy takes its own row value, and the others keep theirs. The first object of the copies sets the shared value where it is, so the copies not set since follow it. Nothing else ties it to its source.
+_Avoid_: duplicate, clone, instance
+
+**Array**:
+Copies of objects placed in a pattern by one operation: in rows and columns, round a centre, or along a path, the objects themselves the first item. AgentDrafter's arrays land as plain copies, each an ordinary object; AutoCAD's associative array, which stays one object to edit later, is not written (Zach, 2026-11-21).
+_Avoid_: associative array (AutoCAD's, which is not written), pattern, repeat
+
+**Path** (of a path array):
+The line, polyline, arc, circle, ellipse or spline a path array runs along, from its start as it is drawn; the copies ride along it as the objects sit at its start, turned with its direction unless they are not aligned.
+_Avoid_: curve, guide
 
 **Change set**:
 Operations sent together as one request. Each sheet takes its part of a change set fully or not at all.

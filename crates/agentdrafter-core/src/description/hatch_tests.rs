@@ -70,6 +70,7 @@ fn a_solid_hatch_reads() {
             pattern: HatchPattern::solid(),
             scale: 1.0,
             angle: 0.0,
+            origin: [0.0, 0.0],
             boundary: square(),
             layer: "0".to_owned(),
             properties: Default::default(),
@@ -268,7 +269,7 @@ fn unknown_keys_list_the_keys_allowed_there() {
         &e,
         ErrorCode::UnknownKey,
         "objects[0].hatch.colour",
-        &["a hatch takes pattern, scale, angle, boundary, layer"],
+        &["a hatch takes pattern, scale, angle, origin, boundary, layer"],
     );
     let e = error(
         "units: mm\nhatch_patterns:\n  P: {lines: [{delta: [0, 1]}], description: x}\nobjects: []\n",
@@ -644,7 +645,7 @@ fn hatch_keys_are_spelled_as_autocad_spells_them() {
         &e,
         ErrorCode::UnknownKey,
         "objects[0].hatch.angel",
-        &["pattern, scale, angle, boundary, layer"],
+        &["pattern, scale, angle, origin, boundary, layer"],
     );
     let e = error(&with_hatch(&format!(
         "pattern: STRIPES, layer: walls, {SQUARE}"
