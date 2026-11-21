@@ -1867,7 +1867,35 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         // and so does every other place that shares it, as every row value
         // is set (decision 5). Of the values a text matched to its parts
         // sets, only those whose text changes are taken.
+        // Of the values a whole text matched to its parts sets, those whose
+        // text the edit does not change are dropped: they are neither held
+        // to a locked layer, nor made a copy's own, nor written. Each is
+        // compared as the matcher reads it: the parts joined with the
+        // sheet's row values as they stand, split as the text sent is, so
+        // an mtext's last value written as a block of lines, whose last
+        // line break the text shows without, is the same.
         let mut sets = sets;
+        if let (FromRow::Parts(held), Some(_)) = (&written, &matched) {
+            let row = files.rows[k].index;
+            let (rows, _) = at.row_record(k);
+            let joined: String = held
+                .iter()
+                .map(|part| match part {
+                    parts::Part::Text(text) => text.clone(),
+                    parts::Part::Row(name) => rows.row_value(row, name).unwrap_or_default(),
+                })
+                .collect();
+            let now = if is_mtext {
+                parts::split(&parts::shown_mtext_parts(held), &shown_mtext(&joined))
+            } else {
+                parts::split(held, &joined)
+            };
+            if let Ok(now) = now {
+                sets.retain(|(name, value)| {
+                    now.iter().find(|(n, _)| n == name).map(|(_, v)| v) != Some(value)
+                });
+            }
+        }
         let mut created: Vec<String> = Vec::new();
         let mut refused_on = refused_on;
         if let FileRef::Template(_) = file {
@@ -2040,10 +2068,17 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 .collect::<Vec<String>>()
                 .join(" and ")
         };
-        let row_message = match (&written, &matched) {
-            (FromRow::Whole(_), _) => {
-                let set = &set_values[0];
-                format!(
+        let row_message = if set_values.is_empty() {
+            format!(
+                "changes no row value of sheet `{}`: the text sent is what the parts {} its                  template joins {set_what} from show already",
+                files.name(k),
+                matched.as_deref().unwrap_or_default()
+            )
+        } else {
+            match (&written, &matched) {
+                (FromRow::Whole(_), _) => {
+                    let set = &set_values[0];
+                    format!(
                     "sets sheet `{}`'s row value {} to `{}`, since its template takes {set_what} \
                      from the row; the value fills {}",
                     files.name(k),
@@ -2051,40 +2086,41 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                     set.now,
                     places(set)
                 )
-            }
-            (FromRow::Parts(held), None) => {
-                let set = &set_values[0];
-                format!(
-                    "sets sheet `{}`'s row value {} to `{}`, one of the parts {} its template \
+                }
+                (FromRow::Parts(held), None) => {
+                    let set = &set_values[0];
+                    format!(
+                        "sets sheet `{}`'s row value {} to `{}`, one of the parts {} its template \
                      joins {set_what} from; the value fills {}",
-                    files.name(k),
-                    set.value,
-                    set.now,
-                    parts::pattern(held),
-                    places(set)
-                )
-            }
-            (FromRow::Parts(_), Some(pattern)) => {
-                let each: Vec<String> = set_values
-                    .iter()
-                    .map(|set| format!("{} to `{}`", set.value, set.now))
-                    .collect();
-                let fills: Vec<String> = set_values
-                    .iter()
-                    .map(|set| format!("{} fills {}", set.value, places(set)))
-                    .collect();
-                format!(
-                    "sets sheet `{}`'s row {} {}, matched to the parts {pattern} its template \
+                        files.name(k),
+                        set.value,
+                        set.now,
+                        parts::pattern(held),
+                        places(set)
+                    )
+                }
+                (FromRow::Parts(_), Some(pattern)) => {
+                    let each: Vec<String> = set_values
+                        .iter()
+                        .map(|set| format!("{} to `{}`", set.value, set.now))
+                        .collect();
+                    let fills: Vec<String> = set_values
+                        .iter()
+                        .map(|set| format!("{} fills {}", set.value, places(set)))
+                        .collect();
+                    format!(
+                        "sets sheet `{}`'s row {} {}, matched to the parts {pattern} its template \
                      joins {set_what} from; {}",
-                    files.name(k),
-                    if set_values.len() == 1 {
-                        "value"
-                    } else {
-                        "values"
-                    },
-                    join_and(&each),
-                    fills.join("; ")
-                )
+                        files.name(k),
+                        if set_values.len() == 1 {
+                            "value"
+                        } else {
+                            "values"
+                        },
+                        join_and(&each),
+                        fills.join("; ")
+                    )
+                }
             }
         };
         done.message = if done.message.is_empty() {

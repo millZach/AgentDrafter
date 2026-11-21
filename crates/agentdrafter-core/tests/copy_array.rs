@@ -1305,3 +1305,101 @@ fn a_split_held_back_reports_no_row_value_and_copy_of_is_the_engines() {
         assert!(!reply.ok, "{op}");
     }
 }
+
+/// The strip set with a label joined from TITLE and TAG, and with the
+/// title, which shows TITLE too, on the locked layer `fixed`.
+fn labelled_set(test: &str, label: &str, rows: &str) -> PathBuf {
+    let template = TEMPLATE.replace(
+        "  - text: {id: title, contents: {row: TITLE}, position: [10, 110, 0], height: 4}\n",
+        &format!(
+            "  - text: {{id: title, contents: {{row: TITLE}}, position: [10, 110, 0], height: 4, layer: fixed}}\n{label}"
+        ),
+    );
+    strip_set_with(test, &template, rows)
+}
+
+#[test]
+fn an_edit_of_one_part_is_not_held_back_by_an_unchanged_part_on_a_locked_layer() {
+    let rows = ROWS
+        .replace(
+            "values: {TITLE: STRIP ONE}",
+            "values: {TITLE: STRIP ONE, TAG: T1}",
+        )
+        .replace(
+            "values: {TITLE: STRIP TWO}",
+            "values: {TITLE: STRIP TWO, TAG: T2}",
+        );
+    let set = labelled_set(
+        "locked-part",
+        "  - text: {id: label, contents: [{row: TITLE}, ' / ', {row: TAG}], position: [10, 100, 0], height: 3}\n",
+        &rows,
+    );
+    let report = lands(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/label"}, "by": [0, -10, 0]},
+            {"op": "change", "target": {"id": "ARR-001/label-1"}, "set": {"contents": "STRIP ONE / T9"}},
+            {"op": "change", "target": {"id": "ARR-001/label"}, "set": {"contents": "STRIP ONE / T7"}},
+        ]),
+    );
+    assert_eq!(report.operations[1].created_row_values, ["TAG-label-1"]);
+    assert!(report.operations[2].created_row_values.is_empty());
+    let set_values: Vec<&str> = report.operations[2]
+        .row_values
+        .iter()
+        .map(|v| v.value.as_str())
+        .collect();
+    assert_eq!(set_values, ["TAG"]);
+    let objects = recorded(&set);
+    let contents = |id: &str| match &objects[id] {
+        Object::Text(text) => text.contents.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(contents("ARR-001/label-1"), "STRIP ONE / T9");
+    assert_eq!(contents("ARR-001/label"), "STRIP ONE / T7");
+    // A part that does change still meets the lock: the original's TITLE
+    // fills the locked title.
+    let reply = send(
+        &set,
+        json!([{"op": "change", "target": {"id": "ARR-001/label"}, "set": {"contents": "RENAMED / T7"}}]),
+        false,
+    );
+    let error = reply.result.unwrap().operations[0].error.clone().unwrap();
+    assert_eq!(error.code, ErrorCode::Locked);
+}
+
+#[test]
+fn an_unchanged_block_of_lines_at_the_end_of_an_mtext_is_not_split() {
+    let rows = ROWS
+        .replace(
+            "values: {TITLE: STRIP ONE}",
+            "values:\n      TITLE: STRIP ONE\n      TAG: T1\n      NOTES: |\n        LINE ONE\n        LINE TWO\n",
+        )
+        .replace(
+            "values: {TITLE: STRIP TWO}",
+            "values: {TITLE: STRIP TWO, TAG: T2, NOTES: N2}",
+        );
+    let set = labelled_set(
+        "notes-part",
+        "  - mtext: {id: label, contents: [{row: TAG}, ' | ', {row: NOTES}], position: [10, 100, 0], height: 3}\n",
+        &rows,
+    );
+    let before = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    let report = lands(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/label"}, "by": [0, -10, 0]},
+            {"op": "change", "target": {"id": "ARR-001/label-1"}, "set": {"contents": "T9 | LINE ONE\nLINE TWO"}},
+        ]),
+    );
+    assert_eq!(report.operations[1].created_row_values, ["TAG-label-1"]);
+    let after = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    assert!(!after.contains("NOTES-label-1"), "{after}");
+    assert!(
+        after.contains(
+            "      TAG-label-1: T9\n      NOTES: |\n        LINE ONE\n        LINE TWO\n"
+        ),
+        "{after}"
+    );
+    assert!(before.contains("      NOTES: |\n        LINE ONE\n        LINE TWO\n"));
+}
