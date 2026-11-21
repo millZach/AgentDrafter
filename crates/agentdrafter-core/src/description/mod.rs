@@ -66,7 +66,7 @@ pub(crate) use edit::{
     RecordFile, TableEdit, TURNED_TYPES,
 };
 pub(crate) use emit::number_text;
-pub(crate) use ids::{ID_SEPARATOR, LONGEST_ID};
+pub(crate) use ids::{COPY_OF_KEY, ID_SEPARATOR, LONGEST_ID};
 pub(crate) use mark::{mark_text, parse_mark, MarkFailure};
 pub(crate) use objects::article;
 pub(crate) use records::{read_sheet_record, read_sheet_record_noting, SavedSet, SheetRecord};

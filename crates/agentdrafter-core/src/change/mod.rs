@@ -216,6 +216,11 @@ pub struct OperationOutcome {
     /// which the record writes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub snapped: Vec<SnapResolved>,
+    /// The row values it created: when it set a value an object shares
+    /// with its copies, the object's own, which every sheet built from the
+    /// template was given, set to what the object showed there.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub created_row_values: Vec<String>,
     /// Each copy a copy or an array made, in the order it made them: its
     /// ID, the object it copies and where it went.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -264,12 +269,6 @@ pub struct Copied {
     /// The point it was turned about.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub about: Option<[f64; 3]>,
-    /// The names of the row values that are its own: a copy of a
-    /// template's object that takes a value from the row takes its own,
-    /// set on each sheet to the value its source shows there, so that
-    /// setting the copy's value sets it alone.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub row_values: Vec<String>,
 }
 
 /// An attribute value a block operation removed from an insert, because

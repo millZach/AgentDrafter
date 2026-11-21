@@ -621,9 +621,10 @@ fn does(spec: &Spec) -> String {
                        object with an ID of its own, its source's id and the first number free, \
                        such as term-1, or its type's, such as line-1, for a source with no id; \
                        it keeps every key of its source, an insert's attribute values among \
-                       them, but its name, which is given once on a sheet; a value it takes \
-                       from the row becomes its own row value, set to what its source shows, \
-                       listed under row_values, so setting it sets that copy alone. A copy is \
+                       them, values from the row too, but its name, which is given once on a \
+                       sheet, and is written with copy_of, the first object of the copies: a \
+                       value from the row it shares with them becomes its own only when one \
+                       of them is set, and setting it then sets that one alone. A copy is \
                        written \
                        where its source is: a template's object's in the template, so on every \
                        sheet built from it, all or nothing, and a row's own object's in the \

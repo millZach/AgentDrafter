@@ -26,7 +26,7 @@ use serde_json::{Map, Value};
 
 use super::blocks::tag_in_capitals;
 use super::emit::{number_text, scalar_text, Context, Emitter};
-use super::ids::{ID_KEY, NAME_KEY};
+use super::ids::{COPY_OF_KEY, ID_KEY, NAME_KEY};
 use super::leader::{ANNOTATION_KEYS, TEXT_CONTENT_KEYS};
 use super::objects::{article, BLOCK_OBJECT_TYPES, OBJECT_TYPES};
 use super::parts::{parts_of, Part};
@@ -1584,20 +1584,19 @@ impl RecordFile {
     }
 
     /// Adds a copy of the object of `list` at `index` at the end of the
-    /// list, as operation `operation`, and gives its place, with each value
-    /// from the row it takes, by its name before and after: every key the
-    /// object has, written as it was, but its name, which is given once on
-    /// a sheet, its `id`, which is `id`, and each value it takes from the
-    /// row, `{row: NAME}`, whole or in a list of parts, which takes the
-    /// name `own` gives it, so that the copy's value is its own.
+    /// list, as operation `operation`, and gives its place: every key the
+    /// object has, written as it was, values from the row among them, but
+    /// its name, which is given once on a sheet, its `id`, which is `id`,
+    /// and its `copy_of`, which is `copy_of`, the first object of the
+    /// copies.
     pub(crate) fn duplicate(
         &mut self,
         list: ObjectList,
         index: usize,
         id: &str,
+        copy_of: &str,
         operation: usize,
-        own: &mut dyn FnMut(&str) -> String,
-    ) -> Result<(usize, Vec<(String, String)>), Error> {
+    ) -> Result<usize, Error> {
         self.state(list);
         let items = self.items_mut(list)?;
         let mut copy = items
@@ -1606,41 +1605,12 @@ impl RecordFile {
             .ok_or_else(|| record_shape("object"))?;
         let kind = object_parts(&copy).0.unwrap_or_default().to_owned();
         let keys = object_keys_mut(&mut copy).ok_or_else(|| record_shape(&kind))?;
-        keys.retain(|e| e.key != NAME_KEY);
+        keys.retain(|e| e.key != NAME_KEY && e.key != COPY_OF_KEY);
         match keys.iter_mut().find(|e| e.key == ID_KEY) {
             Some(entry) => entry.value = Node::scalar(id.to_owned()),
             None => keys.push(new_entry(ID_KEY, Node::scalar(id.to_owned()))),
         }
-        // Each value from the row takes the copy's own name, the same name
-        // wherever the object takes one value twice.
-        let mut renamed: Vec<(String, String)> = Vec::new();
-        let mut rename = |node: &mut Node| {
-            let Some(name) = row_value_name(node) else {
-                return;
-            };
-            let new = match renamed.iter().find(|(old, _)| *old == name) {
-                Some((_, new)) => new.clone(),
-                None => {
-                    let new = own(&name);
-                    renamed.push((name, new.clone()));
-                    new
-                }
-            };
-            *node = Node::new(Kind::Mapping(vec![new_entry(ROW_KEY, Node::scalar(new))]));
-        };
-        super::template::places_in(
-            &mut copy,
-            "",
-            &super::template::no_blocks,
-            &mut |node, _, _| {
-                if let Kind::Sequence(items) = &mut node.kind {
-                    items.iter_mut().for_each(&mut rename);
-                } else {
-                    rename(node);
-                }
-                Ok(())
-            },
-        )?;
+        keys.push(new_entry(COPY_OF_KEY, Node::scalar(copy_of.to_owned())));
         items.push(copy);
         let index = items.len() - 1;
         self.list_state(list).items.push(Item {
@@ -1648,7 +1618,62 @@ impl RecordFile {
             edited: true,
             touches: vec![(operation, Touch::Whole)],
         });
-        Ok((index, renamed))
+        Ok(index)
+    }
+
+    /// Gives the object of `list` at `index` the row values `renamed`
+    /// names, each `(old, new)`: every place in it that takes `old` from
+    /// the row, whole or in a list of parts, takes `new` instead, as
+    /// operation `operation`.
+    pub(crate) fn rename_row_values(
+        &mut self,
+        list: ObjectList,
+        index: usize,
+        renamed: &[(String, String)],
+        operation: usize,
+    ) -> Result<(), Error> {
+        self.state(list);
+        let items = self.items_mut(list)?;
+        let item = items.get_mut(index).ok_or_else(|| record_shape("object"))?;
+        let mut places: Vec<String> = Vec::new();
+        let rename = |node: &mut Node| -> bool {
+            let Some(name) = row_value_name(node) else {
+                return false;
+            };
+            let Some((_, new)) = renamed.iter().find(|(old, _)| *old == name) else {
+                return false;
+            };
+            *node = Node::new(Kind::Mapping(vec![new_entry(
+                ROW_KEY,
+                Node::scalar(new.clone()),
+            )]));
+            true
+        };
+        super::template::places_in(
+            item,
+            "",
+            &super::template::no_blocks,
+            &mut |node, place, _| {
+                let changed = if let Kind::Sequence(items) = &mut node.kind {
+                    // Every item of a list of parts, not only the first.
+                    items
+                        .iter_mut()
+                        .map(rename)
+                        .filter(|renamed| *renamed)
+                        .count()
+                        > 0
+                } else {
+                    rename(node)
+                };
+                if changed {
+                    let within = place.split_once('.').map_or("", |(_, rest)| rest);
+                    places.push(within.to_owned());
+                }
+                Ok(())
+            },
+        )?;
+        self.touch(list, index, operation, Touch::Keys(places));
+        Ok(())
     }
 
     /// Turns the object of `list` at `index` by `degrees`, anticlockwise,

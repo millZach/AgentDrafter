@@ -43,7 +43,7 @@ use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_rows_files_in, read_set_settings,
     rows_of, shown_mtext, template_at, template_in, template_path, AttributeSet, Disk, FromRow,
     GivenValue, LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile,
-    Row, RowsFile, TableEdit, ID_SEPARATOR, LONGEST_ID, TURNED_TYPES,
+    Row, RowsFile, TableEdit, COPY_OF_KEY, ID_SEPARATOR, LONGEST_ID, TURNED_TYPES,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -481,6 +481,8 @@ struct Done {
     copies: Vec<Copied>,
     /// The sheets each copy is on, in the order of `copies`.
     copy_sheets: Vec<Vec<usize>>,
+    /// The row values a set created, giving an object its own.
+    created_row_values: Vec<String>,
     message: String,
 }
 
@@ -890,6 +892,10 @@ pub(super) fn apply(
                     .filter(|_| included[i])
                     .map(|d| d.copies.clone())
                     .unwrap_or_default(),
+                created_row_values: d
+                    .as_ref()
+                    .map(|d| d.created_row_values.clone())
+                    .unwrap_or_default(),
                 attributes_removed: d.map(|d| d.attributes_removed).unwrap_or_default(),
                 error: if included[i] {
                     None
@@ -1205,6 +1211,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 imported: None,
                 copies: Vec::new(),
                 copy_sheets: Vec::new(),
+                created_row_values: Vec::new(),
                 message: format!(
                     "adds {} {object}, `{id}`, {place}{}",
                     article(object),
@@ -1503,6 +1510,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         imported: None,
         copies: Vec::new(),
         copy_sheets: Vec::new(),
+        created_row_values: Vec::new(),
         snapped: Vec::new(),
         message: String::new(),
     };
@@ -1848,6 +1856,116 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 .find(|(b, _)| b == block)
                 .map(|(_, tags)| tags.iter().filter(|t| *t == tag).count())
         };
+        // A value the object shares with an object of its copies, the
+        // object it is a copy of, a copy of it or another copy of the same
+        // object, becomes its own when it is set, so that setting it sets
+        // this object alone; the others keep the value as they show it
+        // (Zach, 2026-11-21). A value shared with any other object is set
+        // where it is, as every row value is (decision 5).
+        let mut sets = sets;
+        let mut created: Vec<String> = Vec::new();
+        let mut refused_on = refused_on;
+        if let FileRef::Template(_) = file {
+            let shared: Vec<String> = match at.template(t) {
+                Ok(template) => {
+                    let listed = template.objects(ObjectList::Template);
+                    let first_of = |i: usize| {
+                        template
+                            .object_value(ObjectList::Template, i, COPY_OF_KEY)
+                            .map(|c| c.to_lowercase())
+                    };
+                    let mine = listed[index].id.to_lowercase();
+                    let my_first = first_of(index);
+                    let kin = |i: usize| {
+                        let theirs = first_of(i);
+                        theirs.as_deref() == Some(mine.as_str())
+                            || my_first.as_deref() == Some(listed[i].id.to_lowercase().as_str())
+                            || (my_first.is_some() && theirs == my_first)
+                    };
+                    sets.iter()
+                        .map(|(name, _)| name.clone())
+                        .filter(|name| {
+                            template
+                                .row_value_places(name, &carries)
+                                .iter()
+                                .any(|(i, _)| *i != index && kin(*i))
+                        })
+                        .collect()
+                }
+                Err(_) => Vec::new(),
+            };
+            if !shared.is_empty() {
+                if let Some(refusal) = many_paths(files, file, op, "target") {
+                    return refusal;
+                }
+                let built_from = files.templates[t].sheets.clone();
+                let local = id.split_once(ID_SEPARATOR).map_or(id.as_str(), |(_, l)| l);
+                // Its own value's name: the value's and the object's ID,
+                // joined by `-`, `_` for a character a value's name does not
+                // take, and a number after it when the name is taken.
+                let mut taken: BTreeSet<String> = BTreeSet::new();
+                for &s in &built_from {
+                    let (rows, l) = at.row_record(s);
+                    if let ObjectList::Row(r) = l {
+                        taken.extend(rows.row_value_names(r));
+                    }
+                }
+                let renamed: Vec<(String, String)> = shared
+                    .iter()
+                    .map(|old| {
+                        let base: String = format!("{old}-{local}")
+                            .chars()
+                            .map(|c| {
+                                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                                    c
+                                } else {
+                                    '_'
+                                }
+                            })
+                            .collect();
+                        let new = std::iter::once(base.clone())
+                            .chain((2..).map(|n| format!("{base}-{n}")))
+                            .find(|n| !taken.contains(n))
+                            .expect("a free name");
+                        taken.insert(new.clone());
+                        (old.clone(), new)
+                    })
+                    .collect();
+                match at.template(t) {
+                    Ok(template) => {
+                        if let Err(e) = template.rename_row_values(list, index, &renamed, op.index)
+                        {
+                            return fail(reach, from_record(e));
+                        }
+                        done.after = Some(template.object_text(list, index));
+                    }
+                    Err(e) => return fail(reach, e),
+                }
+                // On every sheet built from the template, the new value is
+                // what the object showed; on this sheet it is then set.
+                for &s in &built_from {
+                    let (rows, l) = at.row_record(s);
+                    let ObjectList::Row(r) = l else {
+                        continue;
+                    };
+                    for (old, new) in &renamed {
+                        if let Some(text) = rows.row_value(r, old) {
+                            if let Err(e) = rows.add_row_value(r, new, &text) {
+                                return fail(reach, from_record(e));
+                            }
+                        }
+                    }
+                }
+                for (name, _) in sets.iter_mut() {
+                    if let Some((_, new)) = renamed.iter().find(|(old, _)| old == name) {
+                        new.clone_into(name);
+                    }
+                }
+                created = renamed.into_iter().map(|(_, new)| new).collect();
+                sheets.clone_from(&reach);
+                refused_on.clone_from(&reach);
+            }
+        }
         // A row's value fills every place on the sheet its template takes
         // it, and each is edited: none may be on a locked layer.
         if let Ok(template) = at.template(t) {
@@ -1959,6 +2077,17 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         } else {
             format!("{}; and {row_message}", done.message)
         };
+        if !created.is_empty() {
+            let names: Vec<String> = created.iter().map(|n| format!("`{n}`")).collect();
+            done.message.push_str(&format!(
+                "; `{id}` shared the value with its copies, so it takes its own row value {}, \
+                 written in the row of every sheet built from the template, set to what it \
+                 showed there, and to the new value on sheet `{}`; the others keep theirs",
+                join_and(&names),
+                files.name(k)
+            ));
+            done.created_row_values = created;
+        }
         if !sheets.contains(&k) {
             sheets.push(k);
         }
@@ -2325,6 +2454,7 @@ fn apply_table(
             imported: None,
             copies: Vec::new(),
             copy_sheets: Vec::new(),
+            created_row_values: Vec::new(),
             snapped: Vec::new(),
             message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
         }),
@@ -2517,6 +2647,7 @@ fn apply_block(
             imported: None,
             copies: Vec::new(),
             copy_sheets: Vec::new(),
+            created_row_values: Vec::new(),
             snapped: Vec::new(),
             message: format!("{what}{removed}{on}"),
         }),
@@ -2688,6 +2819,7 @@ fn apply_import(
             imported: Some(imported),
             copies: Vec::new(),
             copy_sheets: Vec::new(),
+            created_row_values: Vec::new(),
             snapped: Vec::new(),
             message: format!(
                 "imports from `{}` into the block library `{written}`: {}{left_out}{on}",
@@ -3402,6 +3534,7 @@ fn apply_dimension_from(
             imported: None,
             copies: Vec::new(),
             copy_sheets: Vec::new(),
+            created_row_values: Vec::new(),
             message: format!(
                 "adds {what}, `{added}`, from `{}`, {place}{}",
                 found.id,
@@ -3676,18 +3809,8 @@ fn apply_copy(
             Err(e) => return fail(reach, e),
         }
     }
-    // The names of the values the rows of the sheets the copies reach give,
-    // which a copy's own row value does not take.
-    let mut value_names: BTreeSet<String> = BTreeSet::new();
-    for &s in &reach {
-        let (rows, list) = at.row_record(s);
-        if let ObjectList::Row(r) = list {
-            value_names.extend(rows.row_value_names(r));
-        }
-    }
     let mut copies: Vec<Copied> = Vec::with_capacity(places.len() * found.len());
     let mut copy_sheets: Vec<Vec<usize>> = Vec::with_capacity(copies.capacity());
-    let mut own_values = false;
     for place in &places {
         for (f, _) in &found {
             let on = at.reach(f.file, f.row);
@@ -3709,57 +3832,24 @@ fn apply_copy(
                     .expect("a sheet it reaches")
                     .insert(local.to_lowercase());
             }
-            // A value the copy takes from the row becomes its own, named
-            // after the value and the copy, so that setting the copy's value
-            // sets it alone (decision 5).
-            let mut own = |name: &str| {
-                let base: String = format!("{name}-{local}")
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                            c
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
-                let free = std::iter::once(base.clone())
-                    .chain((2..).map(|n| format!("{base}-{n}")))
-                    .find(|n| !value_names.contains(n))
-                    .expect("a free name");
-                value_names.insert(free.clone());
-                free
-            };
+            // The first object of the copies: the source's own when it is a
+            // copy itself.
+            let first = record
+                .object_value(f.list, f.index, COPY_OF_KEY)
+                .unwrap_or_else(|| record.objects(f.list)[f.index].id.clone());
             let made = record
-                .duplicate(f.list, f.index, &local, op.index, &mut own)
-                .and_then(|(index, renamed)| {
+                .duplicate(f.list, f.index, &local, &first, op.index)
+                .and_then(|index| {
                     if place.by != [0.0; 3] {
                         record.move_by(f.list, index, place.by, units, op.index)?;
                     }
                     if place.turn != 0.0 {
                         record.turn_by(f.list, index, place.about, place.turn, units, op.index)?;
                     }
-                    Ok(renamed)
+                    Ok(())
                 });
-            let renamed = match made {
-                Ok(renamed) => renamed,
-                Err(e) => return fail(reach, op_err(e.code, e.message, "")),
-            };
-            // Each of its own row values is set, on every sheet it is on, to
-            // the value its source's shows there.
-            for (old, new) in &renamed {
-                for &s in &on {
-                    let (rows, list) = at.row_record(s);
-                    let ObjectList::Row(r) = list else {
-                        continue;
-                    };
-                    if let Some(text) = rows.row_value(r, old) {
-                        if let Err(e) = rows.add_row_value(r, new, &text) {
-                            return fail(reach, op_err(e.code, e.message, ""));
-                        }
-                        own_values = true;
-                    }
-                }
+            if let Err(e) = made {
+                return fail(reach, op_err(e.code, e.message, ""));
             }
             let (offset, row, column, item, along) = match place.at {
                 array::At::Offset(i) => (Some(i), None, None, None, None),
@@ -3781,7 +3871,6 @@ fn apply_copy(
                 by: place.by,
                 turned: turned.then_some(place.turn),
                 about: turned.then_some(place.about),
-                row_values: renamed.into_iter().map(|(_, new)| new).collect(),
             });
             copy_sheets.push(on);
         }
@@ -3905,14 +3994,8 @@ fn apply_copy(
     } else {
         "copies"
     };
-    let own_words = if own_values {
-        "; each value a copy takes from the row is its own, under `row_values`, set on each \
-         sheet to the value its source shows there"
-    } else {
-        ""
-    };
     let message = format!(
-        "{verb} {what} {how}, making {}, written {}: {}{own_words}{}",
+        "{verb} {what} {how}, making {}, written {}: {}{}",
         plural(copies.len(), "copy", "copies"),
         written.join(" and "),
         listed(&ids),
@@ -3928,10 +4011,9 @@ fn apply_copy(
             FileRef::Rows(_) => None,
         })
         .max_by_key(|&t| files.templates[t].sheets.len());
-    let writes_rows = own_values
-        || found
-            .iter()
-            .any(|(f, _)| matches!(f.file, FileRef::Rows(_)));
+    let writes_rows = found
+        .iter()
+        .any(|(f, _)| matches!(f.file, FileRef::Rows(_)));
     let record = match template {
         Some(t) if !writes_rows || files.templates[t].sheets.len() > 1 => {
             files.templates[t].path.clone()
@@ -3953,6 +4035,7 @@ fn apply_copy(
             snapped,
             copies,
             copy_sheets,
+            created_row_values: Vec::new(),
             message,
         }),
         sheets: reach,

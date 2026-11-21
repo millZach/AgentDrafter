@@ -321,7 +321,7 @@ A named, typed action on a drawing, such as `insert_block`. Where AutoCAD has th
 _Avoid_: command (the word for what a person types), tool, call
 
 **Copy**:
-An ordinary object an operation made from another, its source, as AutoCAD's COPY makes one: every key of its source, an insert's attribute values among them, but its name, moved to its place and, in an array, turned. It has an ID of its own, its source's `id` and the first number free on the sheets it reaches, such as `term-3`, and is written where its source is: a copy of a template's object in the template, so on every sheet built from it, and of a row's own object in the row. A value its source takes from the row becomes the copy's own row value, set to what the source shows, so setting the copy's value sets it alone. Nothing ties it to its source afterwards.
+An ordinary object an operation made from another, its source, as AutoCAD's COPY makes one: every key of its source, an insert's attribute values among them, but its name, moved to its place and, in an array, turned. It has an ID of its own, its source's `id` and the first number free on the sheets it reaches, such as `term-3`, and is written where its source is: a copy of a template's object in the template, so on every sheet built from it, and of a row's own object in the row. It names the object it was copied from under `copy_of`, which makes it one of a **copy family** with its source and the source's other copies. A value its source takes from the row it shares until one is set: then the object set takes its own row value, and the others keep theirs. Nothing else ties it to its source.
 _Avoid_: duplicate, clone, instance
 
 **Array**:

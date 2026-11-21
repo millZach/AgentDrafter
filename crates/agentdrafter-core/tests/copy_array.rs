@@ -239,7 +239,7 @@ fn a_copy_keeps_an_inserts_attribute_values_but_not_its_name() {
     }
     let template = fs::read_to_string(set.join("templates/strip.yaml")).unwrap();
     assert!(template.contains(
-        "  - insert: {id: term-1, block: TERM, position: [30, 50, 0], attributes: {NUMBER: '1'}}"
+        "  - insert: {id: term-1, block: TERM, position: [30, 50, 0], attributes: {NUMBER: '1'}, copy_of: term}"
     ), "{template}");
     assert_eq!(template.matches("first-terminal").count(), 1);
 }
@@ -681,7 +681,7 @@ fn a_failed_lookup_fails_every_sheet_the_template_reaches_so_none_is_half_edited
 }
 
 #[test]
-fn a_copy_takes_its_own_row_values_so_setting_one_copy_changes_it_alone() {
+fn a_copy_shares_its_sources_row_values_until_one_is_set_and_then_takes_its_own() {
     let template = TEMPLATE.replace(
         "attributes: {NUMBER: '1'}",
         "attributes: {NUMBER: {row: TNUM}}",
@@ -695,47 +695,100 @@ fn a_copy_takes_its_own_row_values_so_setting_one_copy_changes_it_alone() {
             "values: {TITLE: STRIP TWO}",
             "values:\n      TITLE: STRIP TWO\n      TNUM: '5'",
         );
+    let number = |objects: &BTreeMap<String, Object>, id: &str| {
+        insert(objects, id).attributes[0].value.clone()
+    };
+    let shown = |set: &Path| -> Vec<String> {
+        let objects = recorded(set);
+        ["term", "term-1", "term-2"]
+            .iter()
+            .flat_map(|id| ["ARR-001", "ARR-002"].map(|s| number(&objects, &format!("{s}/{id}"))))
+            .collect()
+    };
+    let copy = json!({"op": "copy", "target": {"id": "ARR-001/term"}, "offsets": [[10, 0, 0], [20, 0, 0]]});
+
+    // Copied twice: the copies share the source's value, and the rows
+    // gain nothing.
+    let set = strip_set_with("shared-row-values", &template, &rows);
+    let rows_before = fs::read(set.join("rows.yaml")).unwrap();
+    lands(&set, json!([copy]));
+    assert_eq!(fs::read(set.join("rows.yaml")).unwrap(), rows_before);
+    let template_text = fs::read_to_string(set.join("templates/strip.yaml")).unwrap();
+    assert_eq!(template_text.matches("{NUMBER: {row: TNUM}}").count(), 3);
+    assert_eq!(template_text.matches("copy_of: term}").count(), 2);
+    assert_eq!(shown(&set), ["1", "5", "1", "5", "1", "5"]);
+
+    // Set one copy in the same change set: it alone takes its own value,
+    // on every sheet built from the template, the new value on its sheet
+    // and the old on the other.
     let set = strip_set_with("own-row-values", &template, &rows);
     let report = lands(
         &set,
         json!([
-            {"op": "copy", "target": {"id": "ARR-001/term"}, "offsets": [[10, 0, 0], [20, 0, 0]]},
+            copy,
             {"op": "set_attribute", "target": {"id": "ARR-002/term-2"}, "tag": "NUMBER", "value": "9"},
         ]),
     );
-    let op = &report.operations[0];
-    assert_eq!(op.copies[0].row_values, ["TNUM-term-1"]);
-    assert_eq!(op.copies[1].row_values, ["TNUM-term-2"]);
-    assert!(op.record.as_deref().unwrap().ends_with("strip.yaml"));
+    assert_eq!(report.operations[1].created_row_values, ["TNUM-term-2"]);
+    assert_eq!(report.operations[1].sheets, ["ARR-001", "ARR-002"]);
     let rows_text = fs::read_to_string(set.join("rows.yaml")).unwrap();
     assert!(
-        rows_text.contains("values: {TITLE: STRIP ONE, TNUM: '1', TNUM-term-1: 1, TNUM-term-2: 1}"),
+        rows_text.contains("values: {TITLE: STRIP ONE, TNUM: '1', TNUM-term-2: 1}"),
         "{rows_text}"
     );
     assert!(
-        rows_text.contains("      TNUM: '5'\n      TNUM-term-1: 5\n      TNUM-term-2: 9\n"),
+        rows_text.contains("      TNUM: '5'\n      TNUM-term-2: 9\n"),
         "{rows_text}"
     );
-    let number = |objects: &BTreeMap<String, Object>, id: &str| {
-        insert(objects, id).attributes[0].value.clone()
-    };
-    let objects = recorded(&set);
-    // Each copy shows what its source shows on each sheet; the one set
-    // changed alone.
-    assert_eq!(number(&objects, "ARR-001/term-1"), "1");
-    assert_eq!(number(&objects, "ARR-002/term-1"), "5");
-    assert_eq!(number(&objects, "ARR-002/term-2"), "9");
-    // A later change set sets one copy's value on one sheet alone.
-    lands(
+    assert_eq!(shown(&set), ["1", "5", "1", "5", "1", "9"]);
+
+    // And in the next change set, another copy on the other sheet.
+    let before = snapshot::snapshot(&set);
+    let report = lands(
         &set,
         json!([{"op": "set_attribute", "target": {"id": "ARR-001/term-1"}, "tag": "NUMBER", "value": "2"}]),
     );
+    assert_eq!(report.operations[0].created_row_values, ["TNUM-term-1"]);
+    let entry = report.journal_entry.unwrap();
+    assert_eq!(shown(&set), ["1", "5", "2", "5", "1", "9"]);
+    // Its value is its own now: set again, it is set where it is.
+    let again = lands(
+        &set,
+        json!([{"op": "set_attribute", "target": {"id": "ARR-001/term-1"}, "tag": "NUMBER", "value": "3"}]),
+    );
+    assert!(again.operations[0].created_row_values.is_empty());
+    assert_eq!(again.operations[0].sheets, ["ARR-001"]);
+    assert_eq!(shown(&set), ["1", "5", "3", "5", "1", "9"]);
+    // Undo puts the rows and the template back byte for byte.
+    let undone = undo(&UndoRequest {
+        set: set.clone(),
+        change_set: entry,
+        dry_run: false,
+    });
+    assert!(undone.ok, "{:#?}", undone.error);
+    assert_eq!(snapshot::snapshot(&set), before);
+}
+
+#[test]
+fn a_copied_texts_contents_from_the_row_become_its_own_when_changed() {
+    let set = strip_set("own-contents");
+    let report = lands(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/title"}, "by": [0, -10, 0]},
+            {"op": "change", "target": {"id": "ARR-001/title-1"}, "set": {"contents": "COPY ONE"}},
+        ]),
+    );
+    assert_eq!(report.operations[1].created_row_values, ["TITLE-title-1"]);
     let objects = recorded(&set);
-    let shown: Vec<String> = ["term", "term-1", "term-2"]
-        .iter()
-        .flat_map(|id| ["ARR-001", "ARR-002"].map(|s| number(&objects, &format!("{s}/{id}"))))
-        .collect();
-    assert_eq!(shown, ["1", "5", "2", "5", "1", "9"]);
+    let contents = |id: &str| match &objects[id] {
+        Object::Text(text) => text.contents.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(contents("ARR-001/title"), "STRIP ONE");
+    assert_eq!(contents("ARR-001/title-1"), "COPY ONE");
+    assert_eq!(contents("ARR-002/title"), "STRIP TWO");
+    assert_eq!(contents("ARR-002/title-1"), "STRIP TWO");
 }
 
 #[test]
@@ -990,6 +1043,25 @@ fn the_array_schema_refuses_what_the_reader_refuses() {
             accepted,
             "the reader: {op} {:?}",
             reply.error
+        );
+    }
+    // The object a copy is a copy of: an ID in the file, as text.
+    let schema = jsonschema::validator_for(&sheet_description_schema()).unwrap();
+    for (copy_of, accepted) in [
+        (json!("term"), true),
+        (json!("objects[2]"), true),
+        (json!(7), true),
+        (json!(""), false),
+        (json!("  "), false),
+        (json!(["term"]), false),
+    ] {
+        let sheet = json!({"units": "mm", "objects": [{"line": {"from": [0, 0, 0], "to": [1, 0, 0], "copy_of": copy_of}}]});
+        assert_eq!(schema.is_valid(&sheet), accepted, "{copy_of}");
+        let yaml = serde_json::to_string(&sheet).unwrap();
+        assert_eq!(
+            parse_sheet_description(&yaml).is_ok(),
+            accepted,
+            "the reader: {copy_of}"
         );
     }
     // A hatch's origin, which SOLID does not take.

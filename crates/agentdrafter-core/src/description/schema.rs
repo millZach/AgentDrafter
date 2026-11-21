@@ -21,7 +21,9 @@
 use serde_json::{json, Map, Value};
 
 use super::blocks::LIBRARY_KEYS;
-use super::ids::{ID_KEY, ID_PUNCTUATION, ID_SEPARATOR, LONGEST_ID, SHEET_OBJECT_KEYS};
+use super::ids::{
+    COPY_OF_KEY, ID_KEY, ID_PUNCTUATION, ID_SEPARATOR, LONGEST_ID, SHEET_OBJECT_KEYS,
+};
 use super::layers::{
     colour_names, COLOUR_NAMES, FORBIDDEN_IN_NAMES, LONGEST_DESCRIPTION, LONGEST_LAYER_DESCRIPTION,
     LONGEST_NAME, LONGEST_PATTERN, PROPERTY_KEYS,
@@ -176,6 +178,7 @@ fn sheet_defs() -> Map<String, Value> {
                 let def = match key {
                     ID_KEY => "object_id",
                     SPACE_KEY => "object_space",
+                    COPY_OF_KEY => "object_copy_of",
                     _ => "object_name",
                 };
                 properties.insert(key.into(), json!({ "$ref": format!("#/$defs/{def}") }));
@@ -192,6 +195,16 @@ fn sheet_defs() -> Map<String, Value> {
         .collect::<Vec<_>>()
         .join(", ");
     defs.insert("object_space".into(), super::layout::space_property());
+    defs.insert(
+        "object_copy_of".into(),
+        optional_text(json!({
+            "description": "The object this one is a copy of, which `copy` and `array` write:                             the ID in this file of the first object of the copies, the source,                             or for a copy of a copy, its source's own. A value the object takes                             from the row, {row: NAME}, it shares with its copies until one is                             set: setting it on one of them gives that one its own row value                             (see the change sets' Copy and array). It changes nothing drawn.                             A plain number, true or false is read as its text.",
+            "anyOf": [
+                { "type": "string", "pattern": r"\S" },
+                { "type": ["number", "boolean"] },
+            ],
+        })),
+    );
     defs.insert(
         "object_id".into(),
         optional_text(json!({
