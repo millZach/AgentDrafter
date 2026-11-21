@@ -1550,6 +1550,8 @@ objects:
             position: crate::model::Point3::new(62.0, 105.0, 0.0),
             scale: 1.0,
             rotation: 0.0,
+            mirrored: false,
+            readable_attributes: false,
             attributes: Vec::new(),
             name: None,
             layer: "0".into(),

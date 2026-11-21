@@ -1,0 +1,27 @@
+# The transforms sheet's template: a border, the title from the row, a label
+# for each group and the dashed line the third group mirrors across.
+units: mm
+block_library: ../blocks.yaml
+paper: [420, 297]
+linetypes:
+  DASHED: {pattern: [6, -3]}
+layers:
+  border: {color: white}
+  notes: {color: cyan}
+  symbols: {color: yellow}
+  wires: {color: green}
+  hatch: {color: blue}
+  dims: {color: red}
+  axis: {color: magenta, linetype: DASHED}
+hatch_patterns:
+  CROSS:
+    lines:
+      - {angle: 45, delta: [0, 3]}
+      - {angle: 135, delta: [0, 3]}
+objects:
+  - polyline: {id: border, points: [[0, 0, 0], [420, 0, 0], [420, 297, 0], [0, 297, 0]], closed: true, layer: border}
+  - text: {id: title, contents: {row: TITLE}, position: [10, 285, 0], height: 5, layer: notes}
+  - text: {id: rotate-label, contents: ROTATE 90 (COPY TURNED), position: [20, 262, 0], height: 3.5, layer: notes}
+  - text: {id: scale-label, contents: SCALE 2 (COPY DOUBLED), position: [20, 130, 0], height: 3.5, layer: notes}
+  - text: {id: mirror-label, contents: MIRROR, position: [300, 262, 0], height: 3.5, layer: notes}
+  - line: {id: mirror-axis, from: [355, 70, 0], to: [355, 255, 0], layer: axis}

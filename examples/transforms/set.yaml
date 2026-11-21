@@ -1,0 +1,15 @@
+# A made-up drawing set to show rotate, scale and mirror (#67): one sheet of
+# a made-up junction box, JB-900, with a group of objects for each
+# transform. change-set.json turns a copy of the first group a quarter
+# turn, doubles a copy of the second and mirrors the third across the
+# dashed line, with a mirrored transmitter whose attributes read forwards.
+#
+# Build it, then apply the change set, on a copy of this folder:
+#   agentdrafter build <copy>
+#   agentdrafter change <copy> <copy>/change-set.json
+#   agentdrafter render <copy>/dwg/TRN-001.dwg
+#   agentdrafter plot <copy>
+# Building writes one DWG per row into dwg/.
+units: mm
+output: dwg
+rows: rows.yaml

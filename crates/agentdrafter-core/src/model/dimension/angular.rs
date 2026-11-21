@@ -64,6 +64,9 @@ pub struct Sector {
     /// or the point it measures from reaches: nearest the vertex, and
     /// farthest.
     pub reach: [[f64; 2]; 2],
+    /// The direction of each ray, the first's and then the second's, as
+    /// its points give it: not a unit long.
+    pub rays: [[f64; 2]; 2],
 }
 
 impl Sector {
@@ -84,6 +87,43 @@ impl Sector {
         self.at(self.start + self.sweep / 3.0, self.radius)
     }
 
+    /// Whether `p` lies inside the sector clear of both its rays: so that a
+    /// hair's turn of it, as rounding gives, leaves it inside.
+    pub fn holds_clear(&self, p: Point3) -> bool {
+        let to = [p.x - self.vertex.x, p.y - self.vertex.y];
+        if to == [0.0, 0.0] {
+            return false;
+        }
+        let off = (angle_of(to) - self.start).rem_euclid(360.0);
+        off > CLEAR && off < self.sweep - CLEAR
+    }
+
+    /// The point `r` from the vertex midway round the sector, at height
+    /// `z`, worked out with no sine or cosine, so the same on every system.
+    pub fn middle(&self, r: f64, z: f64) -> Point3 {
+        let unit = |v: V| {
+            let l = (v[0] * v[0] + v[1] * v[1]).sqrt();
+            [v[0] / l, v[1] / l]
+        };
+        let (a, b) = (unit(self.rays[0]), unit(self.rays[1]));
+        let w = [a[0] + b[0], a[1] + b[1]];
+        let l = (w[0] * w[0] + w[1] * w[1]).sqrt();
+        // Across a straight angle, midway is a quarter turn anticlockwise
+        // from the first ray; past one, the far side of the rays' bisector.
+        let w = if l < 1e-6 {
+            [-a[1], a[0]]
+        } else if self.sweep > 180.0 {
+            [-w[0] / l, -w[1] / l]
+        } else {
+            [w[0] / l, w[1] / l]
+        };
+        Point3 {
+            x: self.vertex.x + w[0] * r,
+            y: self.vertex.y + w[1] * r,
+            z,
+        }
+    }
+
     /// Of a three-point angular dimension's two points, the one on the
     /// first ray.
     pub fn first_point(&self, points: &[Point3; 2]) -> Point3 {
@@ -101,6 +141,10 @@ impl Sector {
         }
     }
 }
+
+/// How far, in degrees, a point must lie from a sector's rays to be clear
+/// of them.
+const CLEAR: f64 = 1e-6;
 
 fn direction(degrees: f64) -> V {
     let (s, c) = degrees.to_radians().sin_cos();
@@ -148,10 +192,18 @@ pub(super) fn sector(measured: &Measured, location: Point3) -> Option<Sector> {
             }
             let theta = angle_of(to);
             let rays = [
-                (angle_of(u1), 0),
-                ((angle_of(u1) + 180.0).rem_euclid(360.0), 0),
-                (angle_of(u2), 1),
-                ((angle_of(u2) + 180.0).rem_euclid(360.0), 1),
+                (angle_of(u1), 0, u1),
+                (
+                    (angle_of(u1) + 180.0).rem_euclid(360.0),
+                    0,
+                    [-u1[0], -u1[1]],
+                ),
+                (angle_of(u2), 1, u2),
+                (
+                    (angle_of(u2) + 180.0).rem_euclid(360.0),
+                    1,
+                    [-u2[0], -u2[1]],
+                ),
             ];
             let behind = |a: f64| (theta - a).rem_euclid(360.0);
             let ahead = |a: f64| (a - theta).rem_euclid(360.0);
@@ -181,6 +233,7 @@ pub(super) fn sector(measured: &Measured, location: Point3) -> Option<Sector> {
                     met(reach(vertex, first.0, &lines[first.1])),
                     met(reach(vertex, second.0, &lines[second.1])),
                 ],
+                rays: [first.2, second.2],
             })
         }
         Measured::ThreePointAngular { center, points } => {
@@ -193,11 +246,11 @@ pub(super) fn sector(measured: &Measured, location: Point3) -> Option<Sector> {
             }
             let (a1, a2) = (angle_of(v1), angle_of(v2));
             let theta = angle_of(to);
-            let (start, end, reach) =
+            let (start, end, reach, rays) =
                 if (theta - a1).rem_euclid(360.0) <= (a2 - a1).rem_euclid(360.0) {
-                    (a1, a2, [[d1, d1], [d2, d2]])
+                    (a1, a2, [[d1, d1], [d2, d2]], [v1, v2])
                 } else {
-                    (a2, a1, [[d2, d2], [d1, d1]])
+                    (a2, a1, [[d2, d2], [d1, d1]], [v2, v1])
                 };
             let sweep = (end - start).rem_euclid(360.0);
             if sweep == 0.0 {
@@ -209,6 +262,7 @@ pub(super) fn sector(measured: &Measured, location: Point3) -> Option<Sector> {
                 sweep,
                 radius,
                 reach,
+                rays,
             })
         }
         _ => None,

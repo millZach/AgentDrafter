@@ -28,7 +28,7 @@ use super::from_dimension::dimension_from;
 use super::journal::{commit_change_set, HowChanged, Keeping, Landing, ObjectChanged, SheetFailed};
 use super::operations::{
     op_error, read_change_set, AddTo, BlockOp, Body, FromOp, Import, Kind, Motion, OpPoint,
-    Operation, Pattern, PointSnap, Table, TableOp, Target, ROW_VALUE_KEY,
+    Operation, Pattern, PointSnap, Table, TableOp, Target, TransformBy, ROW_VALUE_KEY,
 };
 use super::MARK_FILE;
 use super::{
@@ -42,8 +42,9 @@ use crate::description::SheetRecord;
 use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_rows_files_in, read_set_settings,
     rows_of, shown_mtext, template_at, template_in, template_path, AttributeSet, Disk, FromRow,
-    GivenValue, LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile,
-    Row, RowsFile, TableEdit, COPY_OF_KEY, ID_SEPARATOR, LONGEST_ID, TURNED_TYPES,
+    GivenValue, How, LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles,
+    RecordFile, Resolved, Row, RowsFile, TableEdit, Transform, COPY_OF_KEY, ID_SEPARATOR,
+    LONGEST_ID,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -481,6 +482,9 @@ struct Done {
     copies: Vec<Copied>,
     /// The sheets each copy is on, in the order of `copies`.
     copy_sheets: Vec<Vec<usize>>,
+    /// Each object a rotate, a scale or a mirror in place transformed, by
+    /// its ID on the sheet named, and the sheets it is on.
+    transformed: Vec<(String, Vec<usize>)>,
     /// The row values a set created, giving an object its own.
     created_row_values: Vec<String>,
     message: String,
@@ -537,6 +541,17 @@ fn objects_changed(
         // line draws as the block now does.
         for id in &d.inserts {
             add(id.clone(), HowChanged::Changed);
+        }
+        // Each object transformed in place is changed, on every sheet it is
+        // on.
+        for (id, on) in &d.transformed {
+            let local = id.split_once(ID_SEPARATOR).map_or(id.as_str(), |(_, l)| l);
+            for &k in on {
+                add(
+                    format!("{}{ID_SEPARATOR}{local}", files.name(k)),
+                    HowChanged::Changed,
+                );
+            }
         }
         // Each copy is added, on every sheet it is on.
         for (copy, on) in d.copies.iter().zip(&d.copy_sheets) {
@@ -892,6 +907,11 @@ pub(super) fn apply(
                     .filter(|_| included[i])
                     .map(|d| d.copies.clone())
                     .unwrap_or_default(),
+                transformed: d
+                    .as_ref()
+                    .filter(|_| included[i])
+                    .map(|d| d.transformed.iter().map(|(id, _)| id.clone()).collect())
+                    .unwrap_or_default(),
                 // Nor did a row value of an operation held back.
                 created_row_values: d
                     .as_ref()
@@ -942,9 +962,12 @@ pub(super) fn apply(
 /// hold: there is no sheet to fail, so the change set itself is wrong.
 fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
     for op in ops {
-        if let Body::Copy { targets, pattern } = &op.body {
-            let path = match pattern {
-                Pattern::Path { path, .. } => Some((path, "path".to_owned())),
+        if let Body::Copy { targets, .. } | Body::Transform { targets, .. } = &op.body {
+            let path = match &op.body {
+                Body::Copy {
+                    pattern: Pattern::Path { path, .. },
+                    ..
+                } => Some((path, "path".to_owned())),
                 _ => None,
             };
             let named = targets.iter().map(|(t, key)| (t, key.clone())).chain(path);
@@ -1041,7 +1064,7 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 } => (sheet, "target.sheet"),
                 Target::Name { sheet: None, .. } => continue,
             },
-            Body::Copy { .. } => continue,
+            Body::Copy { .. } | Body::Transform { .. } => continue,
         };
         if files.sheet(sheet).is_none() {
             return Err(op_error(
@@ -1213,6 +1236,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 imported: None,
                 copies: Vec::new(),
                 copy_sheets: Vec::new(),
+                transformed: Vec::new(),
                 created_row_values: Vec::new(),
                 message: format!(
                     "adds {} {object}, `{id}`, {place}{}",
@@ -1290,6 +1314,9 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
     if let Body::Copy { targets, pattern } = &op.body {
         return apply_copy(at, op, targets, pattern, settings);
     }
+    if let Body::Transform { targets, by } = &op.body {
+        return apply_transform(at, op, targets, by, settings);
+    }
 
     let target = match &op.body {
         Body::Change { target, .. }
@@ -1302,7 +1329,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
-        | Body::Copy { .. } => {
+        | Body::Copy { .. }
+        | Body::Transform { .. } => {
             unreachable!("handled above")
         }
     };
@@ -1512,6 +1540,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         imported: None,
         copies: Vec::new(),
         copy_sheets: Vec::new(),
+        transformed: Vec::new(),
         created_row_values: Vec::new(),
         snapped: Vec::new(),
         message: String::new(),
@@ -1683,7 +1712,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
-        | Body::Copy { .. } => {
+        | Body::Copy { .. }
+        | Body::Transform { .. } => {
             unreachable!("handled above")
         }
     }
@@ -2505,6 +2535,7 @@ fn apply_table(
             imported: None,
             copies: Vec::new(),
             copy_sheets: Vec::new(),
+            transformed: Vec::new(),
             created_row_values: Vec::new(),
             snapped: Vec::new(),
             message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
@@ -2698,6 +2729,7 @@ fn apply_block(
             imported: None,
             copies: Vec::new(),
             copy_sheets: Vec::new(),
+            transformed: Vec::new(),
             created_row_values: Vec::new(),
             snapped: Vec::new(),
             message: format!("{what}{removed}{on}"),
@@ -2870,6 +2902,7 @@ fn apply_import(
             imported: Some(imported),
             copies: Vec::new(),
             copy_sheets: Vec::new(),
+            transformed: Vec::new(),
             created_row_values: Vec::new(),
             snapped: Vec::new(),
             message: format!(
@@ -3585,6 +3618,7 @@ fn apply_dimension_from(
             imported: None,
             copies: Vec::new(),
             copy_sheets: Vec::new(),
+            transformed: Vec::new(),
             created_row_values: Vec::new(),
             message: format!(
                 "adds {what}, `{added}`, from `{}`, {place}{}",
@@ -3620,6 +3654,440 @@ fn copy_base(listed: &Listed) -> String {
     }
 }
 
+/// The objects `targets` names, each with its key in the operation, all
+/// of one sheet; the sheets they reach; and that sheet. Every object is
+/// looked up before any fails the operation, so that a lookup that fails
+/// fails every sheet the objects found reach too: a sheet that shares
+/// their template is not left to take the change set's other operations
+/// without its part of this one (ADR-0005). An object named twice, one on
+/// a locked layer, which AutoCAD does not select, and objects of two
+/// sheets are refused.
+#[allow(clippy::type_complexity)]
+fn found_objects<'t>(
+    at: &mut Attempt,
+    op: &Operation,
+    targets: &'t [(Target, String)],
+) -> Result<(Vec<(Found, &'t str)>, Vec<usize>, usize), Box<Applied>> {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| {
+        Box::new(Applied {
+            sheets,
+            outcome: Err(e),
+            refuse: false,
+        })
+    };
+    let (one_sheet, done) = match op.spec.kind {
+        Kind::Rotate => ("one rotate turns", "turned"),
+        Kind::Scale => ("one scale scales", "scaled"),
+        Kind::Mirror => ("one mirror mirrors", "mirrored"),
+        _ => ("one copy or array copies", "copied"),
+    };
+    let mut found: Vec<(Found, &str)> = Vec::with_capacity(targets.len());
+    let mut lookup: Option<Applied> = None;
+    for (target, key) in targets {
+        match resolve(at, target, op) {
+            Ok(object) => found.push((object, key)),
+            Err(applied) if applied.refuse => return Err(Box::new(keyed(*applied, op, key))),
+            Err(applied) => {
+                lookup.get_or_insert_with(|| keyed(*applied, op, key));
+            }
+        }
+    }
+    let mut reach: BTreeSet<usize> = BTreeSet::new();
+    for (f, _) in &found {
+        reach.extend(at.reach(f.file, f.row));
+    }
+    if let Some(mut failed) = lookup {
+        reach.extend(failed.sheets.iter().copied());
+        failed.sheets = reach.into_iter().collect();
+        return Err(Box::new(failed));
+    }
+    let reach: Vec<usize> = reach.into_iter().collect();
+    let k = found[0].0.row;
+    if let Some((other, key)) = found.iter().find(|(f, _)| f.row != k) {
+        return Err(fail(
+            reach.clone(),
+            op_err(
+                ErrorCode::BadValue,
+                format!(
+                    "`{}` is on sheet `{}` and `{}` on sheet `{}`; {one_sheet} objects of one \
+                     sheet, so send one for each sheet",
+                    found[0].0.id,
+                    files.name(k),
+                    other.id,
+                    files.name(other.row)
+                ),
+                key,
+            ),
+        ));
+    }
+    for (i, (f, key)) in found.iter().enumerate() {
+        if let Some((_, first)) = found[..i]
+            .iter()
+            .find(|(g, _)| (g.file, g.list, g.index) == (f.file, f.list, f.index))
+        {
+            return Err(fail(
+                reach,
+                op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`{}` is named twice, at {first} and here; name it once",
+                        f.id
+                    ),
+                    key,
+                ),
+            ));
+        }
+        if let Some(layer) = locked_layer(at, f) {
+            return Err(fail(
+                reach,
+                op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` sits on layer `{layer}`, which is locked, so it is not {done}; \
+                         unlock it first with change_layer, set: {{\"locked\": false}}, in \
+                         this change set or an earlier one",
+                        f.id
+                    ),
+                    key,
+                ),
+            ));
+        }
+        if let Some(refusal) = many_paths(files, f.file, op, key) {
+            return Err(Box::new(refusal));
+        }
+    }
+    Ok((found, reach, k))
+}
+
+/// What each of `found` draws with that a transform `t` writes as its own:
+/// a leader's and a multileader's lengths from its style or the sheet's
+/// defaults, which a scaling scales, and a table's size, which a mirror
+/// places it by; worked out on sheet `k` as the change set has left it.
+fn resolved_for(
+    at: &Attempt,
+    op: &Operation,
+    k: usize,
+    found: &[(Found, &str)],
+    t: &Transform,
+) -> Result<Vec<Resolved>, Error> {
+    let scaled = t.factor() != 1.0;
+    let mut resolved = vec![Resolved::default(); found.len()];
+    if !scaled && !t.mirrors() {
+        return Ok(resolved);
+    }
+    let needs = |o: &Object| match o {
+        Object::MLeader(_) | Object::Leader(_) => scaled,
+        Object::Table(_) => t.mirrors(),
+        _ => false,
+    };
+    let rows = at.rows_now()?;
+    let mut sheet: Option<SheetRecord> = None;
+    for (i, (f, _)) in found.iter().enumerate() {
+        if sheet.is_none() {
+            sheet = Some(
+                sheet_record(at, &rows, k, &mut Vec::new()).map_err(|e| Error {
+                    message: format!(
+                        "operation {} (`{}`): sheet `{}` cannot be read to work out what its \
+                     objects draw with: {}",
+                        op.index,
+                        op.spec.name,
+                        at.files.name(k),
+                        e.message
+                    ),
+                    ..e
+                })?,
+            );
+        }
+        let record = sheet.as_ref().expect("read above");
+        let Some(place) = model_index(record, f) else {
+            continue;
+        };
+        let object = &record.sheet.objects[place];
+        if !needs(object) {
+            continue;
+        }
+        resolved[i] = match object {
+            Object::MLeader(m) => {
+                let style = record.sheet.mleader_style(&m.mleader_style);
+                let mut lengths = Vec::new();
+                if let Some(style) = style {
+                    lengths.push(("arrow_size", m.arrow_size.unwrap_or(style.arrow_size)));
+                    lengths.push(("landing", m.landing.unwrap_or(style.landing)));
+                    if let crate::model::MLeaderContent::Text(text) = &m.content {
+                        lengths.push(("gap", m.gap.unwrap_or(style.landing_gap)));
+                        lengths.push(("content.height", text.height.unwrap_or(style.text_height)));
+                    }
+                }
+                Resolved {
+                    lengths,
+                    size: None,
+                }
+            }
+            Object::Leader(l) => {
+                let mut lengths = vec![("arrow_size", l.arrow_size), ("gap", l.gap)];
+                if let Some(annotation) = &l.annotation {
+                    lengths.push(("annotation.height", annotation.height));
+                }
+                Resolved {
+                    lengths,
+                    size: None,
+                }
+            }
+            Object::Table(table) => Resolved {
+                lengths: Vec::new(),
+                size: Some([table.columns.iter().sum(), table.rows.iter().sum()]),
+            },
+            _ => Resolved::default(),
+        };
+    }
+    Ok(resolved)
+}
+
+/// Turns, scales or mirrors the objects `targets` names in place, as
+/// AutoCAD's ROTATE, SCALE and MIRROR with its source erased do (#67): each
+/// keeps its ID and is written where it is, a template's object in the
+/// template, so on every sheet built from it, all or nothing, and a row's
+/// own object in the row.
+fn apply_transform(
+    at: &mut Attempt,
+    op: &Operation,
+    targets: &[(Target, String)],
+    by: &TransformBy,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let units = files.units;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let (found, reach, k) = match found_objects(at, op, targets) {
+        Ok(found) => found,
+        Err(applied) => return *applied,
+    };
+    // The points, worked out on the sheets the objects reach as they stand
+    // now.
+    let mut snapped: Vec<SnapResolved> = Vec::new();
+    let mut point = |at: &Attempt, p: &OpPoint| match p {
+        OpPoint::At(xyz) => Ok(*xyz),
+        OpPoint::Snap(snap) => {
+            snapped_points(at, op, &reach, &[snap], settings).map(|mut found| {
+                let (xyz, resolved) = found.remove(0);
+                snapped.push(resolved);
+                xyz
+            })
+        }
+    };
+    let t = match by {
+        TransformBy::Rotate { base_point, angle } => match point(at, base_point) {
+            Ok(base) => Transform::rotate(base, *angle),
+            Err(e) => return fail(reach, e),
+        },
+        TransformBy::Scale { base_point, factor } => match point(at, base_point) {
+            Ok(base) => Transform::scale(base, *factor),
+            Err(e) => return fail(reach, e),
+        },
+        TransformBy::Mirror { first, second } => {
+            let a = match point(at, first) {
+                Ok(a) => a,
+                Err(e) => return fail(reach, e),
+            };
+            let b = match point(at, second) {
+                Ok(b) => b,
+                Err(e) => return fail(reach, e),
+            };
+            match Transform::mirror(a, b) {
+                Some(t) => t,
+                None => return fail(reach, no_mirror_line(op)),
+            }
+        }
+    };
+    // What the sheet description cannot hold is refused, never
+    // approximated.
+    for (f, key) in &found {
+        let why = match at.file(f.file) {
+            Ok(record) => record.refuses_transform(f.list, f.index, &t, units),
+            Err(e) => return fail(reach, e),
+        };
+        if let Some(why) = why {
+            return fail(
+                reach,
+                op_err(ErrorCode::BadValue, format!("`{}`: {why}", f.id), key),
+            );
+        }
+    }
+    let resolved = match resolved_for(at, op, k, &found, &t) {
+        Ok(resolved) => resolved,
+        Err(e) => return fail(reach, e),
+    };
+    let one = found.len() == 1;
+    let mut before = None;
+    let mut after = None;
+    let mut transformed: Vec<(String, Vec<usize>)> = Vec::with_capacity(found.len());
+    for ((f, _), resolved) in found.iter().zip(&resolved) {
+        let on = at.reach(f.file, f.row);
+        let record = match at.file(f.file) {
+            Ok(record) => record,
+            Err(e) => return fail(reach, e),
+        };
+        if one {
+            before = Some(record.object_text(f.list, f.index));
+        }
+        if let Err(e) = record.transform(f.list, f.index, &t, resolved, units, op.index) {
+            return fail(reach, op_err(e.code, e.message, ""));
+        }
+        if one {
+            after = Some(record.object_text(f.list, f.index));
+        }
+        transformed.push((f.id.clone(), on));
+    }
+    let what = join_and(
+        &found
+            .iter()
+            .map(|(f, _)| format!("`{}`", f.id))
+            .collect::<Vec<_>>(),
+    );
+    let message = format!(
+        "{} {what} {}{}",
+        match t.how() {
+            How::Rotate(_) => "turns",
+            How::Scale(_) => "scales",
+            How::Mirror(_) => "mirrors",
+        },
+        transform_words(&t, by, units),
+        where_written(files, &found, k)
+    ) + &snapped_words(&snapped);
+    Applied {
+        outcome: Ok(Done {
+            record: record_of(files, &found, k),
+            id: one.then(|| found[0].0.id.clone()),
+            before,
+            after,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            snapped,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed,
+            created_row_values: Vec::new(),
+            message,
+        }),
+        sheets: reach,
+        refuse: false,
+    }
+}
+
+/// The error of a mirror whose two points are one seen from above.
+fn no_mirror_line(op: &Operation) -> Error {
+    op_error(
+        op.index,
+        op.spec.name,
+        ErrorCode::BadValue,
+        "second_point is first_point seen from above, so the two give no line to mirror \
+         across; give two points apart",
+        "second_point",
+    )
+}
+
+/// How a transform moves its objects, in words: `by 90 degrees about
+/// [1, 2, 0] (in)`.
+fn transform_words(t: &Transform, by: &TransformBy, units: Unit) -> String {
+    let point = |p: [f64; 3]| {
+        format!(
+            "[{}]",
+            p.iter()
+                .map(|c| crate::description::number_text(*c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    match (t.how(), by) {
+        (How::Rotate(angle), _) => format!(
+            "by {} degrees about {} ({units}), in place",
+            crate::description::number_text(angle),
+            point(t.about())
+        ),
+        (How::Scale(factor), _) => format!(
+            "by {} about {} ({units}), in place",
+            crate::description::number_text(factor),
+            point(t.about())
+        ),
+        (How::Mirror(axis), _) => format!(
+            "across the line through {} ({units}) at {} degrees, in place, erasing the source",
+            point(t.about()),
+            crate::description::number_text(axis)
+        ),
+    }
+}
+
+/// Where an operation on `found`, of sheet `k`, writes them, in words: `,
+/// in the template ..., so on every sheet built from it: ...` and `, in
+/// sheet ...'s row`.
+fn where_written(files: &SetFiles, found: &[(Found, &str)], k: usize) -> String {
+    let mut written: Vec<String> = Vec::new();
+    let in_template: BTreeSet<usize> = found
+        .iter()
+        .filter_map(|(f, _)| match f.file {
+            FileRef::Template(t) => Some(t),
+            FileRef::Rows(_) => None,
+        })
+        .collect();
+    for t in in_template {
+        let sheets = &files.templates[t].sheets;
+        written.push(if sheets.len() > 1 {
+            format!(
+                "in the template `{}`, so on {}",
+                files.templates[t].written,
+                every_sheet(&files.names(sheets))
+            )
+        } else {
+            format!("in the template `{}`", files.templates[t].written)
+        });
+    }
+    if found
+        .iter()
+        .any(|(f, _)| matches!(f.file, FileRef::Rows(_)))
+    {
+        written.push(format!("in sheet `{}`'s row", files.name(k)));
+    }
+    format!(", written {}", written.join(" and "))
+}
+
+/// The record an operation on `found`, of sheet `k`, writes, as for every
+/// edit that writes a row and a template: the template when it is built
+/// into more than one sheet, and the rows file when it serves the one
+/// sheet alone.
+fn record_of(files: &SetFiles, found: &[(Found, &str)], k: usize) -> PathBuf {
+    let template = found
+        .iter()
+        .filter_map(|(f, _)| match f.file {
+            FileRef::Template(t) => Some(t),
+            FileRef::Rows(_) => None,
+        })
+        .max_by_key(|&t| files.templates[t].sheets.len());
+    let writes_rows = found
+        .iter()
+        .any(|(f, _)| matches!(f.file, FileRef::Rows(_)));
+    match template {
+        Some(t) if !writes_rows || files.templates[t].sheets.len() > 1 => {
+            files.templates[t].path.clone()
+        }
+        _ => files.rows_path(k).to_owned(),
+    }
+}
+
 /// Copies the objects `targets` names to the places `pattern` gives: a
 /// copy or an array, AutoCAD's COPY and ARRAY as plain copies (Zach,
 /// 2026-11-21). Each copy is an ordinary object, written where its source
@@ -3645,87 +4113,10 @@ fn apply_copy(
         outcome: Err(e),
         refuse: false,
     };
-    // Every object is looked up before any fails the operation, so that a
-    // lookup that fails fails every sheet the objects found reach too: a
-    // sheet that shares their template is not left to take the change
-    // set's other operations without its part of this one (ADR-0005).
-    let mut found: Vec<(Found, &str)> = Vec::with_capacity(targets.len());
-    let mut lookup: Option<Applied> = None;
-    for (target, key) in targets {
-        match resolve(at, target, op) {
-            Ok(object) => found.push((object, key)),
-            Err(applied) if applied.refuse => return keyed(*applied, op, key),
-            Err(applied) => {
-                lookup.get_or_insert_with(|| keyed(*applied, op, key));
-            }
-        }
-    }
-    let mut reach: BTreeSet<usize> = BTreeSet::new();
-    for (f, _) in &found {
-        reach.extend(at.reach(f.file, f.row));
-    }
-    if let Some(mut failed) = lookup {
-        reach.extend(failed.sheets.iter().copied());
-        failed.sheets = reach.into_iter().collect();
-        return failed;
-    }
-    let reach: Vec<usize> = reach.into_iter().collect();
-    let k = found[0].0.row;
-    if let Some((other, key)) = found.iter().find(|(f, _)| f.row != k) {
-        return fail(
-            reach.clone(),
-            op_err(
-                ErrorCode::BadValue,
-                format!(
-                    "`{}` is on sheet `{}` and `{}` on sheet `{}`; one copy or array copies \
-                     objects of one sheet, so send one for each sheet",
-                    found[0].0.id,
-                    files.name(k),
-                    other.id,
-                    files.name(other.row)
-                ),
-                key,
-            ),
-        );
-    }
-    for (i, (f, key)) in found.iter().enumerate() {
-        if let Some((_, first)) = found[..i]
-            .iter()
-            .find(|(g, _)| (g.file, g.list, g.index) == (f.file, f.list, f.index))
-        {
-            return fail(
-                reach,
-                op_err(
-                    ErrorCode::BadValue,
-                    format!(
-                        "`{}` is named twice, at {first} and here; name it once",
-                        f.id
-                    ),
-                    key,
-                ),
-            );
-        }
-        // An object on a locked layer is not copied, as AutoCAD's COPY
-        // does not select it.
-        if let Some(layer) = locked_layer(at, f) {
-            return fail(
-                reach,
-                op_err(
-                    ErrorCode::Locked,
-                    format!(
-                        "`{}` sits on layer `{layer}`, which is locked, so it is not copied; \
-                         unlock it first with change_layer, set: {{\"locked\": false}}, in \
-                         this change set or an earlier one",
-                        f.id
-                    ),
-                    key,
-                ),
-            );
-        }
-        if let Some(refusal) = many_paths(files, f.file, op, key) {
-            return refusal;
-        }
-    }
+    let (found, reach, k) = match found_objects(at, op, targets) {
+        Ok(found) => found,
+        Err(applied) => return *applied,
+    };
 
     // The places, worked out on the sheets the copies reach, as they stand
     // now: a snapped point on each, the base point and the path on the
@@ -3742,7 +4133,23 @@ fn apply_copy(
         }
     };
     let mut path_id = None;
+    let mut mirror: Option<(Transform, [[f64; 3]; 2])> = None;
     let places = match pattern {
+        Pattern::Mirror { first, second } => {
+            let a = match point(at, first, &mut snapped) {
+                Ok(a) => a,
+                Err(e) => return fail(reach, e),
+            };
+            let b = match point(at, second, &mut snapped) {
+                Ok(b) => b,
+                Err(e) => return fail(reach, e),
+            };
+            match Transform::mirror(a, b) {
+                Some(t) => mirror = Some((t, [a, b])),
+                None => return fail(reach, no_mirror_line(op)),
+            }
+            array::offsets(&[[0.0; 3]])
+        }
         Pattern::Offsets(motions) => {
             let mut by = Vec::with_capacity(motions.len());
             for motion in motions {
@@ -3814,35 +4221,56 @@ fn apply_copy(
         }
     };
 
-    // A copy that turns is of an object a turn turns.
-    if places.iter().any(|p| p.turn != 0.0) {
+    // A copy that turns is of an object a turn turns: not a table or a
+    // viewport.
+    if let Some(turning) = places.iter().find(|p| p.turn != 0.0) {
         let key = match pattern {
             Pattern::Polar { .. } => "rotate: false",
             _ => "align: false",
         };
+        let turn = Transform::rotate(turning.about, turning.turn);
         for (f, field) in &found {
-            let kind = match at.file(f.file) {
-                Ok(record) => record.objects(f.list)[f.index].kind.clone(),
+            let why = match at.file(f.file) {
+                Ok(record) => record.refuses_transform(f.list, f.index, &turn, units),
                 Err(e) => return fail(reach, e),
             };
-            if !TURNED_TYPES.contains(&kind.as_str()) {
+            if let Some(why) = why {
                 return fail(
                     reach,
                     op_err(
                         ErrorCode::BadValue,
                         format!(
-                            "`{}` is {} {kind}, which is not turned yet (#67); its copies turn \
-                             as they go round, so give {key} to place them unturned. A copy \
-                             turns when it is a {}",
+                            "`{}`: {why}; its copies turn as they go round, so give {key} to \
+                             place them unturned",
                             f.id,
-                            article(&kind),
-                            join_or(&TURNED_TYPES)
                         ),
                         field,
                     ),
                 );
             }
         }
+    }
+
+    // A mirrored copy is of an object the sheet description holds
+    // mirrored.
+    let mut resolved = vec![Resolved::default(); found.len()];
+    if let Some((t, _)) = &mirror {
+        for (f, field) in &found {
+            let why = match at.file(f.file) {
+                Ok(record) => record.refuses_transform(f.list, f.index, t, units),
+                Err(e) => return fail(reach, e),
+            };
+            if let Some(why) = why {
+                return fail(
+                    reach,
+                    op_err(ErrorCode::BadValue, format!("`{}`: {why}", f.id), field),
+                );
+            }
+        }
+        resolved = match resolved_for(at, op, k, &found, t) {
+            Ok(resolved) => resolved,
+            Err(e) => return fail(reach, e),
+        };
     }
 
     // Each copy's ID: its source's id and the first number free on every
@@ -3863,7 +4291,7 @@ fn apply_copy(
     let mut copies: Vec<Copied> = Vec::with_capacity(places.len() * found.len());
     let mut copy_sheets: Vec<Vec<usize>> = Vec::with_capacity(copies.capacity());
     for place in &places {
-        for (f, _) in &found {
+        for ((f, _), resolved) in found.iter().zip(&resolved) {
             let on = at.reach(f.file, f.row);
             let record = match at.file(f.file) {
                 Ok(record) => record,
@@ -3897,6 +4325,9 @@ fn apply_copy(
                     if place.turn != 0.0 {
                         record.turn_by(f.list, index, place.about, place.turn, units, op.index)?;
                     }
+                    if let Some((t, _)) = &mirror {
+                        record.transform(f.list, index, t, resolved, units, op.index)?;
+                    }
                     Ok(())
                 });
             if let Err(e) = made {
@@ -3910,6 +4341,8 @@ fn apply_copy(
                     (None, None, None, Some(item), Some(distance))
                 }
             };
+            // A mirrored copy is placed by its mirror line, not an offset.
+            let offset = offset.filter(|_| mirror.is_none());
             let turned = place.turn != 0.0;
             copies.push(Copied {
                 id: format!("{}{ID_SEPARATOR}{local}", files.name(k)),
@@ -3922,6 +4355,7 @@ fn apply_copy(
                 by: place.by,
                 turned: turned.then_some(place.turn),
                 about: turned.then_some(place.about),
+                mirrored_across: mirror.as_ref().map(|(_, line)| *line),
             });
             copy_sheets.push(on);
         }
@@ -3945,6 +4379,15 @@ fn apply_copy(
         }
     };
     let how = match pattern {
+        Pattern::Mirror { .. } => {
+            let (_, [a, b]) = mirror.expect("a mirror's line");
+            format!(
+                "across the line through [{}] and [{}] ({units}), keeping {}",
+                numbers(&a),
+                numbers(&b),
+                if found.len() == 1 { "it" } else { "them" }
+            )
+        }
         Pattern::Offsets(_) if places.len() == 1 => {
             format!("by [{}] ({units})", numbers(&places[0].by))
         }
@@ -4040,10 +4483,10 @@ fn apply_copy(
         written.push(format!("in sheet `{}`'s row", files.name(k)));
     }
     let ids: Vec<String> = copies.iter().map(|c| format!("`{}`", c.id)).collect();
-    let verb = if op.spec.kind == Kind::Array {
-        "arrays"
-    } else {
-        "copies"
+    let verb = match op.spec.kind {
+        Kind::Array => "arrays",
+        Kind::Mirror => "mirrors",
+        _ => "copies",
     };
     let message = format!(
         "{verb} {what} {how}, making {}, written {}: {}{}",
@@ -4086,20 +4529,12 @@ fn apply_copy(
             snapped,
             copies,
             copy_sheets,
+            transformed: Vec::new(),
             created_row_values: Vec::new(),
             message,
         }),
         sheets: reach,
         refuse: false,
-    }
-}
-
-/// `items` joined with commas and `or`.
-fn join_or(items: &[&str]) -> String {
-    match items {
-        [] => String::new(),
-        [one] => (*one).to_owned(),
-        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
     }
 }
 
@@ -4989,7 +5424,9 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => reaches(target),
-        Body::Copy { targets, .. } => targets.iter().any(|(t, _)| reaches(t)),
+        Body::Copy { targets, .. } | Body::Transform { targets, .. } => {
+            targets.iter().any(|(t, _)| reaches(t))
+        }
         Body::Block { library, .. } => {
             files.library(library.as_deref()).ok() == files.library_of[files.template_of[k]]
         }
@@ -5104,7 +5541,7 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         // What is wrong with the dimension it adds comes of its point.
         Body::DimensionFrom { .. } => "point".to_owned(),
         // What is wrong with a copy comes of the operation as a whole.
-        Body::Copy { .. } => String::new(),
+        Body::Copy { .. } | Body::Transform { .. } => String::new(),
         // A place within the block it wrote, such as `objects[0].line.layer`,
         // is that place in the operation.
         Body::Block { .. } => rest.to_owned(),
@@ -5287,7 +5724,7 @@ fn target_words(op: &Operation) -> String {
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => target.words(),
-        Body::Copy { targets, .. } => match targets.as_slice() {
+        Body::Copy { targets, .. } | Body::Transform { targets, .. } => match targets.as_slice() {
             [(one, _)] => one.words(),
             [(first, _), rest @ ..] => format!("{} and {} more", first.words(), rest.len()),
             [] => String::new(),

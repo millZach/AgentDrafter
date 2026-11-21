@@ -260,16 +260,17 @@ impl Curve {
         self.point(self.domain().1)
     }
 
-    /// The curve placed by `place`, which moves, scales evenly and turns
-    /// about the Z axis by `turn` radians, enlarging by `scale`.
-    pub(crate) fn placed(&self, place: &dyn Fn(P3) -> P3, scale: f64, turn: f64) -> Curve {
-        let (sin, cos) = turn.sin_cos();
-        let vector = |v: [f64; 2]| {
-            [
-                (v[0] * cos - v[1] * sin) * scale,
-                (v[0] * sin + v[1] * cos) * scale,
-            ]
-        };
+    /// The curve placed by `place`, which moves, scales evenly by `scale`,
+    /// may mirror, when `mirrored`, and turns about the Z axis: `angle`
+    /// gives the direction, in radians, a direction of the curve's own
+    /// takes. A mirror reverses the way an arc runs.
+    pub(crate) fn placed(
+        &self,
+        place: &dyn Fn(P3) -> P3,
+        scale: f64,
+        angle: &dyn Fn(f64) -> f64,
+        mirrored: bool,
+    ) -> Curve {
         match self {
             Curve::Segment { a, b } => Curve::Segment {
                 a: place(*a),
@@ -283,8 +284,8 @@ impl Curve {
             } => Curve::Arc {
                 center: place(*center),
                 radius: radius * scale,
-                start: start + turn,
-                sweep: *sweep,
+                start: angle(*start),
+                sweep: if mirrored { -*sweep } else { *sweep },
             },
             Curve::Ellipse {
                 center,
@@ -292,13 +293,20 @@ impl Curve {
                 minor,
                 start,
                 sweep,
-            } => Curve::Ellipse {
-                center: place(*center),
-                major: vector(*major),
-                minor: vector(*minor),
-                start: *start,
-                sweep: *sweep,
-            },
+            } => {
+                let at = place(*center);
+                let vector = |v: [f64; 2]| {
+                    let tip = place([center[0] + v[0], center[1] + v[1], center[2]]);
+                    [tip[0] - at[0], tip[1] - at[1]]
+                };
+                Curve::Ellipse {
+                    center: at,
+                    major: vector(*major),
+                    minor: vector(*minor),
+                    start: *start,
+                    sweep: *sweep,
+                }
+            }
             Curve::Spline(s) => Curve::Spline(s.placed(place)),
         }
     }

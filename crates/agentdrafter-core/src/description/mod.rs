@@ -62,8 +62,8 @@ use crate::units::{parse_length, LengthError, Unit};
 pub use blocks::parse_block_library;
 pub(crate) use dimension::{kind_keys, DIMENSION_STYLE_KEYS};
 pub(crate) use edit::{
-    AttributeSet, Axis, FromRow, GivenValue, LeaderLineEdit, Listed, Matched, ObjectList,
-    RecordFile, TableEdit, TURNED_TYPES,
+    AttributeSet, Axis, FromRow, GivenValue, How, LeaderLineEdit, Listed, Matched, ObjectList,
+    RecordFile, Resolved, TableEdit, Transform,
 };
 pub(crate) use emit::number_text;
 pub(crate) use ids::{COPY_OF_KEY, ID_SEPARATOR, LONGEST_ID};
@@ -623,6 +623,22 @@ pub(crate) fn normalize_degrees(degrees: f64) -> f64 {
     } else {
         turned + 0.0
     }
+}
+
+/// The sine and cosine of `degrees`: exact for a multiple of 90°, with no
+/// platform sine or cosine, so that a quarter turn writes the same bytes on
+/// every system (#243); the platform's elsewhere.
+pub(crate) fn sin_cos_degrees(degrees: f64) -> (f64, f64) {
+    let quarter = degrees / 90.0;
+    if quarter.fract() == 0.0 && quarter.is_finite() {
+        return match quarter.rem_euclid(4.0) as u8 {
+            0 => (0.0, 1.0),
+            1 => (1.0, 0.0),
+            2 => (0.0, -1.0),
+            _ => (-1.0, 0.0),
+        };
+    }
+    degrees.to_radians().sin_cos()
 }
 
 fn boolean(node: &Node, path: &str) -> Result<bool, Error> {

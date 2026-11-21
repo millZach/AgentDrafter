@@ -7,11 +7,13 @@
 *.dwl2
 # Renders of the examples: build them again from the sheet descriptions.
 examples/*.png
-# What building and plotting the demo plant, the panel set and the two-kinds set
+# What building and plotting the demo plant, the panel set, the two-kinds set
+# and the transforms set
 # writes: build and plot them again.
 examples/demo-plant/dwg/
 examples/panel-set/dwg/
 examples/two-kinds/dwg/
+examples/transforms/dwg/
 !demo-plant/**/*.dwg
 !demo-plant/**/*.dxf
 !tests/fixtures/**/*.dwg

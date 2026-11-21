@@ -142,7 +142,15 @@ pub(super) fn dwg_insert(
     start_of: &dyn Fn(&Text) -> Point3,
 ) -> Result<DwgInsert, Error> {
     let mut dwg = DwgInsert::new(insert.block.clone(), vector(insert.position))
-        .with_uniform_scale(insert.scale)
+        .with_scale(
+            if insert.mirrored {
+                -insert.scale
+            } else {
+                insert.scale
+            },
+            insert.scale,
+            insert.scale,
+        )
         .with_rotation(insert.rotation.to_radians());
     let definitions: Vec<&AttributeDefinition> = block.carried_attributes().collect();
     let tags: Vec<&str> = insert.attributes.iter().map(|a| a.tag.as_str()).collect();
@@ -245,17 +253,21 @@ pub(super) fn read_attribute_definition(
 }
 
 /// An insert the core can read back exactly: of a block it read, flat, not
-/// an array, scaled the same along every axis, with one attribute for each
-/// of the block's attribute definitions but the constant ones, each where
-/// the block puts it.
+/// an array, scaled the same along every axis, or mirrored as AutoCAD's
+/// MIRROR leaves one, its X scale the negative of the others (#242), with
+/// one attribute for each of the block's attribute definitions but the
+/// constant ones, each where the block puts it. One not mirrored whose
+/// attributes read forwards where its turn alone would not leave them so
+/// reads back with [`Insert::readable_attributes`].
 pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> Option<Insert> {
-    let scale = dwg.x_scale();
+    let scale = dwg.y_scale();
+    let mirrored = dwg.x_scale() == -scale;
     let plain = dwg.normal == Vector3::UNIT_Z
         && !dwg.is_array()
         && !dwg.is_minsert()
         && dwg.view_rep_handle.is_none()
         && scale > 0.0
-        && dwg.y_scale() == scale
+        && (dwg.x_scale() == scale || mirrored)
         && dwg.z_scale() == scale;
     if !plain {
         return None;
@@ -265,24 +277,35 @@ pub(super) fn read_insert(dwg: &DwgInsert, layer: String, blocks: &[Block]) -> O
     if definitions.len() != dwg.attributes.len() {
         return None;
     }
-    let mut insert = Insert {
+    let insert = Insert {
         block: block.name.clone(),
         position: point(dwg.insert_point),
         scale,
         rotation: normalize_degrees(dwg.rotation.to_degrees()),
+        mirrored,
+        readable_attributes: false,
         attributes: Vec::with_capacity(definitions.len()),
         name: super::ids::read_name(&dwg.common),
         layer,
         properties: Default::default(),
     };
-    for (definition, dwg_attribute) in definitions.into_iter().zip(&dwg.attributes) {
-        let value = read_attribute(dwg_attribute, &insert, block, definition)?;
-        insert.attributes.push(Attribute {
-            tag: definition.tag.clone(),
-            value,
-        });
-    }
-    Some(insert)
+    // An insert that is not mirrored turns its attributes with it, or, one
+    // mirrored back, keeps them reading forwards.
+    let readings: &[bool] = if mirrored { &[false] } else { &[false, true] };
+    readings.iter().find_map(|&readable_attributes| {
+        let mut insert = Insert {
+            readable_attributes,
+            ..insert.clone()
+        };
+        for (definition, dwg_attribute) in definitions.iter().zip(&dwg.attributes) {
+            let value = read_attribute(dwg_attribute, &insert, block, definition)?;
+            insert.attributes.push(Attribute {
+                tag: definition.tag.clone(),
+                value,
+            });
+        }
+        Some(insert)
+    })
 }
 
 /// The value of an attribute on `insert`, if it is the attribute
@@ -422,6 +445,8 @@ mod tests {
             position: Point3::new(40.0, 30.0, 0.0),
             scale: 2.0,
             rotation: 33.3,
+            mirrored: false,
+            readable_attributes: false,
             attributes: vec![
                 Attribute {
                     tag: "TAG".into(),
@@ -467,6 +492,98 @@ mod tests {
             },
             insert
         );
+    }
+
+    #[test]
+    fn a_mirrored_insert_is_written_with_a_negative_x_scale_and_reads_back() {
+        let block = block();
+        let mut insert = insert();
+        insert.mirrored = true;
+        insert.rotation = 180.0;
+        let written = dwg_insert(&insert, &block, &|t| t.position).unwrap();
+        assert_eq!(
+            (written.x_scale(), written.y_scale(), written.z_scale()),
+            (-2.0, 2.0, 2.0)
+        );
+        // Its attributes read forwards: upright, though the insert is
+        // mirrored and turned a half turn.
+        assert_eq!(written.attributes[0].rotation, 0.0);
+        let read = read_insert(&written, "symbols".into(), std::slice::from_ref(&block)).unwrap();
+        assert!(read.mirrored);
+        assert_eq!(read.scale, 2.0);
+        assert!(same_angle(read.rotation, 180.0), "{read:?}");
+        // Any other negative scale is not one the core holds.
+        let mut stretched = written.clone();
+        stretched.set_scale_unchecked(2.0, -2.0, 2.0);
+        assert!(read_insert(&stretched, "symbols".into(), &[block]).is_none());
+    }
+
+    #[test]
+    fn a_mirrored_insert_whose_attribute_reads_upright_reads_back_through_its_own_dwg() {
+        // Turned 30 degrees with its attribute defined at 120, the attribute
+        // reads straight up, at 90: on the cutoff of the readable rule. Read
+        // back, 120 is 119.99999999999999, which must not flip it to 270.
+        let mut ours = definition("TAG", Justify::MiddleCenter);
+        ours.rotation = 120.0;
+        let block = Block {
+            name: "MARK".into(),
+            base_point: Point3::new(0.0, 0.0, 0.0),
+            objects: vec![crate::model::Object::AttributeDefinition(ours.clone())],
+            cells: Vec::new(),
+        };
+        let written = dwg_attribute_definition(&ours, &|t| t.position);
+        let mut read_block = block.clone();
+        read_block.objects = vec![crate::model::Object::AttributeDefinition(
+            read_attribute_definition(&written, LAYER_ZERO.into()).unwrap(),
+        )];
+        let mut insert = insert();
+        insert.attributes.truncate(1);
+        insert.rotation = 30.0;
+        insert.mirrored = true;
+        let dwg = dwg_insert(&insert, &block, &|t| t.position).unwrap();
+        assert!(same_angle(dwg.attributes[0].rotation.to_degrees(), 90.0));
+        let read = read_insert(&dwg, "symbols".into(), &[read_block]).expect("it reads back");
+        assert!(read.mirrored);
+        assert_eq!(read.attributes, insert.attributes);
+        // And so at the cutoff's other side, where it reads straight down
+        // and is turned to read up.
+        for rotation in [210.0, 300.0, 120.0] {
+            insert.rotation = rotation;
+            let dwg = dwg_insert(&insert, &block, &|t| t.position).unwrap();
+            let read_block = Block {
+                objects: vec![crate::model::Object::AttributeDefinition(
+                    read_attribute_definition(&written, LAYER_ZERO.into()).unwrap(),
+                )],
+                ..block.clone()
+            };
+            assert!(
+                read_insert(&dwg, "symbols".into(), &[read_block]).is_some(),
+                "turned {rotation}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_insert_mirrored_back_reads_back_with_its_attributes_reading_forwards() {
+        let block = block();
+        let mut insert = insert();
+        insert.rotation = 240.0;
+        insert.readable_attributes = true;
+        let written = dwg_insert(&insert, &block, &|t| t.position).unwrap();
+        // Its attributes read at 60, not at the 240 it is turned.
+        assert!(same_angle(
+            written.attributes[0].rotation.to_degrees(),
+            60.0
+        ));
+        let read = read_insert(&written, "symbols".into(), std::slice::from_ref(&block)).unwrap();
+        assert!(read.readable_attributes && !read.mirrored, "{read:?}");
+        assert_eq!(read.attributes, insert.attributes);
+        // Turned so that they read forwards anyway, it reads back as an
+        // ordinary insert, which draws the same.
+        insert.rotation = 30.0;
+        let written = dwg_insert(&insert, &block, &|t| t.position).unwrap();
+        let read = read_insert(&written, "symbols".into(), &[block]).unwrap();
+        assert!(!read.readable_attributes);
     }
 
     #[test]

@@ -1324,3 +1324,45 @@ fn a_wide_polylines_seams_are_its_bands_edges_and_a_wide_arc_is_crossed_inside()
     assert_eq!(crossed([430.0, -8.6], [430.1, -8.5]), ["bands/bend"]);
     assert_eq!(crossed([429.5, -1.0], [429.6, -0.9]), none);
 }
+
+/// A constant attribute on a mirrored insert is drawn with its block,
+/// mirrored, as AutoCAD draws it: its insertion point and its node, where
+/// its reflected baseline starts, are its unmirrored ones reflected, so a
+/// transform about the node pivots where the text is drawn.
+#[test]
+fn a_mirrored_inserts_constant_text_snaps_where_it_is_drawn_mirrored() {
+    let dir = scratch("mirrored-constant");
+    fs::write(
+        dir.join("blocks.yaml"),
+        "units: mm
+blocks:
+  LABEL:
+    objects:
+      - attdef: {tag: KIND, position: [5, 0, 0], height: 2, default: ABC, constant: true, justify: middle_center}
+",
+    )
+    .unwrap();
+    let sheet = dir.join("labels.yaml");
+    fs::write(
+        &sheet,
+        "units: mm
+block_library: blocks.yaml
+objects:
+  - insert: {id: plain, block: LABEL, position: [100, 50, 0]}
+  - insert: {id: mirrored, block: LABEL, position: [100, 80, 0], mirrored: true}
+",
+    )
+    .unwrap();
+    let (_, plain) = snap(&sheet, of("labels/plain"));
+    let (_, mirrored) = snap(&sheet, of("labels/mirrored"));
+    let at = |points: &[SnapPoint], kind: SnapKind| named(points, kind, Some("objects[0]")).at;
+    // Its insertion point sits 5 to the left of the insert's, mirrored.
+    close(at(&mirrored, SnapKind::Insertion), [95.0, 80.0, 0.0]);
+    // Its baseline starts left of the middle unmirrored, so right of it
+    // mirrored: the reflection of the unmirrored node across the insert's
+    // Y axis.
+    let (node, unmirrored) = (at(&mirrored, SnapKind::Node), at(&plain, SnapKind::Node));
+    assert!(unmirrored.x < 105.0, "{unmirrored:?}");
+    assert!(node.x > 95.0, "{node:?}");
+    close(node, [200.0 - unmirrored.x, unmirrored.y + 30.0, 0.0]);
+}

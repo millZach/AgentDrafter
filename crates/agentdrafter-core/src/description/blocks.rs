@@ -121,11 +121,13 @@ pub(crate) const BLOCK_TEXT_KEYS: [&str; 13] = [
 ];
 
 /// The keys an insert takes, besides those every object on a sheet takes.
-pub(crate) const INSERT_KEYS: [&str; 10] = [
+pub(crate) const INSERT_KEYS: [&str; 12] = [
     "block",
     "position",
     "scale",
     "rotation",
+    "mirrored",
+    "readable_attributes",
     "attributes",
     "layer",
     "color",
@@ -574,6 +576,14 @@ pub(super) fn insert(
 ) -> Result<Insert, Error> {
     let block = block_named(fields, library)?;
     let (scale, rotation) = scale_and_rotation(fields)?;
+    let mirrored = match fields.get("mirrored") {
+        Some(node) => boolean(node, &fields.path_of("mirrored"))?,
+        None => false,
+    };
+    let readable_attributes = match fields.get("readable_attributes") {
+        Some(node) => boolean(node, &fields.path_of("readable_attributes"))?,
+        None => false,
+    };
     let attributes = attributes(fields, block, library, noticed)?;
     Ok(Insert {
         block: block.name.clone(),
@@ -584,6 +594,8 @@ pub(super) fn insert(
         )?,
         scale,
         rotation,
+        mirrored,
+        readable_attributes,
         attributes,
         name: None,
         layer,
