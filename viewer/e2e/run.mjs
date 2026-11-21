@@ -2507,6 +2507,35 @@ const checks = {
       }
       return n;
     };
+    // Waits until the canvas shows the set as it is, live: no band, no
+    // preview's drawing (on which nothing is picked) and no entry; then
+    // shows the whole sheet, and gives a point on the page that a click
+    // picks the object `id` at, as the renderer picks (16 CSS pixels).
+    const pointOn = async (page, id) => {
+      await page.waitForFunction(
+        () => {
+          const p = window.agentdrafterViewer;
+          return !document.querySelector('[data-preview]') && p.summary && p.summary.preview == null && p.summary.entry === null;
+        },
+        null,
+        { timeout: 30000 },
+      );
+      await fitAll(page);
+      const { place, box } = await page.evaluate((wanted) => {
+        const p = window.agentdrafterViewer;
+        const at = p.summary.objects.findIndex((o) => o.id === wanted);
+        return { place: at, box: at >= 0 ? p.bounds([at]) : [] };
+      }, id);
+      assert(place >= 0 && box.length === 4, `${id} is on the sheet`);
+      const [x0, y0, x1, y1] = box;
+      for (let j = 1; j < 8; j++) {
+        for (let i = 1; i < 12; i++) {
+          const at = [x0 + ((x1 - x0) * i) / 12, y0 + ((y1 - y0) * j) / 8];
+          if ((await page.evaluate(([x, y]) => window.agentdrafterViewer.pickAt(x, y, 16), at)) === place) return { place, at: await onPage(page, at) };
+        }
+      }
+      throw new Error(`no point on the page picks ${id}`);
+    };
     const copyOp = (entry) => {
       const ops = entry.change_set.operations;
       assert(ops.length === 1 && ops[0].op === 'copy', `one copy operation: ${JSON.stringify(ops)}`);
@@ -2616,8 +2645,10 @@ const checks = {
         const history = () => page.evaluate(() => document.querySelector('.cmd .hist')?.textContent ?? '');
         // A copy placed, then a journal entry opened: the copy is dropped, nothing sent.
         before = journal().length;
+        let target = await pointOn(page, 'DP-LD-101/device');
         await typeIn(page, 'CO');
-        await page.mouse.click(...(await onPage(page, [(device.bounds[0] + device.bounds[2]) / 2, device.bounds[3] - 0.02])));
+        await page.mouse.click(...target.at);
+        assert((await bar(page)).includes('1 object picked'), `Copy picks the device: ${await bar(page)}`);
         await typeIn(page, '', '2,6.5', '@0,-3');
         assert((await bar(page)).includes('1 copy placed'), `a copy is placed: ${await bar(page)}`);
         await sideTab(page, 'journal');
@@ -2638,10 +2669,11 @@ const checks = {
         const number = proposed.result.proposal;
         await page.waitForSelector(`[data-pcard="${number}"]`, { timeout: 30000 });
         // The entry shown brought the view to its change: the whole sheet again.
-        await fitAll(page);
         before = journal().length;
+        target = await pointOn(page, 'DP-LD-101/junction-box');
         await typeIn(page, 'CO');
-        await page.mouse.click(...(await onPage(page, [6.38, 6.5])));
+        await page.mouse.click(...target.at);
+        assert((await bar(page)).includes('1 object picked'), `Copy picks the junction box: ${await bar(page)}`);
         await typeIn(page, '', '6.38,6.5', '@0,-2.2');
         assert((await bar(page)).includes('1 copy placed'), `a template's copy is placed: ${await bar(page)}`);
         await page.click(`[data-pcard="${number}"] [data-pc="show"]`);
@@ -2653,9 +2685,15 @@ const checks = {
         await page.waitForFunction(() => !document.querySelector('[data-preview]'), null, { timeout: 30000 });
         assert(journal().slice(before).every((e) => e.kind === 'discard'), `only the discard is written: ${JSON.stringify(journal().slice(before))}`);
         // A quick properties field edited, then Clear: the edit lands, as leaving the field lands it.
+        // Nothing selected, the proposal's card gone and the set drawn live first.
+        await page.keyboard.press('Escape');
+        await page.waitForFunction((n) => !document.querySelector(`[data-pcard="${n}"]`), number, { timeout: 30000 });
         before = journal().length;
-        await page.mouse.click(...(await onPage(page, [(device.bounds[0] + device.bounds[2]) / 2, device.bounds[3] - 0.02])));
+        target = await pointOn(page, 'DP-LD-101/device');
+        await page.mouse.click(...target.at);
+        await page.waitForFunction((p) => window.agentdrafterViewer.marked?.picked === p, target.place, { timeout: 15000 });
         await page.waitForSelector('.qp');
+        assert((await bar(page)).includes('FT-101 selected'), `the device alone is selected: ${await bar(page)}`);
         const funcKey = await page.evaluate(() => {
           const p = window.agentdrafterViewer;
           const place = p.summary.objects.findIndex((o) => o.id === 'DP-LD-101/device');
