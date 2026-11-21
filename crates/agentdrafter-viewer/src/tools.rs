@@ -939,6 +939,49 @@ impl Tools {
         self.error = None;
     }
 
+    /// Takes back the last point the tool running took, as a guide's Undo
+    /// it asks (#157): Line's last point, as its own Undo does, Circle's
+    /// centre, Rectangle's first corner, where a Text starts before anything
+    /// is typed, or Move's and Copy's base point before a copy is placed.
+    /// Gives whether there was one to take back.
+    pub fn take_back_point(&mut self) -> bool {
+        let Some(running) = &mut self.running else {
+            return false;
+        };
+        let step = std::mem::replace(&mut running.step, Step::LineFirst);
+        let (step, took) = match step {
+            Step::LineNext { mut points } => {
+                points.pop();
+                if points.is_empty() {
+                    (Step::LineFirst, true)
+                } else {
+                    (Step::LineNext { points }, true)
+                }
+            }
+            Step::CircleRadius { .. } => (Step::CircleCenter, true),
+            Step::RectangleSecond { .. } => (Step::RectangleFirst, true),
+            Step::TextType { lines, current, .. } if lines.is_empty() && current.is_empty() => {
+                (Step::TextStart, true)
+            }
+            Step::MoveSecond { picked, .. } => (Step::MoveBase { picked }, true),
+            Step::CopySecond { picked, placed, .. } if placed.is_empty() => {
+                (Step::CopyBase { picked }, true)
+            }
+            other => (other, false),
+        };
+        running.step = step;
+        self.error = None;
+        took
+    }
+
+    /// Sets the height new text is drawn at, as a guide's Text step gives
+    /// it (#157).
+    pub fn set_text_height(&mut self, height: f64) {
+        if height.is_finite() && height > 0.0 {
+            self.text_height = Some(height);
+        }
+    }
+
     /// The point the next one is measured from: Ortho, a length typed alone
     /// and the rubber band use it.
     pub fn base(&self) -> Option<[f64; 2]> {
