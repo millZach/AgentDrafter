@@ -114,6 +114,11 @@ pub use change::{
     ASSISTANT, DRAFTER, PROPOSALS_FOLDER,
 };
 pub use change::{
+    guide_with, guides_with, GuideChecked, GuideGiven, GuideListed, GuideMark, GuidePoint,
+    GuideReport, GuideRequest, GuidesReport, GuidesRequest, PointListed, Setting, SnapNamed,
+    StepGiven, StepListed, GUIDES_FOLDER, GUIDE_TOOLS,
+};
+pub use change::{
     journal, undo, CommitState, Entry, EntryKind, FileState, FileUndone, JournalEntry,
     JournalReport, JournalRequest, Refusal, RollBack, RolledBack, SheetFailed, UndoAction,
     UndoReport, UndoRequest, UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, LOCK_FILE,

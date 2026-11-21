@@ -217,6 +217,12 @@ impl Events {
         self.next("proposals", within)
     }
 
+    /// The next guides the stream sends, as the `guides` command replies,
+    /// passing over comments and the other events.
+    fn next_guides(&mut self, within: Duration) -> Value {
+        self.next("guides", within)
+    }
+
     /// The next event named `name`, passing over comments and the others.
     fn next(&mut self, name: &str, within: Duration) -> Value {
         loop {
@@ -226,7 +232,10 @@ impl Events {
             }
             let mut lines = event.lines();
             let named = lines.next().unwrap().strip_prefix("event: ").unwrap();
-            assert!(["journal", "proposals"].contains(&named), "{event}");
+            assert!(
+                ["journal", "proposals", "guides"].contains(&named),
+                "{event}"
+            );
             if named != name {
                 continue;
             }
@@ -782,6 +791,50 @@ fn an_open_event_stream_sends_the_journal_when_another_process_changes_the_set()
     let (status, refused) = http.send("POST", "/events", Some(&json!({"folder": "demo-set"})));
     assert_eq!(status, 400, "{refused}");
     assert_eq!(refused["error"]["code"], "usage");
+}
+
+#[test]
+fn an_open_event_stream_reports_a_guide_given_and_each_step_landing() {
+    let dir = interface_folder("guide-events", "http");
+    let (code, built) = cli(&["build", "demo-set"], &dir);
+    assert_eq!(code, 0, "{built}");
+    let http = Http::start(&dir, &["--listen", "127.0.0.1:0"]);
+    let mut events = http.events("demo-set");
+    let first = events.next_guides(Duration::from_secs(30));
+    assert_eq!(first["result"]["guides"], json!([]), "{first}");
+
+    // Given through the HTTP API, as an agent would.
+    let (status, given) = http.run(
+        "guide",
+        &json!({"set": "demo-set", "guide": change_set("guide.json")}),
+    );
+    assert_eq!(status, 200, "{given}");
+    assert_eq!(given["result"]["by"], "agent (HTTP API)");
+    let next = events.next_guides(Duration::from_secs(10));
+    let guide = &next["result"]["guides"][0];
+    assert_eq!(guide["guide"], 1, "{next}");
+    assert_eq!(guide["steps"][2]["points"][0]["waits_on"], 2, "{next}");
+
+    // Its second step landed, as the page sends it: the journal marks it,
+    // and the third step names the line it made.
+    let (status, landed) = http.run_as_viewer(
+        "change",
+        &json!({"set": "demo-set", "change_set": change_set("guided.json")}),
+    );
+    assert_eq!(status, 200, "{landed}");
+    assert_eq!(landed["result"]["guide"]["completes"], true, "{landed}");
+    let journal = events.next_journal(Duration::from_secs(10));
+    assert_eq!(
+        journal["result"]["entries"][0]["guide"],
+        json!({"guide": 1, "step": 2, "of": 3}),
+        "{journal}"
+    );
+    let next = events.next_guides(Duration::from_secs(10));
+    let steps = &next["result"]["guides"][0]["steps"];
+    assert_eq!(steps[1]["landed"], json!([1]), "{next}");
+    let made = steps[1]["made"].as_str().unwrap();
+    assert_eq!(steps[2]["points"][0]["object"], made, "{next}");
+    assert_eq!(steps[2]["operation"]["target"], json!({"id": made}));
 }
 
 #[test]

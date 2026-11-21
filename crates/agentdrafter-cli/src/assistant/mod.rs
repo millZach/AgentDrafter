@@ -1102,8 +1102,9 @@ fn prompt(set: &Path, text: &str, looking: Option<&LookingAt>, first: bool) -> S
              only through the `{SERVER}` MCP server's tools, naming the set as `{set}`. You never \
              change the set yourself: to change it, call `propose` with the change set `change` \
              would take (`operations` lists what one can hold). It waits, drawn dashed on the \
-             drafter's drawing, and lands only when they keep it. Answer in a few plain \
-             sentences.\n\n"
+             drafter's drawing, and lands only when they keep it. When they ask how to do \
+             something, call `guide` with the steps for them to do on their own drawing. Answer \
+             in a few plain sentences.\n\n"
         ));
     }
     match looking {

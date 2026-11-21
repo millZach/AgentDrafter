@@ -40,6 +40,10 @@ use crate::change::{
     discard, keep_with, proposals, propose_with, DiscardRequest, KeepRequest, ProposalsRequest,
     ProposeRequest, BY_LONGEST, BY_PATTERN, DRAFTER, PROPOSALS_FOLDER,
 };
+use crate::change::{
+    guide_with, guides_with, GuideRequest, GuidesRequest, GUIDES_FOLDER, GUIDE_TOOLS,
+    LONGEST_LABEL, LONGEST_SAY, LONGEST_TITLE, MOST_STEPS,
+};
 use crate::check::{check_with, CheckRequest};
 use crate::display_list::{display_list_with, DisplayListRequest, NOT_AT_AN_ENTRY};
 use crate::error::{Error, ErrorCode};
@@ -87,7 +91,8 @@ pub struct Command {
 pub enum Access {
     /// Reads and writes nothing.
     Reads,
-    /// Records a proposal, which changes nothing until it is kept.
+    /// Records a proposal, which changes nothing until it is kept, or a
+    /// guide, which changes nothing until the drafter does its steps.
     Proposes,
     /// Writes files: a drawing set's records, its outputs, or a file beside
     /// them.
@@ -130,7 +135,7 @@ impl Command {
         // set, so they roll nothing back; each refuses a set whose journal
         // holds an unfinished commit instead.
         let previews = (self.name == "display-list" && input.get("change_set").is_some())
-            || matches!(self.name, "propose" | "proposals");
+            || matches!(self.name, "propose" | "proposals" | "guide" | "guides");
         // What the drafter is looking at is kept beside the set's records,
         // not in them: recording or reading it neither rolls back nor waits
         // on an unfinished commit.
@@ -318,6 +323,20 @@ const COMMANDS: &[Command] = &[
         input: discard_input,
         run: run_discard,
         access: Access::Writes,
+    },
+    Command {
+        name: "guide",
+        does: guide_does,
+        input: guide_input,
+        run: run_guide,
+        access: Access::Proposes,
+    },
+    Command {
+        name: "guides",
+        does: guides_does,
+        input: guides_input,
+        run: run_guides,
+        access: Access::Reads,
     },
     Command {
         name: "look-at",
@@ -1342,6 +1361,167 @@ fn run_discard(
 ) -> Result<JsonReply, Error> {
     let request: DiscardRequest = parse("discard", input)?;
     Ok(done(discard(&request, via)))
+}
+
+// guides
+
+fn guide_does() -> String {
+    format!(
+        "Gives the drafter a guide on the drawing set in the folder `set`: a list of steps the \
+         drafting app walks them through on their own drawing, each step's words, the drawing \
+         tool, the points to click, and the operation that completes it, or a setting step, \
+         such as making a layer current. A later step names what an earlier step adds with \
+         {{\"made_by\": <step>}}, wherever it names an object. The guide is checked on the set \
+         as it is, its points worked out and its operations applied in memory in order, as a \
+         dry run, and refused, unrecorded, when the set would refuse it. It is recorded in the \
+         set's folder ({GUIDES_FOLDER}), numbered, with who gave it, `by`. Nothing changes: \
+         the drafter starts it, and each step they do lands as their own change set."
+    )
+}
+
+fn guide_input() -> Value {
+    let tools: Vec<&str> = GUIDE_TOOLS.iter().map(|(t, _)| *t).collect();
+    let object = json!({
+        "description": "An object to pick: by its ID, {\"id\": \"DEMO-001/border\"}, by its name, \
+                        {\"name\": \"title-block\"}, or what an earlier step adds, \
+                        {\"made_by\": 2}.",
+        "type": "object",
+        "minProperties": 1,
+    });
+    let point = json!({
+        "description": "A point to click: [x, y] or [x, y, z], or a snapped point, \
+                        {\"snap\": {...}}, written as an operation takes one, whose object may \
+                        be {\"made_by\": <step>} in place of its id.",
+        "type": ["array", "object"],
+    });
+    let step = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["say"],
+        "properties": {
+            "say": {
+                "description": "What the step says to the drafter, in the guide's banner.",
+                "type": "string", "minLength": 1, "maxLength": LONGEST_SAY,
+            },
+            "title": {
+                "description": "The step in a few words, for the list of steps.",
+                "type": "string", "minLength": 1, "maxLength": LONGEST_TITLE,
+            },
+            "tool": {
+                "description": "The drawing tool the drafter does it with. Its operation is \
+                                the one the tool sends: line add_line, circle add_circle, \
+                                rectangle add_polyline, text add_text, move move, copy copy, \
+                                erase delete.",
+                "enum": tools,
+            },
+            "points": {
+                "description": "The points to click, `at`, and the objects to pick, `object`, \
+                                in the order the tool takes them, each marked by a ring with \
+                                its `label`.",
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "at": point,
+                        "object": object,
+                        "label": {
+                            "description": "What it is, in the drafter's words, such as TB1-1, \
+                                            on its ring's tag.",
+                            "type": "string", "minLength": 1, "maxLength": LONGEST_LABEL,
+                        },
+                    },
+                },
+            },
+            "completes": {
+                "description": "The operation that completes the step, as a change set holds \
+                                one, its objects by ID, by name or {\"made_by\": <step>}. The \
+                                drafter's change set for the step is checked against it.",
+                "type": "object",
+                "required": ["op"],
+            },
+            "setting": {
+                "description": "What a setting step sets, in place of an operation: the layer \
+                                to make current.",
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["current_layer"],
+                "properties": {
+                    "current_layer": text("The layer to make current, by its name."),
+                },
+            },
+        },
+    });
+    input(
+        json!({
+            "set": text("The drawing set's folder."),
+            "guide": {
+                "description": "The guide: what it teaches, the sheet it runs on, and its steps.",
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["title", "sheet", "steps"],
+                "properties": {
+                    "title": {
+                        "description": "What it teaches, in a few words.",
+                        "type": "string", "minLength": 1, "maxLength": LONGEST_TITLE,
+                    },
+                    "sheet": text("The sheet it runs on, by its name."),
+                    "steps": {
+                        "description": "Its steps, in order: each an operation step, with \
+                                        `tool`, `points` and `completes`, or a setting step, \
+                                        with `setting`.",
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MOST_STEPS,
+                        "items": step,
+                    },
+                },
+            },
+            "by": by("gives it", "Assistant"),
+            "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
+        }),
+        &["set", "guide"],
+    )
+}
+
+fn run_guide(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    via: Interface,
+) -> Result<JsonReply, Error> {
+    let settings = take_settings(&mut input, base, false)?;
+    let request: GuideRequest = parse("guide", input)?;
+    Ok(done(guide_with(&request, &settings, via)))
+}
+
+fn guides_does() -> String {
+    "Lists the guides given on the drawing set in the folder `set`, the oldest first, each \
+     step worked out on the set as it stands: where each point is, the operation with each \
+     `made_by` named by the object its step's change set made, the steps it needs, and the \
+     change sets in place that were sent for it, which the journal marks with the step."
+        .to_owned()
+}
+
+fn guides_input() -> Value {
+    input(
+        json!({
+            "set": text("The drawing set's folder."),
+            "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
+        }),
+        &["set"],
+    )
+}
+
+fn run_guides(
+    mut input: Map<String, Value>,
+    base: &Settings,
+    _: Interface,
+) -> Result<JsonReply, Error> {
+    let settings = take_settings(&mut input, base, false)?;
+    let request: GuidesRequest = parse("guides", input)?;
+    Ok(done(guides_with(&request, &settings)))
 }
 
 // what the drafter is looking at

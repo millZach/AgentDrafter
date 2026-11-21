@@ -482,7 +482,7 @@ fn dimension_kind(name: &str) -> DimensionKind {
 }
 
 /// The keys of a change set.
-const CHANGE_SET_KEYS: [&str; 2] = ["operations", "fixes"];
+const CHANGE_SET_KEYS: [&str; 3] = ["operations", "fixes", "guide"];
 
 /// The key every operation names itself by.
 const OP_KEY: &str = "op";
@@ -942,7 +942,7 @@ pub fn change_set_schema() -> Value {
         .iter()
         .map(|spec| operation_schema(spec, &defs))
         .collect();
-    let [operations_key, fixes_key] = CHANGE_SET_KEYS;
+    let [operations_key, fixes_key, guide_key] = CHANGE_SET_KEYS;
     let schema = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "AgentDrafter change set",
@@ -963,6 +963,7 @@ pub fn change_set_schema() -> Value {
                 "type": "array",
                 "items": { "$ref": "#/$defs/sheet_name" },
             },
+            guide_key: super::guides::mark_schema(),
         },
     });
     with_definitions(schema, &defs)
@@ -2709,6 +2710,9 @@ pub(crate) fn read_change_set(value: &Value, units: Unit) -> Result<ChangeSet, E
             )
         }
     };
+    if let Some(mark) = map.get("guide") {
+        super::guides::read_mark(mark)?;
+    }
     Ok(ChangeSet { operations, fixes })
 }
 
@@ -4483,7 +4487,7 @@ fn op_point(
 /// The snap of a snapped point sent as `map` at `field`, `{"snap": {...}}`,
 /// checked as a query checks one, with its snap named; or the code, message
 /// and key of what is wrong with it.
-fn read_snap(
+pub(crate) fn read_snap(
     map: &Map<String, Value>,
     field: &str,
 ) -> Result<SnapRef, (ErrorCode, String, String)> {

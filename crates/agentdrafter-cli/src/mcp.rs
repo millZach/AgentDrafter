@@ -80,7 +80,10 @@ const ASSISTANT_INSTRUCTIONS: &str =
      `change` would take: it waits, drawn dashed on the drafter's drawing, and lands only when \
      the drafter keeps it. `operations` lists what a change set can hold. When the drafter \
      says \"this\" or asks what something is, `looking-at` gives the sheet they have open and \
-     the objects they selected, by their IDs; `query` tells you about them.";
+     the objects they selected, by their IDs; `query` tells you about them. When they ask how \
+     to do something, call `guide` with the steps for them to do themselves on their own \
+     drawing, each with its drawing tool, the points to click and the operation that \
+     completes it; they start it from the chat.";
 
 /// Runs `agentdrafter mcp`: serves messages from standard input until it
 /// closes.
@@ -376,9 +379,9 @@ impl Server {
             }
         };
         self.within_set(&arguments)?;
-        // The assistant's proposal is the assistant's when it names no one
-        // else.
-        if self.assistant && command.name() == "propose" {
+        // The assistant's proposal, or guide, is the assistant's when it
+        // names no one else.
+        if self.assistant && matches!(command.name(), "propose" | "guide") {
             if let Some(arguments) = arguments.as_object_mut() {
                 arguments
                     .entry("by")
@@ -596,6 +599,7 @@ mod tests {
         .unwrap();
         let instructions = init["result"]["instructions"].as_str().unwrap();
         assert!(instructions.contains("call `propose`"), "{instructions}");
+        assert!(instructions.contains("call `guide`"), "{instructions}");
         let listed = ask(
             &mut server,
             json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
@@ -609,7 +613,7 @@ mod tests {
             .collect();
         let given: Vec<&str> = assistant_commands().map(Command::name).collect();
         assert_eq!(names, given);
-        for name in ["propose", "query", "looking-at"] {
+        for name in ["propose", "guide", "guides", "query", "looking-at"] {
             assert!(names.contains(&name), "{name}");
         }
         for name in [

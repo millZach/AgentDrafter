@@ -35,6 +35,7 @@ mod apply;
 mod array;
 mod commit;
 mod from_dimension;
+mod guides;
 mod history;
 mod journal;
 mod operations;
@@ -63,6 +64,12 @@ pub use operations::{change_set_schema, operations, OperationInfo, OperationList
 pub use accept::{accept_with, AcceptReport, AcceptRequest, StampRevision};
 pub(crate) use accept::{relative_to, stamp_revision};
 pub(crate) use apply::fit_library_inserts;
+pub use guides::{
+    guide_with, guides_with, GuideChecked, GuideGiven, GuideListed, GuideMark, GuidePoint,
+    GuideReport, GuideRequest, GuidesReport, GuidesRequest, PointListed, Setting, SnapNamed,
+    StepGiven, StepListed, GUIDES_FOLDER, TOOLS as GUIDE_TOOLS,
+};
+pub(crate) use guides::{LONGEST_LABEL, LONGEST_SAY, LONGEST_TITLE, MOST_STEPS};
 pub(crate) use history::FilesAsOf;
 pub(crate) use journal::now;
 pub use journal::{
@@ -133,6 +140,10 @@ pub struct ChangeReport {
     /// which saves nothing to read back, and when no sheet took its part.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checks: Option<Reply<CheckReport>>,
+    /// For a change set sent for a guide's step, under its `guide`, whether
+    /// it completes the step, checked against the step's operation (#157).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guide: Option<GuideChecked>,
 }
 
 /// What became of one sheet.
@@ -411,6 +422,14 @@ fn land(
     settings: &Settings,
     keeping: Option<&journal::Keeping>,
 ) -> Reply<ChangeReport> {
+    // A change set sent for a guide's step names it under `guide`: the step
+    // is checked to be one of the guide's, and what its own operation would
+    // do now is worked out first, on the set as it is, to check it against.
+    let guided = match guides::prepare(request, settings) {
+        Ok(guided) => guided,
+        Err(error) => return Reply::from(Err(error)),
+    };
+    let request = guided.as_ref().map_or(request, |g| &g.request);
     let mut attempted = None;
     let mut outcome = apply::apply(
         request,
@@ -425,6 +444,9 @@ fn land(
     // reads the sheets it landed on back from the saved files.
     if let Ok(report) = &mut outcome {
         report.checks = checks(request, report, settings);
+        if let Some(guided) = &guided {
+            report.guide = Some(guides::checked(guided, report));
+        }
     }
     match outcome {
         Ok(report) if report.failed > 0 => {
