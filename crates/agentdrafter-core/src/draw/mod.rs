@@ -845,6 +845,21 @@ impl<'a> Drawer<'a> {
                 insert_layer.clone_into(&mut text.layer);
             }
             let pen = self.pen(&text.layer, &text.properties, Some(insert_pen));
+            let shown = self.shown(&text.layer);
+            // A constant attribute is part of its block, which the insert
+            // carries no attribute for, so on a mirrored insert AutoCAD draws
+            // it with the block, mirrored: reading backwards and running the
+            // other way, where a carried attribute reads forwards.
+            if definition.constant && insert.mirrored {
+                let in_block = crate::text::Text {
+                    contents: value.to_owned(),
+                    layer: text.layer.clone(),
+                    ..definition_text(definition)
+                };
+                let drawn = self.object(&Object::Text(in_block), pen, within, Some(&placed));
+                list.add_shown(shown, index, &[path, &[p]].concat(), pen.color, drawn);
+                continue;
+            }
             let scale = outer
                 .map_or(1.0, Placed::scale)
                 .abs()
@@ -866,7 +881,6 @@ impl<'a> Drawer<'a> {
                     ..Drawn::default()
                 },
             };
-            let shown = self.shown(&text.layer);
             list.add_shown(shown, index, &[path, &[p]].concat(), pen.color, drawn);
         }
         let b = own?;

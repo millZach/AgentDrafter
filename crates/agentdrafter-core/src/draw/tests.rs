@@ -871,3 +871,45 @@ fn a_constant_attribute_draws_its_value_on_every_insert() {
         .collect();
     assert_eq!(read, [(Some(2), "X".into()), (Some(3), "K-1".into())]);
 }
+
+/// On a mirrored insert a constant attribute draws with its block,
+/// mirrored, as AutoCAD draws it from the DWG: reading backwards and
+/// running the other way from where its definition sits. A carried
+/// attribute still reads forwards.
+#[test]
+fn a_constant_attribute_on_a_mirrored_insert_draws_mirrored_with_its_block() {
+    let library = LIBRARY.replace(
+        "      - attdef: {tag: HIDDEN,",
+        "      - attdef: {tag: FIXED, position: [0, 8, 0], height: 2, default: K-1, constant: true}\n      - attdef: {tag: HIDDEN,",
+    );
+    let sheet = "units: mm\nblock_library: blocks.yaml\nobjects:\n  - insert: {block: B, position: [100, 50, 0], mirrored: true, attributes: {TAG: X}}\n";
+    let list = draw_with_library("constant-mirrored", &library, sheet);
+    let run = |part: usize| list.text.iter().find(|r| r.part == Some(part)).unwrap();
+    // The carried attribute reads forwards, left to right.
+    let carried = run(2);
+    assert!(carried.across[0] > 0.0, "{carried:?}");
+    // The constant one starts where its definition's start lands, 10 to the
+    // right of the base point mirrored to 10 to its right, and runs left,
+    // mirrored, its up still up.
+    let constant = run(3);
+    assert!(constant.across[0] < 0.0, "{constant:?}");
+    assert!(constant.up[1] > 0.0, "{constant:?}");
+    near(constant.origin, [110.0, 58.0]);
+    // Every stroke it draws lies left of where it starts.
+    let drawn: Vec<Point2> = list
+        .items
+        .iter()
+        .filter(|i| i.part == Some(3))
+        .flat_map(|i| i.shape.points())
+        .collect();
+    assert!(!drawn.is_empty());
+    assert!(drawn.iter().all(|p| p[0] <= 110.0 + 1e-9), "{drawn:?}");
+    // Not mirrored, it draws forwards, as before.
+    let plain = draw_with_library(
+        "constant-plain",
+        &library,
+        &sheet.replace(", mirrored: true", ""),
+    );
+    let constant = plain.text.iter().find(|r| r.part == Some(3)).unwrap();
+    assert!(constant.across[0] > 0.0, "{constant:?}");
+}
