@@ -37,6 +37,7 @@ fn demo_set(test: &str) -> PathBuf {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -558,6 +559,7 @@ fn a_change_set_spanning_several_sheets_lands_on_each_and_builds_only_them() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: true,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -900,6 +902,7 @@ fn an_inconsistent_set_is_reported_until_its_failed_sheet_is_fixed() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: true,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -949,6 +952,7 @@ fn an_inconsistent_set_is_reported_until_its_failed_sheet_is_fixed() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: true,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -1055,6 +1059,7 @@ fn a_rows_own_objects_are_built_into_its_sheet_alone() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: true,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -1117,6 +1122,7 @@ fn a_rows_own_objects_are_built_into_its_sheet_alone() {
             &SetBuildRequest {
                 set: broken.clone(),
                 overwrite: false,
+                clean: None,
             },
             &Settings::default(),
         );
@@ -1133,6 +1139,7 @@ fn a_rows_own_objects_are_built_into_its_sheet_alone() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: true,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -1365,6 +1372,7 @@ fn an_edit_to_a_template_reached_by_two_paths_is_refused_whole() {
         &SetBuildRequest {
             set: dir.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -1961,6 +1969,7 @@ fn rebuild(set: &Path) {
         &SetBuildRequest {
             set: set.to_owned(),
             overwrite: true,
+            clean: None,
         },
         &Settings::default(),
     );

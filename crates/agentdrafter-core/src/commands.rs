@@ -359,6 +359,8 @@ struct BuildInput {
     output: Option<PathBuf>,
     #[serde(default)]
     overwrite: bool,
+    #[serde(default)]
+    clean: Option<bool>,
 }
 
 fn build_does() -> String {
@@ -372,8 +374,26 @@ fn build_does() -> String {
          set in it: one DWG per row of its rows, each its template filled in from the row, into \
          the output folder its settings ({SET_SETTINGS_FILE}) name. A sheet that fails writes \
          nothing and the others are still built; the reply gives each sheet's outcome under \
-         `sheets`, and is not ok when any sheet failed."
+         `sheets`, and is not ok when any sheet failed. {LEFTOVERS_DOES}"
     )
+}
+
+/// What `build` and `plot` of a drawing set do with its leftover outputs.
+const LEFTOVERS_DOES: &str = "The reply of a drawing set lists under `leftovers` each DWG and \
+     PDF in the output folder that AgentDrafter made for the set, by its build mark or its \
+     stamp, and that no row writes any more; with `clean`, or `clean: true` in the set's \
+     settings, they are moved into the folder `superseded` in the output folder, keeping their \
+     names, and never deleted. Any other file is never listed or moved.";
+
+/// The input `clean` of `build` and `plot`.
+fn clean() -> Value {
+    json!({
+        "description": "For a drawing set: true moves its leftover outputs into the folder \
+                        `superseded` in its output folder, and false only lists them, whatever \
+                        the set's settings say. Without it, or `null`, as the settings' `clean` \
+                        says, which only lists them unless it is true.",
+        "type": ["boolean", "null"],
+    })
 }
 
 fn build_input() -> Value {
@@ -382,6 +402,7 @@ fn build_input() -> Value {
             "source": text("The sheet description to build, or a drawing set's folder."),
             "output": text("Where to write the DWG of one sheet description. Without it, beside the sheet description."),
             "overwrite": flag("Replace a DWG already there, which is allowed only when AgentDrafter built it."),
+            "clean": clean(),
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
         }),
@@ -399,14 +420,17 @@ fn run_build(
         source,
         output,
         overwrite,
+        clean,
     } = parse("build", input)?;
     if is_set(&source, output.as_deref(), "DWGs", "one sheet description")? {
         let request = SetBuildRequest {
             set: source,
             overwrite,
+            clean,
         };
         return Ok(sent_warned(build_set_with(&request, &settings)));
     }
+    no_clean(clean, "build", "one sheet description")?;
     let request = BuildRequest {
         description: source,
         output,
@@ -700,6 +724,8 @@ struct PlotInput {
     overwrite: bool,
     #[serde(default)]
     plot_style: Option<String>,
+    #[serde(default)]
+    clean: Option<bool>,
 }
 
 fn plot_does() -> String {
@@ -718,7 +744,7 @@ fn plot_does() -> String {
          writes nothing and the others are still plotted; the reply gives each sheet's outcome \
          under `sheets`, and is not ok when any sheet failed. A sheet drawn in several layouts \
          plots a page for each, in the order of their tabs, each on its own paper, and the reply \
-         lists them under `layouts`."
+         lists them under `layouts`. {LEFTOVERS_DOES}"
     )
 }
 
@@ -728,6 +754,7 @@ fn plot_input() -> Value {
             "source": text("The record to plot: a sheet description, a DWG when the file ends .dwg, or a drawing set's folder."),
             "output": text("Where to write the PDF of one sheet description or DWG. Without it, beside the source."),
             "overwrite": flag("Replace a PDF already there, which is allowed only when AgentDrafter plotted it."),
+            "clean": clean(),
             "plot_style": plot_style_name("The CTB plot style to plot through, by its file name, such as `monochrome.ctb`, found in the plot style folders. `null` acts as if it were left out. Without it, the built-in monochrome style."),
             "plot_styles": plot_styles(),
             "fonts": fonts(),
@@ -748,6 +775,7 @@ fn run_plot(
         output,
         overwrite,
         plot_style,
+        clean,
     } = parse("plot", input)?;
     if is_set(
         &source,
@@ -758,10 +786,12 @@ fn run_plot(
         let request = PlotSetRequest {
             set: source,
             overwrite,
+            clean,
             plot_style,
         };
         return Ok(sent_warned(plot_set_with(&request, &settings)));
     }
+    no_clean(clean, "plot", "one sheet description or DWG")?;
     let request = PlotRequest {
         source,
         output,
@@ -1527,6 +1557,19 @@ fn is_set(source: &Path, output: Option<&Path>, outputs: &str, one: &str) -> Res
         )));
     }
     Ok(true)
+}
+
+/// Refuses `clean`, true or false, for `command` of `one`: it is for a
+/// drawing set's folder alone, whose output folder may hold leftovers.
+fn no_clean(clean: Option<bool>, command: &str, one: &str) -> Result<(), Error> {
+    match clean {
+        None => Ok(()),
+        Some(_) => Err(Error::usage(format!(
+            "`clean` (--clean, --no-clean) is for a drawing set's folder, whose output folder may \
+             hold outputs no row writes any more; `{command}` of {one} writes one file and leaves \
+             every other as it is"
+        ))),
+    }
 }
 
 /// The settings for one command: the font folders the input's `fonts`

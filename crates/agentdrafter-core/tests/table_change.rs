@@ -80,6 +80,7 @@ fn set_of(test: &str, template: &str, rows: &str) -> PathBuf {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );

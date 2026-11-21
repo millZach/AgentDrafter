@@ -61,6 +61,7 @@ fn build(set: &Path) -> Reply<SetReport> {
         &SetBuildRequest {
             set: set.to_owned(),
             overwrite: true,
+            clean: None,
         },
         &Settings::default(),
     )
@@ -316,6 +317,7 @@ fn each_sheets_plot_is_stamped_with_its_own_rows_file() {
         &PlotSetRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
             plot_style: None,
         },
         &Settings::default(),
@@ -540,6 +542,7 @@ fn a_sole_rows_file_that_is_not_utf8_is_refused_by_a_plot_as_it_was() {
         &PlotSetRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
             plot_style: None,
         },
         &Settings::default(),

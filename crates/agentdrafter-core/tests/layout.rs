@@ -478,6 +478,7 @@ fn panel_set(test: &str) -> PathBuf {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );

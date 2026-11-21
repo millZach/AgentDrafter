@@ -24,7 +24,7 @@ pub(crate) const VALUE_NAME: &str = "^[A-Za-z0-9_-]+$";
 
 /// The schema of a drawing set's settings, `set.yaml`.
 pub(crate) fn set_schema() -> Value {
-    let [units_key, output_key, rows_key] = SETTINGS_KEYS;
+    let [units_key, output_key, rows_key, clean_key] = SETTINGS_KEYS;
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "AgentDrafter drawing set settings",
@@ -51,6 +51,16 @@ pub(crate) fn set_schema() -> Value {
                     .to_owned(),
             ),
             rows_key: rows_property(),
+            clean_key: {
+                "description": "Whether every build and plot of the set moves its leftover \
+                                outputs, the DWGs and PDFs AgentDrafter made for the set in its \
+                                output folder that no row writes any more, into the folder \
+                                superseded in the output folder, keeping their names; they are \
+                                never deleted. Without it, or false, they are only listed, under \
+                                leftovers in the reply. A run's own clean, true or false, \
+                                overrides it for that run.",
+                "type": "boolean",
+            },
         },
     })
 }

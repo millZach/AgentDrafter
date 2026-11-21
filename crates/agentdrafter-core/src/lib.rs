@@ -78,6 +78,7 @@ mod error;
 mod geometry;
 mod import;
 mod interface;
+mod leftovers;
 mod looking_at;
 mod model;
 mod output;
@@ -145,6 +146,7 @@ pub use import::{
     ImportNoticeCode, ImportedBlock, NotCarried, SkippedBlock, TablesAdded,
 };
 pub use interface::Interface;
+pub use leftovers::{Leftover, LeftoverKind, SUPERSEDED_FOLDER};
 pub use looking_at::{
     look_at, looking_at, looking_at_left_off, LookAtRequest, LookingAtReport, LookingAtRequest,
     LOOKING_AT_FILE, MOST_SELECTED,

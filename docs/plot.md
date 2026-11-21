@@ -4,7 +4,7 @@
 
 ```
 agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite]
-                  [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]
+                  [--clean | --no-clean] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]
 agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]
 ```
 
@@ -70,7 +70,7 @@ Poppler's `pdftotext`, pdfium (the PDF reader in Chrome and Edge), `pypdf` and `
 
 The PDF goes beside the source with a `.pdf` extension unless `--output` names another path. An existing file is never replaced without `--overwrite`, and `--overwrite` replaces only a PDF AgentDrafter plotted, as its stamp shows; anything else may be someone's own file (`not_an_output`). The PDF is written whole or not at all.
 
-Given a drawing set's folder, `plot` plots every sheet of the set, each its template filled in from its row as `build` reads it, into the set's output folder as `<output>/<sheet>.pdf`, beside the DWG `build` writes there. It needs no build first: the PDF is drawn from the record, the template and the row, as the DWG is. As with `build`, a sheet that fails writes nothing and the others are still plotted; the reply gives each sheet's outcome under `sheets`, with its `notices`, and is not `ok`, with the error `sheets_failed`, when any sheet failed. Settings, rows or a plot style that cannot be read stop the set before anything is written. `--output` is refused for a set.
+Given a drawing set's folder, `plot` plots every sheet of the set, each its template filled in from its row as `build` reads it, into the set's output folder as `<output>/<sheet>.pdf`, beside the DWG `build` writes there. It needs no build first: the PDF is drawn from the record, the template and the row, as the DWG is. As with `build`, a sheet that fails writes nothing and the others are still plotted; the reply gives each sheet's outcome under `sheets`, with its `notices`, and is not `ok`, with the error `sheets_failed`, when any sheet failed. Settings, rows or a plot style that cannot be read stop the set before anything is written. `--output` is refused for a set. Like a build, a plot of a set lists under `leftovers` every DWG and PDF AgentDrafter made for the set in the output folder that no row writes any more, and with `--clean`, or `clean: true` in the set's settings, moves them into `superseded/` there; `--no-clean` only lists them ([leftover outputs](drawing-set.md#leftover-outputs)).
 
 The same sheet plots to the same bytes: the PDF holds no date and no random identifier.
 

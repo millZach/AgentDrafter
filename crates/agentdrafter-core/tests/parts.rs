@@ -77,6 +77,7 @@ fn built_set(test: &str) -> PathBuf {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -158,6 +159,7 @@ fn a_row_lacking_a_part_is_missing_a_value() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -186,6 +188,7 @@ fn a_list_of_parts_with_a_value_from_the_row_is_refused_in_a_rows_object_and_a_s
         &SetBuildRequest {
             set,
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );
@@ -664,6 +667,7 @@ fn a_tag_spelt_like_an_mtexts_place_is_held_to_an_attributes_one_line() {
         &SetBuildRequest {
             set,
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );

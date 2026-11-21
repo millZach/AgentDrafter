@@ -120,6 +120,7 @@ fn a_sets_sheet_draws_what_its_dwg_draws() {
         &SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );

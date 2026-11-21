@@ -277,6 +277,7 @@ fn a_sheet_whose_dwg_cannot_be_written_is_refused_and_takes_it_once_it_can() {
         &agentdrafter_core::SetBuildRequest {
             set: set.clone(),
             overwrite: false,
+            clean: None,
         },
         &Settings::default(),
     );

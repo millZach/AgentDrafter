@@ -352,7 +352,7 @@ fn slashed(path: &Path) -> String {
 }
 
 /// The record a stamp names, found from the output's folder.
-fn resolve(output: &Path, path: &str) -> PathBuf {
+pub(crate) fn resolve(output: &Path, path: &str) -> PathBuf {
     let named = PathBuf::from(path);
     if named.is_absolute() {
         return named;

@@ -41,7 +41,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 const BUILD_USAGE: &str =
-    "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg>] [--overwrite] [--fonts <folder>]... [--no-system-fonts]";
+    "agentdrafter build <sheet-description | drawing-set-folder> [--output <dwg>] [--overwrite] [--clean | --no-clean] [--fonts <folder>]... [--no-system-fonts]";
 const SCHEMA_USAGE: &str =
     "agentdrafter schema [sheet-description | block-library | template | set | rows | change-set]";
 const OPERATIONS_USAGE: &str = "agentdrafter operations";
@@ -59,7 +59,7 @@ const LOOKING_AT_USAGE: &str = "agentdrafter looking-at <drawing-set-folder>";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--plot-style <ctb> | --monochrome] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--change-set <change-set.json | -> [--all-or-none]] [--fonts <folder>]... [--no-system-fonts]";
-const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
+const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--clean | --no-clean] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]";
@@ -480,15 +480,31 @@ struct SourceArgs {
     output: Option<PathBuf>,
     overwrite: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    clean: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     plot_style: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     plot_styles: Vec<PathBuf>,
+}
+
+/// Takes `--clean` or `--no-clean` into `clean`: a drawing set's run moves
+/// its leftover outputs into `superseded/`, or only lists them, whatever
+/// its settings say. Each is given once, and not both.
+fn set_clean(clean: &mut Option<bool>, flag: &str) -> Result<(), Error> {
+    if clean.replace(flag == "--clean").is_some() {
+        return Err(Error::usage(
+            "--clean or --no-clean is given more than once; give one, or neither to do as the \
+             set's settings say",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_plot(mut args: Args) -> Result<Value, Error> {
     let mut source: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut overwrite = false;
+    let mut clean: Option<bool> = None;
     let mut plot_style: Option<String> = None;
     let mut fonts = FontOptions::default();
     let mut plot_styles = Vec::new();
@@ -504,6 +520,7 @@ fn parse_plot(mut args: Args) -> Result<Value, Error> {
                 }
             }
             Some("--overwrite") => overwrite = true,
+            Some(flag @ ("--clean" | "--no-clean")) => set_clean(&mut clean, flag)?,
             Some("--plot-style") => {
                 let name = value("--plot-style", args.next())?
                     .into_string()
@@ -538,6 +555,7 @@ fn parse_plot(mut args: Args) -> Result<Value, Error> {
         source,
         output,
         overwrite,
+        clean,
         plot_style,
         plot_styles,
     };
@@ -1234,6 +1252,7 @@ fn parse_build(mut args: Args) -> Result<Value, Error> {
     let mut description: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut overwrite = false;
+    let mut clean: Option<bool> = None;
     let mut fonts = FontOptions::default();
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -1254,6 +1273,7 @@ fn parse_build(mut args: Args) -> Result<Value, Error> {
                 }
             }
             Some("--overwrite") => overwrite = true,
+            Some(flag @ ("--clean" | "--no-clean")) => set_clean(&mut clean, flag)?,
             Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
                 return Err(Error::usage(format!(
                     "unknown option `{flag}`; usage: {BUILD_USAGE}"
@@ -1277,6 +1297,7 @@ fn parse_build(mut args: Args) -> Result<Value, Error> {
         source,
         output,
         overwrite,
+        clean,
         plot_style: None,
         plot_styles: Vec::new(),
     };

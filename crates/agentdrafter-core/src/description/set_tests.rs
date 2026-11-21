@@ -549,9 +549,20 @@ const ROWS: Place = Place {
     json: r#"{"units": "mm", "output": "dwg", "rows": V}"#,
 };
 
+const CLEAN: Place = Place {
+    name: "the set's clean",
+    yaml: "units: mm\noutput: dwg\nrows: rows.yaml\nclean: V\n",
+    json: r#"{"units": "mm", "output": "dwg", "rows": "rows.yaml", "clean": V}"#,
+};
+
 #[test]
 fn the_set_schema_accepts_exactly_the_settings_the_reader_accepts() {
     let cases: Vec<Case> = vec![
+        (&CLEAN, "true", json!(true), true),
+        (&CLEAN, "false", json!(false), true),
+        (&CLEAN, "yes", json!("yes"), false),
+        (&CLEAN, "1", json!(1), false),
+        (&CLEAN, "[true]", json!([true]), false),
         (&UNITS, "in", json!("in"), true),
         (&UNITS, "'mm'", json!("mm"), true),
         (&UNITS, "MM", json!("MM"), false),
