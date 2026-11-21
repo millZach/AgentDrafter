@@ -13,6 +13,7 @@ use agentdrafter_core::{
     ChangeRequest, DisplayListRequest, ErrorCode, HowChanged, Object, Query, QueryRequest, Reply,
     Selection, SetBuildRequest, Settings, UndoRequest,
 };
+use agentdrafter_core::{change_set_schema, parse_sheet_description, sheet_description_schema};
 use serde_json::{json, Value};
 
 #[path = "support/snapshot.rs"]
@@ -67,6 +68,11 @@ const ROWS: &str = "rows:
 /// The made-up set, built, in a folder of its own under Cargo's scratch
 /// folder: one template of two sheets, a block library of one terminal.
 fn strip_set(test: &str) -> PathBuf {
+    strip_set_with(test, TEMPLATE, ROWS)
+}
+
+/// The made-up set, with its template and its rows as given.
+fn strip_set_with(test: &str, template: &str, rows: &str) -> PathBuf {
     let set = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("core-copy-array")
         .join(test);
@@ -74,7 +80,7 @@ fn strip_set(test: &str) -> PathBuf {
     fs::create_dir_all(set.join("templates")).unwrap();
     let write = |name: &str, text: &str| fs::write(set.join(name), text).unwrap();
     write("set.yaml", "units: mm\noutput: dwg\nrows: rows.yaml\n");
-    write("rows.yaml", ROWS);
+    write("rows.yaml", rows);
     write(
         "blocks.yaml",
         "units: mm
@@ -85,7 +91,7 @@ blocks:
       - attdef: {tag: NUMBER, position: [0, 0, 0], height: 2, justify: middle_center}
 ",
     );
-    write("templates/strip.yaml", TEMPLATE);
+    write("templates/strip.yaml", template);
     let built = build_set_with(
         &SetBuildRequest {
             set: set.clone(),
@@ -636,4 +642,380 @@ fn every_kind_a_turn_turns_is_turned_with_its_points_and_its_directions() {
     let rows = fs::read_to_string(set.join("rows.yaml")).unwrap();
     let fill = rows.lines().find(|l| l.contains("id: fill-1")).unwrap();
     assert!(!fill.contains("angle"), "{fill}");
+}
+
+#[test]
+fn a_failed_lookup_fails_every_sheet_the_template_reaches_so_none_is_half_edited() {
+    // An array of the template's terminal along a path that is not there,
+    // or a copy of it with an object that is not there, and a move of the
+    // second sheet's own circle, in one change set: the copy would have
+    // reached both sheets, so both fail whole.
+    for (test, array) in [
+        (
+            "missing-path",
+            json!({"op": "arraypath", "target": {"id": "ARR-001/term"}, "path": {"id": "ARR-001/nope"}, "count": 3}),
+        ),
+        (
+            "missing-source",
+            json!({"op": "copy", "targets": [{"id": "ARR-001/term"}, {"id": "ARR-001/nope"}], "by": [1, 0, 0]}),
+        ),
+    ] {
+        let set = strip_set(test);
+        let before = snapshot::snapshot(&set);
+        let reply = send(
+            &set,
+            json!([array, {"op": "move", "target": {"id": "ARR-002/ring-1"}, "by": [1, 0, 0]}]),
+            false,
+        );
+        assert!(!reply.ok, "{test}");
+        let report = reply.result.unwrap();
+        assert_eq!((report.landed, report.failed), (0, 2), "{test}");
+        assert!(!report.operations[1].ok, "{test}");
+        assert_eq!(
+            report.operations[0].sheets,
+            ["ARR-001", "ARR-002"],
+            "{test}"
+        );
+        assert_eq!(snapshot::snapshot(&set), before, "{test}");
+    }
+}
+
+#[test]
+fn a_copy_takes_its_own_row_values_so_setting_one_copy_changes_it_alone() {
+    let template = TEMPLATE.replace(
+        "attributes: {NUMBER: '1'}",
+        "attributes: {NUMBER: {row: TNUM}}",
+    );
+    let rows = ROWS
+        .replace(
+            "values: {TITLE: STRIP ONE}",
+            "values: {TITLE: STRIP ONE, TNUM: '1'}",
+        )
+        .replace(
+            "values: {TITLE: STRIP TWO}",
+            "values:\n      TITLE: STRIP TWO\n      TNUM: '5'",
+        );
+    let set = strip_set_with("own-row-values", &template, &rows);
+    let report = lands(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/term"}, "offsets": [[10, 0, 0], [20, 0, 0]]},
+            {"op": "set_attribute", "target": {"id": "ARR-002/term-2"}, "tag": "NUMBER", "value": "9"},
+        ]),
+    );
+    let op = &report.operations[0];
+    assert_eq!(op.copies[0].row_values, ["TNUM-term-1"]);
+    assert_eq!(op.copies[1].row_values, ["TNUM-term-2"]);
+    assert!(op.record.as_deref().unwrap().ends_with("strip.yaml"));
+    let rows_text = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    assert!(
+        rows_text.contains("values: {TITLE: STRIP ONE, TNUM: '1', TNUM-term-1: 1, TNUM-term-2: 1}"),
+        "{rows_text}"
+    );
+    assert!(
+        rows_text.contains("      TNUM: '5'\n      TNUM-term-1: 5\n      TNUM-term-2: 9\n"),
+        "{rows_text}"
+    );
+    let number = |objects: &BTreeMap<String, Object>, id: &str| {
+        insert(objects, id).attributes[0].value.clone()
+    };
+    let objects = recorded(&set);
+    // Each copy shows what its source shows on each sheet; the one set
+    // changed alone.
+    assert_eq!(number(&objects, "ARR-001/term-1"), "1");
+    assert_eq!(number(&objects, "ARR-002/term-1"), "5");
+    assert_eq!(number(&objects, "ARR-002/term-2"), "9");
+    // A later change set sets one copy's value on one sheet alone.
+    lands(
+        &set,
+        json!([{"op": "set_attribute", "target": {"id": "ARR-001/term-1"}, "tag": "NUMBER", "value": "2"}]),
+    );
+    let objects = recorded(&set);
+    let shown: Vec<String> = ["term", "term-1", "term-2"]
+        .iter()
+        .flat_map(|id| ["ARR-001", "ARR-002"].map(|s| number(&objects, &format!("{s}/{id}"))))
+        .collect();
+    assert_eq!(shown, ["1", "5", "2", "5", "1", "9"]);
+}
+
+#[test]
+fn an_unturned_polar_arrays_base_point_is_the_centre_of_what_the_objects_draw() {
+    let set = strip_set("base-point");
+    // A terminal alone, turned 30 degrees: its box is about its insertion
+    // point, which goes round.
+    let report = lands(
+        &set,
+        json!([{"op": "arraypolar", "target": {"id": "ARR-001/lug"}, "center": [0, 60, 0], "count": 2, "angle": 180, "rotate": false}]),
+    );
+    let by = report.operations[0].copies[0].by;
+    assert!(close(by, [-20.0, 0.0, 0.0]), "{by:?}");
+    // With a circle: the box round both, the terminal's turned box among it.
+    let report = lands(
+        &set,
+        json!([{"op": "arraypolar", "targets": [{"id": "ARR-001/lug"}, {"id": "ARR-001/hole"}], "center": [0, 60, 0], "count": 2, "angle": 180, "rotate": false}]),
+    );
+    let (sin, cos) = 30f64.to_radians().sin_cos();
+    let left = 10.0 - (2.0 * cos + 3.0 * sin);
+    let middle = (left + 103.0) / 2.0;
+    let by = report.operations[0].copies[0].by;
+    assert!(
+        (by[0] + 2.0 * middle).abs() < 1e-6 && by[1].abs() < 1e-6,
+        "{by:?}"
+    );
+}
+
+#[test]
+fn a_moved_or_turned_patterned_hatch_carries_its_pattern_with_it() {
+    let template = TEMPLATE.replace(
+        "units: mm\n",
+        "units: mm\nhatch_patterns:\n  LINES:\n    lines:\n      - {angle: 45, delta: [0, 2]}\n",
+    );
+    let rows = ROWS.replace(
+        "      - circle: {id: hole,",
+        "      - hatch: {id: grid, pattern: LINES, boundary: [{polyline: {points: [[40, 20, 0], [50, 20, 0], [50, 27, 0], [40, 27, 0]]}}]}\n      - circle: {id: hole,",
+    );
+    let set = strip_set_with("hatch-origin", &template, &rows);
+    let report = lands(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/grid"}, "by": [3.3, 4.1, 0]},
+            {"op": "arraypolar", "target": {"id": "ARR-001/grid"}, "center": [45, 0, 0], "count": 2, "angle": 33},
+        ]),
+    );
+    assert!(report.sheets.iter().all(|s| s.ok));
+    let rows_text = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    let line = |id: &str| {
+        rows_text
+            .lines()
+            .find(|l| l.contains(&format!("id: {id},")))
+            .unwrap()
+            .to_owned()
+    };
+    assert!(
+        line("grid-1").contains("origin: [3.3, 4.1, 0]"),
+        "{}",
+        line("grid-1")
+    );
+    assert!(
+        line("grid-2").contains("angle: 33") && line("grid-2").contains("origin: ["),
+        "{}",
+        line("grid-2")
+    );
+    // Drawn, each copy is its source's pattern moved, or turned, whole.
+    let mut request = DisplayListRequest::new(&set);
+    request.sheet = Some("ARR-001".to_owned());
+    let drawn = display_list_with(&request, &Settings::default()).unwrap();
+    let points_of = |id: &str| -> Vec<[f64; 2]> {
+        let at = drawn
+            .objects
+            .iter()
+            .position(|o| o.id.as_deref() == Some(id))
+            .unwrap();
+        drawn
+            .display_list
+            .items
+            .iter()
+            .filter(|i| i.object == at)
+            .flat_map(|i| i.points())
+            .collect()
+    };
+    let source = points_of("ARR-001/grid");
+    assert!(source.len() > 8);
+    let moved: Vec<[f64; 2]> = source.iter().map(|p| [p[0] + 3.3, p[1] + 4.1]).collect();
+    let copy = points_of("ARR-001/grid-1");
+    assert_eq!(copy.len(), moved.len());
+    for (a, b) in copy.iter().zip(&moved) {
+        assert!(
+            (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6,
+            "{a:?} {b:?}"
+        );
+    }
+    let (sin, cos) = 33f64.to_radians().sin_cos();
+    let turned: Vec<[f64; 2]> = source
+        .iter()
+        .map(|p| {
+            [
+                45.0 + (p[0] - 45.0) * cos - p[1] * sin,
+                (p[0] - 45.0) * sin + p[1] * cos,
+            ]
+        })
+        .collect();
+    let copy = points_of("ARR-001/grid-2");
+    assert_eq!(copy.len(), turned.len());
+    for p in &copy {
+        assert!(
+            turned
+                .iter()
+                .any(|q| (p[0] - q[0]).abs() < 1e-6 && (p[1] - q[1]).abs() < 1e-6),
+            "{p:?}"
+        );
+    }
+    // And a move of the hatch itself carries its pattern too.
+    lands(
+        &set,
+        json!([{"op": "move", "target": {"id": "ARR-001/grid"}, "by": [1, 0, 0]}]),
+    );
+    let rows_text = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    let grid = rows_text.lines().find(|l| l.contains("id: grid,")).unwrap();
+    assert!(grid.contains("origin: [1, 0, 0]"), "{grid}");
+}
+
+#[test]
+fn copies_of_a_template_and_a_row_object_together_are_each_on_their_own_sheets() {
+    let rows = ROWS.replace(
+        "      - circle: {id: ring-1, center: [10, 10, 0], radius: 1}\n",
+        "      - circle: {id: ring-1, center: [10, 10, 0], radius: 1}\n      - circle: {id: hole-1, center: [20, 10, 0], radius: 1}\n",
+    );
+    let set = strip_set_with("mixed", TEMPLATE, &rows);
+    let operations = json!([{"op": "copy", "targets": [{"id": "ARR-001/ring"}, {"id": "ARR-001/hole"}], "by": [0, -5, 0]}]);
+    let mut request = DisplayListRequest::new(&set);
+    request.sheet = Some("ARR-001".to_owned());
+    request.change_set = Some(json!({ "operations": operations }));
+    let preview = display_list_with(&request, &Settings::default())
+        .unwrap()
+        .preview
+        .unwrap();
+    let ids: Vec<&str> = preview.objects.iter().map(|o| o.id.as_str()).collect();
+    // The ring's copy skips ring-1, which the second sheet has; the hole's,
+    // on the first sheet alone, does not skip the second's hole-1.
+    assert_eq!(ids, ["ARR-001/ring-2", "ARR-002/ring-2", "ARR-001/hole-1"]);
+    let report = lands(&set, operations);
+    assert!(report.operations[0]
+        .record
+        .as_deref()
+        .unwrap()
+        .ends_with("strip.yaml"));
+}
+
+#[test]
+fn an_operation_held_back_lists_no_copies_and_the_record_follows_the_rule() {
+    let set = strip_set("held-back");
+    let reply = send(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/hole"}, "by": [1, 0, 0]},
+            {"op": "move", "target": {"id": "ARR-001/nope"}, "by": [1, 0, 0]},
+        ]),
+        false,
+    );
+    let report = reply.result.unwrap();
+    assert!(!report.operations[0].ok);
+    assert!(report.operations[0].copies.is_empty());
+    let report = lands(
+        &set,
+        json!([{"op": "copy", "target": {"id": "ARR-001/hole"}, "by": [1, 0, 0]}]),
+    );
+    assert!(report.operations[0]
+        .record
+        .as_deref()
+        .unwrap()
+        .ends_with("rows.yaml"));
+}
+
+#[test]
+fn the_array_schema_refuses_what_the_reader_refuses() {
+    let set = strip_set("schema");
+    let validator = jsonschema::validator_for(&change_set_schema()).unwrap();
+    let target = json!({"id": "ARR-001/hole"});
+    let center = json!([0, 0, 0]);
+    let cases = [
+        (
+            json!({"op": "arrayrect", "target": target, "columns": 3, "column_spacing": 2}),
+            true,
+        ),
+        (
+            json!({"op": "arrayrect", "target": target, "columns": 3}),
+            false,
+        ),
+        (
+            json!({"op": "arrayrect", "target": target, "rows": 2}),
+            false,
+        ),
+        (
+            json!({"op": "arrayrect", "target": target, "rows": 2, "row_spacing": 1, "columns": 1}),
+            true,
+        ),
+        (
+            json!({"op": "arrayrect", "target": target, "rows": 1, "columns": 1}),
+            false,
+        ),
+        (
+            json!({"op": "arrayrect", "target": target, "rows": 1}),
+            false,
+        ),
+        (
+            json!({"op": "arraypolar", "target": target, "center": center, "count": 3, "base_point": [1, 0, 0]}),
+            false,
+        ),
+        (
+            json!({"op": "arraypolar", "target": target, "center": center, "count": 3, "rotate": true, "base_point": [1, 0, 0]}),
+            false,
+        ),
+        (
+            json!({"op": "arraypolar", "target": target, "center": center, "count": 3, "rotate": false, "base_point": [1, 0, 0]}),
+            true,
+        ),
+        (
+            json!({"op": "arraypolar", "target": target, "center": center, "count": 3, "angle": 0}),
+            false,
+        ),
+        (
+            json!({"op": "arraypolar", "target": target, "center": center, "count": 3, "angle": 0.0}),
+            false,
+        ),
+        (
+            json!({"op": "arraypolar", "target": target, "center": center, "count": 3, "angle": "90"}),
+            false,
+        ),
+        (
+            json!({"op": "arraypolar", "target": target, "center": center, "count": 3, "angle": -360}),
+            true,
+        ),
+        (
+            json!({"op": "arraypolar", "target": target, "center": center, "count": 3, "angle": 361}),
+            false,
+        ),
+    ];
+    for (op, accepted) in cases {
+        let change_set = json!({ "operations": [op] });
+        assert_eq!(
+            validator.is_valid(&change_set),
+            accepted,
+            "the schema: {op}"
+        );
+        // The reader refuses a change set whole, with no result.
+        let reply = send(&set, json!([op]), true);
+        assert_eq!(
+            reply.result.is_some(),
+            accepted,
+            "the reader: {op} {:?}",
+            reply.error
+        );
+    }
+    // A hatch's origin, which SOLID does not take.
+    let schema = jsonschema::validator_for(&sheet_description_schema()).unwrap();
+    let square = json!([{"polyline": {"points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]]}}]);
+    for (hatch, accepted) in [
+        (
+            json!({"pattern": "P", "origin": [1, 2, 0], "boundary": square}),
+            true,
+        ),
+        (
+            json!({"pattern": "SOLID", "origin": [1, 2, 0], "boundary": square}),
+            false,
+        ),
+        (
+            json!({"pattern": "P", "origin": [1, 2], "boundary": square}),
+            false,
+        ),
+    ] {
+        let sheet = json!({"units": "mm", "hatch_patterns": {"P": {"lines": [{"delta": [0, 1]}]}}, "objects": [{"hatch": hatch}]});
+        assert_eq!(schema.is_valid(&sheet), accepted, "{hatch}");
+        let yaml = serde_json::to_string(&sheet).unwrap();
+        assert_eq!(
+            parse_sheet_description(&yaml).is_ok(),
+            accepted,
+            "the reader: {hatch}"
+        );
+    }
 }

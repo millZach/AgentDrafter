@@ -621,7 +621,10 @@ fn does(spec: &Spec) -> String {
                        object with an ID of its own, its source's id and the first number free, \
                        such as term-1, or its type's, such as line-1, for a source with no id; \
                        it keeps every key of its source, an insert's attribute values among \
-                       them, but its name, which is given once on a sheet. A copy is written \
+                       them, but its name, which is given once on a sheet; a value it takes \
+                       from the row becomes its own row value, set to what its source shows, \
+                       listed under row_values, so setting it sets that copy alone. A copy is \
+                       written \
                        where its source is: a template's object's in the template, so on every \
                        sheet built from it, all or nothing, and a row's own object's in the \
                        row. The reply lists each copy under copies, with its source and where \
@@ -635,7 +638,8 @@ fn does(spec: &Spec) -> String {
                         to go the other way; polar: count items round center, the objects the \
                         first, over angle degrees anticlockwise, 360 when left out, negative \
                         clockwise, each turned with it unless rotate is false, when each is \
-                        moved so that its base_point, the centre of their extents when left \
+                        moved so that its base_point, the centre of the box round what they \
+                        draw when left \
                         out, goes round; or path: count items along path, a line, polyline, \
                         arc, circle, ellipse or spline by its ID or its name, the objects the \
                         first at the path's start, evenly spaced from its start to its end \
@@ -1645,11 +1649,28 @@ fn array_schema() -> Value {
             ];
             match *kind {
                 "rectangular" => {
+                    // More than the objects alone: 2 rows or 2 columns at
+                    // least, each spaced when there is more than one.
+                    let many = |key: &str| {
+                        json!({ "required": [key], "properties": { key: { "minimum": 2 } } })
+                    };
+                    all.push(json!({ "anyOf": [many("rows"), many("columns")] }));
+                    all.push(json!({ "if": many("rows"), "then": { "required": ["row_spacing"] } }));
                     all.push(
-                        json!({ "anyOf": [{ "required": ["rows"] }, { "required": ["columns"] }] }),
+                        json!({ "if": many("columns"), "then": { "required": ["column_spacing"] } }),
                     );
                 }
-                "polar" => all.push(json!({ "required": ["center", "count"] })),
+                "polar" => {
+                    all.push(json!({ "required": ["center", "count"] }));
+                    // A base point places copies that are not turned.
+                    all.push(json!({
+                        "if": { "required": ["base_point"] },
+                        "then": {
+                            "required": ["rotate"],
+                            "properties": { "rotate": { "const": false } },
+                        },
+                    }));
+                }
                 _ => all.push(json!({ "required": ["path", "count"] })),
             }
             json!({ "allOf": all })
@@ -1698,11 +1719,15 @@ fn array_schema() -> Value {
                 2,
             ),
             "angle": {
-                "description": "The angle a polar array fills, in degrees, anticlockwise, or \
-                                clockwise when negative: more than 0 and at most 360 either \
-                                way, 360 when left out. A whole turn spaces count items \
-                                evenly round it; less puts the last at its end.",
-                "$ref": "#/$defs/angle",
+                "description": "The angle a polar array fills, in degrees, a number: \
+                                anticlockwise, or clockwise when negative, more than 0 and at \
+                                most 360 either way, 360 when left out. 360 is a whole turn, \
+                                which spaces count items evenly round it; less puts the last \
+                                at its end. 0 fills nothing.",
+                "type": "number",
+                "minimum": -360,
+                "maximum": 360,
+                "not": { "const": 0 },
             },
             "rotate": {
                 "description": "Whether a polar array's copies are turned as they go round, \
@@ -1712,8 +1737,8 @@ fn array_schema() -> Value {
             },
             "base_point": {
                 "description": "The point of the objects that goes round when the copies are \
-                                not turned, a point or a snapped point: the centre of their \
-                                extents when left out. Only with rotate false.",
+                                not turned, a point or a snapped point: the centre of the box \
+                                round what they draw when left out. Only with rotate false.",
                 "$ref": "#/$defs/snapped_point",
             },
             "path": {
@@ -3876,7 +3901,6 @@ fn read_array(map: &Map<String, Value>, sent: &str, units: Unit) -> Result<Patte
                 Some(value) => {
                     let degrees = match value {
                         Value::Number(n) => n.as_f64(),
-                        Value::String(s) => s.trim().parse::<f64>().ok(),
                         _ => None,
                     };
                     match degrees {

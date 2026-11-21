@@ -24,10 +24,11 @@ pub(crate) const HATCH_PATTERN_KEYS: [&str; 1] = ["lines"];
 pub(crate) const PATTERN_LINE_KEYS: [&str; 4] = ["angle", "origin", "delta", "dashes"];
 
 /// The keys a hatch takes.
-pub(crate) const HATCH_KEYS: [&str; 9] = [
+pub(crate) const HATCH_KEYS: [&str; 10] = [
     "pattern",
     "scale",
     "angle",
+    "origin",
     "boundary",
     "layer",
     "color",
@@ -204,8 +205,8 @@ pub(super) fn hatch(
         &fields.path_of("pattern"),
         patterns,
     )?;
-    let (scale, angle) = if pattern.is_solid() {
-        for (key, verb) in [("scale", "scale"), ("angle", "turn")] {
+    let (scale, angle, origin) = if pattern.is_solid() {
+        for (key, verb) in [("scale", "scale"), ("angle", "turn"), ("origin", "lay")] {
             if let Some(node) = fields.get(key) {
                 return Err(bad_value(
                     node,
@@ -214,7 +215,7 @@ pub(super) fn hatch(
                 ));
             }
         }
-        (1.0, 0.0)
+        (1.0, 0.0, [0.0, 0.0])
     } else {
         let scale = match fields.get("scale") {
             Some(node) => scale(node, &fields.path_of("scale"))?,
@@ -224,7 +225,14 @@ pub(super) fn hatch(
             Some(node) => angle(node, &fields.path_of("angle"))?,
             None => 0.0,
         };
-        (scale, angle)
+        let origin = match fields.get("origin") {
+            Some(node) => {
+                let p = point(node, &fields.path_of("origin"), units)?;
+                [p.x, p.y]
+            }
+            None => [0.0, 0.0],
+        };
+        (scale, angle, origin)
     };
     let boundary = boundary(
         fields.require("boundary")?,
@@ -235,6 +243,7 @@ pub(super) fn hatch(
         pattern,
         scale,
         angle,
+        origin,
         boundary,
         layer,
         properties: Default::default(),

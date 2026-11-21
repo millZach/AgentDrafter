@@ -479,6 +479,8 @@ struct Done {
     snapped: Vec<SnapResolved>,
     /// Each copy a copy or an array made.
     copies: Vec<Copied>,
+    /// The sheets each copy is on, in the order of `copies`.
+    copy_sheets: Vec<Vec<usize>>,
     message: String,
 }
 
@@ -534,13 +536,13 @@ fn objects_changed(
         for id in &d.inserts {
             add(id.clone(), HowChanged::Changed);
         }
-        // Each copy is added, on every sheet the operation reaches.
-        for copy in &d.copies {
+        // Each copy is added, on every sheet it is on.
+        for (copy, on) in d.copies.iter().zip(&d.copy_sheets) {
             let local = copy
                 .id
                 .split_once(ID_SEPARATOR)
                 .map_or(copy.id.as_str(), |(_, l)| l);
-            for &k in &op_sheets[i] {
+            for &k in on {
                 add(
                     format!("{}{ID_SEPARATOR}{local}", files.name(k)),
                     HowChanged::Added,
@@ -882,7 +884,12 @@ pub(super) fn apply(
                 inserts: d.as_ref().map(|d| d.inserts.clone()).unwrap_or_default(),
                 imported: d.as_ref().and_then(|d| d.imported.clone()),
                 snapped: d.as_ref().map(|d| d.snapped.clone()).unwrap_or_default(),
-                copies: d.as_ref().map(|d| d.copies.clone()).unwrap_or_default(),
+                // A copy of an operation held back never landed.
+                copies: d
+                    .as_ref()
+                    .filter(|_| included[i])
+                    .map(|d| d.copies.clone())
+                    .unwrap_or_default(),
                 attributes_removed: d.map(|d| d.attributes_removed).unwrap_or_default(),
                 error: if included[i] {
                     None
@@ -1197,6 +1204,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 attributes_removed: Vec::new(),
                 imported: None,
                 copies: Vec::new(),
+                copy_sheets: Vec::new(),
                 message: format!(
                     "adds {} {object}, `{id}`, {place}{}",
                     article(object),
@@ -1494,6 +1502,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         attributes_removed: Vec::new(),
         imported: None,
         copies: Vec::new(),
+        copy_sheets: Vec::new(),
         snapped: Vec::new(),
         message: String::new(),
     };
@@ -2315,6 +2324,7 @@ fn apply_table(
             attributes_removed: Vec::new(),
             imported: None,
             copies: Vec::new(),
+            copy_sheets: Vec::new(),
             snapped: Vec::new(),
             message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
         }),
@@ -2506,6 +2516,7 @@ fn apply_block(
             attributes_removed: synced.removed,
             imported: None,
             copies: Vec::new(),
+            copy_sheets: Vec::new(),
             snapped: Vec::new(),
             message: format!("{what}{removed}{on}"),
         }),
@@ -2676,6 +2687,7 @@ fn apply_import(
             attributes_removed: synced.removed,
             imported: Some(imported),
             copies: Vec::new(),
+            copy_sheets: Vec::new(),
             snapped: Vec::new(),
             message: format!(
                 "imports from `{}` into the block library `{written}`: {}{left_out}{on}",
@@ -3389,6 +3401,7 @@ fn apply_dimension_from(
             attributes_removed: Vec::new(),
             imported: None,
             copies: Vec::new(),
+            copy_sheets: Vec::new(),
             message: format!(
                 "adds {what}, `{added}`, from `{}`, {place}{}",
                 found.id,
@@ -3448,17 +3461,35 @@ fn apply_copy(
         outcome: Err(e),
         refuse: false,
     };
+    // Every object is looked up before any fails the operation, so that a
+    // lookup that fails fails every sheet the objects found reach too: a
+    // sheet that shares their template is not left to take the change
+    // set's other operations without its part of this one (ADR-0005).
     let mut found: Vec<(Found, &str)> = Vec::with_capacity(targets.len());
+    let mut lookup: Option<Applied> = None;
     for (target, key) in targets {
         match resolve(at, target, op) {
             Ok(object) => found.push((object, key)),
-            Err(applied) => return keyed(*applied, op, key),
+            Err(applied) if applied.refuse => return keyed(*applied, op, key),
+            Err(applied) => {
+                lookup.get_or_insert_with(|| keyed(*applied, op, key));
+            }
         }
     }
+    let mut reach: BTreeSet<usize> = BTreeSet::new();
+    for (f, _) in &found {
+        reach.extend(at.reach(f.file, f.row));
+    }
+    if let Some(mut failed) = lookup {
+        reach.extend(failed.sheets.iter().copied());
+        failed.sheets = reach.into_iter().collect();
+        return failed;
+    }
+    let reach: Vec<usize> = reach.into_iter().collect();
     let k = found[0].0.row;
     if let Some((other, key)) = found.iter().find(|(f, _)| f.row != k) {
         return fail(
-            vec![k, other.row],
+            reach.clone(),
             op_err(
                 ErrorCode::BadValue,
                 format!(
@@ -3473,11 +3504,6 @@ fn apply_copy(
             ),
         );
     }
-    let mut reach: BTreeSet<usize> = BTreeSet::new();
-    for (f, _) in &found {
-        reach.extend(at.reach(f.file, f.row));
-    }
-    let reach: Vec<usize> = reach.into_iter().collect();
     for (i, (f, key)) in found.iter().enumerate() {
         if let Some((_, first)) = found[..i]
             .iter()
@@ -3636,17 +3662,35 @@ fn apply_copy(
     }
 
     // Each copy's ID: its source's id and the first number free on every
-    // sheet it reaches.
-    let mut taken: BTreeSet<String> = BTreeSet::new();
+    // sheet the copy itself reaches: a template's object's copy on every
+    // sheet built from the template, a row's own object's on its sheet.
+    let mut taken: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
     for &s in &reach {
         match at.objects(s) {
-            Ok(objects) => taken.extend(objects.into_iter().map(|o| o.3.id.to_lowercase())),
+            Ok(objects) => {
+                taken.insert(
+                    s,
+                    objects.into_iter().map(|o| o.3.id.to_lowercase()).collect(),
+                );
+            }
             Err(e) => return fail(reach, e),
         }
     }
+    // The names of the values the rows of the sheets the copies reach give,
+    // which a copy's own row value does not take.
+    let mut value_names: BTreeSet<String> = BTreeSet::new();
+    for &s in &reach {
+        let (rows, list) = at.row_record(s);
+        if let ObjectList::Row(r) = list {
+            value_names.extend(rows.row_value_names(r));
+        }
+    }
     let mut copies: Vec<Copied> = Vec::with_capacity(places.len() * found.len());
+    let mut copy_sheets: Vec<Vec<usize>> = Vec::with_capacity(copies.capacity());
+    let mut own_values = false;
     for place in &places {
         for (f, _) in &found {
+            let on = at.reach(f.file, f.row);
             let record = match at.file(f.file) {
                 Ok(record) => record,
                 Err(e) => return fail(reach, e),
@@ -3654,22 +3698,68 @@ fn apply_copy(
             let base = copy_base(&record.objects(f.list)[f.index]);
             let local = (1..)
                 .map(|n| format!("{base}-{n}"))
-                .find(|id| !taken.contains(&id.to_lowercase()))
+                .find(|id| {
+                    let id = id.to_lowercase();
+                    on.iter().all(|s| !taken[s].contains(&id))
+                })
                 .expect("a free number");
-            taken.insert(local.to_lowercase());
+            for s in &on {
+                taken
+                    .get_mut(s)
+                    .expect("a sheet it reaches")
+                    .insert(local.to_lowercase());
+            }
+            // A value the copy takes from the row becomes its own, named
+            // after the value and the copy, so that setting the copy's value
+            // sets it alone (decision 5).
+            let mut own = |name: &str| {
+                let base: String = format!("{name}-{local}")
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                let free = std::iter::once(base.clone())
+                    .chain((2..).map(|n| format!("{base}-{n}")))
+                    .find(|n| !value_names.contains(n))
+                    .expect("a free name");
+                value_names.insert(free.clone());
+                free
+            };
             let made = record
-                .duplicate(f.list, f.index, &local, op.index)
-                .and_then(|index| {
+                .duplicate(f.list, f.index, &local, op.index, &mut own)
+                .and_then(|(index, renamed)| {
                     if place.by != [0.0; 3] {
                         record.move_by(f.list, index, place.by, units, op.index)?;
                     }
                     if place.turn != 0.0 {
                         record.turn_by(f.list, index, place.about, place.turn, units, op.index)?;
                     }
-                    Ok(())
+                    Ok(renamed)
                 });
-            if let Err(e) = made {
-                return fail(reach, op_err(e.code, e.message, ""));
+            let renamed = match made {
+                Ok(renamed) => renamed,
+                Err(e) => return fail(reach, op_err(e.code, e.message, "")),
+            };
+            // Each of its own row values is set, on every sheet it is on, to
+            // the value its source's shows there.
+            for (old, new) in &renamed {
+                for &s in &on {
+                    let (rows, list) = at.row_record(s);
+                    let ObjectList::Row(r) = list else {
+                        continue;
+                    };
+                    if let Some(text) = rows.row_value(r, old) {
+                        if let Err(e) = rows.add_row_value(r, new, &text) {
+                            return fail(reach, op_err(e.code, e.message, ""));
+                        }
+                        own_values = true;
+                    }
+                }
             }
             let (offset, row, column, item, along) = match place.at {
                 array::At::Offset(i) => (Some(i), None, None, None, None),
@@ -3691,7 +3781,9 @@ fn apply_copy(
                 by: place.by,
                 turned: turned.then_some(place.turn),
                 about: turned.then_some(place.about),
+                row_values: renamed.into_iter().map(|(_, new)| new).collect(),
             });
+            copy_sheets.push(on);
         }
     }
 
@@ -3813,16 +3905,38 @@ fn apply_copy(
     } else {
         "copies"
     };
+    let own_words = if own_values {
+        "; each value a copy takes from the row is its own, under `row_values`, set on each \
+         sheet to the value its source shows there"
+    } else {
+        ""
+    };
     let message = format!(
-        "{verb} {what} {how}, making {}, written {}: {}{}",
+        "{verb} {what} {how}, making {}, written {}: {}{own_words}{}",
         plural(copies.len(), "copy", "copies"),
         written.join(" and "),
         listed(&ids),
         snapped_words(&snapped)
     );
-    let record = match at.file(found[0].0.file) {
-        Ok(record) => record.path.clone(),
-        Err(e) => return fail(reach, e),
+    // The record, as for every edit that writes a row and a template: the
+    // template when it is built into more than one sheet, and the rows file
+    // when it serves the one sheet alone.
+    let template = found
+        .iter()
+        .filter_map(|(f, _)| match f.file {
+            FileRef::Template(t) => Some(t),
+            FileRef::Rows(_) => None,
+        })
+        .max_by_key(|&t| files.templates[t].sheets.len());
+    let writes_rows = own_values
+        || found
+            .iter()
+            .any(|(f, _)| matches!(f.file, FileRef::Rows(_)));
+    let record = match template {
+        Some(t) if !writes_rows || files.templates[t].sheets.len() > 1 => {
+            files.templates[t].path.clone()
+        }
+        _ => files.rows_path(k).to_owned(),
     };
     Applied {
         outcome: Ok(Done {
@@ -3838,6 +3952,7 @@ fn apply_copy(
             imported: None,
             snapped,
             copies,
+            copy_sheets,
             message,
         }),
         sheets: reach,
@@ -3901,47 +4016,56 @@ fn extents_center(
     settings: &Settings,
 ) -> Result<[f64; 3], Error> {
     let (record, fonts) = sheet_geometry(at, op, k, settings)?;
-    let reader = Reader {
-        sheet: &record.sheet,
-        fonts: &fonts,
-    };
-    let mut bounds: Option<([f64; 3], [f64; 3])> = None;
-    for (f, _) in found {
-        let Some(object) = model_index(&record, f).and_then(|i| record.sheet.objects.get(i)) else {
+    // The sheet drawn as `query extents` draws it, each object in its own
+    // space: every kind of object has bounds there, an insert's its
+    // block's as placed and a text's its letters'.
+    let drawn = crate::query::measuring_objects(&record.sheet, &fonts);
+    let mut points: Vec<[f64; 2]> = Vec::new();
+    for (f, key) in found {
+        let Some(place) = model_index(&record, f) else {
             continue;
         };
-        if let Some(b) = reader.measures(object).extents {
-            bounds = Some(match bounds {
-                None => (b.min, b.max),
-                Some((min, max)) => (
-                    [
-                        min[0].min(b.min[0]),
-                        min[1].min(b.min[1]),
-                        min[2].min(b.min[2]),
-                    ],
-                    [
-                        max[0].max(b.max[0]),
-                        max[1].max(b.max[1]),
-                        max[2].max(b.max[2]),
-                    ],
+        let before = points.len();
+        points.extend(
+            drawn
+                .items
+                .iter()
+                .filter(|item| item.object == place)
+                .flat_map(|item| item.points()),
+        );
+        if points.len() == before {
+            return Err(op_error(
+                op.index,
+                op.spec.name,
+                ErrorCode::BadValue,
+                format!(
+                    "`{}` draws nothing, so it has no bounds to take a base point from; give \
+                     base_point",
+                    f.id
                 ),
-            });
+                key,
+            ));
         }
     }
-    match bounds {
-        Some((min, max)) => Ok([
-            (min[0] + max[0]) / 2.0,
-            (min[1] + max[1]) / 2.0,
-            (min[2] + max[2]) / 2.0,
-        ]),
-        None => Err(op_error(
+    let (min, max) = points.iter().fold(
+        ([f64::MAX, f64::MAX], [f64::MIN, f64::MIN]),
+        |(min, max), p| {
+            (
+                [min[0].min(p[0]), min[1].min(p[1])],
+                [max[0].max(p[0]), max[1].max(p[1])],
+            )
+        },
+    );
+    if points.is_empty() {
+        return Err(op_error(
             op.index,
             op.spec.name,
             ErrorCode::BadValue,
-            "the objects have no extents to take a base point from; give base_point",
+            "the objects have no bounds to take a base point from; give base_point",
             "base_point",
-        )),
+        ));
     }
+    Ok([(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0, 0.0])
 }
 
 /// The ID and the curves, end to end, of the path a path array runs along,
@@ -3964,14 +4088,21 @@ fn path_curves(
             refuse: false,
         })
     };
-    let on = match resolve(at, path, op) {
-        Ok(on) => on,
-        Err(applied) => return Err(Box::new(keyed(*applied, op, "path"))),
-    };
     let mut reach: BTreeSet<usize> = BTreeSet::new();
     for (f, _) in found {
         reach.extend(at.reach(f.file, f.row));
     }
+    let on = match resolve(at, path, op) {
+        Ok(on) => on,
+        Err(applied) => {
+            let mut failed = keyed(*applied, op, "path");
+            if !failed.refuse {
+                reach.extend(failed.sheets.iter().copied());
+                failed.sheets = reach.into_iter().collect();
+            }
+            return Err(Box::new(failed));
+        }
+    };
     let reach: Vec<usize> = reach.into_iter().collect();
     if on.row != k {
         return Err(err(

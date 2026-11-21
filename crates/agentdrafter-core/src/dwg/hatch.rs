@@ -31,7 +31,7 @@ pub(super) fn dwg_hatch(hatch: &Hatch) -> DwgHatch {
             .pattern
             .lines
             .iter()
-            .map(|line| dwg_pattern_line(line, hatch.scale, hatch.angle))
+            .map(|line| dwg_pattern_line(line, hatch.scale, hatch.angle, hatch.origin))
             .collect();
         let mut patterned = DwgHatch::with_pattern(pattern);
         // A pattern the sheet defines is a custom pattern to AutoCAD: not
@@ -58,14 +58,20 @@ fn elevation(hatch: &Hatch) -> f64 {
 }
 
 /// One pattern line as the DWG holds it: turned by the hatch's `angle` and
-/// enlarged by its `scale`, with its step to the next line in the plane.
-fn dwg_pattern_line(line: &HatchPatternLine, scale: f64, angle: f64) -> DwgHatchPatternLine {
+/// enlarged by its `scale`, with its step to the next line in the plane,
+/// laid from the hatch's `origin`.
+fn dwg_pattern_line(
+    line: &HatchPatternLine,
+    scale: f64,
+    angle: f64,
+    origin: [f64; 2],
+) -> DwgHatchPatternLine {
     let direction = normalize_degrees(line.angle + angle);
     let [x, y] = turn(line.origin, angle);
     let [dx, dy] = turn(line.delta, direction);
     DwgHatchPatternLine {
         angle: direction.to_radians(),
-        base_point: Vector2::new(x * scale, y * scale),
+        base_point: Vector2::new(origin[0] + x * scale, origin[1] + y * scale),
         offset: Vector2::new(dx * scale, dy * scale),
         dash_lengths: line.dashes.iter().map(|d| d * scale).collect(),
     }
@@ -175,10 +181,13 @@ pub(super) fn read_hatch(dwg_hatch: &DwgHatch, layer: String) -> Option<Hatch> {
         .iter()
         .map(|path| read_loop(path, dwg_hatch.elevation))
         .collect::<Option<Vec<_>>>()?;
+    // The DWG holds the origin within each line's base point, so a hatch
+    // read back is laid from [0, 0] with its lines' origins carrying it.
     Some(Hatch {
         pattern,
         scale,
         angle,
+        origin: [0.0, 0.0],
         boundary,
         layer,
         properties: Default::default(),
@@ -326,19 +335,23 @@ mod tests {
             delta: [0.0, 3.175],
             dashes: vec![2.0, -1.0, 0.0, -1.0],
         };
-        let at_one = dwg_pattern_line(&line, 1.0, 0.0);
+        let at_one = dwg_pattern_line(&line, 1.0, 0.0, [0.0, 0.0]);
         let half = 3.175 / 2f64.sqrt();
         assert!((at_one.offset.x + half).abs() < 1e-12, "{at_one:?}");
         assert!((at_one.offset.y - half).abs() < 1e-12, "{at_one:?}");
         assert_eq!(at_one.base_point, Vector2::new(1.0, 2.0));
 
-        let drawn = dwg_pattern_line(&line, 2.0, 90.0);
+        let drawn = dwg_pattern_line(&line, 2.0, 90.0, [0.0, 0.0]);
         assert!((drawn.angle - 135f64.to_radians()).abs() < 1e-12);
         assert_eq!(drawn.base_point, Vector2::new(-4.0, 2.0));
         assert_eq!(drawn.dash_lengths, vec![4.0, -2.0, 0.0, -2.0]);
         let back = read_pattern_line(&drawn, 2.0, 90.0);
         assert!((back.angle - 45.0).abs() < 1e-9, "{back:?}");
         assert_eq!(back.origin, [1.0, 2.0]);
+        // A hatch's origin moves every line's base point.
+        let laid = dwg_pattern_line(&line, 2.0, 90.0, [10.0, -3.0]);
+        assert_eq!(laid.base_point, Vector2::new(6.0, -1.0));
+        assert_eq!(laid.offset, drawn.offset);
         assert!(back.delta[0].abs() < 1e-12 && (back.delta[1] - 3.175).abs() < 1e-12);
         assert_eq!(back.dashes, line.dashes);
     }

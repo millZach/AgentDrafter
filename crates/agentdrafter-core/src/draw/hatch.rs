@@ -108,11 +108,12 @@ fn shapes(
         let (sin, cos) = sin_cos_degrees(family.angle + hatch.angle);
         let (hs, hc) = sin_cos_degrees(hatch.angle);
         let scale = hatch.scale;
-        // The family's origin turns with the hatch; its step and dashes
-        // are measured along and across its own direction.
+        // The family's origin turns with the hatch, from the hatch's own
+        // origin; its step and dashes are measured along and across its
+        // own direction.
         let origin = [
-            (family.origin[0] * hc - family.origin[1] * hs) * scale,
-            (family.origin[0] * hs + family.origin[1] * hc) * scale,
+            hatch.origin[0] + (family.origin[0] * hc - family.origin[1] * hs) * scale,
+            hatch.origin[1] + (family.origin[0] * hs + family.origin[1] * hc) * scale,
         ];
         let along = family.delta[0] * scale;
         let across = family.delta[1] * scale;
@@ -378,6 +379,7 @@ mod tests {
             },
             scale: 1.0,
             angle: 0.0,
+            origin: [0.0, 0.0],
             boundary,
             layer: LAYER_ZERO.into(),
             properties: Default::default(),

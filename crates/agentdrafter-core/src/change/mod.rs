@@ -264,6 +264,12 @@ pub struct Copied {
     /// The point it was turned about.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub about: Option<[f64; 3]>,
+    /// The names of the row values that are its own: a copy of a
+    /// template's object that takes a value from the row takes its own,
+    /// set on each sheet to the value its source shows there, so that
+    /// setting the copy's value sets it alone.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub row_values: Vec<String>,
 }
 
 /// An attribute value a block operation removed from an insert, because

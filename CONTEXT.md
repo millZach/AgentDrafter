@@ -172,6 +172,10 @@ _Avoid_: dimstyle alone in prose, dimension format
 An object that fills an area solid or with a hatch pattern, inside a boundary of closed loops, as in AutoCAD. It draws no outline of its own.
 _Avoid_: fill, shading, region (a region is AutoCAD's 2D solid object)
 
+**Hatch origin**:
+The point a patterned hatch's pattern is laid from, AutoCAD's HPORIGIN: each line of the pattern runs through it, moved by the line's own origin. It moves and turns with the hatch's boundary, so a moved or copied hatch keeps its pattern where its boundary is.
+_Avoid_: pattern base point (each line of a pattern has its own), snap base
+
 **Hatch pattern**:
 A named set of families of parallel lines that a hatch fills its area with, as in an AutoCAD `.pat` file. Every hatch pattern but `SOLID` comes from a definition in the sheet description.
 _Avoid_: fill pattern, texture
@@ -317,7 +321,7 @@ A named, typed action on a drawing, such as `insert_block`. Where AutoCAD has th
 _Avoid_: command (the word for what a person types), tool, call
 
 **Copy**:
-An ordinary object an operation made from another, its source, as AutoCAD's COPY makes one: every key of its source, an insert's attribute values among them, but its name, moved to its place and, in an array, turned. It has an ID of its own, its source's `id` and the first number free on the sheets it reaches, such as `term-3`, and is written where its source is: a copy of a template's object in the template, so on every sheet built from it, and of a row's own object in the row. Nothing ties it to its source afterwards.
+An ordinary object an operation made from another, its source, as AutoCAD's COPY makes one: every key of its source, an insert's attribute values among them, but its name, moved to its place and, in an array, turned. It has an ID of its own, its source's `id` and the first number free on the sheets it reaches, such as `term-3`, and is written where its source is: a copy of a template's object in the template, so on every sheet built from it, and of a row's own object in the row. A value its source takes from the row becomes the copy's own row value, set to what the source shows, so setting the copy's value sets it alone. Nothing ties it to its source afterwards.
 _Avoid_: duplicate, clone, instance
 
 **Array**:

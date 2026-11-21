@@ -346,6 +346,7 @@ A `donut`'s `outside_diameter` is more than 0, and its `inside_diameter` is 0 or
 | `pattern` | yes | `SOLID` for a solid hatch, or the name of a pattern under `hatch_patterns`, written exactly as it is there. |
 | `scale` | no | How much the pattern is enlarged: a number more than 0, with no unit. Without it, 1. Not given with `SOLID`. |
 | `angle` | no | How far the pattern is turned, an angle. Without it, 0. Not given with `SOLID`. |
+| `origin` | no | The point the pattern is laid from, AutoCAD's hatch origin, `[x, y, z]`, its `z` not used: every line of the pattern runs through it, moved by the line's own `origin` turned and enlarged with the hatch. Without it, `[0, 0, 0]`. Not given with `SOLID`. A change set that moves or turns the hatch moves or turns its origin with its boundary, so the pattern goes with it. A DWG keeps the origin inside each pattern line, so a hatch read back from one is laid from `[0, 0, 0]` with its lines' origins carrying it. |
 | `boundary` | yes | The closed loops that bound the area: a list of at least one. |
 | `layer` | no | The layer the hatch sits on, as for every object. |
 

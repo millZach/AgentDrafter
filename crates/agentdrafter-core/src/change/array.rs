@@ -185,13 +185,17 @@ impl<'a> Path<'a> {
     /// The point `distance` along it, and its direction there, in radians
     /// anticlockwise from the X axis. A point where two curves meet takes
     /// the direction of the curve after it, and the path's end the last
-    /// curve's.
+    /// curve's. A distance within a billionth of the path's length of the
+    /// end of a curve is at that end, so that the rounding of adding
+    /// lengths up does not put a point that falls where two curves meet
+    /// just inside the first, and turn it the first one's way.
     fn at(&self, distance: f64) -> (P3, f64) {
         let n = self.curves.len();
+        let near = self.length * 1e-9;
         let j = (0..n)
             .find(|&j| {
                 let (start, length) = self.starts[j];
-                distance < start + length && length > 0.0
+                distance < start + length - near && length > 0.0
             })
             .or_else(|| (0..n).rev().find(|&j| self.starts[j].1 > 0.0))
             .unwrap_or(0);
@@ -368,6 +372,29 @@ mod tests {
             too_far.contains("22 along the path, which is 20 long"),
             "{too_far}"
         );
+    }
+
+    #[test]
+    fn an_item_where_two_segments_meet_takes_the_next_ones_direction_despite_rounding() {
+        // 0.1 + 0.2 adds up to a hair past 0.3, where the item falls.
+        let segment = |a: [f64; 2], b: [f64; 2]| Curve::Segment {
+            a: [a[0], a[1], 0.0],
+            b: [b[0], b[1], 0.0],
+        };
+        let curves = [
+            segment([0.0, 0.0], [0.1, 0.0]),
+            segment([0.1, 0.0], [0.1, 0.2]),
+            segment([0.1, 0.2], [0.3, 0.2]),
+        ];
+        let places = along(&curves, 2, Some(0.3), true).unwrap();
+        assert_eq!(places[0].turn, 0.0);
+        let near = |a: P3, b: P3| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-12);
+        assert!(
+            near(places[0].about, [0.1, 0.2, 0.0]),
+            "{:?}",
+            places[0].about
+        );
+        assert!(near(places[0].by, [0.1, 0.2, 0.0]), "{:?}", places[0].by);
     }
 
     #[test]

@@ -25,6 +25,12 @@ pub struct Hatch {
     /// How far the pattern is turned: degrees anticlockwise, in `[0, 360)`.
     /// 0 for `SOLID`.
     pub angle: f64,
+    /// The point the pattern is laid from, in the hatch's plane, AutoCAD's
+    /// hatch origin: each line of the pattern runs through this point
+    /// moved by the line's own origin, turned and enlarged with the hatch.
+    /// `[0, 0]` unless the hatch gives one, and for `SOLID`.
+    #[serde(default, skip_serializing_if = "is_origin")]
+    pub origin: [f64; 2],
     /// The closed loops that bound the area, as AutoCAD's normal island
     /// detection reads them: a point inside an odd number of loops is
     /// filled, so a loop inside another is a hole, and a loop inside that
@@ -34,6 +40,10 @@ pub struct Hatch {
     pub layer: String,
     #[serde(flatten)]
     pub properties: crate::model::Properties,
+}
+
+fn is_origin(p: &[f64; 2]) -> bool {
+    *p == [0.0, 0.0]
 }
 
 impl Hatch {
