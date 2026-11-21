@@ -87,6 +87,7 @@ import {
   toggleFor,
   barNote,
   barWarning,
+  switchingAway,
   isUndoKey,
   toggledWords,
   typeWords,
@@ -1228,11 +1229,25 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // renderer's. A click on the drawing then selects nothing, but takes a
   // polar array's centre while it is picked.
   const arrayUp = !!toolState?.array && !toolState.array.picking;
+  // Another sheet or layout asked for: the array set up on the one drawn
+  // goes, with nothing sent, the moment the tab is asked for, not when the
+  // sheet comes; until then nothing of it can land (#66, review).
+  const arrayStale = () =>
+    !!toolState?.array && switchingAway(wanted, wantedLayout, summary ? { sheet: summary.sheet, layout: summary.layout ?? null } : null);
+  useEffect(() => {
+    if (arrayStale()) leaveTool();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wanted, wantedLayout]);
   const arrayAct = (a: string) => {
+    if (arrayStale()) {
+      leaveTool();
+      return;
+    }
     toolDid(renderer()?.tool_option(a) ?? '');
     if (a === 'rectangular' || a === 'polar') requestAnimationFrame(() => drawing.current?.frameArray(true));
   };
   const arrayValue = (key: string, text: string) => {
+    if (arrayStale()) return;
     renderer()?.tool_array_value(key, text);
     refreshTool();
     requestAnimationFrame(() => drawing.current?.frameArray(false));
@@ -1278,6 +1293,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (as === 'start') {
       // A tool's alias starts it, Move and Erase on what is selected.
       startTool(text.trim());
+      return;
+    }
+    if (arrayStale()) {
+      leaveTool();
       return;
     }
     toolDid(v.tool_input(text));
@@ -2357,7 +2376,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             layer={toolLayer}
             handle={drawing}
             editor={editor}
-            onOpen={onPreview ? () => false : openText}
+            onOpen={onPreview || arrayUp ? () => false : openText}
             previewTags={previewTags}
             ghosts={ghostsOn ? ghostSpecs : []}
             cards={ghostsOn ? proposalCards : null}

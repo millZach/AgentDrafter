@@ -1150,3 +1150,15 @@ export function arrayFraming(box: Box, room: Box, opening: boolean, touch: boole
   if (touch) return true;
   return box[2] - box[0] < 300 && box[3] - box[1] < 240;
 }
+
+/**
+ * Whether the page is on its way to another sheet, or another layout of
+ * it, than the one drawn, `shown`: the moment a tab is asked for, before
+ * the sheet comes. Array's pending array is dropped then, with nothing
+ * sent, since it was set up on the sheet drawn (#66).
+ */
+export function switchingAway(wanted: string | null, wantedLayout: string | null, shown: { sheet: string; layout: string | null } | null): boolean {
+  if (!shown || !wanted) return false;
+  if (wanted.toUpperCase() !== shown.sheet.toUpperCase()) return true;
+  return wantedLayout !== null && (shown.layout ?? '').toUpperCase() !== wantedLayout.toUpperCase();
+}

@@ -58,6 +58,7 @@ import {
   type ArrayPanelState,
   arrayFraming,
   arrayInputMode,
+  switchingAway,
   toggledWords,
   toggleFor,
   typeWords,
@@ -746,4 +747,19 @@ test('an option pressed lets a field being edited go, and gives up the focus Tab
   assert.equal(letGoOnOptionPress({ tag: 'INPUT', option: false, commandField: true }), false);
   assert.equal(letGoOnOptionPress({ tag: 'BUTTON', option: false, commandField: false }), false);
   assert.equal(letGoOnOptionPress(null), false);
+});
+
+test('a pending array is dropped the moment another sheet or layout is asked for, not when it comes (#66)', () => {
+  const shown = { sheet: 'DP-LD-101', layout: null };
+  assert.equal(switchingAway('DP-LD-101', null, shown), false);
+  assert.equal(switchingAway('dp-ld-101', null, shown), false);
+  assert.equal(switchingAway('DP-LD-102', null, shown), true);
+  // A layout asked for that is not the one drawn; none asked for is the one drawn.
+  const laid = { sheet: 'LAY-001', layout: 'Assembly' };
+  assert.equal(switchingAway('LAY-001', null, laid), false);
+  assert.equal(switchingAway('LAY-001', 'assembly', laid), false);
+  assert.equal(switchingAway('LAY-001', 'Wiring', laid), true);
+  // Nothing drawn yet, or nothing asked for: no switch.
+  assert.equal(switchingAway('DP-LD-102', null, null), false);
+  assert.equal(switchingAway(null, null, shown), false);
 });

@@ -8,7 +8,7 @@
 
 import { useEffect, useState, type KeyboardEvent, type MouseEvent, type RefObject } from 'react';
 
-import { arrayInputMode, type ArrayField, type ArrayPanelState } from './frame.ts';
+import { arrayInputMode, letGoOnOptionPress, type ArrayField, type ArrayPanelState } from './frame.ts';
 
 export interface ArrayPanelProps {
   panel: ArrayPanelState;
@@ -22,10 +22,19 @@ export interface ArrayPanelProps {
   boxRef?: RefObject<HTMLDivElement | null>;
 }
 
-// A press keeps the focus where it was, so Enter after a click lands the
-// array from the command bar or a field, rather than pressing the button
-// again, as the command bar's options do.
-const keepFocus = (e: MouseEvent) => e.preventDefault();
+// A press takes no focus, so Enter after a click lands the array rather
+// than pressing the button again, as the command bar's options do (#244):
+// a button of the panel that has the focus, reached by Tab, gives it up,
+// and so does a field being typed in; the command bar's field keeps it.
+const keepFocus = (e: MouseEvent) => {
+  const a = document.activeElement as HTMLElement | null;
+  const was =
+    a && a !== document.body
+      ? { tag: a.tagName, option: !!a.closest?.('.opt, [data-arraypanel] button'), commandField: !!a.classList?.contains('cmdin') }
+      : null;
+  if (letGoOnOptionPress(was)) a?.blur();
+  e.preventDefault();
+};
 
 /** One field: what is typed stays as typed while it has the focus; else it shows the renderer's value. */
 function Field({ field, onValue, onEnter }: { field: ArrayField; onValue(key: string, text: string): void; onEnter(): void }) {

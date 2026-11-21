@@ -3091,6 +3091,14 @@ const checks = {
         await sleep(600);
         assert((await bar(page)).includes('ARRAYRECT'), `Array runs, rectangular: ${await bar(page)}`);
         assert((await panelText(page)).includes('of FT-101'), `the panel names it: ${await panelText(page)}`);
+        // A field left blank holds it back, saying why: Array off, Enter landing nothing.
+        await page.fill('[data-arraypanel] input[data-k="rows"]', '');
+        assert((await count(page)) === 'Rows is not a number: type one.', `a blank field is said: ${await count(page)}`);
+        assert(await page.isDisabled('[data-arraypanel] [data-act="array"]'), 'Array is off');
+        await page.focus('[data-arraypanel] input[data-k="rows"]');
+        await page.keyboard.press('Enter');
+        await sleep(1000);
+        assert(journal().length === before, 'a blank field lands nothing');
         // Rows, columns and spacing typed in the panel: the copies follow.
         await page.fill('[data-arraypanel] input[data-k="rows"]', '3');
         await page.fill('[data-arraypanel] input[data-k="columns"]', '1');
@@ -3129,6 +3137,9 @@ const checks = {
         await typeIn(page, '2,2', 'TO', '@1.5,-1.2');
         assert((await count(page)) === '2 × 2: 3 copies', `typed rows and columns: ${await count(page)}`);
         assert((await fieldValue(page, 'column_total')) === '1.5' && (await fieldValue(page, 'row_total')) === '-1.2', 'typed totals');
+        // Between, reached by Tab and then clicked, gives the focus up, so
+        // Enter lands the array rather than pressing Between again.
+        await page.focus('[data-arraypanel] [data-hold="between"]');
         await page.click('[data-arraypanel] [data-hold="between"]');
         assert(!(await page.evaluate(() => document.activeElement?.closest?.('[data-arraypanel] button'))), 'a button pressed keeps no focus');
         assert(journal().length === before, 'nothing lands while it is set up');
@@ -3161,6 +3172,33 @@ const checks = {
         await page.click('.opt[data-opt="live"]');
         await page.waitForFunction(() => !document.querySelector('.cmdbar')?.textContent.includes('Showing entry'), null, { timeout: 15000 });
         await sideTab(page, 'chat');
+        // Set up, then another sheet asked for, not yet drawn: Array and
+        // Enter straight after land nothing, on DP-LD-101 or anywhere.
+        before = journal().length;
+        target = await pointOn(page, 'DP-LD-101/device');
+        await selectAt(page, target);
+        await page.click('.opt[data-opt="array-objects"]');
+        await page.waitForSelector('[data-arraypanel]');
+        // A double click on a text while it is set up opens no text to edit.
+        await fitAll(page);
+        const service = await objectOf(page, 'DP-LD-101/service');
+        const serviceAt = await onPage(page, [(service.bounds[0] + service.bounds[2]) / 2, (service.bounds[1] + service.bounds[3]) / 2]);
+        await clearAt(page, serviceAt);
+        await page.mouse.dblclick(...serviceAt);
+        await sleep(600);
+        assert(!(await bar(page)).includes('TEXTEDIT') && (await bar(page)).includes('ARRAYRECT'), `a double click opens no text while Array is set up: ${await bar(page)}`);
+        assert(await page.$('[data-arraypanel]'), 'the panel stays');
+        await page.evaluate(() => {
+          [...document.querySelectorAll('.sheettabs .tab')].find((t) => t.querySelector('b')?.textContent === 'DP-LD-102').click();
+          document.querySelector('[data-arraypanel] [data-act="array"]')?.click();
+        });
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(() => window.agentdrafterViewer.summary?.sheet === 'DP-LD-102', null, { timeout: 30000 });
+        await sleep(1000);
+        assert(journal().length === before, `a sheet asked for drops the array, nothing sent: ${JSON.stringify(journal().at(-1))}`);
+        assert(!(await page.$('[data-arraypanel]')), 'the panel goes');
+        await page.evaluate(() => [...document.querySelectorAll('.sheettabs .tab')].find((t) => t.querySelector('b')?.textContent === 'DP-LD-101').click());
+        await page.waitForFunction(() => window.agentdrafterViewer.summary?.sheet === 'DP-LD-101', null, { timeout: 30000 });
         // Polar: ARRAYPOLAR on the tick, its centre on the circle's Centre snap.
         before = journal().length;
         target = await pointOn(page, tickId);
@@ -3241,11 +3279,16 @@ const checks = {
         await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
         const asked = await page.textContent('[data-preview]');
         assert(asked.includes('Array terminal-2, 3 × 2') && asked.includes('Change all 7 sheets'), `the band: ${asked}`);
-        // No tool starts while it asks: Circle's clicks draw nothing.
+        // No tool starts while it asks: Circle picked, then two clicks on
+        // the drawing, draw nothing and write nothing.
+        const askedTemplate = template();
         await page.click('.rb[data-tool="circle"]');
         assert(!(await bar(page)).includes('CIRCLE'), `Circle does not start: ${await bar(page)}`);
-        await sleep(1000);
-        assert(journal().length === before, 'nothing lands before Change all');
+        await page.mouse.click(...(await onPage(page, [13, 3.6])));
+        await page.mouse.click(...(await onPage(page, [13.3, 3.6])));
+        await sleep(1500);
+        assert(!(await bar(page)).includes('CIRCLE'), `Circle has not started: ${await bar(page)}`);
+        assert(journal().length === before && template() === askedTemplate, 'nothing lands, nothing is written, before Change all');
         await shot(page, 'array-laptop-5-change-all.png');
         await page.click('[data-pv="go"]');
         entry = await landed(page, before, 'Array of a template object');
