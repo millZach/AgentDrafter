@@ -180,6 +180,17 @@ impl Transform {
         }
     }
 
+    /// Whether an ordinate dimension measuring along X measures along Y
+    /// once transformed, and the other way round: turned a quarter either
+    /// way, or mirrored across a line at 45 degrees.
+    fn swaps_axes(&self) -> bool {
+        match self.how {
+            How::Rotate(degrees) => whole_degrees(degrees) % 180.0 == 90.0,
+            How::Mirror(axis) => axis == 45.0 || axis == 135.0,
+            How::Scale(_) => false,
+        }
+    }
+
     /// An arc's start and end angles, anticlockwise, once it lands: a
     /// mirror runs it the other way, so its ends swap.
     fn arc_angles(&self, start: f64, end: f64) -> (f64, f64) {
@@ -282,6 +293,22 @@ impl RecordFile {
                         .to_owned(),
                 )
             }
+            ("dimension", How::Rotate(degrees))
+                if is_ordinate(keys) && whole_degrees(degrees) % 90.0 != 0.0 =>
+            {
+                Some(
+                    "an ordinate dimension measures a feature's x or its y, along the sheet's \
+                     axes, so it is turned only by a multiple of 90 degrees, which leaves it \
+                     measuring along one of them"
+                        .to_owned(),
+                )
+            }
+            ("dimension", How::Mirror(axis)) if is_ordinate(keys) && axis % 45.0 != 0.0 => Some(
+                "an ordinate dimension measures a feature's x or its y, along the sheet's axes, \
+                 so it is mirrored only across a line that runs across or up the sheet or at 45 \
+                 degrees, which leaves it measuring along one of them"
+                    .to_owned(),
+            ),
             _ => None,
         }
     }
@@ -323,6 +350,11 @@ impl RecordFile {
         self.touch(list, index, operation, Touch::Keys(changed));
         Ok(())
     }
+}
+
+/// Whether a dimension's keys make it an ordinate dimension.
+fn is_ordinate(keys: Option<&[Entry]>) -> bool {
+    keys.and_then(|keys| scalar_of(keys, "kind")) == Some("ordinate")
 }
 
 /// A transform at work on one object's keys.
@@ -395,6 +427,27 @@ impl At<'_> {
                 // line, so its angle is kept in [0, 180).
                 ("dimension", "angle") => {
                     self.angle(&mut entry.value, &field, &|a| t.angle(a) % 180.0)?
+                }
+                // An ordinate dimension turned a quarter, or mirrored across
+                // a line at 45 degrees, measures along the other axis.
+                ("dimension", "axis") if t.swaps_axes() => {
+                    let other = match &entry.value.kind {
+                        Kind::Scalar(axis) if axis == "x" => "y",
+                        Kind::Scalar(axis) if axis == "y" => "x",
+                        _ => {
+                            return Err(Error::new(
+                                ErrorCode::BadValue,
+                                format!(
+                                    "the record's ordinate axis here is not `x` or `y`, so it \
+                                     cannot be {}",
+                                    t.done()
+                                ),
+                            )
+                            .at_field(field))
+                        }
+                    };
+                    entry.value = Node::scalar(other.to_owned());
+                    true
                 }
                 ("hatch", "angle") if !solid && !t.mirrors() => {
                     self.angle(&mut entry.value, &field, &|a| t.angle(a))?
@@ -1526,6 +1579,62 @@ objects:
             across,
             "dimension: {kind: three_point_angular, center: [0, 0, 0], points: [[10, 0, 0], [0, -10, 0]], location: [3, -4, 0]}",
         );
+    }
+
+    #[test]
+    fn an_ordinate_dimension_measures_along_its_turned_or_mirrored_axis() {
+        let ordinate = "dimension: {kind: ordinate, feature: [4, 6, 0], axis: x, location: [4, 9, 0]}";
+        // A quarter turn either way measures along Y; a half turn along X.
+        lands(
+            ordinate,
+            turn(),
+            "dimension: {kind: ordinate, feature: [-6, 4, 0], axis: y, location: [-9, 4, 0]}",
+        );
+        lands(
+            ordinate,
+            Transform::rotate([0.0; 3], -90.0),
+            "dimension: {kind: ordinate, feature: [6, -4, 0], axis: y, location: [9, -4, 0]}",
+        );
+        lands(
+            ordinate,
+            Transform::rotate([0.0; 3], 180.0),
+            "dimension: {kind: ordinate, feature: [-4, -6, 0], axis: x, location: [-4, -9, 0]}",
+        );
+        // Mirrored across a line at 45 degrees it measures along the other
+        // axis; across or up the sheet, along its own.
+        lands(
+            ordinate,
+            Transform::mirror([0.0; 3], [1.0, 1.0, 0.0]).unwrap(),
+            "dimension: {kind: ordinate, feature: [6, 4, 0], axis: y, location: [9, 4, 0]}",
+        );
+        lands(
+            ordinate,
+            Transform::mirror([0.0; 3], [1.0, 0.0, 0.0]).unwrap(),
+            "dimension: {kind: ordinate, feature: [4, -6, 0], axis: x, location: [4, -9, 0]}",
+        );
+        // Each lands as a sheet's reader reads it, its leader along its axis.
+        for t in [turn(), Transform::mirror([0.0; 3], [1.0, 1.0, 0.0]).unwrap()] {
+            let landed = transformed(ordinate, t, &Resolved::default()).unwrap();
+            let sheet = format!("units: mm\nobjects:\n  - {landed}\n");
+            crate::description::parse_sheet_description(&sheet).unwrap();
+        }
+        // A turn or a mirror that leaves it measuring along neither axis is
+        // refused.
+        for t in [
+            Transform::rotate([0.0; 3], 30.0),
+            Transform::mirror([0.0; 3], [2.0, 1.0, 0.0]).unwrap(),
+        ] {
+            let e = transformed(ordinate, t, &Resolved::default()).unwrap_err();
+            assert_eq!(e.code, ErrorCode::BadValue);
+            assert!(e.message.contains("ordinate dimension"), "{}", e.message);
+        }
+        // A linear dimension turns by any angle.
+        assert!(transformed(
+            "dimension: {kind: linear, points: [[1, 0, 0], [10, 0, 0]], location: [5, -3, 0]}",
+            Transform::rotate([0.0; 3], 30.0),
+            &Resolved::default()
+        )
+        .is_ok());
     }
 
     #[test]
