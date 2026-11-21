@@ -3996,8 +3996,7 @@ fn no_mirror_line(op: &Operation) -> Error {
         op.spec.name,
         ErrorCode::BadValue,
         "second_point is first_point seen from above, so the two give no line to mirror \
-         across; give two points apart"
-            .to_owned(),
+         across; give two points apart",
         "second_point",
     )
 }

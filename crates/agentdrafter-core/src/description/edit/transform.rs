@@ -388,7 +388,11 @@ impl At<'_> {
                     }
                     _ => self.angle(&mut entry.value, &field, &|a| t.angle(a))?,
                 },
-                ("dimension", "angle") => self.angle(&mut entry.value, &field, &|a| t.angle(a))?,
+                // A linear dimension measures the same either way along its
+                // line, so its angle is kept in [0, 180).
+                ("dimension", "angle") => {
+                    self.angle(&mut entry.value, &field, &|a| t.angle(a) % 180.0)?
+                }
                 ("hatch", "angle") if !solid && !t.mirrors() => {
                     self.angle(&mut entry.value, &field, &|a| t.angle(a))?
                 }
@@ -480,6 +484,16 @@ impl At<'_> {
                     }
                 }
             }
+            // A linear dimension written without its angle measures across
+            // the sheet: turned or mirrored, it measures along its turned
+            // direction.
+            "dimension" if scalar_of(keys, "kind") == Some("linear") && !written(keys, "angle") => {
+                let r = t.angle(0.0) % 180.0;
+                if r != 0.0 {
+                    keys.push(new_entry("angle", Node::scalar(number_text(r))));
+                    changed.push("angle".to_owned());
+                }
+            }
             "mleader" | "leader" if scaled => {
                 let lengths: &[&str] = if kind == "mleader" {
                     &["arrow_size", "gap", "landing"]
@@ -499,11 +513,12 @@ impl At<'_> {
             _ => {}
         }
         // An arc's and an ellipse's angles go together: a mirror swaps them.
-        if matches!(kind, "arc" | "ellipse") && (!matches!(t.how, How::Scale(_))) {
-            if self.arc_angles(kind, keys, path)? {
-                changed.push("start_angle".to_owned());
-                changed.push("end_angle".to_owned());
-            }
+        if matches!(kind, "arc" | "ellipse")
+            && !matches!(t.how, How::Scale(_))
+            && self.arc_angles(kind, keys, path)?
+        {
+            changed.push("start_angle".to_owned());
+            changed.push("end_angle".to_owned());
         }
         Ok(changed)
     }
@@ -1064,6 +1079,16 @@ mod tests {
                 "dimension: {kind: linear, angle: 30, points: [[1, 0, 0], [10, 0, 0]], location: [5, -3, 0]}",
                 "dimension: {kind: linear, angle: 120, points: [[0, 1, 0], [0, 10, 0]], location: [3, 5, 0]}",
             ),
+            // Written without its angle, it measures across the sheet: turned,
+            // it measures along its turned direction.
+            (
+                "dimension: {kind: linear, points: [[1, 0, 0], [10, 0, 0]], location: [5, -3, 0]}",
+                "dimension: {kind: linear, points: [[0, 1, 0], [0, 10, 0]], location: [3, 5, 0], angle: 90}",
+            ),
+            (
+                "dimension: {kind: aligned, points: [[1, 0, 0], [10, 0, 0]], location: [5, -3, 0]}",
+                "dimension: {kind: aligned, points: [[0, 1, 0], [0, 10, 0]], location: [3, 5, 0]}",
+            ),
             (
                 "dimension: {kind: angular, lines: [[[1, 0, 0], [5, 0, 0]], [[1, 0, 0], [1, 5, 0]]], location: [2, 2, 0]}",
                 "dimension: {kind: angular, lines: [[[0, 1, 0], [0, 5, 0]], [[0, 1, 0], [-5, 1, 0]]], location: [-2, 2, 0]}",
@@ -1265,6 +1290,10 @@ mod tests {
             (
                 "dimension: {kind: linear, angle: 30, points: [[1, 0, 0], [10, 0, 0]], location: [5, -3, 0]}",
                 "dimension: {kind: linear, angle: 150, points: [[19, 0, 0], [10, 0, 0]], location: [15, -3, 0]}",
+            ),
+            (
+                "dimension: {kind: linear, points: [[1, 0, 0], [10, 0, 0]], location: [5, -3, 0]}",
+                "dimension: {kind: linear, points: [[19, 0, 0], [10, 0, 0]], location: [15, -3, 0]}",
             ),
             (
                 "dimension: {kind: ordinate, feature: [4, 6, 0], axis: x, location: [4, 9, 0]}",

@@ -495,7 +495,7 @@ mod tests {
         // Its attributes read forwards: upright, though the insert is
         // mirrored and turned a half turn.
         assert_eq!(written.attributes[0].rotation, 0.0);
-        let read = read_insert(&written, "symbols".into(), &[block.clone()]).unwrap();
+        let read = read_insert(&written, "symbols".into(), std::slice::from_ref(&block)).unwrap();
         assert!(read.mirrored);
         assert_eq!(read.scale, 2.0);
         assert!(same_angle(read.rotation, 180.0), "{read:?}");
