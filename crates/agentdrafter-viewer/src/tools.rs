@@ -759,6 +759,17 @@ impl Tools {
             return Outcome::default();
         }
         let mut outcome = self.end(false);
+        // The tool it ended gave an edit to a template's objects, which the
+        // page asks about first, as Copy's copies placed are: no tool runs
+        // until that is answered, so nothing lands meanwhile, as none runs
+        // while Move's is asked about.
+        if outcome.sends.iter().any(|s| s.template.is_some()) {
+            outcome.log.push(format!(
+                "{} not started: Change all or Cancel first",
+                kind.command()
+            ));
+            return outcome;
+        }
         self.last = Some(kind);
         let mut picked: Vec<usize> = picked
             .iter()
@@ -889,6 +900,38 @@ impl Tools {
     pub fn escape(&mut self) -> Outcome {
         self.error = None;
         self.end(true)
+    }
+
+    /// The page leaves what the tool works on: an entry of the journal, or
+    /// a proposal opened over the sheet. Copy's copies placed are dropped,
+    /// with nothing sent, as another sheet drops them: only Enter, Done, a
+    /// right-click or Esc lands them. Any other tool ends as Esc ends it.
+    pub fn leave(&mut self) -> Outcome {
+        let Some(Running {
+            kind: ToolKind::Copy,
+            step,
+        }) = &self.running
+        else {
+            return self.escape();
+        };
+        let placed = match step {
+            Step::CopySecond { placed, .. } => placed.len(),
+            _ => 0,
+        };
+        self.running = None;
+        self.error = None;
+        let line = if placed == 0 {
+            "COPY: cancelled, nothing changed".to_owned()
+        } else {
+            format!(
+                "COPY: {} placed dropped, nothing changed",
+                plural(placed, "copy", "copies")
+            )
+        };
+        Outcome {
+            log: vec![line],
+            sends: Vec::new(),
+        }
     }
 
     /// Clears what went wrong, as its OK does.

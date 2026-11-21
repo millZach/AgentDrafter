@@ -852,7 +852,7 @@ fn copying_a_templates_object_warns_and_asks_once_when_the_copies_land() {
 }
 
 #[test]
-fn copy_of_several_names_its_targets_and_another_tool_lands_the_copies_first() {
+fn copy_of_several_names_its_targets_and_another_tool_lands_the_copies_first_and_waits() {
     let mut t = tools();
     t.start(ToolKind::Copy, &[]);
     t.pick(Some(1));
@@ -866,9 +866,10 @@ fn copy_of_several_names_its_targets_and_another_tool_lands_the_copies_first() {
     t.input("@5,0", None);
     let warning = t.state(false).warning.unwrap();
     assert_eq!(warning.title, "One of these is part of the template.");
-    // Another tool lands the copies placed, then starts.
+    // Another tool lands the copies placed; as one is the template's,
+    // they are asked about first, and Line waits.
     let outcome = t.input("L", None);
-    assert_eq!(t.running(), Some(ToolKind::Line));
+    assert_eq!(t.running(), None);
     let ops = operations(&outcome);
     assert_eq!(
         ops[0]["targets"],
@@ -926,4 +927,76 @@ fn copy_leaves_what_a_viewport_shows_as_move_does() {
         .unwrap()
         .contains("Copy copies only what is drawn on the paper here"));
     assert!(t.state(false).picked.is_empty());
+}
+
+#[test]
+fn another_tool_waits_while_the_copies_it_ended_are_asked_about() {
+    let mut t = tools();
+    // Copies of a template's object placed, then Circle picked: the copies
+    // are given to be asked about, and Circle does not start, so nothing
+    // can land before Change all or Cancel.
+    t.start(ToolKind::Copy, &[0]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    let outcome = t.start(ToolKind::Circle, &[]);
+    assert_eq!(outcome.sends.len(), 1);
+    assert!(
+        outcome.sends[0].template.is_some(),
+        "the copies are asked about"
+    );
+    assert_eq!(
+        outcome.log,
+        ["CIRCLE not started: Change all or Cancel first"]
+    );
+    assert_eq!(t.running(), None, "no tool runs while it is asked");
+    assert!(!t.takes_points());
+    // An alias typed is the same, and so is Erase on objects selected,
+    // which would otherwise erase them at once.
+    t.start(ToolKind::Copy, &[0]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    let outcome = t.input("C", None);
+    assert_eq!(outcome.sends.len(), 1);
+    assert_eq!(t.running(), None);
+    t.start(ToolKind::Copy, &[0]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    let outcome = t.start(ToolKind::Erase, &[2]);
+    assert_eq!(outcome.sends.len(), 1, "nothing is erased: {outcome:?}");
+    assert_eq!(operations(&outcome)[0]["op"], "copy");
+    assert_eq!(t.running(), None);
+    // A row's own object's copies are not asked about: the next tool starts.
+    t.start(ToolKind::Copy, &[2]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    let outcome = t.start(ToolKind::Circle, &[]);
+    assert!(outcome.sends[0].template.is_none());
+    assert_eq!(t.running(), Some(ToolKind::Circle));
+}
+
+#[test]
+fn leaving_drops_the_copies_placed_with_nothing_sent() {
+    let mut t = tools();
+    t.start(ToolKind::Copy, &[2]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    t.input("@2,0", None);
+    let outcome = t.leave();
+    assert!(outcome.sends.is_empty(), "nothing is sent");
+    assert_eq!(
+        outcome.log,
+        ["COPY: 2 copies placed dropped, nothing changed"]
+    );
+    assert_eq!(t.running(), None);
+    // With none placed, it ends.
+    t.start(ToolKind::Copy, &[2]);
+    let outcome = t.leave();
+    assert!(outcome.sends.is_empty());
+    assert_eq!(t.running(), None);
+    // Any other tool ends as Esc ends it: Line keeps what it drew.
+    t.start(ToolKind::Line, &[]);
+    t.input("0,0", None);
+    t.input("@1,0", None);
+    assert_eq!(operations(&t.leave()).len(), 1);
+    assert_eq!(t.running(), None);
 }
