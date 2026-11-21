@@ -1238,6 +1238,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (arrayStale()) leaveTool();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wanted, wantedLayout]);
+  // A tab clicked drops it at once, in the renderer, which holds the tool,
+  // so an Array or Enter pressed before the page draws again sends nothing.
+  const dropArrayFor = (sheet: string, layout: string | null) => {
+    const v = renderer();
+    const shown = summary ? { sheet: summary.sheet, layout: summary.layout ?? null } : null;
+    if (v && toolRead.current?.array && switchingAway(sheet, layout, shown)) toolDid(v.tool_leave());
+  };
   const arrayAct = (a: string) => {
     if (arrayStale()) {
       leaveTool();
@@ -2167,6 +2174,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             className={`tab${l === summary?.layout ? ' on' : ''}`}
             aria-current={l === summary?.layout ? 'page' : undefined}
             onClick={() => {
+              dropArrayFor(summary?.sheet ?? '', l);
               setPicked(null);
               setWantedLayout(l);
             }}
@@ -2325,6 +2333,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
               title={reaches ? undefined : 'The change does not reach this sheet'}
               onClick={() => {
                 if (!reaches) return;
+                dropArrayFor(s, null);
                 setPicked(null);
                 setWanted(s);
                 setWantedLayout(null);
