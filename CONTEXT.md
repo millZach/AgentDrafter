@@ -538,8 +538,12 @@ A change set that waits to be kept or discarded. It is shown on the sheet before
 _Avoid_: suggestion, draft, preview (a preview is the drawing of it), pending change
 
 **Guide**:
-A list of steps an assistant gives the drafting app to walk a drafter through a task on their own drawing: what to say, which drawing tool, where to click, and the operation that completes each step.
+A list of steps an assistant gives the drafting app to walk a drafter through a task on their own drawing: what to say, which drawing tool, where to click, and the operation that completes each step. Each step the drafter does lands as their own change set, marked with the step in the journal.
 _Avoid_: tutorial, wizard, walkthrough
+
+**Setting step**:
+A step of a guide that sets something on the page, such as the current layer, in place of an operation: no change set completes it.
+_Avoid_: setup step
 
 ### Measuring
 

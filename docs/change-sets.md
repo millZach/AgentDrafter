@@ -40,6 +40,7 @@ A sheet's template is the file its row's path names, as the file system resolves
 |---|---|---|
 | `operations` | yes | The operations, applied in order. Each is a mapping that names its operation under `op`, by its name or its AutoCAD alias in any case: `move`, `MOVE` and `Move` are one operation. |
 | `fixes` | no | The sheets of the set's [inconsistent mark](#an-inconsistent-set) this change set fixes, by name. |
+| `guide` | no | The [guide](#guides)'s step it is sent for, `{"guide": 1, "step": 2}`: its journal entry is marked with the step, and its reply checks it against the step's operation. |
 
 **Naming the object.** An operation that edits an object names it under `target`, by its [ID](sheet-description.md#ids-and-names), `{"id": "DEMO-001/border"}`, or by its name, `{"name": "title-block", "sheet": "DEMO-002"}`, never by coordinates. An ID and a name are matched in any case. A name is given once on a sheet, and a template's names are on every sheet built from it, so `sheet` may be left out only when the name is on one sheet of the set. An object an earlier operation of the change set added is named by the ID it was given.
 
@@ -397,6 +398,60 @@ agentdrafter discard <drawing-set-folder> <proposal> [--by <who>]
 
 The event stream reports a proposal made, kept and discarded as it reports a change set ([servers.md](servers.md#watching-a-set)).
 
+## Guides
+
+A guide teaches on the drafter's own drawing: an agent, such as the drafter's assistant, gives the drafting app a list of steps, and the drafter does each with a drawing tool, each step landing as their own change set (#157, [viewer.md](viewer.md#guides)). Two commands of the registry, reached by every interface:
+
+```
+agentdrafter guide <drawing-set-folder> <guide.json | -> [--by <who>] [--fonts <folder>]... [--no-system-fonts]
+agentdrafter guides <drawing-set-folder> [--fonts <folder>]... [--no-system-fonts]
+```
+
+A guide is data:
+
+```json
+{"title": "Draw FT-101's + wire to TB1-1", "sheet": "DP-LD-101", "steps": [
+  {"say": "Make wire the current layer.", "setting": {"current_layer": "wire"}},
+  {"say": "Draw the wire with Line, from FT-101's + terminal to TB1-1.", "title": "Draw the wire", "tool": "line",
+   "points": [{"at": {"snap": {"id": "DP-LD-101/device", "snap": "center", "which": "objects[5]"}}, "label": "FT-101's + terminal"},
+              {"at": {"snap": {"id": "DP-LD-101/terminal-1", "snap": "midpoint", "which": "objects[0].segments[3]"}}, "label": "TB1-1"}],
+   "completes": {"op": "add_line", "sheet": "DP-LD-101", "layer": "wire",
+                 "from": {"snap": {"id": "DP-LD-101/device", "snap": "center", "which": "objects[5]"}},
+                 "to": {"snap": {"id": "DP-LD-101/terminal-1", "snap": "midpoint", "which": "objects[0].segments[3]"}}}},
+  {"say": "Number the wire 101+, at its middle.", "tool": "text",
+   "points": [{"at": {"snap": {"made_by": 2, "snap": "midpoint"}}, "label": "the wire's middle"}],
+   "completes": {"op": "add_text", "sheet": "DP-LD-101", "contents": "101+", "height": 0.08, "position": {"snap": {"made_by": 2, "snap": "midpoint"}}}},
+  {"say": "Move the number 0.04 in up.", "tool": "move",
+   "points": [{"object": {"made_by": 3}, "label": "101+"}, {"at": {"snap": {"made_by": 2, "snap": "midpoint"}}, "label": "base point"}],
+   "completes": {"op": "move", "target": {"made_by": 3}, "by": [0, 0.04, 0]}}
+]}
+```
+
+| Key | Required | What it is |
+|---|---|---|
+| `title` | yes | What it teaches, in a few words, up to 120 characters. |
+| `sheet` | yes | The sheet it runs on, by its name. |
+| `steps` | yes | Its steps, 1 to 40, in order. |
+| `steps[].say` | yes | What the step says to the drafter, in the guide's banner, up to 1000 characters. |
+| `steps[].title` | no | The step in a few words, for the list of steps; its `say` when left out. |
+| `steps[].tool` | for an operation step | The drawing tool the drafter does it with: `line`, `circle`, `rectangle`, `text`, `move`, `copy` or `erase`. |
+| `steps[].points` | no | The points to click and the objects to pick, in the order the tool takes them. Each has `at`, a point, `[x, y]` or `[x, y, z]`, or a [snapped point](#snapped-points), `{"snap": {...}}`; or `object`, an object to pick, as a `target` names one; and its `label`, what it is in the drafter's words, up to 80 characters, which its ring's tag shows. |
+| `steps[].completes` | for an operation step | The operation that completes the step, as a change set holds one: the operation the step's tool sends, `add_line` for Line, `add_circle` for Circle, `add_polyline` for Rectangle, `add_text` for Text, `move`, `copy`, and `delete` for Erase. |
+| `steps[].setting` | for a setting step | What a setting step sets in place of an operation: `{"current_layer": "wire"}`, the layer to make current. A setting step has no tool, no points and no operation. |
+
+**What an earlier step made.** Wherever a step names an object, in a point's snap, in an object to pick and in its operation, it may name the object an earlier step's operation adds as `{"made_by": N}`, N that step's number, counted from 1, in place of `id`: `{"snap": {"made_by": 2, "snap": "midpoint"}}`, `{"made_by": 3}`. Step N must be an operation step whose operation adds an object. Skipping step N skips every step that names it ([viewer.md](viewer.md#guides)).
+
+- **`guide`** (`set`, `guide`, `by`) checks the guide on the set as it is, as a dry run would: its sheet; each setting's layer, on the sheet; each step's points, worked out on the sheet as the steps before it leave it; and each step's operation, applied in memory in order, so a later step's `made_by` names the object an earlier one adds, which must reach the guide's sheet and be the one its tool sends. Anything wrong is refused at its key, such as `guide.steps[1].points[1].at.snap.which` or `guide.steps[2].completes.layer`, and the guide is not recorded. It records it beside the journal, in `.agentdrafter/guides/`, one file each, `<number>.json`, numbered from 1 on their own: who gave it, when, the journal's newest entry then, and the guide. It writes nothing else. `by` is as `propose`'s; a guide the assistant gives through its MCP server is `Assistant`'s.
+- **`guides`** (`set`) lists the guides given, the oldest first, each step worked out on the set as it stands: each point's `label`, where it is (`at`), the snap it names (`snap`: `id`, `snap`, `which`) or the object to pick (`object`), or the step it waits on (`waits_on`) while that step has made nothing, or why it names nothing now (`error`); the steps it `needs`; its `operation` with each `made_by` named by its object's ID, ready to send, none while a step it needs has made nothing; the change sets in place that were sent for it (`landed`); and the object the newest of them added (`made`). It reads the guides, the journal and the sheet, and writes nothing.
+
+**A change set sent for a step** names it under the change set's `guide`, `{"guide": 1, "step": 2}`, with `of`, the guide's steps, filled in when left out: the drafting app sends each change set the drafter's tools land while a step runs so. The step must be an operation step of a guide the set holds (`unknown_name` at `guide.guide`, `bad_value` at `guide.step` or `guide.of`), or the change set is refused whole. Its journal entry is marked with the step ([journal.md](journal.md#what-it-records)), and its reply checks it against the step's operation, under `guide`: `completes`, and in words what it did against what the step wants. The check is on the operation as it applied: the same operation, on the same objects, with each key the step's operation gives, its points worked out, within a millionth of the step's (a line drawn the other way round is the same line, and a move given by its base and second points by how far it goes); keys the step leaves out are the drafter's. A change set that does not complete the step lands all the same, as the drafter's own edit: the guide never undoes anything itself.
+
+```json
+"guide": {"guide": 1, "step": 2, "of": 4, "completes": false, "message": "Its `to` went to the midpoint of `DP-LD-101/terminal-2`, [7.2, 6.25, 0]; the step wants the midpoint of `DP-LD-101/terminal-1`, [7.2, 6.75, 0].", "made": "DP-LD-101/line-1"}
+```
+
+Neither command rolls back an unfinished commit, as `propose` does not. The event stream sends `guides` when a guide is given and each time the journal changes ([servers.md](servers.md#watching-a-set)).
+
 ## The reply
 
 ```json
@@ -413,6 +468,7 @@ The event stream reports a proposal made, kept and discarded as it reports a cha
 | `operations` | Each operation, in the order sent: whether it landed, what it does in words, the sheets it reaches, the record it writes, the object's ID, the object as its record writes it `before` and `after`, the row value it sets (`row_value`), or the row values an edit matched to a list of parts sets, each with the same keys (`row_values`), the IDs it wrote (`ids_written`), the inserts a block operation brought into line (`inserts`) and the attribute values it removed (`attributes_removed`, [Blocks](#blocks)), each snapped point it took and what it named (`snapped`, [Snapped points](#snapped-points)), each copy a copy, an array or a mirror made, with its source and its place (`copies`, [Copy and array](#copy-and-array)), the objects a rotate, a scale or a mirror transformed in place (`transformed`, [Rotate, scale and mirror](#rotate-scale-and-mirror)), the row values an edit created to give a copy its own (`created_row_values`), and why it did not land (`error`). |
 | `records` | The records written, or that a dry run would write. |
 | `inconsistent` | The set's mark as it stands after the change set, or would after a dry run; absent when the set is consistent. |
+| `guide` | For a change set sent for a [guide](#guides)'s step: the guide, the step and how many steps the guide has, whether it `completes` the step, in words what it did against what the step wants (`message`), and the object it added (`made`). |
 | `checks` | The [checker](check.md)'s reply on the sheets the change set landed on, read back from their saved files once they were written: `{"ok": true, "result": {...}}`, with each failed check under `findings`. A failed check does not stop a change set from landing, and does not make its reply not `ok`. Absent for a dry run, which saves nothing to read back, and when no sheet took its part. |
 
 When some sheets failed, the reply is not `ok`, carries the same `result`, and adds a `sheets_failed` error; the command exits with 1:
