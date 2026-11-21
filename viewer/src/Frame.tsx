@@ -337,6 +337,10 @@ export function CommandBar({
                 type="button"
                 className={`opt${part.main ? ' main' : ''}`}
                 data-opt={part.act}
+                // A press keeps the focus where it was, so Enter after
+                // clicking Undo enters at the prompt, as AutoCAD's command
+                // line takes it, rather than pressing Undo again (#66).
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={() => onAct(part.act)}
               >
                 {part.option}
