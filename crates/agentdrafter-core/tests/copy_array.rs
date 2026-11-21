@@ -1091,3 +1091,217 @@ fn the_array_schema_refuses_what_the_reader_refuses() {
         );
     }
 }
+
+/// The strip set with the template's terminal taking its number from the
+/// row value `value`, which each row gives as `TNUM`.
+fn bound_set(test: &str, value: &str, rows: &str) -> PathBuf {
+    let template = TEMPLATE.replace(
+        "attributes: {NUMBER: '1'}",
+        &format!("attributes: {{NUMBER: {{row: {value}}}}}"),
+    );
+    strip_set_with(test, &template, rows)
+}
+
+fn number_of(set: &Path, id: &str) -> String {
+    insert(&recorded(set), id).attributes[0].value.clone()
+}
+
+#[test]
+fn the_first_object_of_the_copies_sets_the_shared_value_where_it_is() {
+    // The terminal shows TITLE, which the heading shows too.
+    let set = bound_set("first-sets-in-place", "TITLE", ROWS);
+    lands(
+        &set,
+        json!([{"op": "copy", "target": {"id": "ARR-001/term"}, "by": [10, 0, 0]}]),
+    );
+    let report = lands(
+        &set,
+        json!([{"op": "set_attribute", "target": {"id": "ARR-001/term"}, "tag": "NUMBER", "value": "RENAMED"}]),
+    );
+    assert!(report.operations[0].created_row_values.is_empty());
+    assert_eq!(report.operations[0].sheets, ["ARR-001"]);
+    let objects = recorded(&set);
+    let Object::Text(title) = &objects["ARR-001/title"] else {
+        panic!()
+    };
+    assert_eq!(title.contents, "RENAMED");
+    assert_eq!(number_of(&set, "ARR-001/term-1"), "RENAMED");
+    assert_eq!(number_of(&set, "ARR-002/term-1"), "STRIP TWO");
+    // A copy set later takes its own, and the original's edits no longer
+    // reach it.
+    let report = lands(
+        &set,
+        json!([{"op": "set_attribute", "target": {"id": "ARR-001/term-1"}, "tag": "NUMBER", "value": "COPY"}]),
+    );
+    assert_eq!(report.operations[0].created_row_values, ["TITLE-term-1"]);
+    lands(
+        &set,
+        json!([{"op": "set_attribute", "target": {"id": "ARR-001/term"}, "tag": "NUMBER", "value": "AGAIN"}]),
+    );
+    assert_eq!(number_of(&set, "ARR-001/term-1"), "COPY");
+    assert_eq!(number_of(&set, "ARR-002/term-1"), "STRIP TWO");
+}
+
+#[test]
+fn a_new_row_value_goes_before_a_block_of_lines_and_other_templates_still_land() {
+    let rows = ROWS
+        .replace(
+            "values: {TITLE: STRIP ONE}",
+            "values:\n      TITLE: STRIP ONE\n      TNUM: '1'  # set by hand\n      NOTES: |\n        LINE ONE\n        LINE TWO\n",
+        )
+        .replace(
+            "values: {TITLE: STRIP TWO}",
+            "values: {TITLE: STRIP TWO, TNUM: '5'}",
+        );
+    let set = bound_set("block-scalar", "TNUM", &rows);
+    // A sheet of another template beside them.
+    fs::write(
+        set.join("templates/other.yaml"),
+        "units: mm
+objects:
+  - line: {id: bar, from: [0, 0, 0], to: [10, 0, 0]}
+",
+    )
+    .unwrap();
+    let mut rows_text = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    rows_text.push_str(
+        "  - sheet: ARR-003
+    template: templates/other.yaml
+    values: {}
+",
+    );
+    fs::write(set.join("rows.yaml"), rows_text).unwrap();
+    let reply = build_set_with(
+        &SetBuildRequest {
+            set: set.clone(),
+            overwrite: true,
+            clean: None,
+        },
+        &Settings::default(),
+    );
+    assert!(reply.ok, "{:#?}", reply.error);
+    let report = lands(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/term"}, "by": [10, 0, 0]},
+            {"op": "set_attribute", "target": {"id": "ARR-001/term-1"}, "tag": "NUMBER", "value": "9"},
+            {"op": "move", "target": {"id": "ARR-003/bar"}, "by": [0, 5, 0]},
+        ]),
+    );
+    assert_eq!(report.landed, 3);
+    assert!(report.operations.iter().all(|o| o.ok));
+    let rows_text = fs::read_to_string(set.join("rows.yaml")).unwrap();
+    assert!(
+        rows_text.contains(
+            "      TNUM: '1'  # set by hand\n      TNUM-term-1: 9\n      NOTES: |\n        LINE ONE\n"
+        ),
+        "{rows_text}"
+    );
+    assert!(
+        rows_text.contains("values: {TITLE: STRIP TWO, TNUM: '5', TNUM-term-1: 5}"),
+        "{rows_text}"
+    );
+    assert_eq!(number_of(&set, "ARR-001/term-1"), "9");
+    assert_eq!(number_of(&set, "ARR-001/term"), "1");
+}
+
+#[test]
+fn a_patterned_hatchs_base_point_is_its_boundarys_centre() {
+    let template = TEMPLATE.replace(
+        "units: mm\n",
+        "units: mm\nhatch_patterns:\n  LINES:\n    lines:\n      - {angle: 0, delta: [0, 2]}\n  SPARSE:\n    lines:\n      - {angle: 0, delta: [0, 100]}\n",
+    );
+    let rows = ROWS.replace(
+        "      - circle: {id: hole,",
+        "      - hatch: {id: grid, pattern: LINES, boundary: [{polyline: {points: [[40, 20.5, 0], [50, 20.5, 0], [50, 27, 0], [40, 27, 0]]}}]}\n      - hatch: {id: bare, pattern: SPARSE, boundary: [{polyline: {points: [[40, 20, 0], [50, 20, 0], [50, 27, 0], [40, 27, 0]]}}]}\n      - circle: {id: hole,",
+    );
+    let set = strip_set_with("hatch-base-point", &template, &rows);
+    // The lines of `grid` run from y = 22 to 26, inside its boundary from
+    // 20.5 to 27; `bare` draws no line at all.
+    for (id, middle) in [("grid", [45.0, 23.75]), ("bare", [45.0, 23.5])] {
+        let report = lands(
+            &set,
+            json!([{"op": "arraypolar", "target": {"id": format!("ARR-001/{id}")}, "center": [0, 0, 0], "count": 2, "angle": 180, "rotate": false}]),
+        );
+        let by = report.operations[0].copies[0].by;
+        assert!(
+            close(by, [-2.0 * middle[0], -2.0 * middle[1], 0.0]),
+            "{id}: {by:?}"
+        );
+    }
+}
+
+#[test]
+fn a_copied_text_edited_in_one_part_keeps_the_others_shared() {
+    let template = TEMPLATE.replace(
+        "  - text: {id: title, contents: {row: TITLE}, position: [10, 110, 0], height: 4}\n",
+        "  - text: {id: title, contents: {row: TITLE}, position: [10, 110, 0], height: 4}\n  - text: {id: label, contents: [{row: TITLE}, ' - ', {row: TAG}], position: [10, 100, 0], height: 3}\n",
+    );
+    let rows = ROWS
+        .replace(
+            "values: {TITLE: STRIP ONE}",
+            "values: {TITLE: STRIP ONE, TAG: T1}",
+        )
+        .replace(
+            "values: {TITLE: STRIP TWO}",
+            "values: {TITLE: STRIP TWO, TAG: T2}",
+        );
+    let set = strip_set_with("one-part", &template, &rows);
+    let report = lands(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/label"}, "by": [0, -10, 0]},
+            {"op": "change", "target": {"id": "ARR-001/label-1"}, "set": {"contents": "STRIP ONE - T9"}},
+        ]),
+    );
+    assert_eq!(report.operations[1].created_row_values, ["TAG-label-1"]);
+    // A later TITLE change, on the original, still reaches the copy.
+    lands(
+        &set,
+        json!([{"op": "change", "target": {"id": "ARR-001/title"}, "set": {"contents": "RENAMED"}}]),
+    );
+    let objects = recorded(&set);
+    let contents = |id: &str| match &objects[id] {
+        Object::Text(text) => text.contents.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(contents("ARR-001/label-1"), "RENAMED - T9");
+    assert_eq!(contents("ARR-001/label"), "RENAMED - T1");
+    assert_eq!(contents("ARR-002/label-1"), "STRIP TWO - T2");
+}
+
+#[test]
+fn a_split_held_back_reports_no_row_value_and_copy_of_is_the_engines() {
+    let rows = ROWS
+        .replace(
+            "values: {TITLE: STRIP ONE}",
+            "values: {TITLE: STRIP ONE, TNUM: '1'}",
+        )
+        .replace(
+            "values: {TITLE: STRIP TWO}",
+            "values: {TITLE: STRIP TWO, TNUM: '5'}",
+        );
+    let set = bound_set("held-back-split", "TNUM", &rows);
+    let reply = send(
+        &set,
+        json!([
+            {"op": "copy", "target": {"id": "ARR-001/term"}, "by": [10, 0, 0]},
+            {"op": "set_attribute", "target": {"id": "ARR-001/term-1"}, "tag": "NUMBER", "value": "9"},
+            {"op": "move", "target": {"id": "ARR-001/nope"}, "by": [1, 0, 0]},
+        ]),
+        false,
+    );
+    let report = reply.result.unwrap();
+    assert!(!report.operations[1].ok);
+    assert!(report.operations[1].created_row_values.is_empty());
+    // Neither an add nor a change takes copy_of.
+    let validator = jsonschema::validator_for(&change_set_schema()).unwrap();
+    for op in [
+        json!({"op": "change", "target": {"id": "ARR-001/hole"}, "set": {"copy_of": "term"}}),
+        json!({"op": "add_circle", "sheet": "ARR-001", "center": [0, 0, 0], "radius": 1, "copy_of": "hole"}),
+    ] {
+        assert!(!validator.is_valid(&json!({ "operations": [op] })), "{op}");
+        let reply = send(&set, json!([op]), true);
+        assert!(!reply.ok, "{op}");
+    }
+}

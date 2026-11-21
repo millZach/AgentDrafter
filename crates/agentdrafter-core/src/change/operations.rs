@@ -461,6 +461,10 @@ const CHANGE_SET_KEYS: [&str; 2] = ["operations", "fixes"];
 /// The key every operation names itself by.
 const OP_KEY: &str = "op";
 
+/// The key a copy names the first object of its copies by, which the
+/// engine writes and keeps: no add or change takes it.
+const COPY_OF: &str = "copy_of";
+
 /// One operation as an agent lists them: its name, its AutoCAD alias, what
 /// it does and its schema.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -623,9 +627,9 @@ fn does(spec: &Spec) -> String {
                        it keeps every key of its source, an insert's attribute values among \
                        them, values from the row too, but its name, which is given once on a \
                        sheet, and is written with copy_of, the first object of the copies: a \
-                       value from the row it shares with them becomes its own only when one \
-                       of them is set, and setting it then sets that one alone. A copy is \
-                       written \
+                       value from the row it shares with them becomes the copy's own only \
+                       when an edit changes the copy's, which then sets that copy alone; the \
+                       first object sets the shared value where it is. A copy is written \
                        where its source is: a template's object's in the template, so on every \
                        sheet built from it, all or nothing, and a row's own object's in the \
                        row. The reply lists each copy under copies, with its source and where \
@@ -1254,6 +1258,10 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                 .get(&format!("op_{object}"))
                 .unwrap_or(&defs[object])
                 .clone();
+            // The engine writes copy_of on a copy; an add does not take it.
+            if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+                properties.remove(COPY_OF);
+            }
             if let Some(kind) = kind {
                 // The operation gives the dimension its kind.
                 let own = schema.as_object_mut().expect("an object's definition");
@@ -1321,10 +1329,11 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                                     Any key the object's type takes, name, and, on a sheet \
                                     drawn in a layout, space, which moves the object to the \
                                     other space as it stands, unscaled; not id, nor an \
-                                    insert's attributes.",
+                                    insert's attributes, nor copy_of, which copy and array \
+                                    write and the engine keeps.",
                     "type": "object",
                     "minProperties": 1,
-                    "propertyNames": { "not": { "enum": ["id"] } },
+                    "propertyNames": { "not": { "enum": ["id", "copy_of"] } },
                 },
                 ROW_VALUE_KEY: row_value_key(),
             },
@@ -2805,6 +2814,7 @@ fn operation(
             let others = kind.map_or(&[][..], |kind| kind_keys(dimension_kind(kind)).2);
             let own: Vec<&str> = objects_table(object)
                 .into_iter()
+                .filter(|k| *k != COPY_OF)
                 .filter(|k| kind.is_none() || *k != DIMENSION_KIND_KEY)
                 .filter(|k| !others.contains(k))
                 .collect();

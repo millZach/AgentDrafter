@@ -892,8 +892,10 @@ pub(super) fn apply(
                     .filter(|_| included[i])
                     .map(|d| d.copies.clone())
                     .unwrap_or_default(),
+                // Nor did a row value of an operation held back.
                 created_row_values: d
                     .as_ref()
+                    .filter(|_| included[i])
                     .map(|d| d.created_row_values.clone())
                     .unwrap_or_default(),
                 attributes_removed: d.map(|d| d.attributes_removed).unwrap_or_default(),
@@ -1856,16 +1858,27 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 .find(|(b, _)| b == block)
                 .map(|(_, tags)| tags.iter().filter(|t| *t == tag).count())
         };
-        // A value the object shares with an object of its copies, the
-        // object it is a copy of, a copy of it or another copy of the same
-        // object, becomes its own when it is set, so that setting it sets
-        // this object alone; the others keep the value as they show it
-        // (Zach, 2026-11-21). A value shared with any other object is set
-        // where it is, as every row value is (decision 5).
+        // A value a copy shares with the object it is a copy of, or with
+        // another copy of it, becomes the copy's own when an edit changes
+        // it, so that the edit sets this copy alone; the others keep the
+        // value as they show it (Zach, 2026-11-21). Only an object written
+        // with `copy_of` is a copy: the first object of the copies sets the
+        // shared value where it is, so the copies not set since follow it,
+        // and so does every other place that shares it, as every row value
+        // is set (decision 5). Of the values a text matched to its parts
+        // sets, only those whose text changes are taken.
         let mut sets = sets;
         let mut created: Vec<String> = Vec::new();
         let mut refused_on = refused_on;
         if let FileRef::Template(_) = file {
+            let changing: Vec<String> = {
+                let row = files.rows[k].index;
+                let (rows, _) = at.row_record(k);
+                sets.iter()
+                    .filter(|(name, value)| rows.row_value(row, name).as_deref() != Some(value))
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            };
             let shared: Vec<String> = match at.template(t) {
                 Ok(template) => {
                     let listed = template.objects(ObjectList::Template);
@@ -1874,23 +1887,25 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                             .object_value(ObjectList::Template, i, COPY_OF_KEY)
                             .map(|c| c.to_lowercase())
                     };
-                    let mine = listed[index].id.to_lowercase();
-                    let my_first = first_of(index);
-                    let kin = |i: usize| {
-                        let theirs = first_of(i);
-                        theirs.as_deref() == Some(mine.as_str())
-                            || my_first.as_deref() == Some(listed[i].id.to_lowercase().as_str())
-                            || (my_first.is_some() && theirs == my_first)
-                    };
-                    sets.iter()
-                        .map(|(name, _)| name.clone())
-                        .filter(|name| {
-                            template
-                                .row_value_places(name, &carries)
-                                .iter()
-                                .any(|(i, _)| *i != index && kin(*i))
-                        })
-                        .collect()
+                    match first_of(index) {
+                        // The object it is a copy of, or another copy of it.
+                        Some(first) => {
+                            let kin = |i: usize| {
+                                listed[i].id.to_lowercase() == first
+                                    || first_of(i).as_deref() == Some(first.as_str())
+                            };
+                            changing
+                                .into_iter()
+                                .filter(|name| {
+                                    template
+                                        .row_value_places(name, &carries)
+                                        .iter()
+                                        .any(|(i, _)| *i != index && kin(*i))
+                                })
+                                .collect()
+                        }
+                        None => Vec::new(),
+                    }
                 }
                 Err(_) => Vec::new(),
             };
@@ -4115,6 +4130,15 @@ fn extents_center(
                 .iter()
                 .filter(|item| item.object == place)
                 .flat_map(|item| item.points()),
+        );
+        // A patterned hatch reaches its boundary, as `query extents` takes
+        // it, though its lines may stop short of it or draw none.
+        points.extend(
+            drawn
+                .boundaries
+                .iter()
+                .filter(|(object, _)| *object == place)
+                .flat_map(|(_, b)| [b.min, b.max]),
         );
         if points.len() == before {
             return Err(op_error(

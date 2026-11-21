@@ -275,6 +275,14 @@ pub(crate) struct Matched {
     pub given: Option<String>,
 }
 
+/// Where values added to a row go among the values the file writes there:
+/// before the value at a place, or after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValueAnchor {
+    Before(usize),
+    After(usize),
+}
+
 /// A row's value an edit set: where its old text was written.
 struct ValueEdit {
     row: usize,
@@ -2114,8 +2122,12 @@ impl RecordFile {
         Ok(())
     }
 
-    /// Adds the value `name`, `text`, to row `row`'s values, after the
-    /// values it gives. The row must give values already, and not `name`.
+    /// Adds the value `name`, `text`, to row `row`'s values, where
+    /// [`RecordFile::value_anchor`] puts it: after the values the row
+    /// gives, or before the first written as a block of lines. The row must
+    /// give values already, and not `name`. When the file would then not
+    /// write, the value is taken away again and the error given, so the
+    /// record stays as it was.
     pub(crate) fn add_row_value(
         &mut self,
         row: usize,
@@ -2123,6 +2135,7 @@ impl RecordFile {
         text: &str,
     ) -> Result<(), Error> {
         let field = key_path(&key_path(&index_path("rows", row), "values"), name);
+        let anchor = self.value_anchor(row);
         let values = self
             .row_node_mut(row)
             .and_then(|node| mapping_entry_mut(node, "values"))
@@ -2143,9 +2156,62 @@ impl RecordFile {
             )
             .at_field(field));
         }
-        entries.push(new_entry(name, Node::scalar(text.to_owned())));
+        // After the values added already at the same place, in order.
+        let at = match anchor {
+            Some(ValueAnchor::Before(j)) => j,
+            Some(ValueAnchor::After(j)) => {
+                let mut at = j + 1;
+                while at < entries.len() && entries[at].key_end == 0 {
+                    at += 1;
+                }
+                at
+            }
+            None => entries.len(),
+        };
+        entries.insert(at, new_entry(name, Node::scalar(text.to_owned())));
         self.added_values.push((row, name.to_owned()));
+        if let Err(e) = self.new_text() {
+            if let Some(Kind::Mapping(entries)) = self
+                .row_node_mut(row)
+                .and_then(|node| mapping_entry_mut(node, "values"))
+                .map(|values| &mut values.kind)
+            {
+                entries.retain(|e| !(e.key_end == 0 && e.key == name));
+            }
+            self.added_values.retain(|(r, n)| !(*r == row && n == name));
+            return Err(e.at_field(field));
+        }
         Ok(())
+    }
+
+    /// Where values added to row `row` go, among the values the file
+    /// writes there: before the first written as a block of lines, such as
+    /// `NOTES: |`, which a value after it would read as part of; or else
+    /// after the last. None when the row writes no value.
+    fn value_anchor(&self, row: usize) -> Option<ValueAnchor> {
+        let values = self
+            .row_node(row)
+            .and_then(|n| mapping_entry(n, "values"))?;
+        let Kind::Mapping(entries) = &values.kind else {
+            return None;
+        };
+        let style = |e: &Entry| {
+            self.values
+                .iter()
+                .find(|v| v.row == row && v.name == e.key)
+                .map(|v| v.source.style)
+                .or(e.value.source.map(|s| s.style))
+        };
+        let written: Vec<usize> = (0..entries.len())
+            .filter(|&j| entries[j].key_end != 0)
+            .collect();
+        match written
+            .iter()
+            .find(|&&j| style(&entries[j]) == Some(Style::BlockScalar))
+        {
+            Some(&j) => Some(ValueAnchor::Before(j)),
+            None => written.last().map(|&j| ValueAnchor::After(j)),
+        }
     }
 
     /// The names of the values row `row` gives.
@@ -2159,9 +2225,11 @@ impl RecordFile {
         }
     }
 
-    /// The splices that write the values edits added to each row, after
-    /// the last value the file wrote in the row: in the row's braces, or a
-    /// key to a line at the values' own indent.
+    /// The splices that write the values edits added to each row, where
+    /// [`RecordFile::value_anchor`] puts them: in the row's braces after the
+    /// last value; or a key to a line, at the values' own indent, at the
+    /// start of the line of the first value written as a block of lines,
+    /// or at the end of the last value's line, after any comment on it.
     fn added_value_splices(&self, splices: &mut Vec<(usize, usize, String)>) -> Result<(), Error> {
         let mut rows: Vec<usize> = Vec::new();
         for (row, _) in &self.added_values {
@@ -2170,58 +2238,121 @@ impl RecordFile {
             }
         }
         for row in rows {
+            let lost = || self.cannot_write("a row's values are not where the file wrote them");
             let values = self
                 .row_node(row)
                 .and_then(|n| mapping_entry(n, "values"))
-                .ok_or_else(|| {
-                    self.cannot_write("a row's values are not where the file wrote them")
-                })?;
+                .ok_or_else(lost)?;
             let Kind::Mapping(entries) = &values.kind else {
-                return Err(self.cannot_write("a row's values are not a mapping"));
+                return Err(lost());
             };
             let in_flow = values.source.is_some_and(|s| s.style == Style::Flow);
-            // The last value the file wrote, where it wrote it: an edit may
-            // have set its text since.
-            let last = entries
-                .iter()
-                .rev()
-                .find(|e| e.key_end != 0)
-                .ok_or_else(|| {
-                    self.cannot_write("a row's values are not where the file wrote them")
-                })?;
-            let source = self
-                .values
-                .iter()
-                .find(|v| v.row == row && v.name == last.key)
-                .map(|v| v.source)
-                .or(last.value.source)
-                .ok_or_else(|| self.cannot_write("a row's value is not where the file wrote it"))?;
-            if source.style == Style::BlockScalar {
-                return Err(self.cannot_write(
-                    "a row's last value is a block of lines, after which no value is added",
-                ));
-            }
-            let indent = last.key_at.column.saturating_sub(1);
-            let mut with = String::new();
-            for (_, name) in self.added_values.iter().filter(|(r, _)| *r == row) {
-                let text = self.row_value(row, name).unwrap_or_default();
-                if in_flow {
-                    with.push_str(&format!(
-                        ", {name}: {}",
-                        scalar_text(&text, Context::Flow, indent + 2, self.newline)
-                    ));
-                } else {
-                    with.push_str(self.newline);
-                    with.push_str(&" ".repeat(indent));
-                    with.push_str(&format!(
-                        "{name}: {}",
-                        scalar_text(&text, Context::Block, indent + 2, self.newline)
-                    ));
+            let anchor = self.value_anchor(row);
+            // The values added at the anchor, in the order they are given.
+            let added: Vec<&Entry> = match anchor {
+                Some(ValueAnchor::Before(j)) => {
+                    let mut first = j;
+                    while first > 0 && entries[first - 1].key_end == 0 {
+                        first -= 1;
+                    }
+                    entries[first..j].iter().collect()
                 }
+                Some(ValueAnchor::After(j)) => entries[j + 1..]
+                    .iter()
+                    .take_while(|e| e.key_end == 0)
+                    .collect(),
+                None => entries.iter().filter(|e| e.key_end == 0).collect(),
+            };
+            let text_of = |e: &Entry| match &e.value.kind {
+                Kind::Scalar(text) => text.clone(),
+                _ => String::new(),
+            };
+            match (anchor, in_flow) {
+                (Some(ValueAnchor::After(j)), true) => {
+                    let end = self.value_end(row, &entries[j]).ok_or_else(lost)?;
+                    let with: String = added
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                ", {}: {}",
+                                e.key,
+                                scalar_text(&text_of(e), Context::Flow, 0, self.newline)
+                            )
+                        })
+                        .collect();
+                    splices.push((end, end, with));
+                }
+                (None, true) => {
+                    // Braces that hold no value yet: inside them.
+                    let source = values.source.ok_or_else(lost)?;
+                    let close = self.text[..source.end].rfind('}').ok_or_else(lost)?;
+                    let with: Vec<String> = added
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                "{}: {}",
+                                e.key,
+                                scalar_text(&text_of(e), Context::Flow, 0, self.newline)
+                            )
+                        })
+                        .collect();
+                    splices.push((close, close, with.join(", ")));
+                }
+                (Some(ValueAnchor::Before(j)), _) => {
+                    let indent = entries[j].key_at.column.saturating_sub(1);
+                    let start = self.text[..entries[j].key_end]
+                        .rfind('\n')
+                        .map_or(0, |p| p + 1);
+                    let with: String = added
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                "{}{}: {}{}",
+                                " ".repeat(indent),
+                                e.key,
+                                scalar_text(&text_of(e), Context::Block, indent + 2, self.newline),
+                                self.newline
+                            )
+                        })
+                        .collect();
+                    splices.push((start, start, with));
+                }
+                (Some(ValueAnchor::After(j)), false) => {
+                    let indent = entries[j].key_at.column.saturating_sub(1);
+                    let end = self.value_end(row, &entries[j]).ok_or_else(lost)?;
+                    // The end of its line: after a comment on it, before the
+                    // line break.
+                    let line_end = self.text[end..]
+                        .find(['\r', '\n'])
+                        .map_or(self.text.len(), |p| end + p);
+                    let with: String = added
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                "{}{}{}: {}",
+                                self.newline,
+                                " ".repeat(indent),
+                                e.key,
+                                scalar_text(&text_of(e), Context::Block, indent + 2, self.newline)
+                            )
+                        })
+                        .collect();
+                    splices.push((line_end, line_end, with));
+                }
+                (None, false) => return Err(lost()),
             }
-            splices.push((source.end, source.end, with));
         }
         Ok(())
+    }
+
+    /// Where the file wrote the value `entry` of row `row` ends, before an
+    /// edit set it.
+    fn value_end(&self, row: usize, entry: &Entry) -> Option<usize> {
+        self.values
+            .iter()
+            .find(|v| v.row == row && v.name == entry.key)
+            .map(|v| v.source.end)
+            .or(entry.value.source.map(|s| s.end))
     }
 
     /// The places among the template's objects where it puts the row's
