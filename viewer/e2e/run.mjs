@@ -55,6 +55,12 @@
 //            which lands in the journal and builds the
 //            sheet's DWG again; the template warning's Cancel and Change
 //            all; and Undo last of a drafter's edit.
+// - copy:    the Copy tool (#66), at laptop and phone sizes: copies placed
+//            by a typed displacement, a length and a click, dashed and
+//            tagged, taken back by Ctrl+Z, U and Undo; Enter landing them
+//            as one change set, one journal entry; Esc landing them; and a
+//            template's object warned of and asked about once, Change all
+//            landing on every sheet built from it.
 // - props:   editing in quick properties, by mouse and keyboard and by
 //            touch: a layer, a text's contents in the panel and on the
 //            drawing, an attribute, a radius and a diameter, and the Layer
@@ -2409,6 +2415,307 @@ const checks = {
         await context.close();
       }
       return { ...seen, screenshots: ['tools-laptop-line.png', 'tools-laptop-text.png', 'tools-laptop-move.png', 'tools-laptop-template.png', 'tools-laptop-after.png', 'tools-phone-line.png', 'tools-phone-text.png'] };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+
+  /**
+   * The Copy tool (#66), against a copy of the demo plant, at laptop and
+   * phone sizes: FT-101 selected, then Copy from its options; a base point,
+   * then copies placed by a typed displacement, a length along the cursor
+   * and a click, dashed and tagged while they wait; the last taken back by
+   * Ctrl+Z, U and Undo; Enter landing them all as one change set, one
+   * `copy` with `offsets`, one journal entry; Esc landing the copy placed,
+   * and with none placed ending the tool; and the junction box, a template's
+   * object, warned of while Copy runs and asked about once, when the copies
+   * land, in the preview's band, Change all landing on every sheet.
+   */
+  async copy() {
+    const folder = freshPlant('copy');
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    const seen = { laptop: {}, phone: {} };
+    const shots = [];
+    const journal = () => agentIn(folder, 'journal', 'demo-plant').result.entries;
+    const template = () => readFileSync(join(folder, 'demo-plant', 'templates', 'loop-2-wire.yaml'), 'utf8');
+    const bar = (page) => page.evaluate(() => document.querySelector('.cmdbar')?.textContent ?? '');
+    const frames = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    const onPage = (page, at) =>
+      page.evaluate(([x, y]) => {
+        const v = window.agentdrafterViewer.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+      }, at);
+    const tags = (page) => page.evaluate(() => [...document.querySelectorAll('[data-copytag]')].map((t) => t.textContent));
+    const shot = async (page, name) => {
+      await frames(page);
+      await page.screenshot({ path: join(out, name) });
+      shots.push(name);
+    };
+    // Waits for the journal to hold one more entry than `before`, a change
+    // set that landed on `sheet`, and for the page to draw what it added.
+    const landed = async (page, before, what, sheet = 'DP-LD-101') => {
+      const until = Date.now() + 30000;
+      let entries = journal();
+      while (entries.length <= before) {
+        assert(Date.now() < until, `${what}: no change set landed: ${await bar(page)}`);
+        await sleep(100);
+        entries = journal();
+      }
+      assert(entries.length === before + 1, `${what}: one journal entry, not ${entries.length - before}`);
+      const entry = entries.at(-1);
+      assert(entry.kind === 'change_set' && entry.landed_on?.includes(sheet), `${what} landed: ${JSON.stringify(entry)}`);
+      const added = (entry.objects ?? []).filter((o) => o.how === 'added' && o.id.startsWith(`${sheet}/`)).map((o) => o.id);
+      for (const id of added) {
+        await page.waitForFunction((wanted) => window.agentdrafterViewer.summary.objects.some((o) => o.id === wanted), id, { timeout: 15000 });
+      }
+      return entry;
+    };
+    const typeIn = async (page, ...lines) => {
+      for (const line of lines) {
+        await page.keyboard.type(line);
+        await page.keyboard.press('Enter');
+        await frames(page);
+      }
+    };
+    const fitAll = async (page) => {
+      await page.click('[aria-label="Fit the sheet"]');
+      await sleep(600);
+    };
+    // The journal's line for entry `n`, in the side panel.
+    const journalLine = async (page, n, how) => {
+      await sideTab(page, 'journal', how);
+      await page.waitForSelector(`[data-entry="${n}"] .je-t`, { timeout: 15000 });
+      return page.textContent(`[data-entry="${n}"] .je-t`);
+    };
+    const copyOp = (entry) => {
+      const ops = entry.change_set.operations;
+      assert(ops.length === 1 && ops[0].op === 'copy', `one copy operation: ${JSON.stringify(ops)}`);
+      return ops[0];
+    };
+    try {
+      // A laptop: the mouse, and typing.
+      {
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        // The ribbon: Copy in Modify, between Move and Erase, CO and CP in its tip.
+        const modify = await page.evaluate(() => [...document.querySelectorAll('.ribbon .rb[data-tool]')].map((x) => x.dataset.tool));
+        assert(JSON.stringify(modify.slice(-3)) === '["move","copy","erase"]', `Copy sits between Move and Erase: ${modify}`);
+        await page.hover('.rb[data-tool="copy"]');
+        const tip = await page.textContent('.tip');
+        assert(tip.includes('CO') && tip.includes('CP') && tip.includes('keeps placing copies'), `Copy's tip: ${tip}`);
+        await page.mouse.move(700, 500);
+        // FT-101 selected first, then Copy from its options.
+        await fitAll(page);
+        await page.keyboard.press('F3');
+        const device = await objectOf(page, 'DP-LD-101/device');
+        await page.mouse.click(...(await onPage(page, [(device.bounds[0] + device.bounds[2]) / 2, device.bounds[3] - 0.02])));
+        assert((await bar(page)).includes('FT-101 selected'), `the device is selected: ${await bar(page)}`);
+        assert(/Move.*Copy.*Erase.*Clear/.test(await bar(page)), `a selected object's options hold Copy: ${await bar(page)}`);
+        await page.click('.opt[data-opt="copy-objects"]');
+        assert((await bar(page)).includes('COPY') && (await bar(page)).includes('the base point'), `Copy takes what is selected: ${await bar(page)}`);
+        let before = journal().length;
+        // The base point typed; a displacement typed; a length towards the
+        // cursor, which is below the base; a click; then Ctrl+Z takes it back.
+        await typeIn(page, '2,6.5', '@0,1.2');
+        assert((await bar(page)).includes('1 copy placed'), `a copy is placed: ${await bar(page)}`);
+        await page.mouse.move(...(await onPage(page, [2, 3])));
+        await frames(page);
+        await typeIn(page, '1.2');
+        await page.mouse.click(...(await onPage(page, [4.5, 6.5])));
+        await frames(page);
+        assert((await bar(page)).includes('3 copies placed'), `three copies placed: ${await bar(page)}`);
+        await page.keyboard.press('Control+z');
+        await frames(page);
+        assert((await bar(page)).includes('2 copies placed'), `Ctrl+Z takes the last back: ${await bar(page)}`);
+        // U, then the Undo option, each take one back; placed again by typing.
+        await typeIn(page, '@3,0', 'U');
+        assert((await bar(page)).includes('2 copies placed'), `U takes the last back: ${await bar(page)}`);
+        await typeIn(page, '@3,0');
+        await page.click('.opt[data-opt="tool:undo"]');
+        assert((await bar(page)).includes('2 copies placed'), `Undo takes the last back: ${await bar(page)}`);
+        assert(journal().length === before, 'nothing lands while the copies are placed');
+        // The copy that follows the cursor, and the two placed, tagged.
+        await page.mouse.move(...(await onPage(page, [3.2, 4.4])));
+        await frames(page);
+        assert(JSON.stringify(await tags(page)) === JSON.stringify(['copy 1 · waits for Enter', 'copy 2 · waits for Enter']), `the copies placed are tagged: ${await tags(page)}`);
+        const note = await page.textContent('.cmdnote');
+        assert(note.includes('Enter or Esc: the copies land') && note.includes('Ctrl+Z'), `the note: ${note}`);
+        await shot(page, 'copy-laptop-1-mid-copy.png');
+        // Enter lands them all: one change set, one copy with offsets.
+        await page.keyboard.press('Enter');
+        let entry = await landed(page, before, 'Copy, Enter');
+        let op = copyOp(entry);
+        assert(op.target?.id === 'DP-LD-101/device' && JSON.stringify(op.offsets) === '[[0,1.2,0],[0,-1.2,0]]', `one copy with offsets: ${JSON.stringify(op)}`);
+        const added = entry.objects.filter((o) => o.how === 'added').map((o) => o.id);
+        assert(added.length === 2, `two copies added: ${JSON.stringify(entry.objects)}`);
+        assert(JSON.stringify(entry.landed_on) === '["DP-LD-101"]', `the row's own object's copies land on its sheet alone: ${entry.landed_on}`);
+        assert((await tags(page)).length === 0, 'the tags go when the copies land');
+        seen.laptop.enter = entry.entry;
+        await page.mouse.move(700, 600);
+        await shot(page, 'copy-laptop-2-after-enter.png');
+        const line = await journalLine(page, entry.entry);
+        assert(line.includes('copy device, 2 copies'), `one journal line: ${line}`);
+        await shot(page, 'copy-laptop-3-journal.png');
+        await sideTab(page, 'chat');
+        // Esc lands the copy placed: by CP, the device picked, one copy.
+        before = journal().length;
+        await page.keyboard.press('Escape');
+        await typeIn(page, 'CP');
+        await page.mouse.click(...(await onPage(page, [(device.bounds[0] + device.bounds[2]) / 2, device.bounds[3] - 0.02])));
+        await typeIn(page, '', '2,6.5', '@1.5,-2.5');
+        await page.keyboard.press('Escape');
+        entry = await landed(page, before, 'Copy, Esc');
+        op = copyOp(entry);
+        assert(JSON.stringify(op.from) === '[2,6.5,0]' && JSON.stringify(op.to) === '[3.5,4,0]', `one copy goes from and to: ${JSON.stringify(op)}`);
+        seen.laptop.escape = entry.entry;
+        // With none placed, Esc just ends the tool.
+        before = journal().length;
+        await typeIn(page, 'CO');
+        await page.mouse.click(...(await onPage(page, [(device.bounds[0] + device.bounds[2]) / 2, device.bounds[3] - 0.02])));
+        await typeIn(page, '', '2,6.5');
+        await page.keyboard.press('Escape');
+        await sleep(1000);
+        assert(journal().length === before, 'Esc with no copy placed lands nothing');
+        assert(!(await bar(page)).includes('COPY'), `Esc ends the tool: ${await bar(page)}`);
+        // AR is no tool here: it goes to the assistant, as any other word.
+        await page.keyboard.type('AR');
+        const hint = await page.textContent('.cmdbar');
+        assert(hint.includes('ask the assistant'), `AR goes to the assistant: ${hint}`);
+        await page.keyboard.press('Escape');
+        // The junction box, a template's object: warned while Copy runs,
+        // asked about once, when the copies land.
+        await page.keyboard.press('F3');
+        await fitAll(page);
+        await page.keyboard.press('F3');
+        before = journal().length;
+        const templateBefore = template();
+        const edgeAt = await onPage(page, [6.38, 6.5]);
+        await typeIn(page, 'CO');
+        await page.mouse.click(edgeAt[0], edgeAt[1]);
+        await typeIn(page, '', '6.38,6.5', '@0,-2.2', '@0,1.9');
+        const warned = await page.textContent('[data-warning]');
+        assert(
+          warned.includes('This is part of the template.') && warned.includes('This copies it on every sheet built from this template: 7 sheets.') && warned.includes('You will be asked before it lands.'),
+          `the command bar warns: ${warned}`,
+        );
+        await page.mouse.move(...(await onPage(page, [9.5, 4.0])));
+        await shot(page, 'copy-laptop-4-template-warning.png');
+        assert(journal().length === before, 'nothing lands, nor is asked, while copies are placed');
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
+        const asked = await page.textContent('[data-preview]');
+        assert(asked.includes('Copy') && asked.includes('2 copies') && asked.includes('Change all 7 sheets'), `the band: ${asked}`);
+        await shot(page, 'copy-laptop-5-change-all.png');
+        await page.click('[data-pv="go"]');
+        entry = await landed(page, before, 'Copy of a template object');
+        op = copyOp(entry);
+        assert(op.offsets?.length === 2, `the template's copies go as offsets: ${JSON.stringify(op)}`);
+        assert(entry.landed_on.length === 7 && !entry.landed_on.includes('DP-LD-103'), `they land on every sheet built from the template: ${entry.landed_on}`);
+        assert(template() !== templateBefore, 'the template changes');
+        seen.laptop.template = { entry: entry.entry, sheets: entry.landed_on.length };
+        const tline = await journalLine(page, entry.entry);
+        assert(tline.includes('copy junction-box, 2 copies'), `its journal line: ${tline}`);
+        await shot(page, 'copy-laptop-6-template-journal.png');
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      // A phone: Tools, taps, the options, and the band in the command bar's place.
+      {
+        const context = await b.newContext(PHONE);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        // Snapping off, so each tap is the point itself.
+        await page.tap('.toolsbtn');
+        await page.tap('.ribbon [data-toggle="osnap"]');
+        let before = journal().length;
+        await page.tap('.rb[data-tool="copy"]', { force: true });
+        assert((await bar(page)).includes('Tap the objects to copy'), `the phone's words: ${await bar(page)}`);
+        const device = await objectOf(page, 'DP-LD-101/device');
+        await page.touchscreen.tap(...(await onPage(page, [(device.bounds[0] + device.bounds[2]) / 2, device.bounds[3] - 0.02])));
+        await sleep(300);
+        assert((await bar(page)).includes('1 object picked'), `the device is picked: ${await bar(page)}`);
+        await page.tap('.opt[data-opt="tool:done"]');
+        await page.touchscreen.tap(...(await onPage(page, [2, 6.5])));
+        await sleep(400);
+        await page.touchscreen.tap(...(await onPage(page, [4, 4.2])));
+        await sleep(400);
+        await page.touchscreen.tap(...(await onPage(page, [4, 9.2])));
+        await sleep(400);
+        await page.touchscreen.tap(...(await onPage(page, [5, 9.2])));
+        await sleep(400);
+        assert((await bar(page)).includes('3 copies placed'), `three placed: ${await bar(page)}`);
+        await page.tap('.opt[data-opt="tool:undo"]');
+        await sleep(200);
+        assert((await bar(page)).includes('2 copies placed'), `Undo takes one back: ${await bar(page)}`);
+        assert(JSON.stringify(await tags(page)) === JSON.stringify(['copy 1', 'copy 2']), `a phone's tags: ${await tags(page)}`);
+        await shot(page, 'copy-phone-1-mid-copy.png');
+        await page.tap('.opt[data-opt="tool:done"]');
+        let entry = await landed(page, before, 'Copy, by touch');
+        const op = copyOp(entry);
+        assert(op.offsets?.length === 2 && op.target?.id === 'DP-LD-101/device', `one copy with two offsets: ${JSON.stringify(op)}`);
+        seen.phone.done = entry.entry;
+        await shot(page, 'copy-phone-2-after-done.png');
+        // The journal, the sheet dragged up as a finger raises it.
+        const cdp = await context.newCDPSession(page);
+        for (let attempt = 1; ; attempt += 1) {
+          assert(await sheetAtRest(page, false), 'the sheet comes to rest at its peek');
+          const [gx, gy] = await page.evaluate(() => {
+            const r = document.querySelector('.va-grab').getBoundingClientRect();
+            return [r.left + r.width / 2, r.top + r.height / 2];
+          });
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: gx, y: gy }] });
+          for (let i = 1; i <= 10; i += 1) {
+            await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: gx, y: gy - i * 30 }] });
+            await sleep(16);
+          }
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+          if (await sheetAtRest(page, true, attempt >= 2 ? 30000 : 5000)) break;
+          assert(attempt < 2, 'dragged up twice, the sheet is raised');
+        }
+        const line = await journalLine(page, entry.entry, 'tap');
+        assert(line.includes('copy device, 2 copies'), `one journal line: ${line}`);
+        await sleep(500);
+        await shot(page, 'copy-phone-3-journal.png');
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      {
+        const context = await b.newContext(PHONE);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        await page.tap('.toolsbtn');
+        await page.tap('.ribbon [data-toggle="osnap"]');
+        // The junction box: the warning, then the band, then Change all.
+        const before = journal().length;
+        await page.tap('.rb[data-tool="copy"]', { force: true });
+        await page.touchscreen.tap(...(await onPage(page, [6.38, 6.5])));
+        await sleep(300);
+        assert((await bar(page)).includes('1 object picked'), `the junction box is picked: ${await bar(page)}`);
+        await page.tap('.opt[data-opt="tool:done"]');
+        await page.touchscreen.tap(...(await onPage(page, [6.38, 6.5])));
+        await sleep(400);
+        await page.touchscreen.tap(...(await onPage(page, [6.38, 3.6])));
+        await sleep(400);
+        const warned = await page.textContent('[data-warning]');
+        assert(warned.includes('This copies it on every sheet built from this template: 7 sheets.'), `the warning on a phone: ${warned}`);
+        await shot(page, 'copy-phone-4-template-warning.png');
+        await page.tap('.opt[data-opt="tool:done"]');
+        await page.waitForSelector('[data-preview] [data-pv-summary]', { timeout: 30000 });
+        const asked = await page.textContent('[data-preview]');
+        assert(asked.includes('Change all 7 sheets'), `the band on a phone: ${asked}`);
+        await shot(page, 'copy-phone-5-change-all.png');
+        await page.tap('[data-pv="go"]');
+        const entry = await landed(page, before, 'Copy of a template object, by touch');
+        assert(entry.landed_on.length === 7, `on every sheet built from the template: ${entry.landed_on}`);
+        seen.phone.template = { entry: entry.entry, sheets: entry.landed_on.length };
+        assert(problems.length === 0, problems.join('; '));
+        await context.close();
+      }
+      return { ...seen, screenshots: shots };
     } finally {
       await b.close();
       await server.stop();
