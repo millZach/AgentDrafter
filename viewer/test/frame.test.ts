@@ -3,6 +3,8 @@ import { test } from 'node:test';
 
 import {
   barNote,
+  barWarning,
+  letGoOnOptionPress,
   isUndoKey,
   CORE_ORDER,
   editsHere,
@@ -637,7 +639,7 @@ test('Ctrl+Z, or ⌘Z, is the undo key, in either case, but not with Shift or Al
   assert.ok(!isUndoKey(key({ ctrlKey: true, key: 'y' })));
 });
 
-test('a copy placed in the template shows Copy\'s warning, as the renderer says it', () => {
+test('Copy\'s template warning shows above its prompt in the renderer\'s words, but not while the band asks', () => {
   const copy = toolState({
     tool: 'copy',
     command: 'COPY',
@@ -648,11 +650,42 @@ test('a copy placed in the template shows Copy\'s warning, as the renderer says 
     ],
     takes_points: true,
     placed: 2,
+    // As the renderer gives it for the junction box, a template's, on a template seven sheets are built from.
+    warning: {
+      title: 'This is part of the template.',
+      detail: 'This copies it on every sheet built from this template: 7 sheets. You will be asked before it lands.',
+      path: 'templates/loop-2-wire.yaml',
+      sheets: ['DP-LD-101', 'DP-LD-102', 'DP-LD-104', 'DP-LD-201', 'DP-LD-202', 'DP-LD-301', 'DP-LD-302'],
+      edit: 'Copy junction-box, 2 copies',
+    },
   });
+  // The warning shows above the prompt while Copy runs, in the renderer's words.
+  const shown = barWarning({ tool: copy, previewing: false });
+  assert.equal(
+    `${shown?.title} ${shown?.detail}`,
+    'This is part of the template. This copies it on every sheet built from this template: 7 sheets. You will be asked before it lands.',
+  );
+  // Not while the copies are shown before they land, where the band asks instead; nor with no tool running.
+  assert.equal(barWarning({ tool: copy, previewing: true }), null);
+  assert.equal(barWarning({ tool: toolState({ warning: copy.warning }), previewing: false }), null);
+  // Its prompt, with Undo and Done naming the copies placed.
   const p = promptFor({ ...none, tool: copy });
   assert.equal(p.command, 'COPY');
   assert.equal(
     words(p.parts),
     '2 copies placed, dashed until you finish. Click where the next goes, or type @dx,dy or a length [ <Undo> · <Done: copy 2> ]',
   );
+});
+
+test('an option pressed lets a field being edited go, and gives up the focus Tab gave it, but keeps the command bar\'s field', () => {
+  // A quick properties field being edited lets go, so its edit lands as leaving it does.
+  assert.equal(letGoOnOptionPress({ tag: 'INPUT', option: false, commandField: false }), true);
+  assert.equal(letGoOnOptionPress({ tag: 'TEXTAREA', option: false, commandField: false }), true);
+  assert.equal(letGoOnOptionPress({ tag: 'SELECT', option: false, commandField: false }), true);
+  // An option reached by Tab gives the focus up, so Enter after the click enters at the prompt.
+  assert.equal(letGoOnOptionPress({ tag: 'BUTTON', option: true, commandField: false }), true);
+  // The command bar's field keeps it, and so does anything else, such as a ribbon button.
+  assert.equal(letGoOnOptionPress({ tag: 'INPUT', option: false, commandField: true }), false);
+  assert.equal(letGoOnOptionPress({ tag: 'BUTTON', option: false, commandField: false }), false);
+  assert.equal(letGoOnOptionPress(null), false);
 });

@@ -15,6 +15,7 @@ import {
   TOGGLES,
   fieldKey,
   isUndoKey,
+  letGoOnOptionPress,
   pastedLines,
   checkAgainOffered,
   keepButton,
@@ -339,8 +340,15 @@ export function CommandBar({
                 data-opt={part.act}
                 // A press keeps the focus where it was, so Enter after
                 // clicking Undo enters at the prompt, as AutoCAD's command
-                // line takes it, rather than pressing Undo again (#66).
-                onMouseDown={(e) => e.preventDefault()}
+                // line takes it, rather than pressing Undo again (#66); a
+                // field being edited, or this option reached by Tab, lets
+                // it go first.
+                onMouseDown={(e) => {
+                  const a = document.activeElement as HTMLElement | null;
+                  const was = a && a !== document.body ? { tag: a.tagName, option: !!a.closest?.('.opt'), commandField: a === field.current } : null;
+                  if (letGoOnOptionPress(was)) a?.blur();
+                  e.preventDefault();
+                }}
                 onClick={() => onAct(part.act)}
               >
                 {part.option}

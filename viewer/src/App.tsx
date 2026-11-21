@@ -85,6 +85,7 @@ import {
   takenOf,
   toggleFor,
   barNote,
+  barWarning,
   isUndoKey,
   toggledWords,
   typeWords,
@@ -944,7 +945,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
     setFocused(number);
     setPulseSince(null);
     setPicked(null);
-    endTool();
+    // Copies placed on the sheet shown are dropped, with nothing sent.
+    leaveTool();
     setSide('journal');
     setWanted(target);
     // Another sheet may not have the layout shown: it opens on its first.
@@ -1222,6 +1224,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // Copy's copies placed wait for Enter; Undo, U and Ctrl+Z take the last back.
   const copiesPlaced = toolState?.tool === 'copy' && toolState.placed > 0;
   const undoCopy = () => toolDid(renderer()?.tool_option('undo') ?? '');
+  // The page leaves what the tool works on: an entry, or a proposal opened.
+  // Copy's copies placed are dropped, with nothing sent; only Enter, Done,
+  // a right-click or Esc lands them. Any other tool ends as Esc ends it.
+  const leaveTool = () => {
+    const v = renderer();
+    if (v && toolState?.tool) toolDid(v.tool_leave());
+  };
   const endTool = () => {
     const v = renderer();
     if (v && toolState?.tool) toolDid(v.tool_escape());
@@ -1420,7 +1429,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
     // From the set as it was, as from a toast's Show: back to live first,
     // since a proposal is drawn on the set as it is.
     if (at !== null) backToLive();
-    if (toolState?.tool) endTool();
+    // Copies placed are dropped, with nothing sent, not asked about.
+    if (toolState?.tool) leaveTool();
     setPreviewRefusal(null);
     setChipOpen(null);
     setToast(null);
@@ -2453,7 +2463,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             hint={askHint(typed, !!toolState?.tool, onPreview, toolWord, toolName)}
             spaceEnters={(text) => spaceIsEnter(text, !!toolState?.tool, toolWord)}
             onTyped={setTyped}
-            warning={preview ? null : (toolState?.warning ?? null)}
+            warning={barWarning({ tool: toolState, previewing: !!preview })}
             band={
               preview ? (
                 <PreviewBand

@@ -1057,3 +1057,25 @@ export function barNote(t: ToolState | null | undefined): string {
 export function isUndoKey(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }): boolean {
   return (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z';
 }
+
+/**
+ * Whether a press on a command bar option lets the focus go before the
+ * option acts. The option takes no focus, so Enter after clicking Undo
+ * enters at the prompt; but a field being edited, such as quick
+ * properties', is let go first, so its edit lands as leaving it does; and
+ * an option that has the focus, reached by Tab, gives it up, so Enter
+ * after the click does not press it again. The command bar's own field
+ * keeps it, and its typing (#66).
+ */
+export function letGoOnOptionPress(active: { tag: string; option: boolean; commandField: boolean } | null): boolean {
+  if (!active) return false;
+  if (active.option) return true;
+  if (active.commandField) return false;
+  return active.tag === 'INPUT' || active.tag === 'TEXTAREA' || active.tag === 'SELECT';
+}
+
+/** The template warning the command bar shows above its prompt: the running tool's, but not while a change set is shown before it lands. */
+export function barWarning(s: { tool?: ToolState | null; previewing?: boolean }): TemplateEdit | null {
+  if (s.previewing || !s.tool?.tool) return null;
+  return s.tool.warning ?? null;
+}
