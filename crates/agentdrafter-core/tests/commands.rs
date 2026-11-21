@@ -88,6 +88,21 @@ fn samples() -> Vec<(&'static str, Value)> {
             json!({"set": "missing", "proposal": 2, "by": "drafter"}),
         ),
         (
+            "guide",
+            json!({"set": "missing", "guide": {"title": "Draw a line", "sheet": "DEMO-001", "steps": [
+                {"say": "Make notes current.", "setting": {"current_layer": "notes"}},
+                {"say": "Draw it.", "title": "The line", "tool": "line",
+                 "points": [{"at": [1, 1], "label": "the start"}, {"at": {"snap": {"id": "DEMO-001/border", "snap": "midpoint", "which": "segments[0]"}}}],
+                 "completes": {"op": "add_line", "sheet": "DEMO-001", "from": [1, 1, 0], "to": {"snap": {"id": "DEMO-001/border", "snap": "midpoint", "which": "segments[0]"}}}},
+                {"say": "Move it.", "tool": "move", "points": [{"object": {"made_by": 2}}],
+                 "completes": {"op": "move", "target": {"made_by": 2}, "by": [0, 1, 0]}}
+            ]}, "by": "Assistant", "fonts": ["f"], "no_system_fonts": true}),
+        ),
+        (
+            "guides",
+            json!({"set": "missing", "fonts": ["f"], "no_system_fonts": true}),
+        ),
+        (
             "look-at",
             json!({"set": "missing", "sheet": "DEMO-001", "layout": "Wiring", "selected": ["DEMO-001/border"]}),
         ),
