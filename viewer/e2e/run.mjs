@@ -1657,7 +1657,7 @@ const checks = {
           [...document.querySelectorAll('.ribbon .panel')].map((p) => [p.querySelector('h3').textContent.trim(), [...p.querySelectorAll('.rb')].map((t) => t.textContent)]),
         );
         assert(
-          JSON.stringify(ribbon) === JSON.stringify([['Draw', ['Line', 'Circle', 'Rectangle', 'Text']], ['Modify', ['Move', 'Erase']], ['Layer', []]]),
+          JSON.stringify(ribbon) === JSON.stringify([['Draw', ['Line', 'Circle', 'Rectangle', 'Text']], ['Modify', ['Move', 'Copy', 'Erase']], ['Layer', []]]),
           `the ribbon: ${JSON.stringify(ribbon)}`,
         );
         assert(
@@ -1787,7 +1787,7 @@ const checks = {
         const apart = card[0] >= device.box[2] || card[2] <= device.box[0];
         assert(apart && card[1] < device.box[3] + 1, `quick properties sit beside the device: ${JSON.stringify({ card, device: device.box })}`);
         assert((await page.inputValue('select[data-layer]')) === '0', 'the Layer box shows its layer');
-        assert((await bar(page)).includes('FT-101 selected [ Move Erase Clear ]'), `the command bar names it: ${await bar(page)}`);
+        assert((await bar(page)).includes('FT-101 selected [ Move Copy Erase Clear ]'), `the command bar names it: ${await bar(page)}`);
         assert((await page.textContent('.qp')).includes('Comes from'), 'quick properties say where it comes from');
         await page.screenshot({ path: join(out, 'frame-laptop-selected.png') });
         // They follow it as the view moves.

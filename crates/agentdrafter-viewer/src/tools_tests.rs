@@ -789,7 +789,11 @@ fn copy_takes_a_length_towards_the_cursor_and_ortho() {
     t.ortho = true;
     t.start(ToolKind::Copy, &[2]);
     t.input("1,1", None);
-    assert_eq!(t.aim([3.0, 1.4], None).at, [3.0, 1.0], "Ortho holds it level");
+    assert_eq!(
+        t.aim([3.0, 1.4], None).at,
+        [3.0, 1.0],
+        "Ortho holds it level"
+    );
     t.input("2", Some([1.2, 5.0]));
     let band = t.band(Some(&at(4.0, 1.0)));
     let (picked, offsets) = band.placed.clone().expect("the copy placed shows");
@@ -819,7 +823,10 @@ fn copying_a_templates_object_warns_and_asks_once_when_the_copies_land() {
     // Each copy placed asks nothing: the change set waits for Enter.
     assert!(t.point(at(0.5, 2.0)).sends.is_empty());
     assert!(t.point(at(0.5, 3.0)).sends.is_empty());
-    assert_eq!(t.state(false).warning.unwrap().edit, "Copy border, 2 copies");
+    assert_eq!(
+        t.state(false).warning.unwrap().edit,
+        "Copy border, 2 copies"
+    );
     let outcome = t.input("", None);
     assert_eq!(outcome.sends.len(), 1, "one change set, asked about once");
     let send = outcome.sends[0].clone();
