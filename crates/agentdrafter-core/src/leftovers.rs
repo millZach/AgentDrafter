@@ -363,13 +363,13 @@ fn is_sets(set: &SetOutputs, kind: LeftoverKind, path: &Path) -> io::Result<bool
 /// built: its build mark names the set as the set's own build names it
 /// from there. A DWG with no mark, an original among them, or whose mark
 /// names no set or another set, is not. An error when the file cannot be
-/// opened to read its mark.
+/// read to tell, as a DWG cut short cannot ([`dwg::read_build_mark`]).
 fn is_sets_dwg(set: &SetOutputs, path: &Path) -> io::Result<bool> {
-    fs::File::open(path)?;
     let Some(marked) = set.marked else {
         return Ok(false);
     };
-    Ok(dwg::build_mark(path).is_some_and(|mark| mark.set.as_deref() == Some(marked)))
+    let mark = dwg::read_build_mark(path).map_err(io::Error::other)?;
+    Ok(mark.is_some_and(|mark| mark.set.as_deref() == Some(marked)))
 }
 
 /// Whether the PDF at `path`, in the set's output folder, is one plotted
@@ -551,16 +551,45 @@ fn move_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Copies the file at `from` to a file made new at `to`, failing with
-/// [`ErrorKind::AlreadyExists`] when anything is at `to`. A copy that does
-/// not finish is taken away.
+/// [`ErrorKind::AlreadyExists`] when anything is at `to`. The copy has the
+/// source's permissions, never wider: on Unix it is made with no more than
+/// the source's mode, whatever the umask, and given exactly that mode
+/// before any byte is written; on Windows it is made read-only once its
+/// bytes are written when the source is. A copy that does not finish is
+/// taken away.
 fn copy_new(from: &Path, to: &Path) -> io::Result<()> {
     let mut source = fs::File::open(from)?;
-    let mut target = OpenOptions::new().write(true).create_new(true).open(to)?;
-    io::copy(&mut source, &mut target)
-        .and_then(|_| target.sync_all())
-        .inspect_err(|_| {
-            let _ = fs::remove_file(to);
-        })
+    let permissions = source.metadata()?.permissions();
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(permissions.mode() & 0o7777);
+    }
+    let mut target = options.open(to)?;
+    fill(&mut source, &mut target, permissions).inspect_err(|_| {
+        let _ = fs::remove_file(to);
+    })
+}
+
+/// Writes the bytes of `source` into `target`, a file just made, which
+/// takes `permissions`: on Unix before the bytes are written, and elsewhere,
+/// where the one permission is read-only, after them.
+fn fill(
+    source: &mut fs::File,
+    target: &mut fs::File,
+    permissions: fs::Permissions,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    target.set_permissions(permissions)?;
+    io::copy(source, target)?;
+    target.sync_all()?;
+    #[cfg(not(unix))]
+    if permissions.readonly() {
+        target.set_permissions(permissions)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -581,6 +610,59 @@ mod tests {
         assert_eq!(output_kind("DEMO-004.png"), None);
         assert_eq!(output_kind("DEMO-004"), None);
         assert_eq!(output_kind(".dwg"), None);
+    }
+
+    /// A copy keeps the source's mode exactly, neither wider, as a file made
+    /// under the usual umask of 022 would be, nor narrower, as one made
+    /// under a umask that takes away a group's writing would be.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_keeps_the_source_s_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("agentdrafter-copy-mode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for mode in [0o640, 0o660, 0o600, 0o444] {
+            let (from, to) = (
+                dir.join(format!("{mode:o}.dwg")),
+                dir.join(format!("{mode:o}-copy.dwg")),
+            );
+            fs::write(&from, b"leftover").unwrap();
+            fs::set_permissions(&from, fs::Permissions::from_mode(mode)).unwrap();
+            copy_new(&from, &to).unwrap();
+            let copied = fs::metadata(&to).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(copied, mode, "{mode:o} came out {copied:o}");
+            assert_eq!(fs::read(&to).unwrap(), b"leftover");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// On Windows a read-only source makes a read-only copy.
+    #[cfg(windows)]
+    #[test]
+    fn a_copy_of_a_read_only_file_is_read_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdrafter-copy-read-only-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (from, to) = (dir.join("from.dwg"), dir.join("to.dwg"));
+        fs::write(&from, b"leftover").unwrap();
+        let mut read_only = fs::metadata(&from).unwrap().permissions();
+        read_only.set_readonly(true);
+        fs::set_permissions(&from, read_only).unwrap();
+        copy_new(&from, &to).unwrap();
+        assert!(fs::metadata(&to).unwrap().permissions().readonly());
+        assert_eq!(fs::read(&to).unwrap(), b"leftover");
+        for path in [&from, &to] {
+            let mut writable = fs::metadata(path).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            writable.set_readonly(false);
+            fs::set_permissions(path, writable).unwrap();
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A move never replaces what is at the new name: it fails, and both

@@ -567,3 +567,27 @@ fn a_scan_that_cannot_finish_says_so() {
     let json = serde_json::to_value(build(&set, None).result.unwrap()).unwrap();
     assert!(json["leftovers"].is_array(), "listed again once it can be");
 }
+
+/// A leftover DWG cut short, which starts as a DWG of the 2018 format but
+/// whose drawing properties cannot be read, may or may not carry the mark:
+/// it is listed as unreadable, never moved, and never dropped.
+#[test]
+fn a_dwg_whose_mark_cannot_be_read_is_listed_as_unreadable() {
+    let set = demo_set(&scratch("cut-short").join("demo-set"));
+    built(&set, None);
+    take_out(&set, "DEMO-003");
+    let dwg = set.join("dwg").join("DEMO-003.dwg");
+    let bytes = fs::read(&dwg).unwrap();
+    fs::write(&dwg, &bytes[..256]).unwrap();
+
+    let reply = build(&set, Some(true));
+    assert!(!reply.ok);
+    assert_eq!(reply.error.unwrap().code, ErrorCode::ReadFailed);
+    let leftovers = reply.result.unwrap().leftovers.unwrap();
+    assert_eq!(leftovers.len(), 1, "{leftovers:#?}");
+    assert!(leftovers[0].unreadable);
+    assert_eq!(leftovers[0].sheet, "DEMO-003");
+    assert!(leftovers[0].moved_to.is_none());
+    assert_eq!(fs::read(&dwg).unwrap(), &bytes[..256]);
+    assert!(!set.join("dwg").join(SUPERSEDED_FOLDER).exists());
+}
