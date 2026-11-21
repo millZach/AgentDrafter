@@ -164,7 +164,7 @@ export function advance(run: GuideRun, guide: Guide): GuideRun {
   const why = [...run.why];
   let at = run.at + 1;
   while (at < guide.steps.length) {
-    const missing = (guide.steps[at].needs ?? []).find((n) => !finished(status[n - 1] ?? 'todo'));
+    const missing = (guide.steps[at]?.needs ?? []).find((n) => !finished(status[n - 1] ?? 'todo'));
     if (missing === undefined) break;
     status[at] = 'needs';
     why[at] = `it needs what step ${missing} makes`;
@@ -361,7 +361,7 @@ export function summaryOf(run: GuideRun, guide: Guide, canUndo: number[]): Summa
       ? `Stopped at step ${run.at + 1} of ${n}`
       : `Finished: ${done} of ${n} steps done${done < n ? `, ${n - done} not done` : ''}`;
   const items = guide.steps.map((s, i) => {
-    const st = run.status[i];
+    const st = run.status[i] ?? 'todo';
     const small =
       st === 'forme' ? 'done for you' : st === 'skipped' ? 'skipped' : st === 'needs' ? `skipped: ${run.why[i]}` : st === 'todo' ? 'not reached' : '';
     return { status: st, title: s.title, small };

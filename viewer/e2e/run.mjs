@@ -92,6 +92,12 @@
 //            the picker moving to Codex; no agent found; and on a phone,
 //            the peek, the sheet raised on the chat, and Keep. Linux and
 //            macOS only: the shims are shell scripts.
+// - guides:  guides (#157), at laptop and phone sizes: a guide given
+//            through the HTTP API, Start from its toast, the banner's words,
+//            the tool pulsing and the ring with its tag; each step by hand,
+//            another layer, another tool, a wrong point and Esc each with
+//            its note and what takes it back; Do it for me, Skip and Stop;
+//            the journal's marks; and the one Undo of the guide's steps.
 //
 // It writes results.json, the screenshots and each compared image into
 // --out (target/viewer-e2e by default), and exits 1 when any check fails.
@@ -4876,6 +4882,376 @@ const checks = {
         await context.close();
       }
       return { screenshots: ['look-phone.png', 'look-laptop.png'] };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
+  /**
+   * Guides (#157), at laptop and phone sizes: a guide given through the
+   * HTTP API, as an agent gives one, named by a toast with Start; the
+   * banner with each step's words, the tool's button pulsing (Tools on a
+   * phone), the ring on the next point with its tag; each step done by
+   * hand, the setting step by the Layer box; another layer, another tool, a
+   * wrong point, each with its gentle note and what takes it back; Esc with
+   * nothing drawn, the step waiting; Do it for me; Skip, which skips the
+   * steps that need it, and Stop; the journal marking each step's change
+   * set; and the summary's one Undo of the guide's steps.
+   */
+  async guides() {
+    const folder = freshPlant('guides');
+    // DP-LD-101 starts without its + field wire, as if the drafter had not
+    // drawn it yet: the guide teaches drawing it.
+    const cut = sendChange(folder, { operations: [{ op: 'delete', target: { id: 'DP-LD-101/field-wire-1' } }] });
+    assert(cut.ok, `the + wire deleted: ${JSON.stringify(cut.error)}`);
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    const shots = [];
+    const seen = {};
+    const journal = () => agentIn(folder, 'journal', 'demo-plant').result;
+    const listed = () => agentIn(folder, 'guides', 'demo-plant').result.guides;
+    const frames = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    const shot = async (page, name) => {
+      await frames(page);
+      await sleep(150);
+      await page.screenshot({ path: join(out, name) });
+      shots.push(name);
+    };
+    const onPage = (page, at) =>
+      page.evaluate(([x, y]) => {
+        const v = window.agentdrafterViewer.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
+      }, at);
+    const guide = {
+      title: 'Draw FT-101’s + wire to TB1-1',
+      sheet: 'DP-LD-101',
+      steps: [
+        { say: 'Make wire the current layer. What you draw goes on the current layer, and wires go on wire.', title: 'Make wire the current layer', setting: { current_layer: 'wire' } },
+        {
+          say: 'Draw the wire with Line, from FT-101’s + terminal to TB1-1 in JB-100.',
+          title: 'Draw the wire, FT-101’s + to TB1-1',
+          tool: 'line',
+          points: [
+            { at: { snap: { id: 'DP-LD-101/device', snap: 'center', which: 'objects[5]' } }, label: 'FT-101’s + terminal' },
+            { at: { snap: { id: 'DP-LD-101/terminal-1', snap: 'midpoint', which: 'objects[0].segments[3]' } }, label: 'TB1-1' },
+          ],
+          completes: {
+            op: 'add_line',
+            sheet: 'DP-LD-101',
+            layer: 'wire',
+            from: { snap: { id: 'DP-LD-101/device', snap: 'center', which: 'objects[5]' } },
+            to: { snap: { id: 'DP-LD-101/terminal-1', snap: 'midpoint', which: 'objects[0].segments[3]' } },
+          },
+        },
+        {
+          say: 'Number the wire with Text: 101+, at the wire’s middle.',
+          title: 'Number it 101+',
+          tool: 'text',
+          points: [{ at: { snap: { made_by: 2, snap: 'midpoint' } }, label: 'the wire’s middle' }],
+          completes: { op: 'add_text', sheet: 'DP-LD-101', contents: '101+', height: 0.08, position: { snap: { made_by: 2, snap: 'midpoint' } } },
+        },
+        {
+          say: 'Move the number 0.04 in up, so the wire doesn’t run through its letters.',
+          title: 'Move the number above the wire',
+          tool: 'move',
+          points: [
+            { object: { made_by: 3 }, label: '101+' },
+            { at: { snap: { made_by: 2, snap: 'midpoint' } }, label: 'base point' },
+          ],
+          completes: { op: 'move', target: { made_by: 3 }, by: [0, 0.04, 0] },
+        },
+      ],
+    };
+    // Given through the HTTP API, as an agent does, by the assistant.
+    const give = async () => {
+      const r = await fetch(`${server.base}/commands/guide`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ set: 'demo-plant', guide, by: 'Assistant' }),
+      });
+      const reply = await r.json();
+      assert(r.status === 200 && reply.ok, `the guide is given: ${JSON.stringify(reply)}`);
+      return reply.result.guide;
+    };
+    const banner = (page) => page.evaluate(() => document.querySelector('.gbanner')?.textContent ?? '');
+    const stepShown = (page) => page.evaluate(() => Number(document.querySelector('[data-guide-step]')?.dataset.guideStep ?? 0));
+    const untilStep = async (page, n, what) => {
+      await page.waitForFunction((wanted) => Number(document.querySelector('[data-guide-step]')?.dataset.guideStep ?? 0) === wanted, n, { timeout: 30000 }).catch(async () => {
+        throw new Error(`${what}: the banner is not at step ${n}: ${await banner(page)}`);
+      });
+    };
+    const note = async (page, wanted, what) => {
+      await page.waitForFunction((w) => (document.querySelector('[data-gnote]')?.textContent ?? '').includes(w), wanted, { timeout: 15000 }).catch(async () => {
+        throw new Error(`${what}: no note saying ${JSON.stringify(wanted)}: ${await banner(page)}`);
+      });
+    };
+    const noNote = (page) => page.waitForFunction(() => !document.querySelector('[data-gnote="warn"]'), null, { timeout: 15000 });
+    const pulse = (page) => page.evaluate(() => document.querySelector('.va')?.dataset.gpulse ?? null);
+    // The ring's middle on the page, once it is there, and its tag.
+    const ring = async (page, kind = 'point') => {
+      await page.waitForSelector(`[data-gring="${kind}"]`, { timeout: 15000 });
+      await frames(page);
+      return page.evaluate(() => {
+        const r = document.querySelector('[data-gring]').getBoundingClientRect();
+        return { at: [r.left + r.width / 2, r.top + r.height / 2], tag: document.querySelector('[data-gtag]')?.textContent ?? '' };
+      });
+    };
+    // The point a step's ring marks, as the core works it out on the set as it stands.
+    const ringAt = (guideNo, step, point) => {
+      const at = listed().find((g) => g.guide === guideNo).steps[step - 1].points[point].at;
+      assert(at, `step ${step}'s point ${point} is worked out`);
+      return at;
+    };
+    // Points the cursor at `at`, in drawing units, and waits until it holds
+    // the snap there, exactly: a click then takes that point.
+    const hold = async (page, at) => {
+      const [x, y] = await onPage(page, at);
+      for (let i = 0; i < 40; i++) {
+        await page.mouse.move(x + (i % 2 ? 0.3 : 0), y);
+        await frames(page);
+        const h = await page.evaluate(() => window.agentdrafterViewer.hovered());
+        if (h && Math.abs(h.at[0] - at[0]) < 1e-9 && Math.abs(h.at[1] - at[1]) < 1e-9) return [x, y];
+      }
+      throw new Error(`the cursor holds no snap at ${at}`);
+    };
+    const clickAt = async (page, at) => {
+      const [x, y] = await hold(page, at);
+      await page.mouse.click(x, y);
+      await frames(page);
+    };
+    // The newest journal entry, once there is one past `before`.
+    const landedAfter = async (before, what) => {
+      const until = Date.now() + 30000;
+      let j = journal();
+      while (j.entries.length <= before) {
+        assert(Date.now() < until, `${what}: nothing landed`);
+        await sleep(100);
+        j = journal();
+      }
+      return j.entries.at(-1);
+    };
+    const fitAll = async (page) => {
+      await page.click('[aria-label="Fit the sheet"]');
+      await sleep(600);
+    };
+    try {
+      // A laptop: each step by hand.
+      {
+        const context = await b.newContext(LAPTOP);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        const n = await give();
+        assert(n === 1, `guide 1: ${n}`);
+        await page.waitForSelector('[data-toast="start-guide"]', { timeout: 15000 });
+        const toast = await page.textContent('.va-toast');
+        assert(toast.includes('Assistant gives a guide') && toast.includes('4 steps'), `the toast names the guide: ${toast}`);
+        await shot(page, 'guides-laptop-1-offer.png');
+        await page.click('[data-toast="start-guide"]');
+        await untilStep(page, 1, 'Start');
+        let words = await banner(page);
+        assert(words.includes('Step 1 of 4') && words.includes('Make wire the current layer') && words.includes('Pick wire in the ribbon'), `step 1's banner: ${words}`);
+        assert((await pulse(page)) === 'layer', `the Layer box pulses: ${await pulse(page)}`);
+        // Another layer: a note, and the step waits; then wire.
+        await page.selectOption('.layerbox select', 'cable');
+        await note(page, 'That made cable current; the step wants wire.', 'another layer');
+        await shot(page, 'guides-laptop-2-step1-layer.png');
+        await page.selectOption('.layerbox select', 'wire');
+        await untilStep(page, 2, 'wire made current');
+        words = await banner(page);
+        assert(words.includes('Step 1 done') && words.includes('Start Line: type L and Enter'), `step 2's banner: ${words}`);
+        assert((await pulse(page)) === 'line', `Line pulses: ${await pulse(page)}`);
+        const first = await ring(page);
+        assert(first.tag.includes('2') && first.tag.includes('FT-101’s + terminal'), `the ring's tag: ${first.tag}`);
+        await shot(page, 'guides-laptop-3-step2-ring.png');
+        // Another tool: its note, and End it.
+        await page.click('.rb[data-tool="rectangle"]');
+        await note(page, 'That started Rectangle; this step wants Line. End it?', 'another tool');
+        await shot(page, 'guides-laptop-4-other-tool.png');
+        await page.click('[data-g="noteact"]');
+        await page.waitForFunction(() => !document.querySelector('.stage')?.dataset.tool, null, { timeout: 15000 });
+        // Line, then Esc with nothing drawn: the step waits.
+        await page.click('.rb[data-tool="line"]');
+        await noNote(page);
+        await page.keyboard.press('Escape');
+        await note(page, 'Line ended with nothing drawn, so the step waits.', 'Esc');
+        await shot(page, 'guides-laptop-5-esc.png');
+        assert((await stepShown(page)) === 2, 'the step waits');
+        // By hand: L, the ring, a wrong point and Undo it, the ring, Enter.
+        await page.mouse.move(700, 500);
+        await page.keyboard.type('L');
+        await page.keyboard.press('Enter');
+        await frames(page);
+        await clickAt(page, ringAt(1, 2, 0));
+        const second = await ring(page);
+        assert(second.tag.includes('TB1-1'), `the ring moved on to TB1-1: ${second.tag}`);
+        await shot(page, 'guides-laptop-6-step2-second-point.png');
+        await clickAt(page, [7.2, 6.25]);
+        await note(page, 'That went to the endpoint of field-wire-2; the step wants TB1-1. Undo it?', 'a wrong point');
+        await shot(page, 'guides-laptop-7-wrong-point.png');
+        await page.click('[data-g="noteact"]');
+        await noNote(page);
+        assert((await ring(page)).tag.includes('TB1-1'), 'the point is taken back, and the ring is at TB1-1 again');
+        let before = journal().entries.length;
+        await clickAt(page, ringAt(1, 2, 1));
+        assert((await pulse(page)) === 'done', `Done pulses once the line has its points: ${await pulse(page)}`);
+        await page.keyboard.press('Enter');
+        let entry = await landedAfter(before, 'the wire');
+        assert(JSON.stringify(entry.guide) === '{"guide":1,"step":2,"of":4}', `the journal marks step 2: ${JSON.stringify(entry)}`);
+        await untilStep(page, 3, 'the wire landed');
+        words = await banner(page);
+        assert(words.includes(`Step 2 done · change set ${entry.entry}`), `step 2 done: ${words}`);
+        // Text, by hand, at the ring on the wire it drew.
+        const middle = ringAt(1, 3, 0);
+        assert(Math.abs(middle[0] - 5.2) < 1e-9 && Math.abs(middle[1] - 6.75) < 1e-9, `the wire's middle: ${middle}`);
+        await ring(page);
+        await shot(page, 'guides-laptop-8-step3-ticked.png');
+        await page.keyboard.type('T');
+        await page.keyboard.press('Enter');
+        await frames(page);
+        await clickAt(page, middle);
+        await page.waitForFunction(() => (document.querySelector('[data-g-now]')?.textContent ?? '').includes('Type 101+'), null, { timeout: 15000 });
+        before = journal().entries.length;
+        await page.keyboard.type('101+');
+        await page.keyboard.press('Enter');
+        await page.keyboard.press('Enter');
+        entry = await landedAfter(before, 'the number');
+        assert(entry.guide?.step === 3, `step 3 marked: ${JSON.stringify(entry.guide)}`);
+        await untilStep(page, 4, 'the number landed');
+        // Move, by hand: the number picked in its ring, the base point, @0,0.04.
+        const box = await ring(page, 'object');
+        assert(box.tag.includes('101+'), `the ring is round 101+: ${box.tag}`);
+        await shot(page, 'guides-laptop-9-step4-pick.png');
+        await page.keyboard.type('M');
+        await page.keyboard.press('Enter');
+        await frames(page);
+        const text = listed()[0].steps[2].made;
+        const { place, bounds } = await objectOf(page, text);
+        assert(place >= 0, `the number ${text} is on the sheet`);
+        let picked = false;
+        for (let i = 1; i < 10 && !picked; i++) {
+          const at = [bounds[0] + ((bounds[2] - bounds[0]) * i) / 10, (bounds[1] + bounds[3]) / 2];
+          if ((await page.evaluate(([x, y]) => window.agentdrafterViewer.pickAt(x, y, 16), at)) !== place) continue;
+          await page.mouse.click(...(await onPage(page, at)));
+          picked = true;
+        }
+        assert(picked, 'a click picks the number');
+        await frames(page);
+        await page.keyboard.press('Enter');
+        await clickAt(page, ringAt(1, 4, 1));
+        await page.waitForFunction(() => (document.querySelector('[data-g-now]')?.textContent ?? '').includes('@0,0.04'), null, { timeout: 15000 });
+        await shot(page, 'guides-laptop-10-step4-type.png');
+        before = journal().entries.length;
+        await page.keyboard.type('@0,0.04');
+        await page.keyboard.press('Enter');
+        entry = await landedAfter(before, 'the move');
+        assert(entry.guide?.step === 4, `step 4 marked: ${JSON.stringify(entry.guide)}`);
+        // The end: every step done, what landed, and one Undo.
+        await page.waitForSelector('[data-guide="end"]', { timeout: 15000 });
+        words = await banner(page);
+        assert(words.includes('Finished: 4 of 4 steps done'), `the summary: ${words}`);
+        assert(words.includes('Undo the guide’s steps'), `one Undo: ${words}`);
+        await shot(page, 'guides-laptop-11-done.png');
+        // The journal: each step's change set marked.
+        const marks = journal().entries.filter((e) => e.guide).map((e) => `${e.entry}:${e.guide.step}`);
+        await sideTab(page, 'journal');
+        await page.waitForFunction(() => document.body.textContent.includes('guide step 4 of 4'), null, { timeout: 15000 });
+        await shot(page, 'guides-laptop-12-journal.png');
+        await sideTab(page, 'chat');
+        const guided = journal().entries.filter((e) => e.guide && e.undo_state === 'kept').map((e) => e.entry);
+        before = journal().entries.length;
+        await page.click('[data-g="undoall"]');
+        const undone = await landedAfter(before, 'Undo the guide’s steps');
+        assert(undone.kind === 'undo' && guided.every((n) => undone.undid.includes(n)), `one undo took back ${guided}: ${JSON.stringify(undone)}`);
+        await page.waitForFunction(() => (document.querySelector('[data-g-line]')?.textContent ?? '').startsWith('Undone'), null, { timeout: 15000 });
+        await shot(page, 'guides-laptop-13-undone.png');
+        await page.click('[data-g="close"]');
+        await page.waitForFunction(() => !document.querySelector('.gbanner'), null, { timeout: 15000 });
+        seen.laptop = { marks, undone: undone.undid, problems };
+        assert(!problems.length, `no page errors: ${problems.join('; ')}`);
+        await context.close();
+      }
+      // A phone: Tools pulses, taps, Do it for me, Skip and Stop.
+      {
+        const context = await b.newContext(PHONE);
+        const { page, problems } = await open(context, `${server.base}/?source=demo-plant&sheet=DP-LD-101`, 'DP-LD-101');
+        await live(page);
+        const n = await give();
+        await page.waitForSelector('[data-toast="start-guide"]', { timeout: 15000 });
+        await page.tap('[data-toast="start-guide"]');
+        await untilStep(page, 1, 'Start');
+        await sleep(600);
+        const narrowBanner = await banner(page);
+        assert(narrowBanner.includes('Open Tools, and pick wire in the Layer box.') && narrowBanner.includes('Skip') && narrowBanner.includes('Stop'), `the phone's banner: ${narrowBanner}`);
+        assert(await page.evaluate(() => getComputedStyle(document.querySelector('.toolsbtn')).animationName === 'gpulse'), 'Tools pulses');
+        await shot(page, 'guides-phone-1-step1-layer.png');
+        // Do it for me: the layer.
+        await page.tap('[data-g="forme"]');
+        await untilStep(page, 2, 'Do it for me, the layer');
+        // Line by taps: the ring, a wrong point taken back, the ring, Done.
+        await page.tap('.toolsbtn');
+        await page.tap('.rb[data-tool="line"]', { force: true });
+        await frames(page);
+        const tapAt = async (at) => page.touchscreen.tap(...(await onPage(page, at)));
+        await ring(page);
+        await shot(page, 'guides-phone-2-step2-ring.png');
+        await tapAt(ringAt(n, 2, 0));
+        await frames(page);
+        assert((await ring(page)).tag.includes('TB1-1'), 'the tap took the ring’s point');
+        await tapAt([7.2, 6.25]);
+        await note(page, 'the step wants TB1-1. Undo it?', 'a wrong tap');
+        await shot(page, 'guides-phone-3-wrong-point.png');
+        await page.tap('[data-g="noteact"]');
+        await noNote(page);
+        await tapAt(ringAt(n, 2, 1));
+        let before = journal().entries.length;
+        await page.tap('.opt[data-opt="tool:done"]');
+        const entry = await landedAfter(before, 'the wire, by taps');
+        assert(entry.guide?.guide === n && entry.guide.step === 2, `the tapped wire marked: ${JSON.stringify(entry.guide)}`);
+        await untilStep(page, 3, 'the wire tapped');
+        await shot(page, 'guides-phone-4-step3.png');
+        // Do it for me: the number, as the drafter would land it.
+        before = journal().entries.length;
+        await page.tap('[data-g="forme"]');
+        const forMe = await landedAfter(before, 'Do it for me');
+        assert(forMe.guide?.step === 3 && forMe.change_set.operations[0].op === 'add_text', `done for you: ${JSON.stringify(forMe)}`);
+        await untilStep(page, 4, 'Do it for me, the number');
+        // Skip the last: the end, with what was done for you and skipped.
+        await page.tap('[data-g="skip"]');
+        await page.waitForSelector('[data-guide="end"]', { timeout: 15000 });
+        let words = await banner(page);
+        assert(words.includes('Finished: 3 of 4 steps done') && words.includes('skipped') && words.includes('done for you'), `the phone's summary: ${words}`);
+        await shot(page, 'guides-phone-5-done.png');
+        await page.tap('[data-g="close"]');
+        // Another guide, skipping the wire: the steps that need it skip too, and say why.
+        const m = await give();
+        await page.waitForSelector('[data-toast="start-guide"]', { timeout: 15000 });
+        await page.tap('[data-toast="start-guide"]');
+        await untilStep(page, 1, 'the second start');
+        await page.tap('[data-g="skip"]');
+        await untilStep(page, 2, 'step 1 skipped');
+        await shot(page, 'guides-phone-6-step1-skipped.png');
+        await page.tap('[data-g="skip"]');
+        await page.waitForSelector('[data-guide="end"]', { timeout: 15000 });
+        words = await banner(page);
+        assert(words.includes('skipped: it needs what step 2 makes') && words.includes('Nothing landed.'), `skipped with the steps that need it: ${words}`);
+        await shot(page, 'guides-phone-7-skipped-rest-follow.png');
+        await page.tap('[data-g="close"]');
+        // A third, stopped at its first step.
+        await give();
+        await page.waitForSelector('[data-toast="start-guide"]', { timeout: 15000 });
+        await page.tap('[data-toast="start-guide"]');
+        await untilStep(page, 1, 'the third start');
+        await page.tap('[data-g="stop"]');
+        await page.waitForSelector('[data-guide="end"]', { timeout: 15000 });
+        words = await banner(page);
+        assert(words.includes('Stopped at step 1 of 4') && words.includes('not reached'), `stopped: ${words}`);
+        await shot(page, 'guides-phone-8-stopped.png');
+        seen.phone = { guides: [n, m], problems };
+        assert(!problems.length, `no page errors: ${problems.join('; ')}`);
+        await context.close();
+      }
+      return { seen, shots };
     } finally {
       await b.close();
       await server.stop();

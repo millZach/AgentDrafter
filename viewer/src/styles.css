@@ -178,7 +178,7 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 
 /* toasts, top left of the drawing */
 .va-overlays {
-  position: absolute; left: 12px; right: 58px; top: 12px; z-index: 6; display: flex; flex-direction: column;
+  position: absolute; left: 12px; right: 58px; top: calc(12px + var(--gtop, 0px)); z-index: 6; display: flex; flex-direction: column;
   gap: 8px; pointer-events: none; max-width: 430px;
 }
 .va-overlays > * { pointer-events: auto; }
@@ -917,7 +917,7 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
 .va[data-gpulse='line'] .rb[data-tool='line'], .va[data-gpulse='circle'] .rb[data-tool='circle'],
 .va[data-gpulse='rectangle'] .rb[data-tool='rectangle'], .va[data-gpulse='text'] .rb[data-tool='text'],
 .va[data-gpulse='move'] .rb[data-tool='move'], .va[data-gpulse='copy'] .rb[data-tool='copy'],
-.va[data-gpulse='erase'] .rb[data-tool='erase'], .va[data-gpulse='done'] [data-opt='done'],
+.va[data-gpulse='erase'] .rb[data-tool='erase'], .va[data-gpulse='done'] [data-opt='tool:done'],
 .va[data-gpulse='layer'] .layerbox {
   animation: gpulse 1.3s ease-in-out infinite; border-color: var(--guide); background: rgba(255, 92, 200, .16); color: #fff; border-radius: 4px;
 }
@@ -929,3 +929,4 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   .g-say { font-size: 13.5px; }
   .gbanner .g-acts .btn { padding: 6px 11px; font-size: 13px; }
 }
+.je-by.guide { color: #ff9ad9; }

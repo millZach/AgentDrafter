@@ -54,6 +54,8 @@ export interface Focus {
   places: number[];
   /** Comes to what a preview marks, as the renderer finds it, in place of `places`. */
   preview?: boolean;
+  /** Comes to this box, `[left, bottom, right, top]` in drawing units, in place of `places`: a guide's points (#157). */
+  box?: [number, number, number, number];
 }
 
 /**
@@ -481,9 +483,9 @@ export function Drawing({
       el.style.left = `${Math.round(x)}px`;
       el.style.top = `${Math.round(y)}px`;
     } else {
-      const b = ring.box as number[];
-      const [l, t] = toScreen(view.current, b[0], b[3]);
-      const [r, bottom] = toScreen(view.current, b[2], b[1]);
+      const [bl, bb, br, bt] = ring.box as [number, number, number, number];
+      const [l, t] = toScreen(view.current, bl, bt);
+      const [r, bottom] = toScreen(view.current, br, bb);
       el.className = 'gring box';
       el.style.left = `${Math.round(l - 7)}px`;
       el.style.top = `${Math.round(t - 7)}px`;
@@ -512,7 +514,10 @@ export function Drawing({
     if (!guideSee || !c || !ring) return;
     let p: [number, number];
     if (ring.at) p = ring.at;
-    else if (ring.box?.length === 4) p = [(ring.box[0] + ring.box[2]) / 2, (ring.box[1] + ring.box[3]) / 2];
+    else if (ring.box?.length === 4) {
+      const [bl, bb, br, bt] = ring.box as [number, number, number, number];
+      p = [(bl + br) / 2, (bb + bt) / 2];
+    }
     else return;
     const [x, y] = toScreen(view.current, p[0], p[1]);
     const top = (guideNow.current?.top ?? 0) + 30;
@@ -998,7 +1003,7 @@ export function Drawing({
     pendingFocus.current = null;
     const whole = fitted();
     if (!whole) return;
-    const b = f.preview ? v.preview_extent() : f.places.length ? v.bounds_of(Uint32Array.from(f.places)) : [];
+    const b = f.box ?? (f.preview ? v.preview_extent() : f.places.length ? v.bounds_of(Uint32Array.from(f.places)) : []);
     if (b.length !== 4) {
       fitSheet(450);
       return;

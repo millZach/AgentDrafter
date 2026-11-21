@@ -63,7 +63,7 @@ const guide: Guide = {
     },
   ],
 };
-const step = (n: number): GuideStep => guide.steps[n - 1];
+const step = (n: number): GuideStep => guide.steps[n - 1] as GuideStep;
 
 test('a guide starts at its first step, with nothing done', () => {
   const run = startRun(guide);

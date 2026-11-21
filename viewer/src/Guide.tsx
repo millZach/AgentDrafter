@@ -108,6 +108,7 @@ export function GuideBanner(props: GuideBannerProps) {
     );
   }
   const step = guide.steps[run.at];
+  if (!step) return null;
   const head = (
     <div className="g-head">
       <span className="g-tag">GUIDE</span>

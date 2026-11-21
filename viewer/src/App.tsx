@@ -124,12 +124,11 @@ import {
   endedNote,
   layerChosen,
   landed as guideLanded,
-  marked,
+  marked as guideMarked,
   skipStep,
   startRun,
   stepDone,
   stopRun,
-  toolLabel,
   toolNote,
   type Guide,
   type GuideChecked,
@@ -410,9 +409,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // toast; the one running, if any; and the room its banner takes.
   const [guides, setGuides] = useState<Guide[]>([]);
   const guidesSeen = useRef<Set<number> | null>(null);
-  const [run, setRun] = useState<GuideRun | null>(null);
+  const [guideRun, setRun] = useState<GuideRun | null>(null);
   const runNow = useRef<GuideRun | null>(null);
-  runNow.current = run;
+  runNow.current = guideRun;
   const [guideClosed, setGuideClosed] = useState(true);
   const [guideBusy, setGuideBusy] = useState(false);
   const guideBanner = useRef<HTMLDivElement>(null);
@@ -1567,7 +1566,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   }
   /** A tool's change set, sent marked with the step running, when one runs on its sheet. */
   function sendGuided(s: ToolSend) {
-    const cs = marked(s.change_set, runNow.current, runGuide(), summary?.sheet ?? null);
+    const cs = guideMarked(s.change_set, runNow.current, runGuide(), summary?.sheet ?? null);
     if (cs === s.change_set) return sendChange(s);
     return sendChange({ ...s, change_set: cs }, undefined, guideReplied);
   }
@@ -1597,6 +1596,22 @@ export function App({ token, source, sheet, layout }: AppProps) {
       setWantedLayout(null);
     }
     if (!wide) snapSheet('peek');
+    // The view comes to the part of the sheet the guide's points are in.
+    const ats = g.steps.flatMap((s) => s.points.flatMap((p) => (p.at ? [p.at] : [])));
+    if (ats.length) {
+      const xs = ats.map((p) => p[0]);
+      const ys = ats.map((p) => p[1]);
+      // Room round them, as wide as the sheet's unit allows, and the banner above.
+      const across = Math.max(...xs) - Math.min(...xs);
+      const pad = Math.max(across * 0.35, 1e-6);
+      keys.current += 1;
+      setFocus({
+        key: keys.current,
+        sheet: g.sheet,
+        places: [],
+        box: [Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad * 1.6],
+      });
+    }
     log(`Guide started: ${g.title}`);
   }
   function skipGuideStep() {
@@ -2332,7 +2347,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
         <GuideCard
           guide={guides.find((g) => g.guide === n) ?? null}
           number={n}
-          run={run}
+          run={guideRun}
           onStart={() => startGuide(n)}
           onStop={stopGuide}
         />
@@ -2398,14 +2413,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const askedFindings = asking?.report.checks.findings ?? [];
   // The guide running, its step on its own sheet as it is, and what the
   // step wants next, as the renderer says it (#157).
-  const runningGuide = run ? (guides.find((g) => g.guide === run.guide) ?? null) : null;
-  const bannerShown = !!run && !!runningGuide && !guideClosed && at === null && !preview;
+  const runningGuide = guideRun ? (guides.find((g) => g.guide === guideRun.guide) ?? null) : null;
+  const bannerShown = !!guideRun && !!runningGuide && !guideClosed && at === null && !preview;
   const guideElsewhere = !!runningGuide && !!summary && upper(summary.sheet) !== upper(runningGuide.sheet);
-  const stepNow = bannerShown && !run?.end && !guideElsewhere && runningGuide ? (runningGuide.steps[run!.at] ?? null) : null;
+  const stepNow = bannerShown && !guideRun?.end && !guideElsewhere && runningGuide ? (runningGuide.steps[guideRun!.at] ?? null) : null;
   const phaseText = stepNow && !stepNow.setting ? (renderer()?.guide_phase() ?? '') : '';
   const phase: Phase | null = phaseText ? (JSON.parse(phaseText) as Phase) : null;
   const gpulse =
-    !stepNow || run?.note?.tone === 'warn'
+    !stepNow || guideRun?.note?.tone === 'warn'
       ? undefined
       : stepNow.setting
         ? 'layer'
@@ -2432,7 +2447,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   return (
     <div
       className={`va${toolsOpen ? ' tools-open' : ''}`}
-      style={{ ['--peek' as string]: `${peekHeight}px` }}
+      style={{ ['--peek' as string]: `${peekHeight}px`, ['--gtop' as string]: `${bannerHeight}px` }}
       data-gpulse={gpulse}
     >
       {/* The title bar, and under it the ribbon, which a phone folds behind Tools and opens over the drawing, under the title bar however tall its chips make it. */}
@@ -2568,11 +2583,11 @@ export function App({ token, source, sheet, layout }: AppProps) {
           ref={viewport}
           onPointerDownCapture={() => toolsOpen && setToolsOpen(false)}
         >
-          {bannerShown && run && runningGuide && (
+          {bannerShown && guideRun && runningGuide && (
             <div className="gwrap" ref={guideBanner}>
               <GuideBanner
                 guide={runningGuide}
-                run={run}
+                run={guideRun}
                 phase={phase}
                 phone={!wide}
                 elsewhere={guideElsewhere}
@@ -2593,8 +2608,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
             </div>
           )}
           <Drawing
-            guide={stepNow && run ? { step: run.at + 1, top: bannerHeight } : null}
-            guideSee={stepNow && run ? `${run.guide}:${run.at}:${summary?.sheet ?? ''}:${stepNow.points.map((p) => (p.at ? p.at.join(',') : (p.object ?? ''))).join(';')}` : ''}
+            guide={stepNow && guideRun ? { step: guideRun.at + 1, top: bannerHeight } : null}
+            guideSee={stepNow && guideRun ? `${guideRun.guide}:${guideRun.at}:${summary?.sheet ?? ''}:${stepNow.points.map((p) => (p.at ? p.at.join(',') : (p.object ?? ''))).join(';')}` : ''}
             reply={reply?.text ?? null}
             coveredBelow={covered}
             compact={!wide}

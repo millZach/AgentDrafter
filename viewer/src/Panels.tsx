@@ -176,7 +176,7 @@ export function JournalList({ journal, failing, at, focused, busy, onStep, onSho
                 <span className="je-main">
                   <span className="je-t">{entryTitle(e)}</span>
                   {entryByline(e) && (
-                    <span className="je-by" data-je-by>
+                    <span className={`je-by${e.guide ? " guide" : ""}`} data-je-by>
                       {entryByline(e)}
                     </span>
                   )}
