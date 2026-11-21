@@ -188,6 +188,11 @@ export type Act = 'clear' | 'older' | 'newer' | 'live' | 'copy' | 'move' | 'copy
 export interface Prompt {
   command: string | null;
   parts: Part[];
+  /**
+   * A line kept to one line on a phone: its first words, the selected
+   * object's name, shrink with an ellipsis before its options wrap (#66).
+   */
+  oneLine?: boolean;
 }
 
 export interface PromptState {
@@ -290,6 +295,7 @@ export function promptFor(s: PromptState): Prompt {
     // and the card say it is selected.
     return {
       command: null,
+      oneLine: !!s.touch,
       parts: [
         { text: s.touch ? `${nameOf(s.selected)} ` : `${nameOf(s.selected)} selected ` },
         ...options(['Move', 'move'], ['Copy', 'copy-objects'], ['Array', 'array-objects'], ['Erase', 'erase'], ['Clear', 'clear']),

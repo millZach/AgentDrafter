@@ -327,7 +327,7 @@ export function CommandBar({
       )}
       <div className={`cmdbar${hint ? ' asking' : ''}`} ref={band && touch ? undefined : bar} aria-label="Command bar" hidden={!!band && touch}>
         <span className="chev">&gt;_</span>
-        <span className="cmdline" role="status">
+        <span className={`cmdline${prompt.oneLine ? ' oneline' : ''}`} role="status">
           {prompt.command && <span className="cmdname">{prompt.command}</span>}
           {prompt.parts.map((part, i) =>
             'text' in part ? (

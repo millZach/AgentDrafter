@@ -1880,6 +1880,15 @@ const checks = {
         });
         assert(placed.qp[3] <= placed.cmd[0] && placed.cmd[1] <= placed.peek && placed.qp[0] >= 0 && placed.qp[2] <= placed.width, `on a phone the card sits above the command bar, above the peek: ${JSON.stringify(placed)}`);
         await page.screenshot({ path: join(out, 'frame-phone-selected.png') });
+        // The selected object's line is one line, whatever the font: every
+        // option and the name on one row, the name giving way first (#66).
+        const line = await page.evaluate(() => {
+          const tops = [...document.querySelectorAll('.cmdline.oneline > *')]
+            .filter((el) => getComputedStyle(el).display !== 'none')
+            .map((el) => Math.round(el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2));
+          return { tops, options: document.querySelectorAll('.cmdline.oneline .opt').length };
+        });
+        assert(line.options === 5 && Math.max(...line.tops) - Math.min(...line.tops) <= 3, `the selected object's line is one line: ${JSON.stringify(line)}`);
         assert(await page.isVisible('.va-peek button[data-act="undo"]') && await page.isVisible('.va-peek button[data-act="accept"]'), 'Undo last and Accept are in the peek');
         // Fit stays in reach while something is selected: nothing covers it, and it fits.
         const fitButton = await page.evaluate(() => {
@@ -2976,6 +2985,7 @@ const checks = {
     // are the proposal's purple, the tag and a laptop's panel hidden: the
     // copies are drawn, not only tagged.
     const purpleIn = async (page, [l, bottom, r, t]) => {
+      await still(page);
       const [x0, y0] = await onPage(page, [l, t]);
       const [x1, y1] = await onPage(page, [r, bottom]);
       // Each put back as it was: the laptop's panel is placed, and shown, at each draw.
@@ -3049,6 +3059,37 @@ const checks = {
         });
       await page.keyboard.press('F3');
       await sleep(800);
+    };
+    // Until the view stops moving, as the glide to the array ends: four
+    // frames on end drawn at the same view.
+    const still = async (page) => {
+      const until = Date.now() + 15000;
+      let last = '';
+      for (let same = 0; same < 4; ) {
+        assert(Date.now() < until, 'the view comes to rest');
+        await frames(page);
+        const now = JSON.stringify(await page.evaluate(() => window.agentdrafterViewer.view()));
+        same = now === last ? same + 1 : 0;
+        last = now;
+      }
+    };
+    // The cursor on the drawing point `at`, until it catches the snap
+    // `kind` there: the sheet with its snaps, asked for again as F3 turns
+    // them back on, may still be on its way. Gives where it is on the page.
+    const onSnap = async (page, at, kind) => {
+      const until = Date.now() + 20000;
+      for (let i = 0; ; i++) {
+        await still(page);
+        const [x, y] = await onPage(page, at);
+        await clearAt(page, [x, y]);
+        await page.mouse.move(x + 3 + (i % 2), y + 3);
+        await page.mouse.move(x, y);
+        await frames(page);
+        const h = await page.evaluate(() => window.agentdrafterViewer.hovered());
+        if (h?.snap === kind) return [x, y];
+        assert(Date.now() < until, `the cursor catches the ${kind} at ${at}: ${JSON.stringify(h)}`);
+        await sleep(250);
+      }
     };
     const arrayOp = (entry) => {
       const ops = entry.change_set.operations;
@@ -3209,13 +3250,16 @@ const checks = {
           throw new Error(`ARRAYPOLAR opened no panel: ${await bar(page)} | ${await page.textContent('.cmd .hist')}`);
         });
         assert((await bar(page)).includes('ARRAYPOLAR') && (await bar(page)).includes('Click the centre the items go round'), `it asks for the centre: ${await bar(page)}`);
-        const center = await onPage(page, [3, 8.8]);
-        await clearAt(page, center);
-        await page.mouse.move(center[0] + 3, center[1] + 3);
-        await page.mouse.move(center[0], center[1]);
-        await frames(page);
+        // The view comes to the tick as the panel opens: once it is still,
+        // the cursor on the circle's centre until it catches the Centre snap.
+        const center = await onSnap(page, [3, 8.8], 'center');
         await page.mouse.click(center[0], center[1]);
-        await page.waitForFunction(() => document.querySelector('[data-acenter]')?.textContent.startsWith('Centre of'), null, { timeout: 15000 });
+        await page
+          .waitForFunction(() => document.querySelector('[data-acenter]')?.textContent.startsWith('Centre of'), null, { timeout: 15000 })
+          .catch(async () => {
+            await page.screenshot({ path: join(out, 'array-laptop-centre-failed.png') });
+            throw new Error(`the centre clicked is not the circle's Centre snap: ${await page.textContent('[data-acenter]')} | ${await bar(page)}`);
+          });
         const centerWords = await page.textContent('[data-acenter]');
         assert(centerWords.includes('3.000, 8.800'), `the centre is the circle's: ${centerWords}`);
         await page.fill('[data-arraypanel] input[data-k="items"]', '8');
@@ -3324,6 +3368,7 @@ const checks = {
         await page.waitForSelector('[data-arraypanel].arr.docked');
         await sleep(600);
         // Docked above the command bar, the device in sight above it.
+        await still(page);
         const docked = await panelBox(page);
         const barTop = await page.evaluate(() => document.querySelector('.cmdbar').getBoundingClientRect().top);
         const deviceOnPage = await screenBox(page, target.box);
