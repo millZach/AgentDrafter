@@ -43,7 +43,7 @@ use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_rows_files_in, read_set_settings,
     rows_of, shown_mtext, template_at, template_in, template_path, AttributeSet, Disk, FromRow,
     GivenValue, LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile,
-    Row, RowsFile, TableEdit, COPY_OF_KEY, ID_SEPARATOR, LONGEST_ID, TURNED_TYPES,
+    Row, RowsFile, TableEdit, Transform, COPY_OF_KEY, ID_SEPARATOR, LONGEST_ID,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
@@ -3814,29 +3814,27 @@ fn apply_copy(
         }
     };
 
-    // A copy that turns is of an object a turn turns.
-    if places.iter().any(|p| p.turn != 0.0) {
+    // A copy that turns is of an object a turn turns: not a table or a
+    // viewport.
+    if let Some(turning) = places.iter().find(|p| p.turn != 0.0) {
         let key = match pattern {
             Pattern::Polar { .. } => "rotate: false",
             _ => "align: false",
         };
+        let turn = Transform::rotate(turning.about, turning.turn);
         for (f, field) in &found {
-            let kind = match at.file(f.file) {
-                Ok(record) => record.objects(f.list)[f.index].kind.clone(),
+            let why = match at.file(f.file) {
+                Ok(record) => record.refuses_transform(f.list, f.index, &turn),
                 Err(e) => return fail(reach, e),
             };
-            if !TURNED_TYPES.contains(&kind.as_str()) {
+            if let Some(why) = why {
                 return fail(
                     reach,
                     op_err(
                         ErrorCode::BadValue,
                         format!(
-                            "`{}` is {} {kind}, which is not turned yet (#67); its copies turn \
-                             as they go round, so give {key} to place them unturned. A copy \
-                             turns when it is a {}",
+                            "`{}`: {why}; its copies turn as they go round, so give {key} to                              place them unturned",
                             f.id,
-                            article(&kind),
-                            join_or(&TURNED_TYPES)
                         ),
                         field,
                     ),

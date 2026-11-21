@@ -38,7 +38,9 @@ use crate::error::{Error, ErrorCode};
 use crate::units::{parse_length, LengthError, Unit};
 
 mod cells;
+mod transform;
 pub(crate) use cells::{Axis, TableEdit, TableEdited};
+pub(crate) use transform::{How, Resolved, Transform, TRANSFORMED_TYPES};
 
 /// A list of objects in a record: a template's own, at `objects`, or one
 /// row's, at `rows[N].objects`.
@@ -1687,10 +1689,7 @@ impl RecordFile {
     /// Turns the object of `list` at `index` by `degrees`, anticlockwise,
     /// about the point `about`, in the declared unit `units`, as operation
     /// `operation`: every point it is drawn through turns about it, and so
-    /// does every direction it is drawn in, an arc's angles, an ellipse's
-    /// major axis, a text's, an mtext's and an insert's rotation and a
-    /// patterned hatch's angle. A coordinate along Z is left as written.
-    /// Only the object types [`TURNED_TYPES`] lists are turned.
+    /// does every direction it is drawn in ([`Transform`]).
     pub(crate) fn turn_by(
         &mut self,
         list: ObjectList,
@@ -1700,71 +1699,14 @@ impl RecordFile {
         units: Unit,
         operation: usize,
     ) -> Result<(), Error> {
-        self.state(list);
-        let path = list.place(index);
-        let items = self.items_mut(list)?;
-        let item = &mut items[index];
-        let kind = object_parts(item).0.unwrap_or_default().to_owned();
-        if !TURNED_TYPES.contains(&kind.as_str()) {
-            return Err(Error::new(
-                ErrorCode::BadValue,
-                format!("{} {kind} is not turned", article(&kind)),
-            )
-            .at_field(path));
-        }
-        let keys = object_keys_mut(item).ok_or_else(|| record_shape(&kind))?;
-        let object_path = key_path(&path, &kind);
-        let turn = Turn::new(about, degrees, units);
-        let solid = hatch_is_solid(keys);
-        let mut turned = Vec::new();
-        for entry in keys.iter_mut() {
-            let field = key_path(&object_path, &entry.key);
-            match (kind.as_str(), entry.key.as_str()) {
-                ("line", "from" | "to")
-                | ("arc" | "circle" | "ellipse" | "donut", "center")
-                | ("text" | "mtext" | "insert", "position") => {
-                    turn.point(&mut entry.value, &field)?;
-                }
-                ("polyline", "points")
-                | ("spline", "fit_points" | "control_points")
-                | ("solid", "corners") => turn.points(&mut entry.value, &field)?,
-                ("ellipse", "major_axis") => turn.vector(&mut entry.value, &field)?,
-                ("arc", "start_angle" | "end_angle")
-                | ("text" | "mtext" | "insert", "rotation") => {
-                    turn.angle(&mut entry.value, &field)?;
-                }
-                ("hatch", "angle") if !solid => turn.angle(&mut entry.value, &field)?,
-                ("hatch", "boundary") => turn.boundary(&mut entry.value, &field)?,
-                ("hatch", "origin") => turn.point(&mut entry.value, &field)?,
-                _ => continue,
-            }
-            turned.push(entry.key.clone());
-        }
-        // A text, an mtext or an insert written without its rotation, and
-        // a patterned hatch without its angle, take the turn as theirs.
-        let unwritten = match kind.as_str() {
-            "text" | "mtext" | "insert" => Some("rotation"),
-            "hatch" if !solid => Some("angle"),
-            _ => None,
-        };
-        if let Some(key) = unwritten.filter(|k| !keys.iter().any(|e| e.key == *k)) {
-            let mut node = Node::scalar("0".to_owned());
-            turn.angle(&mut node, key)?;
-            keys.push(new_entry(key, node));
-            turned.push(key.to_owned());
-        }
-        // A patterned hatch written without an origin is laid from
-        // [0, 0, 0], which turns with it.
-        if kind == "hatch" && !solid && !keys.iter().any(|e| e.key == "origin") {
-            let mut node = Node::new(Kind::Sequence(
-                ["0", "0", "0"].map(|c| Node::scalar(c.to_owned())).to_vec(),
-            ));
-            turn.point(&mut node, "origin")?;
-            keys.push(new_entry("origin", node));
-            turned.push("origin".to_owned());
-        }
-        self.touch(list, index, operation, Touch::Keys(turned));
-        Ok(())
+        self.transform(
+            list,
+            index,
+            &Transform::rotate(about, degrees),
+            &Resolved::default(),
+            units,
+            operation,
+        )
     }
 
     /// Sets the attribute `tag`, in capitals, of the insert of `list` at
@@ -3286,14 +3228,6 @@ fn move_boundary(node: &mut Node, by: [f64; 3], units: Unit, field: &str) -> Res
     Ok(())
 }
 
-/// The object types a turn turns: those whose every point and direction
-/// is written where it can be turned. A table, a multileader, an older
-/// leader, a dimension and a viewport are not turned yet (#67).
-pub(crate) const TURNED_TYPES: [&str; 12] = [
-    "line", "polyline", "arc", "circle", "ellipse", "spline", "hatch", "text", "mtext", "donut",
-    "solid", "insert",
-];
-
 /// The hatch pattern that fills solid, which takes no angle.
 const SOLID_PATTERN: &str = "SOLID";
 
@@ -3304,197 +3238,6 @@ fn hatch_is_solid(keys: &[Entry]) -> bool {
         e.key == "pattern"
             && matches!(&e.value.kind, Kind::Scalar(p) if p.eq_ignore_ascii_case(SOLID_PATTERN))
     })
-}
-
-/// A turn about a point, in the declared unit, of the points and
-/// directions of a record.
-struct Turn {
-    about: [f64; 3],
-    degrees: f64,
-    sin: f64,
-    cos: f64,
-    units: Unit,
-}
-
-impl Turn {
-    fn new(about: [f64; 3], degrees: f64, units: Unit) -> Self {
-        let (sin, cos) = degrees.to_radians().sin_cos();
-        Turn {
-            about,
-            degrees,
-            sin,
-            cos,
-            units,
-        }
-    }
-
-    /// Reads coordinate `axis` of the point `coordinates` holds, at
-    /// `field`, in the declared unit.
-    fn coordinate(&self, coordinates: &[Node], axis: usize, field: &str) -> Result<f64, Error> {
-        let Kind::Scalar(text) = &coordinates[axis].kind else {
-            return Err(not_turned(field));
-        };
-        match parse_length(text) {
-            Ok((value, None)) => Ok(value),
-            Ok((value, Some(own))) => Ok(own.convert(value, self.units)),
-            Err(_) => Err(Error::new(
-                ErrorCode::BadNumber,
-                format!("the record's coordinate `{text}` is not a length to turn"),
-            )
-            .at_field(index_path(field, axis))),
-        }
-    }
-
-    /// Writes `x` and `y` as coordinates 0 and 1 of `coordinates`.
-    fn write(coordinates: &mut [Node], x: f64, y: f64, field: &str) -> Result<(), Error> {
-        if !x.is_finite() || !y.is_finite() {
-            return Err(Error::new(
-                ErrorCode::BadNumber,
-                "the coordinate would be too large once turned",
-            )
-            .at_field(field));
-        }
-        coordinates[0] = Node::scalar(number_text(x));
-        coordinates[1] = Node::scalar(number_text(y));
-        Ok(())
-    }
-
-    /// Turns a point `[x, y, z]` about the turn's point.
-    fn point(&self, node: &mut Node, field: &str) -> Result<(), Error> {
-        let Kind::Sequence(coordinates) = &mut node.kind else {
-            return Err(not_turned(field));
-        };
-        if coordinates.len() != 3 {
-            return Err(not_turned(field));
-        }
-        let x = self.coordinate(coordinates, 0, field)? - self.about[0];
-        let y = self.coordinate(coordinates, 1, field)? - self.about[1];
-        Turn::write(
-            coordinates,
-            self.about[0] + x * self.cos - y * self.sin,
-            self.about[1] + x * self.sin + y * self.cos,
-            field,
-        )
-    }
-
-    /// Turns a direction `[dx, dy, dz]`, which has no place to turn about.
-    fn vector(&self, node: &mut Node, field: &str) -> Result<(), Error> {
-        let Kind::Sequence(coordinates) = &mut node.kind else {
-            return Err(not_turned(field));
-        };
-        if coordinates.len() != 3 {
-            return Err(not_turned(field));
-        }
-        let x = self.coordinate(coordinates, 0, field)?;
-        let y = self.coordinate(coordinates, 1, field)?;
-        Turn::write(
-            coordinates,
-            x * self.cos - y * self.sin,
-            x * self.sin + y * self.cos,
-            field,
-        )
-    }
-
-    /// Turns each point of a list, a polyline's point that is a mapping by
-    /// its `point`; its bulge stays as it is.
-    fn points(&self, node: &mut Node, field: &str) -> Result<(), Error> {
-        let Kind::Sequence(points) = &mut node.kind else {
-            return Err(not_turned(field));
-        };
-        for (i, point) in points.iter_mut().enumerate() {
-            let at = index_path(field, i);
-            if let Kind::Mapping(keys) = &mut point.kind {
-                for key in keys.iter_mut().filter(|k| k.key == "point") {
-                    self.point(&mut key.value, &key_path(&at, "point"))?;
-                }
-            } else {
-                self.point(point, &at)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Adds the turn to an angle in degrees, brought into `[0, 360)`.
-    fn angle(&self, node: &mut Node, field: &str) -> Result<(), Error> {
-        let Kind::Scalar(text) = &node.kind else {
-            return Err(not_turned(field));
-        };
-        let Ok(degrees) = text.trim().parse::<f64>() else {
-            return Err(Error::new(
-                ErrorCode::BadNumber,
-                format!("the record's angle `{text}` is not a number of degrees to turn"),
-            )
-            .at_field(field));
-        };
-        let turned = super::normalize_degrees(degrees + self.degrees);
-        let turned = if number_text(turned) == "360" {
-            0.0
-        } else {
-            turned
-        };
-        *node = Node::scalar(number_text(turned));
-        Ok(())
-    }
-
-    /// Turns each loop of a hatch's boundary: a polyline's points, and
-    /// each edge's ends, centre and angles.
-    fn boundary(&self, node: &mut Node, field: &str) -> Result<(), Error> {
-        let Kind::Sequence(loops) = &mut node.kind else {
-            return Err(not_turned(field));
-        };
-        for (i, boundary_loop) in loops.iter_mut().enumerate() {
-            let loop_path = index_path(field, i);
-            let Kind::Mapping(kinds) = &mut boundary_loop.kind else {
-                continue;
-            };
-            for kind in kinds.iter_mut() {
-                let kind_path = key_path(&loop_path, &kind.key);
-                match (kind.key.as_str(), &mut kind.value.kind) {
-                    ("polyline", Kind::Mapping(keys)) => {
-                        for key in keys.iter_mut().filter(|k| k.key == "points") {
-                            self.points(&mut key.value, &key_path(&kind_path, "points"))?;
-                        }
-                    }
-                    ("edges", Kind::Sequence(edges)) => {
-                        for (j, edge) in edges.iter_mut().enumerate() {
-                            let edge_path = index_path(&kind_path, j);
-                            let Kind::Mapping(edge_kinds) = &mut edge.kind else {
-                                continue;
-                            };
-                            for edge_kind in edge_kinds.iter_mut() {
-                                let Kind::Mapping(keys) = &mut edge_kind.value.kind else {
-                                    continue;
-                                };
-                                let within = key_path(&edge_path, &edge_kind.key);
-                                for key in keys.iter_mut() {
-                                    let path = key_path(&within, &key.key);
-                                    match key.key.as_str() {
-                                        "from" | "to" | "center" => {
-                                            self.point(&mut key.value, &path)?;
-                                        }
-                                        "start_angle" | "end_angle" => {
-                                            self.angle(&mut key.value, &path)?;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-fn not_turned(field: &str) -> Error {
-    Error::new(
-        ErrorCode::WrongType,
-        "the record's point here is not a list of three lengths, so the object cannot be turned",
-    )
-    .at_field(field)
 }
 
 fn not_a_point(field: &str) -> Error {
