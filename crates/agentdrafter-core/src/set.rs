@@ -35,7 +35,7 @@ use crate::description::{
 };
 use crate::dwg::{self, BuildMark};
 use crate::error::{Error, ErrorCode};
-use crate::leftovers::{leftovers, not_moved, Leftover, SetOutputs};
+use crate::leftovers::{leftovers, scan_error, Leftover, SetOutputs};
 use crate::model::Paper;
 use crate::reply::Reply;
 use crate::settings::Settings;
@@ -94,8 +94,15 @@ pub struct SetReport {
     pub inconsistent: Option<crate::change::Inconsistent>,
     /// The DWGs and PDFs AgentDrafter made for the set in its output folder
     /// that no row writes any more, each moved into `superseded/` when the
-    /// build cleaned. Empty when there are none.
-    pub leftovers: Vec<Leftover>,
+    /// run cleaned, and any no row writes that could not be read to tell,
+    /// marked `unreadable`. Empty when there are none; left out when the
+    /// output folder could not be listed, which `leftovers_error` says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leftovers: Option<Vec<Leftover>>,
+    /// Why the output folder could not be listed to look for leftovers,
+    /// when it could not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leftovers_error: Option<Error>,
 }
 
 /// What became of one sheet of a drawing set.
@@ -182,10 +189,12 @@ pub fn build_set_with(request: &SetBuildRequest, settings: &Settings) -> Reply<S
             );
             Reply::partly(report, error)
         }
-        Ok(report) => match not_moved(&report.leftovers) {
-            Some(error) => Reply::partly(report, error),
-            None => Reply::from(Ok(report)),
-        },
+        Ok(report) => {
+            match scan_error(report.leftovers_error.as_ref(), report.leftovers.as_deref()) {
+                Some(error) => Reply::partly(report, error),
+                None => Reply::from(Ok(report)),
+            }
+        }
         Err(error) => Reply::from(Err(error)),
     }
 }
@@ -229,7 +238,7 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         })
         .collect();
     let built = sheets.iter().filter(|s| s.ok).count();
-    let leftovers = leftovers(
+    let scan = leftovers(
         &SetOutputs {
             folder,
             output: &output,
@@ -248,7 +257,8 @@ fn build_sheets(request: &SetBuildRequest, settings: &Settings) -> Result<SetRep
         sheets,
         no_set_in_marks: marked.is_none().then(|| no_set_in_marks(&set.output)),
         inconsistent: crate::change::inconsistent(folder),
-        leftovers,
+        leftovers: scan.leftovers,
+        leftovers_error: scan.error,
     })
 }
 

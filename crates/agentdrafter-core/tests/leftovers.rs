@@ -61,7 +61,11 @@ fn plot(set: &Path, clean: Option<bool>) -> Reply<PlotSetReport> {
 fn built(set: &Path, clean: Option<bool>) -> Vec<Leftover> {
     let reply = build(set, clean);
     assert!(reply.ok, "{:#?}", reply.error);
-    reply.result.unwrap().leftovers
+    reply
+        .result
+        .unwrap()
+        .leftovers
+        .expect("the output folder was listed")
 }
 
 /// The set's leftovers as a plot lists them, failing the test unless
@@ -69,7 +73,11 @@ fn built(set: &Path, clean: Option<bool>) -> Vec<Leftover> {
 fn plotted(set: &Path, clean: Option<bool>) -> Vec<Leftover> {
     let reply = plot(set, clean);
     assert!(reply.ok, "{:#?}", reply.error);
-    reply.result.unwrap().leftovers
+    reply
+        .result
+        .unwrap()
+        .leftovers
+        .expect("the output folder was listed")
 }
 
 /// Takes the row of `sheet` out of the set's rows file.
@@ -395,7 +403,7 @@ fn a_leftover_that_cannot_be_moved_stays_and_the_reply_says_so() {
     let error = reply.error.unwrap();
     assert_eq!(error.code, ErrorCode::WriteFailed);
     assert!(error.message.contains("leftovers"), "{}", error.message);
-    let leftovers = reply.result.unwrap().leftovers;
+    let leftovers = reply.result.unwrap().leftovers.unwrap();
     assert_eq!(leftovers.len(), 1);
     assert!(leftovers[0].moved_to.is_none());
     assert_eq!(
@@ -403,4 +411,159 @@ fn a_leftover_that_cannot_be_moved_stays_and_the_reply_says_so() {
         ErrorCode::WriteFailed
     );
     assert!(dwg.join("DEMO-003.dwg").is_file());
+}
+
+/// Whether the file system at `dir` tells names apart by letter case.
+fn tells_case_apart(dir: &Path) -> bool {
+    let probe = dir.join("Case-Probe.txt");
+    fs::write(&probe, b"").unwrap();
+    let apart = !dir.join("case-probe.txt").exists();
+    fs::remove_file(&probe).unwrap();
+    apart
+}
+
+/// A row renamed in letter case writes its outputs under the new name.
+/// Where the file system tells the two names apart, the old files are
+/// other files, and left over; where it does not, they are the row's own
+/// files, and stay where they are, current.
+#[test]
+fn a_sheet_renamed_in_letter_case_is_left_over_only_where_the_names_are_two_files() {
+    let set = demo_set(&scratch("case").join("demo-set"));
+    built(&set, None);
+    plotted(&set, None);
+    let dwg = set.join("dwg");
+    let apart = tells_case_apart(&dwg);
+    let rows = set.join("rows.yaml");
+    let text = fs::read_to_string(&rows).unwrap();
+    fs::write(
+        &rows,
+        text.replace("  - sheet: DEMO-002\n", "  - sheet: demo-002\n"),
+    )
+    .unwrap();
+
+    let cleaned = built(&set, Some(true));
+    assert!(dwg.join("demo-002.dwg").is_file());
+    if apart {
+        assert_eq!(named(&cleaned), listed("DEMO-002"));
+        assert!(cleaned.iter().all(|l| l.moved_to.is_some()));
+        assert_eq!(
+            files_in(&dwg.join(SUPERSEDED_FOLDER)),
+            ["DEMO-002.dwg", "DEMO-002.pdf"]
+        );
+    } else {
+        assert_eq!(cleaned, []);
+        assert!(!dwg.join(SUPERSEDED_FOLDER).exists());
+        // The PDF, still under its old name, is the row's own.
+        assert!(dwg.join("demo-002.pdf").is_file());
+        assert_eq!(plotted(&set, Some(true)), []);
+    }
+}
+
+/// Makes `link` a link to the folder `to`: a symbolic link on Unix, a
+/// junction on Windows, which needs no privilege.
+fn link_folder(to: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(to, link).unwrap();
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(to)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+    }
+}
+
+#[test]
+fn a_superseded_folder_that_is_a_link_or_a_junction_is_refused_and_nothing_moves() {
+    let dir = scratch("linked");
+    let set = demo_set(&dir.join("demo-set"));
+    built(&set, None);
+    plotted(&set, None);
+    take_out(&set, "DEMO-003");
+    let elsewhere = dir.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let dwg = set.join("dwg");
+    link_folder(&elsewhere, &dwg.join(SUPERSEDED_FOLDER));
+
+    let reply = build(&set, Some(true));
+    assert!(!reply.ok);
+    assert_eq!(reply.error.unwrap().code, ErrorCode::WriteFailed);
+    let leftovers = reply.result.unwrap().leftovers.unwrap();
+    assert_eq!(named(&leftovers), listed("DEMO-003"));
+    for leftover in &leftovers {
+        assert!(leftover.moved_to.is_none());
+        let error = leftover.error.as_ref().unwrap();
+        assert!(
+            error.message.contains("link or a junction"),
+            "{}",
+            error.message
+        );
+    }
+    assert!(dwg.join("DEMO-003.dwg").is_file());
+    assert!(dwg.join("DEMO-003.pdf").is_file());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+/// A leftover no one may read is listed as unreadable and never moved,
+/// and an output folder that cannot be listed leaves no list at all: the
+/// reply says the scan did not finish. Unix alone takes a file's reading
+/// away from its owner; as root, who reads everything, it is not shown.
+#[cfg(unix)]
+#[test]
+fn a_scan_that_cannot_finish_says_so() {
+    use std::os::unix::fs::PermissionsExt;
+    let set = demo_set(&scratch("unread").join("demo-set"));
+    built(&set, None);
+    plotted(&set, None);
+    take_out(&set, "DEMO-003");
+    let dwg = set.join("dwg");
+    let pdf = dwg.join("DEMO-003.pdf");
+    let mode = |path: &Path, mode: u32| {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    mode(&pdf, 0o000);
+    if fs::read(&pdf).is_ok() {
+        mode(&pdf, 0o644);
+        eprintln!("run as root, which reads every file: not shown");
+        return;
+    }
+    let reply = build(&set, Some(true));
+    mode(&pdf, 0o644);
+    assert!(!reply.ok);
+    assert_eq!(reply.error.unwrap().code, ErrorCode::ReadFailed);
+    let leftovers = reply.result.unwrap().leftovers.unwrap();
+    assert_eq!(named(&leftovers), listed("DEMO-003"));
+    assert!(leftovers[0].moved_to.is_some() && !leftovers[0].unreadable);
+    assert!(leftovers[1].unreadable && leftovers[1].moved_to.is_none());
+    assert_eq!(
+        leftovers[1].error.as_ref().unwrap().code,
+        ErrorCode::ReadFailed
+    );
+    assert!(pdf.is_file());
+    let json = serde_json::to_value(&leftovers).unwrap();
+    assert_eq!(json[1]["unreadable"], true);
+    assert!(json[0].get("unreadable").is_none());
+
+    // Written to, but not listed.
+    mode(&dwg, 0o333);
+    let reply = build(&set, None);
+    mode(&dwg, 0o755);
+    assert!(!reply.ok);
+    let error = reply.error.unwrap();
+    assert_eq!(error.code, ErrorCode::ReadFailed);
+    assert_eq!(
+        error.file.as_deref(),
+        Some(dwg.display().to_string().as_str())
+    );
+    let report = reply.result.unwrap();
+    assert_eq!(report.built, 2);
+    assert!(report.leftovers.is_none());
+    assert_eq!(report.leftovers_error.unwrap().code, ErrorCode::ReadFailed);
+    let json = serde_json::to_value(build(&set, None).result.unwrap()).unwrap();
+    assert!(json["leftovers"].is_array(), "listed again once it can be");
 }

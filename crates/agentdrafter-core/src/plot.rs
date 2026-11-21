@@ -34,7 +34,7 @@ use crate::description::{
 };
 use crate::draw::{self, Bounds, HatchCutShort, PageFrom};
 use crate::error::{Error, ErrorCode};
-use crate::leftovers::{leftovers, not_moved, Leftover, SetOutputs};
+use crate::leftovers::{leftovers, scan_error, Leftover, SetOutputs};
 use crate::model::Sheet;
 use crate::output::{
     object_counts, read_record, refuse_to_replace, write_whole, OutputKind, Record,
@@ -229,9 +229,16 @@ pub struct PlotSetReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inconsistent: Option<crate::change::Inconsistent>,
     /// The DWGs and PDFs AgentDrafter made for the set in its output folder
-    /// that no row writes any more, as a build lists them, each moved into
-    /// `superseded/` when the plot cleaned.
-    pub leftovers: Vec<Leftover>,
+    /// that no row writes any more, each moved into `superseded/` when the
+    /// run cleaned, and any no row writes that could not be read to tell,
+    /// marked `unreadable`. Empty when there are none; left out when the
+    /// output folder could not be listed, which `leftovers_error` says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leftovers: Option<Vec<Leftover>>,
+    /// Why the output folder could not be listed to look for leftovers,
+    /// when it could not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leftovers_error: Option<Error>,
 }
 
 /// What became of one sheet of a drawing set's plot.
@@ -316,10 +323,12 @@ pub fn plot_set_with(request: &PlotSetRequest, settings: &Settings) -> Reply<Plo
             );
             Reply::partly(report, error)
         }
-        Ok(report) => match not_moved(&report.leftovers) {
-            Some(error) => Reply::partly(report, error),
-            None => Reply::from(Ok(report)),
-        },
+        Ok(report) => {
+            match scan_error(report.leftovers_error.as_ref(), report.leftovers.as_deref()) {
+                Some(error) => Reply::partly(report, error),
+                None => Reply::from(Ok(report)),
+            }
+        }
         Err(error) => Reply::from(Err(error)),
     }
 }
@@ -391,7 +400,7 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
         .collect();
     let plotted = sheets.iter().filter(|s| s.ok).count();
     let marked = set_in_mark(folder, &set.output);
-    let leftovers = leftovers(
+    let scan = leftovers(
         &SetOutputs {
             folder,
             output: &output,
@@ -409,7 +418,8 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
         failed: sheets.len() - plotted,
         sheets,
         inconsistent: crate::change::inconsistent(folder),
-        leftovers,
+        leftovers: scan.leftovers,
+        leftovers_error: scan.error,
     })
 }
 

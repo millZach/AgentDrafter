@@ -208,13 +208,13 @@ A change set edits such a value by matching the new text to the fixed parts, and
 The reply is one line of JSON. When every sheet was built:
 
 ```json
-{"ok":true,"result":{"set":"examples/demo-set","units":"in","output":"examples/demo-set/dwg","built":3,"failed":0,"sheets":[{"sheet":"DEMO-001","template":"templates/ansi-b.yaml","ok":true,"result":{"dwg":"examples/demo-set/dwg/DEMO-001.dwg","...":"..."},"notices":[]}]}}
+{"ok":true,"result":{"set":"examples/demo-set","units":"in","output":"examples/demo-set/dwg","built":3,"failed":0,"sheets":[{"sheet":"DEMO-001","template":"templates/ansi-b.yaml","ok":true,"result":{"dwg":"examples/demo-set/dwg/DEMO-001.dwg","...":"..."},"notices":[]}],"leftovers":[]}}
 ```
 
 Each sheet's `result` is what building one sheet description reports, with its template as `description`. When some sheets failed, the reply is not `ok`, carries the same `result`, and adds an error; the command exits with 1:
 
 ```json
-{"ok":false,"result":{"built":2,"failed":1,"sheets":[{"sheet":"DEMO-002","template":"templates/ansi-b.yaml","ok":false,"error":{"code":"missing_value","message":"sheet `DEMO-002` has no value `TITLE`, which its template `templates/ansi-b.yaml` fills in at `objects[2].insert.attributes.TITLE`, `objects[3].text.contents`; give it under the row's `values`","field":"rows[1].values.TITLE","line":15,"column":7,"file":"examples/demo-set/rows.yaml"},"notices":[]},"..."]},"error":{"code":"sheets_failed","message":"1 of the set's 3 sheets failed, and nothing was written for them; 2 built. Each sheet's outcome is under `sheets`"}}
+{"ok":false,"result":{"built":2,"failed":1,"sheets":[{"sheet":"DEMO-002","template":"templates/ansi-b.yaml","ok":false,"error":{"code":"missing_value","message":"sheet `DEMO-002` has no value `TITLE`, which its template `templates/ansi-b.yaml` fills in at `objects[2].insert.attributes.TITLE`, `objects[3].text.contents`; give it under the row's `values`","field":"rows[1].values.TITLE","line":15,"column":7,"file":"examples/demo-set/rows.yaml"},"notices":[]},"..."],"leftovers":[]},"error":{"code":"sheets_failed","message":"1 of the set's 3 sheets failed, and nothing was written for them; 2 built. Each sheet's outcome is under `sheets`"}}
 ```
 
 When the settings or the rows cannot be read, the reply is an error alone, as for one sheet description.
@@ -228,23 +228,33 @@ agentdrafter build <folder> [--clean | --no-clean] ...
 agentdrafter plot <folder> [--clean | --no-clean] ...
 ```
 
-- **A leftover output is a DWG or a PDF in the set's output folder that AgentDrafter made for this set, and that no row writes any more.** A build and a plot each list every one, DWGs and PDFs both, under `leftovers` in the reply, in the byte order of their names. A row writes `<output>/<sheet>.dwg` and `<output>/<sheet>.pdf`, its name in any letter case, as a set's sheet names are told apart; a row whose sheet failed in this run still writes it, so its file is not a leftover.
+- **A leftover output is a DWG or a PDF in the set's output folder that AgentDrafter made for this set, and that no row writes any more.** A build and a plot each list every one, DWGs and PDFs both, under `leftovers` in the reply, in the byte order of their names. A row writes `<output>/<sheet>.dwg` and `<output>/<sheet>.pdf`, and a file is the row's when it is the very file at that path, as the file system tells it (by its device and number on Unix, by its path as Windows resolves it), however its name compares: where the file system ignores letter case, or takes two spellings of an accented letter for one, as macOS does, a file left under the old spelling is the row's own and stays; where it tells them apart, as Linux does, the file under the old spelling is another file, and left over. Where a file cannot be told apart that way, a name that is a row's in any letter case is the row's, the safe way round. A row whose sheet failed in this run still writes it, so its file is not a leftover.
 - **Made for this set** is told by what the file carries, never by its name:
   - a DWG, by its [build mark](#the-build-mark-names-the-set): the mark names the set exactly as this set's own build writes it from the output folder, such as `..` for `output: dwg` or `../demo-plant` for `output: ../issued`. A DWG of another set that shares the output folder names its own set and is not listed. A set whose DWGs name no set in their marks (`no_set_in_marks`) cannot tell its DWGs from another's, so it lists none of them; its PDFs are still listed.
   - a PDF, by its [stamp](plot.md#the-stamp): the stamp names a rows file of this set, one of its rows files now, or a file in the set's folder, there or gone, that no other set inside it holds, so that the sheets of a whole rows file taken out of the settings are still known.
 - **Anything else is never listed or moved**: a file with no build mark or no stamp, an [original](../CONTEXT.md) among them; a DWG built, or a PDF plotted, from a sheet description on its own; another set's outputs; any other kind of file, such as a PNG; a link, whatever it leads to; and anything in a folder inside the output folder, `superseded/` among them (ADR-0004).
 - **Without cleaning they are only listed**, and stay where they are, as they were.
-- **Cleaning moves each one into `superseded/`** in the output folder, keeping its name, and never deletes it. The build or plot makes the folder when it is not there. Each leftover's `moved_to` says where it went.
+- **Cleaning moves each one into `superseded/`** in the output folder, keeping its name, and never deletes it. The build or plot makes the folder when there is a leftover to move and it is not there. Each leftover's `moved_to` says where it went.
+- **A move never replaces a file**, not even one another program makes at that name while the move is made: the leftover takes its new name as a hard link, which every system refuses to make over a file, and loses its old one after; where the file system has no hard links, its bytes are copied into a file made new, which is refused the same way, and the old one goes once the copy is whole. Just before it moves, each leftover is read again: one that is no longer a plain file, or no longer carries the set's mark or stamp, is not moved, and says so.
+- **A `superseded` that is a link, or a junction on Windows, is refused**, since it would move the leftovers to another folder: nothing is moved, and each leftover carries the error. So is a `superseded` that is a file.
 - **Cleaning is asked for by the run, or by the set.** `--clean` (`clean: true` through the HTTP API, the MCP server and the Python library) cleans for that run; `--no-clean` (`clean: false`) only lists for that run, whatever the settings say. Without either (or with `clean: null`), the run does as the set's settings say: `clean: true` cleans, and `clean: false` or no `clean` only lists. `--clean` and `--no-clean` together, or either twice, are refused. `clean` is for a set's folder alone: given for one sheet description or DWG, it is refused, since that run writes one file and leaves every other as it is.
 - **A name already in `superseded/` is kept.** A sheet taken out, cleaned, put back and taken out again finds its first leftover there: that file is never replaced, and the newer one takes the first free name `<sheet> (2).dwg`, then `<sheet> (3).dwg`, and so on, so the plain name is the oldest. The same goes for PDFs.
-- **A leftover that cannot be moved stays where it is**, with its `error`, and the reply is not `ok`, with the error `write_failed`; when sheets failed too, the error is `sheets_failed`, as before. A sheet name near the longest allowed, 251 characters, that would be too long for the system with its number is such a case.
+- **A leftover that cannot be moved stays where it is**, with its `error`, and the reply is not `ok`, with the error `write_failed`. A sheet name near the longest allowed, 251 characters, that would be too long for the system with its number is such a case.
+- **A look that cannot finish says so.** When the output folder cannot be listed, to its end, the reply has no `leftovers`, so that no one takes an empty list for a folder looked through, and says why under `leftovers_error`, an error `read_failed` naming the folder; the reply is not `ok`, with that error. A DWG or PDF no row writes that cannot be read to tell whether the set made it, its details or its bytes, is listed under `leftovers` with `"unreadable": true` and its `read_failed` error, and never moved; the reply is not `ok`, with a `read_failed` error that counts them. A file that can be read but carries no mark or stamp AgentDrafter can read is not the set's, and is left alone.
+- **Which error a reply carries**: `sheets_failed` when sheets failed; else `read_failed` when the folder could not be listed or a file could not be read; else `write_failed` when a leftover could not be moved. Each leftover carries its own error whatever the reply's is.
 - **When the set cannot be read**, its settings or any of its rows files, nothing is listed or moved, since without every row there is no telling which outputs no row writes.
 
 ```json
 {"ok":true,"result":{"set":"examples/demo-set","...":"...","leftovers":[{"file":"examples/demo-set/dwg/DEMO-004.dwg","kind":"dwg","sheet":"DEMO-004","moved_to":"examples/demo-set/dwg/superseded/DEMO-004.dwg"},{"file":"examples/demo-set/dwg/DEMO-004.pdf","kind":"pdf","sheet":"DEMO-004","moved_to":"examples/demo-set/dwg/superseded/DEMO-004.pdf"}]}}
 ```
 
-A reply with nothing left over has `"leftovers":[]`. Moving a leftover is not a change set: it is not in the [journal](journal.md) and is not undone; the files are in `superseded/`, byte for byte, to be moved back by hand.
+A reply with nothing left over has `"leftovers":[]`. One whose folder could not be listed:
+
+```json
+{"ok":false,"result":{"set":"examples/demo-set","...":"...","leftovers_error":{"code":"read_failed","message":"could not list the set's output folder to look for leftover outputs, so none was looked for or moved: ...","file":"examples/demo-set/dwg"}},"error":{"code":"read_failed","...":"..."}}
+```
+
+Moving a leftover is not a change set: it is not in the [journal](journal.md) and is not undone; the files are in `superseded/`, byte for byte, to be moved back by hand.
 
 ### The build mark names the set
 
