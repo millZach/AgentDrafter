@@ -18,7 +18,19 @@
 
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 
-import { freeBeside, newlyHidden, placeBeside, secondTap, snapTag, type Box, type Hovered, type Named, type Tapped, type ToolState } from './frame.ts';
+import {
+  arrayFraming,
+  freeBeside,
+  newlyHidden,
+  placeBeside,
+  secondTap,
+  snapTag,
+  type Box,
+  type Hovered,
+  type Named,
+  type Tapped,
+  type ToolState,
+} from './frame.ts';
 
 import { screen_color, Viewer } from './wasm/agentdrafter_viewer.js';
 import { attachGestures, Glide, type Surface } from './gestures.ts';
@@ -96,6 +108,8 @@ export interface DrawingProps {
    * the command bar, where its styles put them.
    */
   card?: RefObject<HTMLElement | null>;
+  /** Array's panel on a laptop: placed beside the objects and their copies at each draw (#66). */
+  arrayPanel?: RefObject<HTMLDivElement | null>;
   /** The objects a change set touched, marked with halos. */
   marks: Mark[];
   /** The object the reviewer picked, marked blue; null for none. */
@@ -169,6 +183,12 @@ export interface DrawingHandle {
   viewer(): Viewer | null;
   /** Draws again on the next frame, as after a tool's step. */
   redraw(): void;
+  /**
+   * Brings Array's objects and their copies into the drawing's free part
+   * when any is out of sight, and, `opening`, as its panel opens, on a
+   * phone or a small array (#66).
+   */
+  frameArray(opening: boolean): void;
 }
 
 /** How near a tap must come to an object to pick it, in CSS pixels. */
@@ -204,6 +224,7 @@ export function Drawing({
   compact,
   grid,
   card,
+  arrayPanel,
   marks,
   picked,
   pulseSince,
@@ -440,6 +461,51 @@ export function Drawing({
       if (left + el.offsetWidth > width - 4) el.style.left = `${Math.round(Math.max(4, width - el.offsetWidth - 4))}px`;
     }
   };
+  // Array's copies (#66): one tag over them all, `3 × 2 · waits for
+  // Enter`, at the top right of the box round the objects and their
+  // copies, or what is wrong; and, on a laptop, its panel beside them.
+  const arrayTag = useRef<HTMLDivElement>(null);
+  const arrayExtent = (): Box | null => {
+    const e = viewer.current?.tool_array_extent() ?? [];
+    if (e.length !== 4) return null;
+    const [l, t] = toScreen(view.current, e[0] as number, e[3] as number);
+    const [r, b] = toScreen(view.current, e[2] as number, e[1] as number);
+    return [l, t, r, b];
+  };
+  const placeArrayTag = () => {
+    const el = arrayTag.current;
+    const c = canvas.current;
+    const v = viewer.current;
+    if (!el || !c) return;
+    const text = v?.tool_array_tag(narrow.current) ?? '';
+    if (!text) {
+      el.hidden = true;
+      return;
+    }
+    const tag = JSON.parse(text) as { text: string; at: [number, number]; problem: boolean };
+    const [x, y] = toScreen(view.current, tag.at[0], tag.at[1]);
+    el.textContent = tag.text;
+    el.classList.toggle('bad', tag.problem);
+    el.hidden = false;
+    const width = c.clientWidth;
+    const height = c.clientHeight - covered.current;
+    el.style.left = `${Math.round(Math.max(4, Math.min(width - el.offsetWidth - 4, x + 6)))}px`;
+    el.style.top = `${Math.round(Math.max(4, Math.min(height - 24, y - 26)))}px`;
+  };
+  const placeArrayPanel = () => {
+    const el = arrayPanel?.current;
+    if (!el || narrow.current) return;
+    const box = arrayExtent();
+    if (!box) {
+      el.style.visibility = 'hidden';
+      return;
+    }
+    const a = area();
+    const [x, y] = placeBeside(box, { width: el.offsetWidth, height: el.offsetHeight }, [a.x, a.y, a.x + a.width, a.y + a.height], 28);
+    el.style.left = `${Math.round(x)}px`;
+    el.style.top = `${Math.round(y)}px`;
+    el.style.visibility = 'visible';
+  };
   /** Whether a tool runs that takes the drawing's clicks and taps. */
   // Asked of the renderer, which holds the tool, so a tap made before the
   // page has drawn the tool's new step still goes to it.
@@ -590,6 +656,8 @@ export function Drawing({
     placeEditor();
     placeToolWords();
     placeCopyTags();
+    placeArrayTag();
+    placeArrayPanel();
     placePreviewTags();
     placeProposalCards();
     const at = pointer.current;
@@ -905,6 +973,24 @@ export function Drawing({
     redraw();
   };
   // Shows the part of the sheet a focus asks for, once that sheet is drawn.
+  // The view comes to Array's objects and their copies, in the drawing's
+  // free part: on a laptop, clear of the panel's room at their right.
+  const frameArrayNow = useRef<(opening: boolean) => void>(() => {});
+  frameArrayNow.current = (opening: boolean) => {
+    const v = viewer.current;
+    const e = v?.tool_array_extent() ?? [];
+    const whole = fitted();
+    const box = arrayExtent();
+    if (!v || e.length !== 4 || !whole || !box) return;
+    const a = area();
+    const panel = !narrow.current && arrayPanel?.current ? arrayPanel.current.offsetWidth + 40 : 0;
+    const room = { x: a.x, y: a.y, width: Math.max(120, a.width - panel), height: a.height };
+    if (!arrayFraming(box, [room.x, room.y, room.x + room.width, room.y + room.height], opening, narrow.current)) return;
+    followFit.current = false;
+    bounds.current = limits(whole);
+    const target = focusOn([e[0], e[1], e[2], e[3]] as unknown as Paper, room, whole, narrow.current ? 4 : 3, narrow.current ? 24 : 40);
+    glide.current?.to(target, 300, middle());
+  };
   const applyFocus = () => {
     const f = pendingFocus.current;
     const v = viewer.current;
@@ -1065,7 +1151,7 @@ export function Drawing({
       toolEnter.current?.();
     };
     b.addEventListener('contextmenu', menu);
-    if (handle) handle.current = { viewer: () => viewer.current, redraw };
+    if (handle) handle.current = { viewer: () => viewer.current, redraw, frameArray: (opening) => frameArrayNow.current(opening) };
     b.addEventListener('pointerdown', keysHere);
     b.addEventListener('pointermove', hover);
     b.addEventListener('pointerleave', away);
@@ -1294,6 +1380,9 @@ export function Drawing({
       <div className="typed" ref={typed} aria-hidden="true" data-typed />
       <div className="pvtags" ref={pvTags} data-pvtags />
       <div className="ctags" ref={copyTags} aria-hidden="true" data-copytags />
+      <div className="ctags">
+        <div className="ctag atag" ref={arrayTag} hidden aria-hidden="true" data-arraytag />
+      </div>
       <svg className="pleaders" ref={leaders} aria-hidden="true" data-pleaders />
       <div className="pcards" ref={pcards} data-pcards>
         {cards}

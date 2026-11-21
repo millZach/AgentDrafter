@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { assistantCall, call, CommandError, run, watch, watchAssistant, type StreamState } from './api.ts';
+import { ArrayPanel } from './ArrayPanel.tsx';
 import { AssistantPanel, type ChatCardView, type Side } from './Assistant.tsx';
 import {
   agentName,
@@ -457,6 +458,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const viewport = useRef<HTMLDivElement>(null);
   const bar = useRef<HTMLDivElement>(null);
   const card = useRef<HTMLElement>(null);
+  // Array's panel on a laptop, which the drawing places beside the copies (#66).
+  const arrayBox = useRef<HTMLDivElement>(null);
   const coords = useRef<HTMLSpanElement>(null);
   const [toast, setToast] = useState<Toast | null>(null);
   const [asking, setAsking] = useState<Asking | null>(null);
@@ -1051,7 +1054,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // running: its point read out, as AutoCAD's ID command does, and its
   // object selected.
   const takeSnap = (h: Hovered) => {
-    if (!summary) return;
+    if (!summary || arrayUp) return;
     const o = summary.objects[h.object];
     const read = takenOf(h, summary.objects, summary.units);
     setPicked(o ? { id: o.id ?? null, place: h.object, summary } : null);
@@ -1221,6 +1224,29 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (toolState?.tool === tool.key) toolDid(renderer()?.tool_escape() ?? '');
     else startTool(tool.key);
   };
+  // Array's panel (#66): up while an array is set up, its values the
+  // renderer's. A click on the drawing then selects nothing, but takes a
+  // polar array's centre while it is picked.
+  const arrayUp = !!toolState?.array && !toolState.array.picking;
+  const arrayAct = (a: string) => {
+    toolDid(renderer()?.tool_option(a) ?? '');
+    if (a === 'rectangular' || a === 'polar') requestAnimationFrame(() => drawing.current?.frameArray(true));
+  };
+  const arrayValue = (key: string, text: string) => {
+    renderer()?.tool_array_value(key, text);
+    refreshTool();
+    requestAnimationFrame(() => drawing.current?.frameArray(false));
+  };
+  const arrayKey = toolState?.array ? `${toolState.array.kind}|${toolState.array.picking}` : '';
+  useEffect(() => {
+    // The view comes to the objects and their copies as the panel opens,
+    // and as a polar array's centre is taken.
+    if (arrayKey) requestAnimationFrame(() => drawing.current?.frameArray(true));
+  }, [arrayKey]);
+  const arrayPanel = (touch: boolean) =>
+    toolState?.array && !preview ? (
+      <ArrayPanel panel={toolState.array} touch={touch} onAct={arrayAct} onValue={arrayValue} boxRef={touch ? undefined : arrayBox} />
+    ) : null;
   // Copy's copies placed wait for Enter; Undo, U and Ctrl+Z take the last back.
   const copiesPlaced = toolState?.tool === 'copy' && toolState.placed > 0;
   const undoCopy = () => toolDid(renderer()?.tool_option('undo') ?? '');
@@ -1723,7 +1749,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const vp = viewport.current;
     const b = bar.current;
     if (!vp || !b) return;
-    const band = vp.querySelector('[data-preview]');
+    // On a phone, Array's panel docks above the bar, and covers from its top.
+    const band = vp.querySelector('[data-preview]') ?? (wide ? null : vp.querySelector('[data-arraypanel]'));
     const measure = () => {
       const bottom = vp.getBoundingClientRect().bottom;
       const covered = band ? bottom - band.getBoundingClientRect().top : bottom - b.getBoundingClientRect().bottom + BAR_LINE;
@@ -1739,7 +1766,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     resized.observe(b);
     if (band) resized.observe(band);
     return () => resized.disconnect();
-  }, [peekHeight, wide, previewShown]);
+  }, [peekHeight, wide, previewShown, !!toolState?.array]);
 
   // What the header and the tabs say.
   const pending = journal ? notIssued(journal) : [];
@@ -1860,6 +1887,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     else if (a === 'live') backToLive();
     else if (a === 'move' || a === 'erase') startTool(a);
     else if (a === 'copy-objects') startTool('copy');
+    else if (a === 'array-objects') startTool('array');
     else if (a.startsWith('tool:')) {
       const v = renderer();
       if (!v) return;
@@ -2314,7 +2342,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
             onLoaded={loaded}
             onError={failed}
             onUnavailable={setUnavailable}
-            onPick={onPreview ? () => {} : pick}
+            onPick={onPreview || arrayUp ? () => {} : pick}
+            arrayPanel={arrayBox}
             onCursor={cursorAt}
             snapMask={runningMask(toggles.osnap && at === null && !onPreview, running)}
             onTakeSnap={takeSnap}
@@ -2491,7 +2520,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
             }
             note={barNote(toolState)}
             onUndoKey={copiesPlaced ? undoCopy : undefined}
+            panel={wide ? null : arrayPanel(true)}
           />
+          {wide && arrayPanel(false)}
           {unavailable ? (
             <div className="va-note failed" role="alert">
               The viewer cannot draw here: {unavailable}.

@@ -22,7 +22,7 @@ export interface Tool {
   tip: string;
 }
 
-export type ToolKey = 'line' | 'circle' | 'rectangle' | 'text' | 'move' | 'copy' | 'erase';
+export type ToolKey = 'line' | 'circle' | 'rectangle' | 'text' | 'move' | 'copy' | 'array' | 'erase';
 
 /** The ribbon's panels and their tools, in order. */
 export const PANELS: { title: string; tools: Tool[] }[] = [
@@ -46,6 +46,13 @@ export const PANELS: { title: string; tools: Tool[] }[] = [
         alias: 'CO',
         also: 'CP',
         tip: 'Pick objects, a point to hold them by, then where each copy goes: it keeps placing copies until Enter or Esc. The originals stay.',
+      },
+      {
+        key: 'array',
+        label: 'Array',
+        command: 'ARRAY',
+        alias: 'AR',
+        tip: 'Pick objects, then copies of them in rows and columns or round a centre, set in a small panel. Enter or Array lands them as plain objects, each with its own ID; Esc sends nothing.',
       },
       { key: 'erase', label: 'Erase', command: 'ERASE', alias: 'E', tip: 'Pick objects to remove. Undo brings them back.' },
     ],
@@ -175,7 +182,7 @@ export type Part =
   | { error: string };
 
 /** What an option does: the page's own, or a running tool's (`tool:done`), which the renderer takes. */
-export type Act = 'clear' | 'older' | 'newer' | 'live' | 'copy' | 'move' | 'copy-objects' | 'erase' | `tool:${string}`;
+export type Act = 'clear' | 'older' | 'newer' | 'live' | 'copy' | 'move' | 'copy-objects' | 'array-objects' | 'erase' | `tool:${string}`;
 
 /** What the command bar prompts: a command's name, when one is named, and its line. */
 export interface Prompt {
@@ -278,12 +285,15 @@ export function promptFor(s: PromptState): Prompt {
     return { command: null, parts: [{ snap: s.taken.label }, { text: `${s.taken.rest} ` }, ...options(...acts)] };
   }
   if (s.selected) {
-    // Move, Copy and Erase take what is selected, as AutoCAD's do. A phone
-    // gives the name alone, so its four buttons stay on one line: the halo
+    // Move, Copy, Array and Erase take what is selected, as AutoCAD's do. A
+    // phone gives the name alone, so its buttons stay together: the halo
     // and the card say it is selected.
     return {
       command: null,
-      parts: [{ text: s.touch ? `${nameOf(s.selected)} ` : `${nameOf(s.selected)} selected ` }, ...options(['Move', 'move'], ['Copy', 'copy-objects'], ['Erase', 'erase'], ['Clear', 'clear'])],
+      parts: [
+        { text: s.touch ? `${nameOf(s.selected)} ` : `${nameOf(s.selected)} selected ` },
+        ...options(['Move', 'move'], ['Copy', 'copy-objects'], ['Array', 'array-objects'], ['Erase', 'erase'], ['Clear', 'clear']),
+      ],
     };
   }
   return {
@@ -332,6 +342,39 @@ export interface ToolState {
   text: { height: number; lines: { text: string; at: [number, number] }[] } | null;
   /** The copies Copy has placed, which wait for Enter, Done or Esc. */
   placed: number;
+  /** Array's panel, while it is set up (#66). */
+  array?: ArrayPanelState | null;
+}
+
+/** A field of Array's panel, as the renderer gives it. */
+export interface ArrayField {
+  /** What the renderer is passed back when it is typed in, such as `rows`. */
+  key: string;
+  label: string;
+  /** What the sign means, under it. */
+  hint: string | null;
+  /** Its value, as the renderer shows it. */
+  value: string;
+  /** Whether it takes a whole number. */
+  whole: boolean;
+}
+
+/** What Array's panel shows, as the renderer gives it (`ToolState.array`). */
+export interface ArrayPanelState {
+  kind: 'rectangular' | 'polar';
+  spacing: 'between' | 'total';
+  /** What it arrays: `of terminal-2`. */
+  of: string;
+  fields: ArrayField[];
+  /** A polar array's centre in words, or where to click it; null for a rectangular one. */
+  center: string | null;
+  /** Whether a click takes the centre now. */
+  picking: boolean;
+  rotate: boolean;
+  /** `3 × 2: 5 copies`, or what is wrong. */
+  count: string;
+  /** Whether it can land. */
+  ready: boolean;
 }
 
 /** A change set a tool has ready (`Outcome.send`). */
@@ -1049,6 +1092,8 @@ export function barNote(t: ToolState | null | undefined): string {
   if (t?.typing_text) return 'Enter: next line · Enter again or Esc: done';
   // Copy's copies placed wait for Enter, Done or Esc, which land them all (#66).
   if (t?.tool === 'copy' && t.placed > 0) return 'Enter or Esc: the copies land · Ctrl+Z: one back';
+  // An array's copies are only shown until Enter or Array lands them (#66).
+  if (t?.array) return 'Enter: it lands · Esc: nothing is sent';
   if (t?.tool) return 'Enter or right-click: done · Esc: end · F8: Ortho';
   return 'F3: snaps · F8: Ortho · Tab: the next snap here';
 }
@@ -1078,4 +1123,30 @@ export function letGoOnOptionPress(active: { tag: string; option: boolean; comma
 export function barWarning(s: { tool?: ToolState | null; previewing?: boolean }): TemplateEdit | null {
   if (s.previewing || !s.tool?.tool) return null;
   return s.tool.warning ?? null;
+}
+
+/**
+ * The keyboard a field of Array's panel brings up on a phone: the number
+ * pad for a whole number, which is never below 0; the full keyboard for a
+ * spacing or an angle, which may be, since a phone's decimal pad, as an
+ * iPhone's, has no minus sign.
+ */
+export function arrayInputMode(field: Pick<ArrayField, 'whole'>): 'numeric' | 'text' {
+  return field.whole ? 'numeric' : 'text';
+}
+
+/**
+ * Whether the view comes to Array's objects and their copies, whose box on
+ * the screen is `box`, in `room`, the drawing's free part, beside its
+ * panel on a laptop and above it on a phone: always when any of it is out
+ * of sight; and as the panel opens, on a phone, whose panel covers the
+ * drawing's foot, and on a laptop when it is too small to read, under 300
+ * by 240 pixels, so a small array is shown close (#66).
+ */
+export function arrayFraming(box: Box, room: Box, opening: boolean, touch: boolean): boolean {
+  const inView = box[0] >= room[0] + 10 && box[2] <= room[2] && box[1] >= room[1] + 10 && box[3] <= room[3];
+  if (!inView) return true;
+  if (!opening) return false;
+  if (touch) return true;
+  return box[2] - box[0] < 300 && box[3] - box[1] < 240;
 }

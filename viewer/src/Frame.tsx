@@ -71,6 +71,17 @@ const ICONS: Record<ToolKey, ReactNode> = {
       <rect className="pt" x="1" y="19" width="5" height="5" />
     </>
   ),
+  array: (
+    <>
+      <rect x="3.5" y="3.5" width="6" height="6" />
+      <rect x="11" y="3.5" width="6" height="6" strokeDasharray="2 1.5" />
+      <rect x="18.5" y="3.5" width="6" height="6" strokeDasharray="2 1.5" />
+      <rect x="3.5" y="11" width="6" height="6" strokeDasharray="2 1.5" />
+      <rect x="11" y="11" width="6" height="6" strokeDasharray="2 1.5" />
+      <rect x="18.5" y="11" width="6" height="6" strokeDasharray="2 1.5" />
+      <path d="M3 22h22M3 20v4M25 20v4" />
+    </>
+  ),
   erase: <path d="M16 4l8 8-11 11H8l-4-4zM10 10l8 8M4 25h20" />,
 };
 
@@ -262,6 +273,8 @@ export interface CommandBarProps {
   onTyped?(text: string): void;
   /** Ctrl+Z in the field with nothing typed, when it takes something back: Copy's last copy placed (#66). */
   onUndoKey?(): void;
+  /** Array's panel, which a phone docks above the warning and the bar (#66); a laptop's sits beside the copies. */
+  panel?: ReactNode;
 }
 
 /** The command bar under the drawing: it prompts, with options to click, and takes what is typed. */
@@ -287,6 +300,7 @@ export function CommandBar({
   spaceEnters,
   onTyped,
   onUndoKey,
+  panel = null,
 }: CommandBarProps) {
   return (
     <div className="cmd" data-ui>
@@ -295,6 +309,7 @@ export function CommandBar({
           <div key={`${i}${line}`}>{line}</div>
         ))}
       </div>
+      {touch && panel}
       {warning && (
         <div className="cmdwarn" role="alert" data-warning>
           <span aria-hidden="true">&#9888;</span>

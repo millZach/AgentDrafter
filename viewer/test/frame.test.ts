@@ -55,6 +55,9 @@ import {
   toolOf,
   writeCurrentLayer,
   type ToolState,
+  type ArrayPanelState,
+  arrayFraming,
+  arrayInputMode,
   toggledWords,
   toggleFor,
   typeWords,
@@ -89,16 +92,16 @@ const toolState = (over: Partial<ToolState>): ToolState => ({
   ...over,
 });
 
-test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move, Copy and Erase in Modify, with AutoCAD aliases', () => {
+test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move, Copy, Array and Erase in Modify, with AutoCAD aliases', () => {
   assert.deepEqual(
     PANELS.map((p) => [p.title, p.tools.map((t) => `${t.label} ${t.command} ${t.alias}${t.also ? ` ${t.also}` : ''}`)]),
     [
       ['Draw', ['Line LINE L', 'Circle CIRCLE C', 'Rectangle RECTANG REC', 'Text TEXT T']],
-      ['Modify', ['Move MOVE M', 'Copy COPY CO CP', 'Erase ERASE E']],
+      ['Modify', ['Move MOVE M', 'Copy COPY CO CP', 'Array ARRAY AR', 'Erase ERASE E']],
     ],
   );
-  // No Array tool in this build (#66): it comes later, with its own prototype.
-  assert.ok(!PANELS.flatMap((p) => p.tools).some((t) => /array/i.test(t.label)));
+  // Array's tip says Esc sends nothing, unlike Copy's (#66).
+  assert.match(toolOf('array')?.tip ?? '', /Esc sends nothing/);
   for (const tool of PANELS.flatMap((p) => p.tools)) assert.ok(tool.tip.length > 20, `${tool.label} has a tip in plain words`);
 });
 
@@ -284,19 +287,19 @@ test('while a preview is shown the command bar says nothing has landed and how t
   assert.equal(words(promptFor({ ...none, previewing: true, touch: true }).parts), 'Nothing has landed. ◀ ▶ or the tabs show each sheet');
 });
 
-test('the command bar prompts for a command or a selection, and offers Move, Copy, Erase and Clear on what is selected', () => {
+test('the command bar prompts for a command or a selection, and offers Move, Copy, Array, Erase and Clear on what is selected', () => {
   assert.equal(words(promptFor(none).parts), 'Type a command, such as L for Line, or select an object, or click a snap to read its point');
   assert.equal(words(promptFor({ ...none, touch: true }).parts), 'Pick a tool in Tools, or tap an object to see it; touch and hold to read a point');
   const selected = promptFor({ ...none, selected: { id: 'DP-LD-101/device', name: 'FT-101', type: 'insert', block: 'TRANSMITTER' } });
   assert.equal(selected.command, null);
-  assert.equal(words(selected.parts), 'FT-101 selected [ <Move> <Copy> <Erase> <Clear> ]');
+  assert.equal(words(selected.parts), 'FT-101 selected [ <Move> <Copy> <Array> <Erase> <Clear> ]');
   assert.deepEqual(
     selected.parts.filter((p) => 'act' in p).map((p) => ('act' in p ? p.act : '')),
-    ['move', 'copy-objects', 'erase', 'clear'],
+    ['move', 'copy-objects', 'array-objects', 'erase', 'clear'],
   );
-  // A phone gives the name alone, so the four options stay on one line.
+  // A phone gives the name alone, so the options stay together.
   const tapped = promptFor({ ...none, touch: true, selected: { id: 'DP-LD-101/device', name: 'FT-101', type: 'insert', block: 'TRANSMITTER' } });
-  assert.equal(words(tapped.parts), 'FT-101 [ <Move> <Copy> <Erase> <Clear> ]');
+  assert.equal(words(tapped.parts), 'FT-101 [ <Move> <Copy> <Array> <Erase> <Clear> ]');
 });
 
 test('a running tool prompts in the renderer’s words, on its layer, with its options to click and what went wrong', () => {
@@ -620,6 +623,61 @@ test('the command bar\'s note says what the keys do: with copies placed, Enter o
   // Copy before a copy is placed ends as any tool does.
   assert.equal(barNote(toolState({ tool: 'copy', takes_points: true, points: [[1, 1]] })), 'Enter or right-click: done · Esc: end · F8: Ortho');
   assert.equal(barNote(toolState({ tool: 'copy', takes_points: true, points: [[1, 1]], placed: 2 })), 'Enter or Esc: the copies land · Ctrl+Z: one back');
+  // Array picking its objects ends as any tool does; its panel up, Esc sends nothing (#66).
+  assert.equal(barNote(toolState({ tool: 'array', selecting: true })), 'Enter or right-click: done · Esc: end · F8: Ortho');
+  assert.equal(barNote(toolState({ tool: 'array', array: arrayPanel({}) })), 'Enter: it lands · Esc: nothing is sent');
+});
+
+const arrayPanel = (over: Partial<ArrayPanelState>): ArrayPanelState => ({
+  kind: 'rectangular',
+  spacing: 'between',
+  of: 'of terminal-2',
+  fields: [
+    { key: 'rows', label: 'Rows', hint: null, value: '3', whole: true },
+    { key: 'columns', label: 'Columns', hint: null, value: '2', whole: true },
+    { key: 'row_spacing', label: 'Row spacing, in', hint: '+ up, − down', value: '-0.5', whole: false },
+    { key: 'column_spacing', label: 'Column spacing, in', hint: '+ right, − left', value: '1', whole: false },
+  ],
+  center: null,
+  picking: false,
+  rotate: true,
+  count: '3 × 2: 5 copies',
+  ready: true,
+  ...over,
+});
+
+test('Array\'s panel: a whole number brings up the number pad, a spacing or an angle, which may be below 0, the full keyboard', () => {
+  const panel = arrayPanel({});
+  assert.deepEqual(
+    panel.fields.map((f) => arrayInputMode(f)),
+    ['numeric', 'numeric', 'text', 'text'],
+  );
+  assert.equal(arrayInputMode({ whole: false }), 'text');
+});
+
+test('Array\'s panel: the view comes to the copies when any is out of sight, and as it opens on a phone or on a small array', () => {
+  const room: [number, number, number, number] = [0, 0, 1000, 700];
+  // In sight and readable: left alone, opening or not.
+  assert.equal(arrayFraming([200, 200, 600, 500], room, true, false), false);
+  assert.equal(arrayFraming([200, 200, 600, 500], room, false, false), false);
+  // A small array, as the panel opens on a laptop, is shown close; once open, left where it is.
+  assert.equal(arrayFraming([200, 200, 260, 240], room, true, false), true);
+  assert.equal(arrayFraming([200, 200, 260, 240], room, false, false), false);
+  // On a phone, opening always comes to it: the panel covers the drawing's foot.
+  assert.equal(arrayFraming([200, 200, 600, 500], room, true, true), true);
+  // Out of sight on any side, or under the panel: come to it.
+  assert.equal(arrayFraming([900, 200, 1100, 500], room, false, false), true);
+  assert.equal(arrayFraming([200, 500, 600, 760], room, false, true), true);
+  assert.equal(arrayFraming([-20, 200, 300, 500], room, false, false), true);
+  assert.equal(arrayFraming([200, 4, 300, 500], room, false, false), true);
+});
+
+test('Array\'s panel goes beside its copies, to their right, or their left where there is no room', () => {
+  const room: [number, number, number, number] = [0, 0, 1100, 760];
+  // Right of the box, level with its top, 28 pixels clear.
+  assert.deepEqual(placeBeside([300, 320, 580, 580], { width: 330, height: 220 }, room, 28), [608, 320]);
+  // No room at the right: at the left.
+  assert.deepEqual(placeBeside([700, 320, 900, 580], { width: 330, height: 220 }, room, 28), [342, 320]);
 });
 
 test('Ctrl+Z, or ⌘Z, is the undo key, in either case, but not with Shift or Alt', () => {

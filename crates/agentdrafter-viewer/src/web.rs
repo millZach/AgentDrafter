@@ -1237,9 +1237,10 @@ impl Viewer {
     /// right, top]` in drawing units, for its panel to go beside and the
     /// view to keep in sight; empty while no array is set up.
     pub fn tool_array_extent(&self) -> Vec<f64> {
-        let aim = self.pointer().map(|p| self.aim_at(p));
+        // Not the copies following the cursor while a polar array's centre
+        // is picked: the panel stays put as the cursor moves.
         self.tools
-            .array_extent(aim.as_ref())
+            .array_extent(None)
             .map(|b| b.to_vec())
             .unwrap_or_default()
     }
