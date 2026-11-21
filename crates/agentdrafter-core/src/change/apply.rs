@@ -4240,7 +4240,8 @@ fn apply_copy(
                     op_err(
                         ErrorCode::BadValue,
                         format!(
-                            "`{}`: {why}; its copies turn as they go round, so give {key} to                              place them unturned",
+                            "`{}`: {why}; its copies turn as they go round, so give {key} to \
+                             place them unturned",
                             f.id,
                         ),
                         field,

@@ -185,6 +185,12 @@ pub struct Insert {
     /// negative X scale (#242).
     #[serde(default, skip_serializing_if = "is_false")]
     pub mirrored: bool,
+    /// Whether its attributes read forwards, left to right or upwards,
+    /// however it is turned, as a mirror leaves them: a mirrored insert's
+    /// always do, and one mirrored back keeps them so, as AutoCAD's MIRRTEXT
+    /// 0 does on every mirror.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub readable_attributes: bool,
     /// A value for each of the block's attributes, in the order the block
     /// defines them.
     #[serde(default)]
@@ -228,7 +234,9 @@ pub struct BlockLibrary {
 /// On a mirrored insert the attribute sits where the mirror puts it but
 /// still reads forwards, as AutoCAD's MIRRTEXT 0 leaves it: its direction is
 /// the mirrored one, or that turned a half turn, whichever reads left to
-/// right or upwards ([`readable`]), and its justification is its own.
+/// right or upwards ([`readable`]), and its justification is its own. On an
+/// insert mirrored back, with [`Insert::readable_attributes`], it reads
+/// along its turned direction, or that turned a half turn, by the same rule.
 pub fn attribute_text(
     insert: &Insert,
     block: &Block,
@@ -248,6 +256,8 @@ pub fn attribute_text(
         width_factor: definition.width_factor,
         rotation: if insert.mirrored {
             readable(insert.rotation + 180.0 - definition.rotation)
+        } else if insert.readable_attributes {
+            readable(definition.rotation + insert.rotation)
         } else {
             normalize_degrees(definition.rotation + insert.rotation)
         },
@@ -418,6 +428,7 @@ mod tests {
             scale,
             rotation,
             mirrored: false,
+            readable_attributes: false,
             attributes: Vec::new(),
             name: None,
             layer: "symbols".into(),
@@ -479,6 +490,28 @@ mod tests {
         definition.rotation = 30.0;
         let text = attribute_text(&mirrored, &block(base), &definition, "A-1");
         assert_eq!(text.rotation, 330.0);
+    }
+
+    #[test]
+    fn an_insert_mirrored_back_keeps_its_attributes_reading_forwards() {
+        let base = Point3::new(0.0, 0.0, 0.0);
+        let mut definition = definition(Point3::new(5.0, 0.0, 0.0), "tags");
+        definition.rotation = 0.0;
+        // Mirrored at 120, the attribute reads at 300.
+        let mut once = insert(120.0, 1.0);
+        once.mirrored = true;
+        let text = attribute_text(&once, &block(base), &definition, "A-1");
+        assert_eq!(text.rotation, 300.0);
+        // Mirrored back across a line up the sheet, the insert is turned 240
+        // and no longer mirrored: its attribute reads at 60, not 240.
+        let mut twice = insert(240.0, 1.0);
+        twice.readable_attributes = true;
+        let text = attribute_text(&twice, &block(base), &definition, "A-1");
+        assert!((text.rotation - 60.0).abs() < 1e-9, "{}", text.rotation);
+        // Without the key, an insert turned 240 turns its attribute with it.
+        twice.readable_attributes = false;
+        let text = attribute_text(&twice, &block(base), &definition, "A-1");
+        assert_eq!(text.rotation, 240.0);
     }
 
     #[test]

@@ -458,6 +458,32 @@ impl At<'_> {
                             changed.push("mirrored".to_owned());
                         }
                     }
+                    // Its attributes read forwards after every mirror, as
+                    // MIRRTEXT 0 leaves them: a mirrored insert's always do,
+                    // and one mirrored back keeps them so with
+                    // `readable_attributes`.
+                    let now_mirrored = !matches!(was, Some((_, true)));
+                    let readable = keys.iter().position(|e| e.key == "readable_attributes");
+                    match (now_mirrored, readable) {
+                        (true, Some(i)) => {
+                            keys.remove(i);
+                            changed.push("readable_attributes".to_owned());
+                        }
+                        (false, Some(i)) => {
+                            if !matches!(&keys[i].value.kind, Kind::Scalar(s) if s == "true") {
+                                keys[i].value = Node::scalar("true".to_owned());
+                                changed.push("readable_attributes".to_owned());
+                            }
+                        }
+                        (false, None) => {
+                            keys.push(new_entry(
+                                "readable_attributes",
+                                Node::scalar("true".to_owned()),
+                            ));
+                            changed.push("readable_attributes".to_owned());
+                        }
+                        (true, None) => {}
+                    }
                 }
             }
             "hatch" if !solid => {
@@ -1247,8 +1273,8 @@ mod tests {
             // A hatch's pattern keeps its direction, as MIRRHATCH 0 keeps
             // it; its origin goes with its boundary.
             (
-                "hatch: {pattern: GRID, angle: 30, boundary: [{edges: [{line: {from: [5, 0, 0], to: [7, 0, 0]}}, {arc: {center: [6, 0, 0], radius: 1, start_angle: 0, end_angle: 90}}]}]}",
-                "hatch: {pattern: GRID, angle: 30, boundary: [{edges: [{line: {from: [15, 0, 0], to: [13, 0, 0]}}, {arc: {center: [14, 0, 0], radius: 1, start_angle: 90, end_angle: 180}}]}], origin: [20, 0, 0]}",
+                "hatch: {pattern: GRID, angle: 30, boundary: [{edges: [{line: {from: [5, 0, 0], to: [7, 0, 0]}}, {arc: {center: [6, 0, 0], radius: 1, start_angle: 0, end_angle: 180}}]}]}",
+                "hatch: {pattern: GRID, angle: 30, boundary: [{edges: [{line: {from: [15, 0, 0], to: [13, 0, 0]}}, {arc: {center: [14, 0, 0], radius: 1, start_angle: 0, end_angle: 180}}]}], origin: [20, 0, 0]}",
             ),
             (
                 "text: {contents: A, position: [1, 2, 0], height: 2.5, rotation: 30, justify: right}",
@@ -1274,10 +1300,21 @@ mod tests {
                 "insert: {block: B, position: [1, 2, 0], rotation: 30, scale: 1.5}",
                 "insert: {block: B, position: [19, 2, 0], rotation: 330, scale: 1.5, mirrored: true}",
             ),
-            // Mirrored again, it is not mirrored.
+            // Mirrored again, it is not mirrored, and its attributes keep
+            // reading forwards.
             (
                 "insert: {block: B, position: [1, 2, 0], rotation: 330, mirrored: true}",
-                "insert: {block: B, position: [19, 2, 0], rotation: 30}",
+                "insert: {block: B, position: [19, 2, 0], rotation: 30, readable_attributes: true}",
+            ),
+            (
+                "insert: {block: B, position: [1, 2, 0], rotation: 120, mirrored: true}",
+                "insert: {block: B, position: [19, 2, 0], rotation: 240, readable_attributes: true}",
+            ),
+            // And mirrored a third time, it is mirrored, which reads them
+            // forwards of itself.
+            (
+                "insert: {block: B, position: [1, 2, 0], rotation: 240, readable_attributes: true}",
+                "insert: {block: B, position: [19, 2, 0], rotation: 120, mirrored: true}",
             ),
             (
                 "mleader: {leaders: [[[1, 0, 0], [5, 5, 0]]], content: {text: T}}",
@@ -1301,6 +1338,22 @@ mod tests {
             ),
         ] {
             lands(object, mirrored(), wanted);
+            // What it lands as is a sheet's object, as the sheet's reader
+            // reads it: an insert needs its block's library, so it is read
+            // in the operations' tests.
+            if !wanted.starts_with("insert:") {
+                let sheet = format!(
+                    "units: mm
+hatch_patterns:
+  GRID: {{lines: [{{delta: [0, 1]}}]}}
+objects:
+  - {wanted}
+"
+                );
+                if let Err(e) = crate::description::parse_sheet_description(&sheet) {
+                    panic!("{wanted} does not read back: {}", e.message);
+                }
+            }
         }
         // Across a line that runs across the sheet, an insert turns a half
         // turn as well as mirroring, as AutoCAD's MIRROR leaves it.

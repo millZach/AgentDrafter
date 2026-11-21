@@ -341,7 +341,7 @@ The line a mirror reflects objects across, given by two points. The mirror is up
 _Avoid_: axis, text mirror (a readable rendering of a DWG)
 
 **Mirrored insert**:
-An insert whose block's X axis is reversed before it is scaled and turned, as AutoCAD's MIRROR leaves one: `mirrored: true`, which a DWG keeps as a negative X scale. What its block draws is mirrored; its attributes read forwards.
+An insert whose block's X axis is reversed before it is scaled and turned, as AutoCAD's MIRROR leaves one: `mirrored: true`, which a DWG keeps as a negative X scale. What its block draws is mirrored; its attributes read forwards. Mirrored back, it is no longer mirrored, and `readable_attributes: true` keeps its attributes reading forwards.
 _Avoid_: negative scale, flipped block
 
 **Change set**:

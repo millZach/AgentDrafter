@@ -170,6 +170,7 @@ fn an_insert_reads_every_key_and_fills_in_attributes_it_leaves_out() {
             scale: 2.0,
             rotation: 270.0,
             mirrored: false,
+            readable_attributes: false,
             attributes: vec![
                 Attribute {
                     tag: "TAG".into(),
@@ -339,7 +340,7 @@ fn an_inserts_values_are_checked() {
             "insert: {block: MARKER, position: [0, 0, 0], colour: red}",
             ErrorCode::UnknownKey,
             "objects[0].insert.colour",
-            &["an insert takes block, position, scale, rotation, mirrored, attributes, layer, color, linetype, lineweight, linetype_scale, id, name"],
+            &["an insert takes block, position, scale, rotation, mirrored, readable_attributes, attributes, layer, color, linetype, lineweight, linetype_scale, id, name"],
         ),
         (
             "insert: {position: [0, 0, 0]}",
@@ -386,6 +387,21 @@ fn an_insert_may_be_mirrored() {
         "insert: {block: MARKER, position: [0, 0, 0], mirrored: yes}",
     ));
     assert_eq!(e.field.as_deref(), Some("objects[0].insert.mirrored"));
+    // Mirrored back, its attributes may keep reading forwards.
+    let sheet = with_library(&one_object(
+        "insert: {block: MARKER, position: [0, 0, 0], rotation: 240, readable_attributes: true}",
+    ));
+    let Object::Insert(insert) = &sheet.objects[0] else {
+        panic!("an insert")
+    };
+    assert!(insert.readable_attributes && !insert.mirrored);
+    let e = error_with_library(&one_object(
+        "insert: {block: MARKER, position: [0, 0, 0], readable_attributes: 1}",
+    ));
+    assert_eq!(
+        e.field.as_deref(),
+        Some("objects[0].insert.readable_attributes")
+    );
 }
 
 #[test]

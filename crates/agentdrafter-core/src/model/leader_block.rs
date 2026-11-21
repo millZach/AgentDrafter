@@ -901,6 +901,7 @@ mod tests {
             scale: 1.0,
             rotation: 0.0,
             mirrored: false,
+            readable_attributes: false,
             attributes: Vec::new(),
             name: None,
             layer: "0".into(),

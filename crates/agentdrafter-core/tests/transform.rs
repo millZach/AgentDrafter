@@ -370,6 +370,45 @@ fn a_mirrored_insert_is_built_with_a_negative_x_scale_and_reads_back() {
 }
 
 #[test]
+fn an_insert_mirrored_twice_keeps_its_attributes_reading_forwards() {
+    let set = strip_set("mirror-twice");
+    // Turned to 120, then mirrored across a line up the sheet twice: 240
+    // mirrored, then 120 and not mirrored, where its attribute, defined
+    // across the block, would read backwards at 120 were it turned with it.
+    let mirror = json!({"op": "mirror", "target": {"id": "ROT-001/lug"},
+        "first_point": [50, 0, 0], "second_point": [50, 10, 0], "erase_source": true});
+    lands(
+        &set,
+        json!([{"op": "rotate", "target": {"id": "ROT-001/lug"},
+            "base_point": [10, 60, 0], "angle": 90}, mirror.clone()]),
+    );
+    let once = insert(&recorded(&set), "ROT-001/lug");
+    assert!(once.mirrored && (once.rotation - 240.0).abs() < 1e-9, "{once:?}");
+    let report = lands(&set, json!([mirror]));
+    let twice = insert(&recorded(&set), "ROT-001/lug");
+    assert!(!twice.mirrored && twice.readable_attributes, "{twice:?}");
+    assert!((twice.rotation - 120.0).abs() < 1e-9, "{twice:?}");
+    assert_eq!(xyz(twice.position), [10.0, 60.0, 0.0]);
+    // Its DWG holds the attribute reading forwards, at 300, and reads back so.
+    let sheet = report.sheets.iter().find(|s| s.sheet == "ROT-001").unwrap();
+    let dwg = &sheet.result.as_ref().unwrap().dwg;
+    let read = read_dwg(Path::new(dwg)).unwrap();
+    let lug = read
+        .objects
+        .iter()
+        .find_map(|o| match o {
+            Object::Insert(i) if i.attributes[0].value == "7" => Some(i),
+            _ => None,
+        })
+        .expect("the insert reads back");
+    assert!(!lug.mirrored && lug.readable_attributes, "{lug:?}");
+    let term = read.blocks.iter().find(|b| b.name == "TERM").unwrap();
+    let definition = term.attribute_definitions().next().unwrap();
+    let text = agentdrafter_core::attribute_text(lug, term, definition, "7");
+    assert!((text.rotation - 300.0).abs() < 1e-9, "{}", text.rotation);
+}
+
+#[test]
 fn a_dry_run_writes_nothing_and_undo_puts_the_set_back_byte_for_byte() {
     let set = strip_set("dry-run-undo");
     let before = snapshot::snapshot(&set);

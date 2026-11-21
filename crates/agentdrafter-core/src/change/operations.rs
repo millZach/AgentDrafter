@@ -719,7 +719,8 @@ fn does(spec: &Spec) -> String {
                          it reads along its mirrored direction, or that turned a half turn, \
                          whichever reads left to right or upwards, with its own justification; \
                          an insert's attributes read forwards too, while the insert itself is \
-                         mirrored, mirrored: true, which a DWG keeps as a negative X scale. A \
+                         mirrored, mirrored: true, which a DWG keeps as a negative X scale, and \
+                         one mirrored back keeps them so with readable_attributes: true. A \
                          hatch's pattern keeps its direction, as AutoCAD's MIRRHATCH 0 keeps it. \
                          A line across or up the sheet, or at 45 degrees, mirrors exactly. A \
                          table is mirrored only across a line across or up the sheet, and a \

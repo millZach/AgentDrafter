@@ -163,7 +163,17 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                     "description": "Degrees anticlockwise from the X axis. Without it, 0.",
                 },
                 "mirrored": {
-                    "description": "Whether the block is mirrored, its X axis reversed before                                     it is turned, as AutoCAD's MIRROR leaves an insert, which a                                     DWG keeps as a negative X scale: true or false. Its                                     attributes still read forwards. Without it, false.",
+                    "description": "Whether the block is mirrored, its X axis reversed before \
+                                    it is turned, as AutoCAD's MIRROR leaves an insert, which a \
+                                    DWG keeps as a negative X scale: true or false. Its \
+                                    attributes still read forwards. Without it, false.",
+                    "type": "boolean",
+                },
+                "readable_attributes": {
+                    "description": "Whether its attributes read forwards, left to right or \
+                                    upwards, however it is turned, as a mirror leaves them: true \
+                                    or false. A mirrored insert's always do; one mirrored back \
+                                    keeps them so. Without it, false: they turn with it.",
                     "type": "boolean",
                 },
                 "attributes": {

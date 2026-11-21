@@ -1543,6 +1543,9 @@ fn object_value(object: &Object, names: &Names) -> Value {
             if insert.mirrored {
                 put("mirrored", json!(true));
             }
+            if insert.readable_attributes {
+                put("readable_attributes", json!(true));
+            }
             // A tag the block defines more than once takes its values as a
             // list, in the block's order.
             let mut values: Vec<(String, Vec<String>)> = Vec::new();
