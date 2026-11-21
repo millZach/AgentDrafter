@@ -256,11 +256,22 @@ impl RecordFile {
         list: ObjectList,
         index: usize,
         t: &Transform,
+        units: Unit,
     ) -> Option<String> {
         let item = self.items(list)?.get(index)?;
         let (kind, keys) = object_parts(item);
         let kind = kind?;
         let what = t.done();
+        if let (true, "mleader" | "leader", Some(keys)) = (t.mirrors(), kind, keys) {
+            let at = At {
+                t,
+                units,
+                resolved: &Resolved::default(),
+            };
+            if let Some(why) = at.landing_mirrors(kind, keys) {
+                return Some(why);
+            }
+        }
         match (kind, t.how) {
             ("viewport", _) => Some(format!(
                 "a viewport is a window on the paper and is not {what}; move it, or change its \
@@ -328,7 +339,7 @@ impl RecordFile {
         units: Unit,
         operation: usize,
     ) -> Result<(), Error> {
-        if let Some(why) = self.refuses_transform(list, index, t) {
+        if let Some(why) = self.refuses_transform(list, index, t, units) {
             return Err(Error::new(ErrorCode::BadValue, why).at_field(list.place(index)));
         }
         self.state(list);
@@ -695,6 +706,70 @@ impl At<'_> {
                 .to_vec(),
         ));
         true
+    }
+
+    /// Refuses a mirror that would leave a multileader's landing, or an
+    /// older leader's hook and annotation, on the other side from its
+    /// mirror image. The side is not written: it follows the last segment
+    /// of a multileader's first leader line, or of an older leader's line,
+    /// to the right when that runs right or
+    /// straight up or down and to the left when it runs left. Mirrored, a
+    /// landing running one way runs the other way across the sheet, or the
+    /// same way across a line that runs nearer across it; the leader's
+    /// mirrored last segment must say so. Across a line at 45 degrees the
+    /// landing's mirror image runs straight up or down, which no landing
+    /// does, so it is laid out again by the usual rule, as a turn's is. An
+    /// older leader with no annotation draws neither hook nor text, so
+    /// either side will do.
+    fn landing_mirrors(&self, kind: &str, keys: &[Entry]) -> Option<String> {
+        let across = self.t.m[0][0];
+        if across == 0.0 {
+            return None;
+        }
+        let points_key = if kind == "mleader" { "leaders" } else { "points" };
+        let has = |key: &str| {
+            keys.iter()
+                .any(|e| e.key == key && !e.value.is_bare_null())
+        };
+        if kind == "leader" && !has("annotation") {
+            return None;
+        }
+        let node = &keys.iter().find(|e| e.key == points_key)?.value;
+        let points = match (kind, &node.kind) {
+            ("mleader", Kind::Sequence(lines)) => match &lines.first()?.kind {
+                Kind::Sequence(points) => points,
+                _ => return None,
+            },
+            (_, Kind::Sequence(points)) => points,
+            _ => return None,
+        };
+        let [.., a, b] = points.as_slice() else {
+            return None;
+        };
+        // A point it cannot read is the transform's to report.
+        let (a, b) = (self.read_point(a, "").ok()?, self.read_point(b, "").ok()?);
+        let side = |dx: f64| if dx < 0.0 { -1.0 } else { 1.0 };
+        let was = side(b[0] - a[0]);
+        let (a2, b2) = (self.t.point(a), self.t.point(b));
+        let now = side(b2[0] - a2[0]);
+        let wanted = side(across * was);
+        if now == wanted {
+            return None;
+        }
+        let words = |s: f64| if s < 0.0 { "left" } else { "right" };
+        let what = if kind == "mleader" {
+            "a multileader's landing runs right when its first leader line's last segment runs \
+             right or straight up or down, and left when it runs left"
+        } else {
+            "an older leader's hook and annotation sit to the right when its last segment runs \
+             right or straight up or down, and to the left when it runs left"
+        };
+        Some(format!(
+            "{what}; mirrored, this one's would go to the {}, where its mirror image goes to the \
+             {}, so it is not mirrored; give its last segment a run to one side",
+            words(now),
+            words(wanted)
+        ))
     }
 
     /// Reads a point `[x, y, z]` in the declared unit.
@@ -1635,6 +1710,61 @@ objects:
             &Resolved::default()
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_mirrored_leaders_landing_goes_to_the_mirrored_side_or_it_is_refused() {
+        let up = Transform::mirror([0.0; 3], [0.0, 1.0, 0.0]).unwrap();
+        // A tag's leader whose last segment runs right lands running left,
+        // its landing and text on the left, as its mirror image.
+        let tag = "mleader: {leaders: [[[0, 0, 0], [10, 10, 0], [14, 10, 0]]], content: {text: T}, landing: 8}";
+        let landed = transformed(tag, up, &Resolved::default()).unwrap();
+        let sheet = format!("units: mm
+objects:
+  - {landed}
+");
+        let sheet = crate::description::parse_sheet_description(&sheet).unwrap();
+        let crate::model::Object::MLeader(m) = &sheet.objects[0] else {
+            panic!("a multileader")
+        };
+        assert_eq!(m.side(), -1.0, "{landed}");
+        // One whose last segment runs straight up lands running right,
+        // whatever the mirror: the description cannot hold it running left.
+        for (object, field) in [
+            (
+                "mleader: {leaders: [[[10, 0, 0], [10, 20, 0]]], content: {text: T}, landing: 8}",
+                "objects[0]",
+            ),
+            (
+                "leader: {points: [[10, 0, 0], [10, 20, 0]], annotation: {text: N}}",
+                "objects[0]",
+            ),
+        ] {
+            let e = transformed(object, up, &Resolved::default()).unwrap_err();
+            assert_eq!(e.code, ErrorCode::BadValue, "{object}");
+            assert_eq!(e.field.as_deref(), Some(field), "{object}");
+            assert!(e.message.contains("mirror image goes to the left"), "{}", e.message);
+            // Across the sheet its mirror image runs right too, so it lands.
+            let across = Transform::mirror([0.0; 3], [1.0, 0.0, 0.0]).unwrap();
+            assert!(transformed(object, across, &Resolved::default()).is_ok());
+        }
+        // An older leader with no annotation draws no hook, so it lands.
+        assert!(transformed(
+            "leader: {points: [[10, 0, 0], [10, 20, 0]]}",
+            up,
+            &Resolved::default()
+        )
+        .is_ok());
+        // Across a slanting line that turns its last segment the other way
+        // from its landing's mirror image, it is refused too.
+        let slant = Transform::mirror([0.0; 3], [2.0, 1.0, 0.0]).unwrap();
+        let e = transformed(
+            "mleader: {leaders: [[[0, 0, 0], [1, -2, 0]]], content: {text: T}}",
+            slant,
+            &Resolved::default(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::BadValue);
     }
 
     #[test]

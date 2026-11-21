@@ -370,6 +370,54 @@ fn a_mirrored_insert_is_built_with_a_negative_x_scale_and_reads_back() {
 }
 
 #[test]
+fn a_device_mirrored_with_its_tag_leader_has_its_landing_on_the_mirrored_side() {
+    let set = strip_set("mirror-tag");
+    // The callout's last segment runs right, so its landing does.
+    let Object::MLeader(callout) = &recorded(&set)["ROT-001/callout"] else {
+        panic!("a multileader")
+    };
+    assert_eq!(callout.side(), 1.0);
+    let report = lands(
+        &set,
+        json!([{"op": "mirror", "targets": [{"id": "ROT-001/lug"}, {"id": "ROT-001/callout"}],
+            "first_point": [100, 0, 0], "second_point": [100, 10, 0]}]),
+    );
+    assert_eq!(report.operations[0].copies.len(), 2);
+    let objects = recorded(&set);
+    let Object::MLeader(copy) = &objects["ROT-001/callout-1"] else {
+        panic!("a multileader")
+    };
+    assert_eq!(copy.side(), -1.0, "{copy:?}");
+    assert_eq!(xyz(copy.connection()), [60.0, 105.0, 0.0]);
+    // One whose last segment runs straight up keeps its landing running
+    // right, which the record cannot turn round, so it is refused, at its
+    // target, and nothing changes.
+    let before = snapshot::snapshot(&set);
+    lands(
+        &set,
+        json!([{"op": "add_mleader", "sheet": "ROT-001", "id": "upright",
+            "leaders": [[[150, 80, 0], [150, 100, 0]]], "content": {"text": "TB-2"}}]),
+    );
+    let after_add = snapshot::snapshot(&set);
+    assert_ne!(before, after_add);
+    let reply = send(
+        &set,
+        json!([{"op": "mirror", "target": {"id": "ROT-001/upright"},
+            "first_point": [100, 0, 0], "second_point": [100, 10, 0]}]),
+        false,
+    );
+    assert!(!reply.ok);
+    let e = reply.result.unwrap().operations[0].error.clone().unwrap();
+    assert_eq!(
+        (e.code, e.field.as_deref()),
+        (ErrorCode::BadValue, Some("operations[0].target"))
+    );
+    assert!(e.message.contains("ROT-001/upright"), "{}", e.message);
+    assert!(e.message.contains("landing"), "{}", e.message);
+    assert_eq!(snapshot::snapshot(&set), after_add);
+}
+
+#[test]
 fn an_insert_mirrored_twice_keeps_its_attributes_reading_forwards() {
     let set = strip_set("mirror-twice");
     // Turned to 120, then mirrored across a line up the sheet twice: 240

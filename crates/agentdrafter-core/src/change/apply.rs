@@ -3914,7 +3914,7 @@ fn apply_transform(
     // approximated.
     for (f, key) in &found {
         let why = match at.file(f.file) {
-            Ok(record) => record.refuses_transform(f.list, f.index, &t),
+            Ok(record) => record.refuses_transform(f.list, f.index, &t, units),
             Err(e) => return fail(reach, e),
         };
         if let Some(why) = why {
@@ -4231,7 +4231,7 @@ fn apply_copy(
         let turn = Transform::rotate(turning.about, turning.turn);
         for (f, field) in &found {
             let why = match at.file(f.file) {
-                Ok(record) => record.refuses_transform(f.list, f.index, &turn),
+                Ok(record) => record.refuses_transform(f.list, f.index, &turn, units),
                 Err(e) => return fail(reach, e),
             };
             if let Some(why) = why {
@@ -4257,7 +4257,7 @@ fn apply_copy(
     if let Some((t, _)) = &mirror {
         for (f, field) in &found {
             let why = match at.file(f.file) {
-                Ok(record) => record.refuses_transform(f.list, f.index, t),
+                Ok(record) => record.refuses_transform(f.list, f.index, t, units),
                 Err(e) => return fail(reach, e),
             };
             if let Some(why) = why {
