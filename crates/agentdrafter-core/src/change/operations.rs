@@ -41,6 +41,11 @@ pub(crate) enum Kind {
     SetFrozenLayers,
     Move,
     Delete,
+    /// Copies objects by one offset or several: AutoCAD's COPY.
+    Copy,
+    /// Copies objects in rows and columns, round a centre or along a path:
+    /// AutoCAD's ARRAY, as plain copies.
+    Array,
     SetAttribute,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
@@ -198,8 +203,65 @@ pub(crate) struct Spec {
     pub kind: Kind,
 }
 
+impl Spec {
+    /// The AutoCAD commands besides its alias that name it: ARRAYRECT,
+    /// ARRAYPOLAR and ARRAYPATH for `array`, each of which gives the array
+    /// its kind.
+    pub(crate) fn other_aliases(&self) -> &'static [&'static str] {
+        match self.kind {
+            Kind::Array => &ARRAY_ALIASES,
+            _ => &[],
+        }
+    }
+
+    /// Whether `name`, as an operation is sent, names it: its name, or any
+    /// of its aliases in any case.
+    fn named(&self, name: &str) -> bool {
+        self.name == name
+            || (!self.alias.is_empty() && self.alias.eq_ignore_ascii_case(name))
+            || self
+                .other_aliases()
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(name))
+    }
+
+    /// Its name with its aliases, as an error lists the operations, such as
+    /// `move (MOVE)`.
+    fn listed(&self) -> String {
+        let aliases: Vec<&str> = std::iter::once(self.alias)
+            .filter(|a| !a.is_empty())
+            .chain(self.other_aliases().iter().copied())
+            .collect();
+        if aliases.is_empty() {
+            self.name.to_owned()
+        } else {
+            format!("{} ({})", self.name, aliases.join(", "))
+        }
+    }
+}
+
+/// The aliases of `array` besides ARRAY, each with the kind of array it
+/// makes.
+const ARRAY_ALIASES: [&str; 3] = ["ARRAYRECT", "ARRAYPOLAR", "ARRAYPATH"];
+
+/// The kinds of array, as `kind` names them, in the order of
+/// [`ARRAY_ALIASES`].
+pub(crate) const ARRAY_KINDS: [&str; 3] = ["rectangular", "polar", "path"];
+
+/// The keys each kind of array takes besides `target`, `targets` and
+/// `kind`, in the order of [`ARRAY_KINDS`].
+const ARRAY_KEYS: [&[&str]; 3] = [
+    &["rows", "columns", "row_spacing", "column_spacing"],
+    &["center", "count", "angle", "rotate", "base_point"],
+    &["path", "count", "spacing", "align"],
+];
+
+/// The most copies one copy or array makes: its places times the objects
+/// it copies.
+pub(crate) const MOST_COPIES: usize = 10_000;
+
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 59] = [
+pub(crate) const SPECS: [Spec; 61] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -266,6 +328,16 @@ pub(crate) const SPECS: [Spec; 59] = [
         name: "delete",
         alias: "ERASE",
         kind: Kind::Delete,
+    },
+    Spec {
+        name: "copy",
+        alias: "COPY",
+        kind: Kind::Copy,
+    },
+    Spec {
+        name: "array",
+        alias: "ARRAY",
+        kind: Kind::Array,
     },
     Spec {
         name: "set_attribute",
@@ -396,6 +468,10 @@ pub struct OperationInfo {
     pub name: String,
     /// The AutoCAD command it does the work of, which names it too.
     pub alias: String,
+    /// The other AutoCAD commands that name it, such as ARRAYRECT for
+    /// `array`; none for most.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub other_aliases: Vec<String>,
     pub does: String,
     /// A JSON Schema (draft 2020-12) of the operation as a change set holds
     /// it, with the definitions it refers to.
@@ -422,6 +498,11 @@ pub fn operations() -> OperationList {
             .map(|spec| OperationInfo {
                 name: spec.name.to_owned(),
                 alias: spec.alias.to_owned(),
+                other_aliases: spec
+                    .other_aliases()
+                    .iter()
+                    .map(|a| (*a).to_owned())
+                    .collect(),
                 does: does(spec),
                 schema: with_definitions(operation_schema(spec, &defs), &defs),
             })
@@ -532,6 +613,39 @@ fn does(spec: &Spec) -> String {
         Kind::Delete => "Deletes an object. Each later object of its file that has no id is \
                          given its place as its id, such as objects[3], so that its ID does not \
                          move. AutoCAD's ERASE."
+            .to_owned(),
+        Kind::Copy => "Copies objects, target, one by its ID or its name, or targets, several \
+                       of one sheet: once by by, [dx, dy, dz], to each of offsets, a list of \
+                       them, or from a base point, from, to a second point, to, each a point or \
+                       a snapped point, as AutoCAD's COPY takes them. Each copy is an ordinary \
+                       object with an ID of its own, its source's id and the first number free, \
+                       such as term-1, or its type's, such as line-1, for a source with no id; \
+                       it keeps every key of its source, an insert's attribute values among \
+                       them, but its name, which is given once on a sheet. A copy is written \
+                       where its source is: a template's object's in the template, so on every \
+                       sheet built from it, all or nothing, and a row's own object's in the \
+                       row. The reply lists each copy under copies, with its source and where \
+                       it went. AutoCAD's COPY."
+            .to_owned(),
+        Kind::Array => "Copies objects, target or targets as copy takes them, in an array of \
+                        plain copies, each an ordinary object with an ID of its own as copy \
+                        gives it, written where its source is. kind is rectangular: rows and \
+                        columns, the objects the first row's first column, rows counting up \
+                        by row_spacing and columns across by column_spacing, either negative \
+                        to go the other way; polar: count items round center, the objects the \
+                        first, over angle degrees anticlockwise, 360 when left out, negative \
+                        clockwise, each turned with it unless rotate is false, when each is \
+                        moved so that its base_point, the centre of their extents when left \
+                        out, goes round; or path: count items along path, a line, polyline, \
+                        arc, circle, ellipse or spline by its ID or its name, the objects the \
+                        first at the path's start, evenly spaced from its start to its end \
+                        (round a closed path, count to a turn) or spacing apart, each turned \
+                        with the path's direction unless align is false. Sent as ARRAYRECT, \
+                        ARRAYPOLAR or ARRAYPATH, kind may be left out. A copy is turned only \
+                        when it is a line, polyline, arc, circle, ellipse, spline, hatch, \
+                        text, mtext, donut, solid or insert. The reply lists each copy under \
+                        copies, with its source and its place in the array. AutoCAD's ARRAY, \
+                        ARRAYRECT, ARRAYPOLAR and ARRAYPATH, without the associative array."
             .to_owned(),
         Kind::Table(op, table) => {
             let word = table.word();
@@ -1101,7 +1215,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             "description": format!("The operation: {}.", spec.name),
             "const": spec.name,
         })
-    } else {
+    } else if spec.other_aliases().is_empty() {
         json!({
             "description": format!(
                 "The operation: {}, or its AutoCAD alias {} in any case.",
@@ -1110,6 +1224,21 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             "anyOf": [
                 { "const": spec.name },
                 { "type": "string", "pattern": format!("^{}$", any_case(spec.alias)) },
+            ],
+        })
+    } else {
+        let all: Vec<&str> = std::iter::once(spec.alias)
+            .chain(spec.other_aliases().iter().copied())
+            .collect();
+        json!({
+            "description": format!(
+                "The operation: {}, or its AutoCAD aliases {} in any case.",
+                spec.name,
+                all.join(", ")
+            ),
+            "anyOf": [
+                { "const": spec.name },
+                { "type": "string", "pattern": any_case_of(&all) },
             ],
         })
     };
@@ -1292,6 +1421,51 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             "additionalProperties": false,
             "properties": { "target": target },
         }),
+        Kind::Copy => {
+            let mut schema = json!({
+                "type": "object",
+                "required": [],
+                "additionalProperties": false,
+                "allOf": [
+                    copied_objects_rule(),
+                    {
+                        "oneOf": [
+                            { "required": ["by"], "not": { "anyOf": [{ "required": ["offsets"] }, { "required": ["from"] }, { "required": ["to"] }] } },
+                            { "required": ["offsets"], "not": { "anyOf": [{ "required": ["by"] }, { "required": ["from"] }, { "required": ["to"] }] } },
+                            { "required": ["from", "to"], "not": { "anyOf": [{ "required": ["by"] }, { "required": ["offsets"] }] } },
+                        ],
+                    },
+                ],
+                "properties": {
+                    "by": {
+                        "description": "How far to copy them, [dx, dy, dz], as lengths in the \
+                                        set's declared unit or carrying their own: one copy. \
+                                        Give by, offsets, or from and to.",
+                        "$ref": "#/$defs/point",
+                    },
+                    "offsets": {
+                        "description": "How far to copy them, once for each: a list of \
+                                        [dx, dy, dz], as AutoCAD's COPY makes several copies.",
+                        "type": "array",
+                        "items": { "$ref": "#/$defs/point" },
+                        "minItems": 1,
+                    },
+                    "from": {
+                        "description": "The base point, as AutoCAD's COPY takes it: a point or \
+                                        a snapped point. The copy is to less from away.",
+                        "$ref": "#/$defs/snapped_point",
+                    },
+                    "to": {
+                        "description": "The second point, where the base point's copy lands: \
+                                        a point or a snapped point.",
+                        "$ref": "#/$defs/snapped_point",
+                    },
+                },
+            });
+            copied_objects_properties(&mut schema);
+            schema
+        }
+        Kind::Array => array_schema(),
         Kind::Table(op, table) => table_schema(op, table, defs),
         Kind::Block(op) => block_schema(op, defs),
         Kind::Grid(op) => grid_schema(op, defs),
@@ -1388,6 +1562,184 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
     schema["properties"][OP_KEY] = op;
     let required = schema["required"].as_array_mut().expect("a list");
     required.insert(0, json!(OP_KEY));
+    schema
+}
+
+/// The rule that a copy or an array names its objects by target, one, or
+/// by targets, several, and not both.
+fn copied_objects_rule() -> Value {
+    json!({
+        "oneOf": [
+            { "required": ["target"], "not": { "required": ["targets"] } },
+            { "required": ["targets"], "not": { "required": ["target"] } },
+        ],
+    })
+}
+
+/// Adds to a copy's or an array's `schema` the keys that name the objects
+/// it copies.
+fn copied_objects_properties(schema: &mut Value) {
+    schema["properties"]["target"] = json!({
+        "description": "The object to copy, by its ID or its name. Give target or targets.",
+        "$ref": "#/$defs/target",
+    });
+    schema["properties"]["targets"] = json!({
+        "description": "The objects to copy, each by its ID or its name, all of one sheet: each \
+                        is copied to every place, in the order listed.",
+        "type": "array",
+        "items": { "$ref": "#/$defs/target" },
+        "minItems": 1,
+    });
+}
+
+/// The schema of `array`: the keys of each kind, rectangular, polar and
+/// path, which `kind` names, or which the alias it is sent as, ARRAYRECT,
+/// ARRAYPOLAR or ARRAYPATH, gives it.
+fn array_schema() -> Value {
+    let count = |what: &str, least: usize| {
+        json!({
+            "description": what,
+            "type": "integer",
+            "minimum": least,
+            "maximum": MOST_COPIES + 1,
+        })
+    };
+    let kinds: Vec<Value> = ARRAY_KINDS
+        .iter()
+        .enumerate()
+        .map(|(i, kind)| {
+            let others: Vec<&str> = ARRAY_ALIASES
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, a)| *a)
+                .collect();
+            // Every key of another kind, but one it shares, is refused.
+            let foreign: Vec<Value> = ARRAY_KEYS
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .flat_map(|(_, keys)| keys.iter())
+                .filter(|k| !ARRAY_KEYS[i].contains(k))
+                .map(|k| json!({ "required": [k] }))
+                .collect();
+            // The kind is named, and no alias names another; or it is left
+            // out, and the operation is sent as the kind's alias.
+            let named = json!({
+                "required": ["kind"],
+                "properties": {
+                    "kind": { "const": kind },
+                    "op": { "not": { "type": "string", "pattern": any_case_of(&others) } },
+                },
+            });
+            let by_alias = json!({
+                "not": { "required": ["kind"] },
+                "required": ["op"],
+                "properties": {
+                    "op": { "type": "string", "pattern": any_case_of(&[ARRAY_ALIASES[i]]) },
+                },
+            });
+            let mut all = vec![
+                json!({ "anyOf": [named, by_alias] }),
+                json!({ "not": { "anyOf": foreign } }),
+            ];
+            match *kind {
+                "rectangular" => {
+                    all.push(
+                        json!({ "anyOf": [{ "required": ["rows"] }, { "required": ["columns"] }] }),
+                    );
+                }
+                "polar" => all.push(json!({ "required": ["center", "count"] })),
+                _ => all.push(json!({ "required": ["path", "count"] })),
+            }
+            json!({ "allOf": all })
+        })
+        .collect();
+    let mut schema = json!({
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "allOf": [copied_objects_rule(), { "oneOf": kinds }],
+        "properties": {
+            "kind": {
+                "description": "The kind of array: rectangular, polar or path. It may be left \
+                                out when the operation is sent as ARRAYRECT, ARRAYPOLAR or \
+                                ARRAYPATH, which give it.",
+                "enum": ARRAY_KINDS,
+            },
+            "rows": count(
+                "A rectangular array's rows, the objects' among them, counting up by \
+                 row_spacing: 1 when left out. Rows times columns is at least 2.",
+                1,
+            ),
+            "columns": count(
+                "A rectangular array's columns, the objects' among them, counting across by \
+                 column_spacing: 1 when left out.",
+                1,
+            ),
+            "row_spacing": {
+                "description": "How far apart a rectangular array's rows are, along Y: a \
+                                length, negative to count down. Needed with more than one row.",
+                "$ref": "#/$defs/length",
+            },
+            "column_spacing": {
+                "description": "How far apart its columns are, along X: a length, negative to \
+                                count leftwards. Needed with more than one column.",
+                "$ref": "#/$defs/length",
+            },
+            "center": {
+                "description": "The centre a polar array goes round: a point or a snapped \
+                                point.",
+                "$ref": "#/$defs/snapped_point",
+            },
+            "count": count(
+                "How many items a polar or a path array holds, the objects themselves the \
+                 first: at least 2.",
+                2,
+            ),
+            "angle": {
+                "description": "The angle a polar array fills, in degrees, anticlockwise, or \
+                                clockwise when negative: more than 0 and at most 360 either \
+                                way, 360 when left out. A whole turn spaces count items \
+                                evenly round it; less puts the last at its end.",
+                "$ref": "#/$defs/angle",
+            },
+            "rotate": {
+                "description": "Whether a polar array's copies are turned as they go round, \
+                                as AutoCAD's ARRAYPOLAR turns them by default: true when left \
+                                out.",
+                "type": "boolean",
+            },
+            "base_point": {
+                "description": "The point of the objects that goes round when the copies are \
+                                not turned, a point or a snapped point: the centre of their \
+                                extents when left out. Only with rotate false.",
+                "$ref": "#/$defs/snapped_point",
+            },
+            "path": {
+                "description": "The path a path array runs along, by its ID or its name: a \
+                                line, a polyline, an arc, a circle, an ellipse or a spline of \
+                                the objects' sheet. It runs as it is drawn: a line from its \
+                                from to its to, a polyline through its points in order, an \
+                                arc, a circle from angle 0 and an ellipse anticlockwise, a \
+                                spline from its first point.",
+                "$ref": "#/$defs/target",
+            },
+            "spacing": {
+                "description": "How far apart a path array's items are, along the path: a \
+                                length more than 0. Without it, the items are spaced evenly \
+                                from the path's start to its end, or round a closed path.",
+                "$ref": "#/$defs/length_more_than_0",
+            },
+            "align": {
+                "description": "Whether a path array's copies are turned with the path's \
+                                direction, as AutoCAD's ARRAYPATH aligns them by default, each \
+                                as the first is to the path at its start: true when left out.",
+                "type": "boolean",
+            },
+        },
+    });
+    copied_objects_properties(&mut schema);
     schema
 }
 
@@ -1813,6 +2165,12 @@ fn refs(value: &Value, found: &mut dyn FnMut(&str)) {
     }
 }
 
+/// A regular expression matching any one of `words`, whole, in any case.
+fn any_case_of(words: &[&str]) -> String {
+    let each: Vec<String> = words.iter().map(|w| any_case(w)).collect();
+    format!("^(?:{})$", each.join("|"))
+}
+
 /// A regular expression matching `word` in any case.
 fn any_case(word: &str) -> String {
     word.chars()
@@ -1868,6 +2226,13 @@ pub(crate) enum Body {
     },
     Delete {
         target: Target,
+    },
+    /// Copies of objects at the places `pattern` gives: a copy or an
+    /// array. Each object it copies is given with its key in the
+    /// operation, `target` or `targets[N]`.
+    Copy {
+        targets: Vec<(Target, String)>,
+        pattern: Pattern,
     },
     SetAttribute {
         target: Target,
@@ -1946,6 +2311,52 @@ pub(crate) enum Motion {
         from: Box<OpPoint>,
         to: Box<OpPoint>,
     },
+}
+
+/// Where a copy or an array puts its copies.
+#[derive(Clone, Debug)]
+pub(crate) enum Pattern {
+    /// A copy: once by each motion, as AutoCAD's COPY takes them.
+    Offsets(Vec<Motion>),
+    /// Rows and columns, the objects the first row's first column, rows
+    /// counting up along Y by `row_spacing` and columns across along X by
+    /// `column_spacing`.
+    Rectangular {
+        rows: usize,
+        columns: usize,
+        row_spacing: f64,
+        column_spacing: f64,
+    },
+    /// `count` items round `center`, the objects the first, over `angle`
+    /// degrees, anticlockwise when positive: turned with it when `rotate`,
+    /// or else moved so that `base_point` goes round.
+    Polar {
+        center: Box<OpPoint>,
+        count: usize,
+        angle: f64,
+        rotate: bool,
+        base_point: Option<Box<OpPoint>>,
+    },
+    /// `count` items along the object `path` names, the objects the first,
+    /// `spacing` apart, or spaced evenly over it; turned with the path's
+    /// direction when `align`.
+    Path {
+        path: Target,
+        count: usize,
+        spacing: Option<f64>,
+        align: bool,
+    },
+}
+
+impl Pattern {
+    /// How many places it puts copies at.
+    pub(crate) fn places(&self) -> usize {
+        match self {
+            Pattern::Offsets(motions) => motions.len(),
+            Pattern::Rectangular { rows, columns, .. } => rows * columns - 1,
+            Pattern::Polar { count, .. } | Pattern::Path { count, .. } => count - 1,
+        }
+    }
 }
 
 /// A point an operation takes: coordinates, or a snapped point.
@@ -2302,13 +2713,7 @@ fn operation(
     let listed = || {
         SPECS
             .iter()
-            .map(|s| {
-                if s.alias.is_empty() {
-                    s.name.to_owned()
-                } else {
-                    format!("{} ({})", s.name, s.alias)
-                }
-            })
+            .map(Spec::listed)
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -2325,10 +2730,7 @@ fn operation(
             .at_field(format!("operations[{index}].op")))
         }
     };
-    let Some(spec) = SPECS
-        .iter()
-        .find(|s| s.name == name || (!s.alias.is_empty() && s.alias.eq_ignore_ascii_case(name)))
-    else {
+    let Some(spec) = SPECS.iter().find(|s| s.named(name)) else {
         return Err(Error::new(
             ErrorCode::UnknownName,
             format!(
@@ -2693,6 +3095,40 @@ fn operation(
         Kind::Delete => {
             keys(&["target"])?;
             Body::Delete { target: target()? }
+        }
+        Kind::Copy | Kind::Array => {
+            let pattern = if spec.kind == Kind::Copy {
+                keys(&["target", "targets", "by", "offsets", "from", "to"])?;
+                read_offsets(map, units)
+            } else {
+                let mut allowed = vec!["target", "targets", "kind"];
+                for kind_keys in ARRAY_KEYS {
+                    for key in kind_keys {
+                        if !allowed.contains(key) {
+                            allowed.push(key);
+                        }
+                    }
+                }
+                keys(&allowed)?;
+                read_array(map, name, units)
+            }
+            .map_err(|(code, message, field)| fail(code, message, &field))?;
+            let targets =
+                read_targets(map).map_err(|(code, message, field)| fail(code, message, &field))?;
+            let copies = pattern.places().saturating_mul(targets.len());
+            if copies > MOST_COPIES {
+                return Err(fail(
+                    ErrorCode::BadValue,
+                    format!(
+                        "it would make {copies} copies, {} places times {} objects; one \
+                         operation makes at most {MOST_COPIES}",
+                        pattern.places(),
+                        targets.len()
+                    ),
+                    "",
+                ));
+            }
+            Body::Copy { targets, pattern }
         }
         Kind::SetAttribute => {
             keys(&["target", "tag", "occurrence", "value", ROW_VALUE_KEY])?;
@@ -3103,6 +3539,422 @@ fn operation(
     })
 }
 
+/// The code, message and key of what is wrong with an operation's key.
+type KeyError = (ErrorCode, String, String);
+
+/// `error`, at a key `target` names inside the operation's key `at`, such
+/// as `targets[1]` or `path`.
+fn target_at(at: &str, (code, message, field): KeyError) -> KeyError {
+    let field = match field.strip_prefix("target") {
+        Some(rest) => format!("{at}{rest}"),
+        None => field,
+    };
+    (code, message, field)
+}
+
+/// The objects a copy or an array sent as `map` copies: `target`, one, or
+/// `targets`, several, each with its key in the operation.
+fn read_targets(map: &Map<String, Value>) -> Result<Vec<(Target, String)>, KeyError> {
+    match (map.get("target"), map.get("targets")) {
+        (Some(_), Some(_)) => Err((
+            ErrorCode::Usage,
+            "give target, one object, or targets, several, not both".to_owned(),
+            String::new(),
+        )),
+        (Some(one), None) => Ok(vec![(read_target(one)?, "target".to_owned())]),
+        (None, Some(Value::Array(items))) if !items.is_empty() => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let at = format!("targets[{i}]");
+                read_target(item)
+                    .map(|t| (t, at.clone()))
+                    .map_err(|e| target_at(&at, e))
+            })
+            .collect(),
+        (None, Some(Value::Array(_))) => Err((
+            ErrorCode::BadValue,
+            "targets lists no object; list at least one".to_owned(),
+            "targets".to_owned(),
+        )),
+        (None, Some(_)) => Err((
+            ErrorCode::WrongType,
+            "expected a list of objects, each {\"id\": ...} or {\"name\": ...}".to_owned(),
+            "targets".to_owned(),
+        )),
+        (None, None) => Err((
+            ErrorCode::MissingKey,
+            "missing key `target`, the object to copy, by its ID, {\"id\": \"DEMO-001/border\"}, \
+             or by its name; or targets, a list of them"
+                .to_owned(),
+            "target".to_owned(),
+        )),
+    }
+}
+
+/// Three lengths `[dx, dy, dz]` at `field`, in `units`.
+fn distance(value: &Value, units: Unit, field: &str) -> Result<[f64; 3], KeyError> {
+    match value {
+        Value::Array(items) if items.len() == 3 => {
+            let mut by = [0.0; 3];
+            for (axis, item) in items.iter().enumerate() {
+                by[axis] = length(item, units).map_err(|message| {
+                    (ErrorCode::BadNumber, message, format!("{field}[{axis}]"))
+                })?;
+            }
+            Ok(by)
+        }
+        _ => Err((
+            ErrorCode::WrongType,
+            "expected how far, three lengths [dx, dy, dz]".to_owned(),
+            field.to_owned(),
+        )),
+    }
+}
+
+/// Where a copy sent as `map` copies its objects to: by `by`, by each of
+/// `offsets`, or from `from` to `to`.
+fn read_offsets(map: &Map<String, Value>, units: Unit) -> Result<Pattern, KeyError> {
+    let given = |key: &str| map.contains_key(key);
+    match (given("by"), given("offsets"), given("from"), given("to")) {
+        (true, false, false, false) => Ok(Pattern::Offsets(vec![Motion::By(distance(
+            &map["by"], units, "by",
+        )?)])),
+        (false, true, false, false) => match &map["offsets"] {
+            Value::Array(items) if !items.is_empty() => Ok(Pattern::Offsets(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        distance(item, units, &format!("offsets[{i}]")).map(Motion::By)
+                    })
+                    .collect::<Result<_, _>>()?,
+            )),
+            Value::Array(_) => Err((
+                ErrorCode::BadValue,
+                "offsets lists no distance, so it makes no copy; list at least one".to_owned(),
+                "offsets".to_owned(),
+            )),
+            _ => Err((
+                ErrorCode::WrongType,
+                "expected a list of distances, each [dx, dy, dz]".to_owned(),
+                "offsets".to_owned(),
+            )),
+        },
+        (false, false, true, true) => Ok(Pattern::Offsets(vec![Motion::Between {
+            from: Box::new(op_point(&map["from"], units, "from")?),
+            to: Box::new(op_point(&map["to"], units, "to")?),
+        }])),
+        (false, false, false, false) => Err((
+            ErrorCode::MissingKey,
+            "missing key `by`, how far to copy, [dx, dy, dz]; or give offsets, a list of them, \
+             or from, a base point, and to, where it lands"
+                .to_owned(),
+            "by".to_owned(),
+        )),
+        (false, false, true, false) | (false, false, false, true) => {
+            let missing = if given("from") { "to" } else { "from" };
+            Err((
+                ErrorCode::MissingKey,
+                format!(
+                    "missing key `{missing}`: a copy from a base point to a second point takes \
+                     both, from and to"
+                ),
+                missing.to_owned(),
+            ))
+        }
+        _ => Err((
+            ErrorCode::Usage,
+            "give one of by, offsets, or from and to: a copy is by a distance, by each of \
+             several, or from a base point to a second point"
+                .to_owned(),
+            String::new(),
+        )),
+    }
+}
+
+/// How many items an array's `count` holds, the objects among them.
+const COUNT_WORDS: &str = "the count is the objects and their copies";
+
+/// An array sent as `map`, with the operation's name as sent, `sent`,
+/// which gives its kind when it is ARRAYRECT, ARRAYPOLAR or ARRAYPATH.
+fn read_array(map: &Map<String, Value>, sent: &str, units: Unit) -> Result<Pattern, KeyError> {
+    let implied = ARRAY_ALIASES
+        .iter()
+        .position(|a| a.eq_ignore_ascii_case(sent));
+    let given = match map.get("kind") {
+        None => None,
+        Some(Value::String(kind)) => match ARRAY_KINDS.iter().position(|k| k == kind) {
+            Some(i) => Some(i),
+            None => {
+                return Err((
+                    ErrorCode::BadValue,
+                    format!(
+                        "there is no kind of array `{kind}`; the kinds: {}",
+                        ARRAY_KINDS.join(", ")
+                    ),
+                    "kind".to_owned(),
+                ))
+            }
+        },
+        Some(_) => {
+            return Err((
+                ErrorCode::WrongType,
+                format!(
+                    "expected the kind of array, one of {}",
+                    ARRAY_KINDS.join(", ")
+                ),
+                "kind".to_owned(),
+            ))
+        }
+    };
+    let kind = match (implied, given) {
+        (Some(i), Some(g)) if i != g => {
+            return Err((
+                ErrorCode::Usage,
+                format!(
+                    "sent as {sent}, the operation makes a {} array, and kind is {}; leave kind \
+                     out, or send it as array",
+                    ARRAY_KINDS[i], ARRAY_KINDS[g]
+                ),
+                "kind".to_owned(),
+            ))
+        }
+        (Some(i), _) | (None, Some(i)) => i,
+        (None, None) => {
+            return Err((
+                ErrorCode::MissingKey,
+                format!(
+                    "missing key `kind`, the kind of array: {}; or send the operation as {}",
+                    ARRAY_KINDS.join(", "),
+                    ARRAY_ALIASES.join(", ")
+                ),
+                "kind".to_owned(),
+            ))
+        }
+    };
+    let name = ARRAY_KINDS[kind];
+    let own = ARRAY_KEYS[kind];
+    if let Some(key) = map.keys().find(|k| {
+        !matches!(k.as_str(), OP_KEY | "target" | "targets" | "kind") && !own.contains(&k.as_str())
+    }) {
+        return Err((
+            ErrorCode::UnknownKey,
+            format!(
+                "unknown key `{key}`: {} {name} array takes target or targets, kind, {}",
+                article(name),
+                own.join(", ")
+            ),
+            key.clone(),
+        ));
+    }
+    let count = |key: &str, least: usize, what: &str| -> Result<Option<usize>, KeyError> {
+        let Some(value) = map.get(key) else {
+            return Ok(None);
+        };
+        let n = match value {
+            Value::Number(n) => whole(n),
+            _ => None,
+        };
+        let most = (MOST_COPIES + 1) as u64;
+        match n {
+            Some(n) if n >= least as u64 && n <= most => Ok(Some(n as usize)),
+            Some(n) if n > most => Err((
+                ErrorCode::BadValue,
+                format!("{key} is {n}; one array makes at most {MOST_COPIES} copies"),
+                key.to_owned(),
+            )),
+            Some(n) => Err((
+                ErrorCode::BadValue,
+                format!("{key} is {n}; {what}, so it is at least {least}"),
+                key.to_owned(),
+            )),
+            None => Err((
+                ErrorCode::WrongType,
+                format!("expected a whole number for {key}"),
+                key.to_owned(),
+            )),
+        }
+    };
+    let flag = |key: &str| -> Result<bool, KeyError> {
+        match map.get(key) {
+            None => Ok(true),
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(_) => Err((
+                ErrorCode::WrongType,
+                format!("expected true or false for {key}"),
+                key.to_owned(),
+            )),
+        }
+    };
+    let a_length = |key: &str| -> Result<Option<f64>, KeyError> {
+        map.get(key)
+            .map(|v| length(v, units).map_err(|m| (ErrorCode::BadNumber, m, key.to_owned())))
+            .transpose()
+    };
+    let items = |key: &str| -> Result<usize, KeyError> {
+        count(key, 2, COUNT_WORDS)?.ok_or_else(|| {
+            (
+                ErrorCode::MissingKey,
+                "missing key `count`, how many items the array holds, the objects among them"
+                    .to_owned(),
+                key.to_owned(),
+            )
+        })
+    };
+    match name {
+        "rectangular" => {
+            if !map.contains_key("rows") && !map.contains_key("columns") {
+                return Err((
+                    ErrorCode::MissingKey,
+                    "missing key `rows`: a rectangular array takes rows, columns or both, each \
+                     1 when left out"
+                        .to_owned(),
+                    "rows".to_owned(),
+                ));
+            }
+            let rows = count("rows", 1, "the rows count the objects' own row")?.unwrap_or(1);
+            let columns =
+                count("columns", 1, "the columns count the objects' own column")?.unwrap_or(1);
+            if rows.saturating_mul(columns) < 2 {
+                return Err((
+                    ErrorCode::BadValue,
+                    "1 row and 1 column are the objects alone, which makes no copy; give more \
+                     rows or columns"
+                        .to_owned(),
+                    if map.contains_key("rows") {
+                        "rows"
+                    } else {
+                        "columns"
+                    }
+                    .to_owned(),
+                ));
+            }
+            if rows.saturating_mul(columns) > MOST_COPIES + 1 {
+                return Err((
+                    ErrorCode::BadValue,
+                    format!(
+                        "{rows} rows and {columns} columns would make {} copies; one array \
+                         makes at most {MOST_COPIES}",
+                        rows.saturating_mul(columns) - 1
+                    ),
+                    "rows".to_owned(),
+                ));
+            }
+            let spacing = |key: &str, needed: bool, what: &str| -> Result<f64, KeyError> {
+                match a_length(key)? {
+                    Some(d) => Ok(d),
+                    None if needed => Err((
+                        ErrorCode::MissingKey,
+                        format!("missing key `{key}`, how far apart the {what} are"),
+                        key.to_owned(),
+                    )),
+                    None => Ok(0.0),
+                }
+            };
+            Ok(Pattern::Rectangular {
+                rows,
+                columns,
+                row_spacing: spacing("row_spacing", rows > 1, "rows")?,
+                column_spacing: spacing("column_spacing", columns > 1, "columns")?,
+            })
+        }
+        "polar" => {
+            let center = match map.get("center") {
+                Some(value) => Box::new(op_point(value, units, "center")?),
+                None => {
+                    return Err((
+                        ErrorCode::MissingKey,
+                        "missing key `center`, the point a polar array goes round".to_owned(),
+                        "center".to_owned(),
+                    ))
+                }
+            };
+            let count = items("count")?;
+            let angle = match map.get("angle") {
+                None => 360.0,
+                Some(value) => {
+                    let degrees = match value {
+                        Value::Number(n) => n.as_f64(),
+                        Value::String(s) => s.trim().parse::<f64>().ok(),
+                        _ => None,
+                    };
+                    match degrees {
+                        Some(d) if d.is_finite() && d != 0.0 && d.abs() <= 360.0 => d,
+                        Some(d) => {
+                            return Err((
+                                ErrorCode::BadValue,
+                                format!(
+                                    "angle is {d}; the angle a polar array fills is more than 0 \
+                                     and at most 360 degrees, either way round"
+                                ),
+                                "angle".to_owned(),
+                            ))
+                        }
+                        None => {
+                            return Err((
+                                ErrorCode::WrongType,
+                                "expected an angle in degrees, a number such as 180".to_owned(),
+                                "angle".to_owned(),
+                            ))
+                        }
+                    }
+                }
+            };
+            let rotate = flag("rotate")?;
+            let base_point = match map.get("base_point") {
+                None => None,
+                Some(_) if rotate => {
+                    return Err((
+                        ErrorCode::Usage,
+                        "base_point places copies that are not turned; with rotate true, or \
+                         left out, each copy turns about the centre, so give rotate: false with \
+                         it, or leave it out"
+                            .to_owned(),
+                        "base_point".to_owned(),
+                    ))
+                }
+                Some(value) => Some(Box::new(op_point(value, units, "base_point")?)),
+            };
+            Ok(Pattern::Polar {
+                center,
+                count,
+                angle,
+                rotate,
+                base_point,
+            })
+        }
+        _ => {
+            let path =
+                match map.get("path") {
+                    Some(value) => read_target(value).map_err(|e| target_at("path", e))?,
+                    None => return Err((
+                        ErrorCode::MissingKey,
+                        "missing key `path`, the line, polyline, arc, circle, ellipse or spline \
+                         the array runs along, by its ID or its name"
+                            .to_owned(),
+                        "path".to_owned(),
+                    )),
+                };
+            let count = items("count")?;
+            let spacing = a_length("spacing")?;
+            if let Some(d) = spacing.filter(|d| *d <= 0.0) {
+                return Err((
+                    ErrorCode::BadValue,
+                    format!("spacing is {d}; the items of a path array are more than 0 apart"),
+                    "spacing".to_owned(),
+                ));
+            }
+            Ok(Pattern::Path {
+                path,
+                count,
+                spacing,
+                align: flag("align")?,
+            })
+        }
+    }
+}
+
 /// The required keys an object leaves out: the first one missing, and what
 /// the object needs, in words.
 struct Missing {
@@ -3477,6 +4329,9 @@ mod tests {
                 assert_ne!(a.name, b.name);
                 // An operation with no AutoCAD alias has none to share.
                 assert!(a.alias.is_empty() || !a.alias.eq_ignore_ascii_case(b.alias));
+                for other in a.other_aliases() {
+                    assert!(!b.named(other), "{other} names {} and {}", a.name, b.name);
+                }
             }
         }
     }

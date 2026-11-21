@@ -32,6 +32,7 @@
 
 mod accept;
 mod apply;
+mod array;
 mod commit;
 mod from_dimension;
 mod history;
@@ -215,9 +216,54 @@ pub struct OperationOutcome {
     /// which the record writes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub snapped: Vec<SnapResolved>,
+    /// Each copy a copy or an array made, in the order it made them: its
+    /// ID, the object it copies and where it went.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<Copied>,
     /// Why it did not land.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
+}
+
+/// A copy a copy or an array made: an ordinary object with an ID of its
+/// own, written where the object it copies is.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Copied {
+    /// Its ID, on the sheet the operation names. A copy of a template's
+    /// object is on every sheet built from the template, with the same ID
+    /// after each sheet's name.
+    pub id: String,
+    /// The object it is a copy of.
+    pub source: String,
+    /// For a copy, which of its offsets, counted from 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// For a rectangular array, its row, counted from 0 up from the
+    /// objects' own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row: Option<usize>,
+    /// For a rectangular array, its column, counted from 0 across from the
+    /// objects' own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
+    /// For a polar or a path array, its item, counted from 0, the objects
+    /// themselves item 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item: Option<usize>,
+    /// For a path array, how far along the path it is, in the declared
+    /// unit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub along: Option<f64>,
+    /// How far it was moved from the object it copies, in the declared
+    /// unit.
+    pub by: [f64; 3],
+    /// How far it was then turned, in degrees anticlockwise, about
+    /// `about`; left out when it was not turned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turned: Option<f64>,
+    /// The point it was turned about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub about: Option<[f64; 3]>,
 }
 
 /// An attribute value a block operation removed from an insert, because

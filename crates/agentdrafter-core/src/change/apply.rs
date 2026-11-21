@@ -22,17 +22,18 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::array;
 use super::commit::Replacement;
 use super::from_dimension::dimension_from;
 use super::journal::{commit_change_set, HowChanged, Keeping, Landing, ObjectChanged, SheetFailed};
 use super::operations::{
     op_error, read_change_set, AddTo, BlockOp, Body, FromOp, Import, Kind, Motion, OpPoint,
-    Operation, PointSnap, Table, TableOp, Target, ROW_VALUE_KEY,
+    Operation, Pattern, PointSnap, Table, TableOp, Target, ROW_VALUE_KEY,
 };
 use super::MARK_FILE;
 use super::{
     mark_report, quoted_list, read_mark, relative_to, AttributeRemoved, ChangeReport,
-    ChangeRequest, Fill, OperationOutcome, RowValueSet, SheetChange, SnapResolved,
+    ChangeRequest, Copied, Fill, OperationOutcome, RowValueSet, SheetChange, SnapResolved,
 };
 use crate::build::{is_same_file, prepare_sheet, PreparedSheet};
 use crate::description::blocks::tag_in_capitals;
@@ -42,14 +43,17 @@ use crate::description::{
     article, library_named, mark_text, one_name, read_file, read_rows_files_in, read_set_settings,
     rows_of, shown_mtext, template_at, template_in, template_path, AttributeSet, Disk, FromRow,
     GivenValue, LeaderLineEdit, Listed, MarkFailure, Matched, ObjectList, ReadFiles, RecordFile,
-    Row, RowsFile, TableEdit, ID_SEPARATOR,
+    Row, RowsFile, TableEdit, ID_SEPARATOR, LONGEST_ID, TURNED_TYPES,
 };
 use crate::dwg::BuildMark;
 use crate::error::{Error, ErrorCode};
-use crate::geometry::SnapRef;
+use crate::geometry::curve::Curve;
+use crate::geometry::{Reader, SnapRef};
 use crate::import::{drawing_unit, is_dxf, plan, write_plan, BlocksImported, Existing};
+use crate::model::Object;
 use crate::set::{set_in_mark, sheet_mark, Notice, SET_SETTINGS_FILE};
 use crate::settings::Settings;
+use crate::text::placement::SheetFonts;
 use crate::units::Unit;
 
 /// The most IDs an error lists as the choices on a sheet.
@@ -473,6 +477,8 @@ struct Done {
     imported: Option<BlocksImported>,
     /// Each snapped point it took, and the point it was worked out to.
     snapped: Vec<SnapResolved>,
+    /// Each copy a copy or an array made.
+    copies: Vec<Copied>,
     message: String,
 }
 
@@ -527,6 +533,19 @@ fn objects_changed(
         // line draws as the block now does.
         for id in &d.inserts {
             add(id.clone(), HowChanged::Changed);
+        }
+        // Each copy is added, on every sheet the operation reaches.
+        for copy in &d.copies {
+            let local = copy
+                .id
+                .split_once(ID_SEPARATOR)
+                .map_or(copy.id.as_str(), |(_, l)| l);
+            for &k in &op_sheets[i] {
+                add(
+                    format!("{}{ID_SEPARATOR}{local}", files.name(k)),
+                    HowChanged::Added,
+                );
+            }
         }
     }
     objects
@@ -863,6 +882,7 @@ pub(super) fn apply(
                 inserts: d.as_ref().map(|d| d.inserts.clone()).unwrap_or_default(),
                 imported: d.as_ref().and_then(|d| d.imported.clone()),
                 snapped: d.as_ref().map(|d| d.snapped.clone()).unwrap_or_default(),
+                copies: d.as_ref().map(|d| d.copies.clone()).unwrap_or_default(),
                 attributes_removed: d.map(|d| d.attributes_removed).unwrap_or_default(),
                 error: if included[i] {
                     None
@@ -907,6 +927,35 @@ pub(super) fn apply(
 /// hold: there is no sheet to fail, so the change set itself is wrong.
 fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
     for op in ops {
+        if let Body::Copy { targets, pattern } = &op.body {
+            let path = match pattern {
+                Pattern::Path { path, .. } => Some((path, "path".to_owned())),
+                _ => None,
+            };
+            let named = targets.iter().map(|(t, key)| (t, key.clone())).chain(path);
+            for (target, key) in named {
+                let (sheet, field) = match target {
+                    Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
+                    Target::Name {
+                        sheet: Some(sheet), ..
+                    } => (sheet, format!("{key}.sheet")),
+                    Target::Name { sheet: None, .. } => continue,
+                };
+                if files.sheet(sheet).is_none() {
+                    return Err(op_error(
+                        op.index,
+                        op.spec.name,
+                        ErrorCode::UnknownName,
+                        format!(
+                            "the set holds no sheet `{sheet}`; its sheets: {}",
+                            files.sheet_names()
+                        ),
+                        &field,
+                    ));
+                }
+            }
+            continue;
+        }
         let (sheet, field) = match &op.body {
             Body::Add {
                 to: AddTo::Template(written),
@@ -977,6 +1026,7 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 } => (sheet, "target.sheet"),
                 Target::Name { sheet: None, .. } => continue,
             },
+            Body::Copy { .. } => continue,
         };
         if files.sheet(sheet).is_none() {
             return Err(op_error(
@@ -1146,6 +1196,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 inserts: Vec::new(),
                 attributes_removed: Vec::new(),
                 imported: None,
+                copies: Vec::new(),
                 message: format!(
                     "adds {} {object}, `{id}`, {place}{}",
                     article(object),
@@ -1219,6 +1270,10 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         return apply_dimension_from(at, op, *from, target, point, id, name, settings);
     }
 
+    if let Body::Copy { targets, pattern } = &op.body {
+        return apply_copy(at, op, targets, pattern, settings);
+    }
+
     let target = match &op.body {
         Body::Change { target, .. }
         | Body::Move { target, .. }
@@ -1226,7 +1281,11 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::SetAttribute { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. } => target,
-        Body::Add { .. } | Body::Table { .. } | Body::Block { .. } | Body::DimensionFrom { .. } => {
+        Body::Add { .. }
+        | Body::Table { .. }
+        | Body::Block { .. }
+        | Body::DimensionFrom { .. }
+        | Body::Copy { .. } => {
             unreachable!("handled above")
         }
     };
@@ -1434,6 +1493,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         inserts: Vec::new(),
         attributes_removed: Vec::new(),
         imported: None,
+        copies: Vec::new(),
         snapped: Vec::new(),
         message: String::new(),
     };
@@ -1600,7 +1660,11 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 }
             }
         }
-        Body::Add { .. } | Body::Table { .. } | Body::Block { .. } | Body::DimensionFrom { .. } => {
+        Body::Add { .. }
+        | Body::Table { .. }
+        | Body::Block { .. }
+        | Body::DimensionFrom { .. }
+        | Body::Copy { .. } => {
             unreachable!("handled above")
         }
     }
@@ -2250,6 +2314,7 @@ fn apply_table(
             inserts: Vec::new(),
             attributes_removed: Vec::new(),
             imported: None,
+            copies: Vec::new(),
             snapped: Vec::new(),
             message: format!("{message}, so on {}", every_sheet(&files.names(&sheets))),
         }),
@@ -2440,6 +2505,7 @@ fn apply_block(
             inserts: synced.inserts,
             attributes_removed: synced.removed,
             imported: None,
+            copies: Vec::new(),
             snapped: Vec::new(),
             message: format!("{what}{removed}{on}"),
         }),
@@ -2609,6 +2675,7 @@ fn apply_import(
             inserts: synced.inserts,
             attributes_removed: synced.removed,
             imported: Some(imported),
+            copies: Vec::new(),
             snapped: Vec::new(),
             message: format!(
                 "imports from `{}` into the block library `{written}`: {}{left_out}{on}",
@@ -3321,6 +3388,7 @@ fn apply_dimension_from(
             inserts: Vec::new(),
             attributes_removed: Vec::new(),
             imported: None,
+            copies: Vec::new(),
             message: format!(
                 "adds {what}, `{added}`, from `{}`, {place}{}",
                 found.id,
@@ -3331,6 +3399,651 @@ fn apply_dimension_from(
         sheets: reach,
         refuse: false,
     }
+}
+
+/// `applied`'s error placed at `key` of the operation, such as `targets[1]`
+/// or `path`, where [`resolve`] places it at `target`.
+fn keyed(mut applied: Applied, op: &Operation, key: &str) -> Applied {
+    if let Err(e) = &mut applied.outcome {
+        let at = format!("operations[{}].target", op.index);
+        if let Some(rest) = e.field.as_deref().and_then(|f| f.strip_prefix(&at)) {
+            e.field = Some(format!("operations[{}].{key}{rest}", op.index));
+        }
+    }
+    applied
+}
+
+/// The id a copy of `listed` is given before its number: its source's id,
+/// or, for one whose ID is its place, such as `objects[2]`, its type.
+fn copy_base(listed: &Listed) -> String {
+    if listed.written && !listed.id.contains('[') && listed.id.len() + 8 <= LONGEST_ID {
+        listed.id.clone()
+    } else {
+        listed.kind.clone()
+    }
+}
+
+/// Copies the objects `targets` names to the places `pattern` gives: a
+/// copy or an array, AutoCAD's COPY and ARRAY as plain copies (Zach,
+/// 2026-11-21). Each copy is an ordinary object, written where its source
+/// is, as a dimension added from another is: a template's object's copies
+/// in the template, so on every sheet built from it, all or nothing, and a
+/// row's own object's in the row. Each is given its source's id and the
+/// first number free on every sheet it reaches, and keeps every key of its
+/// source, an insert's attribute values among them, but its name.
+fn apply_copy(
+    at: &mut Attempt,
+    op: &Operation,
+    targets: &[(Target, String)],
+    pattern: &Pattern,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let units = files.units;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let mut found: Vec<(Found, &str)> = Vec::with_capacity(targets.len());
+    for (target, key) in targets {
+        match resolve(at, target, op) {
+            Ok(object) => found.push((object, key)),
+            Err(applied) => return keyed(*applied, op, key),
+        }
+    }
+    let k = found[0].0.row;
+    if let Some((other, key)) = found.iter().find(|(f, _)| f.row != k) {
+        return fail(
+            vec![k, other.row],
+            op_err(
+                ErrorCode::BadValue,
+                format!(
+                    "`{}` is on sheet `{}` and `{}` on sheet `{}`; one copy or array copies \
+                     objects of one sheet, so send one for each sheet",
+                    found[0].0.id,
+                    files.name(k),
+                    other.id,
+                    files.name(other.row)
+                ),
+                key,
+            ),
+        );
+    }
+    let mut reach: BTreeSet<usize> = BTreeSet::new();
+    for (f, _) in &found {
+        reach.extend(at.reach(f.file, f.row));
+    }
+    let reach: Vec<usize> = reach.into_iter().collect();
+    for (i, (f, key)) in found.iter().enumerate() {
+        if let Some((_, first)) = found[..i]
+            .iter()
+            .find(|(g, _)| (g.file, g.list, g.index) == (f.file, f.list, f.index))
+        {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`{}` is named twice, at {first} and here; name it once",
+                        f.id
+                    ),
+                    key,
+                ),
+            );
+        }
+        // An object on a locked layer is not copied, as AutoCAD's COPY
+        // does not select it.
+        if let Some(layer) = locked_layer(at, f) {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::Locked,
+                    format!(
+                        "`{}` sits on layer `{layer}`, which is locked, so it is not copied; \
+                         unlock it first with change_layer, set: {{\"locked\": false}}, in \
+                         this change set or an earlier one",
+                        f.id
+                    ),
+                    key,
+                ),
+            );
+        }
+        if let Some(refusal) = many_paths(files, f.file, op, key) {
+            return refusal;
+        }
+    }
+
+    // The places, worked out on the sheets the copies reach, as they stand
+    // now: a snapped point on each, the base point and the path on the
+    // sheet the operation names.
+    let mut snapped: Vec<SnapResolved> = Vec::new();
+    let point = |at: &Attempt, p: &OpPoint, snapped: &mut Vec<SnapResolved>| match p {
+        OpPoint::At(xyz) => Ok(*xyz),
+        OpPoint::Snap(snap) => {
+            snapped_points(at, op, &reach, &[snap], settings).map(|mut found| {
+                let (xyz, resolved) = found.remove(0);
+                snapped.push(resolved);
+                xyz
+            })
+        }
+    };
+    let mut path_id = None;
+    let places = match pattern {
+        Pattern::Offsets(motions) => {
+            let mut by = Vec::with_capacity(motions.len());
+            for motion in motions {
+                by.push(match motion {
+                    Motion::By(by) => *by,
+                    Motion::Between { from, to } => {
+                        let a = match point(at, from, &mut snapped) {
+                            Ok(a) => a,
+                            Err(e) => return fail(reach, e),
+                        };
+                        let b = match point(at, to, &mut snapped) {
+                            Ok(b) => b,
+                            Err(e) => return fail(reach, e),
+                        };
+                        [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+                    }
+                });
+            }
+            array::offsets(&by)
+        }
+        Pattern::Rectangular {
+            rows,
+            columns,
+            row_spacing,
+            column_spacing,
+        } => array::rectangular(*rows, *columns, *row_spacing, *column_spacing),
+        Pattern::Polar {
+            center,
+            count,
+            angle,
+            rotate,
+            base_point,
+        } => {
+            let c = match point(at, center, &mut snapped) {
+                Ok(c) => c,
+                Err(e) => return fail(reach, e),
+            };
+            let base = match (rotate, base_point) {
+                (true, _) => c,
+                (false, Some(p)) => match point(at, p, &mut snapped) {
+                    Ok(b) => b,
+                    Err(e) => return fail(reach, e),
+                },
+                (false, None) => match extents_center(at, op, k, &found, settings) {
+                    Ok(b) => b,
+                    Err(e) => return fail(reach, e),
+                },
+            };
+            array::polar(c, *count, *angle, *rotate, base)
+        }
+        Pattern::Path {
+            path,
+            count,
+            spacing,
+            align,
+        } => {
+            let (id, curves) = match path_curves(at, op, path, k, &found, settings) {
+                Ok(found) => found,
+                Err(applied) => return *applied,
+            };
+            path_id = Some(id);
+            match array::along(&curves, *count, *spacing, *align) {
+                Ok(places) => places,
+                Err(why) => {
+                    let key = if spacing.is_some() { "spacing" } else { "path" };
+                    return fail(reach, op_err(ErrorCode::BadValue, why, key));
+                }
+            }
+        }
+    };
+
+    // A copy that turns is of an object a turn turns.
+    if places.iter().any(|p| p.turn != 0.0) {
+        let key = match pattern {
+            Pattern::Polar { .. } => "rotate: false",
+            _ => "align: false",
+        };
+        for (f, field) in &found {
+            let kind = match at.file(f.file) {
+                Ok(record) => record.objects(f.list)[f.index].kind.clone(),
+                Err(e) => return fail(reach, e),
+            };
+            if !TURNED_TYPES.contains(&kind.as_str()) {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{}` is {} {kind}, which is not turned yet (#67); its copies turn \
+                             as they go round, so give {key} to place them unturned. A copy \
+                             turns when it is a {}",
+                            f.id,
+                            article(&kind),
+                            join_or(&TURNED_TYPES)
+                        ),
+                        field,
+                    ),
+                );
+            }
+        }
+    }
+
+    // Each copy's ID: its source's id and the first number free on every
+    // sheet it reaches.
+    let mut taken: BTreeSet<String> = BTreeSet::new();
+    for &s in &reach {
+        match at.objects(s) {
+            Ok(objects) => taken.extend(objects.into_iter().map(|o| o.3.id.to_lowercase())),
+            Err(e) => return fail(reach, e),
+        }
+    }
+    let mut copies: Vec<Copied> = Vec::with_capacity(places.len() * found.len());
+    for place in &places {
+        for (f, _) in &found {
+            let record = match at.file(f.file) {
+                Ok(record) => record,
+                Err(e) => return fail(reach, e),
+            };
+            let base = copy_base(&record.objects(f.list)[f.index]);
+            let local = (1..)
+                .map(|n| format!("{base}-{n}"))
+                .find(|id| !taken.contains(&id.to_lowercase()))
+                .expect("a free number");
+            taken.insert(local.to_lowercase());
+            let made = record
+                .duplicate(f.list, f.index, &local, op.index)
+                .and_then(|index| {
+                    if place.by != [0.0; 3] {
+                        record.move_by(f.list, index, place.by, units, op.index)?;
+                    }
+                    if place.turn != 0.0 {
+                        record.turn_by(f.list, index, place.about, place.turn, units, op.index)?;
+                    }
+                    Ok(())
+                });
+            if let Err(e) = made {
+                return fail(reach, op_err(e.code, e.message, ""));
+            }
+            let (offset, row, column, item, along) = match place.at {
+                array::At::Offset(i) => (Some(i), None, None, None, None),
+                array::At::Grid { row, column } => (None, Some(row), Some(column), None, None),
+                array::At::Item(i) => (None, None, None, Some(i), None),
+                array::At::Along { item, distance } => {
+                    (None, None, None, Some(item), Some(distance))
+                }
+            };
+            let turned = place.turn != 0.0;
+            copies.push(Copied {
+                id: format!("{}{ID_SEPARATOR}{local}", files.name(k)),
+                source: f.id.clone(),
+                offset,
+                row,
+                column,
+                item,
+                along,
+                by: place.by,
+                turned: turned.then_some(place.turn),
+                about: turned.then_some(place.about),
+            });
+        }
+    }
+
+    // The message: what it copied, how, where the copies are written, and
+    // their IDs.
+    let sources: Vec<String> = found.iter().map(|(f, _)| format!("`{}`", f.id)).collect();
+    let what = join_and(&sources);
+    let numbers = |v: &[f64]| {
+        v.iter()
+            .map(|d| crate::description::number_text(*d))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let plural = |n: usize, one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    let how = match pattern {
+        Pattern::Offsets(_) if places.len() == 1 => {
+            format!("by [{}] ({units})", numbers(&places[0].by))
+        }
+        Pattern::Offsets(_) => format!("by each of {} offsets ({units})", places.len()),
+        Pattern::Rectangular {
+            rows,
+            columns,
+            row_spacing,
+            column_spacing,
+        } => {
+            let mut parts = Vec::new();
+            if *rows > 1 {
+                parts.push(format!(
+                    "{} {} apart",
+                    plural(*rows, "row", "rows"),
+                    numbers(&[*row_spacing])
+                ));
+            } else {
+                parts.push("1 row".to_owned());
+            }
+            if *columns > 1 {
+                parts.push(format!(
+                    "{} {} apart",
+                    plural(*columns, "column", "columns"),
+                    numbers(&[*column_spacing])
+                ));
+            } else {
+                parts.push("1 column".to_owned());
+            }
+            format!(
+                "in a rectangular array of {} ({units})",
+                parts.join(" and ")
+            )
+        }
+        Pattern::Polar {
+            count,
+            angle,
+            rotate,
+            ..
+        } => format!(
+            "in a polar array of {count} items over {} degrees, {} apart, {}",
+            numbers(&[*angle]),
+            numbers(&[array::polar_step(*count, *angle)]),
+            if *rotate {
+                "each turned as it goes round"
+            } else {
+                "unturned"
+            }
+        ),
+        Pattern::Path {
+            count,
+            spacing,
+            align,
+            ..
+        } => format!(
+            "in a path array of {count} items along `{}`, {}, {}",
+            path_id.as_deref().unwrap_or_default(),
+            match spacing {
+                Some(s) => format!("{} ({units}) apart", numbers(&[*s])),
+                None => "spaced evenly".to_owned(),
+            },
+            if *align {
+                "each turned with the path"
+            } else {
+                "unturned"
+            }
+        ),
+    };
+    let mut written: Vec<String> = Vec::new();
+    let in_template: BTreeSet<usize> = found
+        .iter()
+        .filter_map(|(f, _)| match f.file {
+            FileRef::Template(t) => Some(t),
+            FileRef::Rows(_) => None,
+        })
+        .collect();
+    for t in in_template {
+        let sheets = &files.templates[t].sheets;
+        written.push(if sheets.len() > 1 {
+            format!(
+                "in the template `{}`, so on {}",
+                files.templates[t].written,
+                every_sheet(&files.names(sheets))
+            )
+        } else {
+            format!("in the template `{}`", files.templates[t].written)
+        });
+    }
+    if found
+        .iter()
+        .any(|(f, _)| matches!(f.file, FileRef::Rows(_)))
+    {
+        written.push(format!("in sheet `{}`'s row", files.name(k)));
+    }
+    let ids: Vec<String> = copies.iter().map(|c| format!("`{}`", c.id)).collect();
+    let verb = if op.spec.kind == Kind::Array {
+        "arrays"
+    } else {
+        "copies"
+    };
+    let message = format!(
+        "{verb} {what} {how}, making {}, written {}: {}{}",
+        plural(copies.len(), "copy", "copies"),
+        written.join(" and "),
+        listed(&ids),
+        snapped_words(&snapped)
+    );
+    let record = match at.file(found[0].0.file) {
+        Ok(record) => record.path.clone(),
+        Err(e) => return fail(reach, e),
+    };
+    Applied {
+        outcome: Ok(Done {
+            record,
+            id: None,
+            before: None,
+            after: None,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            snapped,
+            copies,
+            message,
+        }),
+        sheets: reach,
+        refuse: false,
+    }
+}
+
+/// `items` joined with commas and `or`.
+fn join_or(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
+/// The sheet `k` as the change set has left it so far, with the fonts its
+/// text is measured in, for the geometry of its objects.
+fn sheet_geometry(
+    at: &Attempt,
+    op: &Operation,
+    k: usize,
+    settings: &Settings,
+) -> Result<(SheetRecord, SheetFonts), Error> {
+    let rows = at.rows_now()?;
+    let record = sheet_record(at, &rows, k, &mut Vec::new()).map_err(|e| Error {
+        message: format!(
+            "operation {} (`{}`): sheet `{}` cannot be read to work out where the copies go: {}",
+            op.index,
+            op.spec.name,
+            at.files.name(k),
+            e.message
+        ),
+        ..e
+    })?;
+    let fonts = SheetFonts::find(&record.sheet, settings);
+    Ok((record, fonts))
+}
+
+/// The place in `record`'s objects of the object `found` names.
+fn model_index(record: &SheetRecord, found: &Found) -> Option<usize> {
+    let local = found
+        .id
+        .split_once(ID_SEPARATOR)
+        .map_or(found.id.as_str(), |(_, local)| local);
+    let in_row = matches!(found.file, FileRef::Rows(_));
+    record
+        .objects
+        .iter()
+        .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(local))
+}
+
+/// The centre of the box round the objects `found` names, on sheet `k`:
+/// the base point of a polar array's copies that are not turned, when the
+/// operation gives none.
+fn extents_center(
+    at: &Attempt,
+    op: &Operation,
+    k: usize,
+    found: &[(Found, &str)],
+    settings: &Settings,
+) -> Result<[f64; 3], Error> {
+    let (record, fonts) = sheet_geometry(at, op, k, settings)?;
+    let reader = Reader {
+        sheet: &record.sheet,
+        fonts: &fonts,
+    };
+    let mut bounds: Option<([f64; 3], [f64; 3])> = None;
+    for (f, _) in found {
+        let Some(object) = model_index(&record, f).and_then(|i| record.sheet.objects.get(i)) else {
+            continue;
+        };
+        if let Some(b) = reader.measures(object).extents {
+            bounds = Some(match bounds {
+                None => (b.min, b.max),
+                Some((min, max)) => (
+                    [
+                        min[0].min(b.min[0]),
+                        min[1].min(b.min[1]),
+                        min[2].min(b.min[2]),
+                    ],
+                    [
+                        max[0].max(b.max[0]),
+                        max[1].max(b.max[1]),
+                        max[2].max(b.max[2]),
+                    ],
+                ),
+            });
+        }
+    }
+    match bounds {
+        Some((min, max)) => Ok([
+            (min[0] + max[0]) / 2.0,
+            (min[1] + max[1]) / 2.0,
+            (min[2] + max[2]) / 2.0,
+        ]),
+        None => Err(op_error(
+            op.index,
+            op.spec.name,
+            ErrorCode::BadValue,
+            "the objects have no extents to take a base point from; give base_point",
+            "base_point",
+        )),
+    }
+}
+
+/// The ID and the curves, end to end, of the path a path array runs along,
+/// which `path` names on sheet `k`, the objects' sheet: a line, a
+/// polyline, an arc, a circle, an ellipse or a spline. A path of a row's
+/// own is on its sheet alone, so it does not carry a template's objects.
+fn path_curves(
+    at: &mut Attempt,
+    op: &Operation,
+    path: &Target,
+    k: usize,
+    found: &[(Found, &str)],
+    settings: &Settings,
+) -> Result<(String, Vec<Curve>), Box<Applied>> {
+    let files = at.files;
+    let err = |sheets: Vec<usize>, code: ErrorCode, message: String| {
+        Box::new(Applied {
+            sheets,
+            outcome: Err(op_error(op.index, op.spec.name, code, message, "path")),
+            refuse: false,
+        })
+    };
+    let on = match resolve(at, path, op) {
+        Ok(on) => on,
+        Err(applied) => return Err(Box::new(keyed(*applied, op, "path"))),
+    };
+    let mut reach: BTreeSet<usize> = BTreeSet::new();
+    for (f, _) in found {
+        reach.extend(at.reach(f.file, f.row));
+    }
+    let reach: Vec<usize> = reach.into_iter().collect();
+    if on.row != k {
+        return Err(err(
+            reach,
+            ErrorCode::BadValue,
+            format!(
+                "the path `{}` is on sheet `{}`, and the objects on sheet `{}`; a path array \
+                 runs along a path of the objects' sheet",
+                on.id,
+                files.name(on.row),
+                files.name(k)
+            ),
+        ));
+    }
+    let carried = found
+        .iter()
+        .find(|(f, _)| matches!(f.file, FileRef::Template(_)));
+    if let (FileRef::Rows(_), Some((f, _)), true) = (on.file, carried, reach.len() > 1) {
+        return Err(err(
+            reach,
+            ErrorCode::BadValue,
+            format!(
+                "the path `{}` is sheet `{}`'s own, on that sheet alone, and `{}` is its \
+                 template's, so its copies go on every sheet built from the template; run them \
+                 along a path of the template",
+                on.id,
+                files.name(k),
+                f.id
+            ),
+        ));
+    }
+    let (record, fonts) = sheet_geometry(at, op, k, settings).map_err(|e| {
+        Box::new(Applied {
+            sheets: reach.clone(),
+            outcome: Err(e),
+            refuse: false,
+        })
+    })?;
+    let reader = Reader {
+        sheet: &record.sheet,
+        fonts: &fonts,
+    };
+    let Some(object) = model_index(&record, &on).and_then(|i| record.sheet.objects.get(i)) else {
+        return Err(err(
+            reach,
+            ErrorCode::UnknownName,
+            format!("the path `{}` is not on sheet `{}`", on.id, files.name(k)),
+        ));
+    };
+    match object {
+        Object::Line(_)
+        | Object::Polyline(_)
+        | Object::Arc(_)
+        | Object::Circle(_)
+        | Object::Ellipse(_)
+        | Object::Spline(_) => {}
+        other => {
+            let what = other.type_name();
+            return Err(err(
+                reach,
+                ErrorCode::BadValue,
+                format!(
+                    "the path `{}` is {} {what}; a path array runs along a line, a polyline, \
+                     an arc, a circle, an ellipse or a spline",
+                    on.id,
+                    article(what)
+                ),
+            ));
+        }
+    }
+    let curves = reader.curves(object).into_iter().map(|(_, c)| c).collect();
+    Ok((on.id, curves))
 }
 
 /// Reads sheet `k` from the records in memory and builds it, adding what
@@ -3967,6 +4680,15 @@ fn blame_row_values(at: &Attempt, k: usize, value: &str, error: &Error) -> Vec<u
 /// target's sheet.
 fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
     let files = at.files;
+    let reaches = |target: &Target| match target {
+        Target::Id { sheet, .. }
+        | Target::Name {
+            sheet: Some(sheet), ..
+        } => files
+            .sheet(sheet)
+            .is_some_and(|s| s == k || files.template_of[s] == files.template_of[k]),
+        Target::Name { sheet: None, .. } => true,
+    };
     match &op.body {
         Body::Add {
             to: AddTo::Sheet(sheet),
@@ -3992,15 +4714,8 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::SetAttribute { target, .. }
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
-        | Body::DimensionFrom { target, .. } => match target {
-            Target::Id { sheet, .. }
-            | Target::Name {
-                sheet: Some(sheet), ..
-            } => files
-                .sheet(sheet)
-                .is_some_and(|s| s == k || files.template_of[s] == files.template_of[k]),
-            Target::Name { sheet: None, .. } => true,
-        },
+        | Body::DimensionFrom { target, .. } => reaches(target),
+        Body::Copy { targets, .. } => targets.iter().any(|(t, _)| reaches(t)),
         Body::Block { library, .. } => {
             files.library(library.as_deref()).ok() == files.library_of[files.template_of[k]]
         }
@@ -4114,6 +4829,8 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         },
         // What is wrong with the dimension it adds comes of its point.
         Body::DimensionFrom { .. } => "point".to_owned(),
+        // What is wrong with a copy comes of the operation as a whole.
+        Body::Copy { .. } => String::new(),
         // A place within the block it wrote, such as `objects[0].line.layer`,
         // is that place in the operation.
         Body::Block { .. } => rest.to_owned(),
@@ -4296,6 +5013,11 @@ fn target_words(op: &Operation) -> String {
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => target.words(),
+        Body::Copy { targets, .. } => match targets.as_slice() {
+            [(one, _)] => one.words(),
+            [(first, _), rest @ ..] => format!("{} and {} more", first.words(), rest.len()),
+            [] => String::new(),
+        },
         Body::Add {
             to: AddTo::Sheet(s),
             ..
