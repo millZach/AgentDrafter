@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  barNote,
+  isUndoKey,
   CORE_ORDER,
   editsHere,
   fieldKey,
@@ -81,17 +83,20 @@ const toolState = (over: Partial<ToolState>): ToolState => ({
   picked: [],
   points: [],
   text: null,
+  placed: 0,
   ...over,
 });
 
-test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move and Erase in Modify, with AutoCAD aliases', () => {
+test('the ribbon shows Line, Circle, Rectangle and Text in Draw, Move, Copy and Erase in Modify, with AutoCAD aliases', () => {
   assert.deepEqual(
-    PANELS.map((p) => [p.title, p.tools.map((t) => `${t.label} ${t.command} ${t.alias}`)]),
+    PANELS.map((p) => [p.title, p.tools.map((t) => `${t.label} ${t.command} ${t.alias}${t.also ? ` ${t.also}` : ''}`)]),
     [
       ['Draw', ['Line LINE L', 'Circle CIRCLE C', 'Rectangle RECTANG REC', 'Text TEXT T']],
-      ['Modify', ['Move MOVE M', 'Erase ERASE E']],
+      ['Modify', ['Move MOVE M', 'Copy COPY CO CP', 'Erase ERASE E']],
     ],
   );
+  // No Array tool in this build (#66): it comes later, with its own prototype.
+  assert.ok(!PANELS.flatMap((p) => p.tools).some((t) => /array/i.test(t.label)));
   for (const tool of PANELS.flatMap((p) => p.tools)) assert.ok(tool.tip.length > 20, `${tool.label} has a tip in plain words`);
 });
 
@@ -277,15 +282,15 @@ test('while a preview is shown the command bar says nothing has landed and how t
   assert.equal(words(promptFor({ ...none, previewing: true, touch: true }).parts), 'Nothing has landed. ◀ ▶ or the tabs show each sheet');
 });
 
-test('the command bar prompts for a command or a selection, and offers Move, Erase and Clear on what is selected', () => {
+test('the command bar prompts for a command or a selection, and offers Move, Copy, Erase and Clear on what is selected', () => {
   assert.equal(words(promptFor(none).parts), 'Type a command, such as L for Line, or select an object, or click a snap to read its point');
   assert.equal(words(promptFor({ ...none, touch: true }).parts), 'Pick a tool in Tools, or tap an object to see it; touch and hold to read a point');
   const selected = promptFor({ ...none, selected: { id: 'DP-LD-101/device', name: 'FT-101', type: 'insert', block: 'TRANSMITTER' } });
   assert.equal(selected.command, null);
-  assert.equal(words(selected.parts), 'FT-101 selected [ <Move> <Erase> <Clear> ]');
+  assert.equal(words(selected.parts), 'FT-101 selected [ <Move> <Copy> <Erase> <Clear> ]');
   assert.deepEqual(
     selected.parts.filter((p) => 'act' in p).map((p) => ('act' in p ? p.act : '')),
-    ['move', 'erase', 'clear'],
+    ['move', 'copy-objects', 'erase', 'clear'],
   );
 });
 
@@ -601,4 +606,50 @@ test('quick properties edit only while the drawing loaded is the view asked for 
   assert.equal(editsHere({ at: null, sheet: 'LAY-001', layout: 'wiring' }, laid), false);
   assert.equal(editsHere({ at: null, sheet: 'LAY-001', layout: 'wiring' }, { ...laid, layout: 'Wiring' }), true);
   assert.equal(editsHere({ at: null, sheet: null, layout: null }, null), false);
+});
+
+test('the command bar\'s note says what the keys do: with copies placed, Enter or Esc lands them and Ctrl+Z takes one back', () => {
+  assert.equal(barNote(null), 'F3: snaps · F8: Ortho · Tab: the next snap here');
+  assert.equal(barNote(toolState({ tool: 'line', takes_points: true })), 'Enter or right-click: done · Esc: end · F8: Ortho');
+  assert.equal(barNote(toolState({ tool: 'text', typing_text: true })), 'Enter: next line · Enter again or Esc: done');
+  // Copy before a copy is placed ends as any tool does.
+  assert.equal(barNote(toolState({ tool: 'copy', takes_points: true, points: [[1, 1]] })), 'Enter or right-click: done · Esc: end · F8: Ortho');
+  assert.equal(barNote(toolState({ tool: 'copy', takes_points: true, points: [[1, 1]], placed: 2 })), 'Enter or Esc: the copies land · Ctrl+Z: one back');
+});
+
+test('Ctrl+Z, or ⌘Z, is the undo key, in either case, but not with Shift or Alt', () => {
+  const key = (over: Partial<{ key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }>) => ({
+    key: 'z',
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...over,
+  });
+  assert.ok(isUndoKey(key({ ctrlKey: true })));
+  assert.ok(isUndoKey(key({ metaKey: true, key: 'Z' })));
+  assert.ok(!isUndoKey(key({})), 'z alone is typed');
+  assert.ok(!isUndoKey(key({ ctrlKey: true, shiftKey: true })), 'Ctrl+Shift+Z is redo elsewhere');
+  assert.ok(!isUndoKey(key({ ctrlKey: true, altKey: true })));
+  assert.ok(!isUndoKey(key({ ctrlKey: true, key: 'y' })));
+});
+
+test('a copy placed in the template shows Copy\'s warning, as the renderer says it', () => {
+  const copy = toolState({
+    tool: 'copy',
+    command: 'COPY',
+    prompt: '2 copies placed, dashed until you finish. Click where the next goes, or type @dx,dy or a length',
+    options: [
+      { label: 'Undo', act: 'undo', main: false },
+      { label: 'Done: copy 2', act: 'done', main: true },
+    ],
+    takes_points: true,
+    placed: 2,
+  });
+  const p = promptFor({ ...none, tool: copy });
+  assert.equal(p.command, 'COPY');
+  assert.equal(
+    words(p.parts),
+    '2 copies placed, dashed until you finish. Click where the next goes, or type @dx,dy or a length [ <Undo> · <Done: copy 2> ]',
+  );
 });

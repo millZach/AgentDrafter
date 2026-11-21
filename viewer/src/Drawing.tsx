@@ -408,6 +408,38 @@ export function Drawing({
       if (left + el.offsetWidth > width - 4) el.style.left = `${Math.round(Math.max(4, width - el.offsetWidth - 4))}px`;
     }
   };
+  // The tag over each copy Copy has placed, `copy 1 · waits for Enter`,
+  // at the top right of the copy as the renderer finds it, placed at each
+  // draw so it follows the view (#66).
+  const copyTags = useRef<HTMLDivElement>(null);
+  const placeCopyTags = () => {
+    const holder = copyTags.current;
+    const v = viewer.current;
+    const c = canvas.current;
+    if (!holder || !c) return;
+    const tags = v ? (JSON.parse(v.tool_copy_tags(narrow.current)) as { text: string; at: [number, number] }[]) : [];
+    if (!tags.length) {
+      if (holder.childElementCount) holder.replaceChildren();
+      return;
+    }
+    const width = c.clientWidth;
+    const height = c.clientHeight - covered.current;
+    const kids = tags.map((t) => {
+      const [x, y] = toScreen(view.current, t.at[0], t.at[1]);
+      const el = document.createElement('div');
+      el.className = 'ctag';
+      el.textContent = t.text;
+      el.dataset.copytag = '';
+      el.style.left = `${Math.round(Math.max(4, x + 6))}px`;
+      el.style.top = `${Math.round(Math.max(4, Math.min(height - 24, y - 24)))}px`;
+      return el;
+    });
+    holder.replaceChildren(...kids);
+    for (const el of kids) {
+      const left = Number.parseFloat(el.style.left);
+      if (left + el.offsetWidth > width - 4) el.style.left = `${Math.round(Math.max(4, width - el.offsetWidth - 4))}px`;
+    }
+  };
   /** Whether a tool runs that takes the drawing's clicks and taps. */
   // Asked of the renderer, which holds the tool, so a tap made before the
   // page has drawn the tool's new step still goes to it.
@@ -557,6 +589,7 @@ export function Drawing({
     placeCard();
     placeEditor();
     placeToolWords();
+    placeCopyTags();
     placePreviewTags();
     placeProposalCards();
     const at = pointer.current;
@@ -1260,6 +1293,7 @@ export function Drawing({
       <div className="dyn" ref={dyn} aria-hidden="true" data-dyn />
       <div className="typed" ref={typed} aria-hidden="true" data-typed />
       <div className="pvtags" ref={pvTags} data-pvtags />
+      <div className="ctags" ref={copyTags} aria-hidden="true" data-copytags />
       <svg className="pleaders" ref={leaders} aria-hidden="true" data-pleaders />
       <div className="pcards" ref={pcards} data-pcards>
         {cards}

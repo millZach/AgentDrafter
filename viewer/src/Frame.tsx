@@ -14,6 +14,7 @@ import {
   SNAPS,
   TOGGLES,
   fieldKey,
+  isUndoKey,
   pastedLines,
   checkAgainOffered,
   keepButton,
@@ -61,6 +62,13 @@ const ICONS: Record<ToolKey, ReactNode> = {
   text: <path d="M6 23L14 4l8 19M9 16h10" />,
   move: (
     <path d="M14 3v22M3 14h22M14 3l-3.5 3.5M14 3l3.5 3.5M14 25l-3.5-3.5M14 25l3.5-3.5M3 14l3.5-3.5M3 14l3.5 3.5M25 14l-3.5-3.5M25 14l-3.5 3.5" />
+  ),
+  copy: (
+    <>
+      <rect x="3.5" y="9.5" width="12" height="12" rx="1" />
+      <rect x="12.5" y="4.5" width="12" height="12" rx="1" strokeDasharray="3 2" />
+      <rect className="pt" x="1" y="19" width="5" height="5" />
+    </>
   ),
   erase: <path d="M16 4l8 8-11 11H8l-4-4zM10 10l8 8M4 25h20" />,
 };
@@ -112,7 +120,7 @@ export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, cur
                 className={`rb${running === tool.key ? ' on' : ''}`}
                 data-tool={tool.key}
                 aria-pressed={running === tool.key}
-                aria-label={`${tool.label} (${tool.alias})`}
+                aria-label={`${tool.label} (${tool.alias}${tool.also ? ` or ${tool.also}` : ''})`}
                 onPointerEnter={(e) => {
                   if (e.pointerType !== 'mouse') return;
                   const r = e.currentTarget.getBoundingClientRect();
@@ -203,6 +211,7 @@ export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, cur
           <b>
             {tip.tool.label}
             <kbd>{tip.tool.alias}</kbd>
+            {tip.tool.also && <kbd>{tip.tool.also}</kbd>}
           </b>
           {tip.tool.tip}
         </div>
@@ -250,6 +259,8 @@ export interface CommandBarProps {
   spaceEnters?(text: string): boolean;
   /** What the field holds, each time it changes, emptied by Enter or Esc among them: the hint follows it. */
   onTyped?(text: string): void;
+  /** Ctrl+Z in the field with nothing typed, when it takes something back: Copy's last copy placed (#66). */
+  onUndoKey?(): void;
 }
 
 /** The command bar under the drawing: it prompts, with options to click, and takes what is typed. */
@@ -274,6 +285,7 @@ export function CommandBar({
   hint = '',
   spaceEnters,
   onTyped,
+  onUndoKey,
 }: CommandBarProps) {
   return (
     <div className="cmd" data-ui>
@@ -361,6 +373,11 @@ export function CommandBar({
               e.currentTarget.value = '';
               onTyped?.('');
               onEnter(text);
+            } else if (onUndoKey && isUndoKey(e) && !e.currentTarget.value) {
+              // Ctrl+Z with nothing typed takes back Copy's last copy placed.
+              e.preventDefault();
+              e.stopPropagation();
+              onUndoKey();
             } else if (e.key === 'Escape') {
               e.preventDefault();
               e.stopPropagation();

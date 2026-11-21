@@ -84,6 +84,8 @@ import {
   snappedPoint,
   takenOf,
   toggleFor,
+  barNote,
+  isUndoKey,
   toggledWords,
   typeWords,
   nameOf,
@@ -1217,6 +1219,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (toolState?.tool === tool.key) toolDid(renderer()?.tool_escape() ?? '');
     else startTool(tool.key);
   };
+  // Copy's copies placed wait for Enter; Undo, U and Ctrl+Z take the last back.
+  const copiesPlaced = toolState?.tool === 'copy' && toolState.placed > 0;
+  const undoCopy = () => toolDid(renderer()?.tool_option('undo') ?? '');
   const endTool = () => {
     const v = renderer();
     if (v && toolState?.tool) toolDid(v.tool_escape());
@@ -1294,6 +1299,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
         e.preventDefault();
         stepPreview(e.key === 'ArrowLeft' ? -1 : 1);
       }
+      return;
+    }
+    if (isUndoKey(e) && copiesPlaced) {
+      // Ctrl+Z takes back Copy's last copy placed, as U does (#66).
+      e.preventDefault();
+      undoCopy();
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1838,6 +1849,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     else if (a === 'newer') step(1);
     else if (a === 'live') backToLive();
     else if (a === 'move' || a === 'erase') startTool(a);
+    else if (a === 'copy-objects') startTool('copy');
     else if (a.startsWith('tool:')) {
       const v = renderer();
       if (!v) return;
@@ -2467,13 +2479,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
                 />
               ) : null
             }
-            note={
-              toolState?.typing_text
-                ? 'Enter: next line · Enter again or Esc: done'
-                : toolState?.tool
-                  ? 'Enter or right-click: done · Esc: end · F8: Ortho'
-                  : 'F3: snaps · F8: Ortho · Tab: the next snap here'
-            }
+            note={barNote(toolState)}
+            onUndoKey={copiesPlaced ? undoCopy : undefined}
           />
           {unavailable ? (
             <div className="va-note failed" role="alert">

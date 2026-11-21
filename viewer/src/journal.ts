@@ -92,6 +92,12 @@ export function operationWords(op: Operation): string {
   const name = op.op ?? '?';
   const target = op.target?.name ?? op.target?.id?.split('/').slice(1).join('/') ?? op.target?.id;
   if (name === 'set_attribute') return `set ${op.tag ?? '?'} = ${op.value ?? ''}${target ? ` on ${target}` : ''}`;
+  // A copy names its objects and, when it makes several, how many (#66).
+  if (name === 'copy') {
+    const several = Array.isArray(op.targets) && op.targets.length ? `${op.targets.length} objects` : target;
+    const copies = Array.isArray(op.offsets) && op.offsets.length > 1 ? `, ${op.offsets.length} copies` : '';
+    return `copy${several ? ` ${several}` : ''}${copies}`;
+  }
   if (target) return `${name} ${target}`;
   if (op.sheet) return `${name} on ${op.sheet}`;
   if (op.template) return `${name} in ${op.template}`;

@@ -8,6 +8,7 @@ import {
   entryState,
   entryTitle,
   journalReplaced,
+  operationWords,
   lastUndoable,
   newest,
   notIssued,
@@ -191,4 +192,18 @@ test('a change set makes stale every drawing kept of the sheets it touched, each
   assert.deepEqual(staleDrawings(kept, []), []);
   // A preview's drawings go with any change: the change set would apply to another set.
   assert.deepEqual(staleDrawings(['pv2|A|', 'pv2|B|', 'live|B|'], ['A']), ['pv2|A|', 'pv2|B|']);
+});
+
+test('a copy is named by its objects and, when it makes several, how many', () => {
+  assert.equal(operationWords({ op: 'copy', target: { id: 'DP-LD-101/device' }, offsets: [[0, 1.2, 0], [0, -1.2, 0]] }), 'copy device, 2 copies');
+  assert.equal(operationWords({ op: 'copy', target: { id: 'DP-LD-101/device' }, from: [1, 1, 0], to: [2, 1, 0] }), 'copy device');
+  assert.equal(operationWords({ op: 'copy', target: { name: 'FT-101', sheet: 'DP-LD-101' }, offsets: [[1, 0, 0]] }), 'copy FT-101');
+  assert.equal(
+    operationWords({ op: 'copy', targets: [{ id: 'DP-LD-101/device' }, { id: 'DP-LD-101/service' }], offsets: [[1, 0, 0], [2, 0, 0], [3, 0, 0]] }),
+    'copy 2 objects, 3 copies',
+  );
+  assert.equal(
+    entryTitle({ n: 9, kind: 'change_set', change_set: { operations: [{ op: 'copy', target: { id: 'DP-LD-101/device' }, offsets: [[0, 1, 0], [0, 2, 0]] }] } } as never),
+    'copy device, 2 copies',
+  );
 });
