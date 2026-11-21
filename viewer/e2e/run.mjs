@@ -3229,15 +3229,22 @@ const checks = {
         await sleep(600);
         assert(!(await bar(page)).includes('TEXTEDIT') && (await bar(page)).includes('ARRAYRECT'), `a double click opens no text while Array is set up: ${await bar(page)}`);
         assert(await page.$('[data-arraypanel]'), 'the panel stays');
+        // TO typed for it, not entered: it goes with the array, so Enter on
+        // the next sheet sends nothing to the assistant (#66, review 2).
+        await page.keyboard.type('TO');
+        assert((await page.inputValue('.cmdin')) === 'TO', 'TO is typed in the command bar');
         await page.evaluate(() => {
           [...document.querySelectorAll('.sheettabs .tab')].find((t) => t.querySelector('b')?.textContent === 'DP-LD-102').click();
           document.querySelector('[data-arraypanel] [data-act="array"]')?.click();
         });
+        assert((await page.inputValue('.cmdin')) === '', `the draft goes with the array, at once: ${await page.inputValue('.cmdin')}`);
         await page.keyboard.press('Enter');
         await page.waitForFunction(() => window.agentdrafterViewer.summary?.sheet === 'DP-LD-102', null, { timeout: 30000 });
         await sleep(1000);
         assert(journal().length === before, `a sheet asked for drops the array, nothing sent: ${JSON.stringify(journal().at(-1))}`);
         assert(!(await page.$('[data-arraypanel]')), 'the panel goes');
+        assert(!(await page.textContent('.cmd .hist')).includes('To the assistant'), `nothing goes to the assistant: ${await page.textContent('.cmd .hist')}`);
+        assert((await page.inputValue('.cmdin')) === '', 'the command bar is empty on DP-LD-102');
         await page.evaluate(() => [...document.querySelectorAll('.sheettabs .tab')].find((t) => t.querySelector('b')?.textContent === 'DP-LD-101').click());
         await page.waitForFunction(() => window.agentdrafterViewer.summary?.sheet === 'DP-LD-101', null, { timeout: 30000 });
         // Polar: ARRAYPOLAR on the tick, its centre on the circle's Centre snap.

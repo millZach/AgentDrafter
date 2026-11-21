@@ -1243,7 +1243,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const dropArrayFor = (sheet: string, layout: string | null) => {
     const v = renderer();
     const shown = summary ? { sheet: summary.sheet, layout: summary.layout ?? null } : null;
-    if (v && toolRead.current?.array && switchingAway(sheet, layout, shown)) toolDid(v.tool_leave());
+    if (v && toolRead.current?.array && switchingAway(sheet, layout, shown)) {
+      toolDid(v.tool_leave());
+      // What was typed for it goes with it, at once: Enter on the next
+      // sheet must not send it to the assistant (#66, review 2).
+      if (field.current) field.current.value = '';
+      setTyped('');
+    }
   };
   const arrayAct = (a: string) => {
     if (arrayStale()) {
