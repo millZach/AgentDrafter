@@ -1411,10 +1411,10 @@ fn drawing_properties(path: &Path) -> Result<Option<Vec<(String, String)>>, Stri
         })
         .map_err(|e| format!("could not read the file: {e}"))?;
     // A DWG starts with its version, such as `AC1032` for the 2018 format;
-    // the 2007 format is `AC1021`.
+    // the 2007 format is `AC1021`. The DWG library reads `AD` for `AC` too.
     let version = std::str::from_utf8(&start[..read])
         .ok()
-        .and_then(|text| text.strip_prefix("AC"))
+        .and_then(|text| text.strip_prefix("AC").or_else(|| text.strip_prefix("AD")))
         .filter(|digits| digits.len() == 4)
         .and_then(|digits| digits.parse::<u32>().ok());
     match version {
@@ -1428,6 +1428,16 @@ fn drawing_properties(path: &Path) -> Result<Option<Vec<(String, String)>>, Stri
         .map_err(|e| format!("the DWG library could not read its header: {e}"))?;
     if !header.version.r2007_plus() {
         return Ok(None);
+    }
+    // The summary section is optional: a DWG without one has no drawing
+    // properties, so no build mark, which is not a failed read.
+    let has_summary = header
+        .section_descriptors
+        .iter()
+        .any(|section| section.name == SUMMARY_SECTION)
+        || header.section_locators.contains_key(SUMMARY_SECTION);
+    if !has_summary {
+        return Ok(Some(Vec::new()));
     }
     let section = reader
         .get_section_buffer(SUMMARY_SECTION, &header)
@@ -1672,7 +1682,13 @@ mod tests {
                 "{name}"
             );
             // Read from the drawing properties alone, as from the drawing.
-            assert_eq!(build_mark(&dwg), Some(mark), "{name}");
+            assert_eq!(build_mark(&dwg), Some(mark.clone()), "{name}");
+            // The DWG library reads a version starting `AD` as `AC`, and so
+            // does the mark's reader.
+            let mut bytes = fs::read(&dwg).unwrap();
+            bytes[..2].copy_from_slice(b"AD");
+            fs::write(&dwg, &bytes).unwrap();
+            assert_eq!(build_mark(&dwg), Some(mark), "{name}, as AD");
         }
         let _ = fs::remove_dir_all(&dir);
     }
