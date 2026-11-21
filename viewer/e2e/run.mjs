@@ -2637,6 +2637,8 @@ const checks = {
         assert(proposed.ok, `a proposal waits: ${JSON.stringify(proposed)}`);
         const number = proposed.result.proposal;
         await page.waitForSelector(`[data-pcard="${number}"]`, { timeout: 30000 });
+        // The entry shown brought the view to its change: the whole sheet again.
+        await fitAll(page);
         before = journal().length;
         await typeIn(page, 'CO');
         await page.mouse.click(...(await onPage(page, [6.38, 6.5])));
