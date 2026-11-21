@@ -431,7 +431,10 @@ fn an_insert_mirrored_twice_keeps_its_attributes_reading_forwards() {
             "base_point": [10, 60, 0], "angle": 90}, mirror.clone()]),
     );
     let once = insert(&recorded(&set), "ROT-001/lug");
-    assert!(once.mirrored && (once.rotation - 240.0).abs() < 1e-9, "{once:?}");
+    assert!(
+        once.mirrored && (once.rotation - 240.0).abs() < 1e-9,
+        "{once:?}"
+    );
     let report = lands(&set, json!([mirror]));
     let twice = insert(&recorded(&set), "ROT-001/lug");
     assert!(!twice.mirrored && twice.readable_attributes, "{twice:?}");

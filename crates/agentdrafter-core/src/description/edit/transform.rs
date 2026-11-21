@@ -726,11 +726,12 @@ impl At<'_> {
         if across == 0.0 {
             return None;
         }
-        let points_key = if kind == "mleader" { "leaders" } else { "points" };
-        let has = |key: &str| {
-            keys.iter()
-                .any(|e| e.key == key && !e.value.is_bare_null())
+        let points_key = if kind == "mleader" {
+            "leaders"
+        } else {
+            "points"
         };
+        let has = |key: &str| keys.iter().any(|e| e.key == key && !e.value.is_bare_null());
         if kind == "leader" && !has("annotation") {
             return None;
         }
@@ -1658,7 +1659,8 @@ objects:
 
     #[test]
     fn an_ordinate_dimension_measures_along_its_turned_or_mirrored_axis() {
-        let ordinate = "dimension: {kind: ordinate, feature: [4, 6, 0], axis: x, location: [4, 9, 0]}";
+        let ordinate =
+            "dimension: {kind: ordinate, feature: [4, 6, 0], axis: x, location: [4, 9, 0]}";
         // A quarter turn either way measures along Y; a half turn along X.
         lands(
             ordinate,
@@ -1688,7 +1690,10 @@ objects:
             "dimension: {kind: ordinate, feature: [4, -6, 0], axis: x, location: [4, -9, 0]}",
         );
         // Each lands as a sheet's reader reads it, its leader along its axis.
-        for t in [turn(), Transform::mirror([0.0; 3], [1.0, 1.0, 0.0]).unwrap()] {
+        for t in [
+            turn(),
+            Transform::mirror([0.0; 3], [1.0, 1.0, 0.0]).unwrap(),
+        ] {
             let landed = transformed(ordinate, t, &Resolved::default()).unwrap();
             let sheet = format!("units: mm\nobjects:\n  - {landed}\n");
             crate::description::parse_sheet_description(&sheet).unwrap();
@@ -1719,10 +1724,12 @@ objects:
         // its landing and text on the left, as its mirror image.
         let tag = "mleader: {leaders: [[[0, 0, 0], [10, 10, 0], [14, 10, 0]]], content: {text: T}, landing: 8}";
         let landed = transformed(tag, up, &Resolved::default()).unwrap();
-        let sheet = format!("units: mm
+        let sheet = format!(
+            "units: mm
 objects:
   - {landed}
-");
+"
+        );
         let sheet = crate::description::parse_sheet_description(&sheet).unwrap();
         let crate::model::Object::MLeader(m) = &sheet.objects[0] else {
             panic!("a multileader")
@@ -1743,7 +1750,11 @@ objects:
             let e = transformed(object, up, &Resolved::default()).unwrap_err();
             assert_eq!(e.code, ErrorCode::BadValue, "{object}");
             assert_eq!(e.field.as_deref(), Some(field), "{object}");
-            assert!(e.message.contains("mirror image goes to the left"), "{}", e.message);
+            assert!(
+                e.message.contains("mirror image goes to the left"),
+                "{}",
+                e.message
+            );
             // Across the sheet its mirror image runs right too, so it lands.
             let across = Transform::mirror([0.0; 3], [1.0, 0.0, 0.0]).unwrap();
             assert!(transformed(object, across, &Resolved::default()).is_ok());

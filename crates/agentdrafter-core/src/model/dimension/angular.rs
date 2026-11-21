@@ -193,9 +193,17 @@ pub(super) fn sector(measured: &Measured, location: Point3) -> Option<Sector> {
             let theta = angle_of(to);
             let rays = [
                 (angle_of(u1), 0, u1),
-                ((angle_of(u1) + 180.0).rem_euclid(360.0), 0, [-u1[0], -u1[1]]),
+                (
+                    (angle_of(u1) + 180.0).rem_euclid(360.0),
+                    0,
+                    [-u1[0], -u1[1]],
+                ),
                 (angle_of(u2), 1, u2),
-                ((angle_of(u2) + 180.0).rem_euclid(360.0), 1, [-u2[0], -u2[1]]),
+                (
+                    (angle_of(u2) + 180.0).rem_euclid(360.0),
+                    1,
+                    [-u2[0], -u2[1]],
+                ),
             ];
             let behind = |a: f64| (theta - a).rem_euclid(360.0);
             let ahead = |a: f64| (a - theta).rem_euclid(360.0);

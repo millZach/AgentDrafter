@@ -1,5 +1,6 @@
 # The made-up blocks the transforms sheet inserts: a terminal and a field
-# transmitter with its tag and service as attributes.
+# transmitter with its tag and service as attributes and its kind as a
+# constant one, and a pin whose reference is defined at 120 degrees.
 units: mm
 layers:
   symbols: {color: yellow}
@@ -15,3 +16,8 @@ blocks:
       - arc: {center: [0, 0, 0], radius: 3, start_angle: 90, end_angle: 180, layer: symbols}
       - attdef: {tag: TAG, position: [-5, 7, 0], height: 2.5}
       - attdef: {tag: SERVICE, position: [-5, -10, 0], height: 2}
+      - attdef: {tag: KIND, position: [-2, -3, 0], height: 2, default: FT, constant: true}
+  PIN:
+    objects:
+      - polyline: {points: [[-3, -3, 0], [3, -3, 0], [3, 3, 0], [-3, 3, 0]], closed: true, layer: symbols}
+      - attdef: {tag: REF, position: [-1, 10, 0], height: 2.5, rotation: 120}

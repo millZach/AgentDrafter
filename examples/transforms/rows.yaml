@@ -21,6 +21,7 @@ rows:
       - dimension: {id: ring-width, kind: linear, points: [[29, 80, 0], [41, 80, 0]], location: [35, 65, 0], layer: dims}
       # Mirrored across the dashed line x = 355, kept, with mirrored copies.
       - insert: {id: ft-101, block: XMTR, position: [320, 200, 0], attributes: {TAG: FT-101, SERVICE: COOLING WATER}, layer: symbols}
+      - leader: {id: ft-tap, points: [[315.1, 201, 0], [310, 198, 0], [306, 204, 0]], annotation: {text: E2, height: 2.5}, layer: notes}
       - text: {id: ft-note, contents: TO JB-900, position: [328, 178, 0], height: 2.5, rotation: 20, layer: notes}
       - line: {id: cable, from: [332, 200, 0], to: [350, 200, 0], layer: wires}
       - spline: {id: loop, fit_points: [[305, 150, 0], [320, 165, 0], [335, 150, 0], [348, 160, 0]], layer: wires}
@@ -29,5 +30,11 @@ rows:
       - arc: {id: hook, center: [320, 85, 0], radius: 10, start_angle: 200, end_angle: 340, layer: wires}
       # Mirrored in place across the line y = 50: turned a half turn too.
       - insert: {id: strip-c, block: TERM, position: [380, 60, 0], rotation: 30, attributes: {NUMBER: '3'}, layer: symbols}
+      # Mirrored across x = 180 to 30 degrees, its reference reading straight
+      # up; and mirrored twice in place across x = 235, its reference still
+      # reading forwards.
+      - insert: {id: pin-a, block: PIN, position: [165, 50, 0], rotation: 330, attributes: {REF: P1}, layer: symbols}
+      - insert: {id: pin-b, block: PIN, position: [220, 50, 0], attributes: {REF: P2}, layer: symbols}
+      - text: {id: pin-label, contents: MIRRORED ONCE AND TWICE, position: [150, 30, 0], height: 3, layer: notes}
       # Mirrored across a line at 45 degrees: it reads upwards.
       - text: {id: diag, contents: DIAGONAL, position: [285, 55, 0], height: 3, layer: notes}

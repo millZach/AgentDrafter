@@ -571,7 +571,10 @@ mod tests {
         insert.readable_attributes = true;
         let written = dwg_insert(&insert, &block, &|t| t.position).unwrap();
         // Its attributes read at 60, not at the 240 it is turned.
-        assert!(same_angle(written.attributes[0].rotation.to_degrees(), 60.0));
+        assert!(same_angle(
+            written.attributes[0].rotation.to_degrees(),
+            60.0
+        ));
         let read = read_insert(&written, "symbols".into(), std::slice::from_ref(&block)).unwrap();
         assert!(read.readable_attributes && !read.mirrored, "{read:?}");
         assert_eq!(read.attributes, insert.attributes);
