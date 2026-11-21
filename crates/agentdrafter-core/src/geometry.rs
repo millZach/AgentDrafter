@@ -417,14 +417,25 @@ impl<'a> Reader<'a> {
                             let value = block
                                 .attribute_value(insert, k)
                                 .unwrap_or(&definition.default);
-                            let text = attribute_text(insert, block, definition, value);
-                            let snaps = self.text_snaps(&text);
+                            // A constant one on a mirrored insert is drawn
+                            // with its block, mirrored, as AutoCAD draws it:
+                            // its snaps are its text's in the block, placed.
+                            let (snaps, placed) = if definition.constant && insert.mirrored {
+                                let in_block = crate::text::Text {
+                                    contents: value.to_owned(),
+                                    ..crate::model::block::definition_text(definition)
+                                };
+                                (self.text_snaps(&in_block), &inner)
+                            } else {
+                                let text = attribute_text(insert, block, definition, value);
+                                (self.text_snaps(&text), chain)
+                            };
                             for (kind, at) in snaps {
                                 out.push(OwnSnap {
                                     kind,
                                     which: here.clone(),
                                     blocks: inner.blocks.clone(),
-                                    at: chain.point(at),
+                                    at: placed.point(at),
                                 });
                             }
                         }
