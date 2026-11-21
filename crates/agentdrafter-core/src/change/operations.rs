@@ -46,6 +46,13 @@ pub(crate) enum Kind {
     /// Copies objects in rows and columns, round a centre or along a path:
     /// AutoCAD's ARRAY, as plain copies.
     Array,
+    /// Turns objects about a base point: AutoCAD's ROTATE.
+    Rotate,
+    /// Scales objects about a base point: AutoCAD's SCALE.
+    Scale,
+    /// Mirrors objects across a line, as copies or in place: AutoCAD's
+    /// MIRROR.
+    Mirror,
     SetAttribute,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
@@ -206,10 +213,14 @@ pub(crate) struct Spec {
 impl Spec {
     /// The AutoCAD commands besides its alias that name it: ARRAYRECT,
     /// ARRAYPOLAR and ARRAYPATH for `array`, each of which gives the array
-    /// its kind.
+    /// its kind, and the short forms AutoCAD's own aliases give ROTATE,
+    /// SCALE and MIRROR: RO, SC and MI.
     pub(crate) fn other_aliases(&self) -> &'static [&'static str] {
         match self.kind {
             Kind::Array => &ARRAY_ALIASES,
+            Kind::Rotate => &["RO"],
+            Kind::Scale => &["SC"],
+            Kind::Mirror => &["MI"],
             _ => &[],
         }
     }
@@ -261,7 +272,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 61] = [
+pub(crate) const SPECS: [Spec; 64] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -338,6 +349,21 @@ pub(crate) const SPECS: [Spec; 61] = [
         name: "array",
         alias: "ARRAY",
         kind: Kind::Array,
+    },
+    Spec {
+        name: "rotate",
+        alias: "ROTATE",
+        kind: Kind::Rotate,
+    },
+    Spec {
+        name: "scale",
+        alias: "SCALE",
+        kind: Kind::Scale,
+    },
+    Spec {
+        name: "mirror",
+        alias: "MIRROR",
+        kind: Kind::Mirror,
     },
     Spec {
         name: "set_attribute",
@@ -655,6 +681,50 @@ fn does(spec: &Spec) -> String {
                         text, mtext, donut, solid or insert. The reply lists each copy under \
                         copies, with its source and its place in the array. AutoCAD's ARRAY, \
                         ARRAYRECT, ARRAYPOLAR and ARRAYPATH, without the associative array."
+            .to_owned(),
+        Kind::Rotate => "Turns objects in place, target, one by its ID or its name, or \
+                         targets, several of one sheet, by angle degrees, anticlockwise, \
+                         negative clockwise, about base_point, a point or a snapped point, as \
+                         AutoCAD's ROTATE takes them. Every point each is drawn through turns \
+                         about it, and so does every direction it is drawn in: a text's, an \
+                         mtext's and an insert's rotation, an arc's angles, an ellipse's major \
+                         axis, a patterned hatch's angle and origin and a linear dimension's \
+                         angle. A multileader's and a leader's text stays level, laid out again \
+                         where its landing puts it, and a dimension's text reads as its rules \
+                         lay it out. A turn by a multiple of 90 degrees lands exactly. A table, \
+                         which has no rotation, and a viewport are not turned. Each keeps its \
+                         ID. AutoCAD's ROTATE."
+            .to_owned(),
+        Kind::Scale => "Scales objects in place, target or targets as rotate takes them, by \
+                        factor, a number more than 0, about base_point, a point or a snapped \
+                        point, as AutoCAD's SCALE takes them. Every point each is drawn through \
+                        moves away from it or towards it, along Z too, and every length it is \
+                        drawn with is scaled: a radius, a text's and an mtext's height and \
+                        width, a polyline's widths, a donut's diameters, an insert's scale and \
+                        a patterned hatch's pattern scale, and a multileader's and a leader's \
+                        arrow size, gap, landing and text height, written as its own when its \
+                        style or the sheet's default gives them. A dimension's text and arrows \
+                        stay as its style draws them, and it measures its new length. A table, \
+                        whose text its style sizes, and a viewport are not scaled. Each keeps \
+                        its ID. AutoCAD's SCALE."
+            .to_owned(),
+        Kind::Mirror => "Mirrors objects, target or targets as rotate takes them, across the \
+                         line through first_point and second_point, each a point or a snapped \
+                         point, as AutoCAD's MIRROR takes them. As MIRROR does by default, it \
+                         keeps the objects and makes mirrored copies, each an ordinary object \
+                         with an ID of its own and copy_of, as copy gives them, written where \
+                         its source is, listed under copies; erase_source: true mirrors the \
+                         objects themselves instead, each keeping its ID. Text keeps reading \
+                         forwards, as AutoCAD's MIRRTEXT 0 keeps it: its position mirrors, and \
+                         it reads along its mirrored direction, or that turned a half turn, \
+                         whichever reads left to right or upwards, with its own justification; \
+                         an insert's attributes read forwards too, while the insert itself is \
+                         mirrored, mirrored: true, which a DWG keeps as a negative X scale. A \
+                         hatch's pattern keeps its direction, as AutoCAD's MIRRHATCH 0 keeps it. \
+                         A line across or up the sheet, or at 45 degrees, mirrors exactly. A \
+                         table is mirrored only across a line across or up the sheet, and a \
+                         multileader with block content and a viewport are not mirrored. \
+                         AutoCAD's MIRROR."
             .to_owned(),
         Kind::Table(op, table) => {
             let word = table.word();
@@ -1480,6 +1550,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             schema
         }
         Kind::Array => array_schema(),
+        Kind::Rotate | Kind::Scale | Kind::Mirror => transform_schema(spec.kind),
         Kind::Table(op, table) => table_schema(op, table, defs),
         Kind::Block(op) => block_schema(op, defs),
         Kind::Grid(op) => grid_schema(op, defs),
@@ -1604,6 +1675,96 @@ fn copied_objects_properties(schema: &mut Value) {
         "items": { "$ref": "#/$defs/target" },
         "minItems": 1,
     });
+}
+
+/// The schema of `rotate`, `scale` or `mirror`: the objects, by target or
+/// targets, and the base point and angle, the base point and factor, or
+/// the mirror line's two points.
+fn transform_schema(kind: Kind) -> Value {
+    let verb = match kind {
+        Kind::Rotate => "turn",
+        Kind::Scale => "scale",
+        _ => "mirror",
+    };
+    let (required, properties) = match kind {
+        Kind::Rotate => (
+            json!(["base_point", "angle"]),
+            json!({
+                "base_point": {
+                    "description": "The point they turn about, as AutoCAD's ROTATE takes it: a \
+                                    point or a snapped point.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "angle": {
+                    "description": "How far they turn, in degrees anticlockwise, negative \
+                                    clockwise, a number. A multiple of 90 lands exactly.",
+                    "type": "number",
+                },
+            }),
+        ),
+        Kind::Scale => (
+            json!(["base_point", "factor"]),
+            json!({
+                "base_point": {
+                    "description": "The point they are scaled about, which stays where it is, \
+                                    as AutoCAD's SCALE takes it: a point or a snapped point.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "factor": {
+                    "description": "How much they are enlarged, the same along every axis: a \
+                                    number more than 0, less than 1 to make them smaller.",
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                },
+            }),
+        ),
+        _ => (
+            json!(["first_point", "second_point"]),
+            json!({
+                "first_point": {
+                    "description": "The first point of the mirror line, as AutoCAD's MIRROR \
+                                    takes it: a point or a snapped point.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "second_point": {
+                    "description": "The second point of the mirror line, apart from the first \
+                                    seen from above: a point or a snapped point. The mirror is \
+                                    upright through the line, so every point keeps its Z.",
+                    "$ref": "#/$defs/snapped_point",
+                },
+                "erase_source": {
+                    "description": "Whether the objects themselves are mirrored, each keeping \
+                                    its ID, as MIRROR's Erase source objects Yes leaves them, \
+                                    rather than kept with mirrored copies beside them: true or \
+                                    false. Without it, false.",
+                    "type": "boolean",
+                },
+            }),
+        ),
+    };
+    let mut schema = json!({
+        "type": "object",
+        "required": required,
+        "additionalProperties": false,
+        "allOf": [copied_objects_rule()],
+        "properties": properties,
+    });
+    schema["properties"]["target"] = json!({
+        "description": format!(
+            "The object to {verb}, by its ID or its name. Give target or targets."
+        ),
+        "$ref": "#/$defs/target",
+    });
+    schema["properties"]["targets"] = json!({
+        "description": format!(
+            "The objects to {verb}, each by its ID or its name, all of one sheet, in the order \
+             listed."
+        ),
+        "type": "array",
+        "items": { "$ref": "#/$defs/target" },
+        "minItems": 1,
+    });
+    schema
 }
 
 /// The schema of `array`: the keys of each kind, rectangular, polar and
@@ -2269,6 +2430,12 @@ pub(crate) enum Body {
         targets: Vec<(Target, String)>,
         pattern: Pattern,
     },
+    /// Objects turned, scaled or mirrored in place, each given with its key
+    /// in the operation, `target` or `targets[N]`.
+    Transform {
+        targets: Vec<(Target, String)>,
+        by: TransformBy,
+    },
     SetAttribute {
         target: Target,
         tag: String,
@@ -2348,6 +2515,26 @@ pub(crate) enum Motion {
     },
 }
 
+/// How a rotate, a scale or a mirror in place transforms its objects.
+#[derive(Clone, Debug)]
+pub(crate) enum TransformBy {
+    /// Turns them by `angle` degrees, anticlockwise, about `base_point`.
+    Rotate {
+        base_point: Box<OpPoint>,
+        angle: f64,
+    },
+    /// Scales them by `factor` about `base_point`.
+    Scale {
+        base_point: Box<OpPoint>,
+        factor: f64,
+    },
+    /// Mirrors them across the line through `first` and `second`.
+    Mirror {
+        first: Box<OpPoint>,
+        second: Box<OpPoint>,
+    },
+}
+
 /// Where a copy or an array puts its copies.
 #[derive(Clone, Debug)]
 pub(crate) enum Pattern {
@@ -2381,12 +2568,19 @@ pub(crate) enum Pattern {
         spacing: Option<f64>,
         align: bool,
     },
+    /// One copy mirrored across the line through `first` and `second`: a
+    /// mirror that keeps its source, as AutoCAD's MIRROR does by default.
+    Mirror {
+        first: Box<OpPoint>,
+        second: Box<OpPoint>,
+    },
 }
 
 impl Pattern {
     /// How many places it puts copies at.
     pub(crate) fn places(&self) -> usize {
         match self {
+            Pattern::Mirror { .. } => 1,
             Pattern::Offsets(motions) => motions.len(),
             Pattern::Rectangular { rows, columns, .. } => rows * columns - 1,
             Pattern::Polar { count, .. } | Pattern::Path { count, .. } => count - 1,
@@ -3166,6 +3360,8 @@ fn operation(
             }
             Body::Copy { targets, pattern }
         }
+        Kind::Rotate | Kind::Scale | Kind::Mirror => read_transform(map, spec, units)
+            .map_err(|(code, message, field)| fail(code, message, &field))?,
         Kind::SetAttribute => {
             keys(&["target", "tag", "occurrence", "value", ROW_VALUE_KEY])?;
             let target = target()?;
@@ -3588,9 +3784,145 @@ fn target_at(at: &str, (code, message, field): KeyError) -> KeyError {
     (code, message, field)
 }
 
+/// A rotate, a scale or a mirror sent as `map`, as `spec` names it: a
+/// mirror that keeps its source is a copy, mirrored.
+fn read_transform(map: &Map<String, Value>, spec: &Spec, units: Unit) -> Result<Body, KeyError> {
+    let allowed: &[&str] = match spec.kind {
+        Kind::Rotate => &["target", "targets", "base_point", "angle"],
+        Kind::Scale => &["target", "targets", "base_point", "factor"],
+        _ => &[
+            "target",
+            "targets",
+            "first_point",
+            "second_point",
+            "erase_source",
+        ],
+    };
+    if let Some(key) = map
+        .keys()
+        .find(|k| *k != OP_KEY && !allowed.contains(&k.as_str()))
+    {
+        return Err((
+            ErrorCode::UnknownKey,
+            format!(
+                "unknown key `{key}`; {} takes op, {}",
+                spec.name,
+                allowed.join(", ")
+            ),
+            key.clone(),
+        ));
+    }
+    let verb = match spec.kind {
+        Kind::Rotate => "turn",
+        Kind::Scale => "scale",
+        _ => "mirror",
+    };
+    let targets = read_targets_to(map, verb)?;
+    let point = |key: &str, what: &str| -> Result<Box<OpPoint>, KeyError> {
+        match map.get(key) {
+            Some(value) => op_point(value, units, key).map(Box::new),
+            None => Err((
+                ErrorCode::MissingKey,
+                format!("missing key `{key}`, {what}: a point or a snapped point"),
+                key.to_owned(),
+            )),
+        }
+    };
+    let number = |key: &str, what: &str| -> Result<f64, KeyError> {
+        match map.get(key) {
+            Some(Value::Number(n)) => match n.as_f64() {
+                Some(v) if v.is_finite() => Ok(v),
+                _ => Err((
+                    ErrorCode::BadNumber,
+                    format!("{key} is too large; expected {what}"),
+                    key.to_owned(),
+                )),
+            },
+            Some(_) => Err((
+                ErrorCode::WrongType,
+                format!("expected {what}"),
+                key.to_owned(),
+            )),
+            None => Err((
+                ErrorCode::MissingKey,
+                format!("missing key `{key}`, {what}"),
+                key.to_owned(),
+            )),
+        }
+    };
+    let by = match spec.kind {
+        Kind::Rotate => TransformBy::Rotate {
+            base_point: point("base_point", "the point they turn about")?,
+            angle: number(
+                "angle",
+                "how far they turn, in degrees anticlockwise, a number such as 90",
+            )?,
+        },
+        Kind::Scale => {
+            let base_point = point("base_point", "the point they are scaled about")?;
+            let factor = number(
+                "factor",
+                "how much they are enlarged, a number more than 0 such as 2",
+            )?;
+            if factor <= 0.0 {
+                return Err((
+                    ErrorCode::BadValue,
+                    format!(
+                        "factor is {factor}; a scale factor is more than 0, less than 1 to make \
+                         them smaller"
+                    ),
+                    "factor".to_owned(),
+                ));
+            }
+            TransformBy::Scale { base_point, factor }
+        }
+        _ => {
+            let first = point("first_point", "the first point of the mirror line")?;
+            let second = point("second_point", "the second point of the mirror line")?;
+            if let (OpPoint::At(a), OpPoint::At(b)) = (first.as_ref(), second.as_ref()) {
+                if a[0] == b[0] && a[1] == b[1] {
+                    return Err((
+                        ErrorCode::BadValue,
+                        "second_point is first_point seen from above, so the two give no line \
+                         to mirror across; give two points apart"
+                            .to_owned(),
+                        "second_point".to_owned(),
+                    ));
+                }
+            }
+            let erase = match map.get("erase_source") {
+                None => false,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => {
+                    return Err((
+                        ErrorCode::WrongType,
+                        "expected true or false".to_owned(),
+                        "erase_source".to_owned(),
+                    ))
+                }
+            };
+            if !erase {
+                return Ok(Body::Copy {
+                    targets,
+                    pattern: Pattern::Mirror { first, second },
+                });
+            }
+            TransformBy::Mirror { first, second }
+        }
+    };
+    Ok(Body::Transform { targets, by })
+}
+
 /// The objects a copy or an array sent as `map` copies: `target`, one, or
 /// `targets`, several, each with its key in the operation.
 fn read_targets(map: &Map<String, Value>) -> Result<Vec<(Target, String)>, KeyError> {
+    read_targets_to(map, "copy")
+}
+
+/// The objects an operation sent as `map` does `verb` to, such as `copy`:
+/// `target`, one, or `targets`, several, each with its key in the
+/// operation.
+fn read_targets_to(map: &Map<String, Value>, verb: &str) -> Result<Vec<(Target, String)>, KeyError> {
     match (map.get("target"), map.get("targets")) {
         (Some(_), Some(_)) => Err((
             ErrorCode::Usage,
@@ -3620,9 +3952,10 @@ fn read_targets(map: &Map<String, Value>) -> Result<Vec<(Target, String)>, KeyEr
         )),
         (None, None) => Err((
             ErrorCode::MissingKey,
-            "missing key `target`, the object to copy, by its ID, {\"id\": \"DEMO-001/border\"}, \
-             or by its name; or targets, a list of them"
-                .to_owned(),
+            format!(
+                "missing key `target`, the object to {verb}, by its ID, {{\"id\": \
+                 \"DEMO-001/border\"}}, or by its name; or targets, a list of them"
+            ),
             "target".to_owned(),
         )),
     }

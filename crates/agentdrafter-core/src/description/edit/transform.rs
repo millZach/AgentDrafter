@@ -216,7 +216,7 @@ pub(crate) struct Resolved {
 
 /// The object types a transform takes: every type a sheet holds but a
 /// viewport, which is a window on the paper.
-pub(crate) const TRANSFORMED_TYPES: [&str; 16] = [
+const TRANSFORMED_TYPES: [&str; 16] = [
     "line",
     "polyline",
     "arc",

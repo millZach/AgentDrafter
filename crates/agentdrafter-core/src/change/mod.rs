@@ -221,10 +221,14 @@ pub struct OperationOutcome {
     /// template was given, set to what the object showed there.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub created_row_values: Vec<String>,
-    /// Each copy a copy or an array made, in the order it made them: its
-    /// ID, the object it copies and where it went.
+    /// Each copy a copy, an array or a mirror made, in the order it made
+    /// them: its ID, the object it copies and where it went.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub copies: Vec<Copied>,
+    /// The objects a rotate, a scale or a mirror that erased its source
+    /// transformed in place, by ID on the sheet the operation names.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub transformed: Vec<String>,
     /// Why it did not land.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
@@ -269,6 +273,9 @@ pub struct Copied {
     /// The point it was turned about.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub about: Option<[f64; 3]>,
+    /// For a mirror, the two points of the line it was mirrored across.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirrored_across: Option<[[f64; 3]; 2]>,
 }
 
 /// An attribute value a block operation removed from an insert, because

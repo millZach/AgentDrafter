@@ -40,7 +40,7 @@ use crate::units::{parse_length, LengthError, Unit};
 mod cells;
 mod transform;
 pub(crate) use cells::{Axis, TableEdit, TableEdited};
-pub(crate) use transform::{How, Resolved, Transform, TRANSFORMED_TYPES};
+pub(crate) use transform::{How, Resolved, Transform};
 
 /// A list of objects in a record: a template's own, at `objects`, or one
 /// row's, at `rows[N].objects`.
