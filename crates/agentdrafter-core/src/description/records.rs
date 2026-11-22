@@ -18,18 +18,45 @@ use super::{
     read_set_settings_in, read_template_in, template_in, template_path, Disk, ReadFiles, Row,
 };
 use crate::error::Error;
+use crate::model::layout::{DwgExtraLayout, DwgLayoutSetup};
 use crate::model::Sheet;
 use crate::set::{Notice, SET_SETTINGS_FILE};
 use crate::units::Unit;
+
+/// Where a sheet read from a DWG came from: its objects' resolved IDs,
+/// whether each ID was carried in AgentDrafter's extended data, the handles
+/// of its sheet and block objects, and each layout's stored page setup and
+/// checkable paper bounds.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DwgOrigin {
+    /// The resolved unique ID of each of `sheet.objects`, in the same order:
+    /// the carried AgentDrafter ID when unique, else `{sheet}/handle:{handle}`.
+    pub ids: Vec<String>,
+    /// Whether each of `sheet.objects` carried its ID in AgentDrafter's
+    /// extended data (rather than taking its handle ID).
+    pub carried: Vec<bool>,
+    /// The handle of each of `sheet.objects`, in hexadecimal as AutoCAD
+    /// lists it.
+    pub handles: Vec<String>,
+    /// For each block in `sheet.blocks`, the handle of each of its objects,
+    /// in hexadecimal.
+    pub block_handles: Vec<Vec<String>>,
+    /// Stored page setup and checkable paper metadata for each read layout
+    /// (`[sheet.layout, ..sheet.other_layouts]`), in tab order.
+    pub layout_setups: Vec<DwgLayoutSetup>,
+    /// Additional configured inactive-empty layouts kept solely for
+    /// `query layout` without adding unplottable pages to `sheet`.
+    pub extra_layout_setups: Vec<DwgExtraLayout>,
+}
 
 /// One sheet as its record states it, with the ID of each of its objects.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SheetRecord {
     /// The sheet's name: its row's `sheet` in a drawing set, or the sheet
-    /// description's file name without its extension.
+    /// description's or DWG's file name without its extension.
     pub name: String,
     /// The file the sheet's objects are written in: the sheet description,
-    /// or the sheet's template.
+    /// the sheet's template, or the DWG.
     pub file: PathBuf,
     pub sheet: Sheet,
     /// Each of the sheet's objects as its file writes it, in the order of
@@ -38,17 +65,69 @@ pub(crate) struct SheetRecord {
     /// The rows file the sheet's row is in, which holds the row's own
     /// objects, if it is a sheet of a set.
     pub rows_file: Option<PathBuf>,
+    /// Present when this sheet was read from a DWG rather than a sheet
+    /// description or drawing set.
+    pub dwg: Option<DwgOrigin>,
 }
 
 impl SheetRecord {
+    /// Whether this record was read from a DWG.
+    pub(crate) fn is_dwg(&self) -> bool {
+        self.dwg.is_some()
+    }
+
     /// The ID of the sheet's object at `index` in its objects.
     pub(crate) fn id(&self, index: usize) -> String {
+        if let Some(dwg) = &self.dwg {
+            return dwg.ids[index].clone();
+        }
         object_id(&self.name, &self.objects[index])
     }
 
+    /// Whether the record writes an explicit AgentDrafter ID for the object
+    /// at `index`.
+    pub(crate) fn id_written(&self, index: usize) -> bool {
+        if let Some(dwg) = &self.dwg {
+            return dwg.carried.get(index).copied().unwrap_or(false);
+        }
+        self.objects[index].written()
+    }
+
+    /// The DWG handle of the sheet's object at `index`, when read from a DWG.
+    pub(crate) fn handle_of(&self, index: usize) -> Option<&str> {
+        self.dwg
+            .as_ref()
+            .and_then(|dwg| dwg.handles.get(index).map(String::as_str))
+    }
+
+    /// The DWG handle of object `object_index` in block `block_index`, when
+    /// read from a DWG.
+    pub(crate) fn block_handle_of(&self, block_index: usize, object_index: usize) -> Option<&str> {
+        self.dwg.as_ref().and_then(|dwg| {
+            dwg.block_handles
+                .get(block_index)
+                .and_then(|hs| hs.get(object_index))
+                .map(String::as_str)
+        })
+    }
+
+    /// The stored layout setup for the `layout_index`th layout of a DWG.
+    pub(crate) fn layout_setup(&self, layout_index: usize) -> Option<&DwgLayoutSetup> {
+        self.dwg
+            .as_ref()
+            .and_then(|dwg| dwg.layout_setups.get(layout_index))
+    }
+
+    /// Additional configured inactive-empty layouts of a DWG, for `query layout`.
+    pub(crate) fn extra_layout_setups(&self) -> &[DwgExtraLayout] {
+        self.dwg
+            .as_ref()
+            .map_or(&[], |dwg| dwg.extra_layout_setups.as_slice())
+    }
+
     /// The file the sheet's object at `index` is written in: the rows file
-    /// for one of its row's own objects, or else the sheet description or
-    /// template.
+    /// for one of its row's own objects, or else the sheet description,
+    /// template or DWG.
     pub(crate) fn file_of(&self, index: usize) -> &Path {
         match &self.rows_file {
             Some(rows) if self.objects[index].in_row => rows,
@@ -194,5 +273,6 @@ pub(crate) fn read_sheet_record_noting(
         sheet,
         objects,
         rows_file: None,
+        dwg: None,
     })
 }

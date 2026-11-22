@@ -8,7 +8,9 @@
 
 use serde::Serialize;
 
-use super::{article, matched, object_named, Answer, LookedAt, Selection, SheetRecord};
+use super::{
+    article, matched, object_named, units_words, Answer, LookedAt, Selection, SheetRecord,
+};
 use crate::error::{Error, ErrorCode};
 use crate::geometry::measure::Measures;
 use crate::geometry::snap::{
@@ -88,14 +90,18 @@ impl Located<'_> {
     }
 }
 
+/// The point a snap's `from` resolved to (with its object's index on its
+/// sheet), or the missing objects it named.
+type ResolvedFrom = Result<(Box<SnappedFrom>, usize), Vec<Missing>>;
+
 /// A snap worked out: the objects it names, those that matched, and the
 /// points it found.
 struct Resolved<'a> {
     object: Option<Located<'a>>,
     with: Option<Option<Located<'a>>>,
-    /// The point `from` names, or the objects it names, however deep, that
-    /// match nothing.
-    from: Option<Result<Box<SnappedFrom>, Vec<Missing>>>,
+    /// The point `from` names (with its object's index on its sheet), or the
+    /// objects it names, however deep, that match nothing.
+    from: Option<ResolvedFrom>,
     points: Vec<SnapPoint>,
     /// What the object has none of the kind asked, in words, when it found
     /// no point.
@@ -299,7 +305,7 @@ fn resolve<'a>(
             .at_field(format!("{field}.with")));
         }
     }
-    if let Some(Ok(from)) = &resolved.from {
+    if let Some(Ok((from, _))) = &resolved.from {
         on_sheet(
             &format!("the point to snap from, of `{}`,", from.object.id),
             &from.object.sheet,
@@ -314,20 +320,28 @@ fn resolve<'a>(
     let kind = request.snap;
     let mut named: Vec<(String, SnapPoint)> = match (kind, &resolved.with, &resolved.from) {
         (Some(k), Some(Some(with)), _) => {
-            let apparent = k == SnapKind::ApparentIntersection;
-            let points = intersections(
-                &reader.parts(object.object()),
-                &reader.parts(with.object()),
-                apparent,
-            );
-            points.into_iter().map(|p| (which_of(&p), p)).collect()
+            if !object.record.sheet.same_space(object.index, with.index) {
+                Vec::new()
+            } else {
+                let apparent = k == SnapKind::ApparentIntersection;
+                let points = intersections(
+                    &reader.parts(object.object()),
+                    &reader.parts(with.object()),
+                    apparent,
+                );
+                points.into_iter().map(|p| (which_of(&p), p)).collect()
+            }
         }
-        (Some(k), _, Some(Ok(from))) => {
-            let at = p3(from.at);
-            from_point(&reader.parts(object.object()), k, at)
-                .into_iter()
-                .map(|p| (which_of(&p), p))
-                .collect()
+        (Some(k), _, Some(Ok((from, from_index)))) => {
+            if !object.record.sheet.same_space(object.index, *from_index) {
+                Vec::new()
+            } else {
+                let at = p3(from.at);
+                from_point(&reader.parts(object.object()), k, at)
+                    .into_iter()
+                    .map(|p| (which_of(&p), p))
+                    .collect()
+            }
         }
         _ => own_points(&reader, object.object(), kind),
     };
@@ -385,23 +399,53 @@ fn none_words(object: &Located, kind: Option<SnapKind>, resolved: &Resolved) -> 
     let thing = article(object.object().type_name());
     let id = object.record.id(object.index);
     match (kind, &resolved.with, &resolved.from) {
-        (Some(k), Some(Some(with)), _) => format!(
-            "{} and {} do not {}",
-            object.words(),
-            with.words(),
-            if k == SnapKind::ApparentIntersection {
-                "cross seen from above"
-            } else {
-                "cross"
+        (Some(k), Some(Some(with)), _) => {
+            if !object.record.sheet.same_space(object.index, with.index) {
+                return format!(
+                    "{} (in {}) and {} (in {}) are in different spaces and do not {}",
+                    object.words(),
+                    object.record.sheet.space_words(object.index),
+                    with.words(),
+                    with.record.sheet.space_words(with.index),
+                    if k == SnapKind::ApparentIntersection {
+                        "cross seen from above"
+                    } else {
+                        "cross"
+                    }
+                );
             }
-        ),
-        (Some(k), _, Some(Ok(from))) => format!(
-            "there is no {} from the {} of `{}` to {}",
-            k.name(),
-            from.snap.word(),
-            from.object.id,
-            object.words()
-        ),
+            format!(
+                "{} and {} do not {}",
+                object.words(),
+                with.words(),
+                if k == SnapKind::ApparentIntersection {
+                    "cross seen from above"
+                } else {
+                    "cross"
+                }
+            )
+        }
+        (Some(k), _, Some(Ok((from, from_index)))) => {
+            if !object.record.sheet.same_space(object.index, *from_index) {
+                return format!(
+                    "there is no {} from the {} of `{}` (in {}) to {} (in {}): they are in \
+                     different spaces",
+                    k.name(),
+                    from.snap.word(),
+                    from.object.id,
+                    object.record.sheet.space_words(*from_index),
+                    object.words(),
+                    object.record.sheet.space_words(object.index)
+                );
+            }
+            format!(
+                "there is no {} from the {} of `{}` to {}",
+                k.name(),
+                from.snap.word(),
+                from.object.id,
+                object.words()
+            )
+        }
         (Some(k), _, _) => format!(
             "{thing} has no {} snap, as in AutoCAD: `{id}` has none",
             k.word()
@@ -417,7 +461,7 @@ fn from_of(
     request: &SnapRef,
     settings: &Settings,
     field: &str,
-) -> Result<Result<Box<SnappedFrom>, Vec<Missing>>, Error> {
+) -> Result<ResolvedFrom, Error> {
     let resolved = resolve(sheets, request, settings, field)?;
     let missing = resolved.missing(request, field);
     let Some(object) = resolved.object.filter(|_| missing.is_empty()) else {
@@ -441,12 +485,15 @@ fn from_of(
             format!("{} has no {} to snap from", object.words(), kind.word()),
         )
         .at_field(field.to_owned())),
-        [one] => Ok(Ok(Box::new(SnappedFrom {
-            object: object.described(),
-            snap: one.snap,
-            which: request.which.clone().or_else(|| one.which.clone()),
-            at: one.at,
-        }))),
+        [one] => Ok(Ok((
+            Box::new(SnappedFrom {
+                object: object.described(),
+                snap: one.snap,
+                which: request.which.clone().or_else(|| one.which.clone()),
+                at: one.at,
+            }),
+            object.index,
+        ))),
         several => Err(Error::new(
             ErrorCode::BadValue,
             format!(
@@ -597,7 +644,11 @@ pub(super) fn snap(
         count: points.len(),
         object: resolved.object.map(|o| o.described()),
         with: resolved.with.flatten().map(|o| o.described()),
-        from: resolved.from.clone().and_then(Result::ok),
+        from: resolved
+            .from
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|(from, _)| from.clone()),
         points,
     };
     if !missing.is_empty() {
@@ -625,7 +676,9 @@ pub(super) fn snap(
             counted(k, points.len()),
             object.words(),
             match &resolved.from {
-                Some(Ok(from)) => format!(" from the {} of `{}`", from.snap.word(), from.object.id),
+                Some(Ok((from, _))) => {
+                    format!(" from the {} of `{}`", from.snap.word(), from.object.id)
+                }
                 _ => match resolved.with.flatten() {
                     Some(with) => format!(" with {}", with.words()),
                     None => String::new(),
@@ -648,7 +701,7 @@ pub(super) fn geometry(
     sheets: &[&SheetRecord],
     selection: &Selection,
     settings: &Settings,
-    units: Unit,
+    units: Option<Unit>,
     looked: &LookedAt,
 ) -> (String, Answer) {
     let mut fonts: Vec<(String, SheetFonts)> = Vec::new();
@@ -681,6 +734,7 @@ pub(super) fn geometry(
     let count = objects.len();
     let message = match objects.as_slice() {
         [one] => {
+            let u = units_words(units);
             let mut said = Vec::new();
             if let Some(measured) = one.measures.measurement {
                 let shows = one
@@ -689,13 +743,13 @@ pub(super) fn geometry(
                     .as_deref()
                     .map(|t| format!(" and shows `{t}`"))
                     .unwrap_or_default();
-                said.push(format!("measures {measured} {units}{shows}"));
+                said.push(format!("measures {measured} {u}{shows}"));
             }
             if let Some(length) = one.measures.length {
-                said.push(format!("is {length} {units} long"));
+                said.push(format!("is {length} {u} long"));
             }
             if let Some(area) = one.measures.area {
-                said.push(format!("encloses {area} square {units}"));
+                said.push(format!("encloses {area} square {u}"));
             }
             if said.is_empty() {
                 format!(

@@ -1133,7 +1133,10 @@ fn a_rows_own_objects_are_built_into_its_sheet_alone() {
         panic!()
     };
     assert!(objects[0].written_at.file.ends_with("rows.yaml"));
-    assert_eq!(objects[0].written_at.field, "rows[1].objects[1]");
+    assert_eq!(
+        objects[0].written_at.field.as_deref(),
+        Some("rows[1].objects[1]")
+    );
 
     // A row's object that names what the template does not define, or
     // takes a value from the row, is refused in the rows file.
@@ -2002,7 +2005,10 @@ fn a_constant_attribute_is_refused_to_set_attribute_and_found_by_its_text() {
     };
     assert_eq!(objects.len(), 1, "{objects:#?}");
     assert_eq!(objects[0].id, "DEMO-001/badge");
-    assert_eq!(objects[0].block_text[0].field, "blocks.BADGE.objects[0]");
+    assert_eq!(
+        objects[0].block_text[0].field.as_deref(),
+        Some("blocks.BADGE.objects[0]")
+    );
 }
 
 /// Builds the set again from its files, after a test edited them by hand.

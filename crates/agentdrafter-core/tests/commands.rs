@@ -595,6 +595,101 @@ fn read_through_the_registry_never_triggers_drawing_set_journal_recovery() {
     assert!(mirror.is_file());
     assert_eq!(every_file(&set), before, "read left set untouched");
 
+    // `query` and `check` on a DWG are strictly read-only and never trigger
+    // drawing-set journal recovery. `query find` reads only the DWG itself and
+    // succeeds; `query layout` and `check` need the set's template paper for a
+    // built DWG, so they refuse an unfinished commit (ADR-0005) without
+    // modifying the set.
+    let reply = run(
+        "query",
+        json!({"source": dwg, "query": {"kind": "find", "id": "DEMO-001/border"}}),
+    );
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(reply.get("rolled_back").is_none(), "{reply}");
+    assert_eq!(reply["result"]["count"], 1, "{reply}");
+    assert_eq!(
+        every_file(&set),
+        before,
+        "query find on DWG left set untouched"
+    );
+
+    let reply = run("query", json!({"source": dwg, "query": {"kind": "layout"}}));
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(reply["error"]["code"], "rollback_failed", "{reply}");
+    assert!(reply.get("rolled_back").is_none(), "{reply}");
+    assert_eq!(
+        every_file(&set),
+        before,
+        "query layout on built DWG in pending set left set untouched"
+    );
+
+    let reply = run("check", json!({"source": dwg}));
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(reply["error"]["code"], "rollback_failed", "{reply}");
+    assert!(reply.get("rolled_back").is_none(), "{reply}");
+    assert_eq!(
+        every_file(&set),
+        before,
+        "check on built DWG in pending set left set untouched"
+    );
+
+    // A standalone original (built from a sheet description on its own, no set
+    // in its build mark) still succeeds cleanly beside the pending set.
+    let solo_yaml = dir.join("solo.yaml");
+    std::fs::write(
+        &solo_yaml,
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [10, 0, 0]}\n",
+    )
+    .unwrap();
+    assert_eq!(run("build", json!({"source": solo_yaml}))["ok"], true);
+    let solo_dwg = dir.join("solo.dwg");
+    assert_eq!(
+        run(
+            "query",
+            json!({"source": solo_dwg, "query": {"kind": "layout"}})
+        )["ok"],
+        true
+    );
+    assert_eq!(run("check", json!({"source": solo_dwg}))["ok"], true);
+    assert_eq!(every_file(&set), before, "pending set still untouched");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn drawing_set_folder_ending_in_dwg_still_runs_journal_recovery_on_query_and_check() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("commands-set-ending-dwg");
+    let _ = std::fs::remove_dir_all(&dir);
+    for (label, cmd_name, payload) in [
+        (
+            "query",
+            "query",
+            json!({"query": {"kind": "find", "id": "DEMO-001/border"}}),
+        ),
+        ("check", "check", json!({})),
+    ] {
+        let set = dir.join(format!("{label}-set.DWG"));
+        demo_set::copy_demo_set(&set);
+        let moved = json!({"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]});
+        let landed = run("change", json!({"set": set, "change_set": moved}));
+        assert_eq!(landed["ok"], true, "{landed}");
+
+        // Leave a pending commit in the journal.
+        let journal = set.join(agentdrafter_core::JOURNAL_FILE);
+        let text = std::fs::read_to_string(&journal).unwrap();
+        let (rest, last) = text.trim_end().rsplit_once('\n').unwrap();
+        assert!(last.contains(r#""state":"done""#), "{last}");
+        std::fs::write(&journal, format!("{rest}\n")).unwrap();
+
+        let mut input = payload;
+        input["source"] = json!(set);
+        let reply = run(cmd_name, input);
+        assert_eq!(reply["ok"], true, "{label}: {reply}");
+        assert!(
+            reply.get("rolled_back").is_some(),
+            "{label}: directory ending in .DWG must still recover its journal: {reply}"
+        );
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

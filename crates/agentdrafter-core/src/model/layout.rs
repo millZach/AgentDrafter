@@ -19,6 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{is_false, layer_zero, Paper, Point3, Properties};
+use crate::units::Unit;
 
 /// A paper-space layout a sheet is drawn in, as AutoCAD's layout tab holds
 /// it: its name, its paper, and which of the sheet's objects are in its
@@ -56,6 +57,64 @@ impl Layout {
     pub fn holds(&self, index: usize) -> bool {
         self.paper_space.get(index).copied().unwrap_or(false)
     }
+}
+
+/// Stored page setup fields read directly from a DWG's `Layout` object, for
+/// `query layout` so it reports the DWG's own plotter, paper name, plot area,
+/// scale and plot style rather than inventing AgentDrafter defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DwgPageSetup {
+    pub plotter: String,
+    pub paper: String,
+    pub area: String,
+    pub scale: String,
+    pub plot_style: String,
+}
+
+/// The paper bounds a DWG layout declares in paper-space drawing units, for
+/// `check` (`paper_size` and `off_sheet`), including layouts with printer
+/// margins, custom paper sizes, or unitless inch/mm setups at 1:1.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CheckPaper {
+    pub paper: Paper,
+    /// Lower-left corner of the physical paper in paper-space drawing units:
+    /// `[0.0, 0.0]` for full-bleed zero-margin/zero-origin layouts, or shifted
+    /// by negative margin and plot origin when non-zero.
+    pub origin: [f64; 2],
+    /// The physical unit of this layout's paper-space drawing units (from
+    /// `plot_paper_units`, or the drawing's declared unit for a cross-unit 1:1
+    /// setup such as `1:25.4` or `25.4:1`).
+    pub unit: Unit,
+}
+
+/// Stored page setup and checkable paper metadata for one layout read from a
+/// DWG, in the same order as `[DrawingContents::layout, ..other_layouts]`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DwgLayoutSetup {
+    pub page_setup: Option<DwgPageSetup>,
+    pub check_paper: Option<CheckPaper>,
+    /// Stored paper dimensions in `paper_unit` (rotated by `plot_rotation`),
+    /// even when `check_paper` is `None` (such as a non-1:1 or extents-plotted
+    /// tab), so `query layout` can report the tab's configured paper size.
+    pub stored_paper: Option<Paper>,
+    /// The layout's own `plot_paper_units` (`In` or `Mm`), when valid.
+    pub paper_unit: Option<Unit>,
+    /// Why `paper_size` and `off_sheet` cannot be checked on this layout when
+    /// `check_paper` is `None`.
+    pub skip_reason: Option<String>,
+    /// Zero-based position among all non-Model layout tabs in AutoCAD's tab
+    /// order, so `query layout` can merge extra configured tabs in tab order.
+    pub tab_position: usize,
+}
+
+/// An inactive, empty layout tab of a DWG whose stored page setup is
+/// configured (not an untouched blank default tab), kept read-only for
+/// `query layout` without adding an unplottable blank page to
+/// `Sheet.layout` / `Sheet.other_layouts`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DwgExtraLayout {
+    pub name: String,
+    pub setup: DwgLayoutSetup,
 }
 
 /// The boundary a viewport is clipped to instead of its rectangle, on the

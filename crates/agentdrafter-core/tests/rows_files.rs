@@ -299,7 +299,10 @@ fn an_object_of_a_row_is_written_in_its_rows_file_and_takes_its_place_there() {
         .find(|o| o.id == "AREA-102/rows[1].objects[1]")
         .expect("the label without an id takes its place in its rows file");
     assert_eq!(in_set(&set, &label.written_at.file), "rows/areas.yaml");
-    assert_eq!(label.written_at.field, "rows[1].objects[1]");
+    assert_eq!(
+        label.written_at.field.as_deref(),
+        Some("rows[1].objects[1]")
+    );
     let heading = objects
         .iter()
         .find(|o| o.id == "SCHED-201/heading")

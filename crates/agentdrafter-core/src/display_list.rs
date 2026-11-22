@@ -858,9 +858,10 @@ fn cloud_of(finding: &Finding, objects: &[SheetObject], list: &DisplayList) -> O
     // The part of an insert's block that draws the text, when it is one of
     // the block's own objects, as `blocks.TITLE.objects[13]` names it.
     let part = object.in_block.as_ref().and_then(|b| {
-        let (_, tail) = b.field.rsplit_once(".objects[")?;
+        let field = b.field.as_deref()?;
+        let (_, tail) = field.rsplit_once(".objects[")?;
         let part = tail.strip_suffix(']')?.parse::<usize>().ok()?;
-        (b.field.matches(".objects[").count() == 1).then_some(part)
+        (field.matches(".objects[").count() == 1).then_some(part)
     });
     let items: Vec<&Item> = items_of(list, Some(at))
         .into_iter()

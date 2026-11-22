@@ -332,6 +332,18 @@ pub(crate) fn file_id_of_path(_path: &Path) -> Option<FileId> {
     None
 }
 
+/// Whether `candidate` names the same file as `target`, using `target_id`
+/// captured from an already-opened handle of `target` when available so
+/// `target` is never reopened.
+pub(crate) fn is_same_file_id(candidate: &Path, target: &Path, target_id: Option<FileId>) -> bool {
+    #[cfg(any(unix, windows))]
+    if let Some(target_id) = target_id {
+        return file_id_of_path(candidate) == Some(target_id);
+    }
+    let _ = target_id;
+    is_same_file(candidate, target)
+}
+
 /// The identity of the entry at `path` without following a trailing link.
 #[cfg(unix)]
 pub(crate) fn symlink_file_id(meta: &fs::Metadata) -> FileId {

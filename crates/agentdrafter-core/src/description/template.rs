@@ -162,6 +162,7 @@ pub(crate) fn template_in(
         sheet,
         objects,
         rows_file: Some(row.file.clone()),
+        dwg: None,
     };
     Ok((record, library))
 }

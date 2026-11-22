@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::description::{read_sheet_record, ReadFiles, SavedSet, SheetRecord};
 use crate::error::{Error, ErrorCode};
-use crate::model::Paper;
+use crate::model::{Paper, RecordsOfKind};
+use crate::original::{is_dwg_file, kinds_in_words, plural, read_dwg_record};
 use crate::query::{Extents, WrittenAt};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
@@ -90,10 +91,11 @@ impl Rule {
 /// What the checker found on the sheets it checked.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CheckReport {
-    /// The drawing set's folder, or the sheet description, checked.
+    /// The drawing set's folder, sheet description, or DWG checked.
     pub source: String,
-    /// The declared unit every length in the report is in.
-    pub units: Unit,
+    /// The declared unit every length in the report is in; none when a DWG
+    /// states no unit the core knows (checked as millimetres).
+    pub units: Option<Unit>,
     /// The sheets checked, by name, in the set's order.
     pub sheets: Vec<String>,
     /// What was found, in words.
@@ -107,6 +109,20 @@ pub struct CheckReport {
     pub count: usize,
     /// Each failed check, sheet by sheet in the set's order.
     pub findings: Vec<Finding>,
+    /// Checks that could not run on a sheet or layout, such as `paper_size`
+    /// and `off_sheet` on a model-space original DWG with no declared paper,
+    /// or a layout whose page setup cannot be checked at 1:1. Left out when
+    /// empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checks_skipped: Vec<SkippedCheck>,
+    /// How many objects of a DWG the core has no model for yet, which are
+    /// not checked. Left out when 0.
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub objects_not_read: usize,
+    /// Those objects of a DWG, by kind, such as `ACAD_PROXY_ENTITY`, with
+    /// the handle of each, as `read` names them. Left out when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_read: Vec<RecordsOfKind>,
     /// The text styles whose fonts are not in the font folders, and the
     /// look-alike each was measured with: the text checks rest on it.
     pub font_substitutions: Vec<FontSubstitution>,
@@ -122,6 +138,33 @@ pub struct CheckReport {
     pub(crate) warnings: Warnings,
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
+}
+
+/// A check rule that could not run on a sheet or layout, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SkippedCheck {
+    pub sheet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    pub rule: Rule,
+    pub reason: String,
+}
+
+/// How `paper_size` and `off_sheet` should run on one page being checked.
+pub(super) enum PaperCheck {
+    /// Check against `paper` placed at `origin` in paper-space drawing units.
+    Check(Paper, [f64; 2]),
+    /// A sheet description or drawing-set template lacking a `paper` key:
+    /// fail `paper_size` once (not skipped).
+    MissingYaml,
+    /// A DWG sheet or layout whose paper cannot be checked: skip `paper_size`
+    /// and `off_sheet` and record `reason` under `checks_skipped`.
+    Skipped(String),
+}
+
 /// One failed check: the sheet, the rule, the object and what is wrong, in
 /// numbers in the declared unit.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -131,6 +174,11 @@ pub struct Finding {
     /// each layout of a sheet drawn in several is checked on its own paper.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
+    /// The unit this finding's lengths are in when it differs from
+    /// [`CheckReport::units`] (such as an inch layout in a metric or unitless
+    /// DWG). Left out when it matches [`CheckReport::units`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub units: Option<Unit>,
     pub rule: Rule,
     /// What is wrong, in words and numbers.
     pub message: String,
@@ -218,15 +266,19 @@ pub struct CheckedObject {
     pub viewport: Option<String>,
 }
 
-/// One object of an insert's block, as its block library defines it.
+/// One object of an insert's block, as its block library or DWG defines it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BlockPart {
     pub block: String,
-    /// The block library that defines the block.
+    /// The block library that defines the block, or the DWG.
     pub file: String,
     /// The object's place in the block definition, such as
-    /// `blocks.TITLE_BLOCK.objects[13]`.
-    pub field: String,
+    /// `blocks.TITLE_BLOCK.objects[13]`. Absent for a DWG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// The object's handle in the DWG, in hexadecimal. Absent for a block library.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
     /// The object's type: `attdef` for an attribute, `text` or `mtext`.
     #[serde(rename = "type")]
     pub kind: String,
@@ -261,9 +313,15 @@ pub(crate) fn check_in(
     files: Option<Arc<dyn ReadFiles + Send + Sync>>,
 ) -> Result<CheckReport, Error> {
     let source = request.source.as_path();
-    let (units, records) = load(source, &request.sheets, files)?;
-    let tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units);
+    let Loaded {
+        units,
+        records,
+        objects_not_read,
+        not_read,
+    } = load(source, &request.sheets, files)?;
+    let tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units.unwrap_or(Unit::Mm));
     let mut findings = Vec::new();
+    let mut checks_skipped = Vec::new();
     let mut substitutions: Vec<FontSubstitution> = Vec::new();
     let mut warnings = Warnings::default();
     for record in &records {
@@ -275,31 +333,64 @@ pub(crate) fn check_in(
             }
         }
         // Each layout of a sheet drawn in several is checked on its own.
-        for page in record.sheet.pages() {
-            match page {
-                std::borrow::Cow::Borrowed(_) => {
-                    findings.extend(rules::check_sheet(record, &fonts, units, tolerance));
-                }
+        // Never mutate `sheet.units` (ADR-0011): the drawing pipeline must
+        // render model space identically to `plot` and `render`, while
+        // `page_unit` sets only paper-space tolerance, pen widths and
+        // paper-space finding units.
+        for (layout_index, page) in record.sheet.pages().into_iter().enumerate() {
+            let paper_check = paper_check_for(record, &page, layout_index);
+            let page_unit = page_unit_for(record, &page, layout_index, units);
+            let page_tolerance =
+                Unit::Mm.convert(CHECK_TOLERANCE_MM, page_unit.unwrap_or(Unit::Mm));
+            let (page_findings, page_skipped) = match page {
+                std::borrow::Cow::Borrowed(_) => rules::check_sheet(
+                    record,
+                    &fonts,
+                    units,
+                    page_unit,
+                    page_tolerance,
+                    paper_check,
+                ),
                 std::borrow::Cow::Owned(sheet) => {
                     let on_layout = SheetRecord {
                         sheet,
                         ..record.clone()
                     };
-                    findings.extend(rules::check_sheet(&on_layout, &fonts, units, tolerance));
+                    rules::check_sheet(
+                        &on_layout,
+                        &fonts,
+                        units,
+                        page_unit,
+                        page_tolerance,
+                        paper_check,
+                    )
                 }
-            }
+            };
+            findings.extend(page_findings);
+            checks_skipped.extend(page_skipped);
         }
     }
     let sheets: Vec<String> = records.iter().map(|r| r.name.clone()).collect();
+    let mut report_message = message(&sheets, &findings, &checks_skipped);
+    if objects_not_read > 0 {
+        report_message.push_str(&format!(
+            "; {objects_not_read} object{} the core has no model for not checked: {}",
+            plural(objects_not_read),
+            kinds_in_words(&not_read)
+        ));
+    }
     Ok(CheckReport {
         source: source.display().to_string(),
         units,
-        message: message(&sheets, &findings),
+        message: report_message,
         sheets,
         passed: findings.is_empty(),
         tolerance,
         count: findings.len(),
         findings,
+        checks_skipped,
+        objects_not_read,
+        not_read,
         font_substitutions: substitutions,
         inconsistent: if source.is_dir() {
             crate::change::inconsistent(source)
@@ -310,15 +401,81 @@ pub(crate) fn check_in(
     })
 }
 
+/// The physical unit of `page`'s paper-space drawing units: for a DWG layout,
+/// its checkable paper's unit (from `plot_paper_units`, or the drawing's unit
+/// for a cross-unit 1:1 setup such as `1:25.4`), or its `plot_paper_units` even
+/// when `check_paper` is `None` (such as an extents-plotted inch layout);
+/// otherwise the sheet's declared `units`.
+fn page_unit_for(
+    record: &SheetRecord,
+    page: &crate::model::Sheet,
+    layout_index: usize,
+    units: Option<Unit>,
+) -> Option<Unit> {
+    if record.is_dwg() && page.layout.is_some() {
+        if let Some(setup) = record.layout_setup(layout_index) {
+            if let Some(cp) = &setup.check_paper {
+                return Some(cp.unit);
+            }
+            if let Some(paper_unit) = setup.paper_unit {
+                return Some(paper_unit);
+            }
+        }
+    }
+    units
+}
+
+/// Decides how `paper_size` and `off_sheet` run on `page` (the `layout_index`th
+/// layout of `record`, or `0` for model space).
+fn paper_check_for(
+    record: &SheetRecord,
+    page: &crate::model::Sheet,
+    layout_index: usize,
+) -> PaperCheck {
+    if !record.is_dwg() {
+        return match &page.paper {
+            Some(paper) => PaperCheck::Check(paper.clone(), [0.0, 0.0]),
+            None => PaperCheck::MissingYaml,
+        };
+    }
+    if page.layout.is_some() {
+        if let Some(setup) = record.layout_setup(layout_index) {
+            if let Some(cp) = &setup.check_paper {
+                return PaperCheck::Check(cp.paper.clone(), cp.origin);
+            }
+            if let Some(reason) = &setup.skip_reason {
+                return PaperCheck::Skipped(reason.clone());
+            }
+        }
+        return match &page.paper {
+            Some(paper) => PaperCheck::Check(paper.clone(), [0.0, 0.0]),
+            None => PaperCheck::Skipped("layout declares no checkable paper".to_owned()),
+        };
+    }
+    match &page.paper {
+        Some(paper) => PaperCheck::Check(paper.clone(), [0.0, 0.0]),
+        None => PaperCheck::Skipped("no paper is declared in this model-space DWG".to_owned()),
+    }
+}
+
+/// The sheets loaded to check, with their declared unit and any objects of
+/// a DWG the core has no model for.
+struct Loaded {
+    units: Option<Unit>,
+    records: Vec<SheetRecord>,
+    objects_not_read: usize,
+    not_read: Vec<RecordsOfKind>,
+}
+
 /// Reads the sheets to check from their saved files, with the declared
-/// unit: every sheet of the drawing set whose folder is `source`, or the
-/// one sheet description `source` is; or only those `wanted` names, in any
-/// case. A sheet that cannot be read stops the check.
+/// unit: every sheet of the drawing set whose folder is `source`, the one
+/// sheet description `source` is, or the DWG `source` is; or only those
+/// `wanted` names, in any case. A sheet that cannot be read stops the check.
 fn load(
     source: &Path,
     wanted: &[String],
     files: Option<Arc<dyn ReadFiles + Send + Sync>>,
-) -> Result<(Unit, Vec<SheetRecord>), Error> {
+) -> Result<Loaded, Error> {
     let named = |name: &str| wanted.is_empty() || wanted.iter().any(|w| same_name(w, name));
     let missing = |names: &[&str]| {
         wanted
@@ -327,11 +484,28 @@ fn load(
             .map(|w| no_such_sheet(w, names))
     };
     if !source.is_dir() {
+        if is_dwg_file(source) {
+            let loaded = read_dwg_record(source, true)?;
+            if let Some(error) = missing(&[loaded.record.name.as_str()]) {
+                return Err(error);
+            }
+            return Ok(Loaded {
+                units: loaded.units,
+                records: vec![loaded.record],
+                objects_not_read: loaded.objects_not_read,
+                not_read: loaded.not_read,
+            });
+        }
         let record = read_sheet_record(source)?;
         if let Some(error) = missing(&[record.name.as_str()]) {
             return Err(error);
         }
-        return Ok((record.sheet.units, vec![record]));
+        return Ok(Loaded {
+            units: Some(record.sheet.units),
+            records: vec![record],
+            objects_not_read: 0,
+            not_read: Vec::new(),
+        });
     }
     let set = match files {
         Some(files) => SavedSet::read_from(source, files)?,
@@ -355,7 +529,12 @@ fn load(
             })
         })
         .collect::<Result<_, _>>()?;
-    Ok((set.units, records))
+    Ok(Loaded {
+        units: Some(set.units),
+        records,
+        objects_not_read: 0,
+        not_read: Vec::new(),
+    })
 }
 
 /// Whether two sheet names are one: names that differ only in case are.
@@ -377,13 +556,36 @@ fn no_such_sheet(sheet: &str, names: &[&str]) -> Error {
 }
 
 /// What the checker found, in words.
-fn message(sheets: &[String], findings: &[Finding]) -> String {
+fn message(sheets: &[String], findings: &[Finding], skipped: &[SkippedCheck]) -> String {
     let checked = match sheets {
         [one] => format!("sheet `{one}`"),
         all => format!("the {} sheets checked", all.len()),
     };
+    let skipped_note = if skipped.is_empty() {
+        None
+    } else {
+        let mut rules: Vec<&str> = Vec::new();
+        let mut reasons: Vec<&str> = Vec::new();
+        for s in skipped {
+            let rule = s.rule.name();
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
+            if !reasons.contains(&s.reason.as_str()) {
+                reasons.push(&s.reason);
+            }
+        }
+        Some(format!(
+            "skipped {} ({})",
+            rules.join(", "),
+            reasons.join("; ")
+        ))
+    };
     if findings.is_empty() {
-        return format!("every check passes on {checked}");
+        return match skipped_note {
+            Some(note) => format!("every check run passes on {checked}; {note}"),
+            None => format!("every check passes on {checked}"),
+        };
     }
     // Each sheet with a failed check, and the rules it failed, in order.
     let mut failed: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -400,17 +602,23 @@ fn message(sheets: &[String], findings: &[Finding]) -> String {
     } else {
         format!("{} checks failed", findings.len())
     };
-    if let ([_], [(_, rules)]) = (sheets, failed.as_slice()) {
-        return format!("{count} on {checked}: {}", rules.join(", "));
-    }
-    let on = if failed.len() == sheets.len() {
-        format!("each of {checked}")
+    let mut out = if let ([_], [(_, rules)]) = (sheets, failed.as_slice()) {
+        format!("{count} on {checked}: {}", rules.join(", "))
     } else {
-        format!("{} of {checked}", failed.len())
+        let on = if failed.len() == sheets.len() {
+            format!("each of {checked}")
+        } else {
+            format!("{} of {checked}", failed.len())
+        };
+        let listed: Vec<String> = failed
+            .iter()
+            .map(|(sheet, rules)| format!("`{sheet}` ({})", rules.join(", ")))
+            .collect();
+        format!("{count} on {on}: {}", listed.join(", "))
     };
-    let listed: Vec<String> = failed
-        .iter()
-        .map(|(sheet, rules)| format!("`{sheet}` ({})", rules.join(", ")))
-        .collect();
-    format!("{count} on {on}: {}", listed.join(", "))
+    if let Some(note) = skipped_note {
+        out.push_str("; ");
+        out.push_str(&note);
+    }
+    out
 }

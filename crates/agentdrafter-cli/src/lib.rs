@@ -65,10 +65,10 @@ const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description |
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--clean | --no-clean] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
-const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]";
+const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description | dwg> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]";
 const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
 const READ_USAGE: &str = "agentdrafter read <dwg> [--mirror <path> | --no-mirror]";
-const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --space <space> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...] [--no-system-fonts]";
+const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout> <drawing-set-folder | sheet-description | dwg> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --space <space> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...] [--no-system-fonts]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
 /// name, as the binary does: it prints the reply on standard output, or
@@ -1140,14 +1140,14 @@ fn parse_query(mut args: Args) -> Result<Value, Error> {
             _ => {
                 if source.replace(arg.into()).is_some() {
                     return Err(usage(
-                        "query takes one drawing set's folder or sheet description".to_owned(),
+                        "query takes one drawing set's folder, sheet description or DWG".to_owned(),
                     ));
                 }
             }
         }
     }
     let source = source.ok_or_else(|| {
-        usage("query needs a drawing set's folder or a sheet description".to_owned())
+        usage("query needs a drawing set's folder, a sheet description or a DWG".to_owned())
     })?;
     let snap_of = |name: Option<String>, flag: &str| -> Result<Option<SnapKind>, Error> {
         name.map(|name| {
@@ -1218,14 +1218,14 @@ fn parse_check(mut args: Args) -> Result<Value, Error> {
             _ => {
                 if source.replace(arg.into()).is_some() {
                     return Err(usage(
-                        "check takes one drawing set's folder or sheet description".to_owned(),
+                        "check takes one drawing set's folder, sheet description or DWG".to_owned(),
                     ));
                 }
             }
         }
     }
     let source = source.ok_or_else(|| {
-        usage("check needs a drawing set's folder or a sheet description".to_owned())
+        usage("check needs a drawing set's folder, a sheet description or a DWG".to_owned())
     })?;
     input_of(CheckRequest { source, sheets }, fonts)
 }

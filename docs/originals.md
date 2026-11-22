@@ -54,7 +54,7 @@ The core reads what it has a model for, as `render`, `plot` and `display-list` r
 
 ## IDs
 
-Every object the core reads, both on the sheet and inside block definitions, has a unique [ID](../CONTEXT.md) an agent can name it by. An object AgentDrafter built carries its own in the DWG, such as `DEMO-001/border`, and keeps it when it does not collide with another object's ID or handle ID. Any other takes the drawing's name, its on-disk file's name without `.dwg`, joined to its handle: `P-101/handle:2F`. A handle is the DWG's own name for a record, which AutoCAD keeps for the object's life through every save, so the ID is the same each time the same file is read (whatever letter case is used to pass its path), and stays while the object does. The [text mirror](#the-text-mirror) gives each object's ID and handle for both sheet objects and block-definition objects; `display-list` gives IDs for sheet objects the same way.
+Every object the core reads, both on the sheet and inside block definitions, has a unique [ID](../CONTEXT.md) an agent can name it by. An object AgentDrafter built carries its own in the DWG, such as `DEMO-001/border`, and keeps it when it does not collide with another object's ID or handle ID. Any other takes the drawing's name, its on-disk file's name without `.dwg`, joined to its handle: `P-101/handle:2F`. A handle is the DWG's own name for a record, which AutoCAD keeps for the object's life through every save, so the ID is the same each time the same file is read (whatever letter case is used to pass its path), and stays while the object does. The [text mirror](#the-text-mirror) gives each object's ID and handle for both sheet objects and block-definition objects; `display-list`, `query` and `check` give the same IDs for sheet objects, so an agent can `read` an original and immediately `query` or `check` it by those IDs.
 
 ## The text mirror
 
@@ -89,12 +89,17 @@ objects:
 
 `sha256` is the original's fingerprint, as an output's [stamp](render.md) records its source's, so a mirror shows which bytes it was read from.
 
-## Drawing an original
+## Drawing, querying and checking an original
 
 `render`, `plot` and `display-list` take an original as they take a sheet description, and draw what the core reads of it. Each reply counts the objects it could not draw under `objects_not_drawn` and names them, by kind, count and handle as `read` does, under `not_drawn`, which is left out when everything was drawn.
 
+`query` and `check` take an original (or a built DWG) as they take a sheet description or drawing set, strictly read-only, refusing damaged DWGs with `dwg_read` as `render`, `plot` and `display-list` do:
+
+- Every `query` kind (`find`, `blocks`, `attributes`, `measure`, `extents`, `layers`, `snap`, `geometry`, `layout`) works on a DWG using the same sheet name and handle IDs as `read` and `display-list`. Provenance names the DWG `file` and object `handle` (never YAML `field`, `line` or `column`), `query layout` reports each layout's stored plotter, paper name, plot area, scale and plot style from the DWG, spatial queries (`--touching`, `snap` with `--with`/`--from`, `measure`) never mix different spaces, and duplicate carried `name`s fail with an ambiguity error listing every matching ID.
+- `check` runs `paper_size`, `off_sheet`, `text_overflow`, `text_on_text` and `text_on_line` on the DWG. A layout with a 1:1 layout page setup (preserving exact stored dimensions, printer margins, plot rotation, plot origin, and `plot_paper_units` for both scale and paper tolerance/pen widths, without altering model-space units) or a built DWG whose build mark names its set's paper is held to that paper (refusing without modifying the set if that set holds an unfinished journal commit); a model-space original or unsupported layout page setup reports `paper_size` and `off_sheet` under `checks_skipped` and in `message` with the reason rather than silently claiming every check passed. When a layout's `plot_paper_units` differs from `CheckReport.units`, each finding on that layout carries its own `units`.
+- Both report objects of the DWG the core has no model for under `objects_not_read` and `not_read` (left out when 0/empty) and note them in `message`. A unitless DWG reports `units: null` and checks model space as millimetres (`0.01` drawing units tolerance) and each layout in its own `plot_paper_units`.
+
 ## Not yet
 
-- `query` and `check` take a drawing set's folder or a sheet description, not yet an original.
 - Drawing an original has not yet been measured against AutoCAD's own plot of it.
 - Only DWG is read as an original; a DXF is read only by `import-blocks`.

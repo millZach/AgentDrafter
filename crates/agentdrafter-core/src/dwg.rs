@@ -815,7 +815,8 @@ fn contents(
     // The sheet the drawing holds: model space, and the paper space of
     // each layout the core reads, whatever tab it was saved on.
     let units = unit(drawing.header.insertion_units);
-    let (read_layouts, layouts_not_read) = layout::read_layouts(drawing, units.unwrap_or(Unit::Mm));
+    let (read_layouts, layouts_not_read, extra_layout_setups) =
+        layout::read_layouts(drawing, units);
     let blocks_of: Vec<acadrust::types::Handle> = read_layouts.iter().map(|l| l.block).collect();
     let on_sheet = sheet_objects(drawing, &blocks_of);
     // A table's own block holds what it draws, and is read with the table.
@@ -1028,14 +1029,15 @@ fn contents(
             not_read.push((kind, handle));
         }
     }
-    let mut layouts = read_layouts
-        .into_iter()
-        .enumerate()
-        .map(|(k, read)| crate::model::Layout {
+    let mut layout_setups = Vec::with_capacity(read_layouts.len());
+    let mut layouts = read_layouts.into_iter().enumerate().map(|(k, read)| {
+        layout_setups.push(read.setup);
+        crate::model::Layout {
             name: read.name,
             paper: read.paper,
             paper_space: spaces.iter().map(|s| *s == Some(k)).collect(),
-        });
+        }
+    });
     let layout = layouts.next();
     let other_layouts: Vec<crate::model::Layout> = layouts.collect();
     let paper = layout.as_ref().and_then(|l| l.paper.clone());
@@ -1070,6 +1072,8 @@ fn contents(
         handles,
         not_read: RecordsOfKind::group(not_read),
         decode,
+        layout_setups,
+        extra_layout_setups,
     })
 }
 
@@ -2455,6 +2459,184 @@ pub(crate) fn as_someone_elses(dwg: &Path, out: &Path) {
     std::fs::write(out, bytes).expect("the DWG is saved");
 }
 
+/// Only for tests: writes `dwg` to `out` as a unitless original (INSUNITS = 0,
+/// no build mark, no AgentDrafter extended data).
+#[cfg(test)]
+pub(crate) fn as_unitless_original(dwg: &Path, out: &Path) {
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    drawing.header.insertion_units = 0;
+    drawing
+        .summary_info
+        .custom_properties
+        .retain(|(name, _)| name != BUILD_MARK);
+    for entity in drawing.entities_mut() {
+        let common = entity.common_mut();
+        common.extended_data = Default::default();
+        common.raw_record = None;
+    }
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+    std::fs::write(out, bytes).expect("the DWG is saved");
+}
+
+/// Only for tests: plain-data overrides for one DWG layout's stored page setup,
+/// keeping `acadrust` strictly behind the `dwg` seam (ADR-0009).
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TestLayoutSetup {
+    pub plotter: Option<String>,
+    pub paper_size: Option<String>,
+    pub paper_width_mm: Option<f64>,
+    pub paper_height_mm: Option<f64>,
+    pub plot_paper_units: Option<i16>,
+    pub plot_rotation: Option<i16>,
+    pub plot_type: Option<i16>,
+    pub plot_scale: Option<(f64, f64)>,
+    /// `(left, bottom, right, top)` printer margins in millimetres.
+    pub margins_mm: Option<(f64, f64, f64, f64)>,
+    /// `(x, y)` plot origin in millimetres.
+    pub plot_origin_mm: Option<(f64, f64)>,
+    pub plot_style_sheet: Option<String>,
+}
+
+#[cfg(test)]
+fn apply_test_layout_setup(layout: &mut acadrust::objects::Layout, setup: &TestLayoutSetup) {
+    if let Some(plotter) = &setup.plotter {
+        layout.plot_printer_name = plotter.clone();
+    }
+    if let Some(paper_size) = &setup.paper_size {
+        layout.paper_size = paper_size.clone();
+    }
+    if let Some(width) = setup.paper_width_mm {
+        layout.paper_width = width;
+    }
+    if let Some(height) = setup.paper_height_mm {
+        layout.paper_height = height;
+    }
+    if let Some(paper_units) = setup.plot_paper_units {
+        layout.plot_paper_units = paper_units;
+    }
+    if let Some(rotation) = setup.plot_rotation {
+        layout.plot_rotation = rotation;
+    }
+    if let Some(plot_type) = setup.plot_type {
+        layout.plot_type = plot_type;
+    }
+    if let Some((num, den)) = setup.plot_scale {
+        layout.plot_scale_numerator = num;
+        layout.plot_scale_denominator = den;
+    }
+    if let Some((left, bottom, right, top)) = setup.margins_mm {
+        layout.plot_margin_left = left;
+        layout.plot_margin_bottom = bottom;
+        layout.plot_margin_right = right;
+        layout.plot_margin_top = top;
+    }
+    if let Some((x, y)) = setup.plot_origin_mm {
+        layout.plot_origin_x = x;
+        layout.plot_origin_y = y;
+    }
+    if let Some(style) = &setup.plot_style_sheet {
+        layout.plot_style_sheet = style.clone();
+    }
+}
+
+#[cfg(test)]
+fn strip_build_metadata(drawing: &mut CadDocument) {
+    drawing
+        .summary_info
+        .custom_properties
+        .retain(|(name, _)| name != BUILD_MARK);
+    for object in drawing.entities_mut() {
+        let common = object.common_mut();
+        common.extended_data = Default::default();
+        common.raw_record = None;
+    }
+}
+
+/// Only for tests: mutates a built DWG's named layout page setup using plain
+/// data (as an original stripped of build mark and AgentDrafter extended data)
+/// and saves it to `out`.
+#[cfg(test)]
+pub(crate) fn as_original_with_layout_setup(
+    dwg: &Path,
+    out: &Path,
+    layout_name: &str,
+    unitless: bool,
+    setup: &TestLayoutSetup,
+) {
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    if unitless {
+        drawing.header.insertion_units = 0;
+    }
+    strip_build_metadata(&mut drawing);
+    let layout = drawing
+        .objects
+        .values_mut()
+        .find_map(|o| match o {
+            acadrust::objects::ObjectType::Layout(l) if l.name == layout_name => Some(l),
+            _ => None,
+        })
+        .expect("named layout exists");
+    apply_test_layout_setup(layout, setup);
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+    std::fs::write(out, bytes).expect("the DWG is saved");
+}
+
+/// Only for tests: adds extra inactive empty layouts with plain-data page
+/// setups to a built DWG (stripped of build mark and AgentDrafter extended
+/// data) and saves it to `out`.
+#[cfg(test)]
+pub(crate) fn as_original_with_extra_layouts(
+    dwg: &Path,
+    out: &Path,
+    extra_layouts: &[(&str, TestLayoutSetup)],
+) {
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    strip_build_metadata(&mut drawing);
+    for (name, setup) in extra_layouts {
+        drawing.add_layout(name).expect("add extra layout");
+        let layout = drawing
+            .objects
+            .values_mut()
+            .find_map(|o| match o {
+                acadrust::objects::ObjectType::Layout(l) if l.name == *name => Some(l),
+                _ => None,
+            })
+            .expect("added layout exists");
+        apply_test_layout_setup(layout, setup);
+    }
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+    std::fs::write(out, bytes).expect("the DWG is saved");
+}
+
+/// Only for tests: writes `dwg` to `out` with the first two model-space
+/// objects carrying the same AgentDrafter `name` (with distinct IDs).
+#[cfg(test)]
+pub(crate) fn with_duplicate_carried_name(dwg: &Path, out: &Path, duplicate_name: &str) {
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    block::register_application(&mut drawing).expect("register app");
+    drawing.assign_table_entry_handles();
+    drawing
+        .summary_info
+        .custom_properties
+        .retain(|(name, _)| name != BUILD_MARK);
+    let handles: Vec<_> = drawing
+        .model_space_entities()
+        .take(2)
+        .map(|e| e.common().handle)
+        .collect();
+    assert_eq!(handles.len(), 2, "need at least two model-space entities");
+    for (count, handle) in handles.into_iter().enumerate() {
+        let entity = drawing.get_entity_mut(handle).expect("entity exists");
+        let common = entity.common_mut();
+        common.extended_data = Default::default();
+        ids::write_id_and_name(common, "DUP", &format!("obj-{count}"), Some(duplicate_name));
+        common.raw_record = None;
+    }
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+    std::fs::write(out, bytes).expect("the DWG is saved");
+}
+
 /// Only for tests: writes to `out` the DWG at `dwg`, a 2018 DWG AgentDrafter
 /// built, with its first line turned into an object of a made-up
 /// application's custom class named `kind`, which the DWG library reads but
@@ -2633,6 +2815,7 @@ mod tests {
             sheet,
             objects: Vec::new(),
             rows_file: None,
+            dwg: None,
         }
     }
 

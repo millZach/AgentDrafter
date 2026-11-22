@@ -330,6 +330,8 @@ pub(crate) enum Unfinished {
     Preview,
     /// `propose` and `proposals`.
     Proposals,
+    /// Reading a built DWG's drawing set without modifying the set.
+    BuiltDwg,
 }
 
 pub(crate) fn refuse_unfinished(folder: &Path, who: Unfinished) -> Result<(), Error> {
@@ -362,6 +364,12 @@ pub(crate) fn refuse_unfinished(folder: &Path, who: Unfinished) -> Result<(), Er
               and `proposals` write nothing to the set, so they do not roll that back; nothing \
               was changed. Any other command on the set, such as `journal`, rolls it back first; \
               then ask again",
+            folder.display()
+        ),
+        Unfinished::BuiltDwg => format!(
+            "the drawing set `{}` this DWG was built from cannot be read: {what}. Reading a DWG \
+              writes nothing to its set, so it does not roll that back; nothing was changed. Any \
+              other command on the set, such as `journal`, rolls it back first; then ask again",
             folder.display()
         ),
     };

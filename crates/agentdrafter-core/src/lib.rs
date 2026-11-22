@@ -132,7 +132,7 @@ pub use change::{
 };
 pub use check::{
     check, check_with, BlockPart, CheckReport, CheckRequest, CheckedObject, Finding, Rule, Sides,
-    CHECK_TOLERANCE_MM,
+    SkippedCheck, CHECK_TOLERANCE_MM,
 };
 pub use commands::{
     assistant_commands, commands, find_command, Access, Command, CommandInfo, JsonReply,
