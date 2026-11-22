@@ -1071,6 +1071,14 @@ pub struct DrawingContents {
     /// The drawing's block definitions the core has a model for, in table
     /// order, leaving out model space and the layouts.
     pub blocks: Vec<Block>,
+    /// For each block in `blocks`, in the same order, the handle of each of
+    /// its `objects`, in hexadecimal as AutoCAD lists it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_handles: Vec<Vec<String>>,
+    /// For each block in `blocks`, in the same order, the ID and name each
+    /// of its `objects` carries in AgentDrafter's extended data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_ids_and_names: Vec<Vec<IdAndName>>,
     /// How many block definitions the core has no model for yet, such as
     /// anonymous blocks, external references and blocks holding an object
     /// the core has no model for. A table's own anonymous block, which
@@ -1117,6 +1125,116 @@ pub struct DrawingContents {
     /// counted.
     #[serde(default, skip_serializing_if = "is_none_of")]
     pub layouts_not_read: usize,
+    /// The handle of each of `objects`, in the same order, in hexadecimal
+    /// as AutoCAD lists it, such as `2F`. A handle is the DWG's own name for
+    /// a record, and stays the same each time the same file is read.
+    #[serde(default)]
+    pub handles: Vec<String>,
+    /// The objects of the sheet, model space's and each read layout's
+    /// paper space's, the core has no model for, by kind, with the handle
+    /// of each: what an output of the drawing does not draw. Their count is
+    /// `objects_not_read`.
+    #[serde(default)]
+    pub not_read: Vec<RecordsOfKind>,
+    /// Whether the DWG library decoded every record of the file, and the
+    /// records it did not (ADR-0004).
+    #[serde(default)]
+    pub decode: DecodeReport,
+}
+
+/// Records of a DWG of one kind, counted, with the handle of each.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordsOfKind {
+    /// The kind of record, as the DWG names it, such as `LINE`,
+    /// `ACAD_PROXY_ENTITY` or a custom object's own name.
+    pub kind: String,
+    /// How many there are.
+    pub count: usize,
+    /// The handle of each, in hexadecimal as AutoCAD lists it, such as
+    /// `2F`, in the order the file holds them. A record the reader could
+    /// not place has none, so there may be fewer handles than `count`.
+    pub handles: Vec<String>,
+}
+
+/// Whether the DWG library decoded every record of a DWG it read: each
+/// object, table entry and non-graphical object into a model of its own.
+/// A record it did not decode it keeps as the bytes it read, which a save
+/// in the version the file arrived in writes back as they were (ADR-0004,
+/// ADR-0006), but nothing can draw, query or change it; a damaged record
+/// skipped while reading past damage is left out altogether.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodeReport {
+    /// True when every record was decoded whole: none is under
+    /// `not_decoded`, none was skipped, the reader recovered from no error,
+    /// the record stream finished, and diagnostics were not cut off at the
+    /// library's limit.
+    pub decoded: bool,
+    /// The records the library could not decode whole, by kind: opaque,
+    /// proxy and custom records kept as raw bytes, records cut short such
+    /// as a mesh over the face budget, and damaged records skipped while
+    /// reading past damage.
+    pub not_decoded: Vec<RecordsOfKind>,
+    /// How many records the library could not read at all and left out.
+    #[serde(default)]
+    pub skipped: usize,
+    /// How many errors the library recovered from while reading.
+    #[serde(default)]
+    pub recovered_errors: usize,
+    /// How many non-fatal reader warnings the library reported while reading
+    /// (such as inconsistent source references or unknown enum values),
+    /// excluding records listed as skipped or errors.
+    #[serde(default, skip_serializing_if = "is_none_of")]
+    pub warnings: usize,
+    /// True when the DWG library hit its internal diagnostic cap (999
+    /// entries) or notification limit and omitted further diagnostics, so
+    /// `not_decoded` or `warnings` may be incomplete.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diagnostics_truncated: bool,
+    /// Why the library could not read the file whole, when it could not:
+    /// the read then went on past the records it could not read, as
+    /// AutoCAD's RECOVER reads a damaged drawing, though repairing nothing,
+    /// and named each it passed under `not_decoded`. Only `read` reads past
+    /// damage; every other command refuses such a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_past_damage: Option<String>,
+}
+
+impl Default for DecodeReport {
+    fn default() -> Self {
+        Self {
+            decoded: true,
+            not_decoded: Vec::new(),
+            skipped: 0,
+            recovered_errors: 0,
+            warnings: 0,
+            diagnostics_truncated: false,
+            read_past_damage: None,
+        }
+    }
+}
+
+impl RecordsOfKind {
+    /// Groups `(kind, handle)` pairs by kind, in the order each kind is
+    /// first met, each with its handles in the order met.
+    pub(crate) fn group<I: IntoIterator<Item = (String, Option<String>)>>(records: I) -> Vec<Self> {
+        let mut kinds: Vec<RecordsOfKind> = Vec::new();
+        for (kind, handle) in records {
+            let at = match kinds.iter().position(|k| k.kind == kind) {
+                Some(at) => at,
+                None => {
+                    kinds.push(RecordsOfKind {
+                        kind,
+                        count: 0,
+                        handles: Vec::new(),
+                    });
+                    kinds.len() - 1
+                }
+            };
+            kinds[at].count += 1;
+            kinds[at].handles.extend(handle);
+        }
+        kinds
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

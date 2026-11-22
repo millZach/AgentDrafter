@@ -817,17 +817,24 @@ fn text_style_name(drawing: &CadDocument, handle: Option<Handle>) -> Option<Stri
         .map(|s| style_name(&s.name))
 }
 
-/// The drawing's multileader styles the core has a model for, and how many
-/// it has not.
+/// The drawing's multileader styles the core has a model for, in handle
+/// order, and how many it has not.
 pub(super) fn read_mleader_styles(drawing: &CadDocument) -> (Vec<MLeaderStyle>, usize) {
     let mut styles = Vec::new();
     let mut not_read = 0;
-    for object in drawing.objects.values() {
-        if let ObjectType::MultiLeaderStyle(written) = object {
-            match read_style(drawing, written) {
-                Some(style) => styles.push(style),
-                None => not_read += 1,
-            }
+    let mut written: Vec<&DwgStyle> = drawing
+        .objects
+        .values()
+        .filter_map(|object| match object {
+            ObjectType::MultiLeaderStyle(style) => Some(style),
+            _ => None,
+        })
+        .collect();
+    written.sort_by_key(|style| style.handle.value());
+    for style in written {
+        match read_style(drawing, style) {
+            Some(style) => styles.push(style),
+            None => not_read += 1,
         }
     }
     (styles, not_read)

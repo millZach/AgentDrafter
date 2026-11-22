@@ -2,6 +2,8 @@
 # Real drawings are tested from folders outside the repository.
 *.dwg
 *.dxf
+*.mirror.yaml
+*.mirror.tmp
 *.bak
 *.dwl
 *.dwl2

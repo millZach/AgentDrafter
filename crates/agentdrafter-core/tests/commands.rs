@@ -115,6 +115,10 @@ fn samples() -> Vec<(&'static str, Value)> {
             "import-blocks",
             json!({"drawing": "missing.dwg", "library": "missing-blocks.yaml", "blocks": ["MARKER"], "replace": true, "units": "mm", "dry_run": true}),
         ),
+        (
+            "read",
+            json!({"source": "missing.dwg", "mirror": "missing.mirror.yaml"}),
+        ),
     ]
 }
 
@@ -555,4 +559,90 @@ fn a_proposal_s_schema_and_its_command_refuse_the_same_who_and_number() {
             "`{name}` with {input}: {reply}"
         );
     }
+}
+
+#[test]
+fn read_through_the_registry_never_triggers_drawing_set_journal_recovery() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("commands-read-no-recover");
+    let _ = std::fs::remove_dir_all(&dir);
+    let set = dir.join("demo-set");
+    demo_set::copy_demo_set(&set);
+    let moved = json!({"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]});
+    let landed = run("change", json!({"set": set, "change_set": moved}));
+    assert_eq!(landed["ok"], true, "{landed}");
+    let dwg = set.join("dwg").join("DEMO-001.dwg");
+    assert!(dwg.is_file());
+
+    // Leave the journal with a pending commit (strip the final "done" line).
+    let journal = set.join(agentdrafter_core::JOURNAL_FILE);
+    let text = std::fs::read_to_string(&journal).unwrap();
+    let (rest, last) = text.trim_end().rsplit_once('\n').unwrap();
+    assert!(last.contains(r#""state":"done""#), "{last}");
+    std::fs::write(&journal, format!("{rest}\n")).unwrap();
+    let before = every_file(&set);
+
+    // `read --no-mirror` on the set's DWG must NOT recover/mutate the set.
+    let reply = run("read", json!({"source": dwg, "no_mirror": true}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(reply.get("rolled_back").is_none(), "{reply}");
+    assert_eq!(every_file(&set), before, "no-mirror left set untouched");
+
+    // `read` writing a mirror elsewhere must ALSO leave the set untouched.
+    let mirror = dir.join("elsewhere.mirror.yaml");
+    let reply = run("read", json!({"source": dwg, "mirror": mirror}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(reply.get("rolled_back").is_none(), "{reply}");
+    assert!(mirror.is_file());
+    assert_eq!(every_file(&set), before, "read left set untouched");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn read_schema_and_command_agree_on_mirror_null_and_no_mirror_combination() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("commands-read-schema");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let yaml = dir.join("one.yaml");
+    std::fs::write(
+        &yaml,
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [10, 0, 0]}\n",
+    )
+    .unwrap();
+    let built = run("build", json!({"source": yaml}));
+    assert_eq!(built["ok"], true, "{built}");
+    let dwg = dir.join("one.dwg");
+    let custom_mirror = dir.join("custom.mirror.yaml");
+
+    let command = commands().iter().find(|c| c.name() == "read").unwrap();
+    let validator = jsonschema::validator_for(&command.input_schema()).unwrap();
+
+    for (input, valid) in [
+        (json!({"source": dwg}), true),
+        (
+            json!({"source": dwg, "mirror": null, "no_mirror": true}),
+            true,
+        ),
+        (
+            json!({"source": dwg, "mirror": custom_mirror, "no_mirror": false}),
+            true,
+        ),
+        (
+            json!({"source": dwg, "mirror": custom_mirror, "no_mirror": true}),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            validator.is_valid(&input),
+            valid,
+            "read schema with {input}"
+        );
+        let reply = run("read", input.clone());
+        assert_eq!(reply["ok"], valid, "read command with {input}: {reply}");
+        if !valid {
+            assert_eq!(reply["error"]["code"], "usage", "{reply}");
+        }
+    }
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }

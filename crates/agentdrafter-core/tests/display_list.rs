@@ -141,6 +141,11 @@ fn a_sets_sheet_draws_what_its_dwg_draws() {
         );
         assert!(from_dwg.paper.is_some());
         assert_eq!(from_dwg.objects_not_drawn, 0);
+        assert!(from_dwg.not_drawn.is_empty());
+        // A DWG's objects carry the IDs the build wrote on them.
+        let ids =
+            |r: &DisplayListReport| r.objects.iter().map(|o| o.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&from_dwg), ids(&from_set), "{sheet}");
         assert_eq!(points(&from_dwg), points(&from_set), "{sheet}");
     }
 }

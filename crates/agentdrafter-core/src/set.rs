@@ -375,7 +375,11 @@ pub(crate) struct DwgSet {
 /// was built from, since its output folder is not where the DWG is. The
 /// words name the set as the mark writes it, never by its path in full.
 pub(crate) fn set_of_dwg(dwg: &Path) -> Result<DwgSet, String> {
-    let Some(mark) = dwg::build_mark(dwg) else {
+    set_of_dwg_with_mark(dwg, dwg::build_mark(dwg))
+}
+
+fn set_of_dwg_with_mark(dwg: &Path, mark: Option<dwg::BuildMark>) -> Result<DwgSet, String> {
+    let Some(mark) = mark else {
         return Err(NO_MARK.to_owned());
     };
     let Some(written) = mark.set else {
@@ -468,8 +472,19 @@ pub(crate) struct DwgPaper {
 /// row is the one whose DWG in the set's output folder is this very file,
 /// as the file system tells it, so letter case is matched as the file
 /// system matches it.
+#[cfg(test)]
 pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<DwgPaper> {
-    let set = set_of_dwg(dwg).ok()?;
+    paper_of_dwg_in(dwg, set_of_dwg(dwg).ok()?)
+}
+
+/// Same as [`paper_of_dwg`], reading the build mark from `bytes` already
+/// loaded from `dwg` so the DWG file is never opened a second time.
+pub(crate) fn paper_of_dwg_bytes(dwg: &Path, bytes: &[u8]) -> Option<DwgPaper> {
+    let set = set_of_dwg_with_mark(dwg, dwg::build_mark_bytes(bytes)).ok()?;
+    paper_of_dwg_in(dwg, set)
+}
+
+fn paper_of_dwg_in(dwg: &Path, set: DwgSet) -> Option<DwgPaper> {
     let settings_file = set.folder.join(SET_SETTINGS_FILE);
     let settings = read_set_settings(&settings_file).ok()?;
     let rows_files = marked_rows_files(&set.folder, &settings, set.rows.as_deref())?;

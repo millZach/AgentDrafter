@@ -103,6 +103,10 @@
     "import-blocks": {
       "args": ["import-blocks", "demo-set/dwg/DEMO-001.dwg", "--library", "imported-blocks.yaml", "--block", "title_block"],
       "input": {"drawing": "demo-set/dwg/DEMO-001.dwg", "library": "imported-blocks.yaml", "blocks": ["title_block"]}
+    },
+    "read": {
+      "args": ["read", "demo-set/dwg/DEMO-002.dwg", "--mirror", "DEMO-002.mirror.yaml"],
+      "input": {"source": "demo-set/dwg/DEMO-002.dwg", "mirror": "DEMO-002.mirror.yaml"}
     }
   },
   "also": [

@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::description::sheet_description_at;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::Paper;
 use crate::model::Sheet;
+use crate::model::{Paper, RecordsOfKind};
 use crate::stamp::{self, SourceKind};
 use crate::units::Unit;
 
@@ -69,6 +69,12 @@ pub(crate) struct Record {
     pub units: Option<Unit>,
     /// How many objects of a DWG the core has no model for yet.
     pub objects_not_drawn: usize,
+    /// Those objects by kind, with the handle of each.
+    pub not_drawn: Vec<RecordsOfKind>,
+    /// The ID and name of each of the sheet's objects, in order, for a DWG:
+    /// the ID AgentDrafter wrote on it, or the drawing's name joined to its
+    /// handle (`crate::original`). Empty for a sheet description.
+    pub ids: Vec<(String, Option<String>)>,
     /// Every file read, the record first, each with its kind and the bytes
     /// read.
     pub files: Vec<(SourceKind, PathBuf, Vec<u8>)>,
@@ -96,13 +102,16 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
         .in_file(source)
     })?;
     if kind == SourceKind::Dwg {
-        let drawing = dwg::read(source)?;
-        let mut files = vec![(kind, source.to_path_buf(), bytes)];
+        let drawing = dwg::read_bytes(&bytes, source)?;
+        let ids = crate::original::ids_of(source, &drawing);
         // Zach decided on 2026-11-13 that a DWG plots on the paper its
         // sheet declares, read from the set its build mark names; the DWG
-        // itself holds no paper.
+        // itself holds no paper. Read the build mark from the exact bytes
+        // already in memory so `source` is never reopened.
         let units = drawing.units.unwrap_or(Unit::Mm);
-        let paper = crate::set::paper_of_dwg(source).and_then(|found| {
+        let found_paper = crate::set::paper_of_dwg_bytes(source, &bytes);
+        let mut files = vec![(kind, source.to_path_buf(), bytes)];
+        let paper = found_paper.and_then(|found| {
             files.extend(found.read);
             // The paper in the DWG's own unit, should the set's have moved on.
             found.paper.map(|paper| Paper {
@@ -132,6 +141,8 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
             sheet,
             units: drawing.units,
             objects_not_drawn: drawing.objects_not_read,
+            not_drawn: drawing.not_read,
+            ids,
             files,
         });
     }
@@ -151,6 +162,8 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
         units: Some(sheet.units),
         sheet,
         objects_not_drawn: 0,
+        not_drawn: Vec::new(),
+        ids: Vec::new(),
         files,
     })
 }

@@ -394,12 +394,17 @@ pub(super) fn opened_on(drawing: &CadDocument) -> Option<(String, Handle)> {
         return None;
     }
     let block = drawing.header.paper_space_block_handle;
-    drawing.objects.values().find_map(|o| match o {
-        ObjectType::Layout(layout) if layout.block_record == block && !block.is_null() => {
-            Some((layout.name.clone(), block))
-        }
-        _ => None,
-    })
+    drawing
+        .objects
+        .values()
+        .filter_map(|o| match o {
+            ObjectType::Layout(layout) if layout.block_record == block && !block.is_null() => {
+                Some(layout)
+            }
+            _ => None,
+        })
+        .min_by_key(|l| l.handle.value())
+        .map(|layout| (layout.name.clone(), block))
 }
 
 /// A layout of a drawing the core reads: its name, the handle of its block
@@ -474,10 +479,14 @@ pub(super) fn is_overall(object: &EntityType) -> bool {
 /// `units`: a standard paper, whole, at full size, as a build writes it.
 /// None for any other page setup.
 pub(super) fn read_paper(drawing: &CadDocument, block: Handle, units: Unit) -> Option<Paper> {
-    let layout = drawing.objects.values().find_map(|o| match o {
-        ObjectType::Layout(layout) if layout.block_record == block => Some(layout),
-        _ => None,
-    })?;
+    let layout = drawing
+        .objects
+        .values()
+        .filter_map(|o| match o {
+            ObjectType::Layout(layout) if layout.block_record == block => Some(layout),
+            _ => None,
+        })
+        .min_by_key(|l| l.handle.value())?;
     let name = PageSetup::named(&layout.paper_size)?;
     let setup = PageSetup::of(&name)?;
     let (numerator, denominator) = setup.plot_scale(units);
