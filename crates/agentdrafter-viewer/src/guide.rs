@@ -69,6 +69,21 @@ impl StepPlan {
             .collect()
     }
 
+    /// How many places its Move or Copy goes to from the base point: Copy's
+    /// rings after its base point, or with none, its operation's offsets,
+    /// or one.
+    fn goes_to(&self) -> usize {
+        let clicks = self.clicks().len();
+        if clicks >= 2 {
+            return clicks - 1;
+        }
+        self.operation
+            .as_ref()
+            .and_then(|op| op.get("offsets"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(1, |offsets| offsets.len().max(1))
+    }
+
     /// Its objects to pick, by their places among its points.
     fn picks(&self) -> Vec<usize> {
         (0..self.points.len())
@@ -98,6 +113,9 @@ pub enum Phase {
     /// Move or Copy wants a base point the step leaves to the drafter, any
     /// point, before how far it goes is typed.
     Base,
+    /// Move or Copy has its base point and wants where it goes, which the
+    /// step gives no ring for: how far, typed.
+    Place,
 }
 
 /// How many points the tool running has taken for its step: its points,
@@ -138,6 +156,9 @@ pub fn phase(step: &StepPlan, tools: &Tools) -> Phase {
     match step.clicks().get(taken) {
         Some(&i) => Phase::Click(i),
         None if taken == 0 && matches!(kind, ToolKind::Move | ToolKind::Copy) => Phase::Base,
+        None if matches!(kind, ToolKind::Move | ToolKind::Copy) && taken < 1 + step.goes_to() => {
+            Phase::Place
+        }
         None => Phase::Finish,
     }
 }
@@ -177,7 +198,7 @@ pub fn ring(step: &StepPlan, tools: &Tools) -> Option<Ring> {
     let point = match phase(step, tools) {
         Phase::Start => (!step.points.is_empty()).then_some(0)?,
         Phase::Pick(i) | Phase::Click(i) => i,
-        Phase::Finish | Phase::Type | Phase::EndPick | Phase::Base => return None,
+        Phase::Finish | Phase::Type | Phase::EndPick | Phase::Base | Phase::Place => return None,
     };
     let given = &step.points[point];
     let label = given.words();
@@ -353,7 +374,7 @@ pub fn filled(operation: &serde_json::Value, tools: &Tools) -> serde_json::Value
     let adds = op
         .get("op")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|name| name.starts_with("add_"));
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("add_"));
     if let (true, Some(map)) = (adds, op.as_object_mut()) {
         if !map.contains_key("layer") {
             map.insert("layer".to_owned(), serde_json::json!(tools.layer));

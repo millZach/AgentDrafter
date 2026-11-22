@@ -539,6 +539,12 @@ fn text_matches_exactly_and_a_rectangle_by_its_vertices_in_order() {
         1,
     );
     assert!(reversed.completes, "{}", reversed.message);
+    // The same corners with one side an arc, given by its angle: a curve.
+    let arced = tried(
+        polyline(json!([[1, 1, 0], {"point": [3, 1, 0], "arc_angle": 90}, [3, 2, 0], [1, 2, 0]])),
+        1,
+    );
+    assert!(!arced.completes, "{}", arced.message);
 
     let text = |contents: &str| json!({"op": "add_text", "sheet": "DEMO-002", "contents": contents, "height": 0.1, "position": [1.2, 1.4, 0]});
     let shouted = tried(text("PUMP A"), 2);
@@ -580,11 +586,33 @@ fn a_rectangle_step_completes_a_rectangle_at_its_two_corners() {
         json!([{"at": [1, 1]}, {"at": [3, 3]}]),
         "guide.steps[0].points",
     );
+    // A side curved by its arc's angle, as by a bulge, is no rectangle,
+    // rings or none.
+    for rings in [corners.clone(), json!([])] {
+        refused(
+            json!([[1, 1, 0], {"point": [3, 1, 0], "arc_angle": 90}, [3, 2, 0], [1, 2, 0]]),
+            rings,
+            "guide.steps[0].completes",
+        );
+    }
     assert!(give(
         &set,
         guide(json!([[3, 2, 0], [1, 2, 0], [1, 1, 0], [3, 1, 0]]), corners)
     )
     .is_ok());
+}
+
+#[test]
+fn a_guide_may_give_its_steps_no_rings() {
+    let set = demo_set("no-rings");
+    let guide = json!({"title": "A line, moved", "sheet": "DEMO-002", "steps": [
+        {"say": "Draw a line.", "tool": "line",
+         "completes": {"op": "add_line", "sheet": "DEMO-002", "from": [1, 1, 0], "to": [2, 1, 0]}},
+        {"say": "Move it up.", "tool": "move",
+         "completes": {"op": "move", "target": {"made_by": 1}, "by": [0, 0.5, 0]}}
+    ]});
+    assert_eq!(give(&set, guide).unwrap(), 1);
+    assert!(listed(&set).guides[0].steps[0].points.is_empty());
 }
 
 #[test]

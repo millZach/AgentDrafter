@@ -123,8 +123,11 @@ import {
   clickNote,
   endedNote,
   layerChosen,
+  endsStepTool,
   givenToast,
   landed as guideLanded,
+  pulseOf,
+  toastAfterStart,
   marked as guideMarked,
   synced as guideSynced,
   undoAllBlocked,
@@ -1600,7 +1603,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const v = renderer();
     if (v && toolState?.tool) toolDid(v.tool_leave());
     setPicked(null);
-    setToast(null);
+    // Its own Start goes; another guide's, given with it, stays.
+    setToast((t) => toastAfterStart(t, n));
     const fresh = startRun(g);
     runNow.current = fresh;
     setRun(fresh);
@@ -1632,18 +1636,20 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const r = runNow.current;
     const g = runGuide();
     if (!r || !g) return;
-    // What the drafter had not finished is dropped, not landed.
+    // What the step's own tool had not finished is dropped, not landed; a
+    // tool the drafter started for themselves keeps what it holds.
     const v = renderer();
-    if (v && toolState?.tool) toolDid(v.tool_drop());
+    if (v && endsStepTool(g.steps[r.at], toolState?.tool)) toolDid(v.tool_drop());
     setRun(skipStep(r, g));
     log(`Guide: step ${r.at + 1} skipped`);
   }
   function stopGuide() {
     const r = runNow.current;
     if (!r) return;
-    // What the drafter had not finished is dropped, not landed, on any sheet.
+    // What the step's own tool had not finished is dropped, not landed; a
+    // tool the drafter started for themselves keeps what it holds.
     const v = renderer();
-    if (v && toolState?.tool) toolDid(v.tool_drop());
+    if (v && endsStepTool(runGuide()?.steps[r.at], toolState?.tool)) toolDid(v.tool_drop());
     setRun(stopRun(r));
     setGuideClosed(false);
     log(`Guide: stopped at step ${r.at + 1}`);
@@ -2474,16 +2480,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const stepNow = bannerShown && !guideRun?.end && !guideElsewhere && runningGuide ? (runningGuide.steps[guideRun!.at] ?? null) : null;
   const phaseText = stepNow && !stepNow.setting ? (renderer()?.guide_phase() ?? '') : '';
   const phase: Phase | null = phaseText ? (JSON.parse(phaseText) as Phase) : null;
-  const gpulse =
-    !stepNow || guideRun?.note?.tone === 'warn'
-      ? undefined
-      : stepNow.setting
-        ? 'layer'
-        : !phase || phase.phase === 'start'
-          ? stepNow.tool
-          : phase.phase === 'finish' && stepNow.tool !== 'move' && stepNow.tool !== 'copy'
-            ? 'done'
-            : undefined;
+  const gpulse = pulseOf(stepNow, phase, guideRun?.note?.tone === 'warn');
   // The renderer is told the step running, as `guides` works it out on the
   // set as it stands, so it can say what the step wants and ring its point;
   // and the drawing, how far down the banner reaches.

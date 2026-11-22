@@ -7,18 +7,21 @@ import {
   clickNote,
   dots,
   endedNote,
+  endsStepTool,
   givenToast,
   landed,
   lastWords,
   layerChosen,
   marked,
   nowWords,
+  pulseOf,
   skipStep,
   startRun,
   stepDone,
   stopRun,
   summaryOf,
   synced,
+  toastAfterStart,
   toolNote,
   undoAllBlocked,
   undoItBlocked,
@@ -275,4 +278,53 @@ test('guides given between two looks each get a Start', () => {
   assert.equal(two?.title, '2 guides given: Draw FT-101’s + wire to TB1-1; Number the wire');
   assert.deepEqual(two?.guides, [1, 2]);
   assert.equal(two?.detail, 'Guide 1: 4 steps on DP-LD-101 · Guide 2: 4 steps on DP-LD-101, for you to do on your drawing.');
+});
+
+test('Skip and Stop end only the step’s own tool; one the drafter started keeps its work', () => {
+  assert.equal(endsStepTool(step(2), 'line'), true);
+  assert.equal(endsStepTool(step(2), 'copy'), false, 'a Copy the drafter started keeps its copies');
+  assert.equal(endsStepTool(step(2), null), false);
+  assert.equal(endsStepTool(step(1), 'line'), false, 'a setting step has no tool of its own');
+});
+
+test('a Copy step whose copy goes by a typed displacement asks for it, then for Done', () => {
+  const copy: GuideStep = {
+    step: 5,
+    say: 'Copy it up.',
+    title: 'Copy it up',
+    tool: 'copy',
+    points: [{ label: '101+', object: 'DP-LD-101/text-1' }, { label: 'base', at: [5, 6, 0] }],
+    operation: { op: 'copy', by: [0, 1, 0] },
+  };
+  assert.equal(nowWords(copy, { phase: 'place' }, false), 'Type @0,1 and press Enter.');
+  assert.equal(nowWords(copy, { phase: 'finish' }, false), 'Press Enter, or click Done, to place the copy.');
+  assert.equal(pulseOf(copy, { phase: 'place' }, false), undefined);
+  assert.equal(pulseOf(copy, { phase: 'finish' }, false), 'done');
+  assert.equal(nowWords(step(4), { phase: 'place' }, false), 'Type @0,0.04 and press Enter.');
+});
+
+test('what pulses, for every phase the renderer reports', () => {
+  const erase: GuideStep = { step: 6, say: 'Erase it.', title: 'Erase it', tool: 'erase', points: [{ label: '101+', object: 'DP-LD-101/text-1' }] };
+  assert.equal(pulseOf(step(1), null, false), 'layer');
+  assert.equal(pulseOf(step(2), { phase: 'start' }, false), 'line');
+  assert.equal(pulseOf(step(2), null, false), 'line');
+  assert.equal(pulseOf(erase, { phase: 'pick', point: 0 }, false), undefined);
+  assert.equal(pulseOf(erase, { phase: 'end_pick' }, false), 'done', 'Erase: Done once picked');
+  assert.equal(pulseOf(step(4), { phase: 'end_pick' }, false), 'done');
+  assert.equal(pulseOf(step(4), { phase: 'base' }, false), undefined);
+  assert.equal(pulseOf(step(4), { phase: 'place' }, false), undefined);
+  assert.equal(pulseOf(step(4), { phase: 'finish' }, false), undefined, 'Move lands on its last point');
+  assert.equal(pulseOf(step(2), { phase: 'click', point: 0 }, false), undefined);
+  assert.equal(pulseOf(step(2), { phase: 'finish' }, false), 'done');
+  assert.equal(pulseOf(step(3), { phase: 'type' }, false), undefined);
+  assert.equal(pulseOf(step(2), { phase: 'finish' }, true), undefined, 'nothing while a note waits');
+  assert.equal(pulseOf(null, null, false), undefined);
+});
+
+test('starting one guide of a toast leaves the other’s Start', () => {
+  const toast = { key: 1, title: '2 guides given', guides: [1, 2] };
+  assert.deepEqual(toastAfterStart(toast, 1), { key: 1, title: '2 guides given', guides: [2] });
+  assert.equal(toastAfterStart({ ...toast, guides: [2] }, 2), null);
+  assert.equal(toastAfterStart({ key: 3, title: 'Proposal' }, 1), null);
+  assert.equal(toastAfterStart(null, 1), null);
 });

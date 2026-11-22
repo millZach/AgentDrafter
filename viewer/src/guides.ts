@@ -95,7 +95,9 @@ export type Phase =
   /** Move, Copy or Erase has picked what the step picks: Enter ends picking. */
   | { phase: 'end_pick' }
   /** Move or Copy wants a base point the step leaves to the drafter. */
-  | { phase: 'base' };
+  | { phase: 'base' }
+  /** Move or Copy has its base point and wants where it goes, typed. */
+  | { phase: 'place' };
 
 /** What a step came to. */
 export type StepStatus = 'todo' | 'done' | 'forme' | 'skipped' | 'needs';
@@ -314,6 +316,49 @@ export function undoAllBlocked(run: GuideRun, guide: Guide, canUndo: number[], f
   return `The journal changed since: the button now says “${now.undoLabel}”.`;
 }
 
+/**
+ * What pulses for the step, from the phase the renderer reports: the
+ * Layer box for a setting step; the step's tool until it runs; Done when
+ * Enter or Done is what the step wants next, picking ended or the step's
+ * points all taken (Move lands on its last point, so has no Done); and
+ * nothing while the drafter picks, clicks a ring, gives a base point,
+ * types where it goes or types the text, or while a note waits.
+ */
+export function pulseOf(step: GuideStep | null, phase: Phase | null, warned: boolean): string | undefined {
+  if (!step || warned) return undefined;
+  if (step.setting) return 'layer';
+  switch (phase?.phase ?? 'start') {
+    case 'start':
+      return step.tool;
+    case 'end_pick':
+      return 'done';
+    case 'finish':
+      return step.tool === 'move' ? undefined : 'done';
+    case 'pick':
+    case 'click':
+    case 'base':
+    case 'place':
+    case 'type':
+      return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Whether Skip or Stop ends the tool running: only the step's own tool,
+ * whose points were the step's; a tool the drafter started for themselves
+ * keeps what it holds.
+ */
+export function endsStepTool(step: GuideStep | undefined, running: string | null | undefined): boolean {
+  return !!step?.tool && !!running && step.tool === running;
+}
+
+/** The toast once guide `n` starts: its own Start gone, any other guide's left. */
+export function toastAfterStart<T extends { guides?: number[] }>(toast: T | null, n: number): T | null {
+  const rest = (toast?.guides ?? []).filter((g) => g !== n);
+  return toast && rest.length ? { ...toast, guides: rest } : null;
+}
+
 /** The toast for guides given since the last listing: one Start for each. */
 export function givenToast(given: Guide[], who: (by: string) => string): { title: string; detail: string; guides: number[] } | null {
   const first = given[0];
@@ -383,10 +428,11 @@ export function nowWords(step: GuideStep, phase: Phase | null, phone: boolean): 
       return phone ? 'Tap Done: what the step picks is picked.' : 'Press Enter, or click Done: what the step picks is picked.';
     case 'base':
       return `${click} any point, as the base point.`;
+    case 'place':
     case 'finish': {
+      // Copy, once it has placed the step's copies, wants Done.
+      if (tool === 'copy' && phase?.phase === 'finish') return phone ? 'Tap Done to place the copy.' : 'Press Enter, or click Done, to place the copy.';
       if (tool === 'move' || tool === 'copy') {
-        const clicks = step.points.filter((p) => !p.object).length;
-        if (tool === 'copy' && clicks >= 2) return phone ? 'Tap Done to place the copy.' : 'Press Enter, or click Done, to place the copy.';
         const by = step.operation?.by;
         if (Array.isArray(by) && by.length >= 2) {
           const at = `@${fmt(by[0] as number)},${fmt(by[1] as number)}`;

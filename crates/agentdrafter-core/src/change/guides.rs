@@ -740,6 +740,11 @@ fn points_agree(s: usize, step: &StepGiven, walked: &StepWalked) -> Result<(), E
         return Ok(());
     };
     let tool = tool.to_lowercase();
+    // A step need give no rings: then there is nothing to agree, but a
+    // Rectangle step's operation is still a rectangle.
+    if step.points.is_empty() && tool != "rectangle" {
+        return Ok(());
+    }
     let field = format!("guide.steps[{s}].points");
     let wrong = |message: String| -> Result<(), Error> {
         Err(
@@ -864,6 +869,9 @@ fn points_agree(s: usize, step: &StepGiven, walked: &StepWalked) -> Result<(), E
                     ),
                 )
                 .at_field(format!("guide.steps[{s}].completes")));
+            }
+            if step.points.is_empty() {
+                return Ok(());
             }
             let fits = match clicks.as_slice() {
                 [a, b] => same_polyline(&corners(*a, *b), &given, true),
@@ -1484,13 +1492,20 @@ fn near(a: [f64; 3], b: [f64; 3]) -> bool {
     (0..3).all(|i| same(a[i], b[i]))
 }
 
-/// A polyline's vertex: its point and its bulge.
+/// A polyline's vertex: its point and the curve of the segment from it, as
+/// a bulge. A polyline's point gives its curve as a `bulge` or as an
+/// `arc_angle`, its included angle in degrees, whose bulge is the tangent
+/// of a quarter of it; either is a curve.
 fn vertex(v: &Value) -> (Value, f64) {
     match v.get("point") {
-        Some(p) => (
-            p.clone(),
-            v.get("bulge").and_then(Value::as_f64).unwrap_or(0.0),
-        ),
+        Some(p) => {
+            let bulge = v.get("bulge").and_then(Value::as_f64);
+            let arc = v
+                .get("arc_angle")
+                .and_then(Value::as_f64)
+                .map(|degrees| (degrees.to_radians() / 4.0).tan());
+            (p.clone(), bulge.or(arc).unwrap_or(0.0))
+        }
         None => (v.clone(), 0.0),
     }
 }

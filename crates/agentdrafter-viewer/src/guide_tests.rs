@@ -194,7 +194,7 @@ fn a_move_step_rings_its_object_to_pick_then_its_base_point() {
         click(&mut tools, &step, Taken::typed([5.2, 6.75], 0.0)),
         None
     );
-    assert_eq!(phase(&step, &tools), Phase::Finish, "then where it goes");
+    assert_eq!(phase(&step, &tools), Phase::Place, "then where it goes");
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn a_move_step_with_no_base_point_asks_for_any_then_how_far() {
     assert_eq!(phase(&step, &tools), Phase::Base);
     assert_eq!(ring(&step, &tools), None);
     click(&mut tools, &step, Taken::typed([1.0, 1.0], 0.0));
-    assert_eq!(phase(&step, &tools), Phase::Finish, "then how far, typed");
+    assert_eq!(phase(&step, &tools), Phase::Place, "then how far, typed");
 }
 
 #[test]
@@ -366,4 +366,50 @@ fn a_tool_dropped_sends_nothing_where_esc_would_land_it() {
     assert!(dropped.sends.is_empty());
     assert_eq!(dropped.log, vec!["LINE: dropped, nothing changed"]);
     assert_eq!(tools.running(), None);
+}
+
+#[test]
+fn a_copy_step_with_a_typed_displacement_counts_its_first_copy_and_wants_done() {
+    let mut tools = tools();
+    let step: StepPlan = serde_json::from_value(json!({
+        "tool": "copy",
+        "points": [
+            {"label": "101+", "object": "DP-LD-101/text-1"},
+            {"label": "base point", "at": [5.2, 6.75, 0.0]}
+        ],
+        "operation": {"op": "copy", "by": [0, 1, 0]}
+    }))
+    .unwrap();
+    tools.start(ToolKind::Copy, &[4]);
+    assert_eq!(
+        click(&mut tools, &step, Taken::typed([5.2, 6.75], 0.0)),
+        None
+    );
+    assert_eq!(phase(&step, &tools), Phase::Place, "how far, typed");
+    // Typed as the banner asks: the step's own copy, no note, and Done next.
+    let before = phase(&step, &tools);
+    let count = taken(&tools);
+    tools.input("@0,1", None);
+    let at = Taken::typed(tools.last_point().unwrap(), 0.0);
+    assert_eq!(after_point(&step, before, &tools, &at, count), None);
+    assert_eq!(tools.state(false).placed, 1);
+    assert_eq!(phase(&step, &tools), Phase::Finish);
+    // A second copy is one more than the step places.
+    let before = phase(&step, &tools);
+    let count = taken(&tools);
+    tools.input("@0,2", None);
+    let at = Taken::typed(tools.last_point().unwrap(), 0.0);
+    let note = after_point(&step, before, &tools, &at, count).unwrap();
+    assert_eq!(
+        note.words,
+        "That placed another copy; the step places no more."
+    );
+}
+
+#[test]
+fn do_it_for_me_reads_an_add_in_any_case() {
+    let mut tools = tools();
+    tools.layer = "wire".to_owned();
+    let add = json!({"op": "ADD_LINE", "from": [0, 0], "to": [1, 0]});
+    assert_eq!(filled(&add, &tools)["layer"], "wire");
 }
