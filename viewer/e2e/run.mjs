@@ -307,6 +307,73 @@ async function sheetAtRest(page, raised, timeout = 30000) {
     );
 }
 
+/**
+ * Waits until the view has come to rest: no glide, fling or reveal moving
+ * it, the same for 5 frames and 300 ms in a row. Gives the view it rests at.
+ * The deadline is kept by a timer in the page, not by the frames, which a
+ * page that stops drawing stops giving, and by one in Node past it, for a
+ * page that answers nothing at all.
+ */
+async function viewAtRest(page, timeout = 15000) {
+  const resting = page.evaluate(
+    (timeout) =>
+      new Promise((done, fail) => {
+        const now = () => JSON.stringify(window.agentdrafterViewer.view());
+        let last = now();
+        let since = performance.now();
+        let frames = 0;
+        let over = false;
+        const giveUp = setTimeout(() => {
+          over = true;
+          fail(new Error(`the view did not come to rest in ${timeout} ms: ${now()}, ${frames} frames still`));
+        }, timeout);
+        const step = () => {
+          if (over) return;
+          const view = now();
+          const t = performance.now();
+          if (view !== last) [last, since, frames] = [view, t, 0];
+          else frames += 1;
+          if (frames >= 5 && t - since >= 300) {
+            clearTimeout(giveUp);
+            done(JSON.parse(view));
+          } else requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      }),
+    timeout,
+  );
+  // The page's answer, should it come after Node has given up, is let go.
+  resting.catch(() => {});
+  let timer;
+  const deadline = new Promise((_, fail) => {
+    timer = setTimeout(() => fail(new Error(`the view did not come to rest in ${timeout} ms: the page gave no answer in ${timeout + 5000} ms`)), timeout + 5000);
+  });
+  try {
+    return await Promise.race([resting, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Whether the journal's `entry` finished: marked done, or written whole, as a
+ * failed attempt or a discard is, with no state. One pending has not
+ * finished yet. One rolled back changed nothing, so a wait for it to finish
+ * fails at once and says so, rather than taking it for done (`journal.rs`).
+ */
+const finished = (entry) => {
+  if (entry.state === 'rolled_back') throw new Error(`entry ${entry.entry} was rolled back, not done: ${JSON.stringify(entry)}`);
+  return entry.state === undefined || entry.state === 'done';
+};
+
+/**
+ * Whether the journal's `entries` hold more than `before` and the newest
+ * has finished. A change set's entry is written pending before its files
+ * are put in place (`commit.rs`), and `journal` can read it so: its files
+ * are in place only once it is done (#254).
+ */
+const grownAndDone = (entries, before) => entries.length > before && finished(entries.at(-1));
+
 /** Opens the side panel's Journal tab: it opens on the assistant's Chat (#156). */
 async function journalTab(page) {
   await sideTab(page, 'journal');
@@ -902,20 +969,36 @@ const checks = {
       await page.mouse.down();
       await page.mouse.move(300, 300, { steps: 10 });
       await page.mouse.up();
-      await sleep(600);
-      const dragged = await view();
+      // The drag flings on release, as far as the pointer's speed takes it.
+      const dragged = await viewAtRest(page);
       assert(dragged.left > wheeled.left, 'a drag pans the sheet with the pointer');
-      await page.mouse.dblclick(400, 400);
-      await sleep(400);
-      const doubled = await view();
-      assert(doubled.scale > dragged.scale * 1.8, 'a double click zooms in');
+      // A double click on a text opens it to edit, not to zoom (#261): it
+      // goes where the renderer picks nothing, the nearest such point to
+      // (400, 400) on the canvas, wherever the fling left the sheet.
+      const empty = await page.evaluate(() => {
+        const probe = window.agentdrafterViewer;
+        const v = probe.view();
+        const r = document.querySelector('.stage').getBoundingClientRect();
+        for (let reach = 0; reach <= 300; reach += 8) {
+          for (let turn = 0; turn < 360; turn += 15) {
+            const x = 400 + reach * Math.cos((turn * Math.PI) / 180);
+            const y = 400 + reach * Math.sin((turn * Math.PI) / 180);
+            const onStage = document.elementFromPoint(x, y)?.closest('.stage');
+            if (onStage && probe.pickAt(v.left + (x - r.left) / v.scale, v.top - (y - r.top) / v.scale, 16) < 0) return [x, y];
+          }
+        }
+        return null;
+      });
+      assert(empty, 'a point near (400, 400) picks nothing');
+      await page.mouse.dblclick(...empty);
+      await page.waitForFunction((was) => window.agentdrafterViewer.view().scale > was * 1.8, dragged.scale, { timeout: 15000 }).catch(() => {});
+      const doubled = await viewAtRest(page);
+      assert(doubled.scale > dragged.scale * 1.8, `a double click zooms in: ${dragged.scale} to ${doubled.scale}, at ${empty}`);
       await page.click('[aria-label="Fit the sheet"]');
-      await sleep(600);
-      const back = await view();
+      const back = await viewAtRest(page);
       assert(Math.abs(back.scale - fitted.scale) / fitted.scale < 1e-6, 'fit shows the whole sheet again');
       await page.click('[aria-label="Zoom in"]');
-      await sleep(400);
-      assert((await view()).scale > fitted.scale * 1.5, 'the zoom button zooms in');
+      assert((await viewAtRest(page)).scale > fitted.scale * 1.5, 'the zoom button zooms in');
       await page.click('.tab:has-text("DP-LD-202")');
       await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'DP-LD-202');
       assert(page.url().includes('sheet=DP-LD-202'), 'the address names the sheet shown');
@@ -2090,7 +2173,7 @@ const checks = {
     const landed = async (page, before, what, sheet = 'DP-LD-101') => {
       const until = Date.now() + 30000;
       let entries = journal();
-      while (entries.length <= before) {
+      while (!grownAndDone(entries, before)) {
         assert(Date.now() < until, `${what}: no change set landed: ${await bar(page)}`);
         await sleep(100);
         entries = journal();
@@ -2327,7 +2410,7 @@ const checks = {
         // The journal's entry is written ahead of the files and marked done after: wait for both.
         const until = Date.now() + 20000;
         let undone = journal().at(-1);
-        while (!(undone.kind === 'undo' && undone.undo_state !== 'pending' && template() === templateBefore)) {
+        while (!(undone.kind === 'undo' && finished(undone) && template() === templateBefore)) {
           assert(Date.now() < until, `Undo last undoes the drafter's edit and puts the template back: ${JSON.stringify(undone)}`);
           await sleep(100);
           undone = journal().at(-1);
@@ -2474,7 +2557,7 @@ const checks = {
     const landed = async (page, before, what, sheet = 'DP-LD-101') => {
       const until = Date.now() + 30000;
       let entries = journal();
-      while (entries.length <= before) {
+      while (!grownAndDone(entries, before)) {
         assert(Date.now() < until, `${what}: no change set landed: ${await bar(page)}`);
         await sleep(100);
         entries = journal();
@@ -3537,7 +3620,7 @@ const checks = {
     };
     const landedOnAll = async (before, what) => {
       const until = Date.now() + 30000;
-      while (journal().length <= before) {
+      while (!grownAndDone(journal(), before)) {
         assert(Date.now() < until, `${what}: nothing landed`);
         await sleep(100);
       }
@@ -3823,7 +3906,7 @@ const checks = {
     const landed = async (page, before, what) => {
       const until = Date.now() + 30000;
       let entries = journal();
-      while (entries.length <= before) {
+      while (!grownAndDone(entries, before)) {
         assert(Date.now() < until, `${what}: no change set landed: ${await bar(page)}`);
         await sleep(100);
         entries = journal();
@@ -3848,10 +3931,11 @@ const checks = {
         return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
       }, at);
     // Shows the object at `place` large, and gives a point on the page that
-    // picks it, as a click there does.
+    // picks it, as a click there does. The fit's glide is let finish first:
+    // its next frame would put back the view it was heading for (#180).
     const showAndFind = async (page, place, zoom = 4) => {
       await page.click('[aria-label="Fit the sheet"]').catch(() => page.tap('[aria-label="Fit the sheet"]'));
-      await sleep(600);
+      await viewAtRest(page);
       const at = await page.evaluate(
         ([p, zoom]) => {
           const probe = window.agentdrafterViewer;
@@ -3863,7 +3947,7 @@ const checks = {
         },
         [place, zoom],
       );
-      await frames(page);
+      await viewAtRest(page);
       return findOn(page, place, at);
     };
     // A point on the page that picks the object at `place`, in its box, at the view shown.
@@ -3879,13 +3963,58 @@ const checks = {
       }
       throw new Error(`no point on the page picks object ${place}`);
     };
+    // Why a click or tap at the page point `at` would not pick the object
+    // at `place` now, or null when it would: the view still moving, the
+    // renderer picking another object there, or something over the canvas.
+    const wontPick = async (page, at, place) => {
+      const rest = await viewAtRest(page).then(
+        () => null,
+        (e) => e.message,
+      );
+      return (
+        rest ??
+        page.evaluate(
+          ([[x, y], place]) => {
+            const probe = window.agentdrafterViewer;
+            const v = probe.view();
+            const r = document.querySelector('.stage').getBoundingClientRect();
+            const picks = probe.pickAt(v.left + (x - r.left) / v.scale, v.top - (y - r.top) / v.scale, 16);
+            if (picks !== place) return `the renderer picks ${picks} there, not ${place}`;
+            const over = document.elementFromPoint(x, y);
+            return over?.closest('.stage') ? null : `${over?.tagName}.${over?.className} is over the canvas there`;
+          },
+          [at, place],
+        )
+      );
+    };
+    // Picks the object at `place` with a click or a tap, once the view is
+    // at rest, at a point the renderer picks it at, and waits until it is
+    // picked (#180). One that still picks nothing is tried once more from a
+    // point found again, and the run says so.
     const select = async (page, place, touch) => {
-      const [x, y] = await showAndFind(page, place);
-      if (touch) await page.touchscreen.tap(x, y);
-      else await page.mouse.click(x, y);
-      await page.waitForFunction((p) => window.agentdrafterViewer.marked?.picked === p, place, { timeout: 15000 });
-      await page.waitForSelector('.qp [data-prop="layer"]');
-      return [x, y];
+      for (let attempt = 1; ; attempt += 1) {
+        const at = await showAndFind(page, place);
+        let missed = await wontPick(page, at, place);
+        if (!missed) {
+          if (touch) await page.touchscreen.tap(...at);
+          else await page.mouse.click(...at);
+          const picked = await page
+            .waitForFunction((p) => window.agentdrafterViewer.marked?.picked === p, place, { timeout: 8000 })
+            .then(
+              () => true,
+              () => false,
+            );
+          // Picked late is picked: a second tap on a text picked opens it.
+          const now = await page.evaluate(() => window.agentdrafterViewer.marked?.picked);
+          if (picked || now === place) {
+            await page.waitForSelector('.qp [data-prop="layer"]');
+            return at;
+          }
+          missed = `the ${touch ? 'tap' : 'click'} at ${at.map(Math.round)} picked ${now}`;
+        }
+        assert(attempt < 2, `object ${place} is not picked, twice: ${missed}`);
+        console.log(`     props: picking object ${place} again: ${missed}`);
+      }
     };
     const chips = (page) => page.evaluate(() => [...document.querySelectorAll('.qp [data-chip]')].map((c) => c.textContent));
     const valueOf = (page, key) => page.inputValue(`.qp [data-prop="${key}"]`);
@@ -4187,7 +4316,7 @@ const checks = {
         await page.click('.titlebar button[data-act="undo"]');
         const until = Date.now() + 20000;
         let undone = journal().at(-1);
-        while (!(undone.kind === 'undo' && undone.undo_state !== 'pending' && template() === beforeMove)) {
+        while (!(undone.kind === 'undo' && finished(undone) && template() === beforeMove)) {
           assert(Date.now() < until, `Undo last takes the edit back: ${JSON.stringify(undone)}`);
           await sleep(100);
           undone = journal().at(-1);
@@ -4305,7 +4434,11 @@ const checks = {
         seen.phone.layer_box = entry.entry;
         if (await page.isVisible('.ribbon [data-toggle="osnap"]')) await page.tap('.toolsbtn');
 
-        // The circle's radius and diameter.
+        // The circle's radius and diameter. The sheet is drawn again with
+        // the device on `wire`, the revision the journal now ends at, before
+        // the washer is found: a sheet drawn again after the Fit would fit
+        // it again, and move the washer from under the tap (#180).
+        await page.waitForFunction(() => window.agentdrafterViewer.summary.objects.find((o) => o.id === 'DP-LD-101/device')?.layer === 'wire', null, { timeout: 15000 });
         const washer = await placeOf(page, "(o) => o.id === 'DP-LD-101/washer'");
         await select(page, washer, true);
         before = journal().length;
@@ -4359,7 +4492,7 @@ const checks = {
         await page.tap('button[data-act="undo"]:visible');
         const until = Date.now() + 20000;
         let undone = journal().at(-1);
-        while (!(undone.kind === 'undo' && undone.undo_state !== 'pending' && template() === templateBefore)) {
+        while (!(undone.kind === 'undo' && finished(undone) && template() === templateBefore)) {
           assert(Date.now() < until, `Undo last takes the edit back, by touch: ${JSON.stringify(undone)}`);
           await sleep(100);
           undone = journal().at(-1);
@@ -4392,7 +4525,7 @@ const checks = {
         await page.keyboard.press('Enter');
         assert((await page.locator('[data-preview]').count()) === 0, 'no preview: it lands at once');
         const until = Date.now() + 30000;
-        while (panelJournal().length <= before) {
+        while (!grownAndDone(panelJournal(), before)) {
           assert(Date.now() < until, `the joined text lands: ${await bar(page)}`);
           await sleep(100);
         }
@@ -4818,7 +4951,7 @@ const checks = {
     const waiting = (folder) => (agentIn(folder, 'proposals', 'demo-plant').result?.proposals ?? []).map((p) => p.proposal);
     const grows = async (folder, from, what) => {
       const until = Date.now() + 30000;
-      while (journalOf(folder).length <= from) {
+      while (!grownAndDone(journalOf(folder), from)) {
         assert(Date.now() < until, `${what}: the journal did not grow`);
         await sleep(100);
       }
@@ -4986,7 +5119,7 @@ const checks = {
         // Undone as any change set, as one, and the proposal does not come back.
         await page.click('[data-act="undo"]');
         const undone = await grows(folder, 5, 'Undo last');
-        assert(undone.kind === 'undo' && JSON.stringify(undone.undid) === JSON.stringify([second.entry]), `undone: ${JSON.stringify(undone)}`);
+        assert(undone.kind === 'undo' && undone.state === 'done' && JSON.stringify(undone.undid) === JSON.stringify([second.entry]), `undone: ${JSON.stringify(undone)}`);
         await sleep(500);
         assert(waiting(folder).length === 0 && (await page.locator('[data-pcard]').count()) === 0, 'the proposal does not come back');
 
@@ -5167,7 +5300,7 @@ const checks = {
     const waiting = (folder) => (agentIn(folder, 'proposals', 'demo-plant').result?.proposals ?? []).map((p) => p.proposal);
     const grows = async (folder, from, what) => {
       const until = Date.now() + 30000;
-      while (journalOf(folder).length <= from) {
+      while (!grownAndDone(journalOf(folder), from)) {
         assert(Date.now() < until, `${what}: the journal did not grow`);
         await sleep(100);
       }
