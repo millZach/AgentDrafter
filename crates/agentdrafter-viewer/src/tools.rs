@@ -1,17 +1,18 @@
-//! The drafter's drawing tools: Line, Circle, Rectangle, Text, Move, Copy
-//! and Erase, as AutoCAD's LINE, CIRCLE, RECTANG, TEXT, MOVE, COPY and ERASE
-//! run them, cut down for beginners (#152, Copy #66). Plain computation,
+//! The drafter's drawing tools: Line, Circle, Rectangle, Text, Move, Copy,
+//! Array and Erase, as AutoCAD's LINE, CIRCLE, RECTANG, TEXT, MOVE, COPY,
+//! ARRAY and ERASE run them, cut down for beginners (#152, Copy and Array
+//! #66). Plain computation,
 //! tested natively; `web` feeds it the drafter's clicks, taps and typing and
 //! draws what it says.
 //!
 //! A tool takes points, a snapped one where the cursor caught a snap, picks
 //! objects and reads what is typed in the command bar: an alias (`L`, `C`,
-//! `REC`, `T`, `M`, `CO`, `E`), a point (`120,80`, `@40,0`, `@5<30`), a length
+//! `REC`, `T`, `M`, `CO`, `AR`, `E`), a point (`120,80`, `@40,0`, `@5<30`), a length
 //! alone towards the cursor, or an option's capital letter. While it runs it
 //! says what it wants, in plain words with options to click, and shows its
 //! rubber band. When it has what it needs it gives one change set, with the
 //! operation the core has for what it does (`add_line`, `add_circle`, a
-//! closed `add_polyline`, `add_text`, `move`, `copy`, `delete`), which the page
+//! closed `add_polyline`, `add_text`, `move`, `copy`, `array`, `delete`), which the page
 //! sends through `change`: what the edit means is the core's, not this
 //! module's (ADR-0007). Each point taken on a snap goes as a snapped point,
 //! so the core works out the exact place; a point on a row's own object, in
@@ -22,6 +23,7 @@
 //! from a template says so while the tool runs, and the change set it gives
 //! names the sheets the template reaches, for the page to ask first.
 
+use crate::array::{self, ArrayKind, Field, Place, Setup, Spacing};
 use agentdrafter_core::SnapKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -36,6 +38,7 @@ pub enum ToolKind {
     Text,
     Move,
     Copy,
+    Array,
     Erase,
 }
 
@@ -52,7 +55,7 @@ pub struct ToolSpec {
 
 /// The tools and their aliases, as AutoCAD's are, but `T`, which starts
 /// AutoCAD's MTEXT, starts TEXT here: a beginner's text is one line.
-pub const TOOLS: [ToolSpec; 7] = [
+pub const TOOLS: [ToolSpec; 8] = [
     ToolSpec {
         kind: ToolKind::Line,
         command: "LINE",
@@ -83,6 +86,13 @@ pub const TOOLS: [ToolSpec; 7] = [
         command: "COPY",
         aliases: &["CO", "CP", "COPY"],
     },
+    // ARRAYPATH is no tool's word: a path array is the core's, for the
+    // assistant, until the tool makes one.
+    ToolSpec {
+        kind: ToolKind::Array,
+        command: "ARRAY",
+        aliases: &["AR", "ARRAY", "ARRAYRECT", "ARRAYPOLAR"],
+    },
     ToolSpec {
         kind: ToolKind::Erase,
         command: "ERASE",
@@ -105,7 +115,10 @@ impl ToolKind {
 
     /// Whether it draws a new object, on the current layer.
     pub fn draws(self) -> bool {
-        !matches!(self, ToolKind::Move | ToolKind::Copy | ToolKind::Erase)
+        !matches!(
+            self,
+            ToolKind::Move | ToolKind::Copy | ToolKind::Array | ToolKind::Erase
+        )
     }
 
     /// Its name, as the page names it.
@@ -117,6 +130,7 @@ impl ToolKind {
             ToolKind::Text => "text",
             ToolKind::Move => "move",
             ToolKind::Copy => "copy",
+            ToolKind::Array => "array",
             ToolKind::Erase => "erase",
         }
     }
@@ -198,6 +212,9 @@ pub struct ObjectInfo {
     /// Whether it is model space seen through a viewport of the layout
     /// drawn, whose points on the page are the viewport's, not its own.
     pub through_viewport: bool,
+    /// The box round what it draws, `[left, bottom, right, top]` in
+    /// drawing units; none when it draws nothing.
+    pub bounds: Option<[f64; 4]>,
 }
 
 impl ObjectInfo {
@@ -213,6 +230,7 @@ impl ObjectInfo {
             values: value.get("values").cloned(),
             from_template: text("from").map(|f| f == "template"),
             through_viewport: false,
+            bounds: None,
         }
     }
 
@@ -303,6 +321,15 @@ enum Step {
         picked: Vec<usize>,
         base: Taken,
         placed: Vec<Taken>,
+    },
+    /// Array's panel: its values, and a polar array's centre, which a
+    /// click takes while `picking`. Nothing lands until Enter or Array;
+    /// Esc sends nothing.
+    ArraySetup {
+        picked: Vec<usize>,
+        setup: Box<Setup>,
+        center: Option<Taken>,
+        picking: bool,
     },
 }
 
@@ -414,6 +441,29 @@ pub struct State {
     pub text: Option<Typing>,
     /// The copies Copy has placed, which wait for Enter, Done or Esc.
     pub placed: usize,
+    /// Array's panel, while it is set up.
+    pub array: Option<ArrayPanel>,
+}
+
+/// What Array's panel shows (#66): its kind, how the spacing is given, its
+/// fields, a polar array's centre and whether its items turn, and how
+/// many copies it makes or what is wrong.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ArrayPanel {
+    pub kind: ArrayKind,
+    pub spacing: Spacing,
+    /// What it arrays: `of terminal-2`, `of 2 objects`.
+    pub of: String,
+    pub fields: Vec<Field>,
+    /// A polar array's centre in words, or where to click it.
+    pub center: Option<String>,
+    /// Whether a click takes the centre now.
+    pub picking: bool,
+    pub rotate: bool,
+    /// `3 × 2: 5 copies`, or what is wrong.
+    pub count: String,
+    /// Whether it can land: nothing is wrong.
+    pub ready: bool,
 }
 
 /// What a running tool shows before it lands, in drawing units.
@@ -431,6 +481,10 @@ pub struct Band {
     /// The objects Copy copies, and the offset of each copy placed, which
     /// waits for Enter: dashed in the proposal's colour.
     pub placed: Option<(Vec<usize>, Vec<[f64; 2]>)>,
+    /// The objects Array copies and each copy's place, dashed in the
+    /// proposal's colour, faint while a polar array's centre follows the
+    /// cursor.
+    pub arrayed: Option<(Vec<usize>, Vec<Place>, bool)>,
     /// The points taken so far.
     pub points: Vec<[f64; 2]>,
 }
@@ -454,6 +508,9 @@ pub struct Tools {
     last_point: Option<([f64; 2], f64)>,
     error: Option<String>,
     context: Context,
+    /// The kind Array was started as, by `ARRAYRECT` or `ARRAYPOLAR`, until
+    /// its objects are picked.
+    array_kind: Option<ArrayKind>,
 }
 
 impl Default for Tools {
@@ -467,6 +524,7 @@ impl Default for Tools {
             last_point: None,
             error: None,
             context: Context::default(),
+            array_kind: None,
         }
     }
 }
@@ -628,6 +686,18 @@ impl Tools {
                     follow(base);
                     placed.iter_mut().for_each(follow);
                 }
+                Step::ArraySetup {
+                    picked,
+                    center,
+                    setup,
+                    ..
+                } => {
+                    follow_picked(picked);
+                    setup.objects = picked.len();
+                    if let Some(c) = center {
+                        follow(c);
+                    }
+                }
                 _ => {}
             }
             // A move or an erase whose objects have all gone has nothing
@@ -635,7 +705,8 @@ impl Tools {
             if let Step::MoveBase { picked }
             | Step::MoveSecond { picked, .. }
             | Step::CopyBase { picked }
-            | Step::CopySecond { picked, .. } = &running.step
+            | Step::CopySecond { picked, .. }
+            | Step::ArraySetup { picked, .. } = &running.step
             {
                 if picked.is_empty() {
                     self.running = None;
@@ -671,6 +742,7 @@ impl Tools {
                     | Step::MoveSecond { .. }
                     | Step::CopyBase { .. }
                     | Step::CopySecond { .. }
+                    | Step::ArraySetup { picking: true, .. }
             )
         )
     }
@@ -746,6 +818,25 @@ impl Tools {
     /// selected before, which Move and Erase take, as AutoCAD's do when
     /// objects are selected first.
     pub fn start(&mut self, kind: ToolKind, picked: &[usize]) -> Outcome {
+        self.start_with(kind, picked, None)
+    }
+
+    /// Starts the tool `word` names, an alias such as `AR` or the page's
+    /// name such as `array`, as [`Tools::start`] does: `ARRAYRECT` and
+    /// `ARRAYPOLAR` start Array as that kind. Nothing when it names none.
+    pub fn start_word(&mut self, word: &str, picked: &[usize]) -> Outcome {
+        match tool_for(word) {
+            Some(kind) => self.start_with(kind, picked, array::kind_for(word)),
+            None => Outcome::default(),
+        }
+    }
+
+    fn start_with(
+        &mut self,
+        kind: ToolKind,
+        picked: &[usize],
+        array_kind: Option<ArrayKind>,
+    ) -> Outcome {
         self.error = None;
         if self.context.template.is_none() || self.context.past {
             self.error = Some(if self.context.past {
@@ -771,12 +862,13 @@ impl Tools {
             return outcome;
         }
         self.last = Some(kind);
+        self.array_kind = array_kind;
         let mut picked: Vec<usize> = picked
             .iter()
             .copied()
             .filter(|&p| self.nameable(p))
             .collect();
-        if matches!(kind, ToolKind::Move | ToolKind::Copy) {
+        if matches!(kind, ToolKind::Move | ToolKind::Copy | ToolKind::Array) {
             if let Some(&p) = picked.iter().find(|&&p| self.through_viewport(p)) {
                 self.error = Some(self.viewport_words(kind, p));
                 picked.retain(|&p| !self.through_viewport(p));
@@ -793,7 +885,7 @@ impl Tools {
             ToolKind::Copy if !picked.is_empty() => Step::CopyBase {
                 picked: picked.clone(),
             },
-            ToolKind::Move | ToolKind::Copy | ToolKind::Erase => Step::Select {
+            ToolKind::Move | ToolKind::Copy | ToolKind::Array | ToolKind::Erase => Step::Select {
                 picked: picked.clone(),
             },
         };
@@ -805,7 +897,8 @@ impl Tools {
         self.running = Some(Running { kind, step });
         // Erase with objects already selected erases them at once, after
         // what the tool it ended kept, if any: both are sent, in order.
-        if kind == ToolKind::Erase && !picked.is_empty() {
+        // Array opens its panel at once on objects already selected.
+        if matches!(kind, ToolKind::Erase | ToolKind::Array) && !picked.is_empty() {
             let done = self.finish_select();
             outcome.log.extend(done.log);
             outcome.sends.extend(done.sends);
@@ -824,10 +917,10 @@ impl Tools {
 
     /// Why Move and Copy do not take an object seen through a viewport.
     fn viewport_words(&self, kind: ToolKind, place: usize) -> String {
-        let (tool, verb) = if kind == ToolKind::Copy {
-            ("Copy", "copies")
-        } else {
-            ("Move", "moves")
+        let (tool, verb) = match kind {
+            ToolKind::Copy => ("Copy", "copies"),
+            ToolKind::Array => ("Array", "arrays"),
+            _ => ("Move", "moves"),
         };
         format!(
             "{} is in model space, seen through a viewport: {tool} {verb} only what is drawn \
@@ -867,6 +960,16 @@ impl Tools {
                 base,
                 placed,
             } if !placed.is_empty() => self.land_copy(&picked, &base, &placed),
+            // Esc sends nothing: an array's copies are only shown until
+            // Enter or Array lands them (Zach, 2026-11-21).
+            Step::ArraySetup { .. } => Outcome {
+                log: if said {
+                    vec!["ARRAY: cancelled, nothing sent".to_owned()]
+                } else {
+                    Vec::new()
+                },
+                sends: Vec::new(),
+            },
             Step::TextType {
                 at,
                 mut lines,
@@ -1151,6 +1254,20 @@ impl Tools {
                     placed,
                 })
             }
+            Step::ArraySetup {
+                picked,
+                setup,
+                center: _,
+                picking: true,
+            } => {
+                log.push(format!("ARRAY centre {where_}"));
+                Some(Step::ArraySetup {
+                    picked,
+                    setup,
+                    center: Some(point.clone()),
+                    picking: false,
+                })
+            }
             other => Some(other),
         };
         self.last_point = Some((point.at, point.z));
@@ -1179,7 +1296,7 @@ impl Tools {
             return Outcome::default();
         };
         let command = kind.command();
-        if matches!(kind, ToolKind::Move | ToolKind::Copy) && viewport {
+        if matches!(kind, ToolKind::Move | ToolKind::Copy | ToolKind::Array) && viewport {
             let kind = *kind;
             self.error = Some(self.viewport_words(kind, place));
             return Outcome::default();
@@ -1231,6 +1348,24 @@ impl Tools {
                 step: Step::CopyBase { picked },
             });
             return Outcome::default();
+        }
+        if kind == ToolKind::Array {
+            let array_kind = self.array_kind.unwrap_or(ArrayKind::Rectangular);
+            let mut setup = Setup::new(array_kind, self.picked_bounds(&picked));
+            setup.objects = picked.len();
+            self.running = Some(Running {
+                kind,
+                step: Step::ArraySetup {
+                    picked,
+                    setup: Box::new(setup),
+                    center: None,
+                    picking: array_kind == ArrayKind::Polar,
+                },
+            });
+            return Outcome {
+                log: vec![array_kind.command().to_owned()],
+                sends: Vec::new(),
+            };
         }
         self.running = None;
         self.land_erase(&picked)
@@ -1296,8 +1431,233 @@ impl Tools {
             "diameter" => self.input("D", None),
             "radius" => self.input("R", None),
             "height" => self.input("H", None),
+            "array" => self.input("", None),
+            "rectangular" | "polar" | "between" | "total" | "pick-center" | "turn" | "no-turn" => {
+                self.array_option(act)
+            }
             _ => Outcome::default(),
         }
+    }
+
+    /// Array's panel's buttons: its kind, how the spacing is given, the
+    /// centre picked again, and whether the items turn.
+    fn array_option(&mut self, act: &str) -> Outcome {
+        self.error = None;
+        let Some(Running {
+            step:
+                Step::ArraySetup {
+                    setup,
+                    center,
+                    picking,
+                    ..
+                },
+            ..
+        }) = &mut self.running
+        else {
+            return Outcome::default();
+        };
+        let line = match act {
+            "rectangular" | "polar" => {
+                let kind = if act == "polar" {
+                    ArrayKind::Polar
+                } else {
+                    ArrayKind::Rectangular
+                };
+                if setup.kind == kind {
+                    return Outcome::default();
+                }
+                setup.kind = kind;
+                // A polar array asks for its centre first.
+                *picking = kind == ArrayKind::Polar && center.is_none();
+                kind.command().to_owned()
+            }
+            "between" | "total" => {
+                let spacing = if act == "total" {
+                    Spacing::Total
+                } else {
+                    Spacing::Between
+                };
+                if setup.spacing == spacing {
+                    return Outcome::default();
+                }
+                setup.hold(spacing);
+                format!(
+                    "ARRAY: spacing {}",
+                    if act == "total" {
+                        "as the total, divided evenly"
+                    } else {
+                        "between items"
+                    }
+                )
+            }
+            "pick-center" => {
+                *picking = true;
+                return Outcome::default();
+            }
+            _ => {
+                setup.rotate = act == "turn";
+                format!(
+                    "ARRAY: the items {}",
+                    if setup.rotate {
+                        "turn as they go round"
+                    } else {
+                        "go round unturned"
+                    }
+                )
+            }
+        };
+        Outcome {
+            log: vec![line],
+            sends: Vec::new(),
+        }
+    }
+
+    /// A value typed in Array's panel, by its field's key: taken as soon as
+    /// it reads as a number, so the copies follow the typing; left as it
+    /// was while it does not.
+    pub fn array_value(&mut self, key: &str, text: &str) {
+        if let Some(Running {
+            step: Step::ArraySetup { setup, .. },
+            ..
+        }) = &mut self.running
+        {
+            // Text that is not a number, a blank among it, is kept as typed
+            // and lands nothing until it reads, never the value before.
+            if setup.read(key, text) {
+                self.error = None;
+            }
+        }
+    }
+
+    /// Enter, Array, or what is typed in the command bar while Array's
+    /// panel is up; none for a point typed for a polar array's centre,
+    /// which goes on as any point typed does.
+    fn array_input(&mut self, typed: &str, upper: &str) -> Option<Outcome> {
+        let Some(Running {
+            kind,
+            step:
+                Step::ArraySetup {
+                    picked,
+                    mut setup,
+                    center,
+                    picking,
+                },
+        }) = self.running.clone()
+        else {
+            return None;
+        };
+        if typed.is_empty() {
+            // While a centre is picked, a centre taken before is not the one
+            // the copies follow: nothing lands until a centre is taken, as
+            // the prototype has it.
+            if setup.kind == ArrayKind::Polar && (center.is_none() || picking) {
+                self.error = Some(
+                    "Pick the centre the items go round first: click it on the drawing, or type x,y."
+                        .to_owned(),
+                );
+                return Some(Outcome::default());
+            }
+            if let Some(problem) = setup.problem() {
+                self.error = Some(problem);
+                return Some(Outcome::default());
+            }
+            self.running = None;
+            return Some(self.land_array(&picked, &setup, center.as_ref()));
+        }
+        if matches!(upper, "TO" | "TOTAL" | "BE" | "BETWEEN") {
+            return Some(self.array_option(if upper.starts_with('T') {
+                "total"
+            } else {
+                "between"
+            }));
+        }
+        if picking {
+            return None;
+        }
+        let whole = |t: &str| number(t).filter(|v| v.fract() == 0.0);
+        let total = setup.spacing == Spacing::Total;
+        let took = match setup.kind {
+            ArrayKind::Rectangular => {
+                if let Some(rest) = typed.strip_prefix('@') {
+                    match rest.split_once(',').map(|(a, b)| (number(a), number(b))) {
+                        Some((Some(across), Some(up))) => {
+                            if total {
+                                setup.set("column_total", across);
+                                setup.set("row_total", up);
+                            } else {
+                                setup.set("column_spacing", across);
+                                setup.set("row_spacing", up);
+                            }
+                            true
+                        }
+                        _ => false,
+                    }
+                } else {
+                    match typed
+                        .split_once([',', 'x', 'X', '\u{d7}'])
+                        .map(|(a, b)| (whole(a), whole(b)))
+                    {
+                        Some((Some(rows), Some(columns))) => {
+                            setup.set("rows", rows);
+                            setup.set("columns", columns);
+                            true
+                        }
+                        _ => false,
+                    }
+                }
+            }
+            ArrayKind::Polar => {
+                let (n, angle) = match typed.split_once(',') {
+                    Some((n, a)) => (whole(n), number(a).map(Some)),
+                    None => (whole(typed), Some(None)),
+                };
+                match (n, angle) {
+                    (Some(n), Some(angle)) => {
+                        setup.set("items", n);
+                        if let Some(a) = angle {
+                            setup.set(if total { "angle_fill" } else { "angle_between" }, a);
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        };
+        if !took {
+            self.error = Some(
+                match (setup.kind, total) {
+                    (ArrayKind::Rectangular, false) => {
+                        "Type rows,columns, such as 4,2, or @column,row spacing, such as @1,-0.5."
+                    }
+                    (ArrayKind::Rectangular, true) => {
+                        "Type rows,columns, such as 4,2, or @columns,rows first to last, such as \
+                         @2,-1.2."
+                    }
+                    (ArrayKind::Polar, false) => {
+                        "Type the items, such as 8, or items,angle between, such as 8,45."
+                    }
+                    (ArrayKind::Polar, true) => {
+                        "Type the items, such as 8, or items,angle to fill, such as 8,180."
+                    }
+                }
+                .to_owned(),
+            );
+            return Some(Outcome::default());
+        }
+        let line = format!("ARRAY {typed}: {}", setup.tag());
+        self.running = Some(Running {
+            kind,
+            step: Step::ArraySetup {
+                picked,
+                setup,
+                center,
+                picking,
+            },
+        });
+        Some(Outcome {
+            log: vec![line],
+            sends: Vec::new(),
+        })
     }
 
     /// What was typed in the command bar and entered, `aim` the point the
@@ -1315,11 +1675,11 @@ impl Tools {
                     None => Outcome::default(),
                 };
             }
-            if let Some(kind) = tool_for(typed) {
-                return self.start(kind, &[]);
+            if tool_for(typed).is_some() {
+                return self.start_word(typed, &[]);
             }
             self.error = Some(format!(
-                "“{typed}” is not a drawing tool: try L, C, REC, T, M, CO or E."
+                "“{typed}” is not a drawing tool: try L, C, REC, T, M, CO, AR or E."
             ));
             return Outcome {
                 log: vec![format!("“{typed}” is not a drawing tool")],
@@ -1391,8 +1751,11 @@ impl Tools {
             (&running.step, upper.as_str()),
             (Step::LineNext { .. }, "C" | "U") | (Step::CircleRadius { .. }, "D")
         );
-        if let Some(other) = tool_for(typed).filter(|_| !own_option) {
-            return self.start(other, &[]);
+        if tool_for(typed).is_some() && !own_option {
+            return self.start_word(typed, &[]);
+        }
+        if let Some(done) = self.array_input(typed, &upper) {
+            return done;
         }
         if typed.is_empty() {
             return match running.step {
@@ -1735,6 +2098,12 @@ impl Tools {
             ToolKind::Copy => {
                 format!("This copies {them} in the template, which only this sheet is built from.")
             }
+            ToolKind::Array if sheets > 1 => format!(
+                "This arrays {them} on every sheet built from this template: {sheets} sheets."
+            ),
+            ToolKind::Array => {
+                format!("This arrays {them} in the template, which only this sheet is built from.")
+            }
             _ => {
                 let verb = if kind == ToolKind::Move {
                     "Moving"
@@ -1752,6 +2121,7 @@ impl Tools {
         };
         let edit = match kind {
             ToolKind::Copy => format!("Copy {}", self.copy_words(picked, copies)),
+            ToolKind::Array => format!("Array {}", self.picked_words(picked)),
             ToolKind::Move => format!("Move {}", self.picked_words(picked)),
             _ => format!("Erase {}", self.picked_words(picked)),
         };
@@ -1902,6 +2272,155 @@ impl Tools {
         }
     }
 
+    /// The box round what the objects at `picked` draw, `[left, bottom,
+    /// right, top]`; none when none of them draws anything.
+    fn picked_bounds(&self, picked: &[usize]) -> Option<[f64; 4]> {
+        picked
+            .iter()
+            .filter_map(|&p| self.context.objects.get(p)?.bounds)
+            .reduce(|a, b| {
+                [
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[2].max(b[2]),
+                    a[3].max(b[3]),
+                ]
+            })
+    }
+
+    /// The array Array has set up, as one change set: one `array`
+    /// operation, with the core's keys, the spacing between items worked
+    /// out from a total held, and a polar array's centre a snapped point
+    /// where it was taken on one. The core copies each object to each
+    /// place, writing a template's object's copies in the template.
+    fn land_array(&mut self, picked: &[usize], setup: &Setup, center: Option<&Taken>) -> Outcome {
+        let template = picked.iter().any(|&p| self.template_object(p));
+        let mut op = json!({"op": "array"});
+        match picked {
+            [one] => op["target"] = self.target(*one),
+            _ => {
+                op["targets"] = Value::Array(picked.iter().map(|&p| self.target(p)).collect());
+            }
+        }
+        let center = center.map_or(Value::Null, |c| self.point_value(c, template));
+        for (k, v) in setup.keys(center) {
+            op[k] = v;
+        }
+        let objects = self.picked_words(picked);
+        let tag = setup.tag();
+        let copies = setup.copies(picked.len());
+        let what = format!(
+            "Arrayed {objects}, {tag}, {}",
+            plural(copies, "copy", "copies")
+        );
+        let template = self.template_edit(ToolKind::Array, picked, 0).map(|mut t| {
+            t.edit = format!("Array {objects}, {tag}");
+            t
+        });
+        Outcome {
+            log: Vec::new(),
+            sends: vec![Send {
+                change_set: json!({ "operations": [op] }),
+                what,
+                sheets: self.reached(picked),
+                template,
+            }],
+        }
+    }
+
+    /// Array's objects, where each copy goes, the centre of their box and
+    /// the box round each: with the centre `aim` gives while a polar
+    /// array's is being picked. None while no array is set up.
+    fn array_places(&self, aim: Option<&Taken>) -> Option<(Vec<usize>, Vec<Place>, bool)> {
+        let Some(Running {
+            step:
+                Step::ArraySetup {
+                    picked,
+                    setup,
+                    center,
+                    picking,
+                },
+            ..
+        }) = &self.running
+        else {
+            return None;
+        };
+        let b = self.picked_bounds(picked)?;
+        let middle = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+        let at = if *picking {
+            aim.map(|a| a.at)
+        } else {
+            center.as_ref().map(|c| c.at)
+        };
+        Some((picked.clone(), setup.places(middle, at), *picking))
+    }
+
+    /// The box round Array's objects and every copy, and its centre, in
+    /// drawing units: what the panel goes beside and the view keeps in
+    /// sight. None while no array is set up.
+    pub fn array_extent(&self, aim: Option<&Taken>) -> Option<[f64; 4]> {
+        let (picked, places, _) = self.array_places(aim)?;
+        let boxes: Vec<[f64; 4]> = picked
+            .iter()
+            .filter_map(|&p| self.context.objects.get(p)?.bounds)
+            .collect();
+        let mut all = self.picked_bounds(&picked)?;
+        let mut take = |q: [f64; 4]| {
+            all = [
+                all[0].min(q[0]),
+                all[1].min(q[1]),
+                all[2].max(q[2]),
+                all[3].max(q[3]),
+            ];
+        };
+        for place in &places {
+            for b in &boxes {
+                take(place.bounds(*b));
+            }
+        }
+        if let Some(Running {
+            step:
+                Step::ArraySetup {
+                    center: Some(c),
+                    setup,
+                    ..
+                },
+            ..
+        }) = &self.running
+        {
+            if setup.kind == ArrayKind::Polar {
+                take([c.at[0], c.at[1], c.at[0], c.at[1]]);
+            }
+        }
+        Some(all)
+    }
+
+    /// The tag over Array's copies, and where it goes, the top right of
+    /// the box round them all: `3 × 2 · waits for Enter`, on a phone
+    /// `3 × 2`, or what is wrong, and whether something is. None while no
+    /// array is set up, or a polar array's centre is being picked.
+    pub fn array_tag(&self, touch: bool) -> Option<(String, [f64; 2], bool)> {
+        let Some(Running {
+            step:
+                Step::ArraySetup {
+                    setup,
+                    picking: false,
+                    ..
+                },
+            ..
+        }) = &self.running
+        else {
+            return None;
+        };
+        let b = self.array_extent(None)?;
+        let at = [b[2], b[3]];
+        Some(match setup.problem() {
+            Some(problem) => (format!("⚠ {problem}"), at, true),
+            None if touch => (setup.tag(), at, false),
+            None => (format!("{} · waits for Enter", setup.tag()), at, false),
+        })
+    }
+
     /// The tag over each copy Copy has placed, and how far that copy is
     /// from its objects: `copy 1 · waits for Enter`, or on a phone `copy 1`.
     pub fn placed_tags(&self, touch: bool) -> Vec<(String, [f64; 2])> {
@@ -1933,7 +2452,7 @@ impl Tools {
         let mut state = State {
             error: self.error.clone(),
             placeholder: if touch {
-                "L, C, REC, T, M, CO, E".to_owned()
+                "L, C, REC, T, M, CO, AR, E".to_owned()
             } else {
                 String::new()
             },
@@ -2035,6 +2554,7 @@ impl Tools {
                 let verb = match kind {
                     ToolKind::Erase => "erase",
                     ToolKind::Copy => "copy",
+                    ToolKind::Array => "array",
                     _ => "move",
                 };
                 let enter = if touch { "" } else { " Enter" };
@@ -2097,6 +2617,48 @@ impl Tools {
                     )
                 }
             }
+            Step::ArraySetup {
+                picked,
+                setup,
+                picking,
+                ..
+            } => {
+                state.command = Some(setup.kind.command());
+                if *picking {
+                    state.placeholder = "x,y".to_owned();
+                    (
+                        format!("{click} the centre the items go round{hold}, or type x,y"),
+                        vec![cancel],
+                    )
+                } else {
+                    let n = setup.copies(picked.len());
+                    let (typed, placeholder) = match setup.kind {
+                        ArrayKind::Rectangular => (
+                            "rows,columns or @column,row spacing",
+                            "rows,columns  @dx,dy",
+                        ),
+                        ArrayKind::Polar => ("items or items,angle", "items  items,angle"),
+                    };
+                    state.placeholder = placeholder.to_owned();
+                    let land = if touch {
+                        "Array".to_owned()
+                    } else {
+                        format!("Array: {}", plural(n, "copy", "copies"))
+                    };
+                    (
+                        format!(
+                            "{}. {}",
+                            setup.words(&self.unit(), picked.len()),
+                            if touch {
+                                "Set it above".to_owned()
+                            } else {
+                                format!("Set it in the panel, or type {typed}")
+                            }
+                        ),
+                        vec![choice(&land, "array", true), cancel],
+                    )
+                }
+            }
         };
         state.prompt = prompt;
         state.options = options;
@@ -2104,7 +2666,8 @@ impl Tools {
         | Step::MoveBase { picked }
         | Step::MoveSecond { picked, .. }
         | Step::CopyBase { picked }
-        | Step::CopySecond { picked, .. } = &running.step
+        | Step::CopySecond { picked, .. }
+        | Step::ArraySetup { picked, .. } = &running.step
         {
             let copies = match &running.step {
                 Step::CopySecond { placed, .. } => placed.len(),
@@ -2112,7 +2675,20 @@ impl Tools {
             };
             state.picked = picked.clone();
             state.warning = self.template_edit(kind, picked, copies).map(|mut w| {
-                w.detail.push_str(" You will be asked before it lands.");
+                if kind == ToolKind::Array && touch {
+                    // A phone's words are short: the panel sits above them.
+                    w.title = "Part of the template:".to_owned();
+                    w.detail = if w.sheets.len() > 1 {
+                        format!(
+                            "the copies land on all {} sheets. You will be asked first.",
+                            w.sheets.len()
+                        )
+                    } else {
+                        "the copies go in the template. You will be asked first.".to_owned()
+                    };
+                } else {
+                    w.detail.push_str(" You will be asked before it lands.");
+                }
                 w
             });
         }
@@ -2122,10 +2698,60 @@ impl Tools {
             Step::RectangleSecond { first } => vec![first.at],
             Step::TextType { at, .. } => vec![at.at],
             Step::MoveSecond { base, .. } | Step::CopySecond { base, .. } => vec![base.at],
+            Step::ArraySetup {
+                setup,
+                center: Some(c),
+                ..
+            } if setup.kind == ArrayKind::Polar => vec![c.at],
             _ => Vec::new(),
         };
         if let Step::CopySecond { placed, .. } = &running.step {
             state.placed = placed.len();
+        }
+        if let Step::ArraySetup {
+            picked,
+            setup,
+            center,
+            picking,
+        } = &running.step
+        {
+            let problem = if setup.kind == ArrayKind::Polar && center.is_none() {
+                Some("Then the copies show.".to_owned())
+            } else if setup.kind == ArrayKind::Polar && *picking {
+                Some(format!("{click} the new centre on the drawing."))
+            } else {
+                setup.problem()
+            };
+            state.array = Some(ArrayPanel {
+                kind: setup.kind,
+                spacing: setup.spacing,
+                of: format!("of {}", self.picked_words(picked)),
+                fields: setup.fields(self.context.units.as_deref()),
+                center: (setup.kind == ArrayKind::Polar).then(|| match (center, picking) {
+                    (_, true) | (None, _) => format!("{click} it on the drawing"),
+                    (Some(c), false) => {
+                        let at = format!("{}, {}", f3(c.at[0]), f3(c.at[1]));
+                        match &c.snap {
+                            Some(s) => format!(
+                                "{} of {}, {at}",
+                                snap_label(s.snap),
+                                self.object_words(s.object)
+                            ),
+                            None => at,
+                        }
+                    }
+                }),
+                picking: *picking,
+                rotate: setup.rotate,
+                ready: problem.is_none(),
+                count: problem.unwrap_or_else(|| {
+                    format!(
+                        "{}: {}",
+                        setup.tag(),
+                        plural(setup.copies(picked.len()), "copy", "copies")
+                    )
+                }),
+            });
         }
         if let Step::TextType { at, lines, current } = &running.step {
             let mut shown: Vec<TextLine> = lines
@@ -2172,6 +2798,9 @@ impl Tools {
                 band.placed = Some((picked.clone(), offsets));
             }
         }
+        band.arrayed = self
+            .array_places(aim)
+            .filter(|(_, places, _)| !places.is_empty());
         let (Some(aim), Some(base)) = (aim, self.base()) else {
             return band;
         };

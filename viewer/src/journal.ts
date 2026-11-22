@@ -98,6 +98,27 @@ export function operationWords(op: Operation): string {
     const copies = Array.isArray(op.offsets) && op.offsets.length > 1 ? `, ${op.offsets.length} copies` : '';
     return `copy${several ? ` ${several}` : ''}${copies}`;
   }
+  // An array names its objects and its shape: `array terminal-2, 3 × 2`,
+  // `array tick-1, 8 round`, as an agent's ARRAYRECT, ARRAYPOLAR or
+  // ARRAYPATH sent by its alias reads too (#66).
+  const alias = name.toLowerCase();
+  if (alias === 'array' || alias === 'arrayrect' || alias === 'arraypolar' || alias === 'arraypath') {
+    const several = Array.isArray(op.targets) && op.targets.length ? `${op.targets.length} objects` : target;
+    const kind = typeof op.kind === 'string' ? op.kind : alias === 'arraypolar' ? 'polar' : alias === 'arraypath' ? 'path' : 'rectangular';
+    const n = (v: unknown, or: number) => (typeof v === 'number' ? v : or);
+    let shape: string;
+    if (kind === 'polar') {
+      const angle = typeof op.angle === 'number' && Math.abs(op.angle) !== 360 ? `, ${op.angle}°` : '';
+      shape = `${n(op.count, 0)} round${angle}`;
+    } else if (kind === 'path') {
+      const path = op.path as { id?: string; name?: string } | undefined;
+      const along = path?.name ?? path?.id?.split('/').slice(1).join('/') ?? path?.id;
+      shape = `${n(op.count, 0)} along${along ? ` ${along}` : ' a path'}`;
+    } else {
+      shape = `${n(op.rows, 1)} × ${n(op.columns, 1)}`;
+    }
+    return `array${several ? ` ${several}` : ''}, ${shape}`;
+  }
   if (target) return `${name} ${target}`;
   if (op.sheet) return `${name} on ${op.sheet}`;
   if (op.template) return `${name} in ${op.template}`;

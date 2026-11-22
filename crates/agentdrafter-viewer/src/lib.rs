@@ -14,8 +14,9 @@
 //!   running ones, from those the display list gives; [`overlay`] lays out
 //!   the crosshair and the snap markers drawn over the drawing.
 //! - [`tools`] runs the drafter's drawing tools, Line, Circle, Rectangle,
-//!   Text, Move, Copy and Erase: their steps, prompts, rubber bands and the
-//!   change set each gives, in plain Rust.
+//!   Text, Move, Copy, Array and Erase: their steps, prompts, rubber bands
+//!   and the change set each gives, in plain Rust, with [`array`] for
+//!   Array's values and where its copies go.
 //! - [`props`] edits quick properties: the fields an object's quick
 //!   properties edit, what each says of where its value is written, and the
 //!   change set an edit gives, in plain Rust.
@@ -38,6 +39,7 @@
 //!
 //! It needs WebGL2 and nothing newer: no WebGPU.
 
+pub mod array;
 pub mod ghosts;
 pub mod grid;
 pub mod mesh;
