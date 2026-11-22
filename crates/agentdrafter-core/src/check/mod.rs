@@ -319,7 +319,7 @@ pub(crate) fn check_in(
         objects_not_read,
         not_read,
     } = load(source, &request.sheets, files)?;
-    let mut page_units: Vec<Option<Unit>> = Vec::new();
+    let tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units.unwrap_or(Unit::Mm));
     let mut findings = Vec::new();
     let mut checks_skipped = Vec::new();
     let mut substitutions: Vec<FontSubstitution> = Vec::new();
@@ -336,13 +336,12 @@ pub(crate) fn check_in(
         // Never mutate `sheet.units` (ADR-0011): the drawing pipeline must
         // render model space identically to `plot` and `render`, while
         // `page_unit` sets only paper-space tolerance, pen widths and
-        // finding units.
+        // paper-space finding units.
         for (layout_index, page) in record.sheet.pages().into_iter().enumerate() {
             let paper_check = paper_check_for(record, &page, layout_index);
             let page_unit = page_unit_for(record, &page, layout_index, units);
             let page_tolerance =
                 Unit::Mm.convert(CHECK_TOLERANCE_MM, page_unit.unwrap_or(Unit::Mm));
-            page_units.push(page_unit);
             let (page_findings, page_skipped) = match page {
                 std::borrow::Cow::Borrowed(_) => rules::check_sheet(
                     record,
@@ -371,15 +370,6 @@ pub(crate) fn check_in(
             checks_skipped.extend(page_skipped);
         }
     }
-    let tolerance = match units {
-        Some(u) => Unit::Mm.convert(CHECK_TOLERANCE_MM, u),
-        None => match page_units.first().copied().flatten() {
-            Some(first) if page_units.iter().all(|&u| u == Some(first)) => {
-                Unit::Mm.convert(CHECK_TOLERANCE_MM, first)
-            }
-            _ => CHECK_TOLERANCE_MM,
-        },
-    };
     let sheets: Vec<String> = records.iter().map(|r| r.name.clone()).collect();
     let mut report_message = message(&sheets, &findings, &checks_skipped);
     if objects_not_read > 0 {

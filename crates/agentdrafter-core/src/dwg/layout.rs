@@ -560,14 +560,40 @@ fn read_layout_setup(
         1 => Some(Unit::Mm),
         _ => None,
     };
+    let stored_paper = read_stored_paper(layout, paper_unit);
     let (check_paper, skip_reason) = read_check_paper(layout, units);
     DwgLayoutSetup {
         page_setup,
         check_paper,
+        stored_paper,
         paper_unit,
         skip_reason,
         tab_position,
     }
+}
+
+/// The physical paper dimensions `layout` stores in its own `paper_unit`,
+/// rotated by `plot_rotation`, regardless of plot scale or plot area, for
+/// `query layout` reporting.
+fn read_stored_paper(layout: &DwgLayout, paper_unit: Option<Unit>) -> Option<Paper> {
+    let unit = paper_unit?;
+    if !layout.paper_width.is_finite()
+        || !layout.paper_height.is_finite()
+        || layout.paper_width <= 0.0
+        || layout.paper_height <= 0.0
+    {
+        return None;
+    }
+    let (w_mm, h_mm) = match layout.plot_rotation {
+        0 | 2 => (layout.paper_width, layout.paper_height),
+        1 | 3 => (layout.paper_height, layout.paper_width),
+        _ => return None,
+    };
+    Some(Paper {
+        name: standard_paper_name(w_mm, h_mm),
+        width: Unit::Mm.convert(w_mm, unit),
+        height: Unit::Mm.convert(h_mm, unit),
+    })
 }
 
 /// The paper bounds `layout` declares in paper-space drawing units for

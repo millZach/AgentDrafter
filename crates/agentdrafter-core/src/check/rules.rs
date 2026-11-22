@@ -153,10 +153,14 @@ impl Sheet<'_> {
     }
 
     fn finding(&self, rule: Rule, message: String) -> Finding {
+        self.finding_in(rule, message, self.units)
+    }
+
+    fn finding_in(&self, rule: Rule, message: String, units: Option<Unit>) -> Finding {
         Finding {
             sheet: self.record.name.clone(),
             layout: self.record.sheet.layout.as_ref().map(|l| l.name.clone()),
-            units: self.units.filter(|&u| Some(u) != self.report_units),
+            units: units.filter(|&u| Some(u) != self.report_units),
             rule,
             message,
             object: None,
@@ -329,7 +333,6 @@ impl Sheet<'_> {
     /// its block declares for it, and each table cell's text that needs
     /// more than its cell.
     fn text_overflow(&self) -> Vec<Finding> {
-        let u = self.unit_words();
         let mut findings = Vec::new();
         for (i, object) in self.record.sheet.objects.iter().enumerate() {
             if let Object::Table(table) = object {
@@ -345,6 +348,15 @@ impl Sheet<'_> {
             let Some((list, view, through)) = self.measured_in(i) else {
                 continue;
             };
+            // A model-space insert viewed through a viewport has its block
+            // coordinates in model-space units (`report_units`), not the
+            // layout's paper-space `page_unit`.
+            let finding_units = if through.is_some() {
+                self.report_units
+            } else {
+                self.units
+            };
+            let u = finding_units.map_or("drawing units", Unit::symbol);
             let enlarged = insert.scale * view;
             let placement = Placement::of(insert, block.base_point);
             for cell in &block.cells {
@@ -384,7 +396,7 @@ impl Sheet<'_> {
                         self.record.id(v)
                     ),
                 };
-                let mut finding = self.finding(
+                let mut finding = self.finding_in(
                     Rule::TextOverflow,
                     format!(
                         "{} draws {} its cell: in the block {}'s own coordinates it draws from {} \
@@ -397,6 +409,7 @@ impl Sheet<'_> {
                         point(cell.min),
                         point(cell.max),
                     ),
+                    finding_units,
                 );
                 finding.object = Some(self.checked_through(i, &[cell.object], through));
                 finding.drawn = Some(Extents::of(&b));
@@ -416,7 +429,6 @@ impl Sheet<'_> {
     /// the height AutoCAD sets its lines in, placed as the text is
     /// justified.
     fn table_overflow(&self, i: usize, table: &Table) -> Vec<Finding> {
-        let u = self.unit_words();
         let sheet = &self.record.sheet;
         let style = sheet
             .table_style(&table.table_style)
@@ -425,6 +437,15 @@ impl Sheet<'_> {
         let Some((list, view, through)) = self.measured_in(i) else {
             return findings;
         };
+        // A model-space table viewed through a viewport reports `drawn`,
+        // `cell` and `past` in model-space units (`report_units`), not the
+        // layout's paper-space `page_unit`.
+        let finding_units = if through.is_some() {
+            self.report_units
+        } else {
+            self.units
+        };
+        let u = finding_units.map_or("drawing units", Unit::symbol);
         for cell in table.laid_out(&style) {
             let Some(text) = &cell.text else {
                 continue;
@@ -477,7 +498,7 @@ impl Sheet<'_> {
                 continue;
             }
             let path = cell.at.to_vec();
-            let mut finding = self.finding(
+            let mut finding = self.finding_in(
                 Rule::TextOverflow,
                 format!(
                     "{} needs {} its cell inside its margins: its text draws from x {} to {} and \
@@ -492,6 +513,7 @@ impl Sheet<'_> {
                     point(inside.min),
                     point(inside.max),
                 ),
+                finding_units,
             );
             finding.object = Some(self.checked_through(i, &path, through));
             finding.drawn = Some(Extents::of(&needed));

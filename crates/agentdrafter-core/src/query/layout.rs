@@ -204,7 +204,12 @@ fn sheet_layouts(record: &SheetRecord, settings: &Settings) -> Vec<SheetLayout> 
             .map(|(_, first)| (first.model_space, first.model_extents))
             .unwrap_or((0, None));
         for extra in extras {
-            let paper = extra.setup.check_paper.as_ref().map(|cp| cp.paper.clone());
+            let paper = extra
+                .setup
+                .check_paper
+                .as_ref()
+                .map(|cp| cp.paper.clone())
+                .or_else(|| extra.setup.stored_paper.clone());
             let page_setup = extra.setup.page_setup.as_ref().map(|ps| PageSetupUsed {
                 plotter: ps.plotter.clone(),
                 paper: ps.paper.clone(),
@@ -265,7 +270,8 @@ fn sheet_layout(
         let paper = sheet
             .paper
             .clone()
-            .or_else(|| setup.and_then(|s| s.check_paper.as_ref().map(|cp| cp.paper.clone())));
+            .or_else(|| setup.and_then(|s| s.check_paper.as_ref().map(|cp| cp.paper.clone())))
+            .or_else(|| setup.and_then(|s| s.stored_paper.clone()));
         let page_setup = setup
             .and_then(|s| s.page_setup.as_ref())
             .map(|ps| PageSetupUsed {

@@ -2358,9 +2358,10 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
     }
 
     // 3. Unitless (INSUNITS = 0) inch layout at 1:1 with border oversized by
-    //    0.005 in (> 0.01 mm = 0.0003937 in, yet < 0.01 in): must use inch
-    //    tolerance and FAIL paper_size and off_sheet!
-    let inch_tol = 0.01 / 25.4;
+    //    0.005 in (> 0.01 mm = 0.0003937 in, yet < 0.01 in): top-level
+    //    CheckReport reports `units: None` and `tolerance: 0.01` (drawing
+    //    units, matching docs/check.md), while the inch layout still fails
+    //    against its 0.01 mm inch tolerance and tags findings with `units: in`.
     let tiny_over_yaml = dir.join("unitless-inch-tol.yaml");
     fs::write(
         &tiny_over_yaml,
@@ -2395,13 +2396,13 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
     .unwrap();
     assert_eq!(checked.units, None);
     assert!(
-        (checked.tolerance - inch_tol).abs() < 1e-12,
-        "expected inch tolerance {inch_tol}, got {}",
+        (checked.tolerance - 0.01).abs() < 1e-12,
+        "unitless CheckReport.tolerance must stay 0.01 drawing units, got {}",
         checked.tolerance
     );
     assert!(
         !checked.passed,
-        "0.005 in overshoot must fail 0.01 mm tolerance"
+        "0.005 in overshoot must fail 0.01 mm inch-layout tolerance"
     );
     assert!(checked.findings.iter().any(|f| f.rule == Rule::PaperSize));
     assert!(checked.findings.iter().any(|f| f.rule == Rule::OffSheet));
@@ -2572,6 +2573,13 @@ fn inactive_empty_configured_layout_is_reported_by_query_without_breaking_plot_r
     assert_eq!(scaled_setup.paper, "ISO_A3_(420.00_x_297.00_MM)");
     assert_eq!(scaled_setup.scale, "1:2");
     assert_eq!(scaled_setup.plot_style, "madeup-color.ctb");
+    let scaled_paper = layouts[2]
+        .paper
+        .as_ref()
+        .expect("1:2 extra layout must still populate stored paper dimensions");
+    assert_eq!(scaled_paper.name.as_deref(), Some("ISO A3 landscape"));
+    assert!((scaled_paper.width - 420.0).abs() < 1e-9);
+    assert!((scaled_paper.height - 297.0).abs() < 1e-9);
 
     // Conversely, a model-space-only drawing saved on Model space whose empty
     // Layout1 merely carries a template printer/paper must remain model-space-only
@@ -3097,5 +3105,83 @@ fn check_preserves_sheet_units_for_viewport_dimensions_and_uses_inch_units_on_ex
         Some("D"),
         "C's line is 0.05 in away and must NOT trigger text_on_line; D's line is 0.003 in away and MUST: {:#?}",
         ext_tol
+    );
+
+    // (c) Model-space overflowing table on an INSUNITS = mm DWG viewed through
+    //     an inch layout: `text_overflow` reports `drawn`, `cell` and `past` in
+    //     model-space mm, so `finding.units` MUST be `None` (matching
+    //     `CheckReport.units == Some(Unit::Mm)` and message saying `mm`), while
+    //     paper-space findings on that same inch layout STILL carry
+    //     `finding.units == Some(Unit::In)`!
+    let table_yaml = dir.join("mm-model-table-inch-tab.yaml");
+    fs::write(
+        &table_yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: InchTab}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [17.005, 0, 0], [17.005, 11, 0], [0, 11, 0]], closed: true, space: paper}\n\
+         \x20 - viewport: {center: [8.5, 5.5, 0], width: 15, height: 9, view_center: [50, 50, 0], scale: 0.1, space: paper}\n\
+         \x20 - table:\n\
+         \x20     position: [20, 60, 0]\n\
+         \x20     columns: [10]\n\
+         \x20     rows: [8]\n\
+         \x20     cells:\n\
+         \x20       - [\"LONG OVERFLOWING MODEL TABLE TEXT\"]\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: table_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let table_dwg = dir.join("MM-MODEL-TABLE-INCH-TAB.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("mm-model-table-inch-tab.dwg"),
+        &table_dwg,
+        "InchTab",
+        false,
+        &dwg::TestLayoutSetup {
+            paper_size: Some("ANSI_B_(17.00_x_11.00_Inches)".to_owned()),
+            paper_width_mm: Some(17.0 * 25.4),
+            paper_height_mm: Some(11.0 * 25.4),
+            plot_paper_units: Some(0),
+            plot_scale: Some((1.0, 1.0)),
+            ..Default::default()
+        },
+    );
+    let table_checked = check_with(
+        &CheckRequest {
+            source: table_dwg,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(table_checked.units, Some(Unit::Mm));
+    assert!((table_checked.tolerance - 0.01).abs() < 1e-12);
+    let overflow = table_checked
+        .findings
+        .iter()
+        .find(|f| f.rule == Rule::TextOverflow)
+        .expect("model-space table must overflow");
+    assert_eq!(
+        overflow.units, None,
+        "model-space text_overflow is in mm (matching CheckReport.units) and must NOT be tagged `in`: {overflow:#?}"
+    );
+    assert!(
+        overflow.message.contains(" mm") && !overflow.message.contains(" in "),
+        "{overflow:#?}"
+    );
+    let paper_off = table_checked
+        .findings
+        .iter()
+        .find(|f| f.rule == Rule::OffSheet)
+        .expect("oversized paper-space border must fail off_sheet");
+    assert_eq!(
+        paper_off.units,
+        Some(Unit::In),
+        "paper-space findings on the same inch layout must still carry `units: Some(Unit::In)`: {paper_off:#?}"
     );
 }

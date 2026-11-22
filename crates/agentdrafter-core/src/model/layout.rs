@@ -93,6 +93,10 @@ pub(crate) struct CheckPaper {
 pub(crate) struct DwgLayoutSetup {
     pub page_setup: Option<DwgPageSetup>,
     pub check_paper: Option<CheckPaper>,
+    /// Stored paper dimensions in `paper_unit` (rotated by `plot_rotation`),
+    /// even when `check_paper` is `None` (such as a non-1:1 or extents-plotted
+    /// tab), so `query layout` can report the tab's configured paper size.
+    pub stored_paper: Option<Paper>,
     /// The layout's own `plot_paper_units` (`In` or `Mm`), when valid.
     pub paper_unit: Option<Unit>,
     /// Why `paper_size` and `off_sheet` cannot be checked on this layout when
