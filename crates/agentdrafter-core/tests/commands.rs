@@ -115,6 +115,10 @@ fn samples() -> Vec<(&'static str, Value)> {
             "import-blocks",
             json!({"drawing": "missing.dwg", "library": "missing-blocks.yaml", "blocks": ["MARKER"], "replace": true, "units": "mm", "dry_run": true}),
         ),
+        (
+            "read",
+            json!({"source": "missing.dwg", "mirror": "missing.mirror.yaml"}),
+        ),
     ]
 }
 

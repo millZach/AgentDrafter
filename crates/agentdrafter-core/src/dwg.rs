@@ -2201,6 +2201,13 @@ objects:
             "get_entity",
             "entities_in_block",
             "model_space_entities",
+            "ExtendedEntityData",
+            ".entities()",
+            "outcome.document",
+            "as_entity().entity_type()",
+            // The kinds a DWG names, which `read` reports as the DWG names them.
+            "ACAD_PROXY_ENTITY",
+            "EXTENDED_ENTITY",
         ] {
             ours = ours.replace(acadrust_name, "");
         }
