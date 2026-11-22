@@ -39,8 +39,9 @@ The DWG library, acadrust, reads every record of the file. A record of a kind it
 - **`decoded`** is true when the library decoded every record: none is under `not_decoded`, it skipped none and it recovered from no error.
 - **`not_decoded`** names each record it read but could not decode, by `kind`, as the file names it, its `count`, and the `handles` AutoCAD lists each by, in hexadecimal, in the order of the file's handles. A graphical object and a non-graphical one, such as an application's dictionary entry, are both named.
 - **`skipped`** counts the records the library could not read at all and left out, and **`recovered_errors`** the errors it recovered from. Either makes `decoded` false.
+- **`read_past_damage`**, given only when it happened, says why the library could not read the file whole. `read` then reads it again past the records it cannot read, as AutoCAD's RECOVER reads a damaged drawing but repairing nothing, and names each record it passed under `not_decoded`, by its type when the library could tell it, a class's name or `DWG_TYPE_` and the DWG's number for the type, such as `DWG_TYPE_82`, and as `UNREADABLE_RECORD` otherwise. `decoded` is then false. Only `read` reads past damage: `render`, `plot` and `display-list` refuse such a file with `dwg_read`, as before.
 
-A drawing whose report says `decoded: false` will not be revised unless the reviewer allows it for that drawing, and the loss is then listed with the revision (ADR-0004, [#71](https://github.com/millZach/AgentDrafter/issues/71)). Reading never needs that: an original is read whatever it holds.
+A drawing whose report says `decoded: false` will not be revised unless the reviewer allows it for that drawing, and the loss is then listed with the revision (ADR-0004, [#71](https://github.com/millZach/AgentDrafter/issues/71)). Reading never needs that: an original is read whatever it holds, refused only when the library cannot read it even past its damage.
 
 ## What the core reads
 

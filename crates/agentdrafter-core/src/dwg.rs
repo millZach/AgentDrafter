@@ -1082,11 +1082,20 @@ fn decode_report(drawing: &CadDocument, stats: &acadrust::ReadStats) -> DecodeRe
             if not_decoded.iter().any(|(h, _)| *h == handle) {
                 continue;
             }
-            let kind = diagnostic
-                .record_type
-                .clone()
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| UNREADABLE.to_owned());
+            // A type the library gives as its number is named as the
+            // library names a record of a class it cannot find, by the
+            // class's own name when the drawing has one of that number.
+            let kind = match diagnostic.record_type.as_deref() {
+                None | Some("") => UNREADABLE.to_owned(),
+                Some(text) => match text.parse::<i16>() {
+                    Ok(code) => drawing
+                        .classes
+                        .iter()
+                        .find(|c| c.class_number == code)
+                        .map_or_else(|| format!("DWG_TYPE_{code}"), |c| c.dxf_name.clone()),
+                    Err(_) => text.to_owned(),
+                },
+            };
             not_decoded.push((handle, kind));
         }
     }
