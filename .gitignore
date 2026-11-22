@@ -3,6 +3,7 @@
 *.dwg
 *.dxf
 *.mirror.yaml
+*.mirror.tmp
 *.bak
 *.dwl
 *.dwl2

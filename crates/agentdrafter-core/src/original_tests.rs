@@ -428,14 +428,14 @@ fn a_string_is_written_plain_only_where_yaml_reads_it_back_the_same() {
         "a\u{0085}b",
         "del\u{007F}char",
         "c1\u{0080}ctrl\u{009F}",
+        "nonchar\u{FFFE}and\u{FFFF}",
         "é",
     ] {
         let out = scalar(tricky);
         assert!(out.starts_with('"'), "{tricky:?} -> {out}");
         assert!(
-            !out.chars()
-                .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')),
-            "YAML 1.2 valid printable scalar for {tricky:?}: {out}"
+            out.chars().all(is_yaml12_safe_single_line),
+            "YAML 1.2 §5.1 printable scalar for {tricky:?}: {out}"
         );
         assert_eq!(parse_yaml_scalar(&out), tricky, "{tricky:?} -> {out}");
     }
@@ -452,6 +452,7 @@ fn a_filename_with_newlines_or_yaml_punctuation_never_breaks_the_mirror_yaml() {
         "cr\rname.dwg",
         "sep\u{2028}line.dwg",
         "del\u{007F}and\u{0080}c1\u{009F}.dwg",
+        "nonchar\u{FFFE}and\u{FFFF}.dwg",
         "~special: #1 \"q\".dwg",
     ] {
         let fake_path = dir.join(tricky_name);
@@ -460,16 +461,13 @@ fn a_filename_with_newlines_or_yaml_punctuation_never_breaks_the_mirror_yaml() {
         let first_line = text.lines().next().unwrap();
         assert!(first_line.starts_with(MIRROR_MARK), "{first_line}");
         assert!(
-            !first_line
-                .chars()
-                .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')),
-            "header comment must hold only YAML-1.2-valid printable chars: {first_line:?}"
+            first_line.chars().all(is_yaml12_safe_single_line),
+            "header comment must hold only YAML 1.2 §5.1 printable chars: {first_line:?}"
         );
         assert!(
-            !text
-                .chars()
-                .any(|c| (c.is_control() && c != '\n') || matches!(c, '\u{2028}' | '\u{2029}')),
-            "mirror YAML must hold no literal control or line-separator chars: {tricky_name:?}"
+            text.chars()
+                .all(|c| c == '\n' || is_yaml12_safe_single_line(c)),
+            "mirror YAML must hold only YAML 1.2 §5.1 printable chars: {tricky_name:?}"
         );
         reads_as_yaml(&text)
             .unwrap_or_else(|e| panic!("YAML broke on {tricky_name:?}: {e}\n{text}"));
@@ -486,6 +484,7 @@ fn replacing_a_vanished_mirror_never_clobbers_a_newly_created_file() {
     let dir = scratch("vanished-mirror");
     let (original, _) = made_up_original(&dir);
     let mirror = original.with_extension(MIRROR_EXTENSION);
+    let source_id = file_id_of_path(&original);
     read_original(&request(&original)).unwrap();
     // Initial check saw ReplaceExisting, then the mirror was removed and a
     // user's own file appeared at the same path before write_whole.
@@ -493,6 +492,7 @@ fn replacing_a_vanished_mirror_never_clobbers_a_newly_created_file() {
     fs::write(&mirror, b"user's own notes\n").unwrap();
     let err = write_whole(
         &original,
+        source_id,
         &mirror,
         b"new mirror\n",
         MirrorTarget::ReplaceExisting,
@@ -507,6 +507,7 @@ fn replacing_a_vanished_mirror_never_clobbers_a_newly_created_file() {
     let valid_mirror = format!("{MIRROR_MARK}P-100.dwg\n");
     write_whole(
         &original,
+        source_id,
         &mirror,
         valid_mirror.as_bytes(),
         MirrorTarget::ReplaceExisting,
@@ -595,15 +596,26 @@ fn ids_stay_stable_across_path_case_and_agree_with_display_list() {
     // Differently-cased stem (`p-100.dwg`) for the same file: on
     // case-insensitive volumes the path directly names `P-100.dwg` and on
     // case-sensitive Unix a symlink exercises the same on-disk resolution.
+    // Both IDs AND the full written text mirror (including header comment and
+    // `mirror_of`) must be byte-identical.
+    let canonical_mirror = dir.join("canonical.mirror.yaml");
+    read_original(&ReadRequest {
+        mirror: Some(canonical_mirror.clone()),
+        ..request(&original)
+    })
+    .unwrap();
+    let canonical_bytes = fs::read(&canonical_mirror).unwrap();
+
     let lower_stem = dir.join("p-100.dwg");
-    let same_file_directly = is_same_file(&original, &lower_stem);
+    let same_file_directly = crate::build::is_same_file(&original, &lower_stem);
     #[cfg(unix)]
     if !same_file_directly && fs::symlink_metadata(&lower_stem).is_err() {
         std::os::unix::fs::symlink(&original, &lower_stem).unwrap();
     }
     if same_file_directly || fs::symlink_metadata(&lower_stem).is_ok() {
+        let alias_mirror = dir.join("alias.mirror.yaml");
         let alias_report = read_original(&ReadRequest {
-            no_mirror: true,
+            mirror: Some(alias_mirror.clone()),
             ..request(&lower_stem)
         })
         .unwrap();
@@ -618,6 +630,11 @@ fn ids_stay_stable_across_path_case_and_agree_with_display_list() {
                 .filter_map(|o| o.id.clone())
                 .collect::<Vec<_>>(),
             expected_ids
+        );
+        assert_eq!(
+            fs::read(&alias_mirror).unwrap(),
+            canonical_bytes,
+            "same file via case alias must produce a byte-identical mirror"
         );
     }
 }

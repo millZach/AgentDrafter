@@ -1189,6 +1189,13 @@ fn undecoded_non_graphical(
             ClassObjectData::CsacDocumentOptions(options) if options.raw_dwg_data.is_some() => {
                 Some((data.handle, "CSACDOCUMENTOPTIONS".to_owned()))
             }
+            ClassObjectData::VbaProject(vba)
+                if vba.storage.compound_file.is_none()
+                    && vba.storage.leading_records.is_empty()
+                    && vba.storage.trailing_records.is_empty() =>
+            {
+                Some((data.handle, "VBA_PROJECT".to_owned()))
+            }
             _ => None,
         },
         ObjectType::XRecord(xrecord)
@@ -1972,6 +1979,9 @@ fn read_spline(spline: &DwgSpline, layer: String) -> Option<Spline> {
 
 /// Whether the DWG at `path` carries the build mark, that is, whether
 /// AgentDrafter built it. A file that cannot be read as a DWG is an error.
+/// Reads directly through `DwgReader` without the strict decode-report gate
+/// so `build --overwrite` on an existing AgentDrafter DWG is never refused
+/// for non-fatal reader diagnostics.
 pub(crate) fn carries_build_mark(path: &Path) -> Result<bool, Error> {
     read_drawing(path).map(|drawing| mark_in(&drawing.summary_info.custom_properties).is_some())
 }
@@ -2179,18 +2189,84 @@ fn read_file_bytes(path: &Path) -> Result<Vec<u8>, Error> {
     })
 }
 
+/// Reads the DWG at `path` directly through `DwgReader` without the strict
+/// decode-report gate (used by `carries_build_mark` and `import-blocks`).
 fn read_drawing(path: &Path) -> Result<CadDocument, Error> {
-    let bytes = read_file_bytes(path)?;
-    read_drawing_bytes_with_stats(&bytes, path, false).map(|(drawing, _)| drawing)
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mut reader = DwgReader::from_file(path)?;
+        reader.read()
+    })) {
+        Ok(Ok(drawing)) => Ok(drawing),
+        Ok(Err(e)) => Err(Error::new(
+            ErrorCode::DwgRead,
+            format!("the DWG library could not read the drawing: {e}"),
+        )
+        .in_file(path)),
+        Err(panic) => Err(Error::new(
+            ErrorCode::DwgRead,
+            format!(
+                "the DWG library failed while reading the drawing: {}",
+                panic_message(panic)
+            ),
+        )
+        .in_file(path)),
+    }
+}
+
+/// Whether `drawing` carries an AC1021 zero-filled corrupt-page error
+/// notification (which acadrust emits without pushing a `ReadDiagnostic`).
+fn has_ac21_skipped_page_notification(drawing: &CadDocument) -> bool {
+    drawing.notifications.iter().any(|n| {
+        n.notification_type == acadrust::notification::NotificationType::Error
+            && n.message.starts_with("Failsafe: skipped corrupt page ")
+    })
+}
+
+/// Why a strict read must refuse `(drawing, stats)`, if at all.
+///
+/// Acadrust intentionally preserves unsupported auxiliary payloads as raw
+/// bytes in strict mode (`auxiliary-object-preserved`), emitting an error
+/// notification without skipping the record; those stay readable in strict
+/// mode (while still setting `decoded: false` and listing the record in
+/// `not_decoded`). Actual corruption—unreadable object streams, skipped
+/// records, failed/truncated sections, AC1021 zero-filled corrupt pages, or
+/// error notifications beyond preserved auxiliary objects—is refused.
+fn strict_read_rejection(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Option<String> {
+    let auxiliary_preserved = stats
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "auxiliary-object-preserved")
+        .count();
+    let corrupt = stats.skipped_source_records > 0
+        || has_section_failure_or_truncation(stats)
+        || has_ac21_skipped_page_notification(drawing)
+        || drawing.notifications.error_count() > auxiliary_preserved
+        || stats.recovered_errors > auxiliary_preserved;
+    if !corrupt {
+        return None;
+    }
+    Some(
+        first_read_error(drawing, stats)
+            .unwrap_or_else(|| "the DWG had damaged sections or pages".to_owned()),
+    )
 }
 
 /// The first error message reported by the DWG library on `drawing` or
 /// `stats`, if any.
 fn first_read_error(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Option<String> {
+    let auxiliary_messages: std::collections::HashSet<&str> = stats
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "auxiliary-object-preserved")
+        .map(|d| d.message.as_str())
+        .collect();
     drawing
         .notifications
         .iter()
-        .find(|n| n.notification_type == acadrust::notification::NotificationType::Error)
+        .find(|n| {
+            n.notification_type == acadrust::notification::NotificationType::Error
+                && !auxiliary_messages.contains(n.message.as_str())
+        })
         .map(|n| n.message.clone())
         .or_else(|| {
             stats
@@ -2208,6 +2284,13 @@ fn first_read_error(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Optio
                         )
                 })
                 .map(|d| d.message.clone())
+        })
+        .or_else(|| {
+            drawing
+                .notifications
+                .iter()
+                .find(|n| n.notification_type == acadrust::notification::NotificationType::Error)
+                .map(|n| n.message.clone())
         })
 }
 
@@ -2267,23 +2350,18 @@ fn read_drawing_bytes_with_stats(
         )
         .in_file(path));
     }
-    // On strict reads, refuse files where the library recovered from section
-    // or page errors (such as AC1021 zero-filled corrupt pages or failed
-    // named sections) so `render`, `plot` and `display-list` never silently
-    // accept corrupt pages and `read` records `read_past_damage`.
-    if !past_damage
-        && (outcome.document.notifications.error_count() > 0
-            || outcome.stats.recovered_errors > 0
-            || outcome.stats.skipped_source_records > 0
-            || has_section_failure_or_truncation(&outcome.stats))
-    {
-        let why = first_read_error(&outcome.document, &outcome.stats)
-            .unwrap_or_else(|| "the DWG had damaged sections or pages".to_owned());
-        return Err(Error::new(
-            ErrorCode::DwgRead,
-            format!("the DWG library could not read the drawing whole: {why}"),
-        )
-        .in_file(path));
+    // On strict reads, refuse files where the library hit actual section,
+    // page or record corruption (such as AC1021 zero-filled corrupt pages or
+    // failed named sections), while still allowing intentionally preserved
+    // auxiliary payloads (`auxiliary-object-preserved`).
+    if !past_damage {
+        if let Some(why) = strict_read_rejection(&outcome.document, &outcome.stats) {
+            return Err(Error::new(
+                ErrorCode::DwgRead,
+                format!("the DWG library could not read the drawing whole: {why}"),
+            )
+            .in_file(path));
+        }
     }
     Ok((outcome.document, outcome.stats))
 }
@@ -2737,13 +2815,15 @@ mod tests {
 
         // Opaque non-graphical objects: Arch, ProxyObject, RegisteredClass,
         // DgnLineStyle with undecoded_fields or Registered payload,
-        // CsacDocumentOptions with raw_dwg_data, and incomplete XRecord.
-        use acadrust::objects::{DgnLineStyleData, DgnLineStyleObject};
+        // VbaProject with empty/external storage, CsacDocumentOptions with
+        // raw_dwg_data, and incomplete XRecord.
+        use acadrust::objects::{DgnLineStyleData, DgnLineStyleObject, VbaProject};
         let h_arch = next_h();
         let h_proxy = next_h();
         let h_reg = next_h();
         let h_lsdef = next_h();
         let h_lsreg = next_h();
+        let h_vba = next_h();
         let h_csac = next_h();
         let h_xrec = next_h();
         let obj_cases: Vec<(&str, Handle, ObjectType)> = vec![
@@ -2810,6 +2890,19 @@ mod tests {
                         payload: ProxyPayload::from_bytes(&[1, 2, 3]),
                         object_ids: Vec::new(),
                     },
+                }),
+            ),
+            (
+                "VBA_PROJECT",
+                h_vba,
+                ObjectType::ClassObject(ClassObject {
+                    handle: h_vba,
+                    owner: Handle::NULL,
+                    reactors: Vec::new(),
+                    xdictionary_handle: None,
+                    data: ClassObjectData::VbaProject(VbaProject {
+                        storage: Default::default(),
+                    }),
                 }),
             ),
             (
@@ -3006,6 +3099,57 @@ mod tests {
         assert!(rep.decoded, "{rep:?}");
         assert_eq!(rep.warnings, 1, "{rep:?}");
         assert!(rep.not_decoded.is_empty(), "{rep:?}");
+
+        // An intentionally preserved auxiliary payload emits an Error
+        // notification and `auxiliary-object-preserved` diagnostic without
+        // skipping the record: strict mode MUST accept it (no
+        // `read_past_damage`), while `decode_report` still marks it
+        // `decoded: false` and lists it in `not_decoded`.
+        let mut aux_doc = CadDocument::with_version(NEW_SHEET_VERSION);
+        let aux_msg = "Preserved auxiliary object 0x7B as raw bytes";
+        aux_doc
+            .notifications
+            .notify(acadrust::notification::NotificationType::Error, aux_msg);
+        let mut aux_diag = ReadDiagnostic::new(
+            "auxiliary-object-preserved",
+            ReadStage::RecordStream,
+            aux_msg,
+        );
+        aux_diag.record_handle = Some(0x7B);
+        aux_diag.record_type = Some("ACDBASSOCDEPENDENCY".into());
+        let aux_stats = acadrust::ReadStats {
+            stream_completed: true,
+            record_stream_read: true,
+            source_records: 10,
+            decoded_source_records: 10,
+            recovered_errors: 1,
+            diagnostics: vec![aux_diag],
+            ..Default::default()
+        };
+        assert_eq!(
+            strict_read_rejection(&aux_doc, &aux_stats),
+            None,
+            "auxiliary-object-preserved must not reject strict read"
+        );
+        let (rep, _) = decode_report(&aux_doc, &aux_stats);
+        assert!(!rep.decoded, "{rep:?}");
+        assert_eq!(
+            rep.not_decoded,
+            vec![RecordsOfKind {
+                kind: "ACDBASSOCDEPENDENCY".into(),
+                count: 1,
+                handles: vec!["7B".into()],
+            }]
+        );
+        // By contrast, an AC1021 zero-filled corrupt page IS rejected in strict mode.
+        assert!(
+            strict_read_rejection(&ac21_doc, &clean_stats).is_some(),
+            "AC1021 skipped page must reject strict read"
+        );
+        assert!(
+            strict_read_rejection(&drawing, &sec_stats).is_some(),
+            "named section failure must reject strict read"
+        );
     }
 
     #[test]
