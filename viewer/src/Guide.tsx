@@ -61,7 +61,7 @@ export interface GuideBannerProps {
   onStop(): void;
   onNoteAct(): void;
   onBack(): void;
-  onUndoAll(from: number): void;
+  onUndoAll(from: number, label: string): void;
   onClose(): void;
 }
 
@@ -96,7 +96,7 @@ export function GuideBanner(props: GuideBannerProps) {
         </div>
         <div className="g-acts">
           {s.undoFrom !== null && (
-            <button type="button" className="btn sm danger" data-g="undoall" disabled={props.busy} onClick={() => props.onUndoAll(s.undoFrom as number)}>
+            <button type="button" className="btn sm danger" data-g="undoall" disabled={props.busy} onClick={() => props.onUndoAll(s.undoFrom as number, s.undoLabel)}>
               {s.undoLabel}
             </button>
           )}

@@ -440,6 +440,7 @@ fn only_the_change_set_that_completes_a_step_names_what_it_made() {
     // Undone, the step is not done: the listing steps back.
     undone(&set, right_entry);
     let report = listed(&set);
+    assert_eq!(report.newest_entry, right_entry + 1, "as of the undo");
     let steps = &report.guides[0].steps;
     assert_eq!(steps[1].completed_by, None);
     assert_eq!(steps[1].made, None);
@@ -628,6 +629,17 @@ fn a_step_names_what_a_copy_made_and_what_a_template_add_made_on_the_guides_shee
     let report = listed(&set);
     let ruled = report.guides[0].steps[3].points[0].object.clone().unwrap();
     assert!(ruled.starts_with("DEMO-002/"), "{ruled}");
+}
+
+#[test]
+fn a_setting_steps_layer_is_kept_as_the_sheet_names_it() {
+    let set = demo_set("layer-name");
+    let mut guide = a_guide();
+    guide["steps"][0]["setting"]["current_layer"] = json!("NOTES");
+    give(&set, guide).unwrap();
+    let report = listed(&set);
+    let setting = report.guides[0].steps[0].setting.clone().unwrap();
+    assert_eq!(setting.current_layer, "notes");
 }
 
 #[test]

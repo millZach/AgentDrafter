@@ -1127,7 +1127,7 @@ impl Viewer {
             .guide
             .as_ref()
             .map(|step| crate::guide::phase(step, &self.tools));
-        let count = self.tools.state(false).points.len();
+        let count = crate::guide::taken(&self.tools);
         let mut note = None;
         let outcome = if self.tools.selecting() {
             let place = self
@@ -1161,9 +1161,9 @@ impl Viewer {
             .guide
             .as_ref()
             .map(|step| crate::guide::phase(step, &self.tools));
-        let count = self.tools.state(false).points.len();
+        let count = crate::guide::taken(&self.tools);
         let outcome = self.tools.input(text, aim);
-        let taken = self.tools.state(false).points.last().copied();
+        let taken = self.tools.last_point();
         let note = match (&self.guide, before, taken) {
             (Some(step), Some(before), Some(at)) => {
                 crate::guide::after_point(step, before, &self.tools, &Taken::typed(at, 0.0), count)
@@ -1178,9 +1178,23 @@ impl Viewer {
     /// gives the tool its text's height.
     pub fn guide_step(&mut self, step: &str) {
         self.guide = serde_json::from_str::<crate::guide::StepPlan>(step).ok();
-        if let Some(height) = self.guide.as_ref().and_then(crate::guide::text_height) {
-            self.tools.set_text_height(height);
-        }
+        let height = self.guide.as_ref().and_then(crate::guide::text_height);
+        self.tools.set_guide_text_height(height);
+    }
+
+    /// The step's operation as Do it for me sends it, as JSON: on the
+    /// current layer and in the space the page shows, when it leaves them
+    /// out, as the drawing tools send theirs (#157).
+    pub fn guide_operation(&self, operation: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(operation)
+            .map(|op| crate::guide::filled(&op, &self.tools).to_string())
+            .unwrap_or_default()
+    }
+
+    /// Ends the tool running with nothing sent: a guide's Do it for me,
+    /// Skip and Stop drop what the drafter has not finished (#157).
+    pub fn tool_drop(&mut self) -> String {
+        to_json(&self.tools.drop_tool())
     }
 
     /// What the guide's step wants next, as JSON, `{"phase": "click",
@@ -1211,11 +1225,12 @@ impl Viewer {
         value.to_string()
     }
 
-    /// The guide's Undo it: takes back the point just taken, `point`, or
-    /// the object just picked at `place`, `pick`. Gives whether it did.
+    /// The guide's Undo it: takes back the point its note was given for,
+    /// `point`, the tool's points then `place`, while it is still the last
+    /// taken, or the object picked at `place`, `pick`. Gives whether it did.
     pub fn guide_take_back(&mut self, what: &str, place: u32) -> bool {
         match what {
-            "point" => self.tools.take_back_point(),
+            "point" => crate::guide::take_back(&mut self.tools, place as usize),
             "pick" => {
                 let picked = self.tools.state(false).picked;
                 picked.contains(&(place as usize)) && {

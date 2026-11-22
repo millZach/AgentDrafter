@@ -5003,6 +5003,15 @@ const checks = {
       assert(at, `step ${step}'s point ${point} is worked out`);
       return at;
     };
+    // The ring on the page is where the core worked the step's point out
+    // to be, to within a pixel and a half, with its tag.
+    const ringOn = async (page, guideNo, step, point, label) => {
+      const shown = await ring(page);
+      const [x, y] = await onPage(page, ringAt(guideNo, step, point));
+      assert(Math.hypot(shown.at[0] - x, shown.at[1] - y) <= 1.5, `step ${step}'s ring at (${shown.at}), the core's point at (${x}, ${y})`);
+      assert(shown.tag.includes(label), `the ring's tag names ${label}: ${shown.tag}`);
+      return shown;
+    };
     // Points the cursor at `at`, in drawing units, and waits until it holds
     // the snap there, exactly: a click then takes that point.
     const hold = async (page, at) => {
@@ -5061,8 +5070,8 @@ const checks = {
         words = await banner(page);
         assert(words.includes('Step 1 done') && words.includes('Start Line: type L and Enter'), `step 2's banner: ${words}`);
         assert((await pulse(page)) === 'line', `Line pulses: ${await pulse(page)}`);
-        const first = await ring(page);
-        assert(first.tag.includes('2') && first.tag.includes('FT-101’s + terminal'), `the ring's tag: ${first.tag}`);
+        const first = await ringOn(page, 1, 2, 0, 'FT-101’s + terminal');
+        assert(first.tag.includes('2'), `the ring's tag: ${first.tag}`);
         await shot(page, 'guides-laptop-3-step2-ring.png');
         // Another tool: its note, and End it.
         await page.click('.rb[data-tool="rectangle"]');
@@ -5083,28 +5092,27 @@ const checks = {
         await page.keyboard.press('Enter');
         await frames(page);
         await clickAt(page, ringAt(1, 2, 0));
-        const second = await ring(page);
-        assert(second.tag.includes('TB1-1'), `the ring moved on to TB1-1: ${second.tag}`);
+        await ringOn(page, 1, 2, 1, 'TB1-1');
         await shot(page, 'guides-laptop-6-step2-second-point.png');
         await clickAt(page, [7.2, 6.25]);
         await note(page, 'That went to the endpoint of field-wire-2; the step wants TB1-1. Undo it?', 'a wrong point');
         await shot(page, 'guides-laptop-7-wrong-point.png');
         await page.click('[data-g="noteact"]');
         await noNote(page);
-        assert((await ring(page)).tag.includes('TB1-1'), 'the point is taken back, and the ring is at TB1-1 again');
+        await ringOn(page, 1, 2, 1, 'TB1-1');
         let before = journal().entries.length;
         await clickAt(page, ringAt(1, 2, 1));
         assert((await pulse(page)) === 'done', `Done pulses once the line has its points: ${await pulse(page)}`);
         await page.keyboard.press('Enter');
         let entry = await landedAfter(before, 'the wire');
-        assert(JSON.stringify(entry.guide) === '{"guide":1,"step":2,"of":4}', `the journal marks step 2: ${JSON.stringify(entry)}`);
+        assert(JSON.stringify(entry.guide) === '{"guide":1,"step":2,"of":4,"completes":true}', `the journal marks step 2, completed: ${JSON.stringify(entry)}`);
         await untilStep(page, 3, 'the wire landed');
         words = await banner(page);
         assert(words.includes(`Step 2 done · change set ${entry.entry}`), `step 2 done: ${words}`);
         // Text, by hand, at the ring on the wire it drew.
         const middle = ringAt(1, 3, 0);
         assert(Math.abs(middle[0] - 5.2) < 1e-9 && Math.abs(middle[1] - 6.75) < 1e-9, `the wire's middle: ${middle}`);
-        await ring(page);
+        await ringOn(page, 1, 3, 0, 'the wire’s middle');
         await shot(page, 'guides-laptop-8-step3-ticked.png');
         await page.keyboard.type('T');
         await page.keyboard.press('Enter');
@@ -5138,6 +5146,7 @@ const checks = {
         assert(picked, 'a click picks the number');
         await frames(page);
         await page.keyboard.press('Enter');
+        await ringOn(page, 1, 4, 1, 'base point');
         await clickAt(page, ringAt(1, 4, 1));
         await page.waitForFunction(() => (document.querySelector('[data-g-now]')?.textContent ?? '').includes('@0,0.04'), null, { timeout: 15000 });
         await shot(page, 'guides-laptop-10-step4-type.png');
@@ -5159,10 +5168,15 @@ const checks = {
         await shot(page, 'guides-laptop-12-journal.png');
         await sideTab(page, 'chat');
         const guided = journal().entries.filter((e) => e.guide && e.undo_state === 'kept').map((e) => e.entry);
+        const others = journal().entries.filter((e) => !e.guide && e.kind === 'change_set' && e.undo_state === 'kept').map((e) => e.entry);
+        assert(guided.length === 3 && others.length === 1, `three steps landed, after the wire's cut: ${guided} and ${others}`);
         before = journal().entries.length;
         await page.click('[data-g="undoall"]');
         const undone = await landedAfter(before, 'Undo the guide’s steps');
-        assert(undone.kind === 'undo' && guided.every((n) => undone.undid.includes(n)), `one undo took back ${guided}: ${JSON.stringify(undone)}`);
+        const sorted = (list) => JSON.stringify([...list].sort((a, b) => a - b));
+        assert(undone.kind === 'undo' && sorted(undone.undid) === sorted(guided), `one undo took back exactly ${guided}: ${JSON.stringify(undone)}`);
+        const kept = journal().entries.filter((e) => others.includes(e.entry)).every((e) => e.undo_state === 'kept');
+        assert(kept, `the wire's cut, before the guide, is kept: ${JSON.stringify(journal().entries.map((e) => [e.entry, e.undo_state]))}`);
         await page.waitForFunction(() => (document.querySelector('[data-g-line]')?.textContent ?? '').startsWith('Undone'), null, { timeout: 15000 });
         await shot(page, 'guides-laptop-13-undone.png');
         await page.click('[data-g="close"]');

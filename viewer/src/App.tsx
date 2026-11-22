@@ -123,8 +123,12 @@ import {
   clickNote,
   endedNote,
   layerChosen,
+  givenToast,
   landed as guideLanded,
   marked as guideMarked,
+  synced as guideSynced,
+  undoAllBlocked,
+  undoItBlocked,
   skipStep,
   startRun,
   stepDone,
@@ -181,8 +185,8 @@ interface Toast {
   entry?: number;
   /** The proposal its Show button opens. */
   proposal?: number;
-  /** The guide its Start button starts (#157). */
-  guide?: number;
+  /** The guides its Start buttons start, one each (#157). */
+  guides?: number[];
 }
 
 interface Finding {
@@ -912,20 +916,26 @@ export function App({ token, source, sheet, layout }: AppProps) {
         if (!replied.ok || !replied.result) return;
         const list = replied.result.guides;
         setGuides(list);
+        // A guide running steps back when a step's change set is undone,
+        // from any interface: the listing says which steps stay done.
+        const newestEntry = replied.result.newest_entry;
+        if (newestEntry !== undefined) {
+          setRun((r) => {
+            const g = r ? list.find((x) => x.guide === r.guide) : undefined;
+            const next = r && g ? guideSynced(r, g, newestEntry) : r;
+            if (next) runNow.current = next;
+            return next;
+          });
+        }
         const known = guidesSeen.current;
         guidesSeen.current = new Set(list.map((g) => g.guide));
-        const given = known ? list.filter((g) => !known.has(g.guide)).at(-1) : undefined;
-        if (!given) return;
-        const title = `${capitalWho(given.by)} gives a guide: ${given.title}`;
+        // Every guide given since the last listing gets its Start, however
+        // many came between two looks.
+        const offered = givenToast(known ? list.filter((g) => !known.has(g.guide)) : [], capitalWho);
+        if (!offered) return;
         keys.current += 1;
-        setToast({
-          key: keys.current,
-          tone: 'prop',
-          title,
-          detail: `Guide ${given.guide}: ${given.steps.length} step${given.steps.length === 1 ? '' : 's'} on ${given.sheet}, for you to do on your drawing.`,
-          guide: given.guide,
-        });
-        log(title);
+        setToast({ key: keys.current, tone: 'prop', title: offered.title, detail: offered.detail, guides: offered.guides });
+        log(offered.title);
       },
     );
     return () => {
@@ -1202,6 +1212,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
         const note = clickNote(o.guide);
         setRun((r) => (r && !r.end ? { ...r, note } : r));
         log(`Guide: ${o.guide.words}`);
+      } else {
+        // Another point or pick since: the note's Undo it no longer
+        // takes back the last thing taken, so it goes.
+        setRun((r) => (r?.note?.act?.kind === 'take_back' ? { ...r, note: null } : r));
       }
       // Each in order: one to a template's object is asked about first.
       for (const s of o.sends ?? []) {
@@ -1618,17 +1632,18 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const r = runNow.current;
     const g = runGuide();
     if (!r || !g) return;
-    const step = g.steps[r.at];
+    // What the drafter had not finished is dropped, not landed.
     const v = renderer();
-    if (v && step?.tool && toolState?.tool === step.tool) toolDid(v.tool_leave());
+    if (v && toolState?.tool) toolDid(v.tool_drop());
     setRun(skipStep(r, g));
     log(`Guide: step ${r.at + 1} skipped`);
   }
   function stopGuide() {
     const r = runNow.current;
     if (!r) return;
+    // What the drafter had not finished is dropped, not landed, on any sheet.
     const v = renderer();
-    if (v && toolState?.tool) toolDid(v.tool_leave());
+    if (v && toolState?.tool) toolDid(v.tool_drop());
     setRun(stopRun(r));
     setGuideClosed(false);
     log(`Guide: stopped at step ${r.at + 1}`);
@@ -1643,20 +1658,26 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const g = runGuide();
     const step = guideStepHere();
     if (!r || !g || !step) return;
+    // The tool's unfinished points are dropped, so only the step lands.
     const v = renderer();
-    if (v && toolState?.tool) toolDid(v.tool_leave());
+    if (v && toolState?.tool) toolDid(v.tool_drop());
     const forMe = { ...r, forMe: true, note: null };
     runNow.current = forMe;
     setRun(forMe);
     if (step.setting) {
-      chooseLayer(step.setting.current_layer);
+      // As the sheet names the layer, so the Layer box shows it.
+      const want = step.setting.current_layer;
+      chooseLayer(layers?.find((l) => upper(l.name) === upper(want))?.name ?? want);
       return;
     }
     if (!step.operation) return;
+    // On the current layer and in the space shown, as the tools send theirs.
+    const filled = v?.guide_operation(JSON.stringify(step.operation));
+    const operation = filled ? (JSON.parse(filled) as Record<string, unknown>) : step.operation;
     setGuideBusy(true);
     void sendChange(
       {
-        change_set: { operations: [step.operation], guide: { guide: r.guide, step: step.step } } as ToolSend['change_set'],
+        change_set: { operations: [operation], guide: { guide: r.guide, step: step.step } } as ToolSend['change_set'],
         what: `Guide step ${step.step}, done for you`,
         sheets: [g.sheet],
       },
@@ -1670,21 +1691,55 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (!act) return;
     setRun((r) => (r ? { ...r, note: null } : r));
     if (act.kind === 'undo') {
-      void undo(act.entry);
-      log(`Guide: change set ${act.entry} undone, as you asked`);
+      void undoIt(act.entry);
     } else if (act.kind === 'take_back') {
-      renderer()?.guide_take_back(act.what, act.place);
+      const took = renderer()?.guide_take_back(act.what, act.place);
       refreshTool();
-      log(`Guide: the ${act.what} taken back, as you asked`);
+      log(took ? `Guide: the ${act.what} taken back, as you asked` : `Guide: the ${act.what} was no longer the last taken, so nothing was taken back`);
     } else {
       const v = renderer();
       if (v && toolState?.tool) toolDid(v.tool_leave());
     }
   }
-  /** Undo the guide's steps: one undo, of the first and every later one. */
-  async function undoGuide(from: number) {
+  /** The change sets an undo can take now, read from the journal as it is. */
+  async function canUndoNow(): Promise<number[]> {
+    const fresh = await call<{ can_undo?: number[] }>('journal', { set: source }, token);
+    return fresh.can_undo ?? [];
+  }
+  /**
+   * Undo it, of a change set sent for a step that does not complete it:
+   * an undo takes every later change set with it, so one with later edits
+   * in place is not undone, and the note says so.
+   */
+  async function undoIt(entry: number) {
     setGuideBusy(true);
     try {
+      const blocked = undoItBlocked(entry, await canUndoNow());
+      if (blocked) {
+        setRun((r) => (r ? { ...r, note: blocked } : r));
+        log(`Guide: ${blocked.words}`);
+        return;
+      }
+      await call('undo', { set: source, change_set: entry }, token);
+      log(`Guide: change set ${entry} undone, as you asked`);
+    } catch (e) {
+      say('warn', `Change set ${entry} was not undone`, why(e, token));
+    } finally {
+      setGuideBusy(false);
+    }
+  }
+  /** Undo the guide's steps: one undo, of the first and every later one, while the button still says what it takes. */
+  async function undoGuide(from: number, label: string) {
+    const r = runNow.current;
+    const g = runGuide();
+    if (!r || !g) return;
+    setGuideBusy(true);
+    try {
+      const blocked = undoAllBlocked(r, g, await canUndoNow(), from, label);
+      if (blocked) {
+        say('warn', 'The guide’s steps were not undone', blocked);
+        return;
+      }
       const reply = await call<{ journal_entry?: number }>('undo', { set: source, change_set: from }, token);
       setRun((r) => (r ? { ...r, undone: reply.journal_entry ?? 0 } : r));
       log(`Guide: its steps undone, from change set ${from}`);
@@ -2602,7 +2657,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
                   setWanted(runningGuide.sheet);
                   setWantedLayout(null);
                 }}
-                onUndoAll={(from) => void undoGuide(from)}
+                onUndoAll={(from, label) => void undoGuide(from, label)}
                 onClose={closeGuide}
               />
             </div>
@@ -2669,11 +2724,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
                     Show
                   </button>
                 )}
-                {toast.guide !== undefined && guides.some((g) => g.guide === toast.guide) && (
-                  <button type="button" className="btn sm guide" data-toast="start-guide" onClick={() => startGuide(toast.guide as number)}>
-                    Start
-                  </button>
-                )}
+                {(toast.guides ?? [])
+                  .filter((n) => guides.some((g) => g.guide === n))
+                  .map((n, _, all) => (
+                    <button key={n} type="button" className="btn sm guide" data-toast="start-guide" data-guide-n={n} onClick={() => startGuide(n)}>
+                      {all.length > 1 ? `Start guide ${n}` : 'Start'}
+                    </button>
+                  ))}
                 {toast.entry !== undefined && journal?.entries.some((e) => e.entry === toast.entry && e.kind === 'change_set') && (
                   <button
                     type="button"

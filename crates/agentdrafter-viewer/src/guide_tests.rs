@@ -84,7 +84,7 @@ fn on(x: f64, y: f64, snap: SnapKind, object: usize) -> Taken {
 /// tool's point, then the note.
 fn click(tools: &mut Tools, step: &StepPlan, point: Taken) -> Option<Note> {
     let before = phase(step, tools);
-    let count = tools.state(false).points.len();
+    let count = taken(tools);
     tools.point(point.clone());
     after_point(step, before, tools, &point, count)
 }
@@ -181,7 +181,12 @@ fn a_move_step_rings_its_object_to_pick_then_its_base_point() {
     let before = phase(&step, &tools);
     tools.pick(Some(4));
     assert_eq!(after_pick(&step, before, &tools, 4), None);
-    assert_eq!(phase(&step, &tools), Phase::Finish, "picked: Enter next");
+    assert_eq!(
+        phase(&step, &tools),
+        Phase::EndPick,
+        "picked: Enter ends picking, before the base point"
+    );
+    assert_eq!(ring(&step, &tools), None);
     tools.input("", None);
     assert_eq!(phase(&step, &tools), Phase::Click(1));
     assert_eq!(ring(&step, &tools).unwrap().at, Some([5.2, 6.75]));
@@ -214,7 +219,7 @@ fn a_text_step_gives_the_tool_its_height_and_wants_typing_once_placed() {
     .unwrap();
     assert_eq!(text_height(&step), Some(0.08));
     assert_eq!(text_height(&line_step()), None);
-    tools.set_text_height(0.08);
+    tools.set_guide_text_height(Some(0.08));
     assert_eq!(tools.text_height(), 0.08);
     tools.start(ToolKind::Text, &[]);
     assert_eq!(
@@ -234,4 +239,117 @@ fn a_setting_step_has_no_tool_and_no_ring() {
         serde_json::from_value(json!({"setting": {"current_layer": "wire"}})).unwrap();
     assert_eq!(phase(&step, &tools), Phase::Start);
     assert_eq!(ring(&step, &tools), None);
+}
+
+#[test]
+fn a_text_steps_height_goes_when_the_step_ends() {
+    let mut tools = tools();
+    let ordinary = tools.text_height();
+    tools.set_guide_text_height(Some(0.08));
+    assert_eq!(tools.text_height(), 0.08);
+    tools.set_guide_text_height(None);
+    assert_eq!(tools.text_height(), ordinary, "the Text tool's own again");
+}
+
+#[test]
+fn undo_it_takes_back_the_point_its_note_was_for_and_no_later_one() {
+    let mut tools = tools();
+    let step = line_step();
+    tools.start(ToolKind::Line, &[]);
+    click(&mut tools, &step, on(3.2, 6.75, SnapKind::Center, 0));
+    let note = click(&mut tools, &step, on(7.2, 6.25, SnapKind::Midpoint, 2)).unwrap();
+    assert_eq!(note.place, Some(2));
+    // Another point taken since: Undo it takes nothing back.
+    click(&mut tools, &step, on(9.0, 6.75, SnapKind::Endpoint, 3));
+    assert!(!take_back(&mut tools, 2));
+    assert_eq!(tools.state(false).points.len(), 3);
+    // Taken back by the tool's own Undo, the note's point is last again.
+    assert!(tools.take_back_point());
+    assert!(take_back(&mut tools, 2));
+    assert_eq!(tools.state(false).points, vec![[3.2, 6.75]]);
+}
+
+fn copy_step() -> StepPlan {
+    serde_json::from_value(json!({
+        "tool": "copy",
+        "points": [
+            {"label": "101+", "object": "DP-LD-101/text-1"},
+            {"label": "base point", "at": [5.2, 6.75, 0.0]},
+            {"label": "where it goes", "at": [5.2, 7.75, 0.0]}
+        ]
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_copy_step_counts_its_copies_and_says_when_one_goes_elsewhere() {
+    let mut tools = tools();
+    let step = copy_step();
+    tools.start(ToolKind::Copy, &[4]);
+    assert_eq!(phase(&step, &tools), Phase::Click(1), "picked: its base point");
+    assert_eq!(click(&mut tools, &step, Taken::typed([5.2, 6.75], 0.0)), None);
+    assert_eq!(phase(&step, &tools), Phase::Click(2));
+    let note = click(&mut tools, &step, Taken::typed([6.0, 7.75], 0.0)).unwrap();
+    assert_eq!(
+        note.words,
+        "That went to 6.0000, 7.7500; the step wants where it goes."
+    );
+    assert!(take_back(&mut tools, note.place.unwrap()));
+    assert_eq!(tools.state(false).placed, 0);
+    assert_eq!(phase(&step, &tools), Phase::Click(2));
+    assert_eq!(click(&mut tools, &step, Taken::typed([5.2, 7.75], 0.0)), None);
+    // Placed where it goes: no ring, Enter next, and a copy more is said.
+    assert_eq!(phase(&step, &tools), Phase::Finish);
+    assert_eq!(ring(&step, &tools), None);
+    let more = click(&mut tools, &step, Taken::typed([5.2, 8.75], 0.0)).unwrap();
+    assert_eq!(
+        more.words,
+        "That placed another copy; the step places no more."
+    );
+}
+
+#[test]
+fn a_move_step_with_no_base_point_asks_for_any_then_how_far() {
+    let mut tools = tools();
+    let step: StepPlan = serde_json::from_value(json!({
+        "tool": "move",
+        "points": [{"label": "101+", "object": "DP-LD-101/text-1"}],
+        "operation": {"op": "move", "by": [0, 0.04, 0]}
+    }))
+    .unwrap();
+    tools.start(ToolKind::Move, &[]);
+    assert_eq!(phase(&step, &tools), Phase::Pick(0));
+    tools.pick(Some(4));
+    assert_eq!(phase(&step, &tools), Phase::EndPick);
+    tools.input("", None);
+    assert_eq!(phase(&step, &tools), Phase::Base);
+    assert_eq!(ring(&step, &tools), None);
+    click(&mut tools, &step, Taken::typed([1.0, 1.0], 0.0));
+    assert_eq!(phase(&step, &tools), Phase::Finish, "then how far, typed");
+}
+
+#[test]
+fn do_it_for_me_sends_an_add_on_the_current_layer_and_space() {
+    let mut tools = tools();
+    tools.layer = "wire".to_owned();
+    let add = json!({"op": "add_line", "sheet": "DP-LD-101", "from": [0, 0], "to": [1, 0]});
+    assert_eq!(filled(&add, &tools)["layer"], "wire");
+    let own = json!({"op": "add_line", "layer": "notes"});
+    assert_eq!(filled(&own, &tools)["layer"], "notes", "the step's own layer");
+    let moved = json!({"op": "move", "target": {"id": "DP-LD-101/text-1"}, "by": [0, 1, 0]});
+    assert_eq!(filled(&moved, &tools), moved, "only an add takes a layer");
+}
+
+#[test]
+fn a_tool_dropped_sends_nothing_where_esc_would_land_it() {
+    let mut tools = tools();
+    tools.start(ToolKind::Line, &[]);
+    tools.point(Taken::typed([1.0, 1.0], 0.0));
+    tools.point(Taken::typed([2.0, 1.0], 0.0));
+    let mut esc = tools.clone();
+    assert_eq!(esc.escape().sends.len(), 1, "Esc lands the line");
+    let dropped = tools.drop_tool();
+    assert!(dropped.sends.is_empty());
+    assert_eq!(dropped.log, vec!["LINE: dropped, nothing changed"]);
+    assert_eq!(tools.running(), None);
 }

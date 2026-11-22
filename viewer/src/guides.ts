@@ -35,6 +35,8 @@ export interface GuideStep {
   /** Its operation with each `made_by` named, ready to send; none while a step it needs made nothing. */
   operation?: Record<string, unknown>;
   landed?: number[];
+  /** The newest change set in place that completes it, as the core checked it. */
+  completed_by?: number;
   made?: string;
 }
 
@@ -52,6 +54,8 @@ export interface Guide {
 
 export interface GuidesReport {
   set: string;
+  /** The journal's newest entry, which the listing reflects. */
+  newest_entry?: number;
   guides: Guide[];
 }
 
@@ -70,6 +74,8 @@ export interface GuideMark {
   guide: number;
   step: number;
   of: number;
+  /** Whether it completes the step, as the core checked it before it landed. */
+  completes?: boolean;
 }
 
 /** What the renderer says of a point taken or an object picked that the step does not want. */
@@ -85,7 +91,11 @@ export type Phase =
   | { phase: 'pick'; point: number }
   | { phase: 'click'; point: number }
   | { phase: 'finish' }
-  | { phase: 'type' };
+  | { phase: 'type' }
+  /** Move, Copy or Erase has picked what the step picks: Enter ends picking. */
+  | { phase: 'end_pick' }
+  /** Move or Copy wants a base point the step leaves to the drafter. */
+  | { phase: 'base' };
 
 /** What a step came to. */
 export type StepStatus = 'todo' | 'done' | 'forme' | 'skipped' | 'needs';
@@ -113,6 +123,8 @@ export interface GuideRun {
   why: string[];
   /** The change sets sent for its steps while it ran, by their entries. */
   entries: number[];
+  /** The change set that completed each step, while it stays in place. */
+  doneBy: (number | null)[];
   note: Note | null;
   /** The step just ended, for the line above the words. */
   last: { at: number; status: StepStatus; entry?: number } | null;
@@ -147,6 +159,7 @@ export function startRun(guide: Guide): GuideRun {
     status: guide.steps.map(() => 'todo'),
     why: guide.steps.map(() => ''),
     entries: [],
+    doneBy: guide.steps.map(() => null),
     note: null,
     last: null,
     end: null,
@@ -178,7 +191,36 @@ export function stepDone(run: GuideRun, guide: Guide, entry?: number): GuideRun 
   const status = [...run.status];
   const s: StepStatus = run.forMe ? 'forme' : 'done';
   status[run.at] = s;
-  return advance({ ...run, status, last: { at: run.at, status: s, entry } }, guide);
+  const doneBy = [...run.doneBy];
+  doneBy[run.at] = entry ?? null;
+  return advance({ ...run, status, doneBy, last: { at: run.at, status: s, entry } }, guide);
+}
+
+/**
+ * The run against the guide as `guides` lists it, after the journal
+ * changed: a step whose change set was undone, from any interface, is to do
+ * again, and the guide steps back to the first such. `newest` is the
+ * journal's newest entry the listing reflects: a step done by a later one
+ * than it, which the listing has not seen yet, stays done.
+ */
+export function synced(run: GuideRun, guide: Guide, newest: number): GuideRun {
+  if (run.end) return run;
+  const status = [...run.status];
+  const doneBy = [...run.doneBy];
+  let back = -1;
+  guide.steps.forEach((step, i) => {
+    const by = doneBy[i];
+    if (by === null || by === undefined || by > newest) return;
+    if (step.completed_by !== undefined) {
+      doneBy[i] = step.completed_by;
+      return;
+    }
+    status[i] = 'todo';
+    doneBy[i] = null;
+    if (back < 0) back = i;
+  });
+  if (back < 0) return doneBy.every((d, i) => d === run.doneBy[i]) ? run : { ...run, doneBy };
+  return { ...run, status, doneBy, at: Math.min(run.at, back), note: null, last: null, forMe: false };
 }
 
 /** Skip: the step is passed over, and any that needs what it makes with it. */
@@ -199,9 +241,11 @@ export function stopRun(run: GuideRun): GuideRun {
  * and the note offers to undo it. The guide waits.
  */
 export function landed(run: GuideRun, guide: Guide, checked: GuideChecked, entry: number | undefined): GuideRun {
+  // A late reply for another guide's step is that guide's, not this run's.
+  if (checked.guide !== run.guide) return run;
   const entries = entry !== undefined ? [...run.entries, entry] : run.entries;
   const next = { ...run, entries };
-  if (checked.guide !== run.guide || checked.step !== run.at + 1 || run.end) return next;
+  if (checked.step !== run.at + 1 || run.end) return next;
   if (checked.completes) return stepDone(next, guide, entry);
   return {
     ...next,
@@ -241,6 +285,47 @@ export function toolNote(step: GuideStep, tool: string, layer: string): Note | n
     tone: 'warn',
     words: `That started ${started}; this step wants ${toolLabel(step.tool)}. End it?`,
     act: { kind: 'end_tool', label: `End ${started}` },
+  };
+}
+
+/**
+ * Undo it of a change set, `entry`, checked against the journal as it is
+ * when it is pressed: an undo takes every later change set with it, so one
+ * with later edits in place is not undone, and the note says why.
+ */
+export function undoItBlocked(entry: number, canUndo: number[]): Note | null {
+  const later = canUndo.filter((e) => e > entry).length;
+  if (!later) return null;
+  return {
+    tone: 'warn',
+    words: `Undo it would also take back ${later} later edit${later === 1 ? '' : 's'}, so nothing was undone. Undo from the journal if you mean to.`,
+  };
+}
+
+/**
+ * Undo the guide's steps, checked against the journal as it is when it is
+ * pressed: the words on the button, `label`, still say what it takes back,
+ * or nothing is undone and the reason is given.
+ */
+export function undoAllBlocked(run: GuideRun, guide: Guide, canUndo: number[], from: number, label: string): string | null {
+  const now = summaryOf(run, guide, canUndo);
+  if (now.undoFrom === from && now.undoLabel === label) return null;
+  if (now.undoFrom === null) return 'Its steps can no longer be undone.';
+  return `The journal changed since: the button now says “${now.undoLabel}”.`;
+}
+
+/** The toast for guides given since the last listing: one Start for each. */
+export function givenToast(given: Guide[], who: (by: string) => string): { title: string; detail: string; guides: number[] } | null {
+  const first = given[0];
+  if (!first) return null;
+  const about = (g: Guide) => `Guide ${g.guide}: ${g.steps.length} step${g.steps.length === 1 ? '' : 's'} on ${g.sheet}`;
+  if (given.length === 1) {
+    return { title: `${who(first.by)} gives a guide: ${first.title}`, detail: `${about(first)}, for you to do on your drawing.`, guides: [first.guide] };
+  }
+  return {
+    title: `${given.length} guides given: ${given.map((g) => g.title).join('; ')}`,
+    detail: `${given.map(about).join(' · ')}, for you to do on your drawing.`,
+    guides: given.map((g) => g.guide),
   };
 }
 
@@ -293,16 +378,20 @@ export function nowWords(step: GuideStep, phase: Phase | null, phone: boolean): 
       if (!contents) return phone ? 'Type the text in the box, then Add.' : 'Type the text, then press Enter twice.';
       return phone ? `Type ${contents} in the box, then Add.` : `Type ${contents}, then press Enter twice.`;
     }
+    case 'end_pick':
+      if (tool === 'erase') return phone ? 'Tap Done to erase it.' : 'Press Enter, or click Done, to erase it.';
+      return phone ? 'Tap Done: what the step picks is picked.' : 'Press Enter, or click Done: what the step picks is picked.';
+    case 'base':
+      return `${click} any point, as the base point.`;
     case 'finish': {
       if (tool === 'move' || tool === 'copy') {
+        const clicks = step.points.filter((p) => !p.object).length;
+        if (tool === 'copy' && clicks >= 2) return phone ? 'Tap Done to place the copy.' : 'Press Enter, or click Done, to place the copy.';
         const by = step.operation?.by;
         if (Array.isArray(by) && by.length >= 2) {
           const at = `@${fmt(by[0] as number)},${fmt(by[1] as number)}`;
           if (phone) return `Tap ⌨ Type, type ${at} and Go.`;
           return `Type ${at} and press Enter.`;
-        }
-        if (step.points.some((p) => p.object) && !step.points.some((p) => p.at || p.waits_on)) {
-          return phone ? `Tap Done: what the step picks is picked.` : `Press Enter, or click Done: what the step picks is picked.`;
         }
         return `${click} where it goes.`;
       }

@@ -5818,6 +5818,8 @@ pub(super) struct StepWalked {
     /// The objects its operation moves, copies or deletes, by ID on the
     /// guide's sheet.
     pub targets: Vec<String>,
+    /// The layer a setting step makes current, as the sheet names it.
+    pub layer: Option<String>,
 }
 
 /// What the walk found of one point of a step.
@@ -5884,13 +5886,17 @@ pub(super) fn walk_guide(
         })?;
         let mut out = StepWalked::default();
         if let Some(layer) = step.layer {
-            let known = layer == "0"
-                || record
+            out.layer = if layer == "0" {
+                Some("0".to_owned())
+            } else {
+                record
                     .sheet
                     .layers
                     .iter()
-                    .any(|l| l.name.eq_ignore_ascii_case(layer));
-            if !known {
+                    .find(|l| l.name.eq_ignore_ascii_case(layer))
+                    .map(|l| l.name.clone())
+            };
+            if out.layer.is_none() {
                 let names: Vec<&str> = std::iter::once("0")
                     .chain(record.sheet.layers.iter().map(|l| l.name.as_str()))
                     .collect();

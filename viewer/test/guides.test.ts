@@ -7,6 +7,7 @@ import {
   clickNote,
   dots,
   endedNote,
+  givenToast,
   landed,
   lastWords,
   layerChosen,
@@ -17,7 +18,10 @@ import {
   stepDone,
   stopRun,
   summaryOf,
+  synced,
   toolNote,
+  undoAllBlocked,
+  undoItBlocked,
   type Guide,
   type GuideStep,
 } from '../src/guides.ts';
@@ -191,4 +195,84 @@ test('the chat’s card belongs to a guide the assistant gave on the set shown',
   assert.equal(guideMade({ ...part, command: 'propose' } as Part, 'examples/demo-plant'), null);
   assert.equal(cardWords('run', stepDone(startRun(guide), guide), 4), 'Running: step 2 of 4.');
   assert.equal(cardWords('end', stopRun(startRun(guide)), 4), 'Stopped.');
+});
+
+test('a late reply for another guide’s step leaves this run as it was', () => {
+  const run = stepDone(startRun(guide), guide);
+  const other = { guide: 2, step: 2, of: 4, completes: true, message: 'That completes step 2 of 4.' };
+  assert.equal(landed(run, guide, other, 12), run);
+});
+
+test('Undo it is not pressed through edits that landed after the change set', () => {
+  assert.equal(undoItBlocked(7, [5, 7]), null);
+  const note = undoItBlocked(7, [5, 7, 8, 9]);
+  assert.equal(note?.words, 'Undo it would also take back 2 later edits, so nothing was undone. Undo from the journal if you mean to.');
+  assert.equal(note?.act, undefined, 'nothing to press');
+  assert.equal(undoItBlocked(7, [7, 8])?.words.includes('1 later edit,'), true);
+});
+
+test('Undo the guide’s steps is checked again against the journal when pressed', () => {
+  let run = stepDone(startRun(guide), guide);
+  run = landed(run, guide, { guide: 1, step: 2, of: 4, completes: true, message: '' }, 5);
+  run = stopRun(run);
+  const shown = summaryOf(run, guide, [3, 5, 6]);
+  assert.equal(undoAllBlocked(run, guide, [3, 5, 6], 5, shown.undoLabel), null);
+  assert.equal(
+    undoAllBlocked(run, guide, [3, 5, 6, 9], 5, shown.undoLabel),
+    'The journal changed since: the button now says “Undo the guide’s steps and 2 later”.',
+  );
+  assert.equal(undoAllBlocked(run, guide, [3], 5, shown.undoLabel), 'Its steps can no longer be undone.');
+});
+
+test('a step whose change set is undone, from anywhere, is to do again, and the guide steps back', () => {
+  let run = stepDone(startRun(guide), guide);
+  run = landed(run, guide, { guide: 1, step: 2, of: 4, completes: true, message: '' }, 7);
+  assert.deepEqual(run.doneBy, [null, 7, null, null]);
+  assert.equal(run.at, 2);
+  const listing = (completedBy?: number): Guide => ({
+    ...guide,
+    steps: guide.steps.map((s) => (s.step === 2 ? { ...s, completed_by: completedBy } : s)),
+  });
+  // Still in place: as it was.
+  assert.equal(synced(run, listing(7), 7), run);
+  // A listing from before it landed says nothing of it.
+  assert.equal(synced(run, listing(undefined), 6), run);
+  // Undone: step 2 is to do again, and the guide is back at it.
+  const back = synced(run, listing(undefined), 8);
+  assert.equal(back.at, 1);
+  assert.deepEqual(back.status, ['done', 'todo', 'todo', 'todo']);
+  assert.deepEqual(back.doneBy, [null, null, null, null]);
+  assert.equal(back.last, null);
+  // An ended guide keeps its summary.
+  assert.equal(synced(stopRun(run), listing(undefined), 8).at, 2);
+});
+
+test('Move and Copy are worded by the tool’s own phase: pick, Enter, base, then where it goes', () => {
+  assert.equal(nowWords(step(4), { phase: 'pick', point: 0 }, false), 'Click 101+, in the ring, to pick it.');
+  assert.equal(nowWords(step(4), { phase: 'end_pick' }, false), 'Press Enter, or click Done: what the step picks is picked.');
+  assert.equal(nowWords(step(4), { phase: 'base' }, false), 'Click any point, as the base point.');
+  assert.equal(nowWords(step(4), { phase: 'finish' }, false), 'Type @0,0.04 and press Enter.');
+  const copy: GuideStep = {
+    step: 5,
+    say: 'Copy it up.',
+    title: 'Copy it up',
+    tool: 'copy',
+    points: [{ label: '101+', object: 'DP-LD-101/text-1' }, { label: 'base', at: [5, 6, 0] }, { label: 'up', at: [5, 7, 0] }],
+    operation: { op: 'copy', by: [0, 1, 0] },
+  };
+  assert.equal(nowWords(copy, { phase: 'finish' }, false), 'Press Enter, or click Done, to place the copy.');
+  const erase: GuideStep = { step: 6, say: 'Erase it.', title: 'Erase it', tool: 'erase', points: [{ label: '101+', object: 'DP-LD-101/text-1' }] };
+  assert.equal(nowWords(erase, { phase: 'end_pick' }, true), 'Tap Done to erase it.');
+});
+
+test('guides given between two looks each get a Start', () => {
+  const who = (by: string) => by;
+  assert.equal(givenToast([], who), null);
+  const one = givenToast([guide], who);
+  assert.equal(one?.title, 'Assistant gives a guide: Draw FT-101’s + wire to TB1-1');
+  assert.deepEqual(one?.guides, [1]);
+  const two = givenToast([guide, { ...guide, guide: 2, title: 'Number the wire' }], who);
+  assert.equal(two?.title, '2 guides given: Draw FT-101’s + wire to TB1-1; Number the wire');
+  assert.deepEqual(two?.guides, [1, 2]);
+  assert.equal(two?.detail, 'Guide 1: 4 steps on DP-LD-101 · Guide 2: 4 steps on DP-LD-101, for you to do on your drawing.');
 });

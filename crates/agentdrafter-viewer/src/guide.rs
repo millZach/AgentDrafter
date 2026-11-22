@@ -92,6 +92,19 @@ pub enum Phase {
     Finish,
     /// The text typed.
     Type,
+    /// Move or Copy has picked every object the step gives: Enter ends
+    /// picking, before the base point.
+    EndPick,
+    /// Move or Copy wants a base point the step leaves to the drafter, any
+    /// point, before how far it goes is typed.
+    Base,
+}
+
+/// How many points the tool running has taken for its step: its points,
+/// and each copy Copy has placed from its base point.
+pub fn taken(tools: &Tools) -> usize {
+    let state = tools.state(false);
+    state.points.len() + state.placed
 }
 
 /// What the step wants next, from the tool running.
@@ -119,10 +132,12 @@ pub fn phase(step: &StepPlan, tools: &Tools) -> Phase {
                 let want = step.points[i].object.as_deref().unwrap_or_default();
                 !picked.iter().any(|id| id.eq_ignore_ascii_case(want))
             })
-            .map_or(Phase::Finish, Phase::Pick);
+            .map_or(Phase::EndPick, Phase::Pick);
     }
-    match step.clicks().get(state.points.len()) {
+    let taken = taken(tools);
+    match step.clicks().get(taken) {
         Some(&i) => Phase::Click(i),
+        None if taken == 0 && matches!(kind, ToolKind::Move | ToolKind::Copy) => Phase::Base,
         None => Phase::Finish,
     }
 }
@@ -162,7 +177,7 @@ pub fn ring(step: &StepPlan, tools: &Tools) -> Option<Ring> {
     let point = match phase(step, tools) {
         Phase::Start => (!step.points.is_empty()).then_some(0)?,
         Phase::Pick(i) | Phase::Click(i) => i,
-        Phase::Finish | Phase::Type => return None,
+        Phase::Finish | Phase::Type | Phase::EndPick | Phase::Base => return None,
     };
     let given = &step.points[point];
     let label = given.words();
@@ -190,9 +205,18 @@ pub struct Note {
     /// What Undo it takes back: `point`, the point just taken, or `pick`,
     /// the object just picked.
     pub take_back: &'static str,
-    /// The object just picked, by its place, for `pick`.
+    /// For `pick`, the object just picked, by its place; for `point`, how
+    /// many points the tool had taken with it, so Undo it takes back that
+    /// point and no later one ([`take_back`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub place: Option<usize>,
+}
+
+/// The guide's Undo it of a point: takes back the point a note was given
+/// for, `taken` the points the tool had then, while it is still the last
+/// one taken; nothing once another has been taken. Gives whether it did.
+pub fn take_back(tools: &mut Tools, taken_then: usize) -> bool {
+    taken(tools) == taken_then && tools.take_back_point()
 }
 
 /// Whether two coordinates are one point, as the core checks a change
@@ -237,7 +261,8 @@ pub fn after_point(
     }
     // A point the tool did not take, such as the same point twice, is
     // nothing to say.
-    if tools.state(false).points.len() <= points_before {
+    let now = self::taken(tools);
+    if now <= points_before {
         return None;
     }
     match before {
@@ -254,18 +279,23 @@ pub fn after_point(
                     want.words()
                 ),
                 take_back: "point",
-                place: None,
+                place: Some(now),
             })
         }
         Phase::Finish => {
             let last = step.clicks().last().map(|&i| step.points[i].words());
             Some(Note {
-                words: match last {
-                    Some(last) => format!("That would draw on past {last}; the step ends there."),
-                    None => "That point is more than the step asks for.".to_owned(),
+                words: match (kind, last) {
+                    (ToolKind::Copy, _) => {
+                        "That placed another copy; the step places no more.".to_owned()
+                    }
+                    (_, Some(last)) => {
+                        format!("That would draw on past {last}; the step ends there.")
+                    }
+                    (_, None) => "That point is more than the step asks for.".to_owned(),
                 },
                 take_back: "point",
-                place: None,
+                place: Some(now),
             })
         }
         _ => None,
@@ -276,7 +306,7 @@ pub fn after_point(
 /// `before`: a note when it is not one the step wants.
 pub fn after_pick(step: &StepPlan, before: Phase, tools: &Tools, place: usize) -> Option<Note> {
     let kind = step.kind()?;
-    if tools.running() != Some(kind) || !matches!(before, Phase::Pick(_) | Phase::Finish) {
+    if tools.running() != Some(kind) || !matches!(before, Phase::Pick(_) | Phase::EndPick) {
         return None;
     }
     let state = tools.state(false);
@@ -315,8 +345,28 @@ pub fn after_pick(step: &StepPlan, before: Phase, tools: &Tools, place: usize) -
     })
 }
 
+/// The step's operation as the drafting app's tool would send it, for Do it
+/// for me: an add on the current layer, in the space the page shows, when
+/// the operation leaves them to the drafter, as the tool's own add does.
+pub fn filled(operation: &serde_json::Value, tools: &Tools) -> serde_json::Value {
+    let mut op = operation.clone();
+    let adds = op
+        .get("op")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|name| name.starts_with("add_"));
+    if let (true, Some(map)) = (adds, op.as_object_mut()) {
+        if !map.contains_key("layer") {
+            map.insert("layer".to_owned(), serde_json::json!(tools.layer));
+        }
+        if let (false, Some(space)) = (map.contains_key("space"), &tools.context().space) {
+            map.insert("space".to_owned(), serde_json::json!(space));
+        }
+    }
+    op
+}
+
 /// The text height a Text step's operation gives, which the tool takes up
-/// when the step starts, so the text the drafter types is the step's.
+/// while the step runs, so the text the drafter types is the step's.
 pub fn text_height(step: &StepPlan) -> Option<f64> {
     if step.kind() != Some(ToolKind::Text) {
         return None;

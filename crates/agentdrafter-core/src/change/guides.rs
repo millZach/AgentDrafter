@@ -204,6 +204,9 @@ pub struct GuidesReport {
     pub set: String,
     /// The folder the guides are kept in.
     pub folder: String,
+    /// The journal's newest finished entry, which the steps are worked out
+    /// as of.
+    pub newest_entry: u64,
     pub message: String,
     /// Each guide, the oldest first.
     pub guides: Vec<GuideListed>,
@@ -933,7 +936,7 @@ pub fn guide_with(
     let folder = &request.set;
     read_set_settings(&folder.join(SET_SETTINGS_FILE))?;
     refuse_unfinished(folder, Unfinished::Proposals)?;
-    let given = read_guide(&request.guide)?;
+    let mut given = read_guide(&request.guide)?;
     let (sheet, walked) = walk_guide(
         folder,
         &given.sheet,
@@ -977,6 +980,13 @@ pub fn guide_with(
                 )
                 .at_field(format!("guide.steps[{s}]")));
             }
+        }
+    }
+    // A setting's layer is kept as the sheet names it, so the drafting app's
+    // Layer box shows it.
+    for (step, walked) in given.steps.iter_mut().zip(&walked) {
+        if let (Some(setting), Some(layer)) = (&mut step.setting, &walked.layer) {
+            setting.current_layer.clone_from(layer);
         }
     }
     let base_entry = newest(&journal::read_entries(folder)?);
@@ -1126,6 +1136,14 @@ pub fn guides_with(request: &GuidesRequest, settings: &Settings) -> Result<Guide
     Ok(GuidesReport {
         set: folder.display().to_string(),
         folder: store.display().to_string(),
+        // A commit still pending is not in place yet: as of the newest
+        // finished entry, the steps say what is.
+        newest_entry: entries
+            .iter()
+            .filter(|e| e.finished())
+            .map(|e| e.entry)
+            .max()
+            .unwrap_or(0),
         message,
         guides: listed,
     })
