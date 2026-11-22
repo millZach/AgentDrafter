@@ -322,9 +322,11 @@ test('what pulses, for every phase the renderer reports', () => {
 });
 
 test('starting one guide of a toast leaves the other’s Start', () => {
-  const toast = { key: 1, title: '2 guides given', guides: [1, 2] };
+  type Toast = { key: number; title: string; guides?: number[] };
+  const toast: Toast = { key: 1, title: '2 guides given', guides: [1, 2] };
+  const proposal: Toast = { key: 3, title: 'Proposal' };
   assert.deepEqual(toastAfterStart(toast, 1), { key: 1, title: '2 guides given', guides: [2] });
   assert.equal(toastAfterStart({ ...toast, guides: [2] }, 2), null);
-  assert.equal(toastAfterStart({ key: 3, title: 'Proposal' }, 1), null);
-  assert.equal(toastAfterStart(null, 1), null);
+  assert.equal(toastAfterStart(proposal, 1), null);
+  assert.equal(toastAfterStart<Toast>(null, 1), null);
 });
