@@ -308,7 +308,7 @@ pub(crate) fn handle_id(sheet: &str, handle: &str) -> String {
 /// case-insensitive volumes mounted on Linux, where `realpath` keeps the
 /// caller's spelling).
 pub(crate) fn sheet_name(source: &Path) -> String {
-    stem_of(&on_disk_path(source, None))
+    stem_of(&on_disk_path(source, file_id_of_path(source)))
 }
 
 fn stem_of(path: &Path) -> String {
@@ -317,41 +317,85 @@ fn stem_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// The file identity of a regular, non-symlink file at `path`, without
+/// following symlinks or Windows reparse points.
+#[cfg(unix)]
+fn regular_file_id_no_follow(path: &Path) -> Option<FileId> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    Some(crate::build::symlink_file_id(&meta))
+}
+
+#[cfg(windows)]
+fn regular_file_id_no_follow(path: &Path) -> Option<FileId> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(crate::build::win_file::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    let info = crate::build::win_file::file_info(&file)?;
+    let bad = crate::build::win_file::FILE_ATTRIBUTE_DIRECTORY
+        | crate::build::win_file::FILE_ATTRIBUTE_REPARSE_POINT;
+    if (info.file_attributes & bad) != 0 {
+        return None;
+    }
+    file_id_of_file(&file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn regular_file_id_no_follow(_path: &Path) -> Option<FileId> {
+    None
+}
+
 /// Resolves `source` to its canonical on-disk filename, scanning the parent
-/// directory and matching file identity (preferring exact filename, then
-/// Unicode case-folded match, then same-inode match) so that on
-/// case-insensitive volumes (including under Linux) the directory entry's
-/// stored letter case wins over the caller's spelling.
-fn on_disk_path(source: &Path, source_id: Option<FileId>) -> PathBuf {
+/// directory for regular non-symlink entries matching `target_id`, sorted
+/// deterministically by filename before preferring:
+/// 1. exact filename match,
+/// 2. Unicode case-folded match (`to_lowercase` or `to_uppercase`),
+/// 3. the lexicographically first same-inode entry.
+fn on_disk_path(source: &Path, target_id: Option<FileId>) -> PathBuf {
     let resolved = fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
     let (Some(parent), Some(wanted_name)) = (resolved.parent(), resolved.file_name()) else {
         return resolved;
     };
-    let Some(target_id) = source_id.or_else(|| file_id_of_path(&resolved)) else {
+    let Some(target_id) = target_id else {
         return resolved;
     };
-    let wanted_lower = wanted_name.to_string_lossy().to_lowercase();
     let Ok(entries) = fs::read_dir(parent) else {
         return resolved;
     };
-    let mut unicode_match: Option<PathBuf> = None;
-    let mut inode_match: Option<PathBuf> = None;
+    let mut matches: Vec<std::ffi::OsString> = Vec::new();
     for entry in entries.flatten() {
-        let entry_path = entry.path();
-        if file_id_of_path(&entry_path) != Some(target_id) {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() || file_type.is_dir() || !file_type.is_file() {
             continue;
         }
-        let name = entry.file_name();
-        if name == wanted_name {
-            return parent.join(name);
-        }
-        if unicode_match.is_none() && name.to_string_lossy().to_lowercase() == wanted_lower {
-            unicode_match = Some(parent.join(name));
-        } else if inode_match.is_none() {
-            inode_match = Some(parent.join(name));
+        if regular_file_id_no_follow(&entry.path()) == Some(target_id) {
+            matches.push(entry.file_name());
         }
     }
-    unicode_match.or(inode_match).unwrap_or(resolved)
+    if matches.is_empty() {
+        return resolved;
+    }
+    matches.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+    if let Some(exact) = matches.iter().find(|name| name.as_os_str() == wanted_name) {
+        return parent.join(exact);
+    }
+    let wanted_str = wanted_name.to_string_lossy();
+    let wanted_lower = wanted_str.to_lowercase();
+    let wanted_upper = wanted_str.to_uppercase();
+    if let Some(folded) = matches.iter().find(|name| {
+        let s = name.to_string_lossy();
+        s.to_lowercase() == wanted_lower || s.to_uppercase() == wanted_upper
+    }) {
+        return parent.join(folded);
+    }
+    parent.join(&matches[0])
 }
 
 /// Whether `source` is read as a DWG: its name ends `.dwg`, in any case.
@@ -955,10 +999,11 @@ fn plural(n: usize) -> &'static str {
 
 /// Whether `c` is a YAML 1.2 §5.1 printable non-line-break character
 /// (`0x20..=0x7E`, `0xA0..=0xD7FF`, `0xE000..=0xFFFD`, `0x10000..=0x10FFFF`),
-/// additionally excluding Unicode line/paragraph separators (`U+2028`,
-/// `U+2029`) that YAML 1.1 treats as line breaks.
+/// additionally excluding `U+FEFF` (BOM, forbidden by YAML 1.2 §6.6 comments)
+/// and Unicode line/paragraph separators (`U+2028`, `U+2029`) that YAML 1.1
+/// treats as line breaks.
 fn is_yaml12_safe_single_line(c: char) -> bool {
-    !matches!(c, '\u{2028}' | '\u{2029}')
+    !matches!(c, '\u{2028}' | '\u{2029}' | '\u{FEFF}')
         && matches!(
             c as u32,
             0x20..=0x7E | 0xA0..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
@@ -1173,8 +1218,8 @@ fn pair(key: &str, value: &Value) -> String {
 
 /// `text` in double quotes, escaped as JSON escapes it plus every character
 /// outside YAML 1.2 §5.1 printable non-line-break characters (C0, DEL
-/// `U+007F`, C1 `U+0080..=U+009F`, `U+2028`, `U+2029`, `U+FFFE`, `U+FFFF`),
-/// so YAML 1.1 and 1.2 always read it back as `text` on one line.
+/// `U+007F`, C1 `U+0080..=U+009F`, `U+2028`, `U+2029`, `U+FEFF`, `U+FFFE`,
+/// `U+FFFF`), so YAML 1.1 and 1.2 always read it back as `text` on one line.
 fn quoted(text: &str) -> String {
     let raw = serde_json::to_string(text).unwrap_or_default();
     if raw.chars().all(is_yaml12_safe_single_line) {

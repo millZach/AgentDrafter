@@ -1189,11 +1189,7 @@ fn undecoded_non_graphical(
             ClassObjectData::CsacDocumentOptions(options) if options.raw_dwg_data.is_some() => {
                 Some((data.handle, "CSACDOCUMENTOPTIONS".to_owned()))
             }
-            ClassObjectData::VbaProject(vba)
-                if vba.storage.compound_file.is_none()
-                    && vba.storage.leading_records.is_empty()
-                    && vba.storage.trailing_records.is_empty() =>
-            {
+            ClassObjectData::VbaProject(vba) if vba.storage.compound_file.is_none() => {
                 Some((data.handle, "VBA_PROJECT".to_owned()))
             }
             _ => None,
@@ -2222,26 +2218,62 @@ fn has_ac21_skipped_page_notification(drawing: &CadDocument) -> bool {
     })
 }
 
+/// Whether an error notification message from acadrust is an intentionally
+/// preserved auxiliary record (`auxiliary-object-preserved`) rather than
+/// corruption.
+fn is_auxiliary_preserved_error(
+    message: &str,
+    auxiliary_messages: &std::collections::HashSet<&str>,
+) -> bool {
+    auxiliary_messages.contains(message) || message.starts_with("Preserved auxiliary object ")
+}
+
 /// Why a strict read must refuse `(drawing, stats)`, if at all.
 ///
 /// Acadrust intentionally preserves unsupported auxiliary payloads as raw
 /// bytes in strict mode (`auxiliary-object-preserved`), emitting an error
 /// notification without skipping the record; those stay readable in strict
 /// mode (while still setting `decoded: false` and listing the record in
-/// `not_decoded`). Actual corruption—unreadable object streams, skipped
-/// records, failed/truncated sections, AC1021 zero-filled corrupt pages, or
-/// error notifications beyond preserved auxiliary objects—is refused.
+/// `not_decoded`), even when 1,000+ preserved auxiliary records hit the 999
+/// diagnostic cap (`diagnostic-limit-reached`). Actual corruption—unreadable
+/// object streams, skipped records, failed/truncated sections, AC1021
+/// zero-filled corrupt pages, or error notifications/diagnostics beyond
+/// preserved auxiliary objects—is refused.
 fn strict_read_rejection(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Option<String> {
+    let auxiliary_messages: std::collections::HashSet<&str> = stats
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "auxiliary-object-preserved")
+        .map(|d| d.message.as_str())
+        .collect();
     let auxiliary_preserved = stats
         .diagnostics
         .iter()
         .filter(|d| d.code == "auxiliary-object-preserved")
         .count();
+    let diagnostics_capped = stats
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "diagnostic-limit-reached");
+    let has_other_record_error_diag = stats.diagnostics.iter().any(|d| {
+        matches!(
+            d.code.as_str(),
+            "record-catalog-failed" | "record-read-failed" | "record-decode-failed"
+        )
+    });
+    let has_non_auxiliary_error_notification = drawing.notifications.iter().any(|n| {
+        n.notification_type == acadrust::notification::NotificationType::Error
+            && !is_auxiliary_preserved_error(&n.message, &auxiliary_messages)
+    });
+    let uncounted_errors = !(diagnostics_capped && auxiliary_preserved > 0)
+        && (drawing.notifications.error_count() > auxiliary_preserved
+            || stats.recovered_errors > auxiliary_preserved);
     let corrupt = stats.skipped_source_records > 0
         || has_section_failure_or_truncation(stats)
         || has_ac21_skipped_page_notification(drawing)
-        || drawing.notifications.error_count() > auxiliary_preserved
-        || stats.recovered_errors > auxiliary_preserved;
+        || has_other_record_error_diag
+        || has_non_auxiliary_error_notification
+        || uncounted_errors;
     if !corrupt {
         return None;
     }
@@ -2265,7 +2297,7 @@ fn first_read_error(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Optio
         .iter()
         .find(|n| {
             n.notification_type == acadrust::notification::NotificationType::Error
-                && !auxiliary_messages.contains(n.message.as_str())
+                && !is_auxiliary_preserved_error(&n.message, &auxiliary_messages)
         })
         .map(|n| n.message.clone())
         .or_else(|| {
@@ -2815,8 +2847,9 @@ mod tests {
 
         // Opaque non-graphical objects: Arch, ProxyObject, RegisteredClass,
         // DgnLineStyle with undecoded_fields or Registered payload,
-        // VbaProject with empty/external storage, CsacDocumentOptions with
-        // raw_dwg_data, and incomplete XRecord.
+        // VbaProject with empty or raw-only (failed compound-file) storage,
+        // CsacDocumentOptions with raw_dwg_data, and incomplete XRecord.
+        use acadrust::compound_file::StructuredStoragePayload;
         use acadrust::objects::{DgnLineStyleData, DgnLineStyleObject, VbaProject};
         let h_arch = next_h();
         let h_proxy = next_h();
@@ -2824,6 +2857,7 @@ mod tests {
         let h_lsdef = next_h();
         let h_lsreg = next_h();
         let h_vba = next_h();
+        let h_vba_raw = next_h();
         let h_csac = next_h();
         let h_xrec = next_h();
         let obj_cases: Vec<(&str, Handle, ObjectType)> = vec![
@@ -2902,6 +2936,21 @@ mod tests {
                     xdictionary_handle: None,
                     data: ClassObjectData::VbaProject(VbaProject {
                         storage: Default::default(),
+                    }),
+                }),
+            ),
+            (
+                "VBA_PROJECT",
+                h_vba_raw,
+                ObjectType::ClassObject(ClassObject {
+                    handle: h_vba_raw,
+                    owner: Handle::NULL,
+                    reactors: Vec::new(),
+                    xdictionary_handle: None,
+                    data: ClassObjectData::VbaProject(VbaProject {
+                        // Failed compound-file decode keeps raw bytes in
+                        // `leading_records` with `compound_file: None`.
+                        storage: StructuredStoragePayload::decode(&[0xDE, 0xAD, 0xBE, 0xEF]),
                     }),
                 }),
             ),
@@ -3149,6 +3198,78 @@ mod tests {
         assert!(
             strict_read_rejection(&drawing, &sec_stats).is_some(),
             "named section failure must reject strict read"
+        );
+
+        // 1,000 intentionally preserved auxiliary records hit the 999
+        // diagnostic cap (`diagnostic-limit-reached`) while recording all
+        // 1,000 in `notifications.error_count()` / `recovered_errors`: strict
+        // mode MUST accept them (no false `read_past_damage`), while
+        // `decode_report` still marks `decoded: false`,
+        // `diagnostics_truncated: true`, and lists the 999 retained records in
+        // `not_decoded`.
+        let mut aux_cap_doc = CadDocument::with_version(NEW_SHEET_VERSION);
+        let mut aux_cap_diags = Vec::with_capacity(1_000);
+        for i in 0..1_000u64 {
+            let handle = 0x1000 + i;
+            let msg = format!(
+                "Preserved auxiliary object ACDBASSOCDEPENDENCY at handle {handle:#X}, \
+                 type_code=512 as raw DWG data after decode failure: test"
+            );
+            aux_cap_doc
+                .notifications
+                .notify(acadrust::notification::NotificationType::Error, msg.clone());
+            if i < 999 {
+                let mut d =
+                    ReadDiagnostic::new("auxiliary-object-preserved", ReadStage::RecordStream, msg);
+                d.record_handle = Some(handle);
+                d.record_type = Some("ACDBASSOCDEPENDENCY".into());
+                aux_cap_diags.push(d);
+            }
+        }
+        aux_cap_diags.push(ReadDiagnostic::new(
+            "diagnostic-limit-reached",
+            ReadStage::RecordStream,
+            "Additional reader diagnostics were omitted after the safety limit",
+        ));
+        let aux_cap_stats = acadrust::ReadStats {
+            stream_completed: true,
+            record_stream_read: true,
+            source_records: 1_010,
+            decoded_source_records: 1_010,
+            recovered_errors: aux_cap_doc.notifications.error_count(),
+            diagnostics: aux_cap_diags,
+            ..Default::default()
+        };
+        assert_eq!(aux_cap_stats.recovered_errors, 1_000);
+        assert_eq!(
+            strict_read_rejection(&aux_cap_doc, &aux_cap_stats),
+            None,
+            "1,000 preserved auxiliary records hitting diagnostic cap must not reject strict read"
+        );
+        let (rep, _) = decode_report(&aux_cap_doc, &aux_cap_stats);
+        assert!(!rep.decoded, "{rep:?}");
+        assert!(rep.diagnostics_truncated, "{rep:?}");
+        assert_eq!(rep.recovered_errors, 1_000, "{rep:?}");
+        assert_eq!(rep.not_decoded.len(), 1, "{rep:?}");
+        assert_eq!(rep.not_decoded[0].kind, "ACDBASSOCDEPENDENCY");
+        assert_eq!(rep.not_decoded[0].count, 999);
+        assert_eq!(rep.not_decoded[0].handles.len(), 999);
+
+        // If a non-auxiliary error notification is also present beside capped
+        // preserved auxiliary diagnostics, strict mode MUST still reject.
+        let mut mixed_doc = CadDocument::with_version(NEW_SHEET_VERSION);
+        mixed_doc.notifications.notify(
+            acadrust::notification::NotificationType::Error,
+            "Corrupt record payload",
+        );
+        for n in aux_cap_doc.notifications.iter().take(999) {
+            mixed_doc
+                .notifications
+                .notify(n.notification_type, n.message.clone());
+        }
+        assert!(
+            strict_read_rejection(&mixed_doc, &aux_cap_stats).is_some(),
+            "non-auxiliary error beside capped preserved auxiliary diagnostics must reject strict read"
         );
     }
 

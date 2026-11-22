@@ -428,6 +428,8 @@ fn a_string_is_written_plain_only_where_yaml_reads_it_back_the_same() {
         "a\u{0085}b",
         "del\u{007F}char",
         "c1\u{0080}ctrl\u{009F}",
+        "bom\u{FEFF}char",
+        "\u{FEFF}leading",
         "nonchar\u{FFFE}and\u{FFFF}",
         "é",
     ] {
@@ -439,6 +441,7 @@ fn a_string_is_written_plain_only_where_yaml_reads_it_back_the_same() {
         );
         assert_eq!(parse_yaml_scalar(&out), tricky, "{tricky:?} -> {out}");
     }
+    assert_eq!(scalar("bom\u{FEFF}char"), "\"bom\\uFEFFchar\"");
 }
 
 #[test]
@@ -452,6 +455,7 @@ fn a_filename_with_newlines_or_yaml_punctuation_never_breaks_the_mirror_yaml() {
         "cr\rname.dwg",
         "sep\u{2028}line.dwg",
         "del\u{007F}and\u{0080}c1\u{009F}.dwg",
+        "bom\u{FEFF}name.dwg",
         "nonchar\u{FFFE}and\u{FFFF}.dwg",
         "~special: #1 \"q\".dwg",
     ] {
@@ -769,5 +773,60 @@ fn a_damaged_original_is_read_past_its_damage_which_the_reply_names() {
             "\nnot_read: [{{kind: LINE, count: 1, handles: [\"{handle}\"]}}]\n"
         )),
         "{text}"
+    );
+}
+
+#[test]
+fn on_disk_path_prefers_unicode_case_fold_and_breaks_hard_link_ties_deterministically() {
+    let dir = scratch("on-disk-casefold");
+    let strasse = dir.join("Straße.dwg");
+    fs::write(&strasse, b"stub").unwrap();
+    let target_id = file_id_of_path(&strasse);
+    assert!(target_id.is_some());
+
+    // Create hard links that sort before and after `Straße.dwg` (plus a
+    // symlink that sorts even earlier, which must be ignored).
+    let aaa = dir.join("AAA.dwg");
+    let zzz = dir.join("ZZZ.dwg");
+    fs::hard_link(&strasse, &aaa).unwrap();
+    fs::hard_link(&strasse, &zzz).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&strasse, dir.join("000-link.dwg")).unwrap();
+
+    // 1. Exact match wins over lexicographically smaller hard link.
+    assert_eq!(
+        on_disk_path(&zzz, target_id).file_name().unwrap(),
+        "ZZZ.dwg"
+    );
+
+    // 2. Unicode case-fold match (`STRASSE.dwg` <-> `Straße.dwg`, where
+    //    `to_lowercase()` differs but `to_uppercase()` matches) wins over
+    //    lexicographically smaller hard link `AAA.dwg`.
+    let upper_query = dir.join("STRASSE.dwg");
+    assert_eq!(
+        on_disk_path(&upper_query, target_id).file_name().unwrap(),
+        "Straße.dwg"
+    );
+
+    // 3. Reverse direction: querying `Straße.dwg` against `STRASSE.dwg` + `AAA.dwg`.
+    let dir2 = scratch("on-disk-casefold-rev");
+    let upper_disk = dir2.join("STRASSE.dwg");
+    fs::write(&upper_disk, b"stub").unwrap();
+    let target_id2 = file_id_of_path(&upper_disk);
+    fs::hard_link(&upper_disk, dir2.join("AAA.dwg")).unwrap();
+    assert_eq!(
+        on_disk_path(&dir2.join("Straße.dwg"), target_id2)
+            .file_name()
+            .unwrap(),
+        "STRASSE.dwg"
+    );
+
+    // 4. Unrelated query falls back deterministically to the lexicographically
+    //    smallest regular non-symlink same-inode entry (`AAA.dwg`, never
+    //    `000-link.dwg` and independent of `readdir` order).
+    let unrelated = dir.join("UNRELATED.dwg");
+    assert_eq!(
+        on_disk_path(&unrelated, target_id).file_name().unwrap(),
+        "AAA.dwg"
     );
 }
