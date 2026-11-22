@@ -2513,6 +2513,29 @@ pub(crate) fn as_original_with_layout_setup(
     std::fs::write(out, bytes).expect("the DWG is saved");
 }
 
+/// Only for tests: mutates a built DWG (stripped of build mark and AgentDrafter
+/// extended data) with direct access to its `CadDocument` and saves it to `out`.
+#[cfg(test)]
+pub(crate) fn as_original_with_document(
+    dwg: &Path,
+    out: &Path,
+    edit: impl FnOnce(&mut CadDocument),
+) {
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    drawing
+        .summary_info
+        .custom_properties
+        .retain(|(name, _)| name != BUILD_MARK);
+    for entity in drawing.entities_mut() {
+        let common = entity.common_mut();
+        common.extended_data = Default::default();
+        common.raw_record = None;
+    }
+    edit(&mut drawing);
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+    std::fs::write(out, bytes).expect("the DWG is saved");
+}
+
 /// Only for tests: writes `dwg` to `out` with the first two model-space
 /// objects carrying the same AgentDrafter `name` (with distinct IDs).
 #[cfg(test)]

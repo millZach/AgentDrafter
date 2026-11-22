@@ -595,8 +595,11 @@ fn read_through_the_registry_never_triggers_drawing_set_journal_recovery() {
     assert!(mirror.is_file());
     assert_eq!(every_file(&set), before, "read left set untouched");
 
-    // `query` and `check` on a DWG must ALSO be strictly read-only and never
-    // trigger drawing-set journal recovery.
+    // `query` and `check` on a DWG are strictly read-only and never trigger
+    // drawing-set journal recovery. `query find` reads only the DWG itself and
+    // succeeds; `query layout` and `check` need the set's template paper for a
+    // built DWG, so they refuse an unfinished commit (ADR-0005) without
+    // modifying the set.
     let reply = run(
         "query",
         json!({"source": dwg, "query": {"kind": "find", "id": "DEMO-001/border"}}),
@@ -604,12 +607,51 @@ fn read_through_the_registry_never_triggers_drawing_set_journal_recovery() {
     assert_eq!(reply["ok"], true, "{reply}");
     assert!(reply.get("rolled_back").is_none(), "{reply}");
     assert_eq!(reply["result"]["count"], 1, "{reply}");
-    assert_eq!(every_file(&set), before, "query on DWG left set untouched");
+    assert_eq!(
+        every_file(&set),
+        before,
+        "query find on DWG left set untouched"
+    );
+
+    let reply = run("query", json!({"source": dwg, "query": {"kind": "layout"}}));
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(reply["error"]["code"], "rollback_failed", "{reply}");
+    assert!(reply.get("rolled_back").is_none(), "{reply}");
+    assert_eq!(
+        every_file(&set),
+        before,
+        "query layout on built DWG in pending set left set untouched"
+    );
 
     let reply = run("check", json!({"source": dwg}));
-    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(reply["error"]["code"], "rollback_failed", "{reply}");
     assert!(reply.get("rolled_back").is_none(), "{reply}");
-    assert_eq!(every_file(&set), before, "check on DWG left set untouched");
+    assert_eq!(
+        every_file(&set),
+        before,
+        "check on built DWG in pending set left set untouched"
+    );
+
+    // A standalone original (built from a sheet description on its own, no set
+    // in its build mark) still succeeds cleanly beside the pending set.
+    let solo_yaml = dir.join("solo.yaml");
+    std::fs::write(
+        &solo_yaml,
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [10, 0, 0]}\n",
+    )
+    .unwrap();
+    assert_eq!(run("build", json!({"source": solo_yaml}))["ok"], true);
+    let solo_dwg = dir.join("solo.dwg");
+    assert_eq!(
+        run(
+            "query",
+            json!({"source": solo_dwg, "query": {"kind": "layout"}})
+        )["ok"],
+        true
+    );
+    assert_eq!(run("check", json!({"source": solo_dwg}))["ok"], true);
+    assert_eq!(every_file(&set), before, "pending set still untouched");
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

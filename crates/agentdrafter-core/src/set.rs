@@ -375,10 +375,14 @@ pub(crate) struct DwgSet {
 /// was built from, since its output folder is not where the DWG is. The
 /// words name the set as the mark writes it, never by its path in full.
 pub(crate) fn set_of_dwg(dwg: &Path) -> Result<DwgSet, String> {
-    set_of_dwg_with_mark(dwg, dwg::build_mark(dwg))
+    set_of_dwg_with_mark(dwg, None, dwg::build_mark(dwg))
 }
 
-fn set_of_dwg_with_mark(dwg: &Path, mark: Option<dwg::BuildMark>) -> Result<DwgSet, String> {
+fn set_of_dwg_with_mark(
+    dwg: &Path,
+    source_id: Option<crate::build::FileId>,
+    mark: Option<dwg::BuildMark>,
+) -> Result<DwgSet, String> {
     let Some(mark) = mark else {
         return Err(NO_MARK.to_owned());
     };
@@ -394,7 +398,7 @@ fn set_of_dwg_with_mark(dwg: &Path, mark: Option<dwg::BuildMark>) -> Result<DwgS
     folders.dedup();
     let mut why = None;
     for folder in folders {
-        match set_at(folder, dwg, &written) {
+        match set_at(folder, dwg, source_id, &written) {
             Ok(set) => {
                 return Ok(DwgSet {
                     rows: mark.rows,
@@ -416,7 +420,12 @@ fn set_of_dwg_with_mark(dwg: &Path, mark: Option<dwg::BuildMark>) -> Result<DwgS
 
 /// The drawing set at `folder`, which the build mark of the DWG at `dwg`
 /// names as `written`, if it is the set the DWG was built from.
-fn set_at(folder: PathBuf, dwg: &Path, written: &str) -> Result<DwgSet, String> {
+fn set_at(
+    folder: PathBuf,
+    dwg: &Path,
+    source_id: Option<crate::build::FileId>,
+    written: &str,
+) -> Result<DwgSet, String> {
     let named =
         format!("the drawing set the DWG's build mark names, `{written}` from the DWG's folder,");
     let settings_file = folder.join(SET_SETTINGS_FILE);
@@ -433,7 +442,7 @@ fn set_at(folder: PathBuf, dwg: &Path, written: &str) -> Result<DwgSet, String> 
         dwg.file_stem().unwrap_or_default().to_string_lossy()
     );
     let built = folder.join(&settings.output).join(&name);
-    if !is_same_file(&built, dwg) {
+    if !crate::build::is_same_file_id(&built, dwg, source_id) {
         return Err(format!(
             "{named} is no longer the set the DWG was built from: its DWGs go to its output \
              folder, `{}`, and this DWG is not its `{name}` there, so the DWG has been copied or \
@@ -483,14 +492,19 @@ pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<DwgPaper> {
 
 /// Same as [`paper_of_dwg`], reading the build mark from `bytes` already
 /// loaded from `dwg` and matching rows against `source_id` captured from that
-/// same opened handle so the DWG file is never opened a second time.
+/// same opened handle so the DWG file is never opened a second time. Refuses
+/// with [`ErrorCode::RollbackFailed`] without modifying the set when the set
+/// the DWG belongs to holds an unfinished journal commit (ADR-0005).
 pub(crate) fn paper_of_dwg_bytes(
     dwg: &Path,
     source_id: Option<crate::build::FileId>,
     bytes: &[u8],
-) -> Option<DwgPaper> {
-    let set = set_of_dwg_with_mark(dwg, dwg::build_mark_bytes(bytes)).ok()?;
-    paper_of_dwg_in(dwg, source_id, set)
+) -> Result<Option<DwgPaper>, Error> {
+    let Ok(set) = set_of_dwg_with_mark(dwg, source_id, dwg::build_mark_bytes(bytes)) else {
+        return Ok(None);
+    };
+    crate::change::refuse_unfinished(&set.folder, crate::change::Unfinished::BuiltDwg)?;
+    Ok(paper_of_dwg_in(dwg, source_id, set))
 }
 
 fn paper_of_dwg_in(

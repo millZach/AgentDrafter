@@ -19,6 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{is_false, layer_zero, Paper, Point3, Properties};
+use crate::units::Unit;
 
 /// A paper-space layout a sheet is drawn in, as AutoCAD's layout tab holds
 /// it: its name, its paper, and which of the sheet's objects are in its
@@ -80,6 +81,10 @@ pub(crate) struct CheckPaper {
     /// `[0.0, 0.0]` for full-bleed zero-margin/zero-origin layouts, or shifted
     /// by negative margin and plot origin when non-zero.
     pub origin: [f64; 2],
+    /// The physical unit of this layout's paper-space drawing units (from
+    /// `plot_paper_units`, or the drawing's declared unit for a cross-unit 1:1
+    /// setup such as `1:25.4` or `25.4:1`).
+    pub unit: Unit,
 }
 
 /// Stored page setup and checkable paper metadata for one layout read from a
@@ -88,6 +93,8 @@ pub(crate) struct CheckPaper {
 pub(crate) struct DwgLayoutSetup {
     pub page_setup: Option<DwgPageSetup>,
     pub check_paper: Option<CheckPaper>,
+    /// The layout's own `plot_paper_units` (`In` or `Mm`), when valid.
+    pub paper_unit: Option<Unit>,
     /// Why `paper_size` and `off_sheet` cannot be checked on this layout when
     /// `check_paper` is `None`.
     pub skip_reason: Option<String>,

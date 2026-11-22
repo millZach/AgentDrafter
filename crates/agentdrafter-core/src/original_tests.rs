@@ -2188,3 +2188,529 @@ fn query_reports_ambiguous_carried_name_with_all_matching_ids() {
         err.message
     );
 }
+
+#[test]
+fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_tolerance() {
+    let dir = scratch("custom-paper-and-layout-units");
+
+    // 1. Custom 420.4 x 297.0 mm sheet (0.4 mm wider than ISO A3) with an
+    //    exact-fitting border: check must keep exact stored dimensions (not
+    //    snap to 420 x 297) so paper_size and off_sheet pass.
+    let custom_yaml = dir.join("custom-420-4.yaml");
+    fs::write(
+        &custom_yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: Custom}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [420.4, 0, 0], [420.4, 297, 0], [0, 297, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: custom_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let custom_dwg = dir.join("CUSTOM-420-4.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("custom-420-4.dwg"),
+        &custom_dwg,
+        "Custom",
+        false,
+        |l| {
+            l.paper_size = "UserDefinedMetric (420.40 x 297.00MM)".to_owned();
+            l.paper_width = 420.4;
+            l.paper_height = 297.0;
+        },
+    );
+    let checked = check_with(
+        &CheckRequest {
+            source: custom_dwg.clone(),
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(checked.passed, "{:#?}", checked.findings);
+    assert!(checked.checks_skipped.is_empty());
+    let layout_q = query_with(
+        &QueryRequest {
+            source: custom_dwg,
+            sheet: None,
+            query: Query::Layout,
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Layout { layouts, .. } = layout_q.answer else {
+        panic!("layout")
+    };
+    let paper = layouts[0].paper.as_ref().expect("custom paper reported");
+    assert_eq!(paper.name, None);
+    assert!((paper.width - 420.4).abs() < 1e-9);
+    assert!((paper.height - 297.0).abs() < 1e-9);
+
+    // 2. INSUNITS = mm with inch plot_paper_units (0) at 1:1 (ANSI B 17 x 11
+    //    drawn in inches in paper space): accepted as a valid 1:1 inch layout
+    //    with inch tolerance (0.01 / 25.4).
+    let mm_with_inch_layout = dir.join("mm-inch-layout.yaml");
+    fs::write(
+        &mm_with_inch_layout,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: InchTab}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: mm_with_inch_layout,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let mm_inch_dwg = dir.join("MM-INSUNITS-INCH-LAYOUT.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("mm-inch-layout.dwg"),
+        &mm_inch_dwg,
+        "InchTab",
+        false,
+        |l| {
+            l.paper_size = "ANSI_B_(17.00_x_11.00_Inches)".to_owned();
+            l.paper_width = 17.0 * 25.4;
+            l.paper_height = 11.0 * 25.4;
+            l.plot_paper_units = 0; // inches
+            l.plot_scale_numerator = 1.0;
+            l.plot_scale_denominator = 1.0;
+        },
+    );
+    let checked = check_with(
+        &CheckRequest {
+            source: mm_inch_dwg,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(checked.passed, "{:#?}", checked.findings);
+    assert!(checked.checks_skipped.is_empty());
+    let inch_tol = 0.01 / 25.4;
+    assert!(
+        (checked.tolerance - inch_tol).abs() < 1e-12,
+        "expected inch tolerance {inch_tol}, got {}",
+        checked.tolerance
+    );
+
+    // 3. Unitless (INSUNITS = 0) inch layout at 1:1 with border oversized by
+    //    0.005 in (> 0.01 mm = 0.0003937 in, yet < 0.01 in): must use inch
+    //    tolerance and FAIL paper_size and off_sheet!
+    let tiny_over_yaml = dir.join("unitless-inch-tol.yaml");
+    fs::write(
+        &tiny_over_yaml,
+        "units: in\n\
+         paper: ANSI B landscape\n\
+         layout: {name: InchTol}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [17.005, 0, 0], [17.005, 11, 0], [0, 11, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: tiny_over_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let tiny_over_dwg = dir.join("UNITLESS-INCH-TOL.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("unitless-inch-tol.dwg"),
+        &tiny_over_dwg,
+        "InchTol",
+        true,
+        |_| {},
+    );
+    let checked = check_with(
+        &CheckRequest {
+            source: tiny_over_dwg,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(
+        (checked.tolerance - inch_tol).abs() < 1e-12,
+        "expected inch tolerance {inch_tol}, got {}",
+        checked.tolerance
+    );
+    assert!(
+        !checked.passed,
+        "0.005 in overshoot must fail 0.01 mm tolerance"
+    );
+    assert!(checked.findings.iter().any(|f| f.rule == Rule::PaperSize));
+    assert!(checked.findings.iter().any(|f| f.rule == Rule::OffSheet));
+}
+
+#[test]
+fn inactive_empty_configured_layout_is_kept_and_checked_while_blank_default_is_skipped() {
+    let dir = scratch("inactive-empty-layout");
+    let yaml = dir.join("base.yaml");
+    fs::write(
+        &yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: Active}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [420, 0, 0], [420, 297, 0], [0, 297, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let dwg_path = dir.join("INACTIVE-EMPTY.dwg");
+    dwg::as_original_with_document(&dir.join("base.dwg"), &dwg_path, |doc| {
+        doc.add_layout("EmptyConfigured").unwrap();
+        doc.add_layout("BlankDefault").unwrap();
+        for obj in doc.objects.values_mut() {
+            if let acadrust::objects::ObjectType::Layout(l) = obj {
+                if l.name == "EmptyConfigured" {
+                    l.plot_printer_name = "DWG To PDF.pc3".to_owned();
+                    l.paper_size = "Custom_420x297_MM".to_owned();
+                    l.paper_width = 420.4;
+                    l.paper_height = 297.0;
+                    l.plot_paper_units = 1;
+                    l.plot_type = 5;
+                    l.plot_scale_numerator = 1.0;
+                    l.plot_scale_denominator = 1.0;
+                    l.plot_margin_left = 5.0;
+                    l.plot_margin_bottom = 5.0;
+                    l.plot_margin_right = 5.0;
+                    l.plot_margin_top = 5.0;
+                } else if l.name == "BlankDefault" {
+                    l.plot_printer_name = "none_device".to_owned();
+                    l.paper_size = "ANSI_A_(8.50_x_11.00_Inches)".to_owned();
+                    l.paper_width = 215.9;
+                    l.paper_height = 279.4;
+                    l.plot_style_sheet = String::new();
+                }
+            }
+        }
+    });
+
+    let layout_q = query_with(
+        &QueryRequest {
+            source: dwg_path.clone(),
+            sheet: None,
+            query: Query::Layout,
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Layout { layouts, .. } = layout_q.answer else {
+        panic!("layout")
+    };
+    let names: Vec<Option<&str>> = layouts.iter().map(|l| l.layout.as_deref()).collect();
+    assert_eq!(names, vec![Some("Active"), Some("EmptyConfigured")]);
+    assert!(
+        layouts[1]
+            .paper
+            .as_ref()
+            .is_some_and(|p| (p.width - 420.4).abs() < 1e-9),
+        "{:#?}",
+        layouts[1]
+    );
+
+    let checked = check_with(
+        &CheckRequest {
+            source: dwg_path,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(!checked.passed);
+    assert!(
+        checked
+            .findings
+            .iter()
+            .any(|f| f.layout.as_deref() == Some("EmptyConfigured") && f.rule == Rule::PaperSize),
+        "expected empty-paper PaperSize finding on EmptyConfigured: {:#?}",
+        checked.findings
+    );
+
+    // Conversely, a model-space-only drawing saved on Model space whose empty
+    // Layout1 merely carries a template printer/paper must remain model-space-only
+    // (never hijacking render/plot/check onto an empty layout).
+    let model_yaml = dir.join("model-only.yaml");
+    fs::write(
+        &model_yaml,
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [100, 0, 0]}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: model_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let model_dwg = dir.join("MODEL-WITH-TEMPLATE-LAYOUT.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("model-only.dwg"),
+        &model_dwg,
+        "Layout1",
+        false,
+        |l| {
+            l.plot_printer_name = "DWG To PDF.pc3".to_owned();
+            l.paper_size = "ANSI_A_(8.50_x_11.00_Inches)".to_owned();
+            l.paper_width = 215.9;
+            l.paper_height = 279.4;
+            l.plot_paper_units = 0;
+            l.plot_type = 5;
+            l.plot_scale_numerator = 1.0;
+            l.plot_scale_denominator = 1.0;
+            l.plot_margin_left = 6.35;
+            l.plot_margin_bottom = 6.35;
+            l.plot_margin_right = 6.35;
+            l.plot_margin_top = 6.35;
+        },
+    );
+    let model_layout = query_with(
+        &QueryRequest {
+            source: model_dwg,
+            sheet: None,
+            query: Query::Layout,
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Layout { layouts, .. } = model_layout.answer else {
+        panic!("layout")
+    };
+    assert_eq!(layouts.len(), 1);
+    assert_eq!(
+        layouts[0].layout, None,
+        "model-space-only drawing must not be hijacked by an untouched empty Layout1"
+    );
+}
+
+#[test]
+fn plot_and_render_do_not_regress_on_unitless_inch_layouts() {
+    use crate::draw::PageFrom;
+    use crate::plot::{plot_with, PlotRequest};
+    use crate::render::{render_with, RenderRequest};
+
+    let dir = scratch("unitless-inch-plot-render");
+    let inch_yaml = dir.join("inch.yaml");
+    fs::write(
+        &inch_yaml,
+        "units: in\n\
+         paper: ANSI B landscape\n\
+         layout: {name: InchTab}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: inch_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let unitless_inch = dir.join("UNITLESS-INCH.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("inch.dwg"),
+        &unitless_inch,
+        "InchTab",
+        true,
+        |_| {},
+    );
+
+    // `read_paper` must NOT classify a unitless 1:1 inch layout as a 17 x 11 mm
+    // page in `Layout.paper`.
+    let read = crate::read_dwg(&unitless_inch).unwrap();
+    assert_eq!(read.units, None);
+    assert!(
+        read.layout.as_ref().unwrap().paper.is_none(),
+        "unitless 1:1 inch layout must not set Layout.paper to 17x11 mm: {:?}",
+        read.layout
+    );
+
+    // Plotting it must not claim a 17 x 11 mm declared paper page.
+    let pdf = dir.join("unitless-inch.pdf");
+    let plotted = plot_with(
+        &PlotRequest {
+            output: Some(pdf.clone()),
+            ..PlotRequest::new(&unitless_inch)
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(plotted.units, None);
+    assert_eq!(
+        plotted.page,
+        PageFrom::Extents,
+        "must not claim a 17 x 11 mm declared paper: {:?}",
+        plotted
+    );
+
+    // Rendering still succeeds cleanly.
+    let png = dir.join("unitless-inch.png");
+    let rendered = render_with(
+        &RenderRequest {
+            output: Some(png),
+            ..RenderRequest::new(&unitless_inch)
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(rendered.units, None);
+
+    // Meanwhile, a unitless mm-drawn layout on ANSI B inch paper at 1:25.4
+    // (the main-branch contract) still keeps its 431.8 x 279.4 mm (17 x 11 in)
+    // declared paper in `plot`.
+    let mm_on_ansi_yaml = dir.join("mm-on-ansi.yaml");
+    fs::write(
+        &mm_on_ansi_yaml,
+        "units: mm\n\
+         paper: ANSI B landscape\n\
+         layout: {name: MmOnAnsi}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [431.8, 0, 0], [431.8, 279.4, 0], [0, 279.4, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: mm_on_ansi_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let unitless_mm_on_ansi = dir.join("UNITLESS-MM-ON-ANSI.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("mm-on-ansi.dwg"),
+        &unitless_mm_on_ansi,
+        "MmOnAnsi",
+        true,
+        |_| {},
+    );
+    let plotted_mm = plot_with(
+        &PlotRequest {
+            output: Some(dir.join("unitless-mm-on-ansi.pdf")),
+            ..PlotRequest::new(&unitless_mm_on_ansi)
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        plotted_mm.page,
+        PageFrom::Paper,
+        "1:25.4 unitless mm layout keeps declared paper: {plotted_mm:?}"
+    );
+    assert!((plotted_mm.sheet_size.width_mm - 431.8).abs() < 1e-3);
+    assert!((plotted_mm.sheet_size.height_mm - 279.4).abs() < 1e-3);
+}
+
+#[test]
+fn check_handles_asymmetric_margins_90deg_rotation_and_nonzero_plot_origin() {
+    let dir = scratch("asymmetric-rot90-origin");
+    // Media is portrait 297 x 420 mm with asymmetric margins:
+    //   m_left = 12, m_bottom = 8, m_right = 18, m_top = 6
+    // Under plot_rotation = 1 (90 deg CCW):
+    //   rotated sheet size: w = 420, h = 297
+    //   rotated margins: (left, bottom, right, top) = (m_bottom, m_right, m_top, m_left) = (8, 18, 6, 12)
+    // With plot_origin = (5, -3):
+    //   physical paper origin = [-(8 + 5), -(18 + (-3))] = [-13, -15]
+    //   physical paper box    = [-13, -15] .. [407, 282]
+    let clean_yaml = dir.join("rot90-clean.yaml");
+    fs::write(
+        &clean_yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: Rot90}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[-13, -15, 0], [407, -15, 0], [407, 282, 0], [-13, 282, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: clean_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let clean_dwg = dir.join("ROT90-CLEAN.dwg");
+    let configure = |l: &mut acadrust::objects::Layout| {
+        l.paper_size = "ISO_A3_(297.00_x_420.00_MM)".to_owned();
+        l.paper_width = 297.0;
+        l.paper_height = 420.0;
+        l.plot_rotation = 1;
+        l.plot_margin_left = 12.0;
+        l.plot_margin_bottom = 8.0;
+        l.plot_margin_right = 18.0;
+        l.plot_margin_top = 6.0;
+        l.plot_origin_x = 5.0;
+        l.plot_origin_y = -3.0;
+    };
+    dwg::as_original_with_layout_setup(
+        &dir.join("rot90-clean.dwg"),
+        &clean_dwg,
+        "Rot90",
+        false,
+        configure,
+    );
+    let checked = check_with(
+        &CheckRequest {
+            source: clean_dwg,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(checked.passed, "{:#?}", checked.findings);
+    assert!(checked.checks_skipped.is_empty());
+
+    // Shift by +1 mm on left (x = -14) and +1 mm on top (y = 283) -> must fail off_sheet on left & top.
+    let off_yaml = dir.join("rot90-off.yaml");
+    fs::write(
+        &off_yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: Rot90}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[-14, -15, 0], [407, -15, 0], [407, 283, 0], [-14, 283, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: off_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let off_dwg = dir.join("ROT90-OFF.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("rot90-off.dwg"),
+        &off_dwg,
+        "Rot90",
+        false,
+        configure,
+    );
+    let checked_off = check_with(
+        &CheckRequest {
+            source: off_dwg,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(!checked_off.passed);
+    let off = checked_off
+        .findings
+        .iter()
+        .find(|f| f.rule == Rule::OffSheet)
+        .expect("off_sheet finding");
+    let past = off.past.as_ref().expect("past sides");
+    assert!((past.left - 1.0).abs() < 1e-6, "{past:?}");
+    assert!((past.top - 1.0).abs() < 1e-6, "{past:?}");
+    assert!(past.right.abs() < 1e-6, "{past:?}");
+    assert!(past.bottom.abs() < 1e-6, "{past:?}");
+}

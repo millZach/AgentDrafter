@@ -127,7 +127,7 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
         // already in memory and match rows against `source_id` so `source`
         // is never reopened.
         let units = drawing.units.unwrap_or(Unit::Mm);
-        let found_paper = crate::set::paper_of_dwg_bytes(source, source_id, &bytes);
+        let found_paper = crate::set::paper_of_dwg_bytes(source, source_id, &bytes)?;
         let mut files = vec![(kind, source.to_path_buf(), bytes)];
         let paper = found_paper.and_then(|found| {
             files.extend(found.read);

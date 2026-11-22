@@ -323,8 +323,7 @@ pub(crate) fn file_id_of_path(path: &Path) -> Option<FileId> {
 
 #[cfg(windows)]
 pub(crate) fn file_id_of_path(path: &Path) -> Option<FileId> {
-    use std::os::windows::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new().access_mode(0).open(path).ok()?;
+    let file = File::open(path).ok()?;
     file_id_of_file(&file)
 }
 

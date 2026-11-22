@@ -262,7 +262,7 @@ pub(crate) fn read_dwg_record(source: &Path, need_set_paper: bool) -> Result<Dwg
     // bytes already in memory and compares against `source_id` without ever
     // reopening `source`.
     let built_paper = if need_set_paper && drawing.paper.is_none() {
-        crate::set::paper_of_dwg_bytes(source, source_id, &bytes).and_then(|found| {
+        crate::set::paper_of_dwg_bytes(source, source_id, &bytes)?.and_then(|found| {
             found.paper.map(|paper| Paper {
                 width: found.units.convert(paper.width, effective_units),
                 height: found.units.convert(paper.height, effective_units),

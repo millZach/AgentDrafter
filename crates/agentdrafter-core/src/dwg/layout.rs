@@ -454,16 +454,31 @@ pub(super) fn read_layouts(drawing: &CadDocument, units: Option<Unit>) -> (Vec<R
     let opened = opened_on(drawing).map(|(_, block)| block);
     let mut read = Vec::new();
     let mut not_read = 0;
+    let render_units = units.unwrap_or(Unit::Mm);
+    // Keep a drawing of model space alone as model space alone: AutoCAD
+    // templates often leave a default plotter/paper on untouched empty
+    // `Layout1`/`Layout2` tabs even when the drawing only uses Model space.
+    // Once a drawing actually uses layouts (opens on one, draws in one, or
+    // sets a full-bleed standard page setup), also keep any inactive empty
+    // layout that has a configured 1:1 page setup (margins or custom media) so
+    // `query layout` lists it and `check` reports its empty paper.
+    let is_layout_drawing = opened.is_some()
+        || all.iter().any(|l| {
+            holds_anything(l.block_record)
+                || read_paper(drawing, l.block_record, render_units).is_some()
+        });
     for layout in all {
         let block = layout.block_record;
-        let paper = read_paper(drawing, block, units);
+        let paper = read_paper(drawing, block, render_units);
+        let setup = read_layout_setup(layout, units);
         if paper.is_none() {
-            if Some(block) != opened && !holds_anything(block) {
+            let configured_empty =
+                is_layout_drawing && setup.check_paper.is_some() && has_configured_setup(layout);
+            if Some(block) != opened && !holds_anything(block) && !configured_empty {
                 continue;
             }
             not_read += 1;
         }
-        let setup = read_layout_setup(layout, units);
         read.push(ReadLayout {
             name: layout.name.clone(),
             block,
@@ -472,6 +487,20 @@ pub(super) fn read_layouts(drawing: &CadDocument, units: Option<Unit>) -> (Vec<R
         });
     }
     (read, not_read)
+}
+
+/// Whether `layout` has an explicit page setup configured (a plotter other than
+/// AutoCAD's blank `none_device`, a plot style sheet, or media/dimensions when
+/// not `none_device`), as opposed to AutoCAD's or acadrust's untouched default
+/// blank layout tab.
+fn has_configured_setup(layout: &DwgLayout) -> bool {
+    let is_none_device = layout.plot_printer_name.eq_ignore_ascii_case("none_device");
+    let has_plotter = !layout.plot_printer_name.is_empty() && !is_none_device;
+    let has_style = !layout.plot_style_sheet.is_empty();
+    let has_media = !is_none_device
+        && (!layout.paper_size.is_empty()
+            || (layout.paper_width > 0.0 && layout.paper_height > 0.0));
+    has_plotter || has_style || has_media
 }
 
 /// AutoCAD's plot-type code as a lowercase word, matching `query layout`.
@@ -516,10 +545,16 @@ fn read_layout_setup(layout: &DwgLayout, units: Option<Unit>) -> DwgLayoutSetup 
         scale: plot_scale_text(layout),
         plot_style: layout.plot_style_sheet.clone(),
     });
+    let paper_unit = match layout.plot_paper_units {
+        0 => Some(Unit::In),
+        1 => Some(Unit::Mm),
+        _ => None,
+    };
     let (check_paper, skip_reason) = read_check_paper(layout, units);
     DwgLayoutSetup {
         page_setup,
         check_paper,
+        paper_unit,
         skip_reason,
     }
 }
@@ -636,9 +671,6 @@ fn read_check_paper(
             )),
         );
     }
-    // For a unitless DWG (`INSUNITS = 0`), paper-space drawing units follow
-    // the layout's own `plot_paper_units` (inches or millimetres) at 1:1.
-    let drawing_unit = units.unwrap_or(paper_unit);
     if !layout.plot_scale_numerator.is_finite()
         || !layout.plot_scale_denominator.is_finite()
         || layout.plot_scale_numerator <= 0.0
@@ -652,9 +684,27 @@ fn read_check_paper(
             )),
         );
     }
-    let expected = drawing_unit.convert(1.0, paper_unit);
     let actual = layout.plot_scale_numerator / layout.plot_scale_denominator;
-    if ((actual - expected).abs() / expected) > 1e-6 {
+    // In AutoCAD, a layout's paper-space units follow its own `plot_paper_units`
+    // when plotted at 1:1 (`numerator == denominator`), regardless of model-space
+    // INSUNITS. Cross-unit 1:1 layouts (such as a mm sheet built on inch paper
+    // at 1:25.4, or an inch sheet on mm paper at 25.4:1) use the drawing's unit.
+    let layout_unit = if (actual - 1.0).abs() <= 1e-6 {
+        paper_unit
+    } else if let Some(drawing_unit) = units.filter(|&u| u != paper_unit) {
+        let expected = drawing_unit.convert(1.0, paper_unit);
+        if ((actual - expected).abs() / expected) <= 1e-6 {
+            drawing_unit
+        } else {
+            return (
+                None,
+                Some(format!(
+                    "layout `{}` uses plot scale {}:{}, not 1:1",
+                    layout.name, layout.plot_scale_numerator, layout.plot_scale_denominator
+                )),
+            );
+        }
+    } else {
         return (
             None,
             Some(format!(
@@ -662,34 +712,37 @@ fn read_check_paper(
                 layout.name, layout.plot_scale_numerator, layout.plot_scale_denominator
             )),
         );
-    }
-    let paper = match_standard_paper(w_mm, h_mm, drawing_unit).unwrap_or(Paper {
-        name: None,
-        width: Unit::Mm.convert(w_mm, drawing_unit),
-        height: Unit::Mm.convert(h_mm, drawing_unit),
-    });
+    };
+    let paper = Paper {
+        name: standard_paper_name(w_mm, h_mm),
+        width: Unit::Mm.convert(w_mm, layout_unit),
+        height: Unit::Mm.convert(h_mm, layout_unit),
+    };
     let clean_zero = |v: f64| if v == 0.0 { 0.0 } else { v };
     let origin = [
-        clean_zero(Unit::Mm.convert(-(left_mm + layout.plot_origin_x), drawing_unit)),
-        clean_zero(Unit::Mm.convert(-(bottom_mm + layout.plot_origin_y), drawing_unit)),
+        clean_zero(Unit::Mm.convert(-(left_mm + layout.plot_origin_x), layout_unit)),
+        clean_zero(Unit::Mm.convert(-(bottom_mm + layout.plot_origin_y), layout_unit)),
     ];
-    (Some(CheckPaper { paper, origin }), None)
+    (
+        Some(CheckPaper {
+            paper,
+            origin,
+            unit: layout_unit,
+        }),
+        None,
+    )
 }
 
-/// Matches physical paper dimensions `(w_mm, h_mm)` to one of the standard
-/// paper sizes (within 0.5 mm, covering AutoCAD's single-precision inch
-/// storage), returning its exact `Paper` converted into `drawing_unit`.
-fn match_standard_paper(w_mm: f64, h_mm: f64, drawing_unit: Unit) -> Option<Paper> {
+/// The standard paper name matching physical dimensions `(w_mm, h_mm)` within
+/// AutoCAD's single-precision float storage tolerance (`1e-3` mm), without
+/// ever altering the layout's stored dimensions.
+fn standard_paper_name(w_mm: f64, h_mm: f64) -> Option<String> {
     crate::description::paper::paper_names()
         .into_iter()
         .find_map(|(name, width, height, own)| {
             let sw = own.convert(width, Unit::Mm);
             let sh = own.convert(height, Unit::Mm);
-            ((sw - w_mm).abs() <= 0.5 && (sh - h_mm).abs() <= 0.5).then(|| Paper {
-                name: Some(name),
-                width: own.convert(width, drawing_unit),
-                height: own.convert(height, drawing_unit),
-            })
+            ((sw - w_mm).abs() <= 1e-3 && (sh - h_mm).abs() <= 1e-3).then_some(name)
         })
 }
 
@@ -700,14 +753,9 @@ pub(super) fn is_overall(object: &EntityType) -> bool {
 }
 
 /// The paper the layout of `drawing` whose block is `block` plots on, in
-/// `units` (or the layout's own `plot_paper_units` when `units` is `None`):
-/// a standard paper, whole, at full size, as a build writes it. None for any
-/// other page setup.
-pub(super) fn read_paper(
-    drawing: &CadDocument,
-    block: Handle,
-    units: Option<Unit>,
-) -> Option<Paper> {
+/// `units`: a standard paper, whole, at full size, as a build writes it.
+/// None for any other page setup.
+pub(super) fn read_paper(drawing: &CadDocument, block: Handle, units: Unit) -> Option<Paper> {
     let layout = drawing
         .objects
         .values()
@@ -718,13 +766,7 @@ pub(super) fn read_paper(
         .min_by_key(|l| l.handle.value())?;
     let name = PageSetup::named(&layout.paper_size)?;
     let setup = PageSetup::of(&name)?;
-    let paper_unit = match layout.plot_paper_units {
-        0 => Unit::In,
-        1 => Unit::Mm,
-        _ => return None,
-    };
-    let effective_units = units.unwrap_or(paper_unit);
-    let (numerator, denominator) = setup.plot_scale(effective_units);
+    let (numerator, denominator) = setup.plot_scale(units);
     let whole = layout.plot_type == PLOT_LAYOUT
         && layout.plot_rotation == 0
         && layout.plot_paper_units == i16::from(setup.unit != Unit::In)
@@ -750,8 +792,8 @@ pub(super) fn read_paper(
     let (_, width, height, own) = paper;
     Some(Paper {
         name: Some(name),
-        width: own.convert(width, effective_units),
-        height: own.convert(height, effective_units),
+        width: own.convert(width, units),
+        height: own.convert(height, units),
     })
 }
 
