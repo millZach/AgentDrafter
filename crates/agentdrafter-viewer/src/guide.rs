@@ -84,6 +84,19 @@ impl StepPlan {
             .map_or(1, |offsets| offsets.len().max(1))
     }
 
+    /// How many points its tool takes for its operation when the step gives
+    /// no rings, as the core checks what lands against the operation, not
+    /// against rings: Line's two ends, Circle's centre and a point on it,
+    /// Rectangle's two corners and Text's position. Move and Copy count
+    /// theirs from their base point; Erase takes none.
+    fn usual_points(&self) -> usize {
+        match self.kind() {
+            Some(ToolKind::Line | ToolKind::Circle | ToolKind::Rectangle) => 2,
+            Some(ToolKind::Text) => 1,
+            _ => 0,
+        }
+    }
+
     /// Its objects to pick, by their places among its points.
     fn picks(&self) -> Vec<usize> {
         (0..self.points.len())
@@ -116,6 +129,10 @@ pub enum Phase {
     /// Move or Copy has its base point and wants where it goes, which the
     /// step gives no ring for: how far, typed.
     Place,
+    /// A step that gives no rings wants another of the points its tool
+    /// takes for its operation, such as a line's second end: any point, as
+    /// the step's words say.
+    Free,
 }
 
 /// How many points the tool running has taken for its step: its points,
@@ -153,12 +170,14 @@ pub fn phase(step: &StepPlan, tools: &Tools) -> Phase {
             .map_or(Phase::EndPick, Phase::Pick);
     }
     let taken = taken(tools);
-    match step.clicks().get(taken) {
+    let clicks = step.clicks();
+    match clicks.get(taken) {
         Some(&i) => Phase::Click(i),
         None if taken == 0 && matches!(kind, ToolKind::Move | ToolKind::Copy) => Phase::Base,
         None if matches!(kind, ToolKind::Move | ToolKind::Copy) && taken < 1 + step.goes_to() => {
             Phase::Place
         }
+        None if clicks.is_empty() && taken < step.usual_points() => Phase::Free,
         None => Phase::Finish,
     }
 }
@@ -198,7 +217,9 @@ pub fn ring(step: &StepPlan, tools: &Tools) -> Option<Ring> {
     let point = match phase(step, tools) {
         Phase::Start => (!step.points.is_empty()).then_some(0)?,
         Phase::Pick(i) | Phase::Click(i) => i,
-        Phase::Finish | Phase::Type | Phase::EndPick | Phase::Base | Phase::Place => return None,
+        Phase::Finish | Phase::Type | Phase::EndPick | Phase::Base | Phase::Place | Phase::Free => {
+            return None
+        }
     };
     let given = &step.points[point];
     let label = given.words();
@@ -369,12 +390,15 @@ pub fn after_pick(step: &StepPlan, before: Phase, tools: &Tools, place: usize) -
 /// The step's operation as the drafting app's tool would send it, for Do it
 /// for me: an add on the current layer, in the space the page shows, when
 /// the operation leaves them to the drafter, as the tool's own add does.
+/// Its name is read as the core reads it, by its name or an AutoCAD alias
+/// in any case, so `LINE` is `add_line`.
 pub fn filled(operation: &serde_json::Value, tools: &Tools) -> serde_json::Value {
     let mut op = operation.clone();
     let adds = op
         .get("op")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|name| name.to_ascii_lowercase().starts_with("add_"));
+        .and_then(agentdrafter_core::operation_name)
+        .is_some_and(|name| name.starts_with("add_"));
     if let (true, Some(map)) = (adds, op.as_object_mut()) {
         if !map.contains_key("layer") {
             map.insert("layer".to_owned(), serde_json::json!(tools.layer));

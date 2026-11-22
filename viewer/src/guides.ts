@@ -97,7 +97,9 @@ export type Phase =
   /** Move or Copy wants a base point the step leaves to the drafter. */
   | { phase: 'base' }
   /** Move or Copy has its base point and wants where it goes, typed. */
-  | { phase: 'place' };
+  | { phase: 'place' }
+  /** A step with no rings wants another of the points its tool takes, such as a line's second end. */
+  | { phase: 'free' };
 
 /** What a step came to. */
 export type StepStatus = 'todo' | 'done' | 'forme' | 'skipped' | 'needs';
@@ -338,6 +340,7 @@ export function pulseOf(step: GuideStep | null, phase: Phase | null, warned: boo
     case 'click':
     case 'base':
     case 'place':
+    case 'free':
     case 'type':
       return undefined;
   }
@@ -346,11 +349,17 @@ export function pulseOf(step: GuideStep | null, phase: Phase | null, warned: boo
 
 /**
  * Whether Skip or Stop ends the tool running: only the step's own tool,
- * whose points were the step's; a tool the drafter started for themselves
+ * running on the guide's sheet, whose points were the step's; a tool the
+ * drafter started for themselves, such as the same tool on another sheet,
  * keeps what it holds.
  */
-export function endsStepTool(step: GuideStep | undefined, running: string | null | undefined): boolean {
-  return !!step?.tool && !!running && step.tool === running;
+export function endsStepTool(
+  step: GuideStep | undefined,
+  running: string | null | undefined,
+  shown: string | null | undefined,
+  guideSheet: string | null | undefined,
+): boolean {
+  return !!step?.tool && !!running && step.tool === running && !!shown && !!guideSheet && sameName(shown, guideSheet);
 }
 
 /** The toast once guide `n` starts: its own Start gone, any other guide's left. */
@@ -428,6 +437,8 @@ export function nowWords(step: GuideStep, phase: Phase | null, phone: boolean): 
       return phone ? 'Tap Done: what the step picks is picked.' : 'Press Enter, or click Done: what the step picks is picked.';
     case 'base':
       return `${click} any point, as the base point.`;
+    case 'free':
+      return `${click} a point for the ${label.toLowerCase()}, as the step says.`;
     case 'place':
     case 'finish': {
       // Copy, once it has placed the step's copies, wants Done.

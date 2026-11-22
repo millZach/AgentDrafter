@@ -517,6 +517,14 @@ pub struct OperationList {
     pub operations: Vec<OperationInfo>,
 }
 
+/// The name of the operation `name` names, as a change set sends it: its
+/// name, or one of its AutoCAD aliases in any case, such as `add_line` for
+/// `LINE`; none when it names no operation. The same table `operations`
+/// lists, so an interface that reads an operation reads it as `change` does.
+pub fn operation_name(name: &str) -> Option<&'static str> {
+    SPECS.iter().find(|s| s.named(name)).map(|s| s.name)
+}
+
 /// Every operation a change set can hold, with its alias, what it does and
 /// its schema.
 pub fn operations() -> OperationList {

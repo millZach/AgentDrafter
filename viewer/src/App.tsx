@@ -1636,20 +1636,23 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const r = runNow.current;
     const g = runGuide();
     if (!r || !g) return;
-    // What the step's own tool had not finished is dropped, not landed; a
-    // tool the drafter started for themselves keeps what it holds.
+    // What the step's own tool had not finished on the guide's sheet is
+    // dropped, not landed; a tool the drafter started for themselves, on
+    // this sheet or another, keeps what it holds.
     const v = renderer();
-    if (v && endsStepTool(g.steps[r.at], toolState?.tool)) toolDid(v.tool_drop());
+    if (v && endsStepTool(g.steps[r.at], toolState?.tool, summary?.sheet, g.sheet)) toolDid(v.tool_drop());
     setRun(skipStep(r, g));
     log(`Guide: step ${r.at + 1} skipped`);
   }
   function stopGuide() {
     const r = runNow.current;
     if (!r) return;
-    // What the step's own tool had not finished is dropped, not landed; a
-    // tool the drafter started for themselves keeps what it holds.
+    // What the step's own tool had not finished on the guide's sheet is
+    // dropped, not landed; a tool the drafter started for themselves, on
+    // this sheet or another, keeps what it holds.
     const v = renderer();
-    if (v && endsStepTool(runGuide()?.steps[r.at], toolState?.tool)) toolDid(v.tool_drop());
+    const g = runGuide();
+    if (v && endsStepTool(g?.steps[r.at], toolState?.tool, summary?.sheet, g?.sheet)) toolDid(v.tool_drop());
     setRun(stopRun(r));
     setGuideClosed(false);
     log(`Guide: stopped at step ${r.at + 1}`);

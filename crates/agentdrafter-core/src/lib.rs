@@ -104,8 +104,8 @@ pub use change::{
     StampRevision,
 };
 pub use change::{
-    change, change_set_schema, change_with, operations, AttributeRemoved, ChangeReport,
-    ChangeRequest, Copied, Failure, Fill, Inconsistent, OperationInfo, OperationList,
+    change, change_set_schema, change_with, operation_name, operations, AttributeRemoved,
+    ChangeReport, ChangeRequest, Copied, Failure, Fill, Inconsistent, OperationInfo, OperationList,
     OperationOutcome, RowValueSet, SheetChange, SnapResolved, MARK_FILE,
 };
 pub use change::{

@@ -407,9 +407,71 @@ fn a_copy_step_with_a_typed_displacement_counts_its_first_copy_and_wants_done() 
 }
 
 #[test]
-fn do_it_for_me_reads_an_add_in_any_case() {
+fn do_it_for_me_reads_an_add_by_its_alias_as_the_core_does() {
     let mut tools = tools();
+    let mut context = tools.context().clone();
+    context.space = Some("paper".to_owned());
+    tools.load(context);
     tools.layer = "wire".to_owned();
-    let add = json!({"op": "ADD_LINE", "from": [0, 0], "to": [1, 0]});
-    assert_eq!(filled(&add, &tools)["layer"], "wire");
+    // LINE is add_line's alias, in any case, as `agentdrafter operations`
+    // lists it: an add, so it takes the current layer and the space shown.
+    for name in ["LINE", "line"] {
+        let add = json!({"op": name, "from": [0, 0], "to": [1, 0]});
+        let filled = filled(&add, &tools);
+        assert_eq!(filled["layer"], "wire", "{name}");
+        assert_eq!(filled["space"], "paper", "{name}");
+    }
+    // MOVE is no add, and a name the core does not know is left as it is.
+    let moved = json!({"op": "MOVE", "target": {"id": "DP-LD-101/text-1"}, "by": [0, 1, 0]});
+    assert_eq!(filled(&moved, &tools), moved);
+    let unknown = json!({"op": "add_nothing"});
+    assert_eq!(filled(&unknown, &tools), unknown);
+}
+
+#[test]
+fn a_line_step_with_no_rings_takes_two_points_then_wants_done() {
+    let mut tools = tools();
+    let step: StepPlan = serde_json::from_value(json!({
+        "tool": "line",
+        "operation": {"op": "add_line", "from": [3.2, 6.75, 0.0], "to": [7.2, 6.75, 0.0]}
+    }))
+    .unwrap();
+    tools.start(ToolKind::Line, &[]);
+    assert_eq!(phase(&step, &tools), Phase::Free, "Done waits for the line");
+    assert_eq!(ring(&step, &tools), None);
+    assert_eq!(
+        click(&mut tools, &step, Taken::typed([3.2, 6.75], 0.0)),
+        None,
+        "the first point is no more than the step asks for"
+    );
+    assert_eq!(phase(&step, &tools), Phase::Free);
+    assert_eq!(
+        click(&mut tools, &step, Taken::typed([7.2, 6.75], 0.0)),
+        None
+    );
+    assert_eq!(
+        phase(&step, &tools),
+        Phase::Finish,
+        "a line's two ends, then Done"
+    );
+    // A third point would draw a second line, which the step's operation is not.
+    let note = click(&mut tools, &step, Taken::typed([9.0, 6.75], 0.0)).unwrap();
+    assert_eq!(note.words, "That point is more than the step asks for.");
+}
+
+#[test]
+fn a_text_step_with_no_rings_takes_its_position_then_wants_typing() {
+    let mut tools = tools();
+    let step: StepPlan = serde_json::from_value(json!({
+        "tool": "text",
+        "operation": {"op": "add_text", "contents": "101+", "height": 0.08}
+    }))
+    .unwrap();
+    tools.start(ToolKind::Text, &[]);
+    assert_eq!(phase(&step, &tools), Phase::Free);
+    assert_eq!(
+        click(&mut tools, &step, Taken::typed([5.2, 6.75], 0.0)),
+        None
+    );
+    assert_eq!(phase(&step, &tools), Phase::Type);
 }

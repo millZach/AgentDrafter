@@ -281,10 +281,25 @@ test('guides given between two looks each get a Start', () => {
 });
 
 test('Skip and Stop end only the step’s own tool; one the drafter started keeps its work', () => {
-  assert.equal(endsStepTool(step(2), 'line'), true);
-  assert.equal(endsStepTool(step(2), 'copy'), false, 'a Copy the drafter started keeps its copies');
-  assert.equal(endsStepTool(step(2), null), false);
-  assert.equal(endsStepTool(step(1), 'line'), false, 'a setting step has no tool of its own');
+  assert.equal(endsStepTool(step(2), 'line', 'DP-LD-101', 'DP-LD-101'), true);
+  assert.equal(endsStepTool(step(2), 'line', 'dp-ld-101', 'DP-LD-101'), true, 'a sheet named in any case');
+  assert.equal(endsStepTool(step(2), 'copy', 'DP-LD-101', 'DP-LD-101'), false, 'a Copy the drafter started keeps its copies');
+  assert.equal(endsStepTool(step(2), null, 'DP-LD-101', 'DP-LD-101'), false);
+  assert.equal(endsStepTool(step(1), 'line', 'DP-LD-101', 'DP-LD-101'), false, 'a setting step has no tool of its own');
+});
+
+test('Stop on another sheet keeps the line the drafter is drawing there', () => {
+  // The guide runs on DP-LD-101; the drafter is drawing a Line of their own on DP-LD-102.
+  assert.equal(endsStepTool(step(2), 'line', 'DP-LD-102', 'DP-LD-101'), false);
+  assert.equal(endsStepTool(step(2), 'line', null, 'DP-LD-101'), false, 'no sheet shown, nothing of the step’s running');
+});
+
+test('a step with no rings asks for its tool’s points, with nothing pulsing, then Done', () => {
+  const free: GuideStep = { step: 2, say: 'Draw the wire.', title: 'Draw the wire', tool: 'line', points: [], operation: { op: 'add_line' } };
+  assert.equal(nowWords(free, { phase: 'free' }, false), 'Click a point for the line, as the step says.');
+  assert.equal(nowWords(free, { phase: 'free' }, true), 'Tap a point for the line, as the step says.');
+  assert.equal(pulseOf(free, { phase: 'free' }, false), undefined, 'Done waits for the line’s two points');
+  assert.equal(pulseOf(free, { phase: 'finish' }, false), 'done');
 });
 
 test('a Copy step whose copy goes by a typed displacement asks for it, then for Done', () => {
