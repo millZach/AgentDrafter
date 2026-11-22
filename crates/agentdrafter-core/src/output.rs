@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::description::sheet_description_at;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::Paper;
 use crate::model::Sheet;
+use crate::model::{Paper, RecordsOfKind};
 use crate::stamp::{self, SourceKind};
 use crate::units::Unit;
 
@@ -69,6 +69,12 @@ pub(crate) struct Record {
     pub units: Option<Unit>,
     /// How many objects of a DWG the core has no model for yet.
     pub objects_not_drawn: usize,
+    /// Those objects by kind, with the handle of each.
+    pub not_drawn: Vec<RecordsOfKind>,
+    /// The ID and name of each of the sheet's objects, in order, for a DWG:
+    /// the ID AgentDrafter wrote on it, or the drawing's name joined to its
+    /// handle (`crate::original`). Empty for a sheet description.
+    pub ids: Vec<(String, Option<String>)>,
     /// Every file read, the record first, each with its kind and the bytes
     /// read.
     pub files: Vec<(SourceKind, PathBuf, Vec<u8>)>,
@@ -97,6 +103,7 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
     })?;
     if kind == SourceKind::Dwg {
         let drawing = dwg::read(source)?;
+        let ids = crate::original::ids_of(source, &drawing);
         let mut files = vec![(kind, source.to_path_buf(), bytes)];
         // Zach decided on 2026-11-13 that a DWG plots on the paper its
         // sheet declares, read from the set its build mark names; the DWG
@@ -132,6 +139,8 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
             sheet,
             units: drawing.units,
             objects_not_drawn: drawing.objects_not_read,
+            not_drawn: drawing.not_read,
+            ids,
             files,
         });
     }
@@ -151,6 +160,8 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
         units: Some(sheet.units),
         sheet,
         objects_not_drawn: 0,
+        not_drawn: Vec::new(),
+        ids: Vec::new(),
         files,
     })
 }

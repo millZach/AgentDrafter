@@ -30,8 +30,8 @@ use std::process::ExitCode;
 use agentdrafter_core::{commands, find_command, Error, ErrorCode, Interface, Reply, Settings};
 use agentdrafter_core::{
     AcceptRequest, ChangeRequest, CheckRequest, DisplayListRequest, ImportBlocksRequest,
-    JournalRequest, MeasureTextRequest, RenderRequest, StaleRequest, UndoRequest, Unit,
-    FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE,
+    JournalRequest, MeasureTextRequest, ReadRequest, RenderRequest, StaleRequest, UndoRequest,
+    Unit, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE,
 };
 use agentdrafter_core::{
     End, Matching, Measure, ObjectRef, Query, QueryRequest, Selection, SelectionBox, SnapKind,
@@ -67,6 +67,7 @@ const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
 const CHECK_USAGE: &str = "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]";
 const IMPORT_BLOCKS_USAGE: &str = "agentdrafter import-blocks <dwg | dxf> --library <block-library> [--block <name>]... [--replace] [--units <unit>] [--dry-run]";
+const READ_USAGE: &str = "agentdrafter read <dwg> [--mirror <path> | --no-mirror]";
 const QUERY_USAGE: &str = "agentdrafter query <find | blocks | attributes | measure | extents | layers | snap | geometry | layout> <drawing-set-folder | sheet-description> [--sheet <sheet>] [find, attributes and geometry: --id <id> --name <name> --block <block> --tag <tag> --value <value> --text <text> --space <space> --contains --window <x1,y1,x2,y2> --crossing <x1,y1,x2,y2> --touching <id> | --touching-name <name>] [measure: --from <id> | --from-name <name>, --to <id> | --to-name <name>, --from-point <point> --to-point <point>] [snap: --id <id> | --name <name>, --snap <snap> --which <which>, --with <id> | --with-name <name>, --from <id> | --from-name <name> --from-snap <snap> --from-which <which> --from-with <id> | --from-with-name <name>] [--fonts <folder>...] [--no-system-fonts]";
 
 /// Runs the `agentdrafter` command on `args`, the arguments after its own
@@ -121,6 +122,7 @@ fn cli_form(command: &str) -> Option<(&'static str, Parse)> {
         "looking-at" => (LOOKING_AT_USAGE, parse_looking_at),
         "check" => (CHECK_USAGE, parse_check),
         "import-blocks" => (IMPORT_BLOCKS_USAGE, parse_import_blocks),
+        "read" => (READ_USAGE, parse_read),
         _ => return None,
     })
 }
@@ -1287,6 +1289,45 @@ fn parse_import_blocks(mut args: Args) -> Result<Value, Error> {
             replace,
             units,
             dry_run,
+        },
+        FontOptions::default(),
+    )
+}
+
+/// Reads `read`'s arguments: the original, and where to write its text
+/// mirror, or that none is written.
+fn parse_read(mut args: Args) -> Result<Value, Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {READ_USAGE}"));
+    let mut source: Option<PathBuf> = None;
+    let mut mirror: Option<PathBuf> = None;
+    let mut no_mirror = false;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--mirror") => {
+                let Some(path) = args.next() else {
+                    return Err(usage("--mirror needs a path".to_owned()));
+                };
+                if mirror.replace(path.into()).is_some() {
+                    return Err(usage("--mirror is given twice".to_owned()));
+                }
+            }
+            Some("--no-mirror") => no_mirror = true,
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("read takes no option `{flag}`")))
+            }
+            _ => {
+                if source.replace(arg.into()).is_some() {
+                    return Err(usage("read takes one DWG".to_owned()));
+                }
+            }
+        }
+    }
+    let source = source.ok_or_else(|| usage("read needs the DWG to read".to_owned()))?;
+    input_of(
+        ReadRequest {
+            source,
+            mirror,
+            no_mirror,
         },
         FontOptions::default(),
     )

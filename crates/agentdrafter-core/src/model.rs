@@ -1117,6 +1117,91 @@ pub struct DrawingContents {
     /// counted.
     #[serde(default, skip_serializing_if = "is_none_of")]
     pub layouts_not_read: usize,
+    /// The handle of each of `objects`, in the same order, in hexadecimal
+    /// as AutoCAD lists it, such as `2F`. A handle is the DWG's own name for
+    /// a record, and stays the same each time the same file is read.
+    #[serde(default)]
+    pub handles: Vec<String>,
+    /// The objects of the sheet, model space's and each read layout's
+    /// paper space's, the core has no model for, by kind, with the handle
+    /// of each: what an output of the drawing does not draw. Their count is
+    /// `objects_not_read`.
+    #[serde(default)]
+    pub not_read: Vec<RecordsOfKind>,
+    /// Whether the DWG library decoded every record of the file, and the
+    /// records it did not (ADR-0004).
+    #[serde(default)]
+    pub decode: DecodeReport,
+}
+
+/// Records of a DWG of one kind, counted, with the handle of each.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordsOfKind {
+    /// The kind of record, as the DWG names it, such as `LINE`,
+    /// `ACAD_PROXY_ENTITY` or a custom object's own name.
+    pub kind: String,
+    /// How many there are.
+    pub count: usize,
+    /// The handle of each, in hexadecimal as AutoCAD lists it, such as
+    /// `2F`, in the order the file holds them. A record the reader could
+    /// not place has none, so there may be fewer handles than `count`.
+    pub handles: Vec<String>,
+}
+
+/// Whether the DWG library decoded every record of a DWG it read: each
+/// object, table entry and non-graphical object into a model of its own.
+/// A record it did not decode it keeps as the bytes it read, which a save
+/// in the version the file arrived in writes back as they were (ADR-0004,
+/// ADR-0006), but nothing can draw, query or change it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodeReport {
+    /// True when every record was decoded: none is under `not_decoded`,
+    /// none was skipped and the reader recovered from no error.
+    pub decoded: bool,
+    /// The records the library read but could not decode, by kind, such as
+    /// a custom object of an application AutoCAD loads.
+    pub not_decoded: Vec<RecordsOfKind>,
+    /// How many records the library could not read at all and left out.
+    #[serde(default)]
+    pub skipped: usize,
+    /// How many errors the library recovered from while reading.
+    #[serde(default)]
+    pub recovered_errors: usize,
+}
+
+impl Default for DecodeReport {
+    fn default() -> Self {
+        Self {
+            decoded: true,
+            not_decoded: Vec::new(),
+            skipped: 0,
+            recovered_errors: 0,
+        }
+    }
+}
+
+impl RecordsOfKind {
+    /// Groups `(kind, handle)` pairs by kind, in the order each kind is
+    /// first met, each with its handles in the order met.
+    pub(crate) fn group<I: IntoIterator<Item = (String, Option<String>)>>(records: I) -> Vec<Self> {
+        let mut kinds: Vec<RecordsOfKind> = Vec::new();
+        for (kind, handle) in records {
+            let at = match kinds.iter().position(|k| k.kind == kind) {
+                Some(at) => at,
+                None => {
+                    kinds.push(RecordsOfKind {
+                        kind,
+                        count: 0,
+                        handles: Vec::new(),
+                    });
+                    kinds.len() - 1
+                }
+            };
+            kinds[at].count += 1;
+            kinds[at].handles.extend(handle);
+        }
+        kinds
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

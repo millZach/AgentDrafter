@@ -395,6 +395,11 @@ pub struct DisplayListReport {
     /// How many objects of a DWG were not drawn because the core has no
     /// model for them yet. Always 0 for a sheet description.
     pub objects_not_drawn: usize,
+    /// The objects of a DWG not drawn because the core has no model for
+    /// them yet, by kind, such as `ACAD_PROXY_ENTITY`, with the handle of
+    /// each, as `read` names them. Left out when every object is drawn.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_drawn: Vec<crate::model::RecordsOfKind>,
     /// The text styles whose fonts are not in the font folders, and the
     /// look-alike drawn in their place. Empty when every font was found.
     pub font_substitutions: Vec<FontSubstitution>,
@@ -601,6 +606,7 @@ pub fn display_list_with(
         extents: list.extents(),
         tolerance,
         objects_not_drawn: drawn.objects_not_drawn,
+        not_drawn: drawn.not_drawn,
         font_substitutions: fonts.substitutions(),
         hatches_cut_short: list.hatches_cut_short.clone(),
         entry: request.entry,
@@ -876,6 +882,7 @@ struct Drawn {
     sheet: Sheet,
     units: Option<Unit>,
     objects_not_drawn: usize,
+    not_drawn: Vec<crate::model::RecordsOfKind>,
     objects: Vec<SheetObject>,
     /// A drawing set's sheet's template and the sheets built from it.
     template: Option<TemplateReach>,
@@ -1094,6 +1101,7 @@ fn read(
             objects: objects_of(&record.sheet, &ids, &from, request.values, sources.as_ref()),
             sheet: record.sheet,
             objects_not_drawn: 0,
+            not_drawn: Vec::new(),
             template,
         });
     }
@@ -1113,13 +1121,14 @@ fn read(
         return Err(no_such_sheet(sheet, std::slice::from_ref(&name)));
     }
     let record = read_record(source)?;
-    let ids: Vec<(String, Option<String>)> = if record.units.is_some() && !is_dwg(source) {
+    // A DWG's objects carry the IDs its read gives them.
+    let ids: Vec<(String, Option<String>)> = if is_dwg(source) {
+        record.ids.clone()
+    } else {
         let described = read_sheet_record(source)?;
         (0..described.objects.len())
             .map(|i| (described.id(i), described.objects[i].name.clone()))
             .collect()
-    } else {
-        Vec::new()
     };
     Ok(Drawn {
         names: vec![name.clone()],
@@ -1128,6 +1137,7 @@ fn read(
         sheet: record.sheet,
         units: record.units,
         objects_not_drawn: record.objects_not_drawn,
+        not_drawn: record.not_drawn,
         template: None,
     })
 }

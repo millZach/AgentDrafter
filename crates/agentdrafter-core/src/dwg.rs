@@ -32,10 +32,10 @@ use crate::description::{normalize_degrees, SheetRecord};
 use crate::error::{Error, ErrorCode};
 use crate::model::MTextBox;
 use crate::model::{
-    is_one, Arc, Block, Circle, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype,
-    Lineweight, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
-    Properties, Solid, Spline, BUILT_IN_LINETYPES, BY_BLOCK, BY_LAYER, CONTINUOUS, FIT_DEGREE,
-    LAYER_ZERO,
+    is_one, Arc, Block, Circle, DecodeReport, DrawingContents, Ellipse, IdAndName, Layer, Line,
+    Linetype, Lineweight, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
+    Properties, RecordsOfKind, Solid, Spline, BUILT_IN_LINETYPES, BY_BLOCK, BY_LAYER, CONTINUOUS,
+    FIT_DEGREE, LAYER_ZERO,
 };
 use crate::text::{MText as MTextObject, Text as TextObject};
 use crate::units::Unit;
@@ -719,7 +719,7 @@ fn dwg_spline(spline: &Spline) -> DwgSpline {
 /// Reads the drawing in the DWG at `path`: its linetypes, its layers and
 /// the objects in its model space.
 pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
-    let drawing = read_drawing(path)?;
+    let (drawing, stats) = read_drawing_with_stats(path)?;
     let mut linetypes = Vec::new();
     let mut linetypes_not_read = 0;
     for dwg_linetype in drawing.line_types.iter() {
@@ -850,7 +850,8 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         .collect();
     let mut objects = Vec::new();
     let mut ids_and_names = Vec::new();
-    let mut objects_not_read = 0;
+    let mut handles = Vec::new();
+    let mut not_read: Vec<(String, Option<String>)> = Vec::new();
     // An older leader's annotation is read with the leader, not on its own:
     // when the leader is not read, nor is its annotation.
     let mut leaders = Vec::new();
@@ -891,7 +892,7 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         }
         if let Some((_, read_with_its_leader)) = annotations.iter().find(|(a, _)| *a == handle) {
             if !read_with_its_leader {
-                objects_not_read += 1;
+                not_read.push((kind_of(dwg_object), Some(handle_text(handle))));
             }
             continue;
         }
@@ -943,12 +944,13 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
             Some(object) => {
                 objects.push(object);
                 spaces.push(space);
+                handles.push(handle_text(handle));
                 ids_and_names.push(IdAndName {
                     id: ids::read_id(dwg_object.common()),
                     name: ids::read_name(dwg_object.common()),
                 });
             }
-            None => objects_not_read += 1,
+            None => not_read.push((kind_of(dwg_object), Some(handle_text(handle)))),
         }
     }
     let mut layouts = read_layouts
@@ -981,14 +983,87 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         blocks_not_read,
         objects,
         ids_and_names,
-        objects_not_read,
+        objects_not_read: not_read.len(),
         ltscale: drawing.header.linetype_scale,
         layout,
         other_layouts,
         opens_on: layout::opened_on(&drawing).map(|(name, _)| name),
         paper,
         layouts_not_read,
+        handles,
+        not_read: RecordsOfKind::group(not_read),
+        decode: decode_report(&drawing, &stats),
     })
+}
+
+/// The handle of a DWG's record in hexadecimal, as AutoCAD lists it, such
+/// as `2F`.
+fn handle_text(handle: acadrust::types::Handle) -> String {
+    format!("{:X}", handle.value())
+}
+
+/// The kind of a DWG's object, as the DWG names it, such as `LINE`: a
+/// custom object's own name for one the DWG library does not decode.
+fn kind_of(object: &EntityType) -> String {
+    use acadrust::entities::ExtendedEntityData;
+    match object {
+        EntityType::Unknown(unknown) => unknown.dxf_name.clone(),
+        EntityType::Extended(extended) => match &extended.data {
+            ExtendedEntityData::Proxy(_) => "ACAD_PROXY_ENTITY".to_owned(),
+            ExtendedEntityData::OleFrame(_) => "OLEFRAME".to_owned(),
+            ExtendedEntityData::Camera { .. } => "CAMERA".to_owned(),
+            ExtendedEntityData::SectionObject(_) => "SECTIONOBJECT".to_owned(),
+            ExtendedEntityData::ArcAlignedText(_) => "ARCALIGNEDTEXT".to_owned(),
+            ExtendedEntityData::RemoteText(_) => "RTEXT".to_owned(),
+            ExtendedEntityData::GeoPositionMarker(_) => "POSITIONMARKER".to_owned(),
+            ExtendedEntityData::PointCloud(_) | ExtendedEntityData::PointCloudEx(_) => {
+                "ACDBPOINTCLOUD".to_owned()
+            }
+            _ => "EXTENDED_ENTITY".to_owned(),
+        },
+        // A dimension's own kind, such as `DIMENSION_LINEAR`, is the DWG's
+        // `DIMENSION`.
+        EntityType::Dimension(_) => "DIMENSION".to_owned(),
+        other => other.as_entity().entity_type().to_owned(),
+    }
+}
+
+/// Whether the DWG library decoded every record of `drawing`, read with
+/// `stats`, and the records it did not: each object and non-graphical
+/// object it keeps only as the bytes it read, by the kind the file gives
+/// it, with its handle.
+fn decode_report(drawing: &CadDocument, stats: &acadrust::ReadStats) -> DecodeReport {
+    let mut not_decoded: Vec<(u64, String)> = drawing
+        .entities()
+        .filter_map(|e| match e {
+            EntityType::Unknown(unknown) => {
+                Some((unknown.common.handle.value(), unknown.dxf_name.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    not_decoded.extend(drawing.objects.values().filter_map(|o| match o {
+        acadrust::objects::ObjectType::Unknown {
+            type_name, handle, ..
+        } => Some((handle.value(), type_name.clone())),
+        _ => None,
+    }));
+    // In the order of the file's handles, so that two reads of one file
+    // report the same.
+    not_decoded.sort();
+    let not_decoded = RecordsOfKind::group(
+        not_decoded
+            .into_iter()
+            .map(|(handle, kind)| (kind, Some(format!("{handle:X}")))),
+    );
+    DecodeReport {
+        decoded: not_decoded.is_empty()
+            && stats.skipped_source_records == 0
+            && stats.recovered_errors == 0,
+        not_decoded,
+        skipped: stats.skipped_source_records,
+        recovered_errors: stats.recovered_errors,
+    }
 }
 
 /// One of our viewports, if the DWG viewport `v` is one the core draws,
@@ -1524,10 +1599,16 @@ fn mark_in(properties: &[(String, String)]) -> Option<BuildMark> {
 }
 
 fn read_drawing(path: &Path) -> Result<CadDocument, Error> {
+    read_drawing_with_stats(path).map(|(drawing, _)| drawing)
+}
+
+/// Reads the DWG at `path`, with what the DWG library says of how it read
+/// each record.
+fn read_drawing_with_stats(path: &Path) -> Result<(CadDocument, acadrust::ReadStats), Error> {
     match catch_unwind(AssertUnwindSafe(|| {
-        DwgReader::from_file(path).and_then(|mut reader| reader.read())
+        DwgReader::from_file(path).and_then(|mut reader| reader.read_with_stats())
     })) {
-        Ok(Ok(drawing)) => Ok(drawing),
+        Ok(Ok(outcome)) => Ok((outcome.document, outcome.stats)),
         Ok(Err(e)) => Err(Error::new(
             ErrorCode::DwgRead,
             format!("the DWG library could not read the drawing: {e}"),
@@ -1576,6 +1657,91 @@ fn panic_message(panic: Box<dyn Any + Send>) -> String {
     } else {
         "a panic with no message".to_owned()
     }
+}
+
+/// Only for tests: writes to `out` the DWG at `dwg`, a DWG AgentDrafter
+/// built, as if someone else had drawn it: without the build mark, and
+/// without AgentDrafter's extended data on any object, so that its objects
+/// carry no ID of AgentDrafter's.
+#[cfg(test)]
+pub(crate) fn as_someone_elses(dwg: &Path, out: &Path) {
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    drawing
+        .summary_info
+        .custom_properties
+        .retain(|(name, _)| name != BUILD_MARK);
+    for entity in drawing.entities_mut() {
+        let common = entity.common_mut();
+        common.extended_data.remove_record(block::APPLICATION);
+        // Its bytes as read hold the extended data taken off.
+        common.raw_record = None;
+    }
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+    std::fs::write(out, bytes).expect("the DWG is saved");
+}
+
+/// Only for tests: writes to `out` the DWG at `dwg`, a 2018 DWG AgentDrafter
+/// built, with its first line turned into an object of a made-up
+/// application's custom class named `kind`, which the DWG library reads but
+/// cannot decode: it keeps the object as the bytes it read. Gives the
+/// object's handle, as [`handle_text`] writes it. Nothing in it comes from
+/// any real drawing (ADR-0008).
+#[cfg(test)]
+pub(crate) fn with_a_made_up_custom_object(dwg: &Path, out: &Path, kind: &str) -> String {
+    use acadrust::classes::DxfClass;
+    use acadrust::entities::UnknownEntity;
+
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    let line = drawing
+        .model_space_entities()
+        .find(|e| matches!(e, EntityType::Line(_)))
+        .expect("the DWG holds a line")
+        .clone();
+    let mut common = line.common().clone();
+    let raw = common
+        .raw_record
+        .take()
+        .expect("a line read from a DWG keeps its bytes");
+    let handle = common.handle;
+    drawing
+        .classes
+        .add_or_update(DxfClass::new_entity(kind, "AcDbAgentDrafterMadeUp"));
+    // A record of a 2010 DWG or later starts with its type: two bits that
+    // say how it is written, then a byte. A line, 19, is `00` and 19; a
+    // class numbered from 0x1F0 to 0x2EF is `01` and its number less 0x1F0.
+    // Classes are numbered by their place when the DWG is written, so the
+    // number is read back from the written file until it holds.
+    let mut number = drawing
+        .classes
+        .get_by_name(kind)
+        .map(|c| c.class_number)
+        .expect("the class was added");
+    for _ in 0..3 {
+        let offset = u8::try_from(number - 0x1F0).expect("a class numbered below 0x2F0");
+        let mut data = raw.data.clone();
+        data[0] = 0b0100_0000 | (offset >> 2);
+        data[1] = (data[1] & 0b0011_1111) | ((offset & 0b11) << 6);
+        let mut unknown = UnknownEntity::new(kind);
+        unknown.common = common.clone();
+        unknown.dwg_type_code = number;
+        unknown.raw_dwg_data = Some(data);
+        unknown.dwg_handle_bits = raw.handle_bits;
+        unknown.dwg_source_version = Some(drawing.version);
+        *drawing.get_entity_mut(handle).expect("the line") = EntityType::Unknown(unknown);
+        let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+        std::fs::write(out, bytes).expect("the DWG is saved");
+        let written = read_drawing(out).expect("the DWG written reads");
+        let given = written
+            .classes
+            .get_by_name(kind)
+            .map(|c| c.class_number)
+            .expect("the class was written");
+        if given == number {
+            return handle_text(handle);
+        }
+        number = given;
+    }
+    panic!("the made-up class's number never held");
 }
 
 #[cfg(test)]
@@ -1630,6 +1796,52 @@ mod tests {
         set: None,
         rows: None,
     };
+
+    #[test]
+    fn a_record_the_dwg_library_cannot_decode_is_named_by_kind_and_handle() {
+        let dir = scratch("not-decoded");
+        let description = dir.join("sheet.yaml");
+        fs::write(
+            &description,
+            "units: mm
+objects:
+  - line: {from: [0, 0, 0], to: [10, 0, 0]}
+  - circle: {center: [5, 5, 0], radius: 2}
+",
+        )
+        .unwrap();
+        build(&BuildRequest {
+            description: description.clone(),
+            output: None,
+            overwrite: false,
+        })
+        .unwrap();
+        let whole = read(&dir.join("sheet.dwg")).unwrap();
+        assert!(whole.decode.decoded, "{:?}", whole.decode);
+        assert_eq!(whole.handles.len(), 2);
+        assert!(whole.not_read.is_empty());
+
+        let out = dir.join("custom.dwg");
+        let handle = with_a_made_up_custom_object(&dir.join("sheet.dwg"), &out, "MADE_UP_DEVICE");
+        let read = read(&out).unwrap();
+        assert!(!read.decode.decoded, "{:?}", read.decode);
+        assert_eq!(
+            read.decode.not_decoded,
+            vec![RecordsOfKind {
+                kind: "MADE_UP_DEVICE".into(),
+                count: 1,
+                handles: vec![handle.clone()],
+            }]
+        );
+        // Nothing draws it: it is the object of the sheet not read, and the
+        // circle is read with the handle it had.
+        assert_eq!(read.objects_not_read, 1);
+        assert_eq!(read.not_read, read.decode.not_decoded);
+        assert_eq!(read.objects.len(), 1);
+        assert_eq!(read.handles, whole.handles[1..]);
+        // Each read of the same file names the same.
+        assert_eq!(super::read(&out).unwrap(), read);
+    }
 
     #[test]
     fn a_built_dwg_carries_the_build_mark() {

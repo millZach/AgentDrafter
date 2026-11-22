@@ -23,6 +23,11 @@
 //!   hold, as JSON Schemas.
 //! - [`read_dwg`] reads a DWG's linetypes, layers, text styles, block
 //!   definitions and model-space objects.
+//! - [`read_original`] reads an original, a DWG someone else drew, whole:
+//!   whether the DWG library decoded every record, the records it did not
+//!   and the objects the core has no model for, each by kind and handle,
+//!   with an ID for every object it reads, and writes its text mirror
+//!   beside it.
 //! - [`measure_text`] measures how wide a line of text draws in a font.
 //! - [`render`] draws a sheet description or a DWG to a PNG, stamped with
 //!   every file it was drawn from, and [`check_stale`] says whether any of
@@ -81,6 +86,7 @@ mod interface;
 mod leftovers;
 mod looking_at;
 mod model;
+mod original;
 mod output;
 mod pdf;
 mod plot;
@@ -163,9 +169,10 @@ pub use model::{
     DIAMETER_SIGN, ISO_DIMENSION_STYLE, STANDARD_DIMENSION_STYLE,
 };
 pub use model::{
-    Arc, Circle, Donut, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype, Lineweight,
-    Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline, Properties, Sheet,
-    Solid, Spline, BY_BLOCK, BY_LAYER, CONTINUOUS, DEFAULT_LINEWEIGHT, LAYER_ZERO,
+    Arc, Circle, DecodeReport, Donut, DrawingContents, Ellipse, IdAndName, Layer, Line, Linetype,
+    Lineweight, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
+    Properties, RecordsOfKind, Sheet, Solid, Spline, BY_BLOCK, BY_LAYER, CONTINUOUS,
+    DEFAULT_LINEWEIGHT, LAYER_ZERO,
 };
 pub use model::{
     Arrowhead, BlockConnection, LaidContent, LaidMLeader, Leader, LeaderAnnotation,
@@ -175,6 +182,9 @@ pub use model::{
 pub use model::{Cell, Clip, Layout, Paper, Viewport};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use model::{RowKind, RowStyle, Table, TableCell, TableStyle, STANDARD_TABLE_STYLE};
+pub use original::{
+    read_original, ReadReport, ReadRequest, HANDLE_ID, MIRROR_EXTENSION, MIRROR_MARK,
+};
 pub use plot::{
     plot, plot_set, plot_set_with, plot_with, PlotReport, PlotRequest, PlotSetReport,
     PlotSetRequest, PlotStyleUsed, PlottedSheet, SheetSize, BUILT_IN_PLOT_STYLE,

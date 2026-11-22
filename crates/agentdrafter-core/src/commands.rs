@@ -52,6 +52,7 @@ use crate::interface::Interface;
 use crate::looking_at::{
     look_at, looking_at, LookAtRequest, LookingAtRequest, LOOKING_AT_FILE, MOST_SELECTED,
 };
+use crate::original::{read_original, ReadRequest, HANDLE_ID, MIRROR_EXTENSION};
 use crate::plot::{plot_set_with, plot_with, PlotRequest, PlotSetRequest, BUILT_IN_PLOT_STYLE};
 use crate::query::{query_with, QueryRequest};
 use crate::render::{render_with, RenderRequest};
@@ -364,6 +365,13 @@ const COMMANDS: &[Command] = &[
         does: import_blocks_does,
         input: import_blocks_input,
         run: run_import_blocks,
+        access: Access::Writes,
+    },
+    Command {
+        name: "read",
+        does: read_does,
+        input: read_input,
+        run: run_read,
         access: Access::Writes,
     },
 ];
@@ -1695,6 +1703,30 @@ fn run_import_blocks(
 ) -> Result<JsonReply, Error> {
     let request: ImportBlocksRequest = parse("import-blocks", input)?;
     Ok(done(import_blocks(&request)))
+}
+
+// read
+
+fn read_does() -> String {
+    format!(
+        "Reads an original, `source`, a DWG someone else drew, whole, and never writes it. The          reply says whether the DWG library decoded every record of the file, `decoded`, and          names each record it could not, under `not_decoded`, by `kind`, `count` and the          `handles` AutoCAD lists them by, with how many it `skipped` unread and the errors it          `recovered_errors` from; and it names in the same way, under `not_read`, the objects          of the sheet the core has no model for, which render, plot and the viewer do not draw,          with what of the drawing's tables, blocks and layouts it could not read under          `tables_not_read`. Every object read has an ID: the one AgentDrafter wrote on it, or          the drawing's name joined to its handle, such as P-101/{HANDLE_ID}2F, the same each          time the file is read. It writes the drawing's text mirror, a readable YAML rendering          of what it read with each object's ID and handle on a line of its own, for reading          and comparing and never read back, beside the original as P-101.{MIRROR_EXTENSION},          or at `mirror`; a mirror is replaced only when AgentDrafter wrote it, as its first          line shows. With `no_mirror` it writes nothing."
+    )
+}
+
+fn read_input() -> Value {
+    input(
+        json!({
+            "source": text("The original to read: a DWG."),
+            "mirror": text("Where to write the text mirror. Without it, beside the original, named after it with .mirror.yaml in place of .dwg. Not given with `no_mirror`."),
+            "no_mirror": flag("Read only, and write no text mirror."),
+        }),
+        &["source"],
+    )
+}
+
+fn run_read(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<JsonReply, Error> {
+    let request: ReadRequest = parse("read", input)?;
+    Ok(done(read_original(&request)))
 }
 
 /// The drawing set a command's input reads, if it names one: the folder its

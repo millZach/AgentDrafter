@@ -195,6 +195,11 @@ pub struct RenderReport {
     /// How many objects of a DWG were not drawn because the core has no
     /// model for them yet. Always 0 for a sheet description.
     pub objects_not_drawn: usize,
+    /// The objects of a DWG not drawn because the core has no model for
+    /// them yet, by kind, such as `ACAD_PROXY_ENTITY`, with the handle of
+    /// each, as `read` names them. Left out when every object is drawn.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_drawn: Vec<crate::model::RecordsOfKind>,
     /// The size of the PNG in bytes.
     pub bytes: usize,
     /// The text styles whose fonts are not in the font folders, and the
@@ -456,6 +461,7 @@ fn render_page(
         drawn_through,
         objects: object_counts(sheet),
         objects_not_drawn: record.objects_not_drawn,
+        not_drawn: record.not_drawn.clone(),
         bytes: png.len(),
         font_substitutions: fonts.substitutions(),
         hatches_cut_short: list.hatches_cut_short.clone(),

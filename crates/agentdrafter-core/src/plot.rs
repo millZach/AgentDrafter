@@ -175,6 +175,11 @@ pub struct PlotReport {
     /// How many objects of a DWG were not drawn because the core has no
     /// model for them yet. Always 0 for a sheet description.
     pub objects_not_drawn: usize,
+    /// The objects of a DWG not drawn because the core has no model for
+    /// them yet, by kind, such as `ACAD_PROXY_ENTITY`, with the handle of
+    /// each, as `read` names them. Left out when every object is drawn.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_drawn: Vec<crate::model::RecordsOfKind>,
     /// How many lines of text the PDF holds as searchable text.
     pub text_lines: usize,
     /// The size of the PDF in bytes.
@@ -372,6 +377,8 @@ fn plot_sheets(request: &PlotSetRequest, settings: &Settings) -> Result<PlotSetR
                     units: Some(sheet.units),
                     sheet,
                     objects_not_drawn: 0,
+                    not_drawn: Vec::new(),
+                    ids: Vec::new(),
                     files,
                 };
                 plot_record(
@@ -601,6 +608,7 @@ fn plot_record(
         plot_style: used.clone(),
         objects: object_counts(sheet),
         objects_not_drawn: record.objects_not_drawn,
+        not_drawn: record.not_drawn.clone(),
         text_lines: list.text.len(),
         bytes: bytes.len(),
         font_substitutions: fonts.substitutions(),
