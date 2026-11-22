@@ -719,7 +719,31 @@ fn dwg_spline(spline: &Spline) -> DwgSpline {
 /// Reads the drawing in the DWG at `path`: its linetypes, its layers and
 /// the objects in its model space.
 pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
-    let (drawing, stats) = read_drawing_with_stats(path)?;
+    let (drawing, stats) = read_drawing_with_stats(path, false)?;
+    contents(&drawing, &stats)
+}
+
+/// Reads the drawing in the DWG at `path` as [`read`] does; when the DWG
+/// library cannot read the file whole, reads it again past the records it
+/// cannot read, as AutoCAD's RECOVER reads a damaged drawing, though
+/// repairing nothing, and the decode report says so and names each record
+/// passed. Refused only when even that read fails.
+pub(crate) fn read_past_damage(path: &Path) -> Result<DrawingContents, Error> {
+    let strict = match read_drawing_with_stats(path, false) {
+        Ok((drawing, stats)) => return contents(&drawing, &stats),
+        Err(error) => error,
+    };
+    let Ok((drawing, stats)) = read_drawing_with_stats(path, true) else {
+        return Err(strict);
+    };
+    let mut read = contents(&drawing, &stats)?;
+    read.decode.decoded = false;
+    read.decode.read_past_damage = Some(strict.message);
+    Ok(read)
+}
+
+/// What the core reads of `drawing`, read with `stats`.
+fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<DrawingContents, Error> {
     let mut linetypes = Vec::new();
     let mut linetypes_not_read = 0;
     for dwg_linetype in drawing.line_types.iter() {
@@ -992,7 +1016,7 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
         layouts_not_read,
         handles,
         not_read: RecordsOfKind::group(not_read),
-        decode: decode_report(&drawing, &stats),
+        decode: decode_report(drawing, stats),
     })
 }
 
@@ -1048,6 +1072,24 @@ fn decode_report(drawing: &CadDocument, stats: &acadrust::ReadStats) -> DecodeRe
         } => Some((handle.value(), type_name.clone())),
         _ => None,
     }));
+    // A record the library could not read at all, read past damage, is
+    // named by the diagnostic it left, by its type when that is known.
+    if stats.skipped_source_records > 0 || stats.recovered_errors > 0 {
+        for diagnostic in &stats.diagnostics {
+            let Some(handle) = diagnostic.record_handle else {
+                continue;
+            };
+            if not_decoded.iter().any(|(h, _)| *h == handle) {
+                continue;
+            }
+            let kind = diagnostic
+                .record_type
+                .clone()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| UNREADABLE.to_owned());
+            not_decoded.push((handle, kind));
+        }
+    }
     // In the order of the file's handles, so that two reads of one file
     // report the same.
     not_decoded.sort();
@@ -1063,8 +1105,13 @@ fn decode_report(drawing: &CadDocument, stats: &acadrust::ReadStats) -> DecodeRe
         not_decoded,
         skipped: stats.skipped_source_records,
         recovered_errors: stats.recovered_errors,
+        read_past_damage: None,
     }
 }
+
+/// The kind a decode report gives a record the DWG library could not read
+/// at all and whose type it could not tell.
+const UNREADABLE: &str = "UNREADABLE_RECORD";
 
 /// One of our viewports, if the DWG viewport `v` is one the core draws,
 /// with its pen: its boundary, when it is clipped, one the core reads,
@@ -1599,14 +1646,24 @@ fn mark_in(properties: &[(String, String)]) -> Option<BuildMark> {
 }
 
 fn read_drawing(path: &Path) -> Result<CadDocument, Error> {
-    read_drawing_with_stats(path).map(|(drawing, _)| drawing)
+    read_drawing_with_stats(path, false).map(|(drawing, _)| drawing)
 }
 
 /// Reads the DWG at `path`, with what the DWG library says of how it read
-/// each record.
-fn read_drawing_with_stats(path: &Path) -> Result<(CadDocument, acadrust::ReadStats), Error> {
+/// each record: whole, or with `past_damage` past the records it cannot
+/// read, which it reports.
+fn read_drawing_with_stats(
+    path: &Path,
+    past_damage: bool,
+) -> Result<(CadDocument, acadrust::ReadStats), Error> {
+    let options = if past_damage {
+        acadrust::DwgReadOptions::failsafe()
+    } else {
+        acadrust::DwgReadOptions::default()
+    };
     match catch_unwind(AssertUnwindSafe(|| {
-        DwgReader::from_file(path).and_then(|mut reader| reader.read_with_stats())
+        DwgReader::from_file_with_options(path, options)
+            .and_then(|mut reader| reader.read_with_stats())
     })) {
         Ok(Ok(outcome)) => Ok((outcome.document, outcome.stats)),
         Ok(Err(e)) => Err(Error::new(
@@ -1740,6 +1797,38 @@ pub(crate) fn with_a_made_up_custom_object(dwg: &Path, out: &Path, kind: &str) -
     panic!("the made-up class's number never held");
 }
 
+/// Only for tests: writes to `out` the DWG at `dwg`, a 2018 DWG AgentDrafter
+/// built, with the record of its first line cut short, as a damaged file
+/// holds it: its type and handle read, its geometry does not. Gives the
+/// line's handle, as [`handle_text`] writes it.
+#[cfg(test)]
+pub(crate) fn with_a_damaged_line(dwg: &Path, out: &Path) -> String {
+    use acadrust::entities::UnknownEntity;
+
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    let line = drawing
+        .model_space_entities()
+        .find(|e| matches!(e, EntityType::Line(_)))
+        .expect("the DWG holds a line")
+        .clone();
+    let mut common = line.common().clone();
+    let raw = common
+        .raw_record
+        .take()
+        .expect("a line read from a DWG keeps its bytes");
+    let handle = common.handle;
+    let mut damaged = UnknownEntity::new("LINE");
+    damaged.common = common;
+    damaged.dwg_type_code = 19;
+    damaged.raw_dwg_data = Some(raw.data[..raw.data.len() / 3].to_vec());
+    damaged.dwg_handle_bits = 0;
+    damaged.dwg_source_version = Some(drawing.version);
+    *drawing.get_entity_mut(handle).expect("the line") = EntityType::Unknown(damaged);
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+    std::fs::write(out, bytes).expect("the DWG is saved");
+    handle_text(handle)
+}
+
 /// Only for tests: the bytes of a record of a 2010 DWG or later, `line`, a
 /// line's, written as a record of type `code` instead. Such a record starts
 /// with its type: two bits that say how it is written, then a byte or two.
@@ -1842,11 +1931,7 @@ mod tests {
         let description = dir.join("sheet.yaml");
         fs::write(
             &description,
-            "units: mm
-objects:
-  - line: {from: [0, 0, 0], to: [10, 0, 0]}
-  - circle: {center: [5, 5, 0], radius: 2}
-",
+            "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [10, 0, 0]}\n  - circle: {center: [5, 5, 0], radius: 2}\n",
         )
         .unwrap();
         build(&BuildRequest {
@@ -1880,6 +1965,44 @@ objects:
         assert_eq!(read.handles, whole.handles[1..]);
         // Each read of the same file names the same.
         assert_eq!(super::read(&out).unwrap(), read);
+    }
+
+    #[test]
+    fn a_damaged_record_is_read_past_only_when_asked_and_is_named() {
+        let dir = scratch("damaged");
+        let description = dir.join("sheet.yaml");
+        fs::write(
+            &description,
+            "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [10, 0, 0]}\n  - circle: {center: [5, 5, 0], radius: 2}\n",
+        )
+        .unwrap();
+        build(&BuildRequest {
+            description,
+            output: None,
+            overwrite: false,
+        })
+        .unwrap();
+        let out = dir.join("damaged.dwg");
+        let handle = with_a_damaged_line(&dir.join("sheet.dwg"), &out);
+        let refused = read(&out).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::DwgRead, "{refused:?}");
+        let past = read_past_damage(&out).unwrap();
+        assert!(!past.decode.decoded, "{:?}", past.decode);
+        assert_eq!(
+            past.decode.read_past_damage.as_deref(),
+            Some(refused.message.as_str())
+        );
+        assert!(
+            past.decode
+                .not_decoded
+                .iter()
+                .any(|k| k.handles.contains(&handle)),
+            "the line passed is named: {:?}",
+            past.decode
+        );
+        // The circle is read as it was.
+        assert_eq!(past.objects.len(), 1, "{past:?}");
+        assert!(matches!(past.objects[0], Object::Circle(_)));
     }
 
     #[test]

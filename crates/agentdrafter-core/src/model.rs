@@ -1167,6 +1167,13 @@ pub struct DecodeReport {
     /// How many errors the library recovered from while reading.
     #[serde(default)]
     pub recovered_errors: usize,
+    /// Why the library could not read the file whole, when it could not:
+    /// the read then went on past the records it could not read, as
+    /// AutoCAD's RECOVER reads a damaged drawing, though repairing nothing,
+    /// and named each it passed under `not_decoded`. Only `read` reads past
+    /// damage; every other command refuses such a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_past_damage: Option<String>,
 }
 
 impl Default for DecodeReport {
@@ -1176,6 +1183,7 @@ impl Default for DecodeReport {
             not_decoded: Vec::new(),
             skipped: 0,
             recovered_errors: 0,
+            read_past_damage: None,
         }
     }
 }

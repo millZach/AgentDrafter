@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -83,6 +84,12 @@ pub struct ReadReport {
     pub skipped: usize,
     /// How many errors the DWG library recovered from while reading.
     pub recovered_errors: usize,
+    /// Why the DWG library could not read the file whole, when it could
+    /// not: the read then went on past the records it could not read, as
+    /// AutoCAD's RECOVER reads a damaged drawing, repairing nothing, and
+    /// named each it passed under `not_decoded`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_past_damage: Option<String>,
     /// How many objects of each type the core read, such as `{"line": 12}`.
     pub objects: BTreeMap<String, usize>,
     /// The sheet's objects the core has no model for, by kind, with the
@@ -108,6 +115,13 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         )
         .in_file(source));
     }
+    if request.no_mirror && request.mirror.is_some() {
+        return Err(Error::usage(
+            "`mirror` names where to write the text mirror, and `no_mirror` writes none; give one \
+             or the other",
+        )
+        .at_field("mirror"));
+    }
     let bytes = fs::read(source).map_err(|e| {
         Error::new(
             ErrorCode::ReadFailed,
@@ -115,16 +129,9 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         )
         .in_file(source)
     })?;
-    let drawing = dwg::read(source)?;
+    let drawing = dwg::read_past_damage(source)?;
     let sheet = sheet_name(source);
     let mirror = if request.no_mirror {
-        if request.mirror.is_some() {
-            return Err(Error::usage(
-                "`mirror` names where to write the text mirror, and `no_mirror` writes none; give \
-                 one or the other",
-            )
-            .at_field("mirror"));
-        }
         None
     } else {
         let path = request
@@ -152,6 +159,7 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         not_decoded: drawing.decode.not_decoded,
         skipped: drawing.decode.skipped,
         recovered_errors: drawing.decode.recovered_errors,
+        read_past_damage: drawing.decode.read_past_damage,
         objects,
         not_read: drawing.not_read,
         tables_not_read,
@@ -207,6 +215,12 @@ fn refuse_to_replace(source: &Path, mirror: &Path) -> Result<(), Error> {
     if mirror.file_name().is_none() {
         return Err(Error::usage("the mirror's path does not name a file").at_field("mirror"));
     }
+    if is_dwg(mirror) {
+        return Err(Error::usage(
+            "a text mirror is YAML, not a DWG: choose a path for it that does not end .dwg",
+        )
+        .at_field("mirror"));
+    }
     if fs::symlink_metadata(mirror).is_err() {
         return Ok(());
     }
@@ -236,9 +250,16 @@ fn refuse_to_replace(source: &Path, mirror: &Path) -> Result<(), Error> {
 }
 
 /// Writes `bytes` to a temporary file beside `path`, then moves it onto
-/// `path`, so a reader never sees a half-written mirror.
+/// `path`, so a reader never sees a half-written mirror. The temporary
+/// file's name holds the process ID and a count, so no two writes, such as
+/// two reads the HTTP API serves at once, share one.
 fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let temporary = path.with_file_name(format!(".agentdrafter-{}.mirror.tmp", std::process::id()));
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let temporary = path.with_file_name(format!(
+        ".agentdrafter-{}-{}.mirror.tmp",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
     let written = fs::write(&temporary, bytes).and_then(|()| fs::rename(&temporary, path));
     written.map_err(|e| {
         let _ = fs::remove_file(&temporary);
@@ -280,6 +301,9 @@ fn message(source: &Path, drawing: &DrawingContents, mirror: Option<&Path>) -> S
         "the DWG library decoded every record".to_owned()
     } else {
         let mut parts: Vec<String> = Vec::new();
+        if decode.read_past_damage.is_some() {
+            parts.push("could not read the file whole, so read past the damage".to_owned());
+        }
         if !decode.not_decoded.is_empty() {
             parts.push(format!(
                 "could not decode {}",
@@ -365,6 +389,9 @@ fn mirror_text(source: &Path, bytes: &[u8], sheet: &str, drawing: &DrawingConten
     out.push_str(&format!("not_decoded: {}\n", records(&decode.not_decoded)));
     key(&mut out, "skipped", json!(decode.skipped));
     key(&mut out, "recovered_errors", json!(decode.recovered_errors));
+    if let Some(why) = &decode.read_past_damage {
+        key(&mut out, "read_past_damage", json!(why));
+    }
     out.push_str(&format!("not_read: {}\n", records(&drawing.not_read)));
     key(
         &mut out,

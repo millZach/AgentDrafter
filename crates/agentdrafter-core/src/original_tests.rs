@@ -215,6 +215,13 @@ fn a_mirror_replaces_only_a_mirror_and_never_the_original() {
     let error = read_original(&onto_itself).unwrap_err();
     assert_eq!(error.code, ErrorCode::Usage, "{error:?}");
     assert_eq!(fs::read(&original).unwrap(), before);
+    let as_a_dwg = ReadRequest {
+        mirror: Some(dir.join("new.dwg")),
+        ..request(&original)
+    };
+    let error = read_original(&as_a_dwg).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Usage, "{error:?}");
+    assert!(!dir.join("new.dwg").exists());
 
     let elsewhere = dir.join("elsewhere.yaml");
     let at = ReadRequest {
@@ -278,4 +285,30 @@ fn a_string_is_written_plain_only_where_yaml_reads_it_back_the_same() {
         assert!(scalar(quoted).starts_with('"'), "{quoted}");
         reads_as_yaml(&format!("k: {}\n", scalar(quoted))).unwrap();
     }
+}
+
+#[test]
+fn a_damaged_original_is_read_past_its_damage_which_the_reply_names() {
+    let dir = scratch("damaged");
+    let (original, _) = made_up_original(&dir);
+    let damaged = dir.join("P-102.dwg");
+    let handle = dwg::with_a_damaged_line(&original, &damaged);
+    let report = read_original(&request(&damaged)).unwrap();
+    assert!(!report.decoded);
+    assert!(report.read_past_damage.is_some(), "{report:?}");
+    assert!(
+        report
+            .not_decoded
+            .iter()
+            .any(|k| k.handles.contains(&handle)),
+        "{report:?}"
+    );
+    assert!(
+        report.message.contains("could not read the file whole"),
+        "{}",
+        report.message
+    );
+    let text = fs::read_to_string(dir.join("P-102.mirror.yaml")).unwrap();
+    reads_as_yaml(&text).unwrap();
+    assert!(text.contains("\nread_past_damage: "), "{text}");
 }

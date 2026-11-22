@@ -11,7 +11,7 @@ agentdrafter read P-101.dwg --no-mirror
 | Option | What it does |
 |---|---|
 | `<dwg>` | The original to read. It is only read. |
-| `--mirror <path>` | Where to write the [text mirror](#the-text-mirror). Without it, beside the original, named after it with `.mirror.yaml` in place of `.dwg`: `P-101.dwg`'s is `P-101.mirror.yaml`. |
+| `--mirror <path>` | Where to write the [text mirror](#the-text-mirror). Without it, beside the original, named after it with `.mirror.yaml` in place of `.dwg`: `P-101.dwg`'s is `P-101.mirror.yaml`. A path ending `.dwg` is refused. |
 | `--no-mirror` | Read only, and write nothing. Not given with `--mirror`. |
 
 Through the HTTP API, the MCP server and the Python library the command is `read`, and its input is `{"source", "mirror", "no_mirror"}` ([servers.md](servers.md)).
