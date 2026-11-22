@@ -770,22 +770,21 @@ fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<Drawin
             None => layers_not_read += 1,
         }
     }
-    let (text_styles, text_styles_not_read) = text::read_text_styles(&drawing);
-    let (table_styles, table_styles_not_read) = table::read_table_styles(&drawing);
-    let (mleader_styles, mleader_styles_not_read) = leader::read_mleader_styles(&drawing);
-    let (dimension_styles, dimension_styles_not_read) = dimension::read_dimension_styles(&drawing);
+    let (text_styles, text_styles_not_read) = text::read_text_styles(drawing);
+    let (table_styles, table_styles_not_read) = table::read_table_styles(drawing);
+    let (mleader_styles, mleader_styles_not_read) = leader::read_mleader_styles(drawing);
+    let (dimension_styles, dimension_styles_not_read) = dimension::read_dimension_styles(drawing);
     // A leader's or a dimension style's arrowhead block is read with them.
-    let mut arrow_blocks = leader::arrow_blocks(&drawing);
-    arrow_blocks.extend(dimension::style_arrow_blocks(&drawing));
+    let mut arrow_blocks = leader::arrow_blocks(drawing);
+    arrow_blocks.extend(dimension::style_arrow_blocks(drawing));
     // A dimension's own block holds what it draws, and is read with it.
-    let dimension_blocks = dimension::dimension_blocks(&drawing);
+    let dimension_blocks = dimension::dimension_blocks(drawing);
     // The sheet the drawing holds: model space, and the paper space of
     // each layout the core reads, whatever tab it was saved on.
     let units = unit(drawing.header.insertion_units);
-    let (read_layouts, layouts_not_read) =
-        layout::read_layouts(&drawing, units.unwrap_or(Unit::Mm));
+    let (read_layouts, layouts_not_read) = layout::read_layouts(drawing, units.unwrap_or(Unit::Mm));
     let blocks_of: Vec<acadrust::types::Handle> = read_layouts.iter().map(|l| l.block).collect();
-    let on_sheet = sheet_objects(&drawing, &blocks_of);
+    let on_sheet = sheet_objects(drawing, &blocks_of);
     // A table's own block holds what it draws, and is read with the table.
     let table_blocks: Vec<(Option<acadrust::types::Handle>, String)> = on_sheet
         .iter()
@@ -819,7 +818,7 @@ fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<Drawin
     // An arrowhead block that only leaders draw is read with them, and is
     // neither a block of the drawing's nor counted; one an insert or a
     // multileader's block content places is a block like any other.
-    let content_blocks = leader::content_blocks(&drawing);
+    let content_blocks = leader::content_blocks(drawing);
     let inserted: Vec<String> = drawing
         .model_space_entities()
         .chain(
@@ -851,7 +850,7 @@ fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<Drawin
         let mut more = false;
         for (slot, record) in read.iter_mut().zip(&records) {
             if slot.is_none() {
-                if let Some(definition) = read_block(&drawing, record, &known) {
+                if let Some(definition) = read_block(drawing, record, &known) {
                     *slot = Some(definition);
                     more = true;
                 }
@@ -885,11 +884,11 @@ fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<Drawin
             let read = read_properties(&l.common)
                 .filter(|_| !l.common.invisible)
                 .and_then(|properties| {
-                    let (mut read, _) = leader::read_leader(&drawing, l, layer_of(&l.common))?;
+                    let (mut read, _) = leader::read_leader(drawing, l, layer_of(&l.common))?;
                     read.properties = properties;
                     Some(read)
                 });
-            if let Some(annotation) = leader::annotation_of(&drawing, l) {
+            if let Some(annotation) = leader::annotation_of(drawing, l) {
                 annotations.push((annotation, read.is_some()));
             }
             leaders.push((l.common.handle, read));
@@ -901,7 +900,7 @@ fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<Drawin
     let mut boundaries = Vec::new();
     for &(dwg_object, space) in &on_sheet {
         if let (EntityType::Viewport(v), Some(_)) = (dwg_object, space) {
-            let read = read_viewport_of(&drawing, v);
+            let read = read_viewport_of(drawing, v);
             if read.is_some() && !v.clip_boundary_handle.is_null() {
                 boundaries.push(v.clip_boundary_handle);
             }
@@ -930,7 +929,7 @@ fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<Drawin
                 .filter(|_| !m.common.invisible)
                 .and_then(|properties| {
                     let mut read = leader::read_mleader(
-                        &drawing,
+                        drawing,
                         m,
                         &mleader_styles,
                         &blocks,
@@ -954,7 +953,7 @@ fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<Drawin
                 .filter(|_| !t.common.invisible)
                 .and_then(|properties| {
                     let mut read =
-                        table::read_table(&drawing, t, &table_styles, layer_of(&t.common))?;
+                        table::read_table(drawing, t, &table_styles, layer_of(&t.common))?;
                     read.properties = properties;
                     Some(Object::Table(read))
                 }),
@@ -1011,7 +1010,7 @@ fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<Drawin
         ltscale: drawing.header.linetype_scale,
         layout,
         other_layouts,
-        opens_on: layout::opened_on(&drawing).map(|(name, _)| name),
+        opens_on: layout::opened_on(drawing).map(|(name, _)| name),
         paper,
         layouts_not_read,
         handles,
