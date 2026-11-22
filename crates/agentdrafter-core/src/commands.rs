@@ -138,10 +138,15 @@ impl Command {
         let previews = (self.name == "display-list" && input.get("change_set").is_some())
             || matches!(self.name, "propose" | "proposals" | "guide" | "guides");
         // What the drafter is looking at is kept beside the set's records,
-        // not in them, and `read` reads a DWG on its own without touching any
-        // set: none of them probes a set, rolls back, or waits on an
-        // unfinished commit.
-        let beside = matches!(self.name, "look-at" | "looking-at" | "read");
+        // not in them; `read` reads a DWG on its own, and `query` and `check`
+        // on a DWG are strictly read-only without touching any set: none of
+        // them probes a set, rolls back, or waits on an unfinished commit.
+        let dwg_source = matches!(self.name, "query" | "check")
+            && input
+                .get("source")
+                .and_then(Value::as_str)
+                .is_some_and(|s| SourceKind::of(Path::new(s)) == SourceKind::Dwg);
+        let beside = matches!(self.name, "look-at" | "looking-at" | "read") || dwg_source;
         let rolled_back = if previews || beside {
             None
         } else {
@@ -858,33 +863,36 @@ fn run_stale(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<Js
 // query
 
 fn query_does() -> String {
-    "Asks a drawing set, or one sheet description, what is on its sheets, from the records, \
-     with nothing selected by coordinates but a box; `query` says what, by its `kind`. find \
-     lists the objects matching every part given, each with its ID and where it is written, \
-     `window` and `crossing` the objects within a box or crossing it, as AutoCAD's selection \
-     windows take them, and `touching` those whose geometry meets an object's, with where; \
-     attributes \
-     gives each matching insert's attributes as JSON from tag to value; blocks lists the \
-     blocks each sheet inserts; measure gives the distance between a point of two objects on \
-     one sheet, each named by ID or name, by default an insert's or a text's position, a \
-     line's from, a circle's centre; extents gives the box round what each sheet draws; \
-     snap gives the points AutoCAD's object snaps find on an object named by ID or name, \
+    "Asks a drawing set, one sheet description, or a DWG what is on its sheets, from the \
+     records, with nothing selected by coordinates but a box; `query` says what, by its `kind`. \
+     find lists the objects matching every part given, each with its ID and where it is written \
+     (or its file and handle for a DWG), `window` and `crossing` the objects within a box or \
+     crossing it, as AutoCAD's selection windows take them, and `touching` those whose geometry \
+     meets an object's, with where; attributes gives each matching insert's attributes as JSON \
+     from tag to value; blocks lists the blocks each sheet inserts; measure gives the distance \
+     between a point of two objects on one sheet, each named by ID or name, by default an \
+     insert's or a text's position, a line's from, a circle's centre; extents gives the box \
+     round what each sheet draws; layers lists each sheet's layers and how many objects sit on \
+     each; snap gives the points AutoCAD's object snaps find on an object named by ID or name, \
      inserts' blocks among them: endpoint, midpoint, center, quadrant, insertion and node, \
-     intersection and apparent_intersection `with` another object, and perpendicular, \
-     tangent and nearest `from` a snap of another object, each named by `which` to ask for \
-     it again; geometry gives each matching object's length, area, extents and angles. \
-     Lengths are in the declared unit. `id`, `name`, `block` and `tag` match whole, in any \
-     case, and `value` and `text` whole, case and all; with `match` `contains`, each matches \
-     what holds it, in any case. A query that matches nothing is ok and says so; `sheet` \
-     looks at one sheet only."
+     intersection and apparent_intersection `with` another object, and perpendicular, tangent \
+     and nearest `from` a snap of another object, each named by `which` to ask for it again; \
+     geometry gives each matching object's length, area, extents and angles; layout lists each \
+     sheet's paper-space layouts and viewports. Lengths are in the declared unit (null for a \
+     unitless DWG). On a DWG, each object takes its carried AgentDrafter ID or its drawing name \
+     joined to its handle (such as P-101/handle:2F), matching `read` and `display-list`, and \
+     objects the core has no model for are counted under `objects_not_read` and named under \
+     `not_read`. `id`, `name`, `block` and `tag` match whole, in any case, and `value` and \
+     `text` whole, case and all; with `match` `contains`, each matches what holds it, in any \
+     case. A query that matches nothing is ok and says so; `sheet` looks at one sheet only."
         .to_owned()
 }
 
 fn query_input() -> Value {
     input(
         json!({
-            "source": text("A drawing set's folder, or one sheet description."),
-            "sheet": text("Only the sheet of this name, of the set's sheets. Without it, every sheet."),
+            "source": text("A drawing set's folder, one sheet description, or a DWG when the file ends .dwg."),
+            "sheet": text("Only the sheet of this name, in any case. Without it, every sheet."),
             "query": query_schema(),
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
@@ -1614,14 +1622,19 @@ fn proposal_number(does: &str) -> Value {
 // check
 
 fn check_does() -> String {
-    "Checks a drawing set, or one sheet description, `source`, from its saved files, against \
-     the default checks: paper_size, the sheet's extents are its declared paper's size; \
-     off_sheet, every object draws on the paper, from [0, 0]; text_overflow, every text and \
-     attribute of an insert draws within the cell its block declares for it; and \
-     text_on_text, no two texts' drawn boxes overlap. A sheet that declares no paper gets one \
-     paper_size finding that says so. Each sheet is drawn through the drawing pipeline, so \
-     text is measured as its font draws it. Each finding names the sheet, the rule and the \
-     object, by ID and name, and says what is wrong in numbers in the declared unit, within a \
+    "Checks a drawing set, one sheet description, or a DWG, `source`, from its saved files, \
+     against the default checks: paper_size, the sheet's extents are its declared paper's \
+     size; off_sheet, every object draws on the paper, from [0, 0]; text_overflow, every text \
+     and attribute of an insert draws within the cell its block declares for it and every \
+     table cell's text keeps inside its margins; text_on_text, no two texts' drawn boxes \
+     overlap; and text_on_line, no line touches a text's letters as they print. A sheet \
+     description or set template that declares no paper gets one paper_size finding that says \
+     so; a DWG with no layout paper or set paper skips paper_size and off_sheet rather than \
+     failing for lacking one, and objects the core has no model for are counted under \
+     `objects_not_read` and named under `not_read`. Each sheet is drawn through the drawing \
+     pipeline, so text is measured as its font draws it. Each finding names the sheet, the \
+     rule and the object, by ID and name (with file and handle on a DWG), and says what is \
+     wrong in numbers in the declared unit (millimetres for a unitless DWG), within a \
      tolerance of 0.01 mm on paper. A failed check is ok and listed under findings; `sheets` \
      checks only the sheets it names."
         .to_owned()
@@ -1630,7 +1643,7 @@ fn check_does() -> String {
 fn check_input() -> Value {
     input(
         json!({
-            "source": text("A drawing set's folder, or one sheet description."),
+            "source": text("A drawing set's folder, one sheet description, or a DWG when the file ends .dwg."),
             "sheets": {
                 "description": "Only the sheets of these names, in any case. Without them, every sheet.",
                 "type": "array",

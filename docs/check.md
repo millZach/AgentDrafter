@@ -2,13 +2,15 @@
 
 The checker re-reads a drawing set's saved files, or one sheet description, and reports each [check](../CONTEXT.md) a sheet fails (see [`CONTEXT.md`](../CONTEXT.md)). It is separate from whatever made a change: it reads the records on disk, as a build reads them, never the records another part held in memory, so whatever made a change never marks its own work (`docs/plan.md`). Its default checks are the ones a reviewer would otherwise catch by eye: the exact paper size, nothing off the sheet, no text overflowing its cell, no text sitting on other text, and no line running through a text's letters.
 
-`agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]...` checks every sheet of a set, or only those `--sheet` names, in any case, and prints one line of JSON. It is a thin layer over the core's `check_with`, which takes a request and returns the report as plain data (ADR-0007). A change set's reply carries the checker's reply too ([below](#after-a-change-set)).
+`agentdrafter check <drawing-set-folder | sheet-description | dwg> [--sheet <sheet>]... [--fonts <folder>]...` checks every sheet of a set, one sheet description, or a DWG (original or built), or only those `--sheet` names, in any case, and prints one line of JSON. It is a thin layer over the core's `check_with`, which takes a request and returns the report as plain data (ADR-0007). A change set's reply carries the checker's reply too ([below](#after-a-change-set)).
 
 A failed check is reported, not refused. The reply is `ok`, with each failed check under `findings`; it does not stop a change set from landing, and the reviewer can accept a set after a warning that lists them (`docs/plan.md`): [`accept`](journal.md#accept) checks every sheet first, lists what fails, and issues nothing until told to accept despite it. A sheet that cannot be read stops the check with its error, placed in its file, as a query does: a report that left a sheet out could say it passed.
 
 ## What the checker reads
 
-The checker reads each sheet's record: the sheet description, or the template filled in from its row with the row's own objects, and the block library it names, from disk. It does not read the built DWGs, so it needs no build and cannot read a stale one, and a file changed on disk by hand is checked as it now is. It writes nothing.
+For a drawing set or a sheet description, the checker reads each sheet's record: the sheet description, or the template filled in from its row with the row's own objects, and the block library it names, from disk. It does not read the built DWGs, so it needs no build and cannot read a stale one, and a file changed on disk by hand is checked as it now is. It writes nothing.
+
+Given a `.dwg` file (in any case, `.dwg`/`.DWG`), the checker reads the DWG once, strictly read-only (never modifying the file or triggering drawing-set journal recovery), refusing damaged DWGs with `dwg_read`. Each object uses the same canonical sheet name and handle IDs as [`read`](originals.md#ids), `display-list` and [`query`](query.md), and finding object references give the DWG `file` and `handle` (omitting YAML `field`, `line` and `column`, and naming block parts by `file` and `handle`). A DWG drawn in a layout with a standard page setup (or a built DWG whose build mark names its set's declared paper) is checked against that paper for `paper_size` and `off_sheet`; a model-space original DWG (or a layout without a standard page setup) has no declared paper and skips `paper_size` and `off_sheet` rather than failing for lacking a YAML `paper` key. Attribute definitions read from a DWG carry no YAML `cell`, so `text_overflow` checks table cells without false positives on blocks. A unitless DWG reports `units: null` and checks with the 0.01 mm tolerance in drawing units (`0.01`). Objects of a DWG the core has no model for are counted under `objects_not_read` and named under `not_read` (omitted when 0/empty) and noted in `message`.
 
 Each sheet is drawn through the one drawing pipeline (ADR-0011), as [`query extents`](query.md#extents) draws it: every layer continuous, curves drawn as chords within a millionth of the sheet's larger side, and text as its font draws it. The first four checks measure that drawing, so what they measure is what the PNG, the PDF and the viewer draw. `text_on_line` measures a second drawing of the sheet as it prints: the same, but with each linetype laid out, so a line is its dashes, and with layers that do not plot left out. Text is measured in the fonts the font folders hold, or a look-alike, and the reply lists each look-alike under `font_substitutions`, as a build does.
 
@@ -46,14 +48,16 @@ Each check is held to one tolerance, **0.01 mm on paper**, given in the reply's 
 
 | Key | What it is |
 |---|---|
-| `source` | The drawing set's folder, or the sheet description, checked. |
-| `units` | The declared unit every length in the report is in. |
+| `source` | The drawing set's folder, sheet description, or DWG checked. |
+| `units` | The declared unit every length in the report is in (`null` for a unitless DWG). |
 | `sheets` | The sheets checked, in the set's order. |
 | `message` | What was found, in words. |
 | `passed` | Whether every check passed on every sheet checked. |
-| `tolerance` | How far past a limit counts, 0.01 mm on paper, in the declared unit. |
+| `tolerance` | How far past a limit counts, 0.01 mm on paper, in the declared unit (or drawing units for a unitless DWG). |
 | `count` | How many checks failed. |
 | `findings` | Each failed check, sheet by sheet in the set's order, and on each sheet `paper_size`, `off_sheet`, `text_overflow`, `text_on_text`, then `text_on_line`. |
+| `objects_not_read` | For a DWG only, omitted when 0: how many sheet objects the core has no model for. |
+| `not_read` | For a DWG only, omitted when empty: those objects by `kind`, `count` and `handles`, as [`read`](originals.md) lists them. |
 | `font_substitutions` | Each text style whose font was not in a font folder, and the look-alike its text was measured with. The reply also warns of each such font at its top, under `warnings`, naming the sheets it was used on ([fonts](sheet-description.md#fonts)). |
 | `inconsistent` | The set's [inconsistent mark](change-sets.md#an-inconsistent-set), while it is marked. |
 
@@ -112,5 +116,4 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 - A paper placed anywhere but at the origin, or a paper in the set's settings.
 - A cell for a text or mtext on a sheet, outside a block, or for a block's mtext.
 - Text sitting on a fill, such as a hatch or a solid: `text_on_line` holds text to lines, and `text_on_text` to text.
-- Checking DWGs, built or someone else's.
 - A layout's model-space objects checked in model space alone, such as a text that sits on another where no viewport shows them.

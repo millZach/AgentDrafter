@@ -206,10 +206,10 @@ fn a_query_finds_objects_by_id_name_block_attribute_and_text_on_every_sheet() {
         unreachable!()
     };
     assert!(objects[0].id_written);
-    assert_eq!(objects[0].written_at.field, "objects[1]");
+    assert_eq!(objects[0].written_at.field.as_deref(), Some("objects[1]"));
     assert!(objects[0].written_at.file.ends_with("ansi-b.yaml"));
     assert!(matches!(objects[0].object, Object::Polyline(_)));
-    assert_eq!(one.units, Unit::In);
+    assert_eq!(one.units, Some(Unit::In));
     assert_eq!(one.sheets, SHEETS);
 
     let part = Selection {
@@ -368,7 +368,7 @@ fn a_query_measures_a_distance_and_the_extents_of_an_inch_set_in_inches() {
         ..End::default()
     };
     let report = measure(&set, Some("DEMO-001"), by_id("DEMO-001/heading"), named);
-    assert_eq!(report.units, Unit::In);
+    assert_eq!(report.units, Some(Unit::In));
     let (d, delta) = distance(&report);
     close(d, 330.5f64.sqrt(), 1e-12);
     assert_eq!(delta, [15.5, -9.5, 0.0]);
@@ -413,7 +413,7 @@ fn a_query_measures_a_millimetre_sheet_in_millimetres() {
         ..End::default()
     };
     let report = measure(&sheet, None, name("marker-a1"), name("marker-a2"));
-    assert_eq!(report.units, Unit::Mm);
+    assert_eq!(report.units, Some(Unit::Mm));
     assert_eq!(report.sheets, ["sheet-1"]);
     let (d, delta) = distance(&report);
     close(d, 2600f64.sqrt(), 1e-12);
@@ -430,7 +430,7 @@ fn a_query_measures_a_millimetre_sheet_in_millimetres() {
     )
     .unwrap();
     let report = ask(&made_up, Query::Extents);
-    assert_eq!(report.units, Unit::Mm);
+    assert_eq!(report.units, Some(Unit::Mm));
     let Answer::Extents { extents, .. } = &report.answer else {
         panic!("an extents answer: {report:#?}");
     };
@@ -743,7 +743,7 @@ fn a_query_finds_text_an_inserted_block_draws() {
         assert!(matches!(object.object, Object::Insert(_)));
         assert_eq!(object.block_text.len(), 1);
         let text = &object.block_text[0];
-        assert_eq!(text.field, "blocks.TITLE_BLOCK.objects[7]");
+        assert_eq!(text.field.as_deref(), Some("blocks.TITLE_BLOCK.objects[7]"));
         assert_eq!(text.contents, "DEMO PLANT");
         // The template names it as `../blocks.yaml`; it is the set's
         // `blocks.yaml`, worked out (#35).

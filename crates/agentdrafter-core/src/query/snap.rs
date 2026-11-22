@@ -8,7 +8,9 @@
 
 use serde::Serialize;
 
-use super::{article, matched, object_named, Answer, LookedAt, Selection, SheetRecord};
+use super::{
+    article, matched, object_named, units_words, Answer, LookedAt, Selection, SheetRecord,
+};
 use crate::error::{Error, ErrorCode};
 use crate::geometry::measure::Measures;
 use crate::geometry::snap::{
@@ -648,7 +650,7 @@ pub(super) fn geometry(
     sheets: &[&SheetRecord],
     selection: &Selection,
     settings: &Settings,
-    units: Unit,
+    units: Option<Unit>,
     looked: &LookedAt,
 ) -> (String, Answer) {
     let mut fonts: Vec<(String, SheetFonts)> = Vec::new();
@@ -681,6 +683,7 @@ pub(super) fn geometry(
     let count = objects.len();
     let message = match objects.as_slice() {
         [one] => {
+            let u = units_words(units);
             let mut said = Vec::new();
             if let Some(measured) = one.measures.measurement {
                 let shows = one
@@ -689,13 +692,13 @@ pub(super) fn geometry(
                     .as_deref()
                     .map(|t| format!(" and shows `{t}`"))
                     .unwrap_or_default();
-                said.push(format!("measures {measured} {units}{shows}"));
+                said.push(format!("measures {measured} {u}{shows}"));
             }
             if let Some(length) = one.measures.length {
-                said.push(format!("is {length} {units} long"));
+                said.push(format!("is {length} {u} long"));
             }
             if let Some(area) = one.measures.area {
-                said.push(format!("encloses {area} square {units}"));
+                said.push(format!("encloses {area} square {u}"));
             }
             if said.is_empty() {
                 format!(

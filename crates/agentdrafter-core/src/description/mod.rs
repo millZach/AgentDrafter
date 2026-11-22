@@ -51,7 +51,6 @@ pub(crate) use written::{ObjectSources, SheetSources, Source};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ids::ObjectRecord;
 use objects::{Place, Tables};
 use strict_yaml::{index_path, key_path, Entry, Kind, Node, Pos};
 
@@ -66,10 +65,12 @@ pub(crate) use edit::{
     RecordFile, Resolved, TableEdit, Transform,
 };
 pub(crate) use emit::number_text;
-pub(crate) use ids::{COPY_OF_KEY, ID_SEPARATOR, LONGEST_ID};
+pub(crate) use ids::{ObjectRecord, Written, COPY_OF_KEY, ID_SEPARATOR, LONGEST_ID};
 pub(crate) use mark::{mark_text, parse_mark, MarkFailure};
 pub(crate) use objects::article;
-pub(crate) use records::{read_sheet_record, read_sheet_record_noting, SavedSet, SheetRecord};
+pub(crate) use records::{
+    read_sheet_record, read_sheet_record_noting, DwgOrigin, SavedSet, SheetRecord,
+};
 pub(crate) use set::{
     read_rows_file_in, read_rows_files_in, read_set_rows, read_set_rows_in, read_set_settings,
     read_set_settings_in, rows_of, rows_paths, template_path, value_name_problem, Row, RowsFile,

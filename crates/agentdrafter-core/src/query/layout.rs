@@ -4,7 +4,9 @@
 
 use serde::Serialize;
 
-use super::{counted, measuring_drawing, written_at, Answer, Extents, LookedAt, WrittenAt};
+use super::{
+    counted, measuring_drawing, units_words, written_at, Answer, Extents, LookedAt, WrittenAt,
+};
 use crate::description::SheetRecord;
 use crate::dwg::{PageSetup, PLOTTER, PLOT_STYLE};
 use crate::model::{Clip, Paper, Point3, Sheet};
@@ -96,7 +98,7 @@ pub struct ViewportFound {
 pub(super) fn layout(
     sheets: &[&SheetRecord],
     settings: &Settings,
-    units: Unit,
+    units: Option<Unit>,
     looked: &LookedAt,
 ) -> (String, Answer) {
     let on = looked.on();
@@ -164,9 +166,10 @@ pub(super) fn layout(
         all => {
             let drawn = sheets.iter().filter(|s| s.sheet.layout.is_some()).count();
             let layouts = all.iter().filter(|s| s.layout.is_some()).count();
+            let u = units_words(units);
             format!(
                 "{drawn} of the {} sheets {on} {} drawn in a layout, with {} and {} in all; \
-                 lengths in {units}",
+                 lengths in {u}",
                 sheets.len(),
                 if drawn == 1 { "is" } else { "are" },
                 counted(layouts, "layout"),

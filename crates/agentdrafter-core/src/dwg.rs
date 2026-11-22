@@ -2455,6 +2455,25 @@ pub(crate) fn as_someone_elses(dwg: &Path, out: &Path) {
     std::fs::write(out, bytes).expect("the DWG is saved");
 }
 
+/// Only for tests: writes `dwg` to `out` as a unitless original (INSUNITS = 0,
+/// no build mark, no AgentDrafter extended data).
+#[cfg(test)]
+pub(crate) fn as_unitless_original(dwg: &Path, out: &Path) {
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    drawing.header.insertion_units = 0;
+    drawing
+        .summary_info
+        .custom_properties
+        .retain(|(name, _)| name != BUILD_MARK);
+    for entity in drawing.entities_mut() {
+        let common = entity.common_mut();
+        common.extended_data = Default::default();
+        common.raw_record = None;
+    }
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+    std::fs::write(out, bytes).expect("the DWG is saved");
+}
+
 /// Only for tests: writes to `out` the DWG at `dwg`, a 2018 DWG AgentDrafter
 /// built, with its first line turned into an object of a made-up
 /// application's custom class named `kind`, which the DWG library reads but
@@ -2633,6 +2652,7 @@ mod tests {
             sheet,
             objects: Vec::new(),
             rows_file: None,
+            dwg: None,
         }
     }
 

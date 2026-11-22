@@ -109,7 +109,7 @@ fn the_demo_set_passes_clean() {
     passes(&report);
     assert_eq!(report.sheets, ["DEMO-001", "DEMO-002", "DEMO-003"]);
     assert_eq!(report.message, "every check passes on the 3 sheets checked");
-    assert_eq!(report.units.symbol(), "in");
+    assert_eq!(report.units.unwrap().symbol(), "in");
     close(report.tolerance, 0.01 / 25.4);
     // The template declares its paper by name, and the title block its cells.
     let template = fs::read_to_string(set.join("templates/ansi-b.yaml")).unwrap();
@@ -205,8 +205,8 @@ objects:
     assert_eq!(object.id, "sheet/trim");
     assert_eq!(object.name.as_deref(), Some("edge"));
     assert_eq!(object.kind, "polyline");
-    assert_eq!(object.written_at.field, "objects[0]");
-    assert_eq!(object.written_at.line, 4);
+    assert_eq!(object.written_at.field.as_deref(), Some("objects[0]"));
+    assert_eq!(object.written_at.line, Some(4));
     let past = finding.past.unwrap();
     close(past.left, 2.0);
     close(past.right, 0.0);
@@ -286,7 +286,7 @@ objects:
     assert_eq!(object.kind, "insert");
     let part = object.in_block.as_ref().unwrap();
     assert_eq!(part.block, "BOX");
-    assert_eq!(part.field, "blocks.BOX.objects[1]");
+    assert_eq!(part.field.as_deref(), Some("blocks.BOX.objects[1]"));
     assert_eq!(part.kind, "attdef");
     assert_eq!(part.tag.as_deref(), Some("TAG"));
     assert!(part.file.ends_with("lib.yaml"), "{}", part.file);
@@ -323,9 +323,17 @@ objects:
 
     // The label declares no cell and is not checked for overflow, and the
     // hidden attribute draws nothing to check.
-    assert!(overflow.iter().all(
-        |f| f.object.as_ref().unwrap().in_block.as_ref().unwrap().field == "blocks.BOX.objects[1]"
-    ));
+    assert!(overflow.iter().all(|f| {
+        f.object
+            .as_ref()
+            .unwrap()
+            .in_block
+            .as_ref()
+            .unwrap()
+            .field
+            .as_deref()
+            == Some("blocks.BOX.objects[1]")
+    }));
 }
 
 #[test]
@@ -960,7 +968,7 @@ objects:
     let part = object.in_block.as_ref().unwrap();
     assert_eq!(part.block, "TERMINAL");
     assert_eq!(part.tag.as_deref(), Some("NUMBER"));
-    assert_eq!(part.field, "blocks.TERMINAL.objects[1]");
+    assert_eq!(part.field.as_deref(), Some("blocks.TERMINAL.objects[1]"));
     assert_eq!(object.text.as_deref(), Some("2"));
     assert!(
         found[0].message.contains(

@@ -33,7 +33,8 @@ use crate::draw::{self, Bounds, DisplayList, MOST_HATCH_DASHES};
 use crate::error::{Error, ErrorCode};
 use crate::geometry::snap::{touches, SnapPoint, Touch};
 use crate::geometry::{ObjectRef, SnapRef};
-use crate::model::{Attribute, Layer, Measured, Object, Point3, Sheet, LAYER_ZERO};
+use crate::model::{Attribute, Layer, Measured, Object, Point3, RecordsOfKind, Sheet, LAYER_ZERO};
+use crate::original::{is_dwg, kinds_in_words, plural, read_dwg_record};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -266,22 +267,42 @@ pub struct End {
 /// What a query found.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct QueryReport {
-    /// The drawing set's folder, or the sheet description, queried.
+    /// The drawing set's folder, sheet description, or DWG queried.
     pub source: String,
-    /// The declared unit every length in the answer is in: the set's, or
-    /// the sheet description's.
-    pub units: Unit,
+    /// The declared unit every length in the answer is in: the set's, the
+    /// sheet description's, or the DWG's; none when a DWG states no unit the
+    /// core knows.
+    pub units: Option<Unit>,
     /// The sheets looked at, by name, in the set's order.
     pub sheets: Vec<String>,
     /// What was found, in words. When nothing matched, it says so.
     pub message: String,
     #[serde(flatten)]
     pub answer: Answer,
+    /// How many objects of a DWG the core has no model for yet, which are
+    /// not queried. Left out when 0.
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub objects_not_read: usize,
+    /// Those objects of a DWG, by kind, such as `ACAD_PROXY_ENTITY`, with
+    /// the handle of each, as `read` names them. Left out when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_read: Vec<RecordsOfKind>,
     /// The drawing set's inconsistent mark, when a change set landed on
     /// some of its sheets and failed on others: the answer reads the
     /// records as they are.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inconsistent: Option<crate::change::Inconsistent>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
+}
+
+/// How `units` reads in a message: its symbol, or `"drawing units"` when a
+/// DWG declares none.
+pub(super) fn units_words(units: Option<Unit>) -> &'static str {
+    units.map_or("drawing units", Unit::symbol)
 }
 
 /// The answer to each kind of query. Written with the query's `kind`.
@@ -384,17 +405,25 @@ pub struct LayerUse {
     pub objects: usize,
 }
 
-/// Where an object is written: its file and its place in it.
+/// Where an object is written: its file and its place in it, or its handle
+/// in a DWG.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct WrittenAt {
-    /// The sheet description, or the sheet's template.
+    /// The sheet description, the sheet's template, the rows file, or the DWG.
     pub file: String,
-    /// The object's place in the file, such as `objects[3]`.
-    pub field: String,
-    /// The line the object starts on, counted from 1.
-    pub line: usize,
-    /// The column it starts at, counted from 1 in characters.
-    pub column: usize,
+    /// The object's place in the file, such as `objects[3]`. Absent for a DWG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// The line the object starts on, counted from 1. Absent for a DWG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// The column it starts at, counted from 1 in characters. Absent for a DWG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
+    /// The object's handle in a DWG, in hexadecimal as AutoCAD lists it, such
+    /// as `2F`. Absent for a sheet description or drawing set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
 }
 
 /// One object a find matched.
@@ -430,11 +459,15 @@ pub struct FoundObject {
 /// matched.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BlockText {
-    /// The block library that defines the block.
+    /// The block library that defines the block, or the DWG.
     pub file: String,
     /// Its place in the block definition, such as
-    /// `blocks.TITLE_BLOCK.objects[7]`.
-    pub field: String,
+    /// `blocks.TITLE_BLOCK.objects[7]`. Absent for a DWG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Its handle in the DWG, in hexadecimal. Absent for a block library.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
     /// What it says.
     pub contents: String,
 }
@@ -544,14 +577,19 @@ pub fn query(request: &QueryRequest) -> Result<QueryReport, Error> {
     query_with(request, &Settings::from_env())
 }
 
-/// Queries a drawing set, or one sheet description, from its records,
+/// Queries a drawing set, one sheet description, or a DWG, from its records,
 /// reading fonts from the font folders `settings` names to find extents.
 pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryReport, Error> {
     let source = request.source.as_path();
-    let (units, records) = load(source, request.sheet.as_deref())?;
+    let Loaded {
+        units,
+        records,
+        objects_not_read,
+        not_read,
+    } = load(source, request.sheet.as_deref())?;
     let looked_at: Vec<&SheetRecord> = records.iter().collect();
     let looked = LookedAt(&looked_at, request.sheet.is_some());
-    let (message, answer) = match &request.query {
+    let (mut message, answer) = match &request.query {
         Query::Find(selection) => find(&looked_at, selection, settings, &looked),
         Query::Blocks => blocks(&looked_at, &looked),
         Query::Attributes(selection) => attributes(&looked_at, selection, settings, &looked),
@@ -564,12 +602,21 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
         }
         Query::Layout => layout::layout(&looked_at, settings, units, &looked),
     };
+    if objects_not_read > 0 {
+        message.push_str(&format!(
+            "; {objects_not_read} object{} the core has no model for not read: {}",
+            plural(objects_not_read),
+            kinds_in_words(&not_read)
+        ));
+    }
     Ok(QueryReport {
         source: source.display().to_string(),
         units,
         sheets: looked_at.iter().map(|r| r.name.clone()).collect(),
         message,
         answer,
+        objects_not_read,
+        not_read,
         inconsistent: if source.is_dir() {
             crate::change::inconsistent(source)
         } else {
@@ -578,18 +625,44 @@ pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryRe
     })
 }
 
+/// The sheets loaded for a query, with their declared unit and any objects of
+/// a DWG the core has no model for.
+struct Loaded {
+    units: Option<Unit>,
+    records: Vec<SheetRecord>,
+    objects_not_read: usize,
+    not_read: Vec<RecordsOfKind>,
+}
+
 /// Reads the sheets a query looks at, with the declared unit: every sheet
-/// of the drawing set whose folder is `source`, or the one sheet
-/// description `source` is; or only the one named `sheet`, in any case. A
-/// sheet that cannot be read stops the query.
-fn load(source: &Path, sheet: Option<&str>) -> Result<(Unit, Vec<SheetRecord>), Error> {
+/// of the drawing set whose folder is `source`, the one sheet description
+/// `source` is, or the DWG `source` is; or only the one named `sheet`, in
+/// any case. A sheet that cannot be read stops the query.
+fn load(source: &Path, sheet: Option<&str>) -> Result<Loaded, Error> {
     let named = |name: &str| sheet.is_none_or(|s| s.to_lowercase() == name.to_lowercase());
     if !source.is_dir() {
+        if is_dwg(source) {
+            let loaded = read_dwg_record(source)?;
+            if !named(&loaded.record.name) {
+                return Err(no_such_sheet(sheet, &[loaded.record.name.as_str()]));
+            }
+            return Ok(Loaded {
+                units: loaded.units,
+                records: vec![loaded.record],
+                objects_not_read: loaded.objects_not_read,
+                not_read: loaded.not_read,
+            });
+        }
         let record = read_sheet_record(source)?;
         if !named(&record.name) {
             return Err(no_such_sheet(sheet, &[record.name.as_str()]));
         }
-        return Ok((record.sheet.units, vec![record]));
+        return Ok(Loaded {
+            units: Some(record.sheet.units),
+            records: vec![record],
+            objects_not_read: 0,
+            not_read: Vec::new(),
+        });
     }
     let set = SavedSet::read(source)?;
     let looked_at: Vec<_> = set.rows.iter().filter(|row| named(&row.sheet)).collect();
@@ -609,7 +682,12 @@ fn load(source: &Path, sheet: Option<&str>) -> Result<(Unit, Vec<SheetRecord>), 
             })
         })
         .collect::<Result<_, _>>()?;
-    Ok((set.units, records))
+    Ok(Loaded {
+        units: Some(set.units),
+        records,
+        objects_not_read: 0,
+        not_read: Vec::new(),
+    })
 }
 
 /// The error for a sheet to look at that is not among `names`, the sheets
@@ -835,22 +913,32 @@ pub(crate) fn space_of(sheet: &Sheet, index: usize) -> Option<String> {
     ))
 }
 
-/// The text and multiline text of `block`, as the block library of
+/// The text and multiline text of `block`, as the block library or DWG of
 /// `record`'s sheet defines it, and the values of its constant attributes,
 /// which its definition holds, whose contents `wanted` takes.
 fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) -> Vec<BlockText> {
-    let Some(definition) = record.sheet.blocks.iter().find(|b| b.name == block) else {
+    let Some((bi, definition)) = record
+        .sheet
+        .blocks
+        .iter()
+        .enumerate()
+        .find(|(_, b)| b.name == block)
+    else {
         return Vec::new();
     };
-    let file = record
-        .sheet
-        .block_library
-        .as_ref()
-        .map(|written| {
-            let read = record.file.parent().unwrap_or(Path::new("")).join(written);
-            worked_out(&read).display().to_string()
-        })
-        .unwrap_or_default();
+    let file = if record.is_dwg() {
+        record.file.display().to_string()
+    } else {
+        record
+            .sheet
+            .block_library
+            .as_ref()
+            .map(|written| {
+                let read = record.file.parent().unwrap_or(Path::new("")).join(written);
+                worked_out(&read).display().to_string()
+            })
+            .unwrap_or_default()
+    };
     definition
         .objects
         .iter()
@@ -862,10 +950,22 @@ fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) 
                 Object::AttributeDefinition(d) if d.constant => &d.default,
                 _ => return None,
             };
-            wanted(contents).then(|| BlockText {
-                file: file.clone(),
-                field: format!("blocks.{}.objects[{i}]", definition.name),
-                contents: contents.clone(),
+            wanted(contents).then(|| {
+                if record.is_dwg() {
+                    BlockText {
+                        file: file.clone(),
+                        field: None,
+                        handle: record.block_handle_of(bi, i).map(str::to_owned),
+                        contents: contents.clone(),
+                    }
+                } else {
+                    BlockText {
+                        file: file.clone(),
+                        field: Some(format!("blocks.{}.objects[{i}]", definition.name)),
+                        handle: None,
+                        contents: contents.clone(),
+                    }
+                }
             })
         })
         .collect()
@@ -1179,12 +1279,22 @@ fn segment_meets_box(a: draw::Point2, b: draw::Point2, min: [f64; 2], max: [f64;
 
 /// Where the object at `index` of `record`'s sheet is written.
 pub(crate) fn written_at(record: &SheetRecord, index: usize) -> WrittenAt {
+    if record.is_dwg() {
+        return WrittenAt {
+            file: record.file.display().to_string(),
+            field: None,
+            line: None,
+            column: None,
+            handle: record.handle_of(index).map(str::to_owned),
+        };
+    }
     let object = &record.objects[index].object;
     WrittenAt {
         file: record.file_of(index).display().to_string(),
-        field: object.field.clone(),
-        line: object.line,
-        column: object.column,
+        field: Some(object.field.clone()),
+        line: Some(object.line),
+        column: Some(object.column),
+        handle: None,
     }
 }
 
@@ -1243,7 +1353,7 @@ fn find(
         .map(|m| FoundObject {
             sheet: m.record.name.clone(),
             id: m.record.id(m.index),
-            id_written: m.record.objects[m.index].written(),
+            id_written: m.record.id_written(m.index),
             written_at: written_at(m.record, m.index),
             space: space_of(&m.record.sheet, m.index),
             object: m.record.sheet.objects[m.index].clone(),
@@ -1399,7 +1509,7 @@ fn attributes(
 fn measure(
     sheets: &[&SheetRecord],
     measure: &Measure,
-    units: Unit,
+    units: Option<Unit>,
     looked: &LookedAt,
 ) -> Result<(String, Answer), Error> {
     let from = end(sheets, &measure.from, "query.from")?;
@@ -1445,8 +1555,9 @@ fn measure(
         to.at.z - from.at.z,
     ];
     let distance = delta.iter().map(|d| d * d).sum::<f64>().sqrt();
+    let u = units_words(units);
     let message = format!(
-        "{distance} {units} from the {} of `{}` to the {} of `{}`, on sheet `{}`",
+        "{distance} {u} from the {} of `{}` to the {} of `{}`, on sheet `{}`",
         from.point, from.id, to.point, to.id, from.sheet
     );
     Ok((
@@ -1683,7 +1794,7 @@ fn point_choices(points: &[(String, Point3)]) -> String {
 fn extents(
     sheets: &[&SheetRecord],
     settings: &Settings,
-    units: Unit,
+    units: Option<Unit>,
     looked: &LookedAt,
 ) -> (String, Answer) {
     let mut substitutions: Vec<FontSubstitution> = Vec::new();
@@ -1703,17 +1814,18 @@ fn extents(
         })
         .collect();
     let count = listed.iter().filter(|s| s.extents.is_some()).count();
+    let u = units_words(units);
     let message = match listed.as_slice() {
         [one] => match &one.extents {
             Some(e) => format!(
-                "sheet `{}` draws within {} by {} {units}, from [{}, {}] to [{}, {}]",
+                "sheet `{}` draws within {} by {} {u}, from [{}, {}] to [{}, {}]",
                 one.sheet, e.width, e.height, e.min[0], e.min[1], e.max[0], e.max[1]
             ),
             None => format!("nothing matches: sheet `{}` draws nothing", one.sheet),
         },
         _ if count == 0 => format!("nothing matches: no sheet draws anything {}", looked.on()),
         all => format!(
-            "the extents of {} of the {} sheets looked at, in {units}",
+            "the extents of {} of the {} sheets looked at, in {u}",
             count,
             all.len()
         ),

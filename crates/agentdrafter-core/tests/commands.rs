@@ -595,6 +595,22 @@ fn read_through_the_registry_never_triggers_drawing_set_journal_recovery() {
     assert!(mirror.is_file());
     assert_eq!(every_file(&set), before, "read left set untouched");
 
+    // `query` and `check` on a DWG must ALSO be strictly read-only and never
+    // trigger drawing-set journal recovery.
+    let reply = run(
+        "query",
+        json!({"source": dwg, "query": {"kind": "find", "id": "DEMO-001/border"}}),
+    );
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(reply.get("rolled_back").is_none(), "{reply}");
+    assert_eq!(reply["result"]["count"], 1, "{reply}");
+    assert_eq!(every_file(&set), before, "query on DWG left set untouched");
+
+    let reply = run("check", json!({"source": dwg}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(reply.get("rolled_back").is_none(), "{reply}");
+    assert_eq!(every_file(&set), before, "check on DWG left set untouched");
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

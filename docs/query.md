@@ -2,11 +2,13 @@
 
 A query is what an agent asks a drawing set about what is on its sheets, to check its own work: which objects carry a tag or say a piece of text, which blocks a sheet inserts, what an insert's attributes are, how far apart two objects are, how large a sheet is, which points AutoCAD's object snaps find on an object and how long an object is and what it encloses (see [`CONTEXT.md`](../CONTEXT.md)). Objects are selected by [ID](sheet-description.md#ids-and-names), name, block, attribute or text, and by where they are: within or crossing a box, or touching another object. A box is the only coordinates a query takes: it is how AutoCAD selects, a window or a crossing dragged on the sheet, and how an agent asks what is in a part of a sheet, which no ID or name says. A query changes nothing.
 
-`agentdrafter query <kind> <drawing-set-folder | sheet-description> [options]` asks a drawing set's folder, or one sheet description, and prints one line of JSON. It is a thin layer over the core's `query_with`, which takes a request and returns the answer as plain data (ADR-0007).
+`agentdrafter query <kind> <drawing-set-folder | sheet-description | dwg> [options]` asks a drawing set's folder, one sheet description, or a DWG (original or built), and prints one line of JSON. It is a thin layer over the core's `query_with`, which takes a request and returns the answer as plain data (ADR-0007).
 
 ## What a query reads
 
-A query reads the records: each sheet description, and each template filled in from its row of the set, with the row's [own objects](drawing-set.md#a-rows-own-objects), as a build reads them. It does not read the built DWGs. The records are each sheet's truth (ADR-0003), so a query needs no build, cannot read a DWG that has gone stale, and answers in the set's declared unit exactly as the record gives each length. That is the smallest thing that answers every question here: the IDs, names, blocks, attribute values and text are all in the records, and a sheet's extents come from the one drawing pipeline (ADR-0011) the PNG is drawn by. Every object a build writes carries its ID into the DWG as well, so a later query of a built or revised DWG can find it again; querying DWGs is not offered yet.
+For a drawing set or a sheet description, a query reads the records: each sheet description, and each template filled in from its row of the set, with the row's [own objects](drawing-set.md#a-rows-own-objects), as a build reads them, not the built DWGs. The records are each sheet's truth (ADR-0003), so a query needs no build, cannot read a DWG that has gone stale, and answers in the set's declared unit exactly as the record gives each length.
+
+Given a `.dwg` file (in any case, `.dwg`/`.DWG`), a query reads the DWG once, strictly read-only (never modifying the file or triggering drawing-set journal recovery), refusing damaged DWGs with `dwg_read`. Each object takes its carried AgentDrafter ID when unique, or its drawing's canonical on-disk name joined to its handle (such as `P-101/handle:2F`), matching [`read`](originals.md#ids) and `display-list`. Provenance names the DWG `file` and object `handle` (omitting YAML `field`, `line` and `column`), and `block_text` names the DWG `file` and the block object's `handle`. Objects of a DWG the core has no model for are counted under `objects_not_read` and named by kind, count and handle under `not_read` (both omitted when 0/empty) and noted in `message`. A unitless DWG reports `units: null` and writes `drawing units` in prose messages.
 
 A sheet that cannot be read stops the query with its error, placed in its file: an answer that left a sheet out could say nothing matched when something did.
 
@@ -16,11 +18,13 @@ Every answer has the same frame, then what its kind found:
 
 | Key | What it is |
 |---|---|
-| `source` | The drawing set's folder, or the sheet description, asked. |
-| `units` | The declared unit every length in the answer is in: the set's, or the sheet description's. |
-| `sheets` | The sheets looked at, by name, in the set's order. A sheet description on its own is named by its file without the extension. |
+| `source` | The drawing set's folder, sheet description, or DWG asked. |
+| `units` | The declared unit every length in the answer is in: the set's, the sheet description's, or the DWG's (`null` when a DWG states no unit the core knows). |
+| `sheets` | The sheets looked at, by name, in the set's order. A sheet description is named by its file without the extension; a DWG by its canonical on-disk name without `.dwg`. |
 | `message` | What was found, in words. When nothing matched, it starts `nothing matches:` and says what was looked for and where. |
 | `kind` | The query's kind. |
+| `objects_not_read` | For a DWG only, omitted when 0: how many sheet objects the core has no model for. |
+| `not_read` | For a DWG only, omitted when empty: those objects by `kind`, `count` and `handles`, as [`read`](originals.md) lists them. |
 
 `--sheet <sheet>` looks at the one sheet of that name, in any case; a sheet the set does not hold is the `unknown_name` error, which lists its sheets. While a change set has landed on some of the set's sheets and failed on others, the reply also carries the set's mark under `inconsistent` ([Change sets](change-sets.md#an-inconsistent-set)).
 
@@ -248,7 +252,6 @@ Errors take the shape and codes a sheet description's do ([Errors](sheet-descrip
 
 ## What is not offered yet
 
-- Querying DWGs, built or someone else's. Every DWG a build writes carries each object's ID, ready for it.
 - Patterns other than a whole value or a part of it, such as wildcards.
 - A distance from a point given by coordinates. A box is the only coordinates a query takes.
 - AutoCAD's other selections by place, such as a fence or a polygon window, and AutoCAD's `OSNAPHATCH`, a hatch's boundary as geometry to touch.

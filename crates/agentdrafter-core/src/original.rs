@@ -33,10 +33,12 @@ use crate::build::file_id_of_file;
 #[cfg(not(any(unix, windows)))]
 use crate::build::is_same_file;
 use crate::build::{file_id_of_path, FileId};
-use crate::description::{number_text, ID_SEPARATOR};
+use crate::description::{
+    number_text, DwgOrigin, ObjectRecord, SheetRecord, Written, ID_SEPARATOR,
+};
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::{DrawingContents, IdAndName, Layout, Object, RecordsOfKind};
+use crate::model::{DrawingContents, IdAndName, Layout, Object, Paper, RecordsOfKind, Sheet};
 use crate::stamp::fingerprint;
 use crate::units::Unit;
 
@@ -206,8 +208,123 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
     })
 }
 
+/// A DWG loaded once for `query` or `check`, strictly (refusing damaged files)
+/// and strictly read-only, with the same sheet name and object IDs as `read`
+/// and `display-list`.
+pub(crate) struct DwgLoaded {
+    pub record: SheetRecord,
+    /// The drawing's declared unit; none when the DWG is unitless or uses a
+    /// unit the core does not know.
+    pub units: Option<Unit>,
+    /// How many sheet objects of the DWG the core has no model for yet.
+    pub objects_not_read: usize,
+    /// Those objects by kind, with the handle of each.
+    pub not_read: Vec<RecordsOfKind>,
+}
+
+/// Reads the DWG at `source` once in strict mode and turns it into a
+/// [`SheetRecord`] for `query` and `check`, using the same canonical sheet
+/// name and collision-free handle IDs as `read` and `display-list`. Never
+/// writes or modifies any file.
+pub(crate) fn read_dwg_record(source: &Path) -> Result<DwgLoaded, Error> {
+    let mut source_file = File::open(source).map_err(|e| {
+        Error::new(
+            ErrorCode::ReadFailed,
+            format!("could not read the DWG: {e}"),
+        )
+        .in_file(source)
+    })?;
+    #[cfg(any(unix, windows))]
+    let source_id = file_id_of_file(&source_file);
+    #[cfg(not(any(unix, windows)))]
+    let source_id: Option<FileId> = None;
+    let mut bytes = Vec::new();
+    source_file.read_to_end(&mut bytes).map_err(|e| {
+        Error::new(
+            ErrorCode::ReadFailed,
+            format!("could not read the DWG: {e}"),
+        )
+        .in_file(source)
+    })?;
+    drop(source_file);
+    let drawing = dwg::read_bytes(&bytes, source)?;
+    let resolved_source = on_disk_path(source, source_id);
+    let sheet_name = stem_of(&resolved_source);
+    let (resolved_ids, _) = resolve_all_ids(&sheet_name, &drawing);
+    let units = drawing.units;
+    let effective_units = units.unwrap_or(Unit::Mm);
+    // Built DWGs may carry a build mark naming their set's template paper;
+    // originals carry no build mark so `paper_of_dwg_bytes` inspects only the
+    // bytes already in memory and returns `None` without touching the disk.
+    let built_paper = crate::set::paper_of_dwg_bytes(source, &bytes).and_then(|found| {
+        found.paper.map(|paper| Paper {
+            width: found.units.convert(paper.width, effective_units),
+            height: found.units.convert(paper.height, effective_units),
+            ..paper
+        })
+    });
+    let mut ids = Vec::with_capacity(resolved_ids.len());
+    let mut carried = Vec::with_capacity(resolved_ids.len());
+    let mut objects = Vec::with_capacity(resolved_ids.len());
+    for (id, name, is_carried) in resolved_ids {
+        ids.push(id.clone());
+        carried.push(is_carried);
+        objects.push(ObjectRecord {
+            id,
+            name,
+            name_key: None,
+            object: Written {
+                field: String::new(),
+                line: 0,
+                column: 0,
+            },
+            id_key: None,
+            in_row: false,
+        });
+    }
+    let sheet = Sheet {
+        units: effective_units,
+        block_library: None,
+        linetypes: drawing.linetypes,
+        layers: drawing.layers,
+        text_styles: drawing.text_styles,
+        table_styles: drawing.table_styles,
+        mleader_styles: drawing.mleader_styles,
+        dimension_styles: drawing.dimension_styles,
+        blocks: drawing.blocks,
+        objects: drawing.objects,
+        paper: drawing.paper.or(built_paper),
+        ltscale: drawing.ltscale,
+        layout: drawing.layout,
+        other_layouts: drawing.other_layouts,
+    };
+    let record = SheetRecord {
+        name: sheet_name,
+        file: source.to_path_buf(),
+        sheet,
+        objects,
+        rows_file: None,
+        dwg: Some(DwgOrigin {
+            ids,
+            carried,
+            handles: drawing.handles,
+            block_handles: drawing.block_handles,
+        }),
+    };
+    Ok(DwgLoaded {
+        record,
+        units,
+        objects_not_read: drawing.objects_not_read,
+        not_read: drawing.not_read,
+    })
+}
+
 /// One object's resolved unique ID and optional name.
 type ResolvedId = (String, Option<String>);
+
+/// One object's resolved unique ID, optional name, and whether the ID came from
+/// AgentDrafter's extended data rather than its handle.
+type ResolvedEntry = (String, Option<String>, bool);
 
 /// The ID of each object the core read from the DWG at `source`, in the
 /// order of `drawing.objects`, with its name: the ID AgentDrafter's
@@ -216,7 +333,11 @@ type ResolvedId = (String, Option<String>);
 /// handle.
 pub(crate) fn ids_of(source: &Path, drawing: &DrawingContents) -> Vec<ResolvedId> {
     let sheet = sheet_name(source);
-    resolve_all_ids(&sheet, drawing).0
+    resolve_all_ids(&sheet, drawing)
+        .0
+        .into_iter()
+        .map(|(id, name, _)| (id, name))
+        .collect()
 }
 
 /// Resolves unique IDs and names for both the sheet's objects and each
@@ -226,7 +347,7 @@ pub(crate) fn ids_of(source: &Path, drawing: &DrawingContents) -> Vec<ResolvedId
 fn resolve_all_ids(
     sheet: &str,
     drawing: &DrawingContents,
-) -> (Vec<ResolvedId>, Vec<Vec<ResolvedId>>) {
+) -> (Vec<ResolvedEntry>, Vec<Vec<ResolvedEntry>>) {
     // Flatten every object (sheet first, then each block's objects) so
     // handle-ID reservations and uniqueness hold across the whole drawing.
     let mut flat_handles: Vec<&str> = Vec::with_capacity(
@@ -252,7 +373,7 @@ fn resolve_all_ids(
     }
 
     let mut used: HashSet<String> = HashSet::with_capacity(handle_ids.len());
-    let mut resolved: Vec<(String, Option<String>)> = Vec::with_capacity(handle_ids.len());
+    let mut resolved: Vec<ResolvedEntry> = Vec::with_capacity(handle_ids.len());
     for (i, carried) in flat_carried.iter().enumerate() {
         let candidate = carried
             .and_then(|c| c.id.as_deref())
@@ -262,11 +383,11 @@ fn resolve_all_ids(
             let steals_other_handle = handle_owner.get(&key).is_some_and(|&owner| owner != i);
             (!used.contains(&key) && !steals_other_handle).then(|| id.to_owned())
         });
-        let id = match accepted {
-            Some(id) => id,
+        let (id, is_carried) = match accepted {
+            Some(id) => (id, true),
             None => {
                 let base = &handle_ids[i];
-                if !used.contains(&base.to_lowercase()) {
+                let id = if !used.contains(&base.to_lowercase()) {
                     base.clone()
                 } else {
                     let mut n = 2usize;
@@ -277,17 +398,17 @@ fn resolve_all_ids(
                         }
                         n += 1;
                     }
-                }
+                };
+                (id, false)
             }
         };
         used.insert(id.to_lowercase());
-        resolved.push((id, carried.and_then(|c| c.name.clone())));
+        resolved.push((id, carried.and_then(|c| c.name.clone()), is_carried));
     }
 
     let mut iter = resolved.into_iter();
-    let sheet_ids: Vec<(String, Option<String>)> =
-        iter.by_ref().take(drawing.handles.len()).collect();
-    let block_ids: Vec<Vec<(String, Option<String>)>> = drawing
+    let sheet_ids: Vec<ResolvedEntry> = iter.by_ref().take(drawing.handles.len()).collect();
+    let block_ids: Vec<Vec<ResolvedEntry>> = drawing
         .block_handles
         .iter()
         .map(|handles| iter.by_ref().take(handles.len()).collect())
@@ -399,7 +520,7 @@ fn on_disk_path(source: &Path, target_id: Option<FileId>) -> PathBuf {
 }
 
 /// Whether `source` is read as a DWG: its name ends `.dwg`, in any case.
-fn is_dwg(source: &Path) -> bool {
+pub(crate) fn is_dwg(source: &Path) -> bool {
     source
         .extension()
         .and_then(|e| e.to_str())
@@ -981,7 +1102,7 @@ fn message(source: &Path, drawing: &DrawingContents, mirror: Option<&Path>) -> S
 }
 
 /// `3 ACAD_PROXY_ENTITY, 1 MLINE`.
-fn kinds_in_words(kinds: &[RecordsOfKind]) -> String {
+pub(crate) fn kinds_in_words(kinds: &[RecordsOfKind]) -> String {
     kinds
         .iter()
         .map(|k| format!("{} {}", k.count, k.kind))
@@ -989,7 +1110,7 @@ fn kinds_in_words(kinds: &[RecordsOfKind]) -> String {
         .join(", ")
 }
 
-fn plural(n: usize) -> &'static str {
+pub(crate) fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
     } else {
@@ -1111,7 +1232,7 @@ fn mirror_text(source: &Path, bytes: &[u8], sheet: &str, drawing: &DrawingConten
                 let object_ids = block_ids.get(bi);
                 for (oi, object) in block.objects.iter().enumerate() {
                     let mut first = Vec::new();
-                    if let Some((id, name)) = object_ids.and_then(|list| list.get(oi)) {
+                    if let Some((id, name, _)) = object_ids.and_then(|list| list.get(oi)) {
                         first.push(("id", json!(id)));
                         if let Some(name) = name {
                             first.push(("name", json!(name)));
@@ -1130,7 +1251,7 @@ fn mirror_text(source: &Path, bytes: &[u8], sheet: &str, drawing: &DrawingConten
     } else {
         out.push_str("objects:\n");
         for (i, object) in drawing.objects.iter().enumerate() {
-            let (id, name) = &ids[i];
+            let (id, name, _) = &ids[i];
             let mut first = vec![("id", json!(id))];
             if let Some(name) = name {
                 first.push(("name", json!(name)));

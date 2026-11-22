@@ -830,3 +830,805 @@ fn on_disk_path_prefers_unicode_case_fold_and_breaks_hard_link_ties_deterministi
         "AAA.dwg"
     );
 }
+
+#[test]
+fn query_covers_every_kind_on_an_original_dwg_with_handle_ids() {
+    use crate::check::{check_with, CheckRequest};
+    use crate::geometry::{ObjectRef, SnapKind, SnapRef};
+    use crate::query::{
+        query_with, Answer, End, Matching, Measure, Query, QueryRequest, Selection, SelectionBox,
+    };
+    use crate::settings::Settings;
+
+    let dir = scratch("query-original");
+    let library = dir.join("blocks.yaml");
+    fs::write(
+        &library,
+        "units: mm\n\
+         blocks:\n\
+         \x20 TAG_BOX:\n\
+         \x20   objects:\n\
+         \x20     - circle: {center: [0, 0, 0], radius: 6}\n\
+         \x20     - text: {contents: MADE UP PLANT, position: [-5, 8, 0], height: 2}\n\
+         \x20     - attdef: {tag: TAG, position: [0, 0, 0], height: 3, justify: middle_center}\n",
+    )
+    .unwrap();
+    let description = dir.join("built.yaml");
+    fs::write(
+        &description,
+        "units: mm\n\
+         block_library: blocks.yaml\n\
+         layers:\n\
+         \x20 E-WIRE: {color: 1}\n\
+         \x20 HIDDEN: {color: 8, on: false}\n\
+         objects:\n\
+         \x20 - line: {from: [0, 0, 0], to: [100, 0, 0], layer: E-WIRE}\n\
+         \x20 - line: {from: [100, 0, 0], to: [100, 50, 0], layer: E-WIRE}\n\
+         \x20 - circle: {center: [50, 50, 0], radius: 10}\n\
+         \x20 - insert: {block: TAG_BOX, position: [20, 20, 0], attributes: {TAG: P-101}}\n\
+         \x20 - text: {contents: NOTE A, position: [10, 80, 0], height: 4}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let original = dir.join("P-100.dwg");
+    dwg::as_someone_elses(&dir.join("built.dwg"), &original);
+    let before = fs::read(&original).unwrap();
+
+    // `read` gives the canonical sheet name and handle IDs; `query` must agree.
+    let read_report = read_original(&ReadRequest {
+        no_mirror: true,
+        ..request(&original)
+    })
+    .unwrap();
+    assert_eq!(read_report.sheet, "P-100");
+    let drawing = dwg::read(&original).unwrap();
+    let h_line1 = &drawing.handles[0];
+    let h_line2 = &drawing.handles[1];
+    let h_circle = &drawing.handles[2];
+    let h_insert = &drawing.handles[3];
+    let h_text = &drawing.handles[4];
+    let id_line1 = format!("P-100/handle:{h_line1}");
+    let id_line2 = format!("P-100/handle:{h_line2}");
+    let id_circle = format!("P-100/handle:{h_circle}");
+    let id_insert = format!("P-100/handle:{h_insert}");
+    let id_text = format!("P-100/handle:{h_text}");
+
+    let ask = |path: &Path, sheet: Option<&str>, query: Query| {
+        query_with(
+            &QueryRequest {
+                source: path.to_owned(),
+                sheet: sheet.map(str::to_owned),
+                query,
+            },
+            &Settings::default(),
+        )
+        .unwrap()
+    };
+
+    // 1. find: all objects, provenance has file+handle and no YAML line/column/field.
+    let all = ask(&original, None, Query::Find(Selection::default()));
+    assert_eq!(all.units, Some(Unit::Mm));
+    assert_eq!(all.sheets, ["P-100"]);
+    assert_eq!(all.objects_not_read, 0);
+    assert!(all.not_read.is_empty());
+    let all_json = serde_json::to_value(&all).unwrap();
+    assert!(all_json.get("objects_not_read").is_none(), "{all_json}");
+    assert!(all_json.get("not_read").is_none(), "{all_json}");
+    let Answer::Find { count, objects } = &all.answer else {
+        panic!("find answer")
+    };
+    assert_eq!(*count, 5);
+    assert_eq!(
+        objects.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        [
+            id_line1.as_str(),
+            id_line2.as_str(),
+            id_circle.as_str(),
+            id_insert.as_str(),
+            id_text.as_str()
+        ]
+    );
+    for (found, handle) in objects.iter().zip(&drawing.handles) {
+        assert!(!found.id_written);
+        assert_eq!(found.written_at.file, original.display().to_string());
+        assert_eq!(found.written_at.handle.as_deref(), Some(handle.as_str()));
+        assert_eq!(found.written_at.field, None);
+        assert_eq!(found.written_at.line, None);
+        assert_eq!(found.written_at.column, None);
+        let v = serde_json::to_value(found).unwrap();
+        assert_eq!(v["handle"], *handle);
+        assert!(v.get("field").is_none(), "{v}");
+        assert!(v.get("line").is_none(), "{v}");
+        assert!(v.get("column").is_none(), "{v}");
+    }
+
+    // find by handle ID (case-insensitive) + --sheet matching case-insensitively.
+    let by_id = ask(
+        &original,
+        Some("p-100"),
+        Query::Find(Selection {
+            id: Some(id_line1.to_lowercase()),
+            ..Selection::default()
+        }),
+    );
+    let Answer::Find { count, objects } = &by_id.answer else {
+        panic!("find")
+    };
+    assert_eq!(*count, 1);
+    assert_eq!(objects[0].id, id_line1);
+
+    // Wrong --sheet name returns UnknownName.
+    let bad_sheet = query_with(
+        &QueryRequest {
+            source: original.clone(),
+            sheet: Some("OTHER".into()),
+            query: Query::Blocks,
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(bad_sheet.code, ErrorCode::UnknownName);
+    assert!(bad_sheet.message.contains("P-100"), "{}", bad_sheet.message);
+
+    // Uppercase .DWG extension works too.
+    let upper = dir.join("P-100.DWG");
+    if !upper.exists() {
+        fs::copy(&original, &upper).unwrap();
+    }
+    let upper_find = ask(
+        &upper,
+        None,
+        Query::Find(Selection {
+            id: Some(id_circle.clone()),
+            ..Selection::default()
+        }),
+    );
+    assert_eq!(upper_find.sheets, ["P-100"]);
+    assert!(matches!(upper_find.answer, Answer::Find { count: 1, .. }));
+
+    // find by --block, --tag + --value, --text (sheet text and block text),
+    // --window, --crossing, --touching.
+    let by_block_text = ask(
+        &original,
+        None,
+        Query::Find(Selection {
+            text: Some("MADE UP".into()),
+            matching: Matching::Contains,
+            ..Selection::default()
+        }),
+    );
+    let Answer::Find { objects, .. } = &by_block_text.answer else {
+        panic!("find")
+    };
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].id, id_insert);
+    assert_eq!(objects[0].block_text.len(), 1);
+    assert_eq!(
+        objects[0].block_text[0].file,
+        original.display().to_string()
+    );
+    assert_eq!(objects[0].block_text[0].field, None);
+    assert_eq!(
+        objects[0].block_text[0].handle.as_deref(),
+        Some(drawing.block_handles[0][1].as_str())
+    );
+    assert_eq!(objects[0].block_text[0].contents, "MADE UP PLANT");
+
+    let by_window = ask(
+        &original,
+        None,
+        Query::Find(Selection {
+            window: Some(SelectionBox([[35.0, 35.0], [65.0, 65.0]])),
+            ..Selection::default()
+        }),
+    );
+    let Answer::Find { objects, .. } = &by_window.answer else {
+        panic!("find")
+    };
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].id, id_circle);
+
+    let by_crossing = ask(
+        &original,
+        None,
+        Query::Find(Selection {
+            crossing: Some(SelectionBox([[95.0, -5.0], [105.0, 5.0]])),
+            ..Selection::default()
+        }),
+    );
+    let Answer::Find { objects, .. } = &by_crossing.answer else {
+        panic!("find")
+    };
+    assert_eq!(
+        objects.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        [id_line1.as_str(), id_line2.as_str()]
+    );
+
+    let by_touching = ask(
+        &original,
+        None,
+        Query::Find(Selection {
+            touching: Some(ObjectRef {
+                id: Some(id_line1.clone()),
+                name: None,
+            }),
+            ..Selection::default()
+        }),
+    );
+    let Answer::Find { objects, .. } = &by_touching.answer else {
+        panic!("find")
+    };
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].id, id_line2);
+
+    // 2. blocks
+    let blocks = ask(&original, None, Query::Blocks);
+    let Answer::Blocks { count, blocks } = &blocks.answer else {
+        panic!("blocks")
+    };
+    assert_eq!(*count, 1);
+    assert_eq!(blocks[0].blocks[0].block, "TAG_BOX");
+    assert_eq!(blocks[0].blocks[0].inserts, [id_insert.as_str()]);
+
+    // 3. attributes
+    let attrs = ask(
+        &original,
+        None,
+        Query::Attributes(Selection {
+            tag: Some("TAG".into()),
+            value: Some("P-101".into()),
+            ..Selection::default()
+        }),
+    );
+    let Answer::Attributes { count, inserts } = &attrs.answer else {
+        panic!("attributes")
+    };
+    assert_eq!(*count, 1);
+    assert_eq!(inserts[0].id, id_insert);
+    assert_eq!(
+        inserts[0].written_at.handle.as_deref(),
+        Some(h_insert.as_str())
+    );
+    assert_eq!(inserts[0].written_at.field, None);
+
+    // 4. measure
+    let measured = ask(
+        &original,
+        None,
+        Query::Measure(Measure {
+            from: End {
+                id: Some(id_line1.clone()),
+                point: Some("from".into()),
+                ..End::default()
+            },
+            to: End {
+                id: Some(id_line1.clone()),
+                point: Some("to".into()),
+                ..End::default()
+            },
+        }),
+    );
+    let Answer::Measure { distance, .. } = &measured.answer else {
+        panic!("measure")
+    };
+    assert!((distance.unwrap() - 100.0).abs() < 1e-9);
+
+    // 5. extents
+    let ext = ask(&original, None, Query::Extents);
+    let Answer::Extents { count, extents, .. } = &ext.answer else {
+        panic!("extents")
+    };
+    assert_eq!(*count, 1);
+    let b = extents[0].extents.unwrap();
+    assert!((b.min[0] - 0.0).abs() < 1e-3 && (b.max[0] - 100.0).abs() < 1e-3);
+
+    // 6. layers
+    let layers = ask(&original, None, Query::Layers);
+    let Answer::Layers { layers, .. } = &layers.answer else {
+        panic!("layers")
+    };
+    let names: Vec<&str> = layers[0]
+        .layers
+        .iter()
+        .map(|l| l.layer.name.as_str())
+        .collect();
+    assert!(names.contains(&"0") && names.contains(&"E-WIRE") && names.contains(&"HIDDEN"));
+    let wire_layer = layers[0]
+        .layers
+        .iter()
+        .find(|l| l.layer.name == "E-WIRE")
+        .unwrap();
+    assert_eq!(wire_layer.objects, 2);
+
+    // 7. snap
+    let snapped = ask(
+        &original,
+        None,
+        Query::Snap(SnapRef {
+            id: Some(id_circle.clone()),
+            snap: Some(SnapKind::Center),
+            ..SnapRef::default()
+        }),
+    );
+    let Answer::Snap { count, points, .. } = &snapped.answer else {
+        panic!("snap")
+    };
+    assert_eq!(*count, 1);
+    assert_eq!(points[0].at, crate::model::Point3::new(50.0, 50.0, 0.0));
+
+    // 8. geometry
+    let geom = ask(
+        &original,
+        None,
+        Query::Geometry(Selection {
+            id: Some(id_line1.clone()),
+            ..Selection::default()
+        }),
+    );
+    let Answer::Geometry { count, objects } = &geom.answer else {
+        panic!("geometry")
+    };
+    assert_eq!(*count, 1);
+    assert!((objects[0].measures.length.unwrap() - 100.0).abs() < 1e-9);
+
+    // 9. layout (model-space only)
+    let lay = ask(&original, None, Query::Layout);
+    let Answer::Layout { count, layouts } = &lay.answer else {
+        panic!("layout")
+    };
+    assert_eq!(*count, 0);
+    assert_eq!(layouts.len(), 1);
+    assert_eq!(layouts[0].layout, None);
+    assert_eq!(layouts[0].model_space, 5);
+
+    // Clean original DWG passes `check` (no fake `paper_size` failure, no false
+    // positive `text_overflow` on the DWG block's attdef).
+    let checked = check_with(
+        &CheckRequest {
+            source: original.clone(),
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(checked.passed, "{:#?}", checked.findings);
+    assert_eq!(checked.units, Some(Unit::Mm));
+    assert_eq!(checked.sheets, ["P-100"]);
+    assert_eq!(checked.objects_not_read, 0);
+    assert!(checked.not_read.is_empty());
+
+    assert_eq!(
+        fs::read(&original).unwrap(),
+        before,
+        "query and check never modify an original DWG"
+    );
+}
+
+#[test]
+fn query_and_check_handle_layout_original_dwgs_with_space_and_paper() {
+    use crate::check::{check_with, CheckRequest, Rule};
+    use crate::query::{query_with, Answer, Query, QueryRequest, Selection};
+    use crate::settings::Settings;
+
+    let dir = scratch("layout-original");
+    let description = dir.join("built.yaml");
+    fs::write(
+        &description,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: Sheet1}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [420, 0, 0], [420, 297, 0], [0, 297, 0]], closed: true, space: paper}\n\
+         \x20 - viewport: {center: [210, 148.5, 0], width: 200, height: 150, view_center: [50, 50, 0], scale: 1}\n\
+         \x20 - circle: {center: [50, 50, 0], radius: 20}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let original = dir.join("L-200.dwg");
+    dwg::as_someone_elses(&dir.join("built.dwg"), &original);
+
+    // query layout reports layout, paper, page setup and viewport handle.
+    let lay = query_with(
+        &QueryRequest {
+            source: original.clone(),
+            sheet: None,
+            query: Query::Layout,
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Layout { count, layouts } = &lay.answer else {
+        panic!("layout")
+    };
+    assert_eq!(*count, 1);
+    assert_eq!(layouts[0].layout.as_deref(), Some("Sheet1"));
+    assert_eq!(
+        layouts[0].paper.as_ref().and_then(|p| p.name.as_deref()),
+        Some("ISO A3 landscape")
+    );
+    assert!(layouts[0].page_setup.is_some());
+    assert!(layouts[0].viewports[0].id.starts_with("L-200/handle:"));
+    assert!(layouts[0].viewports[0].written_at.handle.is_some());
+    assert_eq!(layouts[0].viewports[0].written_at.field, None);
+
+    // --space filters model vs paper space cleanly.
+    let model_only = query_with(
+        &QueryRequest {
+            source: original.clone(),
+            sheet: None,
+            query: Query::Find(Selection {
+                space: Some("model".into()),
+                ..Selection::default()
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Find { count, objects } = &model_only.answer else {
+        panic!("find")
+    };
+    assert_eq!(*count, 1);
+    assert_eq!(objects[0].space.as_deref(), Some("model"));
+
+    let paper_only = query_with(
+        &QueryRequest {
+            source: original.clone(),
+            sheet: None,
+            query: Query::Find(Selection {
+                space: Some("paper".into()),
+                ..Selection::default()
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Find { count, .. } = &paper_only.answer else {
+        panic!("find")
+    };
+    assert_eq!(*count, 2);
+
+    // Clean layout original passes check (including paper_size and off_sheet).
+    let checked = check_with(
+        &CheckRequest {
+            source: original.clone(),
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(checked.passed, "{:#?}", checked.findings);
+
+    // Layout original with an object running off paper fails paper_size & off_sheet.
+    let bad_desc = dir.join("off.yaml");
+    fs::write(
+        &bad_desc,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: Sheet1}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [420, 0, 0], [420, 297, 0], [0, 297, 0]], closed: true, space: paper}\n\
+         \x20 - line: {from: [410, 10, 0], to: [450, 10, 0], space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: bad_desc,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let off_orig = dir.join("L-201.dwg");
+    dwg::as_someone_elses(&dir.join("off.dwg"), &off_orig);
+    let off_report = check_with(
+        &CheckRequest {
+            source: off_orig.clone(),
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(!off_report.passed);
+    let off_finding = off_report
+        .findings
+        .iter()
+        .find(|f| f.rule == Rule::OffSheet)
+        .expect("off_sheet finding");
+    let obj = off_finding.object.as_ref().unwrap();
+    assert!(obj.id.starts_with("L-201/handle:"));
+    assert!(obj.written_at.handle.is_some());
+    assert_eq!(obj.written_at.field, None);
+    assert!(off_report
+        .findings
+        .iter()
+        .any(|f| f.rule == Rule::PaperSize));
+}
+
+#[test]
+fn check_on_original_dwg_catches_text_on_text_text_on_line_and_table_overflow() {
+    use crate::check::{check_with, CheckRequest, Rule};
+    use crate::settings::Settings;
+
+    let dir = scratch("check-faults");
+    let library = dir.join("blocks.yaml");
+    fs::write(
+        &library,
+        "units: mm\n\
+         blocks:\n\
+         \x20 BADGE:\n\
+         \x20   objects:\n\
+         \x20     - circle: {center: [0, 0, 0], radius: 10}\n\
+         \x20     - attdef: {tag: TAG, position: [0, 0, 0], height: 4, justify: middle_center}\n",
+    )
+    .unwrap();
+    let description = dir.join("faults.yaml");
+    fs::write(
+        &description,
+        "units: mm\n\
+         block_library: blocks.yaml\n\
+         objects:\n\
+         \x20 - text: {contents: ALPHA, position: [10, 10, 0], height: 5}\n\
+         \x20 - text: {contents: BETA, position: [12, 10, 0], height: 5}\n\
+         \x20 - line: {from: [5, 12.5, 0], to: [40, 12.5, 0]}\n\
+         \x20 - insert: {block: BADGE, position: [80, 50, 0], attributes: {TAG: T-1}}\n\
+         \x20 - line: {from: [70, 50, 0], to: [90, 50, 0]}\n\
+         \x20 - table: {position: [120, 80, 0], columns: [10], rows: [5], cells: [[THIS TEXT OVERFLOWS ITS TABLE CELL]]}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let original = dir.join("F-100.dwg");
+    dwg::as_someone_elses(&dir.join("faults.dwg"), &original);
+    let before = fs::read(&original).unwrap();
+
+    let report = check_with(
+        &CheckRequest {
+            source: original.clone(),
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(!report.passed);
+    assert!(
+        report.findings.iter().all(|f| f.rule != Rule::PaperSize),
+        "no fake paper_size failure on a model-space original: {:#?}",
+        report.findings
+    );
+    assert!(report.findings.iter().any(|f| f.rule == Rule::TextOnText));
+    assert!(report.findings.iter().any(|f| f.rule == Rule::TextOnLine));
+    assert!(report.findings.iter().any(|f| f.rule == Rule::TextOverflow));
+
+    // Every finding's object has handle ID + handle provenance and no YAML field/line/column.
+    for finding in &report.findings {
+        let obj = finding.object.as_ref().unwrap();
+        assert!(obj.id.starts_with("F-100/handle:"), "{obj:?}");
+        assert_eq!(obj.written_at.file, original.display().to_string());
+        assert!(obj.written_at.handle.is_some());
+        assert_eq!(obj.written_at.field, None);
+        assert_eq!(obj.written_at.line, None);
+        assert_eq!(obj.written_at.column, None);
+    }
+
+    // The line through the insert's attribute names the block part by handle.
+    let attr_hit = report
+        .findings
+        .iter()
+        .find(|f| {
+            f.rule == Rule::TextOnLine
+                && f.object
+                    .as_ref()
+                    .and_then(|o| o.in_block.as_ref())
+                    .is_some()
+        })
+        .expect("line through insert attribute");
+    let part = attr_hit.object.as_ref().unwrap().in_block.as_ref().unwrap();
+    assert_eq!(part.block, "BADGE");
+    assert_eq!(part.file, original.display().to_string());
+    assert_eq!(part.field, None);
+    assert!(part.handle.is_some());
+    assert_eq!(part.tag.as_deref(), Some("TAG"));
+
+    // Wrong --sheet name returns UnknownName; matching case-insensitively succeeds.
+    let ok_sheet = check_with(
+        &CheckRequest {
+            source: original.clone(),
+            sheets: vec!["f-100".into()],
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(ok_sheet.count, report.count);
+    let err = check_with(
+        &CheckRequest {
+            source: original.clone(),
+            sheets: vec!["NOPE".into()],
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::UnknownName);
+
+    assert_eq!(fs::read(&original).unwrap(), before);
+}
+
+#[test]
+fn query_and_check_report_not_read_handle_unitless_dwgs_and_refuse_damaged_dwgs() {
+    use crate::check::{check_with, CheckRequest};
+    use crate::query::{query_with, Answer, End, Measure, Query, QueryRequest, Selection};
+    use crate::settings::Settings;
+
+    let dir = scratch("edge-dwgs");
+    let (original, _) = made_up_original(&dir);
+
+    // 1. Custom undecoded object is surfaced in `objects_not_read` and `not_read`.
+    let custom = dir.join("P-101.dwg");
+    let handle = dwg::with_a_made_up_custom_object(&original, &custom, "MADE_UP_DEVICE");
+    let expected = vec![RecordsOfKind {
+        kind: "MADE_UP_DEVICE".into(),
+        count: 1,
+        handles: vec![handle],
+    }];
+    let q = query_with(
+        &QueryRequest {
+            source: custom.clone(),
+            sheet: None,
+            query: Query::Find(Selection::default()),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(q.objects_not_read, 1);
+    assert_eq!(q.not_read, expected);
+    assert!(
+        q.message
+            .contains("1 object the core has no model for not read: 1 MADE_UP_DEVICE"),
+        "{}",
+        q.message
+    );
+    let c = check_with(
+        &CheckRequest {
+            source: custom.clone(),
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(c.passed, "{:#?}", c.findings);
+    assert_eq!(c.objects_not_read, 1);
+    assert_eq!(c.not_read, expected);
+    assert!(
+        c.message
+            .contains("1 object the core has no model for not checked: 1 MADE_UP_DEVICE"),
+        "{}",
+        c.message
+    );
+
+    // 2. Unitless DWG reports `units: null` and works without panicking.
+    let unitless = dir.join("U-100.dwg");
+    dwg::as_unitless_original(&dir.join("built.dwg"), &unitless);
+    let before = fs::read(&unitless).unwrap();
+    let u_find = query_with(
+        &QueryRequest {
+            source: unitless.clone(),
+            sheet: None,
+            query: Query::Find(Selection::default()),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(u_find.units, None);
+    assert_eq!(serde_json::to_value(&u_find).unwrap()["units"], Value::Null);
+    let Answer::Find { objects, .. } = &u_find.answer else {
+        panic!("find")
+    };
+    let id0 = objects[0].id.clone();
+
+    let u_ext = query_with(
+        &QueryRequest {
+            source: unitless.clone(),
+            sheet: None,
+            query: Query::Extents,
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(u_ext.units, None);
+    assert!(u_ext.message.contains("drawing units"), "{}", u_ext.message);
+
+    let u_meas = query_with(
+        &QueryRequest {
+            source: unitless.clone(),
+            sheet: None,
+            query: Query::Measure(Measure {
+                from: End {
+                    id: Some(id0.clone()),
+                    point: Some("from".into()),
+                    ..End::default()
+                },
+                to: End {
+                    id: Some(id0.clone()),
+                    point: Some("to".into()),
+                    ..End::default()
+                },
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(
+        u_meas.message.contains("drawing units"),
+        "{}",
+        u_meas.message
+    );
+
+    let u_geom = query_with(
+        &QueryRequest {
+            source: unitless.clone(),
+            sheet: None,
+            query: Query::Geometry(Selection {
+                id: Some(id0),
+                ..Selection::default()
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(
+        u_geom.message.contains("drawing units"),
+        "{}",
+        u_geom.message
+    );
+
+    let u_check = check_with(
+        &CheckRequest {
+            source: unitless.clone(),
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(u_check.passed, "{:#?}", u_check.findings);
+    assert_eq!(u_check.units, None);
+    assert!((u_check.tolerance - 0.01).abs() < 1e-12);
+    assert_eq!(
+        serde_json::to_value(&u_check).unwrap()["units"],
+        Value::Null
+    );
+    assert_eq!(fs::read(&unitless).unwrap(), before);
+
+    // 3. Damaged DWG is refused strictly with `dwg_read` by both `query` and `check`.
+    let damaged = dir.join("P-102.dwg");
+    dwg::with_a_damaged_line(&original, &damaged);
+    let q_err = query_with(
+        &QueryRequest {
+            source: damaged.clone(),
+            sheet: None,
+            query: Query::Find(Selection::default()),
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(q_err.code, ErrorCode::DwgRead, "{q_err:?}");
+    let c_err = check_with(
+        &CheckRequest {
+            source: damaged,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(c_err.code, ErrorCode::DwgRead, "{c_err:?}");
+}

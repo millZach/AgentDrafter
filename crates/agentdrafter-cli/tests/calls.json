@@ -167,6 +167,18 @@
     },
     {
       "command": "query",
+      "after": "read",
+      "args": ["query", "find", "demo-set/dwg/DEMO-003.dwg", "--id", "DEMO-003/border"],
+      "input": {"source": "demo-set/dwg/DEMO-003.dwg", "query": {"kind": "find", "id": "DEMO-003/border"}}
+    },
+    {
+      "command": "check",
+      "after": "read",
+      "args": ["check", "demo-set/dwg/DEMO-003.dwg"],
+      "input": {"source": "demo-set/dwg/DEMO-003.dwg"}
+    },
+    {
+      "command": "query",
       "args": ["query", "snap", "demo-set", "--id", "DEMO-001/objects[2]", "--snap", "perpendicular", "--from", "DEMO-001/border", "--from-snap", "endpoint", "--from-which", "points[2]"],
       "input": {"source": "demo-set", "query": {"kind": "snap", "id": "DEMO-001/objects[2]", "snap": "perpendicular", "from": {"id": "DEMO-001/border", "snap": "endpoint", "which": "points[2]"}}}
     },

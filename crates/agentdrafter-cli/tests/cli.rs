@@ -752,7 +752,7 @@ fn check_reports_each_failed_check_and_a_change_set_carries_them() {
     let (_, json) = agentdrafter(&["--help"], &dir);
     assert_eq!(
         json["result"]["commands"]["check"]["usage"],
-        "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]"
+        "agentdrafter check <drawing-set-folder | sheet-description | dwg> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]"
     );
 }
 

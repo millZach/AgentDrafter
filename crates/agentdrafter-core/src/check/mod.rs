@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::description::{read_sheet_record, ReadFiles, SavedSet, SheetRecord};
 use crate::error::{Error, ErrorCode};
-use crate::model::Paper;
+use crate::model::{Paper, RecordsOfKind};
+use crate::original::{is_dwg, kinds_in_words, plural, read_dwg_record};
 use crate::query::{Extents, WrittenAt};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
@@ -90,10 +91,11 @@ impl Rule {
 /// What the checker found on the sheets it checked.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CheckReport {
-    /// The drawing set's folder, or the sheet description, checked.
+    /// The drawing set's folder, sheet description, or DWG checked.
     pub source: String,
-    /// The declared unit every length in the report is in.
-    pub units: Unit,
+    /// The declared unit every length in the report is in; none when a DWG
+    /// states no unit the core knows (checked as millimetres).
+    pub units: Option<Unit>,
     /// The sheets checked, by name, in the set's order.
     pub sheets: Vec<String>,
     /// What was found, in words.
@@ -107,6 +109,14 @@ pub struct CheckReport {
     pub count: usize,
     /// Each failed check, sheet by sheet in the set's order.
     pub findings: Vec<Finding>,
+    /// How many objects of a DWG the core has no model for yet, which are
+    /// not checked. Left out when 0.
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub objects_not_read: usize,
+    /// Those objects of a DWG, by kind, such as `ACAD_PROXY_ENTITY`, with
+    /// the handle of each, as `read` names them. Left out when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_read: Vec<RecordsOfKind>,
     /// The text styles whose fonts are not in the font folders, and the
     /// look-alike each was measured with: the text checks rest on it.
     pub font_substitutions: Vec<FontSubstitution>,
@@ -120,6 +130,11 @@ pub struct CheckReport {
     /// check.
     #[serde(skip)]
     pub(crate) warnings: Warnings,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 /// One failed check: the sheet, the rule, the object and what is wrong, in
@@ -218,15 +233,19 @@ pub struct CheckedObject {
     pub viewport: Option<String>,
 }
 
-/// One object of an insert's block, as its block library defines it.
+/// One object of an insert's block, as its block library or DWG defines it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BlockPart {
     pub block: String,
-    /// The block library that defines the block.
+    /// The block library that defines the block, or the DWG.
     pub file: String,
     /// The object's place in the block definition, such as
-    /// `blocks.TITLE_BLOCK.objects[13]`.
-    pub field: String,
+    /// `blocks.TITLE_BLOCK.objects[13]`. Absent for a DWG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// The object's handle in the DWG, in hexadecimal. Absent for a block library.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
     /// The object's type: `attdef` for an attribute, `text` or `mtext`.
     #[serde(rename = "type")]
     pub kind: String,
@@ -261,8 +280,13 @@ pub(crate) fn check_in(
     files: Option<Arc<dyn ReadFiles + Send + Sync>>,
 ) -> Result<CheckReport, Error> {
     let source = request.source.as_path();
-    let (units, records) = load(source, &request.sheets, files)?;
-    let tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units);
+    let Loaded {
+        units,
+        records,
+        objects_not_read,
+        not_read,
+    } = load(source, &request.sheets, files)?;
+    let tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units.unwrap_or(Unit::Mm));
     let mut findings = Vec::new();
     let mut substitutions: Vec<FontSubstitution> = Vec::new();
     let mut warnings = Warnings::default();
@@ -291,15 +315,25 @@ pub(crate) fn check_in(
         }
     }
     let sheets: Vec<String> = records.iter().map(|r| r.name.clone()).collect();
+    let mut report_message = message(&sheets, &findings);
+    if objects_not_read > 0 {
+        report_message.push_str(&format!(
+            "; {objects_not_read} object{} the core has no model for not checked: {}",
+            plural(objects_not_read),
+            kinds_in_words(&not_read)
+        ));
+    }
     Ok(CheckReport {
         source: source.display().to_string(),
         units,
-        message: message(&sheets, &findings),
+        message: report_message,
         sheets,
         passed: findings.is_empty(),
         tolerance,
         count: findings.len(),
         findings,
+        objects_not_read,
+        not_read,
         font_substitutions: substitutions,
         inconsistent: if source.is_dir() {
             crate::change::inconsistent(source)
@@ -310,15 +344,24 @@ pub(crate) fn check_in(
     })
 }
 
+/// The sheets loaded to check, with their declared unit and any objects of
+/// a DWG the core has no model for.
+struct Loaded {
+    units: Option<Unit>,
+    records: Vec<SheetRecord>,
+    objects_not_read: usize,
+    not_read: Vec<RecordsOfKind>,
+}
+
 /// Reads the sheets to check from their saved files, with the declared
-/// unit: every sheet of the drawing set whose folder is `source`, or the
-/// one sheet description `source` is; or only those `wanted` names, in any
-/// case. A sheet that cannot be read stops the check.
+/// unit: every sheet of the drawing set whose folder is `source`, the one
+/// sheet description `source` is, or the DWG `source` is; or only those
+/// `wanted` names, in any case. A sheet that cannot be read stops the check.
 fn load(
     source: &Path,
     wanted: &[String],
     files: Option<Arc<dyn ReadFiles + Send + Sync>>,
-) -> Result<(Unit, Vec<SheetRecord>), Error> {
+) -> Result<Loaded, Error> {
     let named = |name: &str| wanted.is_empty() || wanted.iter().any(|w| same_name(w, name));
     let missing = |names: &[&str]| {
         wanted
@@ -327,11 +370,28 @@ fn load(
             .map(|w| no_such_sheet(w, names))
     };
     if !source.is_dir() {
+        if is_dwg(source) {
+            let loaded = read_dwg_record(source)?;
+            if let Some(error) = missing(&[loaded.record.name.as_str()]) {
+                return Err(error);
+            }
+            return Ok(Loaded {
+                units: loaded.units,
+                records: vec![loaded.record],
+                objects_not_read: loaded.objects_not_read,
+                not_read: loaded.not_read,
+            });
+        }
         let record = read_sheet_record(source)?;
         if let Some(error) = missing(&[record.name.as_str()]) {
             return Err(error);
         }
-        return Ok((record.sheet.units, vec![record]));
+        return Ok(Loaded {
+            units: Some(record.sheet.units),
+            records: vec![record],
+            objects_not_read: 0,
+            not_read: Vec::new(),
+        });
     }
     let set = match files {
         Some(files) => SavedSet::read_from(source, files)?,
@@ -355,7 +415,12 @@ fn load(
             })
         })
         .collect::<Result<_, _>>()?;
-    Ok((set.units, records))
+    Ok(Loaded {
+        units: Some(set.units),
+        records,
+        objects_not_read: 0,
+        not_read: Vec::new(),
+    })
 }
 
 /// Whether two sheet names are one: names that differ only in case are.

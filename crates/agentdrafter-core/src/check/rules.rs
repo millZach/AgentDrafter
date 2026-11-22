@@ -62,11 +62,11 @@ use crate::text::placement::SheetFonts;
 use crate::units::Unit;
 
 /// Checks one sheet against every rule; `tolerance` is in the declared unit
-/// `units`.
+/// `units` (or millimetres when a DWG declares no unit).
 pub(super) fn check_sheet(
     record: &SheetRecord,
     fonts: &SheetFonts,
-    units: Unit,
+    units: Option<Unit>,
     tolerance: f64,
 ) -> Vec<Finding> {
     let list = measuring_drawing(&record.sheet, fonts);
@@ -98,7 +98,12 @@ pub(super) fn check_sheet(
     };
     let mut findings = Vec::new();
     match &record.sheet.paper {
-        None => findings.push(on.no_paper()),
+        // A DWG in model space (or a layout without a standard page setup)
+        // cannot declare a YAML `paper` key, so it is not failed for lacking
+        // one; a layout or built DWG that does carry a paper checks both
+        // `paper_size` and `off_sheet`.
+        None if !record.is_dwg() => findings.push(on.no_paper()),
+        None => {}
         Some(paper) => {
             findings.extend(on.paper_size(paper));
             findings.extend(on.off_sheet(paper));
@@ -118,7 +123,7 @@ struct Sheet<'a> {
     /// On a sheet drawn in a layout, each object drawn in its own space.
     own: Option<&'a DisplayList>,
     fonts: &'a SheetFonts,
-    units: Unit,
+    units: Option<Unit>,
     tolerance: f64,
     /// The insert that draws each multileader's block content, by the
     /// sheet's object it is.
@@ -126,6 +131,14 @@ struct Sheet<'a> {
 }
 
 impl Sheet<'_> {
+    fn unit_words(&self) -> &'static str {
+        self.units.map_or("drawing units", Unit::symbol)
+    }
+
+    fn effective_units(&self) -> Unit {
+        self.units.unwrap_or(Unit::Mm)
+    }
+
     fn finding(&self, rule: Rule, message: String) -> Finding {
         Finding {
             sheet: self.record.name.clone(),
@@ -157,7 +170,7 @@ impl Sheet<'_> {
     /// The one finding of a sheet that declares no paper.
     fn no_paper(&self) -> Finding {
         let extents = self.list.extents();
-        let u = self.units;
+        let u = self.unit_words();
         let draws = match &extents {
             Some(e) => format!(
                 "it draws {} by {} {u}, from {} to {}. Declare its paper under `paper` in {}, \
@@ -189,7 +202,7 @@ impl Sheet<'_> {
 
     /// The finding of a sheet whose extents are not its paper's size.
     fn paper_size(&self, paper: &Paper) -> Option<Finding> {
-        let u = self.units;
+        let u = self.unit_words();
         let named = paper_words(paper);
         let Some(e) = self.list.extents() else {
             let mut finding = self.finding(
@@ -241,7 +254,7 @@ impl Sheet<'_> {
 
     /// A finding for each object that draws past the paper.
     fn off_sheet(&self, paper: &Paper) -> Vec<Finding> {
-        let u = self.units;
+        let u = self.unit_words();
         let mut boxes: Vec<Option<Bounds>> = vec![None; self.record.sheet.objects.len()];
         let drawn = self
             .list
@@ -296,7 +309,7 @@ impl Sheet<'_> {
     /// its block declares for it, and each table cell's text that needs
     /// more than its cell.
     fn text_overflow(&self) -> Vec<Finding> {
-        let u = self.units;
+        let u = self.unit_words();
         let mut findings = Vec::new();
         for (i, object) in self.record.sheet.objects.iter().enumerate() {
             if let Object::Table(table) = object {
@@ -383,7 +396,7 @@ impl Sheet<'_> {
     /// the height AutoCAD sets its lines in, placed as the text is
     /// justified.
     fn table_overflow(&self, i: usize, table: &Table) -> Vec<Finding> {
-        let u = self.units;
+        let u = self.unit_words();
         let sheet = &self.record.sheet;
         let style = sheet
             .table_style(&table.table_style)
@@ -472,7 +485,7 @@ impl Sheet<'_> {
     /// A finding for each two texts whose drawn boxes overlap by more than
     /// the tolerance, naming the one drawn later as sitting on the other.
     fn text_on_text(&self) -> Vec<Finding> {
-        let u = self.units;
+        let u = self.unit_words();
         // Each line of text as the pipeline draws it, in its own box.
         let sheet = &self.record.sheet;
         let window = |v: Option<usize>| match v.map(|v| &sheet.objects[v]) {
@@ -568,8 +581,7 @@ impl Sheet<'_> {
     /// once for each text and line, at the first point found where they
     /// touch.
     fn text_on_line(&self, printed: &DisplayList) -> Vec<Finding> {
-        let u = self.units;
-        let units_per_mm = Unit::Mm.convert(1.0, u);
+        let units_per_mm = Unit::Mm.convert(1.0, self.effective_units());
         let mut letters: BTreeMap<Seen, Ink> = BTreeMap::new();
         let mut lines: BTreeMap<Seen, Ink> = BTreeMap::new();
         for item in &printed.items {
@@ -669,24 +681,38 @@ impl Sheet<'_> {
     fn line_words(&self, i: usize, path: &[usize]) -> String {
         let words = self.object_words(i);
         match self.in_block(i, path) {
-            Some(inner) => format!(
-                "the {} at `{}` of the block {} {}",
-                inner.object.type_name(),
-                inner.field(),
-                inner.block.name,
-                inner.inserted_by(&words)
-            ),
+            Some(inner) => match inner.handle(self.record) {
+                Some(handle) => format!(
+                    "the {} with handle `{handle}` of the block {} {}",
+                    inner.object.type_name(),
+                    inner.block.name,
+                    inner.inserted_by(&words)
+                ),
+                None => format!(
+                    "the {} at `{}` of the block {} {}",
+                    inner.object.type_name(),
+                    inner.field(),
+                    inner.block.name,
+                    inner.inserted_by(&words)
+                ),
+            },
             None => words,
         }
     }
 
     /// The block an insert places, as the sheet holds it.
     fn block(&self, insert: &Insert) -> Option<&Block> {
+        self.block_with_index(insert).map(|(_, b)| b)
+    }
+
+    /// The index and definition of the block an insert places, as the sheet holds it.
+    fn block_with_index(&self, insert: &Insert) -> Option<(usize, &Block)> {
         self.record
             .sheet
             .blocks
             .iter()
-            .find(|b| b.name == insert.block)
+            .enumerate()
+            .find(|(_, b)| b.name == insert.block)
     }
 
     /// The object at `path` that the sheet's object `i` draws, when `i` is
@@ -702,17 +728,18 @@ impl Sheet<'_> {
         };
         let (&index, through) = path.split_last()?;
         let mut insert = outermost;
-        let mut block = self.block(insert)?;
+        let (mut block_index, mut block) = self.block_with_index(insert)?;
         let top = &block.name;
         for &at in through {
             let Some(Object::Insert(inner)) = block.objects.get(at) else {
                 return None;
             };
             insert = inner;
-            block = self.block(insert)?;
+            (block_index, block) = self.block_with_index(insert)?;
         }
         Some(InBlock {
             insert,
+            block_index,
             block,
             index,
             object: block.objects.get(index)?,
@@ -784,12 +811,24 @@ impl Sheet<'_> {
                     Object::AttributeDefinition(d) => Some(d.tag.clone()),
                     _ => None,
                 };
-                let part = BlockPart {
-                    block: inner.block.name.clone(),
-                    file: self.library_file(),
-                    field: inner.field(),
-                    kind: inner.object.type_name().to_owned(),
-                    tag,
+                let part = if record.is_dwg() {
+                    BlockPart {
+                        block: inner.block.name.clone(),
+                        file: record.file.display().to_string(),
+                        field: None,
+                        handle: inner.handle(record),
+                        kind: inner.object.type_name().to_owned(),
+                        tag,
+                    }
+                } else {
+                    BlockPart {
+                        block: inner.block.name.clone(),
+                        file: self.library_file(),
+                        field: Some(inner.field()),
+                        handle: None,
+                        kind: inner.object.type_name().to_owned(),
+                        tag,
+                    }
                 };
                 (Some(part), inner.says())
             }
@@ -907,11 +946,18 @@ impl Sheet<'_> {
                 inner.block.name,
                 inner.inserted_by(&words)
             ),
-            Object::MText(_) => format!(
-                "the mtext at `{}`{on_line}, {}",
-                inner.field(),
-                inner.inserted_by(&words)
-            ),
+            Object::MText(_) => match inner.handle(self.record) {
+                Some(handle) => format!(
+                    "the mtext with handle `{handle}` of the block {}{on_line}, {}",
+                    inner.block.name,
+                    inner.inserted_by(&words)
+                ),
+                None => format!(
+                    "the mtext at `{}`{on_line}, {}",
+                    inner.field(),
+                    inner.inserted_by(&words)
+                ),
+            },
             _ => words,
         }
     }
@@ -921,6 +967,8 @@ impl Sheet<'_> {
 struct InBlock<'a> {
     /// The insert of `block`: the sheet's, or one nested in its block.
     insert: &'a Insert,
+    /// Its block's place in `sheet.blocks`.
+    block_index: usize,
     block: &'a Block,
     /// Its place in the block's objects.
     index: usize,
@@ -931,6 +979,12 @@ struct InBlock<'a> {
 }
 
 impl InBlock<'_> {
+    /// The object's handle in the DWG, when the sheet was read from one.
+    fn handle(&self, record: &SheetRecord) -> Option<String> {
+        record
+            .block_handle_of(self.block_index, self.index)
+            .map(str::to_owned)
+    }
     /// Which insert puts it on the sheet, in words, given the sheet's
     /// insert's: "that the insert ... inserts", or, nested, "nested in the
     /// block STRIP that the insert ... inserts".
@@ -1190,7 +1244,7 @@ impl Sides {
     /// How far past which sides, in words, such as "0.5 in past the right
     /// edge of": each side past by more than `tolerance` once enlarged by
     /// `scale`. `side` names a side, such as "edge".
-    fn words(&self, tolerance: f64, scale: f64, u: Unit, side: &str) -> String {
+    fn words(&self, tolerance: f64, scale: f64, u: &str, side: &str) -> String {
         let parts: Vec<String> = [
             (self.left, "left"),
             (self.bottom, "bottom"),
