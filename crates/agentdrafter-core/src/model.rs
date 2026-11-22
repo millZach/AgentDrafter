@@ -889,6 +889,28 @@ impl Sheet {
         self.layout.iter().chain(&self.other_layouts)
     }
 
+    /// Which space the sheet's object at `index` lives in: `None` for model
+    /// space, or `Some(k)` for the `k`th layout's paper space (`0` for
+    /// `self.layout`, `1..` for `self.other_layouts`).
+    pub(crate) fn space_index(&self, index: usize) -> Option<usize> {
+        self.layouts().position(|l| l.holds(index))
+    }
+
+    /// Whether two objects of this sheet live in the same space (both in
+    /// model space, or both in the same layout's paper space).
+    pub(crate) fn same_space(&self, a: usize, b: usize) -> bool {
+        self.space_index(a) == self.space_index(b)
+    }
+
+    /// The space of the sheet's object at `index`, in words: `"model space"`
+    /// or `"paper space of layout `Name`"`.
+    pub(crate) fn space_words(&self, index: usize) -> String {
+        match self.layout_of(index) {
+            None => "model space".to_owned(),
+            Some(layout) => format!("paper space of layout `{}`", layout.name),
+        }
+    }
+
     /// The sheet as each of its layouts prints it, in the order of their
     /// tabs: the sheet itself when it has one layout or none, and for each
     /// of several, the sheet with that layout first, as `layout`, and its
@@ -1140,6 +1162,10 @@ pub struct DrawingContents {
     /// records it did not (ADR-0004).
     #[serde(default)]
     pub decode: DecodeReport,
+    /// Stored page setup and checkable paper metadata for each read layout
+    /// (`[layout, ..other_layouts]`), in tab order.
+    #[serde(skip)]
+    pub(crate) layout_setups: Vec<layout::DwgLayoutSetup>,
 }
 
 /// Records of a DWG of one kind, counted, with the handle of each.

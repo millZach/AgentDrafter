@@ -58,6 +58,41 @@ impl Layout {
     }
 }
 
+/// Stored page setup fields read directly from a DWG's `Layout` object, for
+/// `query layout` so it reports the DWG's own plotter, paper name, plot area,
+/// scale and plot style rather than inventing AgentDrafter defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DwgPageSetup {
+    pub plotter: String,
+    pub paper: String,
+    pub area: String,
+    pub scale: String,
+    pub plot_style: String,
+}
+
+/// The paper bounds a DWG layout declares in paper-space drawing units, for
+/// `check` (`paper_size` and `off_sheet`), including layouts with printer
+/// margins, custom paper sizes, or unitless inch/mm setups at 1:1.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CheckPaper {
+    pub paper: Paper,
+    /// Lower-left corner of the physical paper in paper-space drawing units:
+    /// `[0.0, 0.0]` for full-bleed zero-margin/zero-origin layouts, or shifted
+    /// by negative margin and plot origin when non-zero.
+    pub origin: [f64; 2],
+}
+
+/// Stored page setup and checkable paper metadata for one layout read from a
+/// DWG, in the same order as `[DrawingContents::layout, ..other_layouts]`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DwgLayoutSetup {
+    pub page_setup: Option<DwgPageSetup>,
+    pub check_paper: Option<CheckPaper>,
+    /// Why `paper_size` and `off_sheet` cannot be checked on this layout when
+    /// `check_paper` is `None`.
+    pub skip_reason: Option<String>,
+}
+
 /// The boundary a viewport is clipped to instead of its rectangle, on the
 /// paper, as AutoCAD's VPCLIP and MVIEW's Object and Polygonal options
 /// clip one: model space shows inside it alone, and it is the viewport's

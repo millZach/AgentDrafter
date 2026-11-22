@@ -109,7 +109,8 @@ pub(super) fn layout(
                 .sheet
                 .pages()
                 .iter()
-                .map(|page| sheet_layout(record, page, settings))
+                .enumerate()
+                .map(|(layout_index, page)| sheet_layout(record, page, layout_index, settings))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -188,7 +189,12 @@ pub(super) fn layout(
 
 /// One layout of a sheet and its viewports: the layout `sheet` draws, the
 /// sheet `record` holds as one of its layouts prints it.
-fn sheet_layout(record: &SheetRecord, sheet: &Sheet, settings: &Settings) -> SheetLayout {
+fn sheet_layout(
+    record: &SheetRecord,
+    sheet: &Sheet,
+    layout_index: usize,
+    settings: &Settings,
+) -> SheetLayout {
     let paper_space = (0..sheet.objects.len())
         .filter(|&i| sheet.in_paper_space(i))
         .count();
@@ -210,18 +216,37 @@ fn sheet_layout(record: &SheetRecord, sheet: &Sheet, settings: &Settings) -> She
     let model_extents = measuring_drawing(&model, &fonts)
         .extents()
         .map(|b| Extents::of(&b));
-    let page_setup = sheet.layout.as_ref().and_then(|_| {
-        let paper = sheet.paper.as_ref()?;
-        let setup = PageSetup::of(paper.name.as_deref()?)?;
-        let (numerator, denominator) = setup.plot_scale(sheet.units);
-        Some(PageSetupUsed {
-            plotter: PLOTTER.to_owned(),
-            paper: setup.media,
-            area: "layout".to_owned(),
-            scale: format!("{numerator}:{denominator}"),
-            plot_style: PLOT_STYLE.to_owned(),
-        })
-    });
+    let (paper, page_setup) = if record.is_dwg() && sheet.layout.is_some() {
+        let setup = record.layout_setup(layout_index);
+        let paper = sheet
+            .paper
+            .clone()
+            .or_else(|| setup.and_then(|s| s.check_paper.as_ref().map(|cp| cp.paper.clone())));
+        let page_setup = setup
+            .and_then(|s| s.page_setup.as_ref())
+            .map(|ps| PageSetupUsed {
+                plotter: ps.plotter.clone(),
+                paper: ps.paper.clone(),
+                area: ps.area.clone(),
+                scale: ps.scale.clone(),
+                plot_style: ps.plot_style.clone(),
+            });
+        (paper, page_setup)
+    } else {
+        let page_setup = sheet.layout.as_ref().and_then(|_| {
+            let paper = sheet.paper.as_ref()?;
+            let setup = PageSetup::of(paper.name.as_deref()?)?;
+            let (numerator, denominator) = setup.plot_scale(sheet.units);
+            Some(PageSetupUsed {
+                plotter: PLOTTER.to_owned(),
+                paper: setup.media,
+                area: "layout".to_owned(),
+                scale: format!("{numerator}:{denominator}"),
+                plot_style: PLOT_STYLE.to_owned(),
+            })
+        });
+        (sheet.paper.clone(), page_setup)
+    };
     let viewports = sheet
         .viewports()
         .map(|(i, v)| ViewportFound {
@@ -245,7 +270,7 @@ fn sheet_layout(record: &SheetRecord, sheet: &Sheet, settings: &Settings) -> She
     SheetLayout {
         sheet: record.name.clone(),
         layout: sheet.layout.as_ref().map(|l| l.name.clone()),
-        paper: sheet.paper.clone(),
+        paper,
         page_setup,
         paper_space,
         model_space,

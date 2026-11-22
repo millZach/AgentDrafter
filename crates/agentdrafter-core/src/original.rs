@@ -226,7 +226,11 @@ pub(crate) struct DwgLoaded {
 /// [`SheetRecord`] for `query` and `check`, using the same canonical sheet
 /// name and collision-free handle IDs as `read` and `display-list`. Never
 /// writes or modifies any file.
-pub(crate) fn read_dwg_record(source: &Path) -> Result<DwgLoaded, Error> {
+///
+/// When `need_set_paper` is true and the DWG declares no layout paper, checks
+/// its in-memory build mark for its set's declared paper without reopening
+/// `source`.
+pub(crate) fn read_dwg_record(source: &Path, need_set_paper: bool) -> Result<DwgLoaded, Error> {
     let mut source_file = File::open(source).map_err(|e| {
         Error::new(
             ErrorCode::ReadFailed,
@@ -255,14 +259,19 @@ pub(crate) fn read_dwg_record(source: &Path) -> Result<DwgLoaded, Error> {
     let effective_units = units.unwrap_or(Unit::Mm);
     // Built DWGs may carry a build mark naming their set's template paper;
     // originals carry no build mark so `paper_of_dwg_bytes` inspects only the
-    // bytes already in memory and returns `None` without touching the disk.
-    let built_paper = crate::set::paper_of_dwg_bytes(source, &bytes).and_then(|found| {
-        found.paper.map(|paper| Paper {
-            width: found.units.convert(paper.width, effective_units),
-            height: found.units.convert(paper.height, effective_units),
-            ..paper
+    // bytes already in memory and compares against `source_id` without ever
+    // reopening `source`.
+    let built_paper = if need_set_paper && drawing.paper.is_none() {
+        crate::set::paper_of_dwg_bytes(source, source_id, &bytes).and_then(|found| {
+            found.paper.map(|paper| Paper {
+                width: found.units.convert(paper.width, effective_units),
+                height: found.units.convert(paper.height, effective_units),
+                ..paper
+            })
         })
-    });
+    } else {
+        None
+    };
     let mut ids = Vec::with_capacity(resolved_ids.len());
     let mut carried = Vec::with_capacity(resolved_ids.len());
     let mut objects = Vec::with_capacity(resolved_ids.len());
@@ -309,6 +318,7 @@ pub(crate) fn read_dwg_record(source: &Path) -> Result<DwgLoaded, Error> {
             carried,
             handles: drawing.handles,
             block_handles: drawing.block_handles,
+            layout_setups: drawing.layout_setups,
         }),
     };
     Ok(DwgLoaded {
@@ -331,8 +341,19 @@ type ResolvedEntry = (String, Option<String>, bool);
 /// extended data on it gives when unique and not colliding with another
 /// object's handle ID, and otherwise the drawing's name joined to its
 /// handle.
+#[cfg(test)]
 pub(crate) fn ids_of(source: &Path, drawing: &DrawingContents) -> Vec<ResolvedId> {
-    let sheet = sheet_name(source);
+    ids_of_with_id(source, file_id_of_path(source), drawing)
+}
+
+/// Same as [`ids_of`], reusing `source_id` captured from an already-opened
+/// handle so `source` is not reopened to identify it.
+pub(crate) fn ids_of_with_id(
+    source: &Path,
+    source_id: Option<FileId>,
+    drawing: &DrawingContents,
+) -> Vec<ResolvedId> {
+    let sheet = stem_of(&on_disk_path(source, source_id));
     resolve_all_ids(&sheet, drawing)
         .0
         .into_iter()
@@ -453,7 +474,7 @@ fn regular_file_id_no_follow(path: &Path) -> Option<FileId> {
 fn regular_file_id_no_follow(path: &Path) -> Option<FileId> {
     use std::os::windows::fs::OpenOptionsExt;
     let file = OpenOptions::new()
-        .read(true)
+        .access_mode(0)
         .custom_flags(crate::build::win_file::FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .ok()?;
@@ -519,12 +540,18 @@ fn on_disk_path(source: &Path, target_id: Option<FileId>) -> PathBuf {
     parent.join(&matches[0])
 }
 
-/// Whether `source` is read as a DWG: its name ends `.dwg`, in any case.
+/// Whether `source` has a `.dwg` extension, in any case.
 pub(crate) fn is_dwg(source: &Path) -> bool {
     source
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("dwg"))
+}
+
+/// Whether `source` should be read as a DWG file rather than a drawing-set
+/// folder: its name ends `.dwg` (any case) and it is not a directory.
+pub(crate) fn is_dwg_file(source: &Path) -> bool {
+    is_dwg(source) && !source.is_dir()
 }
 
 /// Whether the mirror path is brand new or an existing AgentDrafter mirror

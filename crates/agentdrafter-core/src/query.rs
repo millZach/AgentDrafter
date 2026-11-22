@@ -34,7 +34,7 @@ use crate::error::{Error, ErrorCode};
 use crate::geometry::snap::{touches, SnapPoint, Touch};
 use crate::geometry::{ObjectRef, SnapRef};
 use crate::model::{Attribute, Layer, Measured, Object, Point3, RecordsOfKind, Sheet, LAYER_ZERO};
-use crate::original::{is_dwg, kinds_in_words, plural, read_dwg_record};
+use crate::original::{is_dwg_file, kinds_in_words, plural, read_dwg_record};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
 use crate::text::placement::SheetFonts;
@@ -581,23 +581,31 @@ pub fn query(request: &QueryRequest) -> Result<QueryReport, Error> {
 /// reading fonts from the font folders `settings` names to find extents.
 pub fn query_with(request: &QueryRequest, settings: &Settings) -> Result<QueryReport, Error> {
     let source = request.source.as_path();
+    let need_set_paper = matches!(request.query, Query::Layout);
     let Loaded {
         units,
         records,
         objects_not_read,
         not_read,
-    } = load(source, request.sheet.as_deref())?;
+    } = load(source, request.sheet.as_deref(), need_set_paper)?;
     let looked_at: Vec<&SheetRecord> = records.iter().collect();
     let looked = LookedAt(&looked_at, request.sheet.is_some());
     let (mut message, answer) = match &request.query {
-        Query::Find(selection) => find(&looked_at, selection, settings, &looked),
+        Query::Find(selection) => {
+            check_touching(&looked_at, selection)?;
+            find(&looked_at, selection, settings, &looked)
+        }
         Query::Blocks => blocks(&looked_at, &looked),
-        Query::Attributes(selection) => attributes(&looked_at, selection, settings, &looked),
+        Query::Attributes(selection) => {
+            check_touching(&looked_at, selection)?;
+            attributes(&looked_at, selection, settings, &looked)
+        }
         Query::Measure(measure) => self::measure(&looked_at, measure, units, &looked)?,
         Query::Extents => extents(&looked_at, settings, units, &looked),
         Query::Layers => layers(&looked_at, &looked),
         Query::Snap(request) => snap::snap(&looked_at, request, settings, &looked)?,
         Query::Geometry(selection) => {
+            check_touching(&looked_at, selection)?;
             snap::geometry(&looked_at, selection, settings, units, &looked)
         }
         Query::Layout => layout::layout(&looked_at, settings, units, &looked),
@@ -638,11 +646,11 @@ struct Loaded {
 /// of the drawing set whose folder is `source`, the one sheet description
 /// `source` is, or the DWG `source` is; or only the one named `sheet`, in
 /// any case. A sheet that cannot be read stops the query.
-fn load(source: &Path, sheet: Option<&str>) -> Result<Loaded, Error> {
+fn load(source: &Path, sheet: Option<&str>, need_set_paper: bool) -> Result<Loaded, Error> {
     let named = |name: &str| sheet.is_none_or(|s| s.to_lowercase() == name.to_lowercase());
     if !source.is_dir() {
-        if is_dwg(source) {
-            let loaded = read_dwg_record(source)?;
+        if is_dwg_file(source) {
+            let loaded = read_dwg_record(source, need_set_paper)?;
             if !named(&loaded.record.name) {
                 return Err(no_such_sheet(sheet, &[loaded.record.name.as_str()]));
             }
@@ -1047,6 +1055,48 @@ fn touching_found(sheets: &[&SheetRecord], selection: &Selection) -> bool {
         .any(|record| named_on(record, named).is_some())
 }
 
+/// Validates `selection.touching`: when it names an object by `name` and more
+/// than one object on a single sheet carries that name (as can happen on a
+/// DWG), returns an error listing all matching IDs so the caller can
+/// disambiguate with `--id`.
+fn check_touching(sheets: &[&SheetRecord], selection: &Selection) -> Result<(), Error> {
+    let Some(named) = &selection.touching else {
+        return Ok(());
+    };
+    if named.id.is_some() {
+        return Ok(());
+    }
+    let Some(name) = named.name.as_deref() else {
+        return Ok(());
+    };
+    for record in sheets {
+        let matches: Vec<String> = (0..record.objects.len())
+            .filter(|&i| {
+                record.objects[i]
+                    .name
+                    .as_deref()
+                    .is_some_and(|have| Matching::Exact.identifier(have, name))
+            })
+            .map(|i| record.id(i))
+            .collect();
+        if matches.len() > 1 {
+            return Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "{} is ambiguous on sheet `{}`: {} objects carry it ({}); give one object's \
+                     ID instead",
+                    named.words(),
+                    record.name,
+                    matches.len(),
+                    matches.join(", ")
+                ),
+            )
+            .at_field("query.touching.name"));
+        }
+    }
+    Ok(())
+}
+
 /// The place on `record`'s sheet of the object `named` names, by its ID or
 /// by its name, in any case.
 fn named_on(record: &SheetRecord, named: &ObjectRef) -> Option<usize> {
@@ -1141,7 +1191,7 @@ impl Space {
                 .iter()
                 .enumerate()
                 .map(|(i, object)| {
-                    if i == index || theirs.is_empty() {
+                    if i == index || theirs.is_empty() || !record.sheet.same_space(i, index) {
                         return Vec::new();
                     }
                     touches(&reader.parts(object), &theirs)
@@ -1514,7 +1564,7 @@ fn measure(
 ) -> Result<(String, Answer), Error> {
     let from = end(sheets, &measure.from, "query.from")?;
     let to = end(sheets, &measure.to, "query.to")?;
-    let (from, to) = match (from, to) {
+    let ((from_record, from_index, from), (to_record, to_index, to)) = match (from, to) {
         (Some(from), Some(to)) => (from, to),
         (from, to) => {
             let mut missing = Vec::new();
@@ -1532,8 +1582,8 @@ fn measure(
             let answer = Answer::Measure {
                 distance: None,
                 delta: None,
-                from: from.map(Box::new),
-                to: to.map(Box::new),
+                from: from.map(|(_, _, p)| Box::new(p)),
+                to: to.map(|(_, _, p)| Box::new(p)),
             };
             return Ok((message, answer));
         }
@@ -1545,6 +1595,20 @@ fn measure(
                 "`{}` is on sheet `{}` and `{}` on sheet `{}`; a distance is measured between \
                  two objects on one sheet",
                 from.id, from.sheet, to.id, to.sheet
+            ),
+        )
+        .at_field("query.to"));
+    }
+    if !from_record.sheet.same_space(from_index, to_index) {
+        return Err(Error::new(
+            ErrorCode::BadValue,
+            format!(
+                "`{}` is in {} and `{}` is in {}; a distance is measured between two objects in \
+                 the same space",
+                from.id,
+                from_record.sheet.space_words(from_index),
+                to.id,
+                to_record.sheet.space_words(to_index)
             ),
         )
         .at_field("query.to"));
@@ -1585,7 +1649,11 @@ impl End {
 /// The point one end of a distance names, or none when no object on
 /// `sheets` has the ID or name it gives. `field` is the end's place in the
 /// request, for an error.
-fn end(sheets: &[&SheetRecord], end: &End, field: &str) -> Result<Option<MeasuredPoint>, Error> {
+fn end<'a>(
+    sheets: &[&'a SheetRecord],
+    end: &End,
+    field: &str,
+) -> Result<Option<(&'a SheetRecord, usize, MeasuredPoint)>, Error> {
     let named = ObjectRef {
         id: end.id.clone(),
         name: end.name.clone(),
@@ -1622,14 +1690,18 @@ fn end(sheets: &[&SheetRecord], end: &End, field: &str) -> Result<Option<Measure
                 .at_field(format!("{field}.point"))
             })?,
     };
-    Ok(Some(MeasuredPoint {
-        sheet: record.name.clone(),
-        id,
-        name: record.objects[index].name.clone(),
-        kind: object.type_name().to_owned(),
-        point,
-        at,
-    }))
+    Ok(Some((
+        record,
+        index,
+        MeasuredPoint {
+            sheet: record.name.clone(),
+            id,
+            name: record.objects[index].name.clone(),
+            kind: object.type_name().to_owned(),
+            point,
+            at,
+        },
+    )))
 }
 
 /// The error for an object with no point of its own to measure from.
@@ -1681,12 +1753,13 @@ pub(crate) fn object_named<'a>(
                 record
                     .objects
                     .iter()
-                    .position(|r| {
+                    .enumerate()
+                    .filter(|(_, r)| {
                         r.name
                             .as_deref()
                             .is_some_and(|have| Matching::Exact.identifier(have, name))
                     })
-                    .map(|i| (*record, i))
+                    .map(move |(i, _)| (*record, i))
             })
             .collect(),
         _ => {
@@ -1699,10 +1772,26 @@ pub(crate) fn object_named<'a>(
     match found.as_slice() {
         [] => Ok(None),
         [one] => Ok(Some(*one)),
+        several if several.iter().all(|(r, _)| r.name == several[0].0.name) => {
+            let ids: Vec<String> = several.iter().map(|(r, i)| r.id(*i)).collect();
+            Err(Error::new(
+                ErrorCode::BadValue,
+                format!(
+                    "{} is ambiguous on sheet `{}`: {} objects carry it ({}); give one object's \
+                     ID instead",
+                    object.words(),
+                    several[0].0.name,
+                    several.len(),
+                    ids.join(", ")
+                ),
+            )
+            .at_field(format!("{field}.name")))
+        }
         several => Err(Error::new(
             ErrorCode::BadValue,
             format!(
-                "{} is given on {} sheets, {}, and a name is given once on a sheet; name the                  sheet to {doing} on, or give the object's ID",
+                "{} is given on {} sheets, {}, and a name is given once on a sheet; name the \
+                 sheet to {doing} on, or give the object's ID",
                 object.words(),
                 several.len(),
                 several

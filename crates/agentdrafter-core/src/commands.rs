@@ -145,7 +145,7 @@ impl Command {
             && input
                 .get("source")
                 .and_then(Value::as_str)
-                .is_some_and(|s| SourceKind::of(Path::new(s)) == SourceKind::Dwg);
+                .is_some_and(|s| crate::original::is_dwg_file(Path::new(s)));
         let beside = matches!(self.name, "look-at" | "looking-at" | "read") || dwg_source;
         let rolled_back = if previews || beside {
             None
@@ -1629,9 +1629,11 @@ fn check_does() -> String {
      table cell's text keeps inside its margins; text_on_text, no two texts' drawn boxes \
      overlap; and text_on_line, no line touches a text's letters as they print. A sheet \
      description or set template that declares no paper gets one paper_size finding that says \
-     so; a DWG with no layout paper or set paper skips paper_size and off_sheet rather than \
-     failing for lacking one, and objects the core has no model for are counted under \
-     `objects_not_read` and named under `not_read`. Each sheet is drawn through the drawing \
+     so; a DWG with a 1:1 layout page setup (including layouts with printer margins or unitless \
+     inch/mm setups) or a built DWG with set paper checks paper_size and off_sheet, while a \
+     model-space original or unsupported layout page setup reports skipped paper_size and \
+     off_sheet under `checks_skipped` and in `message`, and objects the core has no model for \
+     are counted under `objects_not_read` and named under `not_read`. Each sheet is drawn \
      pipeline, so text is measured as its font draws it. Each finding names the sheet, the \
      rule and the object, by ID and name (with file and handle on a DWG), and says what is \
      wrong in numbers in the declared unit (millimetres for a unitless DWG), within a \

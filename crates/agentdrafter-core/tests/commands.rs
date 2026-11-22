@@ -615,6 +615,43 @@ fn read_through_the_registry_never_triggers_drawing_set_journal_recovery() {
 }
 
 #[test]
+fn drawing_set_folder_ending_in_dwg_still_runs_journal_recovery_on_query_and_check() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("commands-set-ending-dwg");
+    let _ = std::fs::remove_dir_all(&dir);
+    for (label, cmd_name, payload) in [
+        (
+            "query",
+            "query",
+            json!({"query": {"kind": "find", "id": "DEMO-001/border"}}),
+        ),
+        ("check", "check", json!({})),
+    ] {
+        let set = dir.join(format!("{label}-set.DWG"));
+        demo_set::copy_demo_set(&set);
+        let moved = json!({"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]});
+        let landed = run("change", json!({"set": set, "change_set": moved}));
+        assert_eq!(landed["ok"], true, "{landed}");
+
+        // Leave a pending commit in the journal.
+        let journal = set.join(agentdrafter_core::JOURNAL_FILE);
+        let text = std::fs::read_to_string(&journal).unwrap();
+        let (rest, last) = text.trim_end().rsplit_once('\n').unwrap();
+        assert!(last.contains(r#""state":"done""#), "{last}");
+        std::fs::write(&journal, format!("{rest}\n")).unwrap();
+
+        let mut input = payload;
+        input["source"] = json!(set);
+        let reply = run(cmd_name, input);
+        assert_eq!(reply["ok"], true, "{label}: {reply}");
+        assert!(
+            reply.get("rolled_back").is_some(),
+            "{label}: directory ending in .DWG must still recover its journal: {reply}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn read_schema_and_command_agree_on_mirror_null_and_no_mirror_combination() {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("commands-read-schema");
     let _ = std::fs::remove_dir_all(&dir);

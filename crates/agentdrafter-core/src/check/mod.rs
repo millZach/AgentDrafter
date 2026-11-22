@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::description::{read_sheet_record, ReadFiles, SavedSet, SheetRecord};
 use crate::error::{Error, ErrorCode};
 use crate::model::{Paper, RecordsOfKind};
-use crate::original::{is_dwg, kinds_in_words, plural, read_dwg_record};
+use crate::original::{is_dwg_file, kinds_in_words, plural, read_dwg_record};
 use crate::query::{Extents, WrittenAt};
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
@@ -109,6 +109,12 @@ pub struct CheckReport {
     pub count: usize,
     /// Each failed check, sheet by sheet in the set's order.
     pub findings: Vec<Finding>,
+    /// Checks that could not run on a sheet or layout, such as `paper_size`
+    /// and `off_sheet` on a model-space original DWG with no declared paper,
+    /// or a layout whose page setup cannot be checked at 1:1. Left out when
+    /// empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checks_skipped: Vec<SkippedCheck>,
     /// How many objects of a DWG the core has no model for yet, which are
     /// not checked. Left out when 0.
     #[serde(skip_serializing_if = "is_zero_usize")]
@@ -135,6 +141,28 @@ pub struct CheckReport {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_usize(n: &usize) -> bool {
     *n == 0
+}
+
+/// A check rule that could not run on a sheet or layout, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SkippedCheck {
+    pub sheet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    pub rule: Rule,
+    pub reason: String,
+}
+
+/// How `paper_size` and `off_sheet` should run on one page being checked.
+pub(super) enum PaperCheck {
+    /// Check against `paper` placed at `origin` in paper-space drawing units.
+    Check(Paper, [f64; 2]),
+    /// A sheet description or drawing-set template lacking a `paper` key:
+    /// fail `paper_size` once (not skipped).
+    MissingYaml,
+    /// A DWG sheet or layout whose paper cannot be checked: skip `paper_size`
+    /// and `off_sheet` and record `reason` under `checks_skipped`.
+    Skipped(String),
 }
 
 /// One failed check: the sheet, the rule, the object and what is wrong, in
@@ -288,6 +316,7 @@ pub(crate) fn check_in(
     } = load(source, &request.sheets, files)?;
     let tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units.unwrap_or(Unit::Mm));
     let mut findings = Vec::new();
+    let mut checks_skipped = Vec::new();
     let mut substitutions: Vec<FontSubstitution> = Vec::new();
     let mut warnings = Warnings::default();
     for record in &records {
@@ -299,23 +328,26 @@ pub(crate) fn check_in(
             }
         }
         // Each layout of a sheet drawn in several is checked on its own.
-        for page in record.sheet.pages() {
-            match page {
+        for (layout_index, page) in record.sheet.pages().into_iter().enumerate() {
+            let paper_check = paper_check_for(record, &page, layout_index);
+            let (page_findings, page_skipped) = match page {
                 std::borrow::Cow::Borrowed(_) => {
-                    findings.extend(rules::check_sheet(record, &fonts, units, tolerance));
+                    rules::check_sheet(record, &fonts, units, tolerance, paper_check)
                 }
                 std::borrow::Cow::Owned(sheet) => {
                     let on_layout = SheetRecord {
                         sheet,
                         ..record.clone()
                     };
-                    findings.extend(rules::check_sheet(&on_layout, &fonts, units, tolerance));
+                    rules::check_sheet(&on_layout, &fonts, units, tolerance, paper_check)
                 }
-            }
+            };
+            findings.extend(page_findings);
+            checks_skipped.extend(page_skipped);
         }
     }
     let sheets: Vec<String> = records.iter().map(|r| r.name.clone()).collect();
-    let mut report_message = message(&sheets, &findings);
+    let mut report_message = message(&sheets, &findings, &checks_skipped);
     if objects_not_read > 0 {
         report_message.push_str(&format!(
             "; {objects_not_read} object{} the core has no model for not checked: {}",
@@ -332,6 +364,7 @@ pub(crate) fn check_in(
         tolerance,
         count: findings.len(),
         findings,
+        checks_skipped,
         objects_not_read,
         not_read,
         font_substitutions: substitutions,
@@ -342,6 +375,39 @@ pub(crate) fn check_in(
         },
         warnings,
     })
+}
+
+/// Decides how `paper_size` and `off_sheet` run on `page` (the `layout_index`th
+/// layout of `record`, or `0` for model space).
+fn paper_check_for(
+    record: &SheetRecord,
+    page: &crate::model::Sheet,
+    layout_index: usize,
+) -> PaperCheck {
+    if !record.is_dwg() {
+        return match &page.paper {
+            Some(paper) => PaperCheck::Check(paper.clone(), [0.0, 0.0]),
+            None => PaperCheck::MissingYaml,
+        };
+    }
+    if page.layout.is_some() {
+        if let Some(setup) = record.layout_setup(layout_index) {
+            if let Some(cp) = &setup.check_paper {
+                return PaperCheck::Check(cp.paper.clone(), cp.origin);
+            }
+            if let Some(reason) = &setup.skip_reason {
+                return PaperCheck::Skipped(reason.clone());
+            }
+        }
+        return match &page.paper {
+            Some(paper) => PaperCheck::Check(paper.clone(), [0.0, 0.0]),
+            None => PaperCheck::Skipped("layout declares no checkable paper".to_owned()),
+        };
+    }
+    match &page.paper {
+        Some(paper) => PaperCheck::Check(paper.clone(), [0.0, 0.0]),
+        None => PaperCheck::Skipped("no paper is declared in this model-space DWG".to_owned()),
+    }
 }
 
 /// The sheets loaded to check, with their declared unit and any objects of
@@ -370,8 +436,8 @@ fn load(
             .map(|w| no_such_sheet(w, names))
     };
     if !source.is_dir() {
-        if is_dwg(source) {
-            let loaded = read_dwg_record(source)?;
+        if is_dwg_file(source) {
+            let loaded = read_dwg_record(source, true)?;
             if let Some(error) = missing(&[loaded.record.name.as_str()]) {
                 return Err(error);
             }
@@ -442,13 +508,36 @@ fn no_such_sheet(sheet: &str, names: &[&str]) -> Error {
 }
 
 /// What the checker found, in words.
-fn message(sheets: &[String], findings: &[Finding]) -> String {
+fn message(sheets: &[String], findings: &[Finding], skipped: &[SkippedCheck]) -> String {
     let checked = match sheets {
         [one] => format!("sheet `{one}`"),
         all => format!("the {} sheets checked", all.len()),
     };
+    let skipped_note = if skipped.is_empty() {
+        None
+    } else {
+        let mut rules: Vec<&str> = Vec::new();
+        let mut reasons: Vec<&str> = Vec::new();
+        for s in skipped {
+            let rule = s.rule.name();
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
+            if !reasons.contains(&s.reason.as_str()) {
+                reasons.push(&s.reason);
+            }
+        }
+        Some(format!(
+            "skipped {} ({})",
+            rules.join(", "),
+            reasons.join("; ")
+        ))
+    };
     if findings.is_empty() {
-        return format!("every check passes on {checked}");
+        return match skipped_note {
+            Some(note) => format!("every check run passes on {checked}; {note}"),
+            None => format!("every check passes on {checked}"),
+        };
     }
     // Each sheet with a failed check, and the rules it failed, in order.
     let mut failed: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -465,17 +554,23 @@ fn message(sheets: &[String], findings: &[Finding]) -> String {
     } else {
         format!("{} checks failed", findings.len())
     };
-    if let ([_], [(_, rules)]) = (sheets, failed.as_slice()) {
-        return format!("{count} on {checked}: {}", rules.join(", "));
-    }
-    let on = if failed.len() == sheets.len() {
-        format!("each of {checked}")
+    let mut out = if let ([_], [(_, rules)]) = (sheets, failed.as_slice()) {
+        format!("{count} on {checked}: {}", rules.join(", "))
     } else {
-        format!("{} of {checked}", failed.len())
+        let on = if failed.len() == sheets.len() {
+            format!("each of {checked}")
+        } else {
+            format!("{} of {checked}", failed.len())
+        };
+        let listed: Vec<String> = failed
+            .iter()
+            .map(|(sheet, rules)| format!("`{sheet}` ({})", rules.join(", ")))
+            .collect();
+        format!("{count} on {on}: {}", listed.join(", "))
     };
-    let listed: Vec<String> = failed
-        .iter()
-        .map(|(sheet, rules)| format!("`{sheet}` ({})", rules.join(", ")))
-        .collect();
-    format!("{count} on {on}: {}", listed.join(", "))
+    if let Some(note) = skipped_note {
+        out.push_str("; ");
+        out.push_str(&note);
+    }
+    out
 }

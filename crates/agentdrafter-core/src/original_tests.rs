@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::build::{build, BuildRequest};
 use crate::error::ErrorCode;
+use crate::{
+    check_with, query_with, Answer, CheckRequest, End, Measure, ObjectRef, Query, QueryRequest,
+    Rule, Selection, Settings, SnapKind, SnapRef,
+};
 
 /// An empty folder for one test under the system's temporary folder.
 fn scratch(test: &str) -> PathBuf {
@@ -1631,4 +1635,556 @@ fn query_and_check_report_not_read_handle_unitless_dwgs_and_refuse_damaged_dwgs(
     )
     .unwrap_err();
     assert_eq!(c_err.code, ErrorCode::DwgRead, "{c_err:?}");
+}
+
+#[test]
+fn check_handles_layout_margins_unitless_inch_layouts_and_reports_skipped_checks() {
+    let dir = scratch("check-layout-margins-and-skipped");
+
+    // 1. ISO A3 landscape layout with non-zero printer margins (10 mm each side)
+    //    and off-page geometry running past x = 410 (physical right edge in paper space).
+    let a3_off_yaml = dir.join("a3-off.yaml");
+    fs::write(
+        &a3_off_yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: Sheet1}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [400, 0, 0], [400, 277, 0], [0, 277, 0]], closed: true, space: paper}\n\
+         \x20 - line: {from: [400, 10, 0], to: [450, 10, 0], space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: a3_off_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let a3_margins_off = dir.join("A3-MARGINS-OFF.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("a3-off.dwg"),
+        &a3_margins_off,
+        "Sheet1",
+        false,
+        |l| {
+            l.paper_size = "ISO_A3_(420.00_x_297.00_MM)".to_owned();
+            l.plot_margin_left = 10.0;
+            l.plot_margin_bottom = 10.0;
+            l.plot_margin_right = 10.0;
+            l.plot_margin_top = 10.0;
+        },
+    );
+    let checked = check_with(
+        &CheckRequest {
+            source: a3_margins_off,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(!checked.passed, "off-page line must fail check");
+    assert!(
+        checked.checks_skipped.is_empty(),
+        "{:#?}",
+        checked.checks_skipped
+    );
+    assert!(
+        checked.findings.iter().any(|f| f.rule == Rule::OffSheet),
+        "{:#?}",
+        checked.findings
+    );
+    assert!(
+        checked.findings.iter().any(|f| f.rule == Rule::PaperSize),
+        "{:#?}",
+        checked.findings
+    );
+
+    // Clean geometry filling the physical A3 sheet (-10,-10 to 410,287) with 10 mm margins passes!
+    let a3_clean_yaml = dir.join("a3-clean.yaml");
+    fs::write(
+        &a3_clean_yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: Sheet1}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[-10, -10, 0], [410, -10, 0], [410, 287, 0], [-10, 287, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: a3_clean_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let a3_margins_clean = dir.join("A3-MARGINS-CLEAN.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("a3-clean.dwg"),
+        &a3_margins_clean,
+        "Sheet1",
+        false,
+        |l| {
+            l.paper_size = "ISO_A3_(420.00_x_297.00_MM)".to_owned();
+            l.plot_margin_left = 10.0;
+            l.plot_margin_bottom = 10.0;
+            l.plot_margin_right = 10.0;
+            l.plot_margin_top = 10.0;
+        },
+    );
+    let clean_checked = check_with(
+        &CheckRequest {
+            source: a3_margins_clean,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(clean_checked.passed, "{:#?}", clean_checked.findings);
+    assert!(clean_checked.checks_skipped.is_empty());
+
+    // 2. Unitless (INSUNITS = 0) inch-based ANSI B layout at 1:1 (plot_paper_units = 0):
+    //    must use the layout's own plot_paper_units (inches) rather than assuming mm!
+    let inch_yaml = dir.join("inch-off.yaml");
+    fs::write(
+        &inch_yaml,
+        "units: in\n\
+         paper: ANSI B landscape\n\
+         layout: {name: InchSheet}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, space: paper}\n\
+         \x20 - line: {from: [16, 5, 0], to: [19, 5, 0], space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: inch_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let unitless_inch = dir.join("UNITLESS-INCH.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("inch-off.dwg"),
+        &unitless_inch,
+        "InchSheet",
+        true,
+        |_| {},
+    );
+    let u_checked = check_with(
+        &CheckRequest {
+            source: unitless_inch,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(u_checked.units, None);
+    assert!(
+        !u_checked.passed,
+        "off-sheet line on unitless inch layout must fail"
+    );
+    assert!(u_checked.checks_skipped.is_empty());
+    let off = u_checked
+        .findings
+        .iter()
+        .find(|f| f.rule == Rule::OffSheet)
+        .expect("off_sheet finding");
+    assert!(
+        (off.past.as_ref().unwrap().right - 2.0).abs() < 1e-6,
+        "{off:#?}"
+    );
+
+    // 3. Layout with non-1:1 plot scale (1:2) skips paper_size and off_sheet explicitly.
+    let scaled_dwg = dir.join("SCALED-LAYOUT.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("a3-off.dwg"),
+        &scaled_dwg,
+        "Sheet1",
+        false,
+        |l| {
+            l.plot_scale_numerator = 1.0;
+            l.plot_scale_denominator = 2.0;
+        },
+    );
+    let s_checked = check_with(
+        &CheckRequest {
+            source: scaled_dwg,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(s_checked.passed, "{:#?}", s_checked.findings);
+    assert_eq!(s_checked.checks_skipped.len(), 2);
+    assert_eq!(s_checked.checks_skipped[0].rule, Rule::PaperSize);
+    assert_eq!(s_checked.checks_skipped[1].rule, Rule::OffSheet);
+    assert_eq!(
+        s_checked.checks_skipped[0].layout.as_deref(),
+        Some("Sheet1")
+    );
+    assert!(
+        s_checked.checks_skipped[0].reason.contains("1:2"),
+        "{:#?}",
+        s_checked.checks_skipped
+    );
+    assert!(
+        s_checked.message.contains("skipped paper_size, off_sheet")
+            && !s_checked.message.starts_with("every check passes "),
+        "{}",
+        s_checked.message
+    );
+
+    // 4. Genuinely paperless model-space original reports checks_skipped and explains in message.
+    let model_yaml = dir.join("model.yaml");
+    fs::write(
+        &model_yaml,
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [100, 0, 0]}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: model_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let model_orig = dir.join("MODEL-ORIG.dwg");
+    dwg::as_someone_elses(&dir.join("model.dwg"), &model_orig);
+    let m_checked = check_with(
+        &CheckRequest {
+            source: model_orig,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(m_checked.passed);
+    assert_eq!(m_checked.checks_skipped.len(), 2);
+    assert_eq!(m_checked.checks_skipped[0].rule, Rule::PaperSize);
+    assert_eq!(m_checked.checks_skipped[1].rule, Rule::OffSheet);
+    assert_eq!(m_checked.checks_skipped[0].layout, None);
+    assert!(
+        m_checked.message.contains("every check run passes")
+            && m_checked.message.contains("skipped paper_size, off_sheet"),
+        "{}",
+        m_checked.message
+    );
+}
+
+#[test]
+fn query_layout_reports_stored_dwg_plotter_and_plot_style() {
+    let dir = scratch("query-layout-stored-setup");
+    let yaml = dir.join("lay.yaml");
+    fs::write(
+        &yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: Plan}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [420, 0, 0], [420, 297, 0], [0, 297, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let orig = dir.join("CUSTOM-SETUP.dwg");
+    dwg::as_original_with_layout_setup(&dir.join("lay.dwg"), &orig, "Plan", false, |l| {
+        l.plot_printer_name = "MadeUp Plotter.pc3".to_owned();
+        l.plot_style_sheet = "madeup-color.ctb".to_owned();
+        l.paper_size = "ISO_A3_(420.00_x_297.00_MM)".to_owned();
+        l.plot_margin_left = 5.0;
+        l.plot_margin_bottom = 5.0;
+        l.plot_margin_right = 5.0;
+        l.plot_margin_top = 5.0;
+    });
+    let report = query_with(
+        &QueryRequest {
+            source: orig,
+            sheet: None,
+            query: Query::Layout,
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Layout { layouts, .. } = &report.answer else {
+        panic!("layout")
+    };
+    let setup = layouts[0]
+        .page_setup
+        .as_ref()
+        .expect("stored page_setup present");
+    assert_eq!(setup.plotter, "MadeUp Plotter.pc3");
+    assert_eq!(setup.plot_style, "madeup-color.ctb");
+    assert_eq!(setup.paper, "ISO_A3_(420.00_x_297.00_MM)");
+    assert_eq!(setup.area, "layout");
+    assert_eq!(setup.scale, "1:1");
+    assert_eq!(
+        layouts[0].paper.as_ref().and_then(|p| p.name.as_deref()),
+        Some("ISO A3 landscape")
+    );
+}
+
+#[test]
+fn query_touching_snap_and_measure_do_not_cross_spaces() {
+    let dir = scratch("query-no-cross-space");
+    let yaml = dir.join("spaces.yaml");
+    // Two crossing lines at identical raw coordinates [0,50]-[100,50] and [50,0]-[50,100],
+    // one in model space and one in paper space. They MUST NOT touch, intersect or measure!
+    fs::write(
+        &yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: Sheet1}\n\
+         objects:\n\
+         \x20 - line: {from: [0, 50, 0], to: [100, 50, 0]}\n\
+         \x20 - line: {from: [50, 0, 0], to: [50, 100, 0], space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let orig = dir.join("SPACES.dwg");
+    dwg::as_someone_elses(&dir.join("spaces.dwg"), &orig);
+
+    let found = query_with(
+        &QueryRequest {
+            source: orig.clone(),
+            sheet: None,
+            query: Query::Find(Selection::default()),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Find { objects, .. } = &found.answer else {
+        panic!("find")
+    };
+    let model_id = objects
+        .iter()
+        .find(|o| o.space.as_deref() == Some("model"))
+        .unwrap()
+        .id
+        .clone();
+    let paper_id = objects
+        .iter()
+        .find(|o| o.space.as_deref() == Some("Sheet1"))
+        .unwrap()
+        .id
+        .clone();
+
+    // find --touching <paper_id> must not match the model-space line!
+    let touching = query_with(
+        &QueryRequest {
+            source: orig.clone(),
+            sheet: None,
+            query: Query::Find(Selection {
+                touching: Some(ObjectRef {
+                    id: Some(paper_id.clone()),
+                    name: None,
+                }),
+                ..Selection::default()
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Find { count, .. } = &touching.answer else {
+        panic!("find")
+    };
+    assert_eq!(*count, 0, "cross-space touching must be 0: {touching:?}");
+
+    // snap --snap intersection across model and paper space must return 0 points!
+    for snap_kind in [SnapKind::Intersection, SnapKind::ApparentIntersection] {
+        let snap = query_with(
+            &QueryRequest {
+                source: orig.clone(),
+                sheet: None,
+                query: Query::Snap(SnapRef {
+                    id: Some(model_id.clone()),
+                    name: None,
+                    snap: Some(snap_kind),
+                    which: None,
+                    with: Some(ObjectRef {
+                        id: Some(paper_id.clone()),
+                        name: None,
+                    }),
+                    from: None,
+                }),
+            },
+            &Settings::default(),
+        )
+        .unwrap();
+        let Answer::Snap { count, points, .. } = &snap.answer else {
+            panic!("snap")
+        };
+        assert_eq!(*count, 0, "{snap_kind:?}: {snap:?}");
+        assert!(points.is_empty());
+        assert!(
+            snap.message.contains("different spaces"),
+            "{}",
+            snap.message
+        );
+    }
+
+    // snap --snap perpendicular --from across spaces must also return 0 points.
+    let perp = query_with(
+        &QueryRequest {
+            source: orig.clone(),
+            sheet: None,
+            query: Query::Snap(SnapRef {
+                id: Some(model_id.clone()),
+                name: None,
+                snap: Some(SnapKind::Perpendicular),
+                which: None,
+                with: None,
+                from: Some(Box::new(SnapRef {
+                    id: Some(paper_id.clone()),
+                    name: None,
+                    snap: Some(SnapKind::Midpoint),
+                    which: None,
+                    with: None,
+                    from: None,
+                })),
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    let Answer::Snap { count, .. } = &perp.answer else {
+        panic!("snap")
+    };
+    assert_eq!(*count, 0, "{perp:?}");
+    assert!(
+        perp.message.contains("different spaces"),
+        "{}",
+        perp.message
+    );
+
+    // measure across spaces is refused cleanly with BadValue.
+    let meas_err = query_with(
+        &QueryRequest {
+            source: orig,
+            sheet: None,
+            query: Query::Measure(Measure {
+                from: End {
+                    id: Some(model_id),
+                    ..End::default()
+                },
+                to: End {
+                    id: Some(paper_id),
+                    ..End::default()
+                },
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(meas_err.code, ErrorCode::BadValue);
+    assert!(
+        meas_err.message.contains("same space"),
+        "{}",
+        meas_err.message
+    );
+}
+
+#[test]
+fn query_reports_ambiguous_carried_name_with_all_matching_ids() {
+    let dir = scratch("query-ambiguous-name");
+    let yaml = dir.join("dup.yaml");
+    fs::write(
+        &yaml,
+        "units: mm\n\
+         objects:\n\
+         \x20 - line: {from: [0, 0, 0], to: [10, 0, 0]}\n\
+         \x20 - line: {from: [0, 10, 0], to: [10, 10, 0]}\n\
+         \x20 - line: {from: [5, -5, 0], to: [5, 15, 0]}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let dup_dwg = dir.join("DUP.dwg");
+    dwg::with_duplicate_carried_name(&dir.join("dup.dwg"), &dup_dwg, "same-wire");
+
+    // 1. measure --from-name
+    let err = query_with(
+        &QueryRequest {
+            source: dup_dwg.clone(),
+            sheet: None,
+            query: Query::Measure(Measure {
+                from: End {
+                    name: Some("same-wire".into()),
+                    ..End::default()
+                },
+                to: End {
+                    id: Some("DUP/obj-0".into()),
+                    ..End::default()
+                },
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadValue, "{err:?}");
+    assert!(
+        err.message.contains("ambiguous")
+            && err.message.contains("DUP/obj-0")
+            && err.message.contains("DUP/obj-1"),
+        "{}",
+        err.message
+    );
+
+    // 2. snap --name
+    let err = query_with(
+        &QueryRequest {
+            source: dup_dwg.clone(),
+            sheet: None,
+            query: Query::Snap(SnapRef {
+                id: None,
+                name: Some("same-wire".into()),
+                snap: Some(SnapKind::Midpoint),
+                which: None,
+                with: None,
+                from: None,
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadValue, "{err:?}");
+    assert!(
+        err.message.contains("DUP/obj-0") && err.message.contains("DUP/obj-1"),
+        "{}",
+        err.message
+    );
+
+    // 3. find --touching-name
+    let err = query_with(
+        &QueryRequest {
+            source: dup_dwg,
+            sheet: None,
+            query: Query::Find(Selection {
+                touching: Some(ObjectRef {
+                    id: None,
+                    name: Some("same-wire".into()),
+                }),
+                ..Selection::default()
+            }),
+        },
+        &Settings::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadValue, "{err:?}");
+    assert!(
+        err.message.contains("ambiguous")
+            && err.message.contains("DUP/obj-0")
+            && err.message.contains("DUP/obj-1"),
+        "{}",
+        err.message
+    );
 }

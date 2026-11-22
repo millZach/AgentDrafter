@@ -49,7 +49,7 @@
 use std::collections::BTreeMap;
 
 use super::ink::Ink;
-use super::{BlockPart, CheckedObject, Finding, Rule, Sides};
+use super::{BlockPart, CheckedObject, Finding, PaperCheck, Rule, Sides, SkippedCheck};
 use crate::description::SheetRecord;
 use crate::draw::{
     clip_polygon, clip_to_convex, inside_outline, is_convex, mtext_lines, outlines_cross,
@@ -68,7 +68,8 @@ pub(super) fn check_sheet(
     fonts: &SheetFonts,
     units: Option<Unit>,
     tolerance: f64,
-) -> Vec<Finding> {
+    paper_check: PaperCheck,
+) -> (Vec<Finding>, Vec<SkippedCheck>) {
     let list = measuring_drawing(&record.sheet, fonts);
     // On a sheet drawn in a layout, each object in its own space too: a
     // text's cell and a table's are measured there, at the largest scale
@@ -97,23 +98,30 @@ pub(super) fn check_sheet(
         contents: &contents,
     };
     let mut findings = Vec::new();
-    match &record.sheet.paper {
-        // A DWG in model space (or a layout without a standard page setup)
-        // cannot declare a YAML `paper` key, so it is not failed for lacking
-        // one; a layout or built DWG that does carry a paper checks both
-        // `paper_size` and `off_sheet`.
-        None if !record.is_dwg() => findings.push(on.no_paper()),
-        None => {}
-        Some(paper) => {
-            findings.extend(on.paper_size(paper));
-            findings.extend(on.off_sheet(paper));
+    let mut skipped = Vec::new();
+    match paper_check {
+        PaperCheck::MissingYaml => findings.push(on.no_paper()),
+        PaperCheck::Skipped(reason) => {
+            let layout = record.sheet.layout.as_ref().map(|l| l.name.clone());
+            for rule in [Rule::PaperSize, Rule::OffSheet] {
+                skipped.push(SkippedCheck {
+                    sheet: record.name.clone(),
+                    layout: layout.clone(),
+                    rule,
+                    reason: reason.clone(),
+                });
+            }
+        }
+        PaperCheck::Check(paper, origin) => {
+            findings.extend(on.paper_size(&paper));
+            findings.extend(on.off_sheet(&paper, origin));
         }
     }
     findings.extend(on.text_overflow());
     findings.extend(on.text_on_text());
     let printed = printing_drawing(&record.sheet, fonts);
     findings.extend(on.text_on_line(&printed));
-    findings
+    (findings, skipped)
 }
 
 /// One sheet being checked, drawn.
@@ -252,9 +260,13 @@ impl Sheet<'_> {
         Some(finding)
     }
 
-    /// A finding for each object that draws past the paper.
-    fn off_sheet(&self, paper: &Paper) -> Vec<Finding> {
+    /// A finding for each object that draws past the paper placed at `origin`.
+    fn off_sheet(&self, paper: &Paper, origin: [f64; 2]) -> Vec<Finding> {
         let u = self.unit_words();
+        let min_x = origin[0];
+        let min_y = origin[1];
+        let max_x = origin[0] + paper.width;
+        let max_y = origin[1] + paper.height;
         let mut boxes: Vec<Option<Bounds>> = vec![None; self.record.sheet.objects.len()];
         let drawn = self
             .list
@@ -274,10 +286,10 @@ impl Sheet<'_> {
                 continue;
             };
             let past = Sides {
-                left: beyond(0.0 - b.min[0]),
-                bottom: beyond(0.0 - b.min[1]),
-                right: beyond(b.max[0] - paper.width),
-                top: beyond(b.max[1] - paper.height),
+                left: beyond(min_x - b.min[0]),
+                bottom: beyond(min_y - b.min[1]),
+                right: beyond(b.max[0] - max_x),
+                top: beyond(b.max[1] - max_y),
             };
             if past.most() <= self.tolerance {
                 continue;
@@ -286,14 +298,16 @@ impl Sheet<'_> {
                 Rule::OffSheet,
                 format!(
                     "{} draws {} the paper: it draws from {} to {}, and the paper{} runs from \
-                     [0, 0] to [{}, {}] {u}",
+                     [{}, {}] to [{}, {}] {u}",
                     self.object_words(i),
                     past.words(self.tolerance, 1.0, u, "edge"),
                     point(b.min),
                     point(b.max),
                     paper_words(paper),
-                    num(paper.width),
-                    num(paper.height)
+                    num(min_x),
+                    num(min_y),
+                    num(max_x),
+                    num(max_y)
                 ),
             );
             finding.object = Some(self.checked(i, &[]));

@@ -815,7 +815,7 @@ fn contents(
     // The sheet the drawing holds: model space, and the paper space of
     // each layout the core reads, whatever tab it was saved on.
     let units = unit(drawing.header.insertion_units);
-    let (read_layouts, layouts_not_read) = layout::read_layouts(drawing, units.unwrap_or(Unit::Mm));
+    let (read_layouts, layouts_not_read) = layout::read_layouts(drawing, units);
     let blocks_of: Vec<acadrust::types::Handle> = read_layouts.iter().map(|l| l.block).collect();
     let on_sheet = sheet_objects(drawing, &blocks_of);
     // A table's own block holds what it draws, and is read with the table.
@@ -1028,14 +1028,15 @@ fn contents(
             not_read.push((kind, handle));
         }
     }
-    let mut layouts = read_layouts
-        .into_iter()
-        .enumerate()
-        .map(|(k, read)| crate::model::Layout {
+    let mut layout_setups = Vec::with_capacity(read_layouts.len());
+    let mut layouts = read_layouts.into_iter().enumerate().map(|(k, read)| {
+        layout_setups.push(read.setup);
+        crate::model::Layout {
             name: read.name,
             paper: read.paper,
             paper_space: spaces.iter().map(|s| *s == Some(k)).collect(),
-        });
+        }
+    });
     let layout = layouts.next();
     let other_layouts: Vec<crate::model::Layout> = layouts.collect();
     let paper = layout.as_ref().and_then(|l| l.paper.clone());
@@ -1070,6 +1071,7 @@ fn contents(
         handles,
         not_read: RecordsOfKind::group(not_read),
         decode,
+        layout_setups,
     })
 }
 
@@ -2468,6 +2470,71 @@ pub(crate) fn as_unitless_original(dwg: &Path, out: &Path) {
     for entity in drawing.entities_mut() {
         let common = entity.common_mut();
         common.extended_data = Default::default();
+        common.raw_record = None;
+    }
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+    std::fs::write(out, bytes).expect("the DWG is saved");
+}
+
+/// Only for tests: mutates a built DWG's named layout page setup (as an
+/// original stripped of build mark and AgentDrafter extended data) and saves
+/// it to `out`.
+#[cfg(test)]
+pub(crate) fn as_original_with_layout_setup(
+    dwg: &Path,
+    out: &Path,
+    layout_name: &str,
+    unitless: bool,
+    edit: impl FnOnce(&mut acadrust::objects::Layout),
+) {
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    if unitless {
+        drawing.header.insertion_units = 0;
+    }
+    drawing
+        .summary_info
+        .custom_properties
+        .retain(|(name, _)| name != BUILD_MARK);
+    for entity in drawing.entities_mut() {
+        let common = entity.common_mut();
+        common.extended_data = Default::default();
+        common.raw_record = None;
+    }
+    let layout = drawing
+        .objects
+        .values_mut()
+        .find_map(|o| match o {
+            acadrust::objects::ObjectType::Layout(l) if l.name == layout_name => Some(l),
+            _ => None,
+        })
+        .expect("named layout exists");
+    edit(layout);
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
+    std::fs::write(out, bytes).expect("the DWG is saved");
+}
+
+/// Only for tests: writes `dwg` to `out` with the first two model-space
+/// objects carrying the same AgentDrafter `name` (with distinct IDs).
+#[cfg(test)]
+pub(crate) fn with_duplicate_carried_name(dwg: &Path, out: &Path, duplicate_name: &str) {
+    let mut drawing = read_drawing(dwg).expect("the DWG reads");
+    block::register_application(&mut drawing).expect("register app");
+    drawing.assign_table_entry_handles();
+    drawing
+        .summary_info
+        .custom_properties
+        .retain(|(name, _)| name != BUILD_MARK);
+    let handles: Vec<_> = drawing
+        .model_space_entities()
+        .take(2)
+        .map(|e| e.common().handle)
+        .collect();
+    assert_eq!(handles.len(), 2, "need at least two model-space entities");
+    for (count, handle) in handles.into_iter().enumerate() {
+        let entity = drawing.get_entity_mut(handle).expect("entity exists");
+        let common = entity.common_mut();
+        common.extended_data = Default::default();
+        ids::write_id_and_name(common, "DUP", &format!("obj-{count}"), Some(duplicate_name));
         common.raw_record = None;
     }
     let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");

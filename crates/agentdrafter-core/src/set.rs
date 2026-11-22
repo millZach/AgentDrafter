@@ -474,25 +474,38 @@ pub(crate) struct DwgPaper {
 /// system matches it.
 #[cfg(test)]
 pub(crate) fn paper_of_dwg(dwg: &Path) -> Option<DwgPaper> {
-    paper_of_dwg_in(dwg, set_of_dwg(dwg).ok()?)
+    paper_of_dwg_in(
+        dwg,
+        crate::build::file_id_of_path(dwg),
+        set_of_dwg(dwg).ok()?,
+    )
 }
 
 /// Same as [`paper_of_dwg`], reading the build mark from `bytes` already
-/// loaded from `dwg` so the DWG file is never opened a second time.
-pub(crate) fn paper_of_dwg_bytes(dwg: &Path, bytes: &[u8]) -> Option<DwgPaper> {
+/// loaded from `dwg` and matching rows against `source_id` captured from that
+/// same opened handle so the DWG file is never opened a second time.
+pub(crate) fn paper_of_dwg_bytes(
+    dwg: &Path,
+    source_id: Option<crate::build::FileId>,
+    bytes: &[u8],
+) -> Option<DwgPaper> {
     let set = set_of_dwg_with_mark(dwg, dwg::build_mark_bytes(bytes)).ok()?;
-    paper_of_dwg_in(dwg, set)
+    paper_of_dwg_in(dwg, source_id, set)
 }
 
-fn paper_of_dwg_in(dwg: &Path, set: DwgSet) -> Option<DwgPaper> {
+fn paper_of_dwg_in(
+    dwg: &Path,
+    source_id: Option<crate::build::FileId>,
+    set: DwgSet,
+) -> Option<DwgPaper> {
     let settings_file = set.folder.join(SET_SETTINGS_FILE);
     let settings = read_set_settings(&settings_file).ok()?;
     let rows_files = marked_rows_files(&set.folder, &settings, set.rows.as_deref())?;
     let rows = rows_of(&rows_files).ok()?;
     let output = set.folder.join(&settings.output);
-    let row = rows
-        .iter()
-        .find(|r| is_same_file(&output.join(format!("{}.dwg", r.sheet)), dwg))?;
+    let row = rows.iter().find(|r| {
+        crate::build::is_same_file_id(&output.join(format!("{}.dwg", r.sheet)), dwg, source_id)
+    })?;
     let rows_file = &rows_files[row.file_index];
     let template = template_path(&set.folder, row);
     let template_bytes = fs::read(&template).ok()?;

@@ -18,14 +18,16 @@ use super::{
     read_set_settings_in, read_template_in, template_in, template_path, Disk, ReadFiles, Row,
 };
 use crate::error::Error;
+use crate::model::layout::DwgLayoutSetup;
 use crate::model::Sheet;
 use crate::set::{Notice, SET_SETTINGS_FILE};
 use crate::units::Unit;
 
 /// Where a sheet read from a DWG came from: its objects' resolved IDs,
-/// whether each ID was carried in AgentDrafter's extended data, and the
-/// handles of its sheet and block objects.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// whether each ID was carried in AgentDrafter's extended data, the handles
+/// of its sheet and block objects, and each layout's stored page setup and
+/// checkable paper bounds.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DwgOrigin {
     /// The resolved unique ID of each of `sheet.objects`, in the same order:
     /// the carried AgentDrafter ID when unique, else `{sheet}/handle:{handle}`.
@@ -39,6 +41,9 @@ pub(crate) struct DwgOrigin {
     /// For each block in `sheet.blocks`, the handle of each of its objects,
     /// in hexadecimal.
     pub block_handles: Vec<Vec<String>>,
+    /// Stored page setup and checkable paper metadata for each read layout
+    /// (`[sheet.layout, ..sheet.other_layouts]`), in tab order.
+    pub layout_setups: Vec<DwgLayoutSetup>,
 }
 
 /// One sheet as its record states it, with the ID of each of its objects.
@@ -101,6 +106,13 @@ impl SheetRecord {
                 .and_then(|hs| hs.get(object_index))
                 .map(String::as_str)
         })
+    }
+
+    /// The stored layout setup for the `layout_index`th layout of a DWG.
+    pub(crate) fn layout_setup(&self, layout_index: usize) -> Option<&DwgLayoutSetup> {
+        self.dwg
+            .as_ref()
+            .and_then(|dwg| dwg.layout_setups.get(layout_index))
     }
 
     /// The file the sheet's object at `index` is written in: the rows file

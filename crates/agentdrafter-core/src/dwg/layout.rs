@@ -41,6 +41,7 @@ use acadrust::CadDocument;
 
 use crate::description::paper::STANDARD_SIZES;
 use crate::error::{Error, ErrorCode};
+use crate::model::layout::{CheckPaper, DwgLayoutSetup, DwgPageSetup};
 use crate::model::{Clip, Paper, Point3, Sheet, Viewport};
 use crate::units::Unit;
 
@@ -408,23 +409,25 @@ pub(super) fn opened_on(drawing: &CadDocument) -> Option<(String, Handle)> {
 }
 
 /// A layout of a drawing the core reads: its name, the handle of its block
-/// of paper-space objects, and the paper its page setup plots, when the
-/// core can read it.
+/// of paper-space objects, the full-bleed standard paper its page setup plots
+/// (when the core can render/plot it directly), and its stored page setup and
+/// checkable paper bounds for `query layout` and `check`.
 pub(super) struct ReadLayout {
     pub(super) name: String,
     pub(super) block: Handle,
     pub(super) paper: Option<Paper>,
+    pub(super) setup: DwgLayoutSetup,
 }
 
-/// The layouts of `drawing`, in `units`, the core reads, in the order of
-/// their tabs, and how many of them it reads no page setup of, whatever
-/// tab the drawing was saved on: the one it opens on, if it opens on a
-/// layout, one whose page setup the core reads, and one that holds
-/// anything but its own overall viewport, whose page setup it does not
-/// read and counts. AutoCAD's own empty layout, on its own page setup, is
-/// neither read nor counted, so a drawing of model space alone reads as
-/// one.
-pub(super) fn read_layouts(drawing: &CadDocument, units: Unit) -> (Vec<ReadLayout>, usize) {
+/// The layouts of `drawing`, in `units` (when declared), the core reads, in
+/// the order of their tabs, and how many of them it reads no full-bleed page
+/// setup of, whatever tab the drawing was saved on: the one it opens on, if
+/// it opens on a layout, one whose full-bleed page setup the core reads, and
+/// one that holds anything but its own overall viewport, whose page setup it
+/// does not read and counts. AutoCAD's own empty layout, on its own page
+/// setup, is neither read nor counted, so a drawing of model space alone
+/// reads as one.
+pub(super) fn read_layouts(drawing: &CadDocument, units: Option<Unit>) -> (Vec<ReadLayout>, usize) {
     let model = drawing.header.model_space_block_handle;
     let mut all: Vec<&DwgLayout> = drawing
         .objects
@@ -460,13 +463,234 @@ pub(super) fn read_layouts(drawing: &CadDocument, units: Unit) -> (Vec<ReadLayou
             }
             not_read += 1;
         }
+        let setup = read_layout_setup(layout, units);
         read.push(ReadLayout {
             name: layout.name.clone(),
             block,
             paper,
+            setup,
         });
     }
     (read, not_read)
+}
+
+/// AutoCAD's plot-type code as a lowercase word, matching `query layout`.
+fn plot_area_name(plot_type: i16) -> String {
+    match plot_type {
+        0 => "display".to_owned(),
+        1 => "extents".to_owned(),
+        2 => "limits".to_owned(),
+        3 => "view".to_owned(),
+        4 => "window".to_owned(),
+        5 => "layout".to_owned(),
+        other => format!("unknown ({other})"),
+    }
+}
+
+/// The stored plot scale of `layout`, such as `1:1` or `1:25.4`.
+fn plot_scale_text(layout: &DwgLayout) -> String {
+    if layout.plot_scale_numerator.is_finite()
+        && layout.plot_scale_denominator.is_finite()
+        && layout.plot_scale_numerator > 0.0
+        && layout.plot_scale_denominator > 0.0
+    {
+        format!(
+            "{}:{}",
+            layout.plot_scale_numerator, layout.plot_scale_denominator
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// Reads the stored plot settings and checkable paper bounds from `layout`.
+fn read_layout_setup(layout: &DwgLayout, units: Option<Unit>) -> DwgLayoutSetup {
+    let has_setup = !layout.plot_printer_name.is_empty()
+        || !layout.paper_size.is_empty()
+        || !layout.plot_style_sheet.is_empty()
+        || (layout.paper_width > 0.0 && layout.paper_height > 0.0);
+    let page_setup = has_setup.then(|| DwgPageSetup {
+        plotter: layout.plot_printer_name.clone(),
+        paper: layout.paper_size.clone(),
+        area: plot_area_name(layout.plot_type),
+        scale: plot_scale_text(layout),
+        plot_style: layout.plot_style_sheet.clone(),
+    });
+    let (check_paper, skip_reason) = read_check_paper(layout, units);
+    DwgLayoutSetup {
+        page_setup,
+        check_paper,
+        skip_reason,
+    }
+}
+
+/// The paper bounds `layout` declares in paper-space drawing units for
+/// `check` (`paper_size` and `off_sheet`), or the reason those checks must be
+/// skipped on this layout.
+fn read_check_paper(
+    layout: &DwgLayout,
+    units: Option<Unit>,
+) -> (Option<CheckPaper>, Option<String>) {
+    if layout.plot_type != PLOT_LAYOUT {
+        return (
+            None,
+            Some(format!(
+                "layout `{}` plots {} rather than layout",
+                layout.name,
+                plot_area_name(layout.plot_type)
+            )),
+        );
+    }
+    let paper_unit = match layout.plot_paper_units {
+        0 => Unit::In,
+        1 => Unit::Mm,
+        _ => {
+            return (
+                None,
+                Some(format!(
+                    "layout `{}` uses unsupported paper units ({})",
+                    layout.name, layout.plot_paper_units
+                )),
+            );
+        }
+    };
+    if !layout.paper_width.is_finite()
+        || !layout.paper_height.is_finite()
+        || layout.paper_width <= 0.0
+        || layout.paper_height <= 0.0
+    {
+        return (
+            None,
+            Some(format!("layout `{}` declares no paper size", layout.name)),
+        );
+    }
+    let ((w_mm, h_mm), (left_mm, bottom_mm, right_mm, top_mm)) = match layout.plot_rotation {
+        0 => (
+            (layout.paper_width, layout.paper_height),
+            (
+                layout.plot_margin_left,
+                layout.plot_margin_bottom,
+                layout.plot_margin_right,
+                layout.plot_margin_top,
+            ),
+        ),
+        1 => (
+            (layout.paper_height, layout.paper_width),
+            (
+                layout.plot_margin_bottom,
+                layout.plot_margin_right,
+                layout.plot_margin_top,
+                layout.plot_margin_left,
+            ),
+        ),
+        2 => (
+            (layout.paper_width, layout.paper_height),
+            (
+                layout.plot_margin_right,
+                layout.plot_margin_top,
+                layout.plot_margin_left,
+                layout.plot_margin_bottom,
+            ),
+        ),
+        3 => (
+            (layout.paper_height, layout.paper_width),
+            (
+                layout.plot_margin_top,
+                layout.plot_margin_left,
+                layout.plot_margin_bottom,
+                layout.plot_margin_right,
+            ),
+        ),
+        other => {
+            return (
+                None,
+                Some(format!(
+                    "layout `{}` has an unsupported plot rotation ({other})",
+                    layout.name
+                )),
+            );
+        }
+    };
+    let margins_ok = [
+        left_mm,
+        bottom_mm,
+        right_mm,
+        top_mm,
+        layout.plot_origin_x,
+        layout.plot_origin_y,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
+        && left_mm >= 0.0
+        && bottom_mm >= 0.0
+        && right_mm >= 0.0
+        && top_mm >= 0.0
+        && left_mm + right_mm < w_mm
+        && bottom_mm + top_mm < h_mm;
+    if !margins_ok {
+        return (
+            None,
+            Some(format!(
+                "layout `{}` has invalid printer margins or plot origin",
+                layout.name
+            )),
+        );
+    }
+    // For a unitless DWG (`INSUNITS = 0`), paper-space drawing units follow
+    // the layout's own `plot_paper_units` (inches or millimetres) at 1:1.
+    let drawing_unit = units.unwrap_or(paper_unit);
+    if !layout.plot_scale_numerator.is_finite()
+        || !layout.plot_scale_denominator.is_finite()
+        || layout.plot_scale_numerator <= 0.0
+        || layout.plot_scale_denominator <= 0.0
+    {
+        return (
+            None,
+            Some(format!(
+                "layout `{}` has no valid 1:1 plot scale",
+                layout.name
+            )),
+        );
+    }
+    let expected = drawing_unit.convert(1.0, paper_unit);
+    let actual = layout.plot_scale_numerator / layout.plot_scale_denominator;
+    if ((actual - expected).abs() / expected) > 1e-6 {
+        return (
+            None,
+            Some(format!(
+                "layout `{}` uses plot scale {}:{}, not 1:1",
+                layout.name, layout.plot_scale_numerator, layout.plot_scale_denominator
+            )),
+        );
+    }
+    let paper = match_standard_paper(w_mm, h_mm, drawing_unit).unwrap_or(Paper {
+        name: None,
+        width: Unit::Mm.convert(w_mm, drawing_unit),
+        height: Unit::Mm.convert(h_mm, drawing_unit),
+    });
+    let clean_zero = |v: f64| if v == 0.0 { 0.0 } else { v };
+    let origin = [
+        clean_zero(Unit::Mm.convert(-(left_mm + layout.plot_origin_x), drawing_unit)),
+        clean_zero(Unit::Mm.convert(-(bottom_mm + layout.plot_origin_y), drawing_unit)),
+    ];
+    (Some(CheckPaper { paper, origin }), None)
+}
+
+/// Matches physical paper dimensions `(w_mm, h_mm)` to one of the standard
+/// paper sizes (within 0.5 mm, covering AutoCAD's single-precision inch
+/// storage), returning its exact `Paper` converted into `drawing_unit`.
+fn match_standard_paper(w_mm: f64, h_mm: f64, drawing_unit: Unit) -> Option<Paper> {
+    crate::description::paper::paper_names()
+        .into_iter()
+        .find_map(|(name, width, height, own)| {
+            let sw = own.convert(width, Unit::Mm);
+            let sh = own.convert(height, Unit::Mm);
+            ((sw - w_mm).abs() <= 0.5 && (sh - h_mm).abs() <= 0.5).then(|| Paper {
+                name: Some(name),
+                width: own.convert(width, drawing_unit),
+                height: own.convert(height, drawing_unit),
+            })
+        })
 }
 
 /// Whether `object` is a layout's own overall viewport, which shows paper
@@ -476,9 +700,14 @@ pub(super) fn is_overall(object: &EntityType) -> bool {
 }
 
 /// The paper the layout of `drawing` whose block is `block` plots on, in
-/// `units`: a standard paper, whole, at full size, as a build writes it.
-/// None for any other page setup.
-pub(super) fn read_paper(drawing: &CadDocument, block: Handle, units: Unit) -> Option<Paper> {
+/// `units` (or the layout's own `plot_paper_units` when `units` is `None`):
+/// a standard paper, whole, at full size, as a build writes it. None for any
+/// other page setup.
+pub(super) fn read_paper(
+    drawing: &CadDocument,
+    block: Handle,
+    units: Option<Unit>,
+) -> Option<Paper> {
     let layout = drawing
         .objects
         .values()
@@ -489,7 +718,13 @@ pub(super) fn read_paper(drawing: &CadDocument, block: Handle, units: Unit) -> O
         .min_by_key(|l| l.handle.value())?;
     let name = PageSetup::named(&layout.paper_size)?;
     let setup = PageSetup::of(&name)?;
-    let (numerator, denominator) = setup.plot_scale(units);
+    let paper_unit = match layout.plot_paper_units {
+        0 => Unit::In,
+        1 => Unit::Mm,
+        _ => return None,
+    };
+    let effective_units = units.unwrap_or(paper_unit);
+    let (numerator, denominator) = setup.plot_scale(effective_units);
     let whole = layout.plot_type == PLOT_LAYOUT
         && layout.plot_rotation == 0
         && layout.plot_paper_units == i16::from(setup.unit != Unit::In)
@@ -515,8 +750,8 @@ pub(super) fn read_paper(drawing: &CadDocument, block: Handle, units: Unit) -> O
     let (_, width, height, own) = paper;
     Some(Paper {
         name: Some(name),
-        width: own.convert(width, units),
-        height: own.convert(height, units),
+        width: own.convert(width, effective_units),
+        height: own.convert(height, effective_units),
     })
 }
 

@@ -7,10 +7,14 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(any(unix, windows))]
+use crate::build::file_id_of_file;
+#[cfg(not(any(unix, windows)))]
+use crate::build::FileId;
 use crate::description::sheet_description_at;
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
@@ -94,22 +98,36 @@ impl Record {
 /// otherwise a sheet description, with the block library it names.
 pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
     let kind = SourceKind::of(source);
-    let bytes = fs::read(source).map_err(|e| {
+    let mut file = File::open(source).map_err(|e| {
         Error::new(
             ErrorCode::ReadFailed,
             format!("could not read the {}: {e}", kind.words()),
         )
         .in_file(source)
     })?;
+    #[cfg(any(unix, windows))]
+    let source_id = file_id_of_file(&file);
+    #[cfg(not(any(unix, windows)))]
+    let source_id: Option<FileId> = None;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|e| {
+        Error::new(
+            ErrorCode::ReadFailed,
+            format!("could not read the {}: {e}", kind.words()),
+        )
+        .in_file(source)
+    })?;
+    drop(file);
     if kind == SourceKind::Dwg {
         let drawing = dwg::read_bytes(&bytes, source)?;
-        let ids = crate::original::ids_of(source, &drawing);
+        let ids = crate::original::ids_of_with_id(source, source_id, &drawing);
         // Zach decided on 2026-11-13 that a DWG plots on the paper its
         // sheet declares, read from the set its build mark names; the DWG
         // itself holds no paper. Read the build mark from the exact bytes
-        // already in memory so `source` is never reopened.
+        // already in memory and match rows against `source_id` so `source`
+        // is never reopened.
         let units = drawing.units.unwrap_or(Unit::Mm);
-        let found_paper = crate::set::paper_of_dwg_bytes(source, &bytes);
+        let found_paper = crate::set::paper_of_dwg_bytes(source, source_id, &bytes);
         let mut files = vec![(kind, source.to_path_buf(), bytes)];
         let paper = found_paper.and_then(|found| {
             files.extend(found.read);
