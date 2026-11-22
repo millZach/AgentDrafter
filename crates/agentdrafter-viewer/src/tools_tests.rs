@@ -17,6 +17,11 @@ fn context() -> Context {
         values: None,
         from_template: Some(template),
         through_viewport: false,
+        bounds: Some(match id {
+            "border" => [0.0, 0.0, 17.0, 11.0],
+            "title" => [5.0, 1.0, 7.0, 1.3],
+            _ => [1.5, 6.3, 2.5, 6.7],
+        }),
     };
     Context {
         sheet: "DP-LD-101".to_owned(),
@@ -106,11 +111,15 @@ fn the_aliases_start_their_tools_in_any_case() {
     }
     assert_eq!(tool_for("PLINE"), None);
     assert_eq!(tool_for("X"), None);
-    // No Array tool yet: its words are no tool's, so they go to the
-    // assistant.
-    for word in ["AR", "ARRAY", "ARRAYRECT"] {
-        assert_eq!(tool_for(word), None, "{word}");
+    for word in ["AR", "ar", "ARRAY", "arrayrect", "ARRAYPOLAR"] {
+        assert_eq!(tool_for(word), Some(ToolKind::Array), "{word}");
     }
+    // A path array is the core's, for the assistant: ARRAYPATH is no
+    // tool's word.
+    assert_eq!(tool_for("ARRAYPATH"), None);
+    assert_eq!(array::kind_for("arrayrect"), Some(ArrayKind::Rectangular));
+    assert_eq!(array::kind_for("ARRAYPOLAR"), Some(ArrayKind::Polar));
+    assert_eq!(array::kind_for("AR"), None);
 }
 
 #[test]
@@ -999,4 +1008,771 @@ fn leaving_drops_the_copies_placed_with_nothing_sent() {
     t.input("@1,0", None);
     assert_eq!(operations(&t.leave()).len(), 1);
     assert_eq!(t.running(), None);
+}
+
+/// The device, the row's own object at place 2, selected first, then AR:
+/// Array's panel opens at once.
+fn array_on_device(word: &str) -> Tools {
+    let mut t = tools();
+    let outcome = t.start_word(word, &[2]);
+    assert!(outcome.sends.is_empty(), "nothing is sent as it opens");
+    t
+}
+
+fn panel(t: &Tools, touch: bool) -> ArrayPanel {
+    t.state(touch).array.expect("Array's panel")
+}
+
+fn field(t: &Tools, key: &str) -> String {
+    panel(t, false)
+        .fields
+        .into_iter()
+        .find(|f| f.key == key)
+        .unwrap_or_else(|| panic!("no field {key}"))
+        .value
+}
+
+#[test]
+fn array_opens_its_panel_on_the_object_selected_first_rectangular_by_default() {
+    let t = array_on_device("AR");
+    assert_eq!(t.running(), Some(ToolKind::Array));
+    let s = t.state(false);
+    assert_eq!(s.command, Some("ARRAYRECT"));
+    assert!(!s.takes_points && !s.selecting, "the panel takes no clicks");
+    assert_eq!(s.picked, [2]);
+    let p = s.array.unwrap();
+    assert_eq!(p.kind, ArrayKind::Rectangular);
+    assert_eq!(p.spacing, Spacing::Between);
+    assert_eq!(p.of, "of device");
+    // Three rows, a box and a little more apart downwards, to a quarter
+    // of an inch: the device is 0.4 tall and 1 across.
+    let keys: Vec<(&str, String, String)> = p
+        .fields
+        .iter()
+        .map(|f| (f.key, f.label.clone(), f.value.clone()))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("rows", "Rows".to_owned(), "3".to_owned()),
+            ("columns", "Columns".to_owned(), "1".to_owned()),
+            (
+                "row_spacing",
+                "Row spacing, in".to_owned(),
+                "-0.75".to_owned()
+            ),
+            (
+                "column_spacing",
+                "Column spacing, in".to_owned(),
+                "1.25".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(p.count, "3 × 1: 2 copies");
+    assert!(p.ready);
+    assert_eq!(
+        s.prompt,
+        "3 rows × 1 column, rows 0.750 in apart down: 2 copies. Set it in the panel, or type \
+         rows,columns or @column,row spacing"
+    );
+    let labels: Vec<&str> = s.options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(labels, ["Array: 2 copies", "Cancel"]);
+    assert_eq!(s.placeholder, "rows,columns  @dx,dy");
+    // On a phone, the panel sits above the prompt.
+    let phone = t.state(true);
+    assert!(
+        phone.prompt.ends_with(": 2 copies. Set it above"),
+        "{}",
+        phone.prompt
+    );
+    assert_eq!(phone.options[0].label, "Array");
+}
+
+#[test]
+fn array_picks_objects_first_when_none_is_selected() {
+    let mut t = tools();
+    t.input("array", None);
+    assert!(t.state(false).selecting);
+    assert_eq!(
+        t.state(false).prompt,
+        "Click the objects to array, then Enter"
+    );
+    // An object with no ID cannot be named.
+    t.pick(Some(3));
+    assert!(t.state(false).error.unwrap().contains("no ID"));
+    t.pick(Some(2));
+    t.pick(Some(1));
+    let out = t.input("", None);
+    assert!(out.sends.is_empty());
+    assert_eq!(out.log, ["ARRAYRECT"]);
+    let p = panel(&t, false);
+    assert_eq!(p.of, "of 2 objects");
+    // Each object makes two copies.
+    assert_eq!(p.count, "3 × 1: 4 copies");
+}
+
+#[test]
+fn enter_lands_one_rectangular_array_with_the_spacing_between_items() {
+    let mut t = array_on_device("AR");
+    t.array_value("rows", "3");
+    t.array_value("columns", "2");
+    t.array_value("row_spacing", "-0.5");
+    t.array_value("column_spacing", "1");
+    // A field mid-typing that does not read as a number shows as typed and
+    // holds the array back; it lands once the field reads again.
+    t.array_value("column_spacing", "-");
+    assert_eq!(field(&t, "column_spacing"), "-");
+    assert!(!panel(&t, false).ready);
+    t.array_value("column_spacing", "1");
+    assert_eq!(panel(&t, false).count, "3 × 2: 5 copies");
+    let out = t.input("", None);
+    assert_eq!(t.running(), None);
+    assert_eq!(out.sends.len(), 1);
+    let send = &out.sends[0];
+    assert_eq!(
+        send.change_set,
+        json!({"operations": [{
+            "op": "array",
+            "target": {"id": "DP-LD-101/device"},
+            "kind": "rectangular",
+            "rows": 3,
+            "columns": 2,
+            "row_spacing": -0.5,
+            "column_spacing": 1.0
+        }]})
+    );
+    assert_eq!(send.what, "Arrayed device, 3 × 2, 5 copies");
+    assert_eq!(send.sheets, ["DP-LD-101"]);
+    assert!(send.template.is_none(), "a row's own object lands at once");
+    // One row: no row spacing is sent.
+    let mut t = array_on_device("ARRAY");
+    t.array_value("rows", "1");
+    t.array_value("columns", "4");
+    let op = &operations(&t.option("array"))[0];
+    assert_eq!(op["rows"], json!(1));
+    assert!(op.get("row_spacing").is_none());
+    assert_eq!(op["column_spacing"], json!(1.25));
+}
+
+#[test]
+fn a_total_held_is_divided_evenly_and_sent_as_the_spacing_between_items() {
+    let mut t = array_on_device("AR");
+    t.array_value("rows", "4");
+    let out = t.option("total");
+    assert_eq!(out.log, ["ARRAY: spacing as the total, divided evenly"]);
+    let p = panel(&t, false);
+    assert_eq!(p.spacing, Spacing::Total);
+    let labels: Vec<&str> = p.fields.iter().map(|f| f.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Rows",
+            "Columns",
+            "Rows, first to last, in",
+            "Columns, first to last, in"
+        ]
+    );
+    // The total follows what was between them: 3 gaps of 0.75.
+    assert_eq!(field(&t, "row_total"), "-2.25");
+    // 1.2 over 3 gaps is 0.4, not 0.39999999999999997.
+    t.array_value("row_total", "-1.2");
+    assert_eq!(
+        t.state(false).prompt.split(':').next().unwrap(),
+        "4 rows × 1 column, rows 0.400 in apart down"
+    );
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["row_spacing"], json!(-0.4));
+    // Two over three gaps: two thirds, cleared of noise past a ten-billionth.
+    let mut t = array_on_device("AR");
+    t.option("total");
+    t.array_value("rows", "4");
+    t.array_value("row_total", "2");
+    assert_eq!(field(&t, "row_total"), "2");
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["row_spacing"], json!(0.6666666667));
+    // Back to between items: the spacing worked out shows, to four places.
+    let mut t = array_on_device("AR");
+    t.option("total");
+    t.array_value("rows", "4");
+    t.array_value("row_total", "2");
+    t.option("between");
+    assert_eq!(field(&t, "row_spacing"), "0.6667");
+    assert!(t.state(false).prompt.contains("rows 0.667 in apart up"));
+    t.option("total");
+    assert_eq!(field(&t, "row_total"), "2");
+}
+
+#[test]
+fn the_command_bar_takes_rows_and_columns_spacings_and_the_total_typed() {
+    let mut t = array_on_device("AR");
+    let out = t.input("4,2", None);
+    assert_eq!(out.log, ["ARRAY 4,2: 4 × 2"]);
+    t.input("3x5", None);
+    assert_eq!(panel(&t, false).count, "3 × 5: 14 copies");
+    t.input("@1.5,-0.5", None);
+    assert_eq!(field(&t, "column_spacing"), "1.5");
+    assert_eq!(field(&t, "row_spacing"), "-0.5");
+    // TO holds the total: @ then sets the distances first to last.
+    t.input("TO", None);
+    t.input("@6,-1", None);
+    assert_eq!(field(&t, "column_total"), "6");
+    assert_eq!(field(&t, "row_total"), "-1");
+    t.input("be", None);
+    assert_eq!(panel(&t, false).spacing, Spacing::Between);
+    assert_eq!(field(&t, "row_spacing"), "-0.5");
+    // Words it does not read say what it takes, and change nothing.
+    t.input("lots", None);
+    assert_eq!(
+        t.state(false).error.as_deref(),
+        Some("Type rows,columns, such as 4,2, or @column,row spacing, such as @1,-0.5.")
+    );
+    assert_eq!(panel(&t, false).count, "3 × 5: 14 copies");
+    // Another tool's alias ends Array with nothing sent.
+    let out = t.input("L", None);
+    assert!(out.sends.is_empty());
+    assert_eq!(t.running(), Some(ToolKind::Line));
+}
+
+#[test]
+fn values_that_make_no_array_are_said_and_nothing_lands() {
+    let mut t = array_on_device("AR");
+    t.array_value("rows", "1");
+    let p = panel(&t, false);
+    assert!(!p.ready);
+    assert_eq!(
+        p.count,
+        "One row and one column make no copy: give 2 or more of one."
+    );
+    let out = t.input("", None);
+    assert!(out.sends.is_empty());
+    assert_eq!(
+        t.running(),
+        Some(ToolKind::Array),
+        "it stays to be put right"
+    );
+    assert_eq!(
+        t.state(false).error.as_deref(),
+        Some("One row and one column make no copy: give 2 or more of one.")
+    );
+    t.array_value("rows", "2.5");
+    assert_eq!(
+        panel(&t, false).count,
+        "Rows and columns are whole numbers, 1 or more."
+    );
+    t.array_value("rows", "2");
+    t.array_value("row_spacing", "0");
+    assert_eq!(panel(&t, false).count, "Rows need a spacing other than 0.");
+    t.array_value("row_spacing", "1");
+    t.array_value("columns", "10001");
+    assert_eq!(
+        panel(&t, false).count,
+        "This makes 20001 copies; one array makes at most 10,000."
+    );
+    // The tag over the copies says it too, and no copy is drawn.
+    let (tag, _, problem) = t.array_tag(false).unwrap();
+    assert!(
+        problem && tag.starts_with("⚠ This makes 20001 copies"),
+        "{tag}"
+    );
+    assert!(t.band(None).arrayed.is_none());
+}
+
+#[test]
+fn esc_and_leaving_send_nothing_and_cancel_ends_it() {
+    let mut t = array_on_device("AR");
+    t.array_value("columns", "2");
+    let out = t.escape();
+    assert!(out.sends.is_empty());
+    assert_eq!(out.log, ["ARRAY: cancelled, nothing sent"]);
+    assert_eq!(t.running(), None);
+    let mut t = array_on_device("AR");
+    let out = t.leave();
+    assert!(out.sends.is_empty());
+    assert_eq!(t.running(), None);
+    let mut t = array_on_device("AR");
+    assert!(t.option("cancel").sends.is_empty());
+    assert_eq!(t.running(), None);
+    // Another sheet drops it, with nothing sent.
+    let mut t = array_on_device("AR");
+    let mut other = context();
+    other.sheet = "DP-LD-102".to_owned();
+    t.load(other);
+    assert_eq!(t.running(), None);
+}
+
+#[test]
+fn a_polar_array_takes_its_centre_on_a_snap_then_lands_with_a_snapped_point() {
+    let mut t = array_on_device("ARRAYPOLAR");
+    let s = t.state(false);
+    assert_eq!(s.command, Some("ARRAYPOLAR"));
+    assert!(s.takes_points, "a click takes the centre");
+    assert_eq!(s.prompt, "Click the centre the items go round, or type x,y");
+    assert_eq!(s.placeholder, "x,y");
+    let p = s.array.unwrap();
+    assert_eq!(p.kind, ArrayKind::Polar);
+    assert!(p.picking && !p.ready);
+    assert_eq!(p.center.as_deref(), Some("Click it on the drawing"));
+    assert_eq!(
+        t.state(true).array.unwrap().center.as_deref(),
+        Some("Tap it on the drawing")
+    );
+    // Enter before the centre lands nothing.
+    assert!(t.input("", None).sends.is_empty());
+    assert!(t.state(false).error.unwrap().starts_with("Pick the centre"));
+    // While the centre is picked, the copies follow the cursor, faint.
+    let (_, places, following) = t.band(Some(&at(5.0, 5.0))).arrayed.unwrap();
+    assert!(following);
+    assert_eq!(places.len(), 5);
+    assert_eq!(places[0].about, [5.0, 5.0]);
+    // The centre on the title's centre snap.
+    let out = t.point(snapped(6.0, 1.15, SnapKind::Center, 1, None));
+    assert_eq!(out.log, ["ARRAY centre Centre of title, 6.0000, 1.1500"]);
+    let s = t.state(false);
+    assert!(!s.takes_points);
+    assert_eq!(s.points, [[6.0, 1.15]]);
+    let p = s.array.unwrap();
+    assert_eq!(p.center.as_deref(), Some("Centre of title, 6.000, 1.150"));
+    let keys: Vec<(&str, &str)> = p.fields.iter().map(|f| (f.key, f.label.as_str())).collect();
+    assert_eq!(
+        keys,
+        [("items", "Items"), ("angle_between", "Angle between, °")]
+    );
+    assert_eq!(field(&t, "items"), "6");
+    assert_eq!(field(&t, "angle_between"), "60");
+    // Eight round a whole turn: 45 apart, the angle left out.
+    t.array_value("items", "8");
+    assert_eq!(field(&t, "angle_between"), "45");
+    assert_eq!(panel(&t, false).count, "8 round: 7 copies");
+    assert_eq!(
+        t.state(false).prompt,
+        "8 items round the centre, a whole turn, 45° apart: 7 copies. Set it in the panel, or \
+         type items or items,angle"
+    );
+    let out = t.input("", None);
+    let op = &operations(&out)[0];
+    assert_eq!(
+        *op,
+        json!({
+            "op": "array",
+            "target": {"id": "DP-LD-101/device"},
+            "kind": "polar",
+            "center": {"snap": {"id": "DP-LD-101/title", "snap": "center"}},
+            "count": 8
+        })
+    );
+    assert_eq!(out.sends[0].what, "Arrayed device, 8 round, 7 copies");
+}
+
+#[test]
+fn a_whole_turn_stays_whole_as_the_items_change_and_less_sends_its_angle() {
+    let mut t = array_on_device("AR");
+    let out = t.option("polar");
+    assert_eq!(out.log, ["ARRAYPOLAR"]);
+    t.input("3,8.8", None);
+    assert_eq!(t.state(false).points, [[3.0, 8.8]]);
+    t.array_value("items", "7");
+    // 360 over 7, shown to four places, still a whole turn.
+    assert_eq!(field(&t, "angle_between"), "51.4286");
+    let op = &operations(&t.clone().input("", None))[0];
+    assert!(op.get("angle").is_none(), "{op}");
+    assert_eq!(op["center"], json!([3.0, 8.8, 0]));
+    // An angle between typed that falls short of a turn is sent as the
+    // angle it fills: 5 items 45° apart fill 180°.
+    t.input("5,45", None);
+    assert_eq!(panel(&t, false).count, "5 round, 180°: 4 copies");
+    let op = &operations(&t.clone().input("", None))[0];
+    assert_eq!(op["angle"], json!(180.0));
+    // More than a turn is said.
+    t.array_value("angle_between", "100");
+    assert_eq!(
+        panel(&t, false).count,
+        "5 items 100° apart fill 400°: more than a whole turn."
+    );
+    // The angle to fill held: clockwise half a turn, unturned items.
+    t.option("total");
+    t.array_value("angle_fill", "-180");
+    assert_eq!(field(&t, "angle_fill"), "-180");
+    t.option("no-turn");
+    assert_eq!(panel(&t, false).count, "5 round, -180°: 4 copies");
+    assert!(t
+        .state(false)
+        .prompt
+        .contains("180° clockwise, 45° apart, not turned"));
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["angle"], json!(-180.0));
+    assert_eq!(op["count"], json!(5));
+    assert_eq!(op["rotate"], json!(false));
+}
+
+#[test]
+fn the_copies_shown_go_where_the_core_puts_them() {
+    // Rectangular: shifted by the spacings, row by row.
+    let mut t = array_on_device("AR");
+    t.input("2,2", None);
+    t.input("@1,-0.5", None);
+    let (picked, places, following) = t.band(None).arrayed.unwrap();
+    assert_eq!(picked, [2]);
+    assert!(!following);
+    let by: Vec<[f64; 2]> = places.iter().map(|p| p.apply([0.0, 0.0])).collect();
+    assert_eq!(by, [[1.0, 0.0], [0.0, -0.5], [1.0, -0.5]]);
+    // Polar, turned: the copy a quarter turn round turns about the centre.
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.array_value("items", "4");
+    let (_, places, _) = t.band(None).arrayed.unwrap();
+    let p = places[0].apply([2.0, 6.5]);
+    assert!(
+        (p[0] - 0.0).abs() < 1e-12 && (p[1] - 4.5).abs() < 1e-12,
+        "{p:?}"
+    );
+    assert_eq!(places[0].turn, 90.0);
+    // Unturned: the box's centre goes round, as the core's base point.
+    t.option("no-turn");
+    let (_, places, _) = t.band(None).arrayed.unwrap();
+    assert_eq!(places[0].turn, 0.0);
+    let middle = places[0].apply([2.0, 6.5]);
+    assert!(
+        (middle[0] - 0.0).abs() < 1e-12 && (middle[1] - 4.5).abs() < 1e-12,
+        "{middle:?}"
+    );
+}
+
+#[test]
+fn the_tag_and_the_box_round_the_copies() {
+    let mut t = array_on_device("AR");
+    t.input("3,2", None);
+    t.input("@1,-0.5", None);
+    // The device is [1.5, 6.3, 2.5, 6.7]; the copies run 1 right and 1 down.
+    assert_eq!(t.array_extent(None), Some([1.5, 5.3, 3.5, 6.7]));
+    let (tag, top_right, problem) = t.array_tag(false).unwrap();
+    assert_eq!(
+        (tag.as_str(), top_right, problem),
+        ("3 × 2 · waits for Enter", [3.5, 6.7], false)
+    );
+    assert_eq!(t.array_tag(true).unwrap().0, "3 × 2");
+    // A polar array's tag waits for its centre.
+    let mut t = array_on_device("ARRAYPOLAR");
+    assert!(t.array_tag(false).is_none());
+    t.point(at(2.0, 4.0));
+    t.option("total");
+    t.array_value("items", "5");
+    t.array_value("angle_fill", "-180");
+    assert_eq!(
+        t.array_tag(false).unwrap().0,
+        "5 round, -180° · waits for Enter"
+    );
+}
+
+#[test]
+fn arraying_a_templates_object_warns_and_asks_before_it_lands() {
+    let mut t = tools();
+    t.start_word("AR", &[1]);
+    let w = t.state(false).warning.unwrap();
+    assert_eq!(w.title, "This is part of the template.");
+    assert_eq!(
+        w.detail,
+        "This arrays it on every sheet built from this template: 3 sheets. You will be asked \
+         before it lands."
+    );
+    let phone = t.state(true).warning.unwrap();
+    assert_eq!(phone.title, "Part of the template:");
+    assert_eq!(
+        phone.detail,
+        "the copies land on all 3 sheets. You will be asked first."
+    );
+    t.input("2,2", None);
+    let out = t.input("", None);
+    let send = &out.sends[0];
+    let asked = send.template.as_ref().expect("asked first");
+    assert_eq!(asked.edit, "Array title, 2 × 2");
+    assert_eq!(asked.sheets.len(), 3);
+    assert_eq!(send.sheets.len(), 3);
+    // A polar array of a template's object round a row's own object's
+    // centre sends the centre as coordinates, the same on every sheet.
+    let mut t = tools();
+    t.start_word("ARRAYPOLAR", &[1]);
+    t.point(snapped(2.0, 6.5, SnapKind::Center, 2, None));
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["center"], json!([2.0, 6.5, 0]));
+}
+
+#[test]
+fn array_follows_its_picks_and_centre_through_a_sheet_drawn_again() {
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(snapped(6.0, 1.15, SnapKind::Center, 1, None));
+    let mut again = context();
+    again.objects.insert(
+        0,
+        ObjectInfo {
+            id: Some("DP-LD-101/new".to_owned()),
+            kind: "line".to_owned(),
+            ..ObjectInfo::default()
+        },
+    );
+    t.load(again);
+    assert_eq!(t.state(false).picked, [3]);
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["target"], json!({"id": "DP-LD-101/device"}));
+    assert_eq!(
+        op["center"],
+        json!({"snap": {"id": "DP-LD-101/title", "snap": "center"}})
+    );
+    // Pick, again: the next click takes a new centre.
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(1.0, 1.0));
+    t.option("pick-center");
+    assert!(t.takes_points());
+    t.point(at(2.0, 2.0));
+    assert_eq!(t.state(false).points, [[2.0, 2.0]]);
+}
+
+#[test]
+fn array_leaves_what_a_viewport_shows_as_copy_does() {
+    let mut context = context();
+    context.objects[2].through_viewport = true;
+    let mut t = Tools::default();
+    t.load(context);
+    t.start_word("AR", &[2]);
+    assert!(t
+        .state(false)
+        .error
+        .unwrap()
+        .contains("Array arrays only what is drawn"));
+    assert!(t.state(false).selecting, "it picks objects instead");
+}
+
+#[test]
+fn while_a_new_centre_is_picked_nothing_lands_until_it_is_taken() {
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.array_value("items", "4");
+    // Pick, again: the copies follow the cursor, not the centre before.
+    t.option("pick-center");
+    let (_, places, following) = t.band(Some(&at(5.0, 5.0))).arrayed.unwrap();
+    assert!(following);
+    assert_eq!(places[0].about, [5.0, 5.0]);
+    let p = panel(&t, false);
+    assert!(!p.ready, "Array is off while a centre is picked");
+    assert_eq!(p.count, "Click the new centre on the drawing.");
+    assert!(t.array_tag(false).is_none());
+    // Enter, a right-click (Enter) and the Array button land nothing.
+    for out in [t.input("", None), t.option("array")] {
+        assert!(out.sends.is_empty());
+    }
+    assert!(t.state(false).error.unwrap().starts_with("Pick the centre"));
+    assert_eq!(t.running(), Some(ToolKind::Array));
+    // The new centre taken: it, the one the copies showed round, is sent.
+    t.point(at(5.0, 5.0));
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["center"], json!([5.0, 5.0, 0]));
+}
+
+#[test]
+fn a_polar_array_between_items_sends_the_angle_its_copies_show() {
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    // Four 120° apart would end on the objects, a whole turn round, which
+    // the core reads as four spread evenly, 90° apart: said, not sent.
+    t.input("4,120", None);
+    let p = panel(&t, false);
+    assert!(!p.ready);
+    assert_eq!(
+        p.count,
+        "4 items 120° apart put the last on the objects, a whole turn round: give 3 items, or \
+         90° apart."
+    );
+    assert!(t.input("", None).sends.is_empty());
+    assert!(
+        t.band(None).arrayed.is_none(),
+        "no copy is shown that would not land"
+    );
+    // Three 120° apart go a whole turn, evenly: the core's whole turn.
+    t.input("3,120", None);
+    assert_eq!(panel(&t, false).count, "3 round: 2 copies");
+    let op = &operations(&t.clone().input("", None))[0];
+    assert!(op.get("angle").is_none(), "{op}");
+    // Four 100° apart fill 300°: sent as 300, and shown at 100, 200, 300.
+    t.input("4,100", None);
+    let turns: Vec<f64> = t
+        .band(None)
+        .arrayed
+        .unwrap()
+        .1
+        .iter()
+        .map(|p| p.turn)
+        .collect();
+    assert_eq!(turns, [100.0, 200.0, 300.0]);
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["angle"], json!(300.0));
+}
+
+#[test]
+fn a_clockwise_whole_turn_is_sent_clockwise() {
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.option("total");
+    t.array_value("items", "4");
+    t.array_value("angle_fill", "-360");
+    assert_eq!(panel(&t, false).count, "4 round: 3 copies");
+    assert!(t
+        .state(false)
+        .prompt
+        .contains("a whole turn clockwise, 90° apart"));
+    // The first copy shown goes a quarter turn clockwise, so the first
+    // landed, and its ID, go there too.
+    let turns: Vec<f64> = t
+        .band(None)
+        .arrayed
+        .unwrap()
+        .1
+        .iter()
+        .map(|p| p.turn)
+        .collect();
+    assert_eq!(turns, [-90.0, -180.0, -270.0]);
+    let op = &operations(&t.clone().input("", None))[0];
+    assert_eq!(op["angle"], json!(-360.0));
+    // Between items, eight 45° clockwise, a whole turn: -360 too.
+    t.option("between");
+    t.input("8,-45", None);
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["angle"], json!(-360.0));
+    assert_eq!(op["count"], json!(8));
+}
+
+#[test]
+fn a_field_left_blank_or_not_a_number_holds_the_array_back() {
+    let mut t = array_on_device("AR");
+    t.array_value("columns", "2");
+    t.array_value("rows", "");
+    let p = panel(&t, false);
+    assert_eq!(field(&t, "rows"), "", "it shows as typed");
+    assert!(!p.ready);
+    assert_eq!(p.count, "Rows is not a number: type one.");
+    let (tag, _, problem) = t.array_tag(false).unwrap();
+    assert!(problem && tag.contains("Rows is not a number"), "{tag}");
+    // Enter, a right-click and the Array button send nothing: not the 3
+    // rows there were before.
+    for out in [t.input("", None), t.option("array")] {
+        assert!(out.sends.is_empty());
+    }
+    assert_eq!(
+        t.state(false).error.as_deref(),
+        Some("Rows is not a number: type one.")
+    );
+    t.array_value("row_spacing", "abc");
+    t.array_value("rows", "2");
+    assert_eq!(
+        panel(&t, false).count,
+        "Row spacing is not a number: type one."
+    );
+    // Typed in the command bar, a value reads again.
+    t.input("@1,-0.5", None);
+    assert_eq!(panel(&t, false).count, "2 × 2: 3 copies");
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(
+        (op["rows"].clone(), op["row_spacing"].clone()),
+        (json!(2), json!(-0.5))
+    );
+}
+
+#[test]
+fn the_copy_limit_counts_every_objects_copies_as_the_core_does() {
+    let mut t = tools();
+    t.start_word("AR", &[]);
+    t.pick(Some(1));
+    t.pick(Some(2));
+    t.input("", None);
+    // Two objects, 5,001 places each beside them: 10,002 copies in all.
+    t.input("1,5002", None);
+    let p = panel(&t, false);
+    assert!(!p.ready);
+    assert_eq!(
+        p.count,
+        "This makes 10002 copies; one array makes at most 10,000."
+    );
+    assert!(t.input("", None).sends.is_empty());
+    // 5,000 each, 10,000 in all, is the most: it lands.
+    t.input("1,5001", None);
+    assert!(panel(&t, false).ready);
+    assert_eq!(t.input("", None).sends.len(), 1);
+}
+
+#[test]
+fn a_whole_turn_stays_whole_as_the_item_count_is_typed_a_digit_at_a_time() {
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    // 6 becomes 10, typed 1 then 0: the 1 passes through and the turn holds.
+    t.array_value("items", "1");
+    t.array_value("items", "10");
+    assert_eq!(field(&t, "angle_between"), "36");
+    assert_eq!(panel(&t, false).count, "10 round: 9 copies");
+    let op = &operations(&t.clone().input("", None))[0];
+    assert_eq!(op["count"], json!(10));
+    assert!(op.get("angle").is_none(), "{op}");
+    // Cleared, then 12 typed: still a whole turn, 30° apart.
+    t.array_value("items", "");
+    t.array_value("items", "1");
+    t.array_value("items", "12");
+    assert_eq!(field(&t, "angle_between"), "30");
+    assert_eq!(panel(&t, false).count, "12 round: 11 copies");
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["count"], json!(12));
+    assert!(op.get("angle").is_none(), "{op}");
+    // Clockwise, with the total held: -360 kept through the typing, and sent.
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.option("total");
+    t.array_value("angle_fill", "-360");
+    t.array_value("items", "1");
+    t.array_value("items", "10");
+    assert_eq!(panel(&t, false).count, "10 round: 9 copies");
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["angle"], json!(-360.0));
+    // Less than a turn is still (items - 1) times the angle between them.
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.input("5,45", None);
+    t.array_value("items", "1");
+    t.array_value("items", "4");
+    let op = &operations(&t.input("", None))[0];
+    assert_eq!(op["angle"], json!(135.0));
+}
+
+#[test]
+fn switching_to_the_total_reads_a_whole_turn_from_the_angle_to_fill() {
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    // Four 120° apart are refused; the total held, 360 is a whole turn,
+    // four spread 90° apart, as the core places them.
+    t.input("4,120", None);
+    assert!(!panel(&t, false).ready);
+    t.option("total");
+    let turns = |t: &Tools| -> Vec<f64> {
+        t.band(None)
+            .arrayed
+            .unwrap()
+            .1
+            .iter()
+            .map(|p| p.turn)
+            .collect()
+    };
+    assert_eq!(turns(&t), [90.0, 180.0, 270.0]);
+    assert_eq!(panel(&t, false).count, "4 round: 3 copies");
+    assert!(operations(&t.clone().input("", None))[0]
+        .get("angle")
+        .is_none());
+    // Back to the spacing between items: still a whole turn, 90° apart.
+    t.option("between");
+    assert_eq!(field(&t, "angle_between"), "90");
+    assert_eq!(turns(&t), [90.0, 180.0, 270.0]);
+    assert!(operations(&t.input("", None))[0].get("angle").is_none());
+    // A partial turn stays one both ways: 5 items 45° apart fill 180°.
+    let mut t = array_on_device("ARRAYPOLAR");
+    t.point(at(2.0, 4.5));
+    t.input("5,45", None);
+    t.option("total");
+    assert_eq!(turns(&t), [45.0, 90.0, 135.0, 180.0]);
+    t.option("between");
+    assert_eq!(turns(&t), [45.0, 90.0, 135.0, 180.0]);
+    assert_eq!(operations(&t.input("", None))[0]["angle"], json!(180.0));
 }

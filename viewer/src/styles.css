@@ -561,6 +561,39 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   background: rgba(38, 32, 56, .94); border: 1px solid #b48cff; color: #e2d6ff;
 }
 .pvpaper.held { border: 2px dashed #8a8f96; }
+/* Array's tag over its copies (#66), and what is wrong, in red. */
+.ctag.atag.bad { border-color: #ff5d5d; color: #ffb0b0; background: rgba(56, 28, 28, .94); }
+/* Array's panel (#66), beside the objects and their copies on a laptop, placed at each draw; docked above
+   the command bar on a phone. As the picked prototype draws it. */
+.arr {
+  position: absolute; z-index: 7; width: 330px; visibility: hidden; font: 13px var(--ui); color: var(--text);
+  background: rgba(48, 56, 69, .98); border: 1px solid #6a7689; border-radius: 5px; box-shadow: 0 8px 22px rgba(0, 0, 0, .5);
+  padding: 8px 10px; pointer-events: auto;
+}
+.arr.docked { position: static; visibility: visible; width: auto; margin: 0 0 4px; padding: 7px 9px; }
+.arr .ah { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.arr .aof { color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arr .akinds, .arr .aseg { display: flex; border: 1px solid #5a6577; border-radius: 4px; overflow: hidden; flex: none; }
+.arr .akinds button, .arr .aseg button { background: #2b323d; border: 0; padding: 4px 10px; color: var(--dim); font: 12px var(--ui); }
+.arr .akinds button + button, .arr .aseg button + button { border-left: 1px solid #5a6577; }
+.arr .akinds button[aria-pressed=true], .arr .aseg button[aria-pressed=true] { background: #1f6fc9; color: #fff; }
+.arr .ahold { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; font-size: 11px; color: var(--dim); }
+.arr .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+.arr label { display: grid; gap: 2px; font-size: 11px; color: var(--dim); }
+.arr label small { font-size: 10.5px; color: #8f99a6; }
+.arr input:not([type=checkbox]) {
+  background: #1b2129; border: 1px solid #5a6577; border-radius: 3px; padding: 5px 7px; color: #fff; font-size: 14px; width: 100%;
+  min-width: 0; box-sizing: border-box;
+}
+.arr input:focus { outline: none; border-color: var(--blue); }
+.arr .apick { display: flex; align-items: center; gap: 8px; margin-top: 7px; font-size: 12px; min-height: 26px; }
+.arr .apick .al { color: var(--dim); width: 42px; flex: none; }
+.arr .apick .av { flex: 1; color: #e6e9ee; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arr .apick .av.live { color: var(--snap, #f2e24b); }
+.arr label.achk { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; color: #dfe5ec; }
+.arr .foot { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.arr .foot span { flex: 1; font-size: 12px; color: #cfe6ff; }
+.arr .foot span.bad { color: #ffb0b0; }
 
 /* Proposals (#155), as the picked prototype's B draws them: each waiting proposal dashed on its sheet,
    with a card at the change joined by a leader; on a phone, a chip a tap opens. Purple is a proposal's. */
@@ -659,7 +692,14 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   .cmdnote, .hist { display: none; }
   .cmdbar { flex-wrap: wrap; }
   .cmdin { flex: 1 1 100%; font-size: 16px; padding: 6px 4px; background: #1b2129; border: 1px solid #5a6577; border-radius: 3px; }
-  .opt { display: inline-block; background: #2b3a50; border: 1px solid #4f6684; border-radius: 12px; color: #cfe3ff; text-decoration: none; padding: 2px 9px; margin: 1px 2px; font: 13px var(--ui); }
+  /* Tight enough that a selected object's name and its five options, Move, Copy, Array, Erase and Clear,
+     stay on one line on a phone 390 pixels wide, whatever its font (#66). */
+  .opt { display: inline-block; background: #2b3a50; border: 1px solid #4f6684; border-radius: 12px; color: #cfe3ff; text-decoration: none; padding: 2px 6px; margin: 1px; font: 13px var(--ui); }
+  /* That line: the name shrinks, with an ellipsis, before an option wraps; only on a phone too narrow for
+     the options themselves do they wrap. */
+  .cmdline.oneline { display: flex; flex-wrap: wrap; align-items: center; }
+  .cmdline.oneline > span:first-child { flex: 1 1 0; min-width: 2em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 3px; }
+  .cmdline.oneline .opt { flex: none; }
   .brk, .chev { display: none; }
   .opt.main { background: #1f6fc9; border-color: #3d8fe8; color: #fff; font-weight: 600; }
   /* Above the command bar at its real height (--cmd, which the page measures, a wrapped prompt's among
@@ -669,6 +709,13 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
     left: 8px; right: 8px; top: auto; bottom: var(--qp-bottom); width: auto;
     max-height: min(44%, calc(100% - var(--qp-bottom) - 8px)); visibility: visible;
   }
+  /* Array's panel docked above the command bar: its fields at 16 pixels, so focusing one does not zoom the
+     page, its hints left out for room (#66). */
+  .arr input:not([type=checkbox]) { font-size: 16px; padding: 4px 7px; }
+  .arr .grid2 { gap: 4px 8px; }
+  .arr label small { display: none; }
+  .arr .akinds button, .arr .aseg button { padding: 6px 10px; font-size: 13px; }
+  .arr .foot .btn { padding: 7px 12px; }
   /* A phone's fields at 16 pixels, so focusing one does not zoom the page. */
   .qin { font-size: 16px; line-height: 16px; height: 20px; padding: 1px 5px; }
   .kv .qrow th, .kv .qrow td { padding-top: 0; padding-bottom: 1px; }

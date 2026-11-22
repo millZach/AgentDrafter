@@ -19,6 +19,7 @@ fn tools() -> Tools {
         values: None,
         from_template: Some(false),
         through_viewport: false,
+        bounds: None,
     };
     let mut tools = Tools::default();
     tools.load(Context {

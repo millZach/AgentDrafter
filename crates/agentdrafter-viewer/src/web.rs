@@ -50,8 +50,9 @@
 //!   and gives the change set to send; this module draws its rubber band
 //!   in the current layer's colour, its guides dashed, the objects a move
 //!   would move where they would go, a copy following the cursor dashed
-//!   and the copies Copy has placed dashed in the proposal's colour, the
-//!   points it has taken, and a halo round each object it has picked.
+//!   and the copies Copy has placed dashed in the proposal's colour, as
+//!   are Array's copies, turned round a polar array's centre, the points it
+//!   has taken, and a halo round each object it has picked.
 //! - Over the ink, a halo marks each object a change set added or changed,
 //!   green or amber, and the object the reviewer picked, blue, as the
 //!   picked prototype marks them; the page fades the change set's halos in
@@ -596,12 +597,27 @@ impl Viewer {
         let edges = std::mem::take(&mut sheet.edges);
         // An object whose drawing on the page is cut at a viewport's window
         // is model space seen through it: its points there are not its own.
+        // Each object's box too, which Array spaces its copies by.
         let mut objects: Vec<ObjectInfo> = sheet.objects.iter().map(ObjectInfo::of).collect();
         for item in &sheet.display_list.items {
+            let Some(o) = objects.get_mut(item.object) else {
+                continue;
+            };
             if item.clip.is_some() {
-                if let Some(o) = objects.get_mut(item.object) {
-                    o.through_viewport = true;
-                }
+                o.through_viewport = true;
+            }
+            let runs = match &item.shape {
+                Shape::Stroke { runs, .. } => runs,
+                Shape::Fill { contours, .. } => contours,
+            };
+            for p in runs.iter().flatten() {
+                let b = o.bounds.get_or_insert([p[0], p[1], p[0], p[1]]);
+                *b = [
+                    b[0].min(p[0]),
+                    b[1].min(p[1]),
+                    b[2].max(p[0]),
+                    b[3].max(p[1]),
+                ];
             }
         }
         self.shown = (sheet.sheet.clone(), sheet.layout.clone());
@@ -1109,7 +1125,7 @@ impl Viewer {
     pub fn tool_start(&mut self, word: &str, picked: &[u32]) -> String {
         let picked: Vec<usize> = picked.iter().map(|&p| p as usize).collect();
         let outcome = match tool_for(word) {
-            Some(kind) => self.tools.start(kind, &picked),
+            Some(_) => self.tools.start_word(word, &picked),
             None => self.tools.input(word, None),
         };
         to_json(&outcome)
@@ -1298,6 +1314,37 @@ impl Viewer {
             .map(|(text, [dx, dy])| serde_json::json!({"text": text, "at": [b[2] + dx, b[3] + dy]}))
             .collect();
         to_json(&tags)
+    }
+
+    /// A value typed in Array's panel, by its field's key, such as `rows`:
+    /// the copies follow it as soon as it reads as a number (#66).
+    pub fn tool_array_value(&mut self, key: &str, text: &str) {
+        self.tools.array_value(key, text);
+    }
+
+    /// The tag over Array's copies, as JSON: `{"text": "3 × 2 · waits for
+    /// Enter", "at": [x, y], "problem": false}`, `at` the top right of the
+    /// box round the objects and their copies, in drawing units; a phone's
+    /// words when `touch`; empty while there is none.
+    pub fn tool_array_tag(&self, touch: bool) -> String {
+        self.tools
+            .array_tag(touch)
+            .map(|(text, at, problem)| {
+                to_json(&serde_json::json!({"text": text, "at": at, "problem": problem}))
+            })
+            .unwrap_or_default()
+    }
+
+    /// The box round Array's objects and their copies, `[left, bottom,
+    /// right, top]` in drawing units, for its panel to go beside and the
+    /// view to keep in sight; empty while no array is set up.
+    pub fn tool_array_extent(&self) -> Vec<f64> {
+        // Not the copies following the cursor while a polar array's centre
+        // is picked: the panel stays put as the cursor moves.
+        self.tools
+            .array_extent(None)
+            .map(|b| b.to_vec())
+            .unwrap_or_default()
     }
 
     /// Whether the tool running takes the drawing's clicks and taps now: it
@@ -1530,6 +1577,45 @@ impl Viewer {
         if let Some((picked, by)) = &band.copying {
             let copy = dashed(shifted(picked, &[*by]));
             self.lines(&copy, (1.3 * ratio).max(1.0), MOVING, size);
+        }
+        // Array: each copy where it goes, turned round a polar array's
+        // centre, dashed in the proposal's colour until Enter or Array
+        // lands them; fainter while the centre follows the cursor.
+        if let Some((picked, places, following)) = &band.arrayed {
+            let mut runs: Vec<Vec<Segment>> = Vec::new();
+            let mut count = 0;
+            'copies: for place in places {
+                for item in sheet
+                    .list
+                    .items
+                    .iter()
+                    .filter(|i| picked.contains(&i.object))
+                {
+                    let shape = match &item.shape {
+                        Shape::Stroke { runs, .. } => runs,
+                        Shape::Fill { contours, .. } => contours,
+                    };
+                    for run in shape {
+                        let pieces: Vec<Segment> = run
+                            .windows(2)
+                            .map(|pair| seg([place.apply(pair[0]), place.apply(pair[1])]))
+                            .collect();
+                        count += pieces.len();
+                        runs.push(pieces);
+                    }
+                    if count > MOST_MOVED {
+                        break 'copies;
+                    }
+                }
+            }
+            let [r, g, b, a] = ghosts::PROPOSAL;
+            let alpha = if *following { a * 0.55 } else { a };
+            self.lines(
+                &dashed(runs),
+                (1.4 * ratio).max(1.0),
+                [r, g, b, alpha],
+                size,
+            );
         }
         let lines: Vec<Segment> = band.lines.iter().copied().map(seg).collect();
         self.lines(&lines, (1.5 * ratio).max(1.0), self.layer_color, size);

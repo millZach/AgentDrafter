@@ -207,3 +207,17 @@ test('a copy is named by its objects and, when it makes several, how many', () =
     'copy device, 2 copies',
   );
 });
+
+test('an array is named by its objects and its shape (#66)', () => {
+  const rect = { op: 'array', target: { id: 'DP-LD-101/terminal-2' }, kind: 'rectangular', rows: 3, columns: 2, row_spacing: -0.5, column_spacing: 1 };
+  assert.equal(operationWords(rect), 'array terminal-2, 3 × 2');
+  assert.equal(operationWords({ op: 'array', target: { id: 'DP-LD-101/terminal-2' }, kind: 'rectangular', columns: 4, column_spacing: 1 }), 'array terminal-2, 1 × 4');
+  const polar = { op: 'array', target: { id: 'DP-LD-101/tick-1' }, kind: 'polar', center: [3, 8.8, 0], count: 8 };
+  assert.equal(operationWords(polar), 'array tick-1, 8 round');
+  assert.equal(operationWords({ ...polar, count: 5, angle: -180 }), 'array tick-1, 5 round, -180°');
+  assert.equal(operationWords({ ...polar, angle: 360 }), 'array tick-1, 8 round');
+  // An agent's, sent by AutoCAD's aliases, reads the same.
+  assert.equal(operationWords({ op: 'ARRAYPOLAR', target: { id: 'GA-001/bolt' }, center: [0, 0, 0], count: 8 }), 'array bolt, 8 round');
+  assert.equal(operationWords({ op: 'arraypath', targets: [{ id: 'CB-001/tray' }, { id: 'CB-001/tag' }], path: { name: 'route' }, count: 12 }), 'array 2 objects, 12 along route');
+  assert.equal(entryTitle({ n: 7, kind: 'change_set', change_set: { operations: [rect] } } as never), 'array terminal-2, 3 × 2');
+});
