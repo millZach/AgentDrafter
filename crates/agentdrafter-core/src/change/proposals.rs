@@ -281,6 +281,9 @@ pub fn propose_with(
     // It writes nothing to the set, so it rolls nothing back: a set whose
     // journal holds an unfinished commit is refused, as a preview is.
     refuse_unfinished(folder, Unfinished::Proposals)?;
+    // A change set sent for a guide's step names one the set holds, or
+    // `keep` would refuse it: so is the proposal.
+    super::guides::check_mark(folder, &request.change_set)?;
     let dry = ChangeRequest {
         set: folder.clone(),
         change_set: request.change_set.clone(),

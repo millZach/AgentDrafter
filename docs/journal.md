@@ -48,7 +48,7 @@ A change set's entry, an undo's and an accept's are **written ahead** of their f
 | `issued` | The change sets an accept issued. |
 | `failed_checks` | The failed checks an accept was told to accept despite: each one's sheet, rule, object's ID and message. |
 | `revision` | Each file of the set as an accept issued it: its path, relative to the set's folder, and the SHA-256 of its bytes. |
-| `guide` | The [guide](change-sets.md#guides)'s step a change set or a failed attempt was sent for: `{"guide": 1, "step": 2, "of": 4}`. The viewer reads it `guide step 2 of 4`. |
+| `guide` | The [guide](change-sets.md#guides)'s step a change set or a failed attempt was sent for, with whether it completes the step, as the core checked it before it landed: `{"guide": 1, "step": 2, "of": 4, "completes": true}`. Only the change set that completes a step names, for the steps after it, what the step made. The viewer reads it `guide step 2 of 4`. |
 | `proposal` | The [proposal](change-sets.md#proposals) a change set kept, a failed attempt tried to keep, or a discard discarded, by its number. |
 | `proposed_by`, `kept_by`, `discarded_by` | Who proposed it, who kept it, or tried to, and who discarded it, as `by` gave each, or the interface it came through. |
 | `files`, on a line that marks an entry `rolled_back` | Each file the rollback put back: its SHA-256 as the rollback found it, `before`, and as it put it back, `after`. |

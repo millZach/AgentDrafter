@@ -425,10 +425,22 @@ fn land(
     // A change set sent for a guide's step names it under `guide`: the step
     // is checked to be one of the guide's, and what its own operation would
     // do now is worked out first, on the set as it is, to check it against.
-    let guided = match guides::prepare(request, settings) {
+    let mut guided = match guides::prepare(request, settings) {
         Ok(guided) => guided,
         Err(error) => return Reply::from(Err(error)),
     };
+    // Whether it completes the step is checked on a dry run first, so its
+    // journal entry records it: only the change set that completes a step
+    // names, for the steps after it, what the step made.
+    if let Some(guided) = guided.as_mut().filter(|_| !request.dry_run) {
+        let dry = ChangeRequest {
+            dry_run: true,
+            ..guided.request.clone()
+        };
+        let would = apply::apply(&dry, settings, &mut None, None, keeping, keeping.is_some());
+        let completes = would.is_ok_and(|report| guides::checked(guided, &report).completes);
+        guides::mark_completes(guided, completes);
+    }
     let request = guided.as_ref().map_or(request, |g| &g.request);
     let mut attempted = None;
     let mut outcome = apply::apply(
@@ -480,6 +492,9 @@ pub(crate) fn preview(
     whole: bool,
 ) -> Result<Previewed, Error> {
     refuse_unfinished(set, Unfinished::Preview)?;
+    // A guide's step it names is one the set holds, as `change` and `keep`
+    // check it.
+    guides::check_mark(set, change_set)?;
     let request = ChangeRequest {
         set: set.to_owned(),
         change_set: change_set.clone(),

@@ -39,7 +39,7 @@ use super::apply::{self, walk_guide, StepWalked, WalkStep};
 use super::journal::{self, fates, in_place, now, HowChanged};
 use super::proposals::{newest, numbers, text_given, who};
 use super::recover::{refuse_unfinished, Unfinished};
-use super::{ChangeReport, ChangeRequest, OperationOutcome};
+use super::{ChangeReport, ChangeRequest, OperationOutcome, SnapResolved};
 use crate::description::{read_set_settings, ID_SEPARATOR};
 use crate::error::{Error, ErrorCode};
 use crate::interface::Interface;
@@ -251,7 +251,12 @@ pub struct StepListed {
     /// The change sets in place that were sent for it, the oldest first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub landed: Vec<u64>,
-    /// The object the newest of them added, which later steps name.
+    /// The newest of them that completes it, as the core checked it: the
+    /// step is done while it stays in place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_by: Option<u64>,
+    /// The object that change set added, or the one copy it made, which
+    /// later steps name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub made: Option<String>,
 }
@@ -294,6 +299,12 @@ pub struct GuideMark {
     pub guide: u64,
     pub step: u64,
     pub of: u64,
+    /// Whether the change set completes the step, as the core checked it
+    /// before it landed: only the one that does names, for later steps,
+    /// what the step made. The core writes it; a change set does not send
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completes: Option<bool>,
 }
 
 /// A change set sent for a guide's step, checked against the step's
@@ -326,6 +337,11 @@ pub(crate) fn mark_schema() -> Value {
             "guide": { "description": "The guide, by its number.", "type": "integer", "minimum": 1 },
             "step": { "description": "The step, counted from 1.", "type": "integer", "minimum": 1 },
             "of": { "description": "How many steps the guide has.", "type": "integer", "minimum": 1 },
+            "completes": {
+                "description": "Written by the core in the journal: whether the change set                                 completes the step. A change set does not send it.",
+                "type": "boolean",
+                "readOnly": true,
+            },
         },
     })
 }
@@ -344,7 +360,7 @@ pub(super) fn read_mark(value: &Value) -> Result<(u64, u64, Option<u64>), Error>
     };
     if let Some(key) = map
         .keys()
-        .find(|k| !matches!(k.as_str(), "guide" | "step" | "of"))
+        .find(|k| !matches!(k.as_str(), "guide" | "step" | "of" | "completes"))
     {
         return Err(Error::new(
             ErrorCode::UnknownKey,
@@ -373,6 +389,9 @@ pub(super) fn read_mark(value: &Value) -> Result<(u64, u64, Option<u64>), Error>
     };
     let guide = number("guide")?.ok_or_else(|| missing("guide"))?;
     let step = number("step")?.ok_or_else(|| missing("step"))?;
+    if map.get("completes").is_some_and(|v| !v.is_boolean()) {
+        return Err(wrong("expected true or false", "guide.completes"));
+    }
     Ok((guide, step, number("of")?))
 }
 
@@ -447,9 +466,114 @@ fn needs_of(step: &StepGiven) -> Vec<u64> {
     needs
 }
 
+/// Checks a guide's keys and their kinds, each refused at its own key, such
+/// as `guide.steps[1].points[0].label`.
+fn shape(value: &Value) -> Result<(), Error> {
+    let wrong = |field: String, what: &str| -> Result<(), Error> {
+        Err(Error::new(ErrorCode::WrongType, format!("expected {what}")).at_field(field))
+    };
+    let keys = |map: &Map<String, Value>,
+                field: &str,
+                what: &str,
+                known: &[&str],
+                required: &[&str]|
+     -> Result<(), Error> {
+        if let Some(k) = map.keys().find(|k| !known.contains(&k.as_str())) {
+            return Err(Error::new(
+                ErrorCode::UnknownKey,
+                format!("unknown key `{k}`; {what} takes {}", known.join(", ")),
+            )
+            .at_field(format!("{field}.{k}")));
+        }
+        if let Some(k) = required.iter().find(|k| !map.contains_key(**k)) {
+            return Err(Error::new(
+                ErrorCode::MissingKey,
+                format!("missing key `{k}`; {what} takes {}", known.join(", ")),
+            )
+            .at_field(format!("{field}.{k}")));
+        }
+        Ok(())
+    };
+    let words = |map: &Map<String, Value>, key: &str, field: &str| -> Result<(), Error> {
+        match map.get(key) {
+            Some(v) if !v.is_string() => wrong(format!("{field}.{key}"), "words"),
+            _ => Ok(()),
+        }
+    };
+    let Value::Object(guide) = value else {
+        return wrong(
+            "guide".to_owned(),
+            "a guide, {\"title\", \"sheet\", \"steps\"}",
+        );
+    };
+    keys(
+        guide,
+        "guide",
+        "a guide",
+        &["title", "sheet", "steps"],
+        &["title", "sheet", "steps"],
+    )?;
+    words(guide, "title", "guide")?;
+    words(guide, "sheet", "guide")?;
+    let Some(steps) = guide["steps"].as_array() else {
+        return wrong("guide.steps".to_owned(), "a list of steps");
+    };
+    for (s, step) in steps.iter().enumerate() {
+        let here = format!("guide.steps[{s}]");
+        let Value::Object(step) = step else {
+            return wrong(here, "a step, {\"say\", ...}");
+        };
+        keys(
+            step,
+            &here,
+            "a step",
+            &["say", "title", "tool", "points", "completes", "setting"],
+            &["say"],
+        )?;
+        for key in ["say", "title", "tool"] {
+            words(step, key, &here)?;
+        }
+        if let Some(points) = step.get("points") {
+            let Some(points) = points.as_array() else {
+                return wrong(format!("{here}.points"), "a list of points");
+            };
+            for (p, point) in points.iter().enumerate() {
+                let at = format!("{here}.points[{p}]");
+                let Value::Object(point) = point else {
+                    return wrong(at, "a point, {\"at\"} or {\"object\"}, with its \"label\"");
+                };
+                keys(point, &at, "a point", &["at", "object", "label"], &[])?;
+                words(point, "label", &at)?;
+            }
+        }
+        if step.get("completes").is_some_and(|v| !v.is_object()) {
+            return wrong(
+                format!("{here}.completes"),
+                "an operation, as a change set holds one",
+            );
+        }
+        if let Some(setting) = step.get("setting") {
+            let at = format!("{here}.setting");
+            let Value::Object(setting) = setting else {
+                return wrong(at, "a setting, {\"current_layer\"}");
+            };
+            keys(
+                setting,
+                &at,
+                "a setting",
+                &["current_layer"],
+                &["current_layer"],
+            )?;
+            words(setting, "current_layer", &at)?;
+        }
+    }
+    Ok(())
+}
+
 /// Reads and checks a guide's shape: everything that can be checked
 /// without the set.
 fn read_guide(value: &Value) -> Result<GuideGiven, Error> {
+    shape(value)?;
     let guide: GuideGiven = serde_json::from_value(value.clone()).map_err(|e| {
         Error::new(
             ErrorCode::WrongType,
@@ -599,6 +723,204 @@ fn walk_steps(guide: &[StepGiven]) -> Vec<WalkStep<'_>> {
         .collect()
 }
 
+/// Checks that a step's points are its operation's own, so the drafter who
+/// clicks each ring and picks each object lands the step: the objects to
+/// pick are the ones its operation moves, copies or erases, and the points
+/// to click are where its tool takes the operation's points from. Line's
+/// two are the line's ends, Circle's its centre and a point on it,
+/// Rectangle's two opposite corners, Text's its position, and Move's and
+/// Copy's a base point and each place it goes to, or the base point alone,
+/// how far typed. A Rectangle step completes an axis-aligned, closed,
+/// four-vertex rectangle.
+fn points_agree(s: usize, step: &StepGiven, walked: &StepWalked) -> Result<(), Error> {
+    let (Some(tool), Some(op)) = (step.tool.as_deref(), walked.resolved.as_ref()) else {
+        return Ok(());
+    };
+    let tool = tool.to_lowercase();
+    let field = format!("guide.steps[{s}].points");
+    let wrong = |message: String| -> Result<(), Error> {
+        Err(
+            Error::new(ErrorCode::BadValue, format!("step {}: {message}", s + 1))
+                .at_field(field.clone()),
+        )
+    };
+    let mut clicks: Vec<[f64; 3]> = Vec::new();
+    let mut picks: Vec<String> = Vec::new();
+    for (given, w) in step.points.iter().zip(&walked.points) {
+        match (&given.at, w.at, &w.object) {
+            (Some(_), Some(at), _) => clicks.push(at),
+            (None, _, Some(id)) => picks.push(id.to_lowercase()),
+            // A point that names nothing yet is refused where it is.
+            _ => return Ok(()),
+        }
+    }
+    let at = |key: &str| op.get(key).and_then(xyz);
+    let point = |p: [f64; 3]| shown(&json!(p));
+    let points = |ps: &[[f64; 3]]| {
+        ps.iter()
+            .map(|&p| point(p))
+            .collect::<Vec<_>>()
+            .join(" and ")
+    };
+    if matches!(tool.as_str(), "move" | "copy" | "erase") {
+        let mut want: Vec<String> = walked.targets.iter().map(|t| t.to_lowercase()).collect();
+        want.sort();
+        let mut got = picks.clone();
+        got.sort();
+        got.dedup();
+        if got != want || got.len() != picks.len() {
+            return wrong(format!(
+                "its objects to pick are {}, but its operation takes {}; a step picks each \
+                 object its operation takes, once",
+                if picks.is_empty() {
+                    "none".to_owned()
+                } else {
+                    picks.join(", ")
+                },
+                walked.targets.join(", ")
+            ));
+        }
+    } else if !picks.is_empty() {
+        return wrong(format!(
+            "{tool} picks no objects: its points are `at`, points to click"
+        ));
+    }
+    match tool.as_str() {
+        "line" => {
+            let (Some(from), Some(to)) = (at("from"), at("to")) else {
+                return Ok(());
+            };
+            let fits = |c: &[[f64; 3]]| {
+                c.len() == 2
+                    && ((near(c[0], from) && near(c[1], to)) || (near(c[0], to) && near(c[1], from)))
+            };
+            if !fits(&clicks) {
+                return wrong(format!(
+                    "Line takes two points, the line's ends, and its operation draws from {} to \
+                     {}; its points are {}",
+                    point(from),
+                    point(to),
+                    points(&clicks)
+                ));
+            }
+        }
+        "circle" => {
+            let Some(center) = at("center") else {
+                return Ok(());
+            };
+            let radius = op.get("radius").and_then(Value::as_f64);
+            let on = |p: [f64; 3]| {
+                let d = ((p[0] - center[0]).powi(2) + (p[1] - center[1]).powi(2)).sqrt();
+                radius.is_some_and(|r| same(d, r))
+            };
+            let fits = match clicks.as_slice() {
+                [c] => near(*c, center),
+                [c, p] => near(*c, center) && on(*p),
+                _ => false,
+            };
+            if !fits {
+                return wrong(format!(
+                    "Circle takes its centre, {}, then a point on it{}; its points are {}",
+                    point(center),
+                    radius.map_or(String::new(), |r| format!(", {} from it", shown(&json!(r)))),
+                    points(&clicks)
+                ));
+            }
+        }
+        "rectangle" => {
+            let corners = |a: [f64; 3], b: [f64; 3]| {
+                vec![
+                    json!(a),
+                    json!([b[0], a[1], a[2]]),
+                    json!(b),
+                    json!([a[0], b[1], a[2]]),
+                ]
+            };
+            let given: Vec<Value> = op
+                .get("points")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let vertices: Vec<[f64; 3]> = given.iter().filter_map(|v| xyz(&vertex(v).0)).collect();
+            let unbulged = given.iter().all(|v| vertex(v).1 == 0.0);
+            let rectangle = op.get("closed").and_then(Value::as_bool) == Some(true)
+                && unbulged
+                && vertices.len() == 4
+                && given.len() == 4
+                && !same(vertices[0][0], vertices[2][0])
+                && !same(vertices[0][1], vertices[2][1])
+                && same_polyline(&corners(vertices[0], vertices[2]), &given, true);
+            if !rectangle {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    format!(
+                        "step {}: Rectangle lands an axis-aligned rectangle, a closed polyline of \
+                         four vertices with no bulges, and its operation is another polyline",
+                        s + 1
+                    ),
+                )
+                .at_field(format!("guide.steps[{s}].completes")));
+            }
+            let fits = match clicks.as_slice() {
+                [a, b] => same_polyline(&corners(*a, *b), &given, true),
+                _ => false,
+            };
+            if !fits {
+                return wrong(format!(
+                    "Rectangle takes two opposite corners, and its operation's are {}; its points \
+                     are {}",
+                    points(&[vertices[0], vertices[2]]),
+                    points(&clicks)
+                ));
+            }
+        }
+        "text" => {
+            let Some(position) = at("position") else {
+                return Ok(());
+            };
+            if !matches!(clicks.as_slice(), [c] if near(*c, position)) {
+                return wrong(format!(
+                    "Text takes one point, its position, {}; its points are {}",
+                    point(position),
+                    points(&clicks)
+                ));
+            }
+        }
+        "move" | "copy" => {
+            let op = normal(op, &tool);
+            let goes: Vec<[f64; 3]> = match (op.get("by").and_then(xyz), op.get("offsets")) {
+                (Some(by), _) => vec![by],
+                (None, Some(Value::Array(offsets))) => offsets.iter().filter_map(xyz).collect(),
+                _ => return Ok(()),
+            };
+            let fits = match clicks.as_slice() {
+                [] | [_] => true,
+                [base, to @ ..] => {
+                    to.len() == goes.len()
+                        && to.iter().zip(&goes).all(|(p, by)| {
+                            near([p[0] - base[0], p[1] - base[1], p[2] - base[2]], *by)
+                        })
+                }
+            };
+            if !fits {
+                return wrong(format!(
+                    "{} takes a base point, then where it goes, and its operation goes {}; its \
+                     points are {}",
+                    if tool == "move" { "Move" } else { "Copy" },
+                    points(&goes),
+                    points(&clicks)
+                ));
+            }
+        }
+        _ => {
+            if !clicks.is_empty() {
+                return wrong("Erase takes objects to pick, and no points".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Records a guide for the drawing set in `request.set`, once it is
 /// checked on the set as it is: its sheet, each point and each operation,
 /// in order. A guide the set would refuse is not recorded.
@@ -642,6 +964,7 @@ pub fn guide_with(
                 .at_field(format!("guide.steps[{s}].completes.op")));
             }
         }
+        points_agree(s, step, &walked[s])?;
         for n in needs_of(step) {
             if walked[n as usize - 1].made.is_none() {
                 return Err(Error::new(
@@ -740,30 +1063,40 @@ fn read(folder: &Path, number: u64) -> Result<Stored, Error> {
     })
 }
 
+/// What the journal holds of one step of a guide.
+#[derive(Clone, Debug, Default)]
+struct StepLanded {
+    /// The change sets in place sent for it, the oldest first.
+    entries: Vec<u64>,
+    /// The newest of them that completes it.
+    completed_by: Option<u64>,
+    /// The object that one added on the guide's sheet.
+    made: Option<String>,
+}
+
 /// For each step of guide `number`, the change sets in place sent for it,
-/// the oldest first, and the object the newest added on sheet `sheet`.
-fn landed_for(
-    entries: &[journal::Entry],
-    number: u64,
-    sheet: &str,
-) -> BTreeMap<u64, (Vec<u64>, Option<String>)> {
+/// the newest that completes it and the object that one added on sheet
+/// `sheet`. A change set sent for the step that does not complete it, such
+/// as a line drawn to the wrong place, names nothing for later steps.
+fn landed_for(entries: &[journal::Entry], number: u64, sheet: &str) -> BTreeMap<u64, StepLanded> {
     let fates = fates(entries);
-    let mut out: BTreeMap<u64, (Vec<u64>, Option<String>)> = BTreeMap::new();
+    let mut out: BTreeMap<u64, StepLanded> = BTreeMap::new();
     let prefix = format!("{sheet}{ID_SEPARATOR}").to_lowercase();
     for entry in in_place(entries, &fates) {
         let Some(mark) = entry.guide.filter(|m| m.guide == number) else {
             continue;
         };
-        let added = entry
+        let slot = out.entry(mark.step).or_default();
+        slot.entries.push(entry.entry);
+        if mark.completes != Some(true) {
+            continue;
+        }
+        slot.completed_by = Some(entry.entry);
+        slot.made = entry
             .objects
             .iter()
             .find(|o| o.how == HowChanged::Added && o.id.to_lowercase().starts_with(&prefix))
             .map(|o| o.id.clone());
-        let slot = out.entry(mark.step).or_default();
-        slot.0.push(entry.entry);
-        if added.is_some() {
-            slot.1 = added;
-        }
     }
     out
 }
@@ -807,7 +1140,7 @@ fn listed_guide(
     let landed = landed_for(entries, stored.guide, &stored.sheet);
     let made: BTreeMap<u64, String> = landed
         .iter()
-        .filter_map(|(&k, (_, id))| id.clone().map(|id| (k, id)))
+        .filter_map(|(&k, l)| l.made.clone().map(|id| (k, id)))
         .collect();
     let walked = walk_guide(
         folder,
@@ -830,7 +1163,7 @@ fn listed_guide(
         .enumerate()
         .map(|(s, (step, walked))| {
             let number = s as u64 + 1;
-            let (landed, made) = landed.get(&number).cloned().unwrap_or_default();
+            let landed = landed.get(&number).cloned().unwrap_or_default();
             let points = step
                 .points
                 .iter()
@@ -861,8 +1194,9 @@ fn listed_guide(
                 needs: needs_of(step),
                 points,
                 operation: walked.operation,
-                landed,
-                made,
+                landed: landed.entries,
+                completed_by: landed.completed_by,
+                made: landed.made,
             }
         })
         .collect();
@@ -884,6 +1218,8 @@ fn listed_guide(
 pub(super) struct Guided {
     pub request: ChangeRequest,
     pub mark: GuideMark,
+    /// The guide's sheet, as the set names it.
+    sheet: String,
     /// The step's operation, each `made_by` named, as the dry run sent it.
     expected_op: Option<Value>,
     expected: Result<ChangeReport, Error>,
@@ -896,11 +1232,78 @@ pub(super) fn prepare(
     request: &ChangeRequest,
     settings: &Settings,
 ) -> Result<Option<Guided>, Error> {
-    let Some(mark) = request.change_set.get("guide") else {
+    let Some((mark, stored)) = marked_step(&request.set, &request.change_set)? else {
+        return Ok(None);
+    };
+    let folder = &request.set;
+    let step = mark.step;
+    let mut change_set = request.change_set.clone();
+    change_set["guide"] = serde_json::to_value(mark).expect("a mark serializes");
+    let entries = journal::read_entries(folder)?;
+    let sheet = stored.sheet.clone();
+    let listed = listed_guide(folder, &entries, stored, settings);
+    let wanted = &listed.steps[step as usize - 1];
+    let expected = match &wanted.operation {
+        Some(op) => apply::apply(
+            &ChangeRequest {
+                set: folder.clone(),
+                change_set: json!({ "operations": [op] }),
+                dry_run: true,
+            },
+            settings,
+            &mut None,
+            None,
+            None,
+            false,
+        ),
+        None => Err(Error::new(
+            ErrorCode::BadValue,
+            format!(
+                "it names what step {} makes, and no change set in place made it",
+                wanted.needs.first().copied().unwrap_or(0)
+            ),
+        )),
+    };
+    Ok(Some(Guided {
+        request: ChangeRequest {
+            change_set,
+            ..request.clone()
+        },
+        mark,
+        sheet,
+        expected_op: wanted.operation.clone(),
+        expected,
+    }))
+}
+
+/// `guided`'s change set, marked with whether it completes its step, as
+/// the core checked it before it landed, for its journal entry.
+pub(super) fn mark_completes(guided: &mut Guided, completes: bool) {
+    guided.mark.completes = Some(completes);
+    guided.request.change_set["guide"]["completes"] = Value::Bool(completes);
+}
+
+/// Checks that a change set's `guide`, when it has one, names an operation
+/// step of a guide the set in `folder` holds, as a change set or a proposal
+/// sent for one must: refused whole otherwise.
+pub(super) fn check_mark(folder: &Path, change_set: &Value) -> Result<(), Error> {
+    marked_step(folder, change_set).map(|_| ())
+}
+
+/// The step `change_set`'s `guide` names, with `of` filled in, and its
+/// guide; none when it names none.
+fn marked_step(folder: &Path, change_set: &Value) -> Result<Option<(GuideMark, Stored)>, Error> {
+    let Some(mark) = change_set.get("guide") else {
         return Ok(None);
     };
     let (number, step, of) = read_mark(mark)?;
-    let folder = &request.set;
+    if mark.get("completes").is_some() {
+        return Err(Error::new(
+            ErrorCode::UnknownKey,
+            "`completes` is the core's to write, once it has checked the change set against              the step; a change set sends the guide and the step, and `of`",
+        )
+        .at_field("guide.completes"));
+    }
     let store = folder.join(GUIDES_FOLDER);
     if !numbers(&store)?.contains(&number) {
         return Err(Error::new(
@@ -939,42 +1342,9 @@ pub(super) fn prepare(
         guide: number,
         step,
         of: steps,
+        completes: None,
     };
-    let mut change_set = request.change_set.clone();
-    change_set["guide"] = serde_json::to_value(mark).expect("a mark serializes");
-    let entries = journal::read_entries(folder)?;
-    let listed = listed_guide(folder, &entries, stored, settings);
-    let wanted = &listed.steps[step as usize - 1];
-    let expected = match &wanted.operation {
-        Some(op) => apply::apply(
-            &ChangeRequest {
-                set: folder.clone(),
-                change_set: json!({ "operations": [op] }),
-                dry_run: true,
-            },
-            settings,
-            &mut None,
-            None,
-            None,
-            false,
-        ),
-        None => Err(Error::new(
-            ErrorCode::BadValue,
-            format!(
-                "it names what step {} makes, and no change set in place made it",
-                wanted.needs.first().copied().unwrap_or(0)
-            ),
-        )),
-    };
-    Ok(Some(Guided {
-        request: ChangeRequest {
-            change_set,
-            ..request.clone()
-        },
-        mark,
-        expected_op: wanted.operation.clone(),
-        expected,
-    }))
+    Ok(Some((mark, stored)))
 }
 
 /// How far two coordinates may be apart and still be one point: a
@@ -1002,11 +1372,11 @@ fn shown(value: &Value) -> String {
     }
 }
 
-/// The operation `sent` with each snapped point the reply `outcome` says it
-/// took written as its coordinates.
-fn resolved(sent: &Value, outcome: &OperationOutcome) -> Value {
+/// The operation `sent` with each snapped point `snapped` says it took
+/// written as its coordinates.
+pub(super) fn resolved(sent: &Value, snapped: &[SnapResolved]) -> Value {
     let mut out = sent.clone();
-    for snapped in &outcome.snapped {
+    for snapped in snapped {
         let at = json!([snapped.at.x, snapped.at.y, snapped.at.z]);
         if let Some(slot) = place(&mut out, &snapped.field) {
             *slot = at;
@@ -1033,47 +1403,125 @@ fn place<'a>(value: &'a mut Value, field: &str) -> Option<&'a mut Value> {
     Some(here)
 }
 
+/// The keys whose words name something, a layer or a style, which match in
+/// any case, as AutoCAD's names do. Any other words, such as a text's
+/// contents, match exactly.
+const NAME_KEYS: [&str; 13] = [
+    "layer",
+    "linetype",
+    "style",
+    "color",
+    "lineweight",
+    "justify",
+    "block",
+    "space",
+    "text_style",
+    "dimension_style",
+    "table_style",
+    "multileader_style",
+    "snap",
+];
+
 /// Whether `got` is `want`: numbers and points within [`same`], a point of
-/// two coordinates as one with z 0, words in any case, and of a mapping
-/// only the keys `want` gives.
-fn matches(want: &Value, got: &Value) -> bool {
+/// two coordinates as one with z 0, words exactly, or in any case for a
+/// name (`name`), and of a mapping only the keys `want` gives.
+fn matches(want: &Value, got: &Value, name: bool) -> bool {
     match (want, got) {
         (Value::Number(a), Value::Number(b)) => match (a.as_f64(), b.as_f64()) {
             (Some(a), Some(b)) => same(a, b),
             _ => false,
         },
         (Value::Array(a), Value::Array(b)) => {
-            let numbers = |v: &[Value]| v.iter().all(Value::is_number);
-            if numbers(a) && numbers(b) && (2..=3).contains(&a.len()) && (2..=3).contains(&b.len())
-            {
-                (0..3).all(|i| {
-                    let c = |v: &[Value]| v.get(i).and_then(Value::as_f64).unwrap_or(0.0);
-                    same(c(a), c(b))
-                })
+            if let (Some(a), Some(b)) = (xyz(want), xyz(got)) {
+                near(a, b)
             } else {
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| matches(x, y))
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| matches(x, y, name))
             }
         }
-        (Value::String(a), Value::String(b)) => a.trim().eq_ignore_ascii_case(b.trim()),
-        (Value::Object(a), Value::Object(b)) => a
-            .iter()
-            .all(|(k, v)| b.get(k).is_some_and(|w| matches(v, w))),
+        (Value::String(a), Value::String(b)) if name => a.trim().eq_ignore_ascii_case(b.trim()),
+        (Value::Object(a), Value::Object(b)) => a.iter().all(|(k, v)| {
+            b.get(k)
+                .is_some_and(|w| matches(v, w, NAME_KEYS.contains(&k.as_str())))
+        }),
         (a, b) => a == b,
     }
 }
 
-/// `op`, resolved, as the check compares it: a move given from and to
-/// written as how far it goes, and a closed polyline's points in order.
+/// A point, `[x, y]` or `[x, y, z]`, as three coordinates.
+fn xyz(value: &Value) -> Option<[f64; 3]> {
+    let items = value.as_array()?;
+    if !(2..=3).contains(&items.len()) {
+        return None;
+    }
+    let mut out = [0.0; 3];
+    for (i, item) in items.iter().enumerate() {
+        out[i] = item.as_f64()?;
+    }
+    Some(out)
+}
+
+/// Whether two points are one, within [`same`].
+fn near(a: [f64; 3], b: [f64; 3]) -> bool {
+    (0..3).all(|i| same(a[i], b[i]))
+}
+
+/// A polyline's vertex: its point and its bulge.
+fn vertex(v: &Value) -> (Value, f64) {
+    match v.get("point") {
+        Some(p) => (
+            p.clone(),
+            v.get("bulge").and_then(Value::as_f64).unwrap_or(0.0),
+        ),
+        None => (v.clone(), 0.0),
+    }
+}
+
+/// Whether polyline vertices `got` draw the polyline `want` does: the same
+/// vertices in the same order, either way round, a closed one from any of
+/// them, each segment's bulge with it, turned the other way when the
+/// polyline runs the other way. A bow-tie is not a rectangle.
+fn same_polyline(want: &[Value], got: &[Value], closed: bool) -> bool {
+    let n = want.len();
+    if n != got.len() {
+        return false;
+    }
+    if n == 0 {
+        return true;
+    }
+    let w: Vec<(Value, f64)> = want.iter().map(vertex).collect();
+    let g: Vec<(Value, f64)> = got.iter().map(vertex).collect();
+    // An open polyline's last vertex starts no segment.
+    let counts = |i: usize| closed || i + 1 < n;
+    let starts: Vec<usize> = if closed { (0..n).collect() } else { vec![0] };
+    let forwards = starts.iter().any(|&s| {
+        (0..n).all(|i| {
+            let (gp, gb) = &g[(s + i) % n];
+            matches(&w[i].0, gp, false) && (!counts(i) || same(w[i].1, *gb))
+        })
+    });
+    if forwards {
+        return true;
+    }
+    // Run the other way from vertex `s`: its k-th vertex is `s - k`, and
+    // its k-th segment the one from `s - k - 1`, its bulge turned.
+    let ends: Vec<usize> = if closed { (0..n).collect() } else { vec![n - 1] };
+    ends.iter().any(|&s| {
+        (0..n).all(|k| {
+            let i = (s + n - k) % n;
+            let j = (s + 2 * n - k - 1) % n;
+            matches(&w[k].0, &g[i].0, false) && (!counts(k) || same(w[k].1, -g[j].1))
+        })
+    })
+}
+
+/// `op`, resolved, as the check compares it: a move or a copy given from
+/// and to written as how far it goes.
 fn normal(op: &Value, name: &str) -> Value {
     let mut op = op.clone();
     if name == "move" || name == "copy" {
-        if let (Some(Value::Array(from)), Some(Value::Array(to))) = (op.get("from"), op.get("to")) {
-            let c = |v: &Vec<Value>, i: usize| v.get(i).and_then(Value::as_f64).unwrap_or(0.0);
-            let by = json!([
-                c(to, 0) - c(from, 0),
-                c(to, 1) - c(from, 1),
-                c(to, 2) - c(from, 2)
-            ]);
+        if let (Some(from), Some(to)) = (op.get("from").and_then(xyz), op.get("to").and_then(xyz))
+        {
+            let by = json!([to[0] - from[0], to[1] - from[1], to[2] - from[2]]);
             if let Value::Object(map) = &mut op {
                 map.remove("from");
                 map.remove("to");
@@ -1081,37 +1529,78 @@ fn normal(op: &Value, name: &str) -> Value {
             }
         }
     }
-    if name == "add_polyline" {
-        if let Some(Value::Array(points)) = op.get_mut("points") {
-            let key = |v: &Value| -> Vec<f64> {
-                let p = v.get("point").unwrap_or(v);
-                (0..3)
-                    .map(|i| p.get(i).and_then(Value::as_f64).unwrap_or(0.0))
-                    .collect()
-            };
-            points.sort_by(|a, b| {
-                key(a)
-                    .partial_cmp(&key(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        }
-    }
     op
 }
 
 /// The keys the check passes over: what names the operation and where it
-/// lands, which the targets' IDs and the sheets reached compare instead.
+/// lands, which the sheets reached, the targets' IDs and a given ID
+/// compare instead.
 const PASSED_OVER: [&str; 5] = ["op", "sheet", "target", "targets", "id"];
+
+/// An ID's part after its sheet's name, in small letters, to compare.
+fn local(id: &str) -> String {
+    id.split_once(ID_SEPARATOR)
+        .map_or(id, |(_, l)| l)
+        .to_lowercase()
+}
+
+/// The objects an operation moved, copied, deleted or changed, by their
+/// IDs' own parts, sorted: none for an add.
+fn targets_of(outcome: &OperationOutcome) -> Vec<String> {
+    let mut out: Vec<String> = if outcome.op == "copy" {
+        outcome.copies.iter().map(|c| local(&c.source)).collect()
+    } else if outcome.op.starts_with("add_") {
+        Vec::new()
+    } else {
+        outcome.id.iter().map(|id| local(id)).collect()
+    };
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The same, as the reply names them.
+fn targets_named(outcome: &OperationOutcome) -> String {
+    let mut out: Vec<String> = if outcome.op == "copy" {
+        outcome.copies.iter().map(|c| c.source.clone()).collect()
+    } else {
+        outcome.id.iter().cloned().collect()
+    };
+    out.dedup();
+    if out.is_empty() {
+        "nothing".to_owned()
+    } else {
+        out.iter()
+            .map(|id| format!("`{id}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// The sheets an operation reached, sorted in small letters.
+fn sheets_of(outcome: &OperationOutcome) -> Vec<String> {
+    let mut out: Vec<String> = outcome.sheets.iter().map(|s| s.to_lowercase()).collect();
+    out.sort();
+    out
+}
 
 /// The change set `request` sent for a guide's step, checked against the
 /// step's own operation, as `report` says it landed.
 pub(super) fn checked(guided: &Guided, report: &ChangeReport) -> GuideChecked {
     let mark = guided.mark;
-    let made = report
-        .operations
-        .iter()
-        .find(|o| o.ok && o.op.starts_with("add_"))
-        .and_then(|o| o.id.clone());
+    let here = |id: &str| {
+        let own = id.split_once(ID_SEPARATOR).map_or(id, |(_, l)| l);
+        format!("{}{ID_SEPARATOR}{own}", guided.sheet)
+    };
+    let made = report.operations.iter().find(|o| o.ok).and_then(|o| {
+        if o.op.starts_with("add_") {
+            o.id.as_deref().map(here)
+        } else if let [one] = o.copies.as_slice() {
+            Some(here(&one.id))
+        } else {
+            None
+        }
+    });
     let verdict = |completes: bool, message: String| GuideChecked {
         guide: mark.guide,
         step: mark.step,
@@ -1166,11 +1655,44 @@ pub(super) fn checked(guided: &Guided, report: &ChangeReport) -> GuideChecked {
             format!("That was `{}`; the step wants `{}`.", got.op, want.op),
         );
     }
-    if !want.op.starts_with("add_") {
-        if let (Some(w), Some(g)) = (&want.id, &got.id) {
-            if !w.eq_ignore_ascii_case(g) {
-                return verdict(false, format!("That went to `{g}`; the step wants `{w}`."));
-            }
+    if sheets_of(got) != sheets_of(want) {
+        let named = |o: &OperationOutcome| {
+            o.sheets
+                .iter()
+                .map(|s| format!("`{s}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return verdict(
+            false,
+            format!(
+                "That landed on {}; the step wants {}.",
+                named(got),
+                named(want)
+            ),
+        );
+    }
+    if targets_of(got) != targets_of(want) {
+        return verdict(
+            false,
+            format!(
+                "That went to {}; the step wants {}.",
+                targets_named(got),
+                targets_named(want)
+            ),
+        );
+    }
+    if want.op.starts_with("add_") && sent_want.get("id").is_some() {
+        let (w, g) = (want.id.as_deref(), got.id.as_deref());
+        if w.map(local) != g.map(local) {
+            return verdict(
+                false,
+                format!(
+                    "Its `id` is `{}`; the step wants `{}`.",
+                    g.unwrap_or_default(),
+                    w.unwrap_or_default()
+                ),
+            );
         }
     }
     let sent_got = guided
@@ -1180,14 +1702,26 @@ pub(super) fn checked(guided: &Guided, report: &ChangeReport) -> GuideChecked {
         .and_then(|o| o.get(0))
         .cloned()
         .unwrap_or(Value::Null);
-    let want_op = normal(&resolved(&sent_want, want), &want.op);
-    let got_op = normal(&resolved(&sent_got, got), &got.op);
+    let want_op = normal(&resolved(&sent_want, &want.snapped), &want.op);
+    let got_op = normal(&resolved(&sent_got, &got.snapped), &got.op);
+    let polyline = want.op == "add_polyline";
+    let closed = want_op.get("closed").and_then(Value::as_bool) == Some(true);
     let differs = |got_op: &Value| -> Option<String> {
         let want_map = want_op.as_object()?;
         want_map
             .iter()
             .filter(|(k, _)| !PASSED_OVER.contains(&k.as_str()))
-            .find(|(k, v)| !got_op.get(k.as_str()).is_some_and(|g| matches(v, g)))
+            .find(|(k, v)| {
+                let Some(g) = got_op.get(k.as_str()) else {
+                    return true;
+                };
+                match (v, g) {
+                    (Value::Array(w), Value::Array(g)) if polyline && k.as_str() == "points" => {
+                        !same_polyline(w, g, closed)
+                    }
+                    _ => !matches(v, g, NAME_KEYS.contains(&k.as_str())),
+                }
+            })
             .map(|(k, _)| k.clone())
     };
     let mut first = differs(&got_op);
@@ -1223,7 +1757,7 @@ pub(super) fn checked(guided: &Guided, report: &ChangeReport) -> GuideChecked {
                 }
             };
             // A point goes somewhere; anything else is something.
-            let went = if want_op.get(&key).is_some_and(Value::is_array) {
+            let went = if want_op.get(&key).and_then(xyz).is_some() {
                 "went to"
             } else {
                 "is"

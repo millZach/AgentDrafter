@@ -826,15 +826,26 @@ fn an_open_event_stream_reports_a_guide_given_and_each_step_landing() {
     let journal = events.next_journal(Duration::from_secs(10));
     assert_eq!(
         journal["result"]["entries"][0]["guide"],
-        json!({"guide": 1, "step": 2, "of": 3}),
+        json!({"guide": 1, "step": 2, "of": 3, "completes": true}),
         "{journal}"
     );
     let next = events.next_guides(Duration::from_secs(10));
     let steps = &next["result"]["guides"][0]["steps"];
     assert_eq!(steps[1]["landed"], json!([1]), "{next}");
+    assert_eq!(steps[1]["completed_by"], 1, "{next}");
     let made = steps[1]["made"].as_str().unwrap();
     assert_eq!(steps[2]["points"][0]["object"], made, "{next}");
     assert_eq!(steps[2]["operation"]["target"], json!({"id": made}));
+
+    // Undone, from any interface: the guides change with it, so the page
+    // steps the guide back.
+    let (code, undone) = cli(&["undo", "demo-set", "1"], &dir);
+    assert_eq!(code, 0, "{undone}");
+    let next = events.next_guides(Duration::from_secs(10));
+    let steps = &next["result"]["guides"][0]["steps"];
+    assert!(steps[1].get("completed_by").is_none(), "{next}");
+    assert!(steps[1].get("landed").is_none(), "{next}");
+    assert_eq!(steps[2]["points"][0]["waits_on"], 2, "{next}");
 }
 
 #[test]

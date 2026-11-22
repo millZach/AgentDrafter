@@ -5812,6 +5812,12 @@ pub(super) struct StepWalked {
     pub made: Option<String>,
     /// Its operation's name, as the core names it.
     pub op_name: Option<&'static str>,
+    /// Its operation as it applied, each snapped point written as the
+    /// point it was worked out to.
+    pub resolved: Option<Value>,
+    /// The objects its operation moves, copies or deletes, by ID on the
+    /// guide's sheet.
+    pub targets: Vec<String>,
 }
 
 /// What the walk found of one point of a step.
@@ -5940,9 +5946,11 @@ pub(super) fn walk_guide(
             }
         }
         if let (true, Some(op)) = (checking, &out.operation) {
-            let (op_name, made) = guide_op(&mut at, &files, k, op, s, settings)?;
-            out.op_name = Some(op_name);
-            out.made = made;
+            let applied = guide_op(&mut at, &files, k, op, s, settings)?;
+            out.op_name = Some(applied.name);
+            out.made = applied.made;
+            out.resolved = Some(applied.resolved);
+            out.targets = applied.targets;
             if let Some(id) = &out.made {
                 made_now.insert(s as u64 + 1, id.clone());
             }
@@ -6043,8 +6051,20 @@ fn guide_object(record: &SheetRecord, given: &Value, field: &str) -> Result<Stri
 /// The most IDs a guide's error lists.
 const LISTED_IDS: usize = 40;
 
+/// What a guide step's operation did, applied in memory.
+struct GuideOpDone {
+    name: &'static str,
+    /// The object it adds, or the one copy it makes, by its ID on the
+    /// guide's sheet.
+    made: Option<String>,
+    /// The operation, each snapped point written as its point.
+    resolved: Value,
+    /// The objects it moves, copies or deletes, by ID on the guide's sheet.
+    targets: Vec<String>,
+}
+
 /// Applies a guide step's operation `op` in memory, as a dry run does, on
-/// `at`, and gives the ID of the object it adds. It must reach sheet `k`.
+/// `at`, and says what it did. It must reach sheet `k`.
 fn guide_op(
     at: &mut Attempt,
     files: &SetFiles,
@@ -6052,7 +6072,7 @@ fn guide_op(
     op: &Value,
     s: usize,
     settings: &Settings,
-) -> Result<(&'static str, Option<String>), Error> {
+) -> Result<GuideOpDone, Error> {
     let here = format!("guide.steps[{s}].completes");
     let step = s + 1;
     let moved = |e: Error| -> Error {
@@ -6107,5 +6127,33 @@ fn guide_op(
         }
     })?;
     let name = operation.spec.name;
-    Ok((name, name.starts_with("add_").then_some(done.id).flatten()))
+    // An object of a template's, added or copied through another sheet
+    // built from it, is on the guide's sheet with the same ID after its
+    // name.
+    let here = |id: &str| {
+        let local = id.split_once(ID_SEPARATOR).map_or(id, |(_, l)| l);
+        format!("{}{ID_SEPARATOR}{local}", files.name(k))
+    };
+    let made = if name.starts_with("add_") {
+        done.id.as_deref().map(here)
+    } else if let [one] = done.copies.as_slice() {
+        Some(here(&one.id))
+    } else {
+        None
+    };
+    let mut targets: Vec<String> = if name == "copy" {
+        done.copies.iter().map(|c| here(&c.source)).collect()
+    } else if name.starts_with("add_") {
+        Vec::new()
+    } else {
+        done.id.as_deref().map(here).into_iter().collect()
+    };
+    targets.sort_by_key(|t| t.to_lowercase());
+    targets.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    Ok(GuideOpDone {
+        name,
+        made,
+        resolved: super::guides::resolved(op, &done.snapped),
+        targets,
+    })
 }

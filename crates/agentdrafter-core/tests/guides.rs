@@ -8,9 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use agentdrafter_core::{
-    build_set_with, change_with, guide_with, guides_with, journal, undo, ChangeReport,
-    ChangeRequest, ErrorCode, GuideRequest, GuidesReport, GuidesRequest, Interface, JournalRequest,
-    Reply, SetBuildRequest, Settings, UndoRequest, GUIDES_FOLDER, JOURNAL_FILE,
+    build_set_with, change_with, guide_with, guides_with, journal, propose_with, undo,
+    ChangeReport, ChangeRequest, ErrorCode, GuideChecked, GuideRequest, GuidesReport,
+    GuidesRequest, Interface, JournalRequest, ProposeRequest, Reply, SetBuildRequest, Settings,
+    UndoRequest, GUIDES_FOLDER, JOURNAL_FILE,
 };
 use serde_json::{json, Value};
 
@@ -210,6 +211,40 @@ fn a_guide_the_set_would_refuse_is_not_recorded() {
         ErrorCode::BadValue,
         "guide.steps",
     );
+    // A key of the wrong kind inside a step is refused at its own key.
+    wrong(
+        &|g| g["steps"][1]["points"][0]["label"] = json!(5),
+        ErrorCode::WrongType,
+        "guide.steps[1].points[0].label",
+    );
+    wrong(
+        &|g| g["steps"][1]["colour"] = json!("red"),
+        ErrorCode::UnknownKey,
+        "guide.steps[1].colour",
+    );
+    wrong(
+        &|g| g["steps"][0]["setting"] = json!({}),
+        ErrorCode::MissingKey,
+        "guide.steps[0].setting.current_layer",
+    );
+    wrong(
+        &|g| g["steps"][1]["points"][0]["at"] = json!("corner"),
+        ErrorCode::WrongType,
+        "guide.steps[1].points[0].at",
+    );
+    // Rings that are not the operation's points: the drafter who clicks
+    // them would draw another line.
+    wrong(
+        &|g| g["steps"][1]["points"][1]["at"] = json!([2, 1]),
+        ErrorCode::BadValue,
+        "guide.steps[1].points",
+    );
+    // An object to pick that is not the one the operation moves.
+    wrong(
+        &|g| g["steps"][2]["points"][0]["object"] = json!({"id": "DEMO-002/heading"}),
+        ErrorCode::BadValue,
+        "guide.steps[2].points",
+    );
     assert!(!set.join(GUIDES_FOLDER).exists(), "nothing was recorded");
 }
 
@@ -337,4 +372,278 @@ fn a_change_set_naming_no_step_of_a_guide_is_refused_whole() {
         !set.join(JOURNAL_FILE).exists(),
         "a change set refused whole before it was read is not an attempt"
     );
+}
+
+/// Lands `change_set` for a step and gives the core's check and its entry.
+fn landed(set: &Path, change_set: Value) -> (GuideChecked, u64) {
+    let reply = change(set, change_set);
+    assert!(reply.ok, "{:#?}", reply.error);
+    let report = reply.result.unwrap();
+    (report.guide.unwrap(), report.journal_entry.unwrap())
+}
+
+fn undone(set: &Path, entry: u64) {
+    let reply = undo(&UndoRequest {
+        set: set.to_owned(),
+        change_set: entry,
+        dry_run: false,
+    });
+    assert!(reply.ok, "{:#?}", reply.error);
+}
+
+#[test]
+fn only_the_change_set_that_completes_a_step_names_what_it_made() {
+    let set = demo_set("completes");
+    give(&set, a_guide()).unwrap();
+    let line = |to: Value| {
+        json!({"guide": {"guide": 1, "step": 2}, "operations": [
+            {"op": "add_line", "sheet": "DEMO-002", "layer": "notes", "from": corner(), "to": to}]})
+    };
+    // A line to the wrong place lands, marked for the step, but is not the
+    // step's: the step after it still waits.
+    let (wrong, wrong_entry) = landed(&set, line(json!([3, 3, 0])));
+    assert!(!wrong.completes);
+    let report = listed(&set);
+    let steps = &report.guides[0].steps;
+    assert_eq!(steps[1].landed, vec![wrong_entry]);
+    assert_eq!(steps[1].completed_by, None);
+    assert_eq!(steps[1].made, None);
+    assert_eq!(steps[2].points[0].waits_on, Some(2));
+    assert!(steps[2].operation.is_none());
+
+    // The journal records the core's check with the mark.
+    let marks = || -> Vec<(u64, Option<bool>)> {
+        journal(&JournalRequest { set: set.clone() })
+            .result
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|e| e.recorded.guide.map(|m| (e.recorded.entry, m.completes)))
+            .collect()
+    };
+    assert_eq!(marks(), vec![(wrong_entry, Some(false))]);
+
+    // The right line, left beside the wrong one, is the step's.
+    let (right, right_entry) = landed(&set, line(side()));
+    assert!(right.completes, "{}", right.message);
+    let report = listed(&set);
+    let steps = &report.guides[0].steps;
+    assert_eq!(steps[1].landed, vec![wrong_entry, right_entry]);
+    assert_eq!(steps[1].completed_by, Some(right_entry));
+    assert_eq!(steps[1].made, right.made);
+    assert_eq!(steps[2].points[0].object, right.made);
+    assert_eq!(
+        marks(),
+        vec![(wrong_entry, Some(false)), (right_entry, Some(true))]
+    );
+
+    // Undone, the step is not done: the listing steps back.
+    undone(&set, right_entry);
+    let report = listed(&set);
+    let steps = &report.guides[0].steps;
+    assert_eq!(steps[1].completed_by, None);
+    assert_eq!(steps[1].made, None);
+    assert_eq!(steps[2].points[0].waits_on, Some(2));
+
+    // Whether a change set completes its step is the core's to say.
+    let error = change(
+        &set,
+        json!({"guide": {"guide": 1, "step": 2, "completes": true}, "operations": [
+            {"op": "add_line", "sheet": "DEMO-002", "from": [1, 1, 0], "to": [2, 2, 0]}]}),
+    )
+    .error
+    .unwrap();
+    assert_eq!(error.code, ErrorCode::UnknownKey, "{}", error.message);
+    assert_eq!(error.field.as_deref(), Some("guide.completes"));
+}
+
+#[test]
+fn a_step_is_completed_on_its_sheet_by_its_objects_with_its_id() {
+    let set = demo_set("where");
+    give(
+        &set,
+        json!({"title": "Rule a line and copy the heading", "sheet": "DEMO-002", "steps": [
+            {"say": "Draw the rule.", "tool": "line", "points": [{"at": [1, 1]}, {"at": [2, 1]}],
+             "completes": {"op": "add_line", "sheet": "DEMO-002", "id": "rule", "from": [1, 1, 0], "to": [2, 1, 0]}},
+            {"say": "Copy the heading 1 down.", "tool": "copy",
+             "points": [{"object": {"id": "DEMO-002/heading"}}, {"at": [1, 10]}, {"at": [1, 9]}],
+             "completes": {"op": "copy", "target": {"id": "DEMO-002/heading"}, "by": [0, -1, 0]}}
+        ]}),
+    )
+    .unwrap();
+    let step = |n: u64, op: Value| json!({"guide": {"guide": 1, "step": n}, "operations": [op]});
+    let line = |sheet: &str, id: &str| {
+        json!({"op": "add_line", "sheet": sheet, "id": id, "from": [1, 1, 0], "to": [2, 1, 0]})
+    };
+    let tried = |change_set: Value| {
+        let (checked, entry) = landed(&set, change_set);
+        undone(&set, entry);
+        checked
+    };
+
+    let elsewhere = tried(step(1, line("DEMO-003", "rule")));
+    assert!(!elsewhere.completes);
+    assert_eq!(
+        elsewhere.message,
+        "That landed on `DEMO-003`; the step wants `DEMO-002`."
+    );
+    let renamed = tried(step(1, line("DEMO-002", "rule-2")));
+    assert!(!renamed.completes);
+    assert!(renamed.message.contains("`id`"), "{}", renamed.message);
+    assert!(tried(step(1, line("DEMO-002", "rule"))).completes);
+
+    let copy = |id: &str| json!({"op": "copy", "target": {"id": id}, "by": [0, -1, 0]});
+    let border = tried(step(2, copy("DEMO-002/border")));
+    assert!(!border.completes);
+    assert_eq!(
+        border.message,
+        "That went to `DEMO-002/border`; the step wants `DEMO-002/heading`."
+    );
+    let heading = tried(step(2, copy("DEMO-002/heading")));
+    assert!(heading.completes, "{}", heading.message);
+    assert!(heading.made.unwrap().starts_with("DEMO-002/"));
+}
+
+#[test]
+fn text_matches_exactly_and_a_rectangle_by_its_vertices_in_order() {
+    let set = demo_set("exact");
+    let rectangle = json!([[1, 1, 0], [3, 1, 0], [3, 2, 0], [1, 2, 0]]);
+    give(
+        &set,
+        json!({"title": "A box and its name", "sheet": "DEMO-002", "steps": [
+            {"say": "Draw the box.", "tool": "rectangle", "points": [{"at": [1, 1]}, {"at": [3, 2]}],
+             "completes": {"op": "add_polyline", "sheet": "DEMO-002", "points": rectangle, "closed": true}},
+            {"say": "Name it.", "tool": "text", "points": [{"at": [1.2, 1.4]}],
+             "completes": {"op": "add_text", "sheet": "DEMO-002", "contents": "Pump A", "height": 0.1, "position": [1.2, 1.4, 0]}}
+        ]}),
+    )
+    .unwrap();
+    let tried = |op: Value, n: u64| {
+        let (checked, entry) = landed(
+            &set,
+            json!({"guide": {"guide": 1, "step": n}, "operations": [op]}),
+        );
+        undone(&set, entry);
+        checked
+    };
+    let polyline = |points: Value| {
+        json!({"op": "add_polyline", "sheet": "DEMO-002", "points": points, "closed": true})
+    };
+    // The same four corners crossed, a bow-tie.
+    let bow_tie = tried(
+        polyline(json!([[1, 1, 0], [3, 2, 0], [3, 1, 0], [1, 2, 0]])),
+        1,
+    );
+    assert!(!bow_tie.completes, "{}", bow_tie.message);
+    assert!(bow_tie.message.contains("`points`"), "{}", bow_tie.message);
+    // The rectangle drawn the other way round, from another corner.
+    let reversed = tried(
+        polyline(json!([[3, 2, 0], [3, 1, 0], [1, 1, 0], [1, 2, 0]])),
+        1,
+    );
+    assert!(reversed.completes, "{}", reversed.message);
+
+    let text = |contents: &str| {
+        json!({"op": "add_text", "sheet": "DEMO-002", "contents": contents, "height": 0.1, "position": [1.2, 1.4, 0]})
+    };
+    let shouted = tried(text("PUMP A"), 2);
+    assert!(!shouted.completes);
+    assert_eq!(
+        shouted.message,
+        "Its `contents` is `PUMP A`; the step wants `Pump A`."
+    );
+    assert!(tried(text("Pump A"), 2).completes);
+}
+
+#[test]
+fn a_rectangle_step_completes_a_rectangle_at_its_two_corners() {
+    let set = demo_set("rectangle");
+    let guide = |points: Value, rings: Value| {
+        json!({"title": "A box", "sheet": "DEMO-002", "steps": [
+            {"say": "Draw the box.", "tool": "rectangle", "points": rings,
+             "completes": {"op": "add_polyline", "sheet": "DEMO-002", "points": points, "closed": true}}
+        ]})
+    };
+    let corners = json!([{"at": [1, 1]}, {"at": [3, 2]}]);
+    let refused = |points: Value, rings: Value, field: &str| {
+        let error = give(&set, guide(points, rings)).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BadValue, "{}", error.message);
+        assert_eq!(error.field.as_deref(), Some(field), "{}", error.message);
+    };
+    refused(
+        json!([[1, 1, 0], [3, 2, 0], [3, 1, 0], [1, 2, 0]]),
+        corners.clone(),
+        "guide.steps[0].completes",
+    );
+    refused(
+        json!([[1, 1, 0], [3, 1, 0], [2, 2, 0], [1, 2, 0]]),
+        corners.clone(),
+        "guide.steps[0].completes",
+    );
+    refused(
+        json!([[1, 1, 0], [3, 1, 0], [3, 2, 0], [1, 2, 0]]),
+        json!([{"at": [1, 1]}, {"at": [3, 3]}]),
+        "guide.steps[0].points",
+    );
+    assert!(give(
+        &set,
+        guide(json!([[3, 2, 0], [1, 2, 0], [1, 1, 0], [3, 1, 0]]), corners)
+    )
+    .is_ok());
+}
+
+#[test]
+fn a_step_names_what_a_copy_made_and_what_a_template_add_made_on_the_guides_sheet() {
+    let set = demo_set("made");
+    let guide = json!({"title": "Copy the heading, rule a line, move both", "sheet": "DEMO-002", "steps": [
+        {"say": "Copy the heading 1 down.", "tool": "copy",
+         "points": [{"object": {"id": "DEMO-002/heading"}}],
+         "completes": {"op": "copy", "target": {"id": "DEMO-003/heading"}, "by": [0, -1, 0]}},
+        {"say": "Move the copy right.", "tool": "move", "points": [{"object": {"made_by": 1}}],
+         "completes": {"op": "move", "target": {"made_by": 1}, "by": [0.5, 0, 0]}},
+        {"say": "Rule a line on the template.", "tool": "line", "points": [{"at": [1, 1]}, {"at": [2, 1]}],
+         "completes": {"op": "add_line", "template": "templates/ansi-b.yaml", "from": [1, 1, 0], "to": [2, 1, 0]}},
+        {"say": "Move it up.", "tool": "move", "points": [{"object": {"made_by": 3}}],
+         "completes": {"op": "move", "target": {"made_by": 3}, "by": [0, 0.5, 0]}}
+    ]});
+    give(&set, guide).unwrap();
+    let operation = |n: usize| listed(&set).guides[0].steps[n].operation.clone().unwrap();
+    let (copied, _) = landed(
+        &set,
+        json!({"guide": {"guide": 1, "step": 1}, "operations": [operation(0)]}),
+    );
+    assert!(copied.completes, "{}", copied.message);
+    let made = copied.made.unwrap();
+    assert!(made.starts_with("DEMO-002/"), "{made}");
+    let report = listed(&set);
+    assert_eq!(
+        report.guides[0].steps[1].points[0].object.as_deref(),
+        Some(made.as_str())
+    );
+    let (ruled, _) = landed(
+        &set,
+        json!({"guide": {"guide": 1, "step": 3}, "operations": [operation(2)]}),
+    );
+    assert!(ruled.completes, "{}", ruled.message);
+    let report = listed(&set);
+    let ruled = report.guides[0].steps[3].points[0].object.clone().unwrap();
+    assert!(ruled.starts_with("DEMO-002/"), "{ruled}");
+}
+
+#[test]
+fn a_proposal_for_a_guide_the_set_does_not_hold_is_refused() {
+    let set = demo_set("proposed");
+    let error = propose_with(
+        &ProposeRequest {
+            set: set.clone(),
+            change_set: json!({"guide": {"guide": 4, "step": 1}, "operations": [
+                {"op": "add_line", "sheet": "DEMO-002", "from": [1, 1, 0], "to": [2, 2, 0]}]}),
+            by: Some("Assistant".to_owned()),
+        },
+        &Settings::default(),
+        Interface::Mcp,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::UnknownName, "{}", error.message);
+    assert_eq!(error.field.as_deref(), Some("guide.guide"));
 }
