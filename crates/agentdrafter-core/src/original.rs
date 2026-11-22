@@ -319,6 +319,7 @@ pub(crate) fn read_dwg_record(source: &Path, need_set_paper: bool) -> Result<Dwg
             handles: drawing.handles,
             block_handles: drawing.block_handles,
             layout_setups: drawing.layout_setups,
+            extra_layout_setups: drawing.extra_layout_setups,
         }),
     };
     Ok(DwgLoaded {

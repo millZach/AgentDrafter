@@ -61,11 +61,14 @@ use crate::query::{measuring_drawing, measuring_objects, printing_drawing, writt
 use crate::text::placement::SheetFonts;
 use crate::units::Unit;
 
-/// Checks one sheet against every rule; `tolerance` is in the declared unit
-/// `units` (or millimetres when a DWG declares no unit).
+/// Checks one sheet against every rule; `tolerance` is in the page's unit
+/// `units` (or millimetres when a DWG declares no unit). `report_units` is the
+/// top-level `CheckReport::units`, so a finding tags its own `units` only when
+/// `units` differs from `report_units`.
 pub(super) fn check_sheet(
     record: &SheetRecord,
     fonts: &SheetFonts,
+    report_units: Option<Unit>,
     units: Option<Unit>,
     tolerance: f64,
     paper_check: PaperCheck,
@@ -93,6 +96,7 @@ pub(super) fn check_sheet(
         list: &list,
         own: own.as_ref(),
         fonts,
+        report_units,
         units,
         tolerance,
         contents: &contents,
@@ -131,6 +135,7 @@ struct Sheet<'a> {
     /// On a sheet drawn in a layout, each object drawn in its own space.
     own: Option<&'a DisplayList>,
     fonts: &'a SheetFonts,
+    report_units: Option<Unit>,
     units: Option<Unit>,
     tolerance: f64,
     /// The insert that draws each multileader's block content, by the
@@ -151,6 +156,7 @@ impl Sheet<'_> {
         Finding {
             sheet: self.record.name.clone(),
             layout: self.record.sheet.layout.as_ref().map(|l| l.name.clone()),
+            units: self.units.filter(|&u| Some(u) != self.report_units),
             rule,
             message,
             object: None,

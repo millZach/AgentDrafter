@@ -1666,12 +1666,10 @@ fn check_handles_layout_margins_unitless_inch_layouts_and_reports_skipped_checks
         &a3_margins_off,
         "Sheet1",
         false,
-        |l| {
-            l.paper_size = "ISO_A3_(420.00_x_297.00_MM)".to_owned();
-            l.plot_margin_left = 10.0;
-            l.plot_margin_bottom = 10.0;
-            l.plot_margin_right = 10.0;
-            l.plot_margin_top = 10.0;
+        &dwg::TestLayoutSetup {
+            paper_size: Some("ISO_A3_(420.00_x_297.00_MM)".to_owned()),
+            margins_mm: Some((10.0, 10.0, 10.0, 10.0)),
+            ..Default::default()
         },
     );
     let checked = check_with(
@@ -1722,12 +1720,10 @@ fn check_handles_layout_margins_unitless_inch_layouts_and_reports_skipped_checks
         &a3_margins_clean,
         "Sheet1",
         false,
-        |l| {
-            l.paper_size = "ISO_A3_(420.00_x_297.00_MM)".to_owned();
-            l.plot_margin_left = 10.0;
-            l.plot_margin_bottom = 10.0;
-            l.plot_margin_right = 10.0;
-            l.plot_margin_top = 10.0;
+        &dwg::TestLayoutSetup {
+            paper_size: Some("ISO_A3_(420.00_x_297.00_MM)".to_owned()),
+            margins_mm: Some((10.0, 10.0, 10.0, 10.0)),
+            ..Default::default()
         },
     );
     let clean_checked = check_with(
@@ -1766,7 +1762,7 @@ fn check_handles_layout_margins_unitless_inch_layouts_and_reports_skipped_checks
         &unitless_inch,
         "InchSheet",
         true,
-        |_| {},
+        &dwg::TestLayoutSetup::default(),
     );
     let u_checked = check_with(
         &CheckRequest {
@@ -1799,9 +1795,9 @@ fn check_handles_layout_margins_unitless_inch_layouts_and_reports_skipped_checks
         &scaled_dwg,
         "Sheet1",
         false,
-        |l| {
-            l.plot_scale_numerator = 1.0;
-            l.plot_scale_denominator = 2.0;
+        &dwg::TestLayoutSetup {
+            plot_scale: Some((1.0, 2.0)),
+            ..Default::default()
         },
     );
     let s_checked = check_with(
@@ -1888,15 +1884,19 @@ fn query_layout_reports_stored_dwg_plotter_and_plot_style() {
     })
     .unwrap();
     let orig = dir.join("CUSTOM-SETUP.dwg");
-    dwg::as_original_with_layout_setup(&dir.join("lay.dwg"), &orig, "Plan", false, |l| {
-        l.plot_printer_name = "MadeUp Plotter.pc3".to_owned();
-        l.plot_style_sheet = "madeup-color.ctb".to_owned();
-        l.paper_size = "ISO_A3_(420.00_x_297.00_MM)".to_owned();
-        l.plot_margin_left = 5.0;
-        l.plot_margin_bottom = 5.0;
-        l.plot_margin_right = 5.0;
-        l.plot_margin_top = 5.0;
-    });
+    dwg::as_original_with_layout_setup(
+        &dir.join("lay.dwg"),
+        &orig,
+        "Plan",
+        false,
+        &dwg::TestLayoutSetup {
+            plotter: Some("MadeUp Plotter.pc3".to_owned()),
+            plot_style_sheet: Some("madeup-color.ctb".to_owned()),
+            paper_size: Some("ISO_A3_(420.00_x_297.00_MM)".to_owned()),
+            margins_mm: Some((5.0, 5.0, 5.0, 5.0)),
+            ..Default::default()
+        },
+    );
     let report = query_with(
         &QueryRequest {
             source: orig,
@@ -2218,10 +2218,11 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
         &custom_dwg,
         "Custom",
         false,
-        |l| {
-            l.paper_size = "UserDefinedMetric (420.40 x 297.00MM)".to_owned();
-            l.paper_width = 420.4;
-            l.paper_height = 297.0;
+        &dwg::TestLayoutSetup {
+            paper_size: Some("UserDefinedMetric (420.40 x 297.00MM)".to_owned()),
+            paper_width_mm: Some(420.4),
+            paper_height_mm: Some(297.0),
+            ..Default::default()
         },
     );
     let checked = check_with(
@@ -2252,8 +2253,10 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
     assert!((paper.height - 297.0).abs() < 1e-9);
 
     // 2. INSUNITS = mm with inch plot_paper_units (0) at 1:1 (ANSI B 17 x 11
-    //    drawn in inches in paper space): accepted as a valid 1:1 inch layout
-    //    with inch tolerance (0.01 / 25.4).
+    //    drawn in inches in paper space): accepted as a valid 1:1 inch layout,
+    //    keeping CheckReport.units = mm and CheckReport.tolerance = 0.01 mm
+    //    consistent while checking the inch layout with inch tolerance and
+    //    tagging any inch-layout finding with `units: Some(Unit::In)`.
     let mm_with_inch_layout = dir.join("mm-inch-layout.yaml");
     fs::write(
         &mm_with_inch_layout,
@@ -2271,19 +2274,20 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
     })
     .unwrap();
     let mm_inch_dwg = dir.join("MM-INSUNITS-INCH-LAYOUT.dwg");
+    let inch_tab_setup = dwg::TestLayoutSetup {
+        paper_size: Some("ANSI_B_(17.00_x_11.00_Inches)".to_owned()),
+        paper_width_mm: Some(17.0 * 25.4),
+        paper_height_mm: Some(11.0 * 25.4),
+        plot_paper_units: Some(0), // inches
+        plot_scale: Some((1.0, 1.0)),
+        ..Default::default()
+    };
     dwg::as_original_with_layout_setup(
         &dir.join("mm-inch-layout.dwg"),
         &mm_inch_dwg,
         "InchTab",
         false,
-        |l| {
-            l.paper_size = "ANSI_B_(17.00_x_11.00_Inches)".to_owned();
-            l.paper_width = 17.0 * 25.4;
-            l.paper_height = 11.0 * 25.4;
-            l.plot_paper_units = 0; // inches
-            l.plot_scale_numerator = 1.0;
-            l.plot_scale_denominator = 1.0;
-        },
+        &inch_tab_setup,
     );
     let checked = check_with(
         &CheckRequest {
@@ -2295,16 +2299,68 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
     .unwrap();
     assert!(checked.passed, "{:#?}", checked.findings);
     assert!(checked.checks_skipped.is_empty());
-    let inch_tol = 0.01 / 25.4;
+    assert_eq!(checked.units, Some(Unit::Mm));
     assert!(
-        (checked.tolerance - inch_tol).abs() < 1e-12,
-        "expected inch tolerance {inch_tol}, got {}",
+        (checked.tolerance - 0.01).abs() < 1e-12,
+        "CheckReport.tolerance must match CheckReport.units (mm), got {}",
         checked.tolerance
     );
+
+    // Oversizing the same inch layout by 0.005 in (> 0.01 mm = 0.0003937 in,
+    // < 0.01 in) fails using the layout's inch tolerance and tags the findings
+    // with `units: Some(Unit::In)` so they never contradict `CheckReport.units: mm`.
+    let mm_inch_over_yaml = dir.join("mm-inch-over.yaml");
+    fs::write(
+        &mm_inch_over_yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: InchTab}\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [17.005, 0, 0], [17.005, 11, 0], [0, 11, 0]], closed: true, space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: mm_inch_over_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let mm_inch_over_dwg = dir.join("MM-INSUNITS-INCH-OVER.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("mm-inch-over.dwg"),
+        &mm_inch_over_dwg,
+        "InchTab",
+        false,
+        &inch_tab_setup,
+    );
+    let checked_over = check_with(
+        &CheckRequest {
+            source: mm_inch_over_dwg,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(checked_over.units, Some(Unit::Mm));
+    assert!((checked_over.tolerance - 0.01).abs() < 1e-12);
+    assert!(!checked_over.passed);
+    assert!(checked_over
+        .findings
+        .iter()
+        .any(|f| f.rule == Rule::PaperSize));
+    assert!(checked_over
+        .findings
+        .iter()
+        .any(|f| f.rule == Rule::OffSheet));
+    for f in &checked_over.findings {
+        assert_eq!(f.units, Some(Unit::In), "{f:#?}");
+        assert!(f.message.contains(" in"), "{f:#?}");
+    }
 
     // 3. Unitless (INSUNITS = 0) inch layout at 1:1 with border oversized by
     //    0.005 in (> 0.01 mm = 0.0003937 in, yet < 0.01 in): must use inch
     //    tolerance and FAIL paper_size and off_sheet!
+    let inch_tol = 0.01 / 25.4;
     let tiny_over_yaml = dir.join("unitless-inch-tol.yaml");
     fs::write(
         &tiny_over_yaml,
@@ -2327,7 +2383,7 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
         &tiny_over_dwg,
         "InchTol",
         true,
-        |_| {},
+        &dwg::TestLayoutSetup::default(),
     );
     let checked = check_with(
         &CheckRequest {
@@ -2337,6 +2393,7 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
         &Settings::default(),
     )
     .unwrap();
+    assert_eq!(checked.units, None);
     assert!(
         (checked.tolerance - inch_tol).abs() < 1e-12,
         "expected inch tolerance {inch_tol}, got {}",
@@ -2348,10 +2405,16 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
     );
     assert!(checked.findings.iter().any(|f| f.rule == Rule::PaperSize));
     assert!(checked.findings.iter().any(|f| f.rule == Rule::OffSheet));
+    for f in &checked.findings {
+        assert_eq!(f.units, Some(Unit::In), "{f:#?}");
+    }
 }
 
 #[test]
-fn inactive_empty_configured_layout_is_kept_and_checked_while_blank_default_is_skipped() {
+fn inactive_empty_configured_layout_is_reported_by_query_without_breaking_plot_render_or_check() {
+    use crate::plot::{plot_with, PlotRequest};
+    use crate::render::{render_with, RenderRequest};
+
     let dir = scratch("inactive-empty-layout");
     let yaml = dir.join("base.yaml");
     fs::write(
@@ -2370,38 +2433,109 @@ fn inactive_empty_configured_layout_is_kept_and_checked_while_blank_default_is_s
     })
     .unwrap();
     let dwg_path = dir.join("INACTIVE-EMPTY.dwg");
-    dwg::as_original_with_document(&dir.join("base.dwg"), &dwg_path, |doc| {
-        doc.add_layout("EmptyConfigured").unwrap();
-        doc.add_layout("BlankDefault").unwrap();
-        for obj in doc.objects.values_mut() {
-            if let acadrust::objects::ObjectType::Layout(l) = obj {
-                if l.name == "EmptyConfigured" {
-                    l.plot_printer_name = "DWG To PDF.pc3".to_owned();
-                    l.paper_size = "Custom_420x297_MM".to_owned();
-                    l.paper_width = 420.4;
-                    l.paper_height = 297.0;
-                    l.plot_paper_units = 1;
-                    l.plot_type = 5;
-                    l.plot_scale_numerator = 1.0;
-                    l.plot_scale_denominator = 1.0;
-                    l.plot_margin_left = 5.0;
-                    l.plot_margin_bottom = 5.0;
-                    l.plot_margin_right = 5.0;
-                    l.plot_margin_top = 5.0;
-                } else if l.name == "BlankDefault" {
-                    l.plot_printer_name = "none_device".to_owned();
-                    l.paper_size = "ANSI_A_(8.50_x_11.00_Inches)".to_owned();
-                    l.paper_width = 215.9;
-                    l.paper_height = 279.4;
-                    l.plot_style_sheet = String::new();
-                }
-            }
-        }
-    });
+    dwg::as_original_with_extra_layouts(
+        &dir.join("base.dwg"),
+        &dwg_path,
+        &[
+            (
+                "EmptyConfigured",
+                dwg::TestLayoutSetup {
+                    plotter: Some("DWG To PDF.pc3".to_owned()),
+                    paper_size: Some("Custom_420x297_MM".to_owned()),
+                    paper_width_mm: Some(420.4),
+                    paper_height_mm: Some(297.0),
+                    plot_paper_units: Some(1),
+                    plot_type: Some(5),
+                    plot_scale: Some((1.0, 1.0)),
+                    margins_mm: Some((5.0, 5.0, 5.0, 5.0)),
+                    plot_style_sheet: Some("monochrome.ctb".to_owned()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ScaledEmpty",
+                dwg::TestLayoutSetup {
+                    plotter: Some("MadeUp Plotter.pc3".to_owned()),
+                    paper_size: Some("ISO_A3_(420.00_x_297.00_MM)".to_owned()),
+                    paper_width_mm: Some(420.0),
+                    paper_height_mm: Some(297.0),
+                    plot_paper_units: Some(1),
+                    plot_type: Some(5),
+                    plot_scale: Some((1.0, 2.0)),
+                    plot_style_sheet: Some("madeup-color.ctb".to_owned()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "BlankDefault",
+                dwg::TestLayoutSetup {
+                    plotter: Some("none_device".to_owned()),
+                    paper_size: Some("ANSI_A_(8.50_x_11.00_Inches)".to_owned()),
+                    paper_width_mm: Some(215.9),
+                    paper_height_mm: Some(279.4),
+                    plot_style_sheet: Some(String::new()),
+                    ..Default::default()
+                },
+            ),
+        ],
+    );
 
+    // (a) `plot` and `render` must succeed without aborting on empty tabs or
+    //     renaming the populated tab's output PNG or emitting a blank PNG, and
+    //     `check` must only check the populated tab.
+    let pdf = dir.join("active.pdf");
+    let plotted = plot_with(
+        &PlotRequest {
+            output: Some(pdf.clone()),
+            ..PlotRequest::new(&dwg_path)
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(pdf.is_file(), "PDF must be written: {plotted:?}");
+    assert!(
+        plotted.layouts.is_empty(),
+        "single populated tab must not expand into multi-layout PDF pages: {plotted:?}"
+    );
+
+    let png = dir.join("active.png");
+    let rendered = render_with(
+        &RenderRequest {
+            output: Some(png.clone()),
+            ..RenderRequest::new(&dwg_path)
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(
+        png.is_file(),
+        "exact PNG filename must be kept: {rendered:?}"
+    );
+    assert_eq!(rendered.png, png.display().to_string());
+    assert!(
+        rendered.layout.is_none(),
+        "single populated tab must not split into multi-layout PNGs: {rendered:?}"
+    );
+    assert!(!dir.join("active-EmptyConfigured.png").exists());
+    assert!(!dir.join("active-ScaledEmpty.png").exists());
+
+    let checked = check_with(
+        &CheckRequest {
+            source: dwg_path.clone(),
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert!(checked.passed, "{:#?}", checked.findings);
+    assert!(checked.checks_skipped.is_empty());
+
+    // (b) `query layout` reports both inactive empty configured tabs (including
+    //     the 1:2 scaled tab) with their stored metadata, while skipping the
+    //     untouched blank default tab.
     let layout_q = query_with(
         &QueryRequest {
-            source: dwg_path.clone(),
+            source: dwg_path,
             sheet: None,
             query: Query::Layout,
         },
@@ -2412,7 +2546,10 @@ fn inactive_empty_configured_layout_is_kept_and_checked_while_blank_default_is_s
         panic!("layout")
     };
     let names: Vec<Option<&str>> = layouts.iter().map(|l| l.layout.as_deref()).collect();
-    assert_eq!(names, vec![Some("Active"), Some("EmptyConfigured")]);
+    assert_eq!(
+        names,
+        vec![Some("Active"), Some("EmptyConfigured"), Some("ScaledEmpty")]
+    );
     assert!(
         layouts[1]
             .paper
@@ -2421,28 +2558,24 @@ fn inactive_empty_configured_layout_is_kept_and_checked_while_blank_default_is_s
         "{:#?}",
         layouts[1]
     );
+    let empty_setup = layouts[1]
+        .page_setup
+        .as_ref()
+        .expect("EmptyConfigured setup");
+    assert_eq!(empty_setup.plotter, "DWG To PDF.pc3");
+    assert_eq!(empty_setup.paper, "Custom_420x297_MM");
+    assert_eq!(empty_setup.scale, "1:1");
+    assert_eq!(empty_setup.plot_style, "monochrome.ctb");
 
-    let checked = check_with(
-        &CheckRequest {
-            source: dwg_path,
-            sheets: Vec::new(),
-        },
-        &Settings::default(),
-    )
-    .unwrap();
-    assert!(!checked.passed);
-    assert!(
-        checked
-            .findings
-            .iter()
-            .any(|f| f.layout.as_deref() == Some("EmptyConfigured") && f.rule == Rule::PaperSize),
-        "expected empty-paper PaperSize finding on EmptyConfigured: {:#?}",
-        checked.findings
-    );
+    let scaled_setup = layouts[2].page_setup.as_ref().expect("ScaledEmpty setup");
+    assert_eq!(scaled_setup.plotter, "MadeUp Plotter.pc3");
+    assert_eq!(scaled_setup.paper, "ISO_A3_(420.00_x_297.00_MM)");
+    assert_eq!(scaled_setup.scale, "1:2");
+    assert_eq!(scaled_setup.plot_style, "madeup-color.ctb");
 
     // Conversely, a model-space-only drawing saved on Model space whose empty
     // Layout1 merely carries a template printer/paper must remain model-space-only
-    // (never hijacking render/plot/check onto an empty layout).
+    // (never hijacking render/plot/check/query onto an empty layout).
     let model_yaml = dir.join("model-only.yaml");
     fs::write(
         &model_yaml,
@@ -2461,19 +2594,16 @@ fn inactive_empty_configured_layout_is_kept_and_checked_while_blank_default_is_s
         &model_dwg,
         "Layout1",
         false,
-        |l| {
-            l.plot_printer_name = "DWG To PDF.pc3".to_owned();
-            l.paper_size = "ANSI_A_(8.50_x_11.00_Inches)".to_owned();
-            l.paper_width = 215.9;
-            l.paper_height = 279.4;
-            l.plot_paper_units = 0;
-            l.plot_type = 5;
-            l.plot_scale_numerator = 1.0;
-            l.plot_scale_denominator = 1.0;
-            l.plot_margin_left = 6.35;
-            l.plot_margin_bottom = 6.35;
-            l.plot_margin_right = 6.35;
-            l.plot_margin_top = 6.35;
+        &dwg::TestLayoutSetup {
+            plotter: Some("DWG To PDF.pc3".to_owned()),
+            paper_size: Some("ANSI_A_(8.50_x_11.00_Inches)".to_owned()),
+            paper_width_mm: Some(215.9),
+            paper_height_mm: Some(279.4),
+            plot_paper_units: Some(0),
+            plot_type: Some(5),
+            plot_scale: Some((1.0, 1.0)),
+            margins_mm: Some((6.35, 6.35, 6.35, 6.35)),
+            ..Default::default()
         },
     );
     let model_layout = query_with(
@@ -2524,7 +2654,7 @@ fn plot_and_render_do_not_regress_on_unitless_inch_layouts() {
         &unitless_inch,
         "InchTab",
         true,
-        |_| {},
+        &dwg::TestLayoutSetup::default(),
     );
 
     // `read_paper` must NOT classify a unitless 1:1 inch layout as a 17 x 11 mm
@@ -2592,7 +2722,7 @@ fn plot_and_render_do_not_regress_on_unitless_inch_layouts() {
         &unitless_mm_on_ansi,
         "MmOnAnsi",
         true,
-        |_| {},
+        &dwg::TestLayoutSetup::default(),
     );
     let plotted_mm = plot_with(
         &PlotRequest {
@@ -2639,24 +2769,21 @@ fn check_handles_asymmetric_margins_90deg_rotation_and_nonzero_plot_origin() {
     })
     .unwrap();
     let clean_dwg = dir.join("ROT90-CLEAN.dwg");
-    let configure = |l: &mut acadrust::objects::Layout| {
-        l.paper_size = "ISO_A3_(297.00_x_420.00_MM)".to_owned();
-        l.paper_width = 297.0;
-        l.paper_height = 420.0;
-        l.plot_rotation = 1;
-        l.plot_margin_left = 12.0;
-        l.plot_margin_bottom = 8.0;
-        l.plot_margin_right = 18.0;
-        l.plot_margin_top = 6.0;
-        l.plot_origin_x = 5.0;
-        l.plot_origin_y = -3.0;
+    let configure = dwg::TestLayoutSetup {
+        paper_size: Some("ISO_A3_(297.00_x_420.00_MM)".to_owned()),
+        paper_width_mm: Some(297.0),
+        paper_height_mm: Some(420.0),
+        plot_rotation: Some(1),
+        margins_mm: Some((12.0, 8.0, 18.0, 6.0)),
+        plot_origin_mm: Some((5.0, -3.0)),
+        ..Default::default()
     };
     dwg::as_original_with_layout_setup(
         &dir.join("rot90-clean.dwg"),
         &clean_dwg,
         "Rot90",
         false,
-        configure,
+        &configure,
     );
     let checked = check_with(
         &CheckRequest {
@@ -2692,7 +2819,7 @@ fn check_handles_asymmetric_margins_90deg_rotation_and_nonzero_plot_origin() {
         &off_dwg,
         "Rot90",
         false,
-        configure,
+        &configure,
     );
     let checked_off = check_with(
         &CheckRequest {
@@ -2713,4 +2840,262 @@ fn check_handles_asymmetric_margins_90deg_rotation_and_nonzero_plot_origin() {
     assert!((past.top - 1.0).abs() < 1e-6, "{past:?}");
     assert!(past.right.abs() < 1e-6, "{past:?}");
     assert!(past.bottom.abs() < 1e-6, "{past:?}");
+}
+
+#[test]
+fn check_preserves_sheet_units_for_viewport_dimensions_and_uses_inch_units_on_extents_layout() {
+    let dir = scratch("preserve-sheet-units-and-extents-inch");
+
+    // (a) INSUNITS = mm DWG with an inch layout (`plot_paper_units = 0`, 1:1)
+    //     showing a model-space stacked-fraction linear dimension (`12 1/2`)
+    //     through a viewport: `check` MUST NOT mutate `sheet.units` to `in`,
+    //     so the stacked fraction's whole-number piece (`12`) keeps its metric
+    //     bottom alignment (`-7h/6`), matching `display-list` / `plot` (ADR-0011),
+    //     instead of shifting up by `+2h/3` into imperial middle alignment!
+    let dim_yaml = dir.join("dim-vp.yaml");
+    fs::write(
+        &dim_yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: InchTab}\n\
+         dimension_styles:\n\
+         \x20 FRAC:\n\
+         \x20   text_height: 1.0\n\
+         \x20   arrow_size: 0.2\n\
+         \x20   unit_format: fractional\n\
+         \x20   fraction_format: horizontal\n\
+         \x20   precision: 4\n\
+         \x20   placement: centered\n\
+         objects:\n\
+         \x20 - polyline: {points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, space: paper}\n\
+         \x20 - viewport: {center: [8.5, 5.5, 0], width: 15, height: 9, view_center: [6.25, 5.0, 0], scale: 1.0, space: paper}\n\
+         \x20 - dimension: {kind: linear, points: [[0, 2, 0], [12.5, 2, 0]], location: [6.25, 5, 0], dimension_style: FRAC}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: dim_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let dim_dwg = dir.join("MM-DIM-INCH-TAB.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("dim-vp.dwg"),
+        &dim_dwg,
+        "InchTab",
+        false,
+        &dwg::TestLayoutSetup {
+            paper_size: Some("ANSI_B_(17.00_x_11.00_Inches)".to_owned()),
+            paper_width_mm: Some(17.0 * 25.4),
+            paper_height_mm: Some(11.0 * 25.4),
+            plot_paper_units: Some(0),
+            plot_scale: Some((1.0, 1.0)),
+            ..Default::default()
+        },
+    );
+    // Compute the exact world box of the metric `12` piece using the real
+    // drawing pipeline (`measuring_drawing`) on `dim_dwg`, and confirm that
+    // mutating `sheet.units` to Inch WOULD shift `12` up by ~0.667!
+    let run_world_min = |dl: &crate::draw::DisplayList, text: &str| -> [f64; 2] {
+        let run = dl
+            .text
+            .iter()
+            .find(|run| run.characters.iter().map(|&(c, _)| c).collect::<String>() == text)
+            .expect("expected text run");
+        let [lo, _] = run.drawn.expect("drawn box");
+        [
+            run.origin[0] + lo[0] * run.across[0] + lo[1] * run.up[0],
+            run.origin[1] + lo[0] * run.across[1] + lo[1] * run.up[1],
+        ]
+    };
+    let read_ref = crate::read_dwg(&dim_dwg).unwrap();
+    let mut ref_sheet = crate::model::Sheet {
+        units: read_ref.units.unwrap(),
+        block_library: None,
+        linetypes: read_ref.linetypes,
+        layers: read_ref.layers,
+        text_styles: read_ref.text_styles,
+        table_styles: read_ref.table_styles,
+        mleader_styles: read_ref.mleader_styles,
+        dimension_styles: read_ref.dimension_styles,
+        blocks: read_ref.blocks,
+        objects: read_ref.objects,
+        paper: read_ref.paper,
+        ltscale: read_ref.ltscale,
+        layout: read_ref.layout,
+        other_layouts: read_ref.other_layouts,
+    };
+    let ref_fonts = crate::text::placement::SheetFonts::find(&ref_sheet, &Settings::default());
+    let metric_dl = crate::query::measuring_drawing(&ref_sheet, &ref_fonts);
+    let [metric_12_min_x, metric_12_min_y] = run_world_min(&metric_dl, "12");
+    ref_sheet.units = Unit::In;
+    let imperial_dl = crate::query::measuring_drawing(&ref_sheet, &ref_fonts);
+    let [_, imperial_12_min_y] = run_world_min(&imperial_dl, "12");
+    assert!(
+        (imperial_12_min_y - metric_12_min_y).abs() > 0.5,
+        "stacked fraction alignment must differ between metric ({metric_12_min_y}) and imperial ({imperial_12_min_y})"
+    );
+    // Now run `check_with` on a DWG with paper-space text placed squarely over
+    // the metric `12` baseline (and below imperial `12`): it must hit `12` at
+    // `metric_12_min_y`, proving `check` did NOT mutate `sheet.units`!
+    let hit_yaml = dir.join("dim-vp-hit.yaml");
+    fs::write(
+        &hit_yaml,
+        format!(
+            "units: mm\n\
+             paper: ISO A3 landscape\n\
+             layout: {{name: InchTab}}\n\
+             dimension_styles:\n\
+             \x20 FRAC:\n\
+             \x20   text_height: 1.0\n\
+             \x20   arrow_size: 0.2\n\
+             \x20   unit_format: fractional\n\
+             \x20   fraction_format: horizontal\n\
+             \x20   precision: 4\n\
+             \x20   placement: centered\n\
+             objects:\n\
+             \x20 - polyline: {{points: [[0, 0, 0], [17, 0, 0], [17, 11, 0], [0, 11, 0]], closed: true, space: paper}}\n\
+             \x20 - viewport: {{center: [8.5, 5.5, 0], width: 15, height: 9, view_center: [6.25, 5.0, 0], scale: 1.0, space: paper}}\n\
+             \x20 - dimension: {{kind: linear, points: [[0, 2, 0], [12.5, 2, 0]], location: [6.25, 5, 0], dimension_style: FRAC}}\n\
+             \x20 - text: {{contents: \"X\", position: [{metric_12_min_x}, {y}, 0], height: 0.15, space: paper}}\n",
+            y = metric_12_min_y + 0.05
+        ),
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: hit_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let hit_dwg = dir.join("MM-DIM-INCH-HIT.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("dim-vp-hit.dwg"),
+        &hit_dwg,
+        "InchTab",
+        false,
+        &dwg::TestLayoutSetup {
+            paper_size: Some("ANSI_B_(17.00_x_11.00_Inches)".to_owned()),
+            paper_width_mm: Some(17.0 * 25.4),
+            paper_height_mm: Some(11.0 * 25.4),
+            plot_paper_units: Some(0),
+            plot_scale: Some((1.0, 1.0)),
+            ..Default::default()
+        },
+    );
+    let hit_checked = check_with(
+        &CheckRequest {
+            source: hit_dwg,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(hit_checked.units, Some(Unit::Mm));
+    assert!((hit_checked.tolerance - 0.01).abs() < 1e-12);
+    let tot = hit_checked
+        .findings
+        .iter()
+        .find(|f| f.rule == Rule::TextOnText)
+        .expect("paper-space text must collide with metric-aligned `12`");
+    assert_eq!(tot.units, Some(Unit::In), "{tot:#?}");
+    let other_min_y = tot.other_drawn.as_ref().unwrap().min[1];
+    assert!(
+        (other_min_y - metric_12_min_y).abs() < 1e-4,
+        "expected metric `12` min_y {metric_12_min_y}, got {other_min_y} (imperial would be {imperial_12_min_y})"
+    );
+
+    // (b) Extents-plotted inch layout (`check_paper == None`, `plot_type = 1`,
+    //     `plot_paper_units = 0`) in an `INSUNITS = mm` DWG:
+    //     - `paper_size` and `off_sheet` are skipped in `checks_skipped`;
+    //     - `text_on_text` STILL uses inch tolerance (`0.01 / 25.4 = 0.0003937 in`),
+    //       catching a 0.005 in overlap (which would falsely pass under 0.01 mm!);
+    //     - `text_on_line` STILL uses inch pen widths (`0.25 mm = 0.00984 in`,
+    //       half-width `0.00492 in`), NOT `0.25 in`: a line 0.05 in below text
+    //       does NOT trigger `text_on_line`, while a line 0.003 in below text DOES!
+    let ext_yaml = dir.join("extents-inch.yaml");
+    fs::write(
+        &ext_yaml,
+        "units: mm\n\
+         paper: ISO A3 landscape\n\
+         layout: {name: ExtentsInch}\n\
+         objects:\n\
+         \x20 - text: {contents: \"A\", position: [1.0, 2.0, 0], height: 0.2, space: paper}\n\
+         \x20 - text: {contents: \"B\", position: [1.0, 2.195, 0], height: 0.2, space: paper}\n\
+         \x20 - text: {contents: \"C\", position: [5.0, 2.0, 0], height: 0.2, space: paper}\n\
+         \x20 - line: {from: [4.8, 1.95, 0], to: [5.5, 1.95, 0], space: paper}\n\
+         \x20 - text: {contents: \"D\", position: [8.0, 2.0, 0], height: 0.2, space: paper}\n\
+         \x20 - line: {from: [7.8, 1.997, 0], to: [8.5, 1.997, 0], space: paper}\n",
+    )
+    .unwrap();
+    build(&BuildRequest {
+        description: ext_yaml,
+        output: None,
+        overwrite: false,
+    })
+    .unwrap();
+    let ext_dwg = dir.join("EXTENTS-INCH.dwg");
+    dwg::as_original_with_layout_setup(
+        &dir.join("extents-inch.dwg"),
+        &ext_dwg,
+        "ExtentsInch",
+        false,
+        &dwg::TestLayoutSetup {
+            paper_size: Some("ANSI_B_(17.00_x_11.00_Inches)".to_owned()),
+            paper_width_mm: Some(17.0 * 25.4),
+            paper_height_mm: Some(11.0 * 25.4),
+            plot_paper_units: Some(0), // inches
+            plot_type: Some(1),        // extents -> check_paper == None
+            plot_scale: Some((1.0, 1.0)),
+            ..Default::default()
+        },
+    );
+    let ext_checked = check_with(
+        &CheckRequest {
+            source: ext_dwg,
+            sheets: Vec::new(),
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(ext_checked.units, Some(Unit::Mm));
+    assert!((ext_checked.tolerance - 0.01).abs() < 1e-12);
+    assert_eq!(ext_checked.checks_skipped.len(), 2);
+    assert_eq!(ext_checked.checks_skipped[0].rule, Rule::PaperSize);
+    assert_eq!(ext_checked.checks_skipped[1].rule, Rule::OffSheet);
+
+    let ext_tot: Vec<&crate::check::Finding> = ext_checked
+        .findings
+        .iter()
+        .filter(|f| f.rule == Rule::TextOnText)
+        .collect();
+    assert_eq!(
+        ext_tot.len(),
+        1,
+        "0.005 in overlap on extents-plotted inch layout must fail text_on_text: {:#?}",
+        ext_checked.findings
+    );
+    assert_eq!(ext_tot[0].units, Some(Unit::In));
+
+    let ext_tol: Vec<&crate::check::Finding> = ext_checked
+        .findings
+        .iter()
+        .filter(|f| f.rule == Rule::TextOnLine)
+        .collect();
+    assert_eq!(
+        ext_tol.len(),
+        1,
+        "only the 0.003 in line (not the 0.05 in line) must trigger text_on_line with inch pen width: {:#?}",
+        ext_tol
+    );
+    assert_eq!(ext_tol[0].units, Some(Unit::In));
+    assert_eq!(
+        ext_tol[0]
+            .object
+            .as_ref()
+            .and_then(|o| o.text.as_deref()),
+        Some("D"),
+        "C's line is 0.05 in away and must NOT trigger text_on_line; D's line is 0.003 in away and MUST: {:#?}",
+        ext_tol
+    );
 }

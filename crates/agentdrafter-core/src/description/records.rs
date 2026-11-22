@@ -18,7 +18,7 @@ use super::{
     read_set_settings_in, read_template_in, template_in, template_path, Disk, ReadFiles, Row,
 };
 use crate::error::Error;
-use crate::model::layout::DwgLayoutSetup;
+use crate::model::layout::{DwgExtraLayout, DwgLayoutSetup};
 use crate::model::Sheet;
 use crate::set::{Notice, SET_SETTINGS_FILE};
 use crate::units::Unit;
@@ -44,6 +44,9 @@ pub(crate) struct DwgOrigin {
     /// Stored page setup and checkable paper metadata for each read layout
     /// (`[sheet.layout, ..sheet.other_layouts]`), in tab order.
     pub layout_setups: Vec<DwgLayoutSetup>,
+    /// Additional configured inactive-empty layouts kept solely for
+    /// `query layout` without adding unplottable pages to `sheet`.
+    pub extra_layout_setups: Vec<DwgExtraLayout>,
 }
 
 /// One sheet as its record states it, with the ID of each of its objects.
@@ -113,6 +116,13 @@ impl SheetRecord {
         self.dwg
             .as_ref()
             .and_then(|dwg| dwg.layout_setups.get(layout_index))
+    }
+
+    /// Additional configured inactive-empty layouts of a DWG, for `query layout`.
+    pub(crate) fn extra_layout_setups(&self) -> &[DwgExtraLayout] {
+        self.dwg
+            .as_ref()
+            .map_or(&[], |dwg| dwg.extra_layout_setups.as_slice())
     }
 
     /// The file the sheet's object at `index` is written in: the rows file

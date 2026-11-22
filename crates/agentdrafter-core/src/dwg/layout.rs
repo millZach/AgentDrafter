@@ -41,7 +41,7 @@ use acadrust::CadDocument;
 
 use crate::description::paper::STANDARD_SIZES;
 use crate::error::{Error, ErrorCode};
-use crate::model::layout::{CheckPaper, DwgLayoutSetup, DwgPageSetup};
+use crate::model::layout::{CheckPaper, DwgExtraLayout, DwgLayoutSetup, DwgPageSetup};
 use crate::model::{Clip, Paper, Point3, Sheet, Viewport};
 use crate::units::Unit;
 
@@ -427,7 +427,15 @@ pub(super) struct ReadLayout {
 /// does not read and counts. AutoCAD's own empty layout, on its own page
 /// setup, is neither read nor counted, so a drawing of model space alone
 /// reads as one.
-pub(super) fn read_layouts(drawing: &CadDocument, units: Option<Unit>) -> (Vec<ReadLayout>, usize) {
+///
+/// Additional inactive empty layouts with a configured page setup (when the
+/// drawing uses layouts) are returned separately in `extra_layout_setups` for
+/// `query layout` alone, so `render`, `plot`, `display-list` and `check`
+/// never receive unplottable blank pages in `Sheet.other_layouts`.
+pub(super) fn read_layouts(
+    drawing: &CadDocument,
+    units: Option<Unit>,
+) -> (Vec<ReadLayout>, usize, Vec<DwgExtraLayout>) {
     let model = drawing.header.model_space_block_handle;
     let mut all: Vec<&DwgLayout> = drawing
         .objects
@@ -454,27 +462,20 @@ pub(super) fn read_layouts(drawing: &CadDocument, units: Option<Unit>) -> (Vec<R
     let opened = opened_on(drawing).map(|(_, block)| block);
     let mut read = Vec::new();
     let mut not_read = 0;
+    let mut extra = Vec::new();
     let render_units = units.unwrap_or(Unit::Mm);
-    // Keep a drawing of model space alone as model space alone: AutoCAD
-    // templates often leave a default plotter/paper on untouched empty
-    // `Layout1`/`Layout2` tabs even when the drawing only uses Model space.
-    // Once a drawing actually uses layouts (opens on one, draws in one, or
-    // sets a full-bleed standard page setup), also keep any inactive empty
-    // layout that has a configured 1:1 page setup (margins or custom media) so
-    // `query layout` lists it and `check` reports its empty paper.
-    let is_layout_drawing = opened.is_some()
-        || all.iter().any(|l| {
-            holds_anything(l.block_record)
-                || read_paper(drawing, l.block_record, render_units).is_some()
-        });
-    for layout in all {
+    for (tab_position, layout) in all.into_iter().enumerate() {
         let block = layout.block_record;
         let paper = read_paper(drawing, block, render_units);
-        let setup = read_layout_setup(layout, units);
+        let setup = read_layout_setup(layout, units, tab_position);
         if paper.is_none() {
-            let configured_empty =
-                is_layout_drawing && setup.check_paper.is_some() && has_configured_setup(layout);
-            if Some(block) != opened && !holds_anything(block) && !configured_empty {
+            if Some(block) != opened && !holds_anything(block) {
+                if has_configured_setup(layout) {
+                    extra.push(DwgExtraLayout {
+                        name: layout.name.clone(),
+                        setup,
+                    });
+                }
                 continue;
             }
             not_read += 1;
@@ -486,20 +487,25 @@ pub(super) fn read_layouts(drawing: &CadDocument, units: Option<Unit>) -> (Vec<R
             setup,
         });
     }
-    (read, not_read)
+    // Keep a drawing of model space alone as model space alone: AutoCAD
+    // templates often leave a default printer/paper on untouched empty
+    // `Layout1`/`Layout2` tabs even when the drawing only uses Model space.
+    if read.is_empty() {
+        extra.clear();
+    }
+    (read, not_read, extra)
 }
 
 /// Whether `layout` has an explicit page setup configured (a plotter other than
-/// AutoCAD's blank `none_device`, a plot style sheet, or media/dimensions when
-/// not `none_device`), as opposed to AutoCAD's or acadrust's untouched default
-/// blank layout tab.
+/// AutoCAD's blank `None`/`none_device`, a plot style sheet, or a paper size
+/// when the plotter is not `None`/`none_device`), as opposed to AutoCAD's or
+/// acadrust's untouched default blank layout tab.
 fn has_configured_setup(layout: &DwgLayout) -> bool {
-    let is_none_device = layout.plot_printer_name.eq_ignore_ascii_case("none_device");
-    let has_plotter = !layout.plot_printer_name.is_empty() && !is_none_device;
+    let is_none_plotter = layout.plot_printer_name.eq_ignore_ascii_case("none_device")
+        || layout.plot_printer_name.eq_ignore_ascii_case("None");
+    let has_plotter = !layout.plot_printer_name.is_empty() && !is_none_plotter;
     let has_style = !layout.plot_style_sheet.is_empty();
-    let has_media = !is_none_device
-        && (!layout.paper_size.is_empty()
-            || (layout.paper_width > 0.0 && layout.paper_height > 0.0));
+    let has_media = !is_none_plotter && !layout.paper_size.is_empty();
     has_plotter || has_style || has_media
 }
 
@@ -533,7 +539,11 @@ fn plot_scale_text(layout: &DwgLayout) -> String {
 }
 
 /// Reads the stored plot settings and checkable paper bounds from `layout`.
-fn read_layout_setup(layout: &DwgLayout, units: Option<Unit>) -> DwgLayoutSetup {
+fn read_layout_setup(
+    layout: &DwgLayout,
+    units: Option<Unit>,
+    tab_position: usize,
+) -> DwgLayoutSetup {
     let has_setup = !layout.plot_printer_name.is_empty()
         || !layout.paper_size.is_empty()
         || !layout.plot_style_sheet.is_empty()
@@ -556,6 +566,7 @@ fn read_layout_setup(layout: &DwgLayout, units: Option<Unit>) -> DwgLayoutSetup 
         check_paper,
         paper_unit,
         skip_reason,
+        tab_position,
     }
 }
 

@@ -174,6 +174,11 @@ pub struct Finding {
     /// each layout of a sheet drawn in several is checked on its own paper.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
+    /// The unit this finding's lengths are in when it differs from
+    /// [`CheckReport::units`] (such as an inch layout in a metric or unitless
+    /// DWG). Left out when it matches [`CheckReport::units`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub units: Option<Unit>,
     pub rule: Rule,
     /// What is wrong, in words and numbers.
     pub message: String,
@@ -314,8 +319,7 @@ pub(crate) fn check_in(
         objects_not_read,
         not_read,
     } = load(source, &request.sheets, files)?;
-    let default_tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units.unwrap_or(Unit::Mm));
-    let mut page_tolerances: Vec<f64> = Vec::new();
+    let mut page_units: Vec<Option<Unit>> = Vec::new();
     let mut findings = Vec::new();
     let mut checks_skipped = Vec::new();
     let mut substitutions: Vec<FontSubstitution> = Vec::new();
@@ -329,35 +333,52 @@ pub(crate) fn check_in(
             }
         }
         // Each layout of a sheet drawn in several is checked on its own.
+        // Never mutate `sheet.units` (ADR-0011): the drawing pipeline must
+        // render model space identically to `plot` and `render`, while
+        // `page_unit` sets only paper-space tolerance, pen widths and
+        // finding units.
         for (layout_index, page) in record.sheet.pages().into_iter().enumerate() {
             let paper_check = paper_check_for(record, &page, layout_index);
             let page_unit = page_unit_for(record, &page, layout_index, units);
             let page_tolerance =
                 Unit::Mm.convert(CHECK_TOLERANCE_MM, page_unit.unwrap_or(Unit::Mm));
-            page_tolerances.push(page_tolerance);
+            page_units.push(page_unit);
             let (page_findings, page_skipped) = match page {
-                std::borrow::Cow::Borrowed(sheet) if page_unit.is_none_or(|u| u == sheet.units) => {
-                    rules::check_sheet(record, &fonts, page_unit, page_tolerance, paper_check)
-                }
-                page => {
-                    let mut sheet = page.into_owned();
-                    if let Some(u) = page_unit {
-                        sheet.units = u;
-                    }
+                std::borrow::Cow::Borrowed(_) => rules::check_sheet(
+                    record,
+                    &fonts,
+                    units,
+                    page_unit,
+                    page_tolerance,
+                    paper_check,
+                ),
+                std::borrow::Cow::Owned(sheet) => {
                     let on_layout = SheetRecord {
                         sheet,
                         ..record.clone()
                     };
-                    rules::check_sheet(&on_layout, &fonts, page_unit, page_tolerance, paper_check)
+                    rules::check_sheet(
+                        &on_layout,
+                        &fonts,
+                        units,
+                        page_unit,
+                        page_tolerance,
+                        paper_check,
+                    )
                 }
             };
             findings.extend(page_findings);
             checks_skipped.extend(page_skipped);
         }
     }
-    let tolerance = match page_tolerances.first().copied() {
-        Some(first) if page_tolerances.iter().all(|&t| (t - first).abs() <= 1e-12) => first,
-        _ => default_tolerance,
+    let tolerance = match units {
+        Some(u) => Unit::Mm.convert(CHECK_TOLERANCE_MM, u),
+        None => match page_units.first().copied().flatten() {
+            Some(first) if page_units.iter().all(|&u| u == Some(first)) => {
+                Unit::Mm.convert(CHECK_TOLERANCE_MM, first)
+            }
+            _ => CHECK_TOLERANCE_MM,
+        },
     };
     let sheets: Vec<String> = records.iter().map(|r| r.name.clone()).collect();
     let mut report_message = message(&sheets, &findings, &checks_skipped);
@@ -392,8 +413,9 @@ pub(crate) fn check_in(
 
 /// The physical unit of `page`'s paper-space drawing units: for a DWG layout,
 /// its checkable paper's unit (from `plot_paper_units`, or the drawing's unit
-/// for a cross-unit 1:1 setup such as `1:25.4`), or its `plot_paper_units` when
-/// the drawing is unitless; otherwise the sheet's declared `units`.
+/// for a cross-unit 1:1 setup such as `1:25.4`), or its `plot_paper_units` even
+/// when `check_paper` is `None` (such as an extents-plotted inch layout);
+/// otherwise the sheet's declared `units`.
 fn page_unit_for(
     record: &SheetRecord,
     page: &crate::model::Sheet,
@@ -405,8 +427,8 @@ fn page_unit_for(
             if let Some(cp) = &setup.check_paper {
                 return Some(cp.unit);
             }
-            if units.is_none() {
-                return setup.paper_unit;
+            if let Some(paper_unit) = setup.paper_unit {
+                return Some(paper_unit);
             }
         }
     }

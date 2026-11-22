@@ -98,6 +98,19 @@ pub(crate) struct DwgLayoutSetup {
     /// Why `paper_size` and `off_sheet` cannot be checked on this layout when
     /// `check_paper` is `None`.
     pub skip_reason: Option<String>,
+    /// Zero-based position among all non-Model layout tabs in AutoCAD's tab
+    /// order, so `query layout` can merge extra configured tabs in tab order.
+    pub tab_position: usize,
+}
+
+/// An inactive, empty layout tab of a DWG whose stored page setup is
+/// configured (not an untouched blank default tab), kept read-only for
+/// `query layout` without adding an unplottable blank page to
+/// `Sheet.layout` / `Sheet.other_layouts`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DwgExtraLayout {
+    pub name: String,
+    pub setup: DwgLayoutSetup,
 }
 
 /// The boundary a viewport is clipped to instead of its rectangle, on the

@@ -1166,6 +1166,10 @@ pub struct DrawingContents {
     /// (`[layout, ..other_layouts]`), in tab order.
     #[serde(skip)]
     pub(crate) layout_setups: Vec<layout::DwgLayoutSetup>,
+    /// Additional configured inactive-empty layouts read from the DWG, kept
+    /// solely for `query layout` without adding blank pages to `other_layouts`.
+    #[serde(skip)]
+    pub(crate) extra_layout_setups: Vec<layout::DwgExtraLayout>,
 }
 
 /// Records of a DWG of one kind, counted, with the handle of each.

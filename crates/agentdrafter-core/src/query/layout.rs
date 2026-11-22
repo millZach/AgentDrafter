@@ -104,15 +104,7 @@ pub(super) fn layout(
     let on = looked.on();
     let listed: Vec<SheetLayout> = sheets
         .iter()
-        .flat_map(|record| {
-            record
-                .sheet
-                .pages()
-                .iter()
-                .enumerate()
-                .map(|(layout_index, page)| sheet_layout(record, page, layout_index, settings))
-                .collect::<Vec<_>>()
-        })
+        .flat_map(|record| sheet_layouts(record, settings))
         .collect();
     let count: usize = listed.iter().map(|s| s.viewports.len()).sum();
     let one_sheet = sheets.len() == 1;
@@ -185,6 +177,58 @@ pub(super) fn layout(
             layouts: listed,
         },
     )
+}
+
+/// All layouts of `record`, in tab order, including any inactive empty
+/// configured layout tabs read from a DWG.
+fn sheet_layouts(record: &SheetRecord, settings: &Settings) -> Vec<SheetLayout> {
+    let mut entries: Vec<(usize, SheetLayout)> = record
+        .sheet
+        .pages()
+        .iter()
+        .enumerate()
+        .map(|(layout_index, page)| {
+            let tab_position = record
+                .layout_setup(layout_index)
+                .map_or(layout_index, |s| s.tab_position);
+            (
+                tab_position,
+                sheet_layout(record, page, layout_index, settings),
+            )
+        })
+        .collect();
+    let extras = record.extra_layout_setups();
+    if record.sheet.layout.is_some() && !extras.is_empty() {
+        let (model_space, model_extents) = entries
+            .first()
+            .map(|(_, first)| (first.model_space, first.model_extents))
+            .unwrap_or((0, None));
+        for extra in extras {
+            let paper = extra.setup.check_paper.as_ref().map(|cp| cp.paper.clone());
+            let page_setup = extra.setup.page_setup.as_ref().map(|ps| PageSetupUsed {
+                plotter: ps.plotter.clone(),
+                paper: ps.paper.clone(),
+                area: ps.area.clone(),
+                scale: ps.scale.clone(),
+                plot_style: ps.plot_style.clone(),
+            });
+            entries.push((
+                extra.setup.tab_position,
+                SheetLayout {
+                    sheet: record.name.clone(),
+                    layout: Some(extra.name.clone()),
+                    paper,
+                    page_setup,
+                    paper_space: 0,
+                    model_space,
+                    model_extents,
+                    viewports: Vec::new(),
+                },
+            ));
+        }
+        entries.sort_by_key(|(pos, _)| *pos);
+    }
+    entries.into_iter().map(|(_, layout)| layout).collect()
 }
 
 /// One layout of a sheet and its viewports: the layout `sheet` draws, the

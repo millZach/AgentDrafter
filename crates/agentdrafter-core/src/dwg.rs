@@ -815,7 +815,8 @@ fn contents(
     // The sheet the drawing holds: model space, and the paper space of
     // each layout the core reads, whatever tab it was saved on.
     let units = unit(drawing.header.insertion_units);
-    let (read_layouts, layouts_not_read) = layout::read_layouts(drawing, units);
+    let (read_layouts, layouts_not_read, extra_layout_setups) =
+        layout::read_layouts(drawing, units);
     let blocks_of: Vec<acadrust::types::Handle> = read_layouts.iter().map(|l| l.block).collect();
     let on_sheet = sheet_objects(drawing, &blocks_of);
     // A table's own block holds what it draws, and is read with the table.
@@ -1072,6 +1073,7 @@ fn contents(
         not_read: RecordsOfKind::group(not_read),
         decode,
         layout_setups,
+        extra_layout_setups,
     })
 }
 
@@ -2476,30 +2478,97 @@ pub(crate) fn as_unitless_original(dwg: &Path, out: &Path) {
     std::fs::write(out, bytes).expect("the DWG is saved");
 }
 
-/// Only for tests: mutates a built DWG's named layout page setup (as an
-/// original stripped of build mark and AgentDrafter extended data) and saves
-/// it to `out`.
+/// Only for tests: plain-data overrides for one DWG layout's stored page setup,
+/// keeping `acadrust` strictly behind the `dwg` seam (ADR-0009).
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TestLayoutSetup {
+    pub plotter: Option<String>,
+    pub paper_size: Option<String>,
+    pub paper_width_mm: Option<f64>,
+    pub paper_height_mm: Option<f64>,
+    pub plot_paper_units: Option<i16>,
+    pub plot_rotation: Option<i16>,
+    pub plot_type: Option<i16>,
+    pub plot_scale: Option<(f64, f64)>,
+    /// `(left, bottom, right, top)` printer margins in millimetres.
+    pub margins_mm: Option<(f64, f64, f64, f64)>,
+    /// `(x, y)` plot origin in millimetres.
+    pub plot_origin_mm: Option<(f64, f64)>,
+    pub plot_style_sheet: Option<String>,
+}
+
+#[cfg(test)]
+fn apply_test_layout_setup(layout: &mut acadrust::objects::Layout, setup: &TestLayoutSetup) {
+    if let Some(plotter) = &setup.plotter {
+        layout.plot_printer_name = plotter.clone();
+    }
+    if let Some(paper_size) = &setup.paper_size {
+        layout.paper_size = paper_size.clone();
+    }
+    if let Some(width) = setup.paper_width_mm {
+        layout.paper_width = width;
+    }
+    if let Some(height) = setup.paper_height_mm {
+        layout.paper_height = height;
+    }
+    if let Some(paper_units) = setup.plot_paper_units {
+        layout.plot_paper_units = paper_units;
+    }
+    if let Some(rotation) = setup.plot_rotation {
+        layout.plot_rotation = rotation;
+    }
+    if let Some(plot_type) = setup.plot_type {
+        layout.plot_type = plot_type;
+    }
+    if let Some((num, den)) = setup.plot_scale {
+        layout.plot_scale_numerator = num;
+        layout.plot_scale_denominator = den;
+    }
+    if let Some((left, bottom, right, top)) = setup.margins_mm {
+        layout.plot_margin_left = left;
+        layout.plot_margin_bottom = bottom;
+        layout.plot_margin_right = right;
+        layout.plot_margin_top = top;
+    }
+    if let Some((x, y)) = setup.plot_origin_mm {
+        layout.plot_origin_x = x;
+        layout.plot_origin_y = y;
+    }
+    if let Some(style) = &setup.plot_style_sheet {
+        layout.plot_style_sheet = style.clone();
+    }
+}
+
+#[cfg(test)]
+fn strip_build_metadata(drawing: &mut CadDocument) {
+    drawing
+        .summary_info
+        .custom_properties
+        .retain(|(name, _)| name != BUILD_MARK);
+    for object in drawing.entities_mut() {
+        let common = object.common_mut();
+        common.extended_data = Default::default();
+        common.raw_record = None;
+    }
+}
+
+/// Only for tests: mutates a built DWG's named layout page setup using plain
+/// data (as an original stripped of build mark and AgentDrafter extended data)
+/// and saves it to `out`.
 #[cfg(test)]
 pub(crate) fn as_original_with_layout_setup(
     dwg: &Path,
     out: &Path,
     layout_name: &str,
     unitless: bool,
-    edit: impl FnOnce(&mut acadrust::objects::Layout),
+    setup: &TestLayoutSetup,
 ) {
     let mut drawing = read_drawing(dwg).expect("the DWG reads");
     if unitless {
         drawing.header.insertion_units = 0;
     }
-    drawing
-        .summary_info
-        .custom_properties
-        .retain(|(name, _)| name != BUILD_MARK);
-    for entity in drawing.entities_mut() {
-        let common = entity.common_mut();
-        common.extended_data = Default::default();
-        common.raw_record = None;
-    }
+    strip_build_metadata(&mut drawing);
     let layout = drawing
         .objects
         .values_mut()
@@ -2508,30 +2577,34 @@ pub(crate) fn as_original_with_layout_setup(
             _ => None,
         })
         .expect("named layout exists");
-    edit(layout);
+    apply_test_layout_setup(layout, setup);
     let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
     std::fs::write(out, bytes).expect("the DWG is saved");
 }
 
-/// Only for tests: mutates a built DWG (stripped of build mark and AgentDrafter
-/// extended data) with direct access to its `CadDocument` and saves it to `out`.
+/// Only for tests: adds extra inactive empty layouts with plain-data page
+/// setups to a built DWG (stripped of build mark and AgentDrafter extended
+/// data) and saves it to `out`.
 #[cfg(test)]
-pub(crate) fn as_original_with_document(
+pub(crate) fn as_original_with_extra_layouts(
     dwg: &Path,
     out: &Path,
-    edit: impl FnOnce(&mut CadDocument),
+    extra_layouts: &[(&str, TestLayoutSetup)],
 ) {
     let mut drawing = read_drawing(dwg).expect("the DWG reads");
-    drawing
-        .summary_info
-        .custom_properties
-        .retain(|(name, _)| name != BUILD_MARK);
-    for entity in drawing.entities_mut() {
-        let common = entity.common_mut();
-        common.extended_data = Default::default();
-        common.raw_record = None;
+    strip_build_metadata(&mut drawing);
+    for (name, setup) in extra_layouts {
+        drawing.add_layout(name).expect("add extra layout");
+        let layout = drawing
+            .objects
+            .values_mut()
+            .find_map(|o| match o {
+                acadrust::objects::ObjectType::Layout(l) if l.name == *name => Some(l),
+                _ => None,
+            })
+            .expect("added layout exists");
+        apply_test_layout_setup(layout, setup);
     }
-    edit(&mut drawing);
     let bytes = DwgWriter::write_to_vec(&drawing).expect("the DWG writes");
     std::fs::write(out, bytes).expect("the DWG is saved");
 }
