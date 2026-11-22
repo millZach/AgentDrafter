@@ -2388,7 +2388,7 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
     );
     let checked = check_with(
         &CheckRequest {
-            source: tiny_over_dwg,
+            source: tiny_over_dwg.clone(),
             sheets: Vec::new(),
         },
         &Settings::default(),
@@ -2409,6 +2409,26 @@ fn check_preserves_exact_custom_paper_size_and_respects_layout_paper_units_and_t
     for f in &checked.findings {
         assert_eq!(f.units, Some(Unit::In), "{f:#?}");
     }
+    // `query layout` on a unitless DWG keeps the inch paper dimensions in
+    // inches (17 x 11) and exposes `paper_unit: Some(Unit::In)` so callers
+    // know what unit `paper` is sized in.
+    let unitless_lq = query_with(
+        &QueryRequest {
+            source: tiny_over_dwg,
+            sheet: None,
+            query: Query::Layout,
+        },
+        &Settings::default(),
+    )
+    .unwrap();
+    assert_eq!(unitless_lq.units, None);
+    let Answer::Layout { layouts, .. } = unitless_lq.answer else {
+        panic!("layout")
+    };
+    let u_paper = layouts[0].paper.as_ref().expect("unitless inch paper");
+    assert!((u_paper.width - 17.0).abs() < 1e-3, "{u_paper:?}");
+    assert!((u_paper.height - 11.0).abs() < 1e-3, "{u_paper:?}");
+    assert_eq!(layouts[0].paper_unit, Some(Unit::In));
 }
 
 #[test]
@@ -2461,6 +2481,20 @@ fn inactive_empty_configured_layout_is_reported_by_query_without_breaking_plot_r
                     paper_width_mm: Some(420.0),
                     paper_height_mm: Some(297.0),
                     plot_paper_units: Some(1),
+                    plot_type: Some(5),
+                    plot_scale: Some((1.0, 2.0)),
+                    plot_style_sheet: Some("madeup-color.ctb".to_owned()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ScaledInchEmpty",
+                dwg::TestLayoutSetup {
+                    plotter: Some("MadeUp Plotter.pc3".to_owned()),
+                    paper_size: Some("ANSI_B_(17.00_x_11.00_Inches)".to_owned()),
+                    paper_width_mm: Some(17.0 * 25.4),
+                    paper_height_mm: Some(11.0 * 25.4),
+                    plot_paper_units: Some(0), // inches on a mm DWG
                     plot_type: Some(5),
                     plot_scale: Some((1.0, 2.0)),
                     plot_style_sheet: Some("madeup-color.ctb".to_owned()),
@@ -2547,9 +2581,15 @@ fn inactive_empty_configured_layout_is_reported_by_query_without_breaking_plot_r
         panic!("layout")
     };
     let names: Vec<Option<&str>> = layouts.iter().map(|l| l.layout.as_deref()).collect();
+    assert_eq!(layout_q.units, Some(Unit::Mm));
     assert_eq!(
         names,
-        vec![Some("Active"), Some("EmptyConfigured"), Some("ScaledEmpty")]
+        vec![
+            Some("Active"),
+            Some("EmptyConfigured"),
+            Some("ScaledEmpty"),
+            Some("ScaledInchEmpty"),
+        ]
     );
     assert!(
         layouts[1]
@@ -2559,6 +2599,7 @@ fn inactive_empty_configured_layout_is_reported_by_query_without_breaking_plot_r
         "{:#?}",
         layouts[1]
     );
+    assert_eq!(layouts[1].paper_unit, None);
     let empty_setup = layouts[1]
         .page_setup
         .as_ref()
@@ -2580,6 +2621,19 @@ fn inactive_empty_configured_layout_is_reported_by_query_without_breaking_plot_r
     assert_eq!(scaled_paper.name.as_deref(), Some("ISO A3 landscape"));
     assert!((scaled_paper.width - 420.0).abs() < 1e-9);
     assert!((scaled_paper.height - 297.0).abs() < 1e-9);
+    assert_eq!(layouts[2].paper_unit, None);
+
+    // An inch 1:2 extra tab on a millimetre DWG converts its paper dimensions
+    // into the reply's declared unit (mm: 431.8 x 279.4) so every length in a
+    // unitful `query layout` reply is in `report.units`.
+    let inch_paper = layouts[3]
+        .paper
+        .as_ref()
+        .expect("1:2 inch extra layout must populate converted paper dimensions");
+    assert_eq!(inch_paper.name.as_deref(), Some("ANSI B landscape"));
+    assert!((inch_paper.width - 431.8).abs() < 1e-3, "{inch_paper:?}");
+    assert!((inch_paper.height - 279.4).abs() < 1e-3, "{inch_paper:?}");
+    assert_eq!(layouts[3].paper_unit, None);
 
     // Conversely, a model-space-only drawing saved on Model space whose empty
     // Layout1 merely carries a template printer/paper must remain model-space-only

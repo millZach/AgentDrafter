@@ -24,6 +24,12 @@ pub struct SheetLayout {
     /// The paper the layout is drawn on, which its page setup plots.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paper: Option<Paper>,
+    /// The unit `paper`'s dimensions are in when the reply itself has no
+    /// declared `units` (a unitless DWG). Omitted whenever the reply declares
+    /// `units` (in which case `paper` is converted into the reply's `units`)
+    /// or when `paper` is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paper_unit: Option<Unit>,
     /// How the layout plots, as its DWG's page setup holds it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_setup: Option<PageSetupUsed>,
@@ -104,7 +110,7 @@ pub(super) fn layout(
     let on = looked.on();
     let listed: Vec<SheetLayout> = sheets
         .iter()
-        .flat_map(|record| sheet_layouts(record, settings))
+        .flat_map(|record| sheet_layouts(record, settings, units))
         .collect();
     let count: usize = listed.iter().map(|s| s.viewports.len()).sum();
     let one_sheet = sheets.len() == 1;
@@ -181,7 +187,11 @@ pub(super) fn layout(
 
 /// All layouts of `record`, in tab order, including any inactive empty
 /// configured layout tabs read from a DWG.
-fn sheet_layouts(record: &SheetRecord, settings: &Settings) -> Vec<SheetLayout> {
+fn sheet_layouts(
+    record: &SheetRecord,
+    settings: &Settings,
+    report_units: Option<Unit>,
+) -> Vec<SheetLayout> {
     let mut entries: Vec<(usize, SheetLayout)> = record
         .sheet
         .pages()
@@ -193,7 +203,7 @@ fn sheet_layouts(record: &SheetRecord, settings: &Settings) -> Vec<SheetLayout> 
                 .map_or(layout_index, |s| s.tab_position);
             (
                 tab_position,
-                sheet_layout(record, page, layout_index, settings),
+                sheet_layout(record, page, layout_index, settings, report_units),
             )
         })
         .collect();
@@ -204,12 +214,7 @@ fn sheet_layouts(record: &SheetRecord, settings: &Settings) -> Vec<SheetLayout> 
             .map(|(_, first)| (first.model_space, first.model_extents))
             .unwrap_or((0, None));
         for extra in extras {
-            let paper = extra
-                .setup
-                .check_paper
-                .as_ref()
-                .map(|cp| cp.paper.clone())
-                .or_else(|| extra.setup.stored_paper.clone());
+            let (paper, paper_unit) = dwg_layout_paper(None, Some(&extra.setup), report_units);
             let page_setup = extra.setup.page_setup.as_ref().map(|ps| PageSetupUsed {
                 plotter: ps.plotter.clone(),
                 paper: ps.paper.clone(),
@@ -223,6 +228,7 @@ fn sheet_layouts(record: &SheetRecord, settings: &Settings) -> Vec<SheetLayout> 
                     sheet: record.name.clone(),
                     layout: Some(extra.name.clone()),
                     paper,
+                    paper_unit,
                     page_setup,
                     paper_space: 0,
                     model_space,
@@ -236,6 +242,45 @@ fn sheet_layouts(record: &SheetRecord, settings: &Settings) -> Vec<SheetLayout> 
     entries.into_iter().map(|(_, layout)| layout).collect()
 }
 
+fn paper_in_units(paper: &Paper, from: Unit, to: Unit) -> Paper {
+    if from == to {
+        return paper.clone();
+    }
+    Paper {
+        name: paper.name.clone(),
+        width: from.convert(paper.width, to),
+        height: from.convert(paper.height, to),
+    }
+}
+
+/// Resolves a DWG layout's `paper` (converted into `report_units` whenever
+/// the DWG declares a unit so every length in the reply matches `units`) and
+/// its optional `paper_unit` tag (present only on unitless DWGs).
+fn dwg_layout_paper(
+    sheet_paper: Option<&Paper>,
+    setup: Option<&crate::model::layout::DwgLayoutSetup>,
+    report_units: Option<Unit>,
+) -> (Option<Paper>, Option<Unit>) {
+    if let Some(paper) = sheet_paper {
+        let tag = report_units.is_none().then_some(Unit::Mm);
+        return (Some(paper.clone()), tag);
+    }
+    let Some(setup) = setup else {
+        return (None, None);
+    };
+    let (raw, raw_unit) = if let Some(cp) = &setup.check_paper {
+        (&cp.paper, cp.unit)
+    } else if let (Some(stored), Some(unit)) = (&setup.stored_paper, setup.paper_unit) {
+        (stored, unit)
+    } else {
+        return (None, None);
+    };
+    match report_units {
+        Some(target) => (Some(paper_in_units(raw, raw_unit, target)), None),
+        None => (Some(raw.clone()), Some(raw_unit)),
+    }
+}
+
 /// One layout of a sheet and its viewports: the layout `sheet` draws, the
 /// sheet `record` holds as one of its layouts prints it.
 fn sheet_layout(
@@ -243,6 +288,7 @@ fn sheet_layout(
     sheet: &Sheet,
     layout_index: usize,
     settings: &Settings,
+    report_units: Option<Unit>,
 ) -> SheetLayout {
     let paper_space = (0..sheet.objects.len())
         .filter(|&i| sheet.in_paper_space(i))
@@ -265,13 +311,9 @@ fn sheet_layout(
     let model_extents = measuring_drawing(&model, &fonts)
         .extents()
         .map(|b| Extents::of(&b));
-    let (paper, page_setup) = if record.is_dwg() && sheet.layout.is_some() {
+    let (paper, paper_unit, page_setup) = if record.is_dwg() && sheet.layout.is_some() {
         let setup = record.layout_setup(layout_index);
-        let paper = sheet
-            .paper
-            .clone()
-            .or_else(|| setup.and_then(|s| s.check_paper.as_ref().map(|cp| cp.paper.clone())))
-            .or_else(|| setup.and_then(|s| s.stored_paper.clone()));
+        let (paper, paper_unit) = dwg_layout_paper(sheet.paper.as_ref(), setup, report_units);
         let page_setup = setup
             .and_then(|s| s.page_setup.as_ref())
             .map(|ps| PageSetupUsed {
@@ -281,7 +323,7 @@ fn sheet_layout(
                 scale: ps.scale.clone(),
                 plot_style: ps.plot_style.clone(),
             });
-        (paper, page_setup)
+        (paper, paper_unit, page_setup)
     } else {
         let page_setup = sheet.layout.as_ref().and_then(|_| {
             let paper = sheet.paper.as_ref()?;
@@ -295,7 +337,7 @@ fn sheet_layout(
                 plot_style: PLOT_STYLE.to_owned(),
             })
         });
-        (sheet.paper.clone(), page_setup)
+        (sheet.paper.clone(), None, page_setup)
     };
     let viewports = sheet
         .viewports()
@@ -321,6 +363,7 @@ fn sheet_layout(
         sheet: record.name.clone(),
         layout: sheet.layout.as_ref().map(|l| l.name.clone()),
         paper,
+        paper_unit,
         page_setup,
         paper_space,
         model_space,
