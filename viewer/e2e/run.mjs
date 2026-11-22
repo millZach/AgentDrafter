@@ -3306,9 +3306,8 @@ const checks = {
         return [r.left + (x - v.left) * v.scale, r.top + (v.top - y) * v.scale];
       }, at);
     // Shows the object at `place` large, and gives a point on the page that
-    // picks it, as a click there does.
-    // The fit's glide is let finish first, or its next frame would put back
-    // the view it was heading for (#180).
+    // picks it, as a click there does. The fit's glide is let finish first:
+    // its next frame would put back the view it was heading for (#180).
     const showAndFind = async (page, place, zoom = 4) => {
       await page.click('[aria-label="Fit the sheet"]').catch(() => page.tap('[aria-label="Fit the sheet"]'));
       await viewAtRest(page);
