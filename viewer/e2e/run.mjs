@@ -5005,10 +5005,19 @@ const checks = {
     };
     // The ring on the page is where the core worked the step's point out
     // to be, to within a pixel and a half, with its tag.
+    // The view may still be gliding to the guide's points, so the ring and
+    // the view are read on one frame, until the view is at rest.
     const ringOn = async (page, guideNo, step, point, label) => {
-      const shown = await ring(page);
-      const [x, y] = await onPage(page, ringAt(guideNo, step, point));
-      assert(Math.hypot(shown.at[0] - x, shown.at[1] - y) <= 1.5, `step ${step}'s ring at (${shown.at}), the core's point at (${x}, ${y})`);
+      const want = ringAt(guideNo, step, point);
+      let shown;
+      let at;
+      for (let i = 0; i < 40; i++) {
+        shown = await ring(page);
+        at = await onPage(page, want);
+        if (Math.hypot(shown.at[0] - at[0], shown.at[1] - at[1]) <= 1.5) break;
+        await sleep(100);
+      }
+      assert(Math.hypot(shown.at[0] - at[0], shown.at[1] - at[1]) <= 1.5, `step ${step}'s ring at (${shown.at}), the core's point at (${at})`);
       assert(shown.tag.includes(label), `the ring's tag names ${label}: ${shown.tag}`);
       return shown;
     };
