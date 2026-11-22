@@ -352,7 +352,8 @@ fn mirror_text(source: &Path, bytes: &[u8], sheet: &str, drawing: &DrawingConten
          never read back, and editing it changes nothing.\n"
     ));
     let key = |out: &mut String, key: &str, value: Value| {
-        out.push_str(&format!("{key}: {}\n", flow(&value)));
+        out.push_str(&pair(key, &value));
+        out.push('\n');
     };
     key(&mut out, "mirror_of", json!(name));
     key(&mut out, "sha256", json!(fingerprint(bytes)));
@@ -491,11 +492,12 @@ fn object_entry<'a>(object: &Object, first: impl IntoIterator<Item = (&'a str, V
     format!("{{{}}}", inner.join(", "))
 }
 
-/// `key: value`, a handle or a list of handles always in double quotes, so
-/// that one such as `1E3` is never read back as a number.
+/// `key: value`, a handle or a list of handles, and a fingerprint, always in
+/// double quotes, so that one such as `1E3` is never read back as a
+/// number.
 fn pair(key: &str, value: &Value) -> String {
     let value = match (key, value) {
-        ("handle", Value::String(h)) => quoted(h),
+        ("handle" | "sha256", Value::String(h)) => quoted(h),
         ("handles", Value::Array(hs)) => {
             let inner: Vec<String> = hs
                 .iter()
@@ -531,7 +533,17 @@ fn flow(value: &Value) -> String {
             format!("[{}]", inner.join(", "))
         }
         Value::Object(map) => {
-            let inner: Vec<String> = map.iter().map(|(k, v)| pair(k, v)).collect();
+            // A named entry's name first, then its other keys in order.
+            let named = map.get("name").map(|name| ("name", name));
+            let inner: Vec<String> = named
+                .into_iter()
+                .chain(
+                    map.iter()
+                        .filter(|(k, _)| *k != "name")
+                        .map(|(k, v)| (k.as_str(), v)),
+                )
+                .map(|(k, v)| pair(k, v))
+                .collect();
             format!("{{{}}}", inner.join(", "))
         }
     }

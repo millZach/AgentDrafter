@@ -261,7 +261,7 @@ The file at the top of a drawing set's folder, `set.yaml`, that declares the set
 _Avoid_: project file, config
 
 **ID**:
-An object's identifier, fixed for the object's life. It lives in the object's record: the sheet's name joined to the `id` the sheet description or template gives the object, such as `DEMO-001/border`, or to the object's place in the file when it gives none. It is unique in the drawing set, and the DWG carries it with the object.
+An object's identifier, fixed for the object's life. It lives in the object's record: the sheet's name joined to the `id` the sheet description or template gives the object, such as `DEMO-001/border`, or to the object's place in the file when it gives none. It is unique in the drawing set, and the DWG carries it with the object. An object of an original that carries no ID of AgentDrafter's takes the original's name joined to its handle, such as `P-101/handle:2F`, which stays while the object does.
 _Avoid_: handle (a handle is the DWG's own identifier), index
 
 **Name**:
@@ -309,6 +309,10 @@ _Avoid_: patch, diff, edit log
 **Text mirror**:
 A readable text rendering of an existing DWG, kept beside it for reading and comparing. It is never the record.
 _Avoid_: dump, export
+
+**Decode report**:
+What a read of a DWG says of the DWG library's reading of it: whether it decoded every record of the file, and each record it did not, by kind, count and handle. A record not decoded is kept as the bytes read, so a revision in the original's version carries it through, but nothing draws, queries or changes it.
+_Avoid_: audit (AutoCAD's AUDIT checks a drawing's integrity), parse log
 
 **Untouched means unchanged**:
 The fidelity rule for a revision: everything AgentDrafter did not edit comes back exactly as it was in the original, including content AgentDrafter does not understand. An original that cannot be fully read is not revised unless the reviewer allows it for that drawing.

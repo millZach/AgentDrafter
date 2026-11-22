@@ -104,7 +104,7 @@ fn an_original_is_read_whole_never_written_and_mirrored_beside_it() {
     reads_as_yaml(&text).unwrap();
     assert!(text.contains("\nmirror_of: P-100.dwg\n"), "{text}");
     assert!(
-        text.contains(&format!("\nsha256: {}\n", fingerprint(&before))),
+        text.contains(&format!("\nsha256: \"{}\"\n", fingerprint(&before))),
         "{text}"
     );
     assert!(text.contains("\ndecoded: true\n"), "{text}");

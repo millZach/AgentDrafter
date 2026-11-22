@@ -1672,7 +1672,9 @@ pub(crate) fn as_someone_elses(dwg: &Path, out: &Path) {
         .retain(|(name, _)| name != BUILD_MARK);
     for entity in drawing.entities_mut() {
         let common = entity.common_mut();
-        common.extended_data.remove_record(block::APPLICATION);
+        // A drawing AgentDrafter built holds no extended data but its own,
+        // kept as the bytes it was read in as well as decoded.
+        common.extended_data = Default::default();
         // Its bytes as read hold the extended data taken off.
         common.raw_record = None;
     }
@@ -1706,9 +1708,6 @@ pub(crate) fn with_a_made_up_custom_object(dwg: &Path, out: &Path, kind: &str) -
     drawing
         .classes
         .add_or_update(DxfClass::new_entity(kind, "AcDbAgentDrafterMadeUp"));
-    // A record of a 2010 DWG or later starts with its type: two bits that
-    // say how it is written, then a byte. A line, 19, is `00` and 19; a
-    // class numbered from 0x1F0 to 0x2EF is `01` and its number less 0x1F0.
     // Classes are numbered by their place when the DWG is written, so the
     // number is read back from the written file until it holds.
     let mut number = drawing
@@ -1717,10 +1716,7 @@ pub(crate) fn with_a_made_up_custom_object(dwg: &Path, out: &Path, kind: &str) -
         .map(|c| c.class_number)
         .expect("the class was added");
     for _ in 0..3 {
-        let offset = u8::try_from(number - 0x1F0).expect("a class numbered below 0x2F0");
-        let mut data = raw.data.clone();
-        data[0] = 0b0100_0000 | (offset >> 2);
-        data[1] = (data[1] & 0b0011_1111) | ((offset & 0b11) << 6);
+        let data = of_type(&raw.data, number);
         let mut unknown = UnknownEntity::new(kind);
         unknown.common = common.clone();
         unknown.dwg_type_code = number;
@@ -1742,6 +1738,49 @@ pub(crate) fn with_a_made_up_custom_object(dwg: &Path, out: &Path, kind: &str) -
         number = given;
     }
     panic!("the made-up class's number never held");
+}
+
+/// Only for tests: the bytes of a record of a 2010 DWG or later, `line`, a
+/// line's, written as a record of type `code` instead. Such a record starts
+/// with its type: two bits that say how it is written, then a byte or two.
+/// A line, 19, is `00` and 19; a type from 0x1F0 to 0x2EF is `01` and the
+/// type less 0x1F0; any other is `10` and the type as two bytes, the low
+/// one first. The rest of the record follows unchanged, its handles found
+/// from its end, so it reads the same however long the type is.
+#[cfg(test)]
+fn of_type(line: &[u8], code: i16) -> Vec<u8> {
+    let bits_of = |byte: u8| (0..8).rev().map(move |i| (byte >> i) & 1 == 1);
+    let bits: Vec<bool> = line.iter().copied().flat_map(bits_of).collect();
+    assert!(
+        !bits[0] && !bits[1] && ((line[0] << 2) | (line[1] >> 6)) == 19,
+        "a line's record starts with its type, 19"
+    );
+    let mut out: Vec<bool> = Vec::new();
+    match code {
+        0..=0xFF => {
+            out.extend([false, false]);
+            out.extend(bits_of(code as u8));
+        }
+        0x1F0..=0x2EF => {
+            out.extend([false, true]);
+            out.extend(bits_of((code - 0x1F0) as u8));
+        }
+        _ => {
+            out.extend([true, false]);
+            for byte in code.to_le_bytes() {
+                out.extend(bits_of(byte));
+            }
+        }
+    }
+    out.extend_from_slice(&bits[10..]);
+    out.chunks(8)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .enumerate()
+                .fold(0_u8, |byte, (i, &bit)| byte | (u8::from(bit) << (7 - i)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
