@@ -473,9 +473,7 @@ fn a_step_is_completed_on_its_sheet_by_its_objects_with_its_id() {
     )
     .unwrap();
     let step = |n: u64, op: Value| json!({"guide": {"guide": 1, "step": n}, "operations": [op]});
-    let line = |sheet: &str, id: &str| {
-        json!({"op": "add_line", "sheet": sheet, "id": id, "from": [1, 1, 0], "to": [2, 1, 0]})
-    };
+    let line = |sheet: &str, id: &str| json!({"op": "add_line", "sheet": sheet, "id": id, "from": [1, 1, 0], "to": [2, 1, 0]});
     let tried = |change_set: Value| {
         let (checked, entry) = landed(&set, change_set);
         undone(&set, entry);
@@ -527,9 +525,7 @@ fn text_matches_exactly_and_a_rectangle_by_its_vertices_in_order() {
         undone(&set, entry);
         checked
     };
-    let polyline = |points: Value| {
-        json!({"op": "add_polyline", "sheet": "DEMO-002", "points": points, "closed": true})
-    };
+    let polyline = |points: Value| json!({"op": "add_polyline", "sheet": "DEMO-002", "points": points, "closed": true});
     // The same four corners crossed, a bow-tie.
     let bow_tie = tried(
         polyline(json!([[1, 1, 0], [3, 2, 0], [3, 1, 0], [1, 2, 0]])),
@@ -544,9 +540,7 @@ fn text_matches_exactly_and_a_rectangle_by_its_vertices_in_order() {
     );
     assert!(reversed.completes, "{}", reversed.message);
 
-    let text = |contents: &str| {
-        json!({"op": "add_text", "sheet": "DEMO-002", "contents": contents, "height": 0.1, "position": [1.2, 1.4, 0]})
-    };
+    let text = |contents: &str| json!({"op": "add_text", "sheet": "DEMO-002", "contents": contents, "height": 0.1, "position": [1.2, 1.4, 0]});
     let shouted = tried(text("PUMP A"), 2);
     assert!(!shouted.completes);
     assert_eq!(

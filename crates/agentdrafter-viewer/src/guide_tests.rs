@@ -286,8 +286,15 @@ fn a_copy_step_counts_its_copies_and_says_when_one_goes_elsewhere() {
     let mut tools = tools();
     let step = copy_step();
     tools.start(ToolKind::Copy, &[4]);
-    assert_eq!(phase(&step, &tools), Phase::Click(1), "picked: its base point");
-    assert_eq!(click(&mut tools, &step, Taken::typed([5.2, 6.75], 0.0)), None);
+    assert_eq!(
+        phase(&step, &tools),
+        Phase::Click(1),
+        "picked: its base point"
+    );
+    assert_eq!(
+        click(&mut tools, &step, Taken::typed([5.2, 6.75], 0.0)),
+        None
+    );
     assert_eq!(phase(&step, &tools), Phase::Click(2));
     let note = click(&mut tools, &step, Taken::typed([6.0, 7.75], 0.0)).unwrap();
     assert_eq!(
@@ -297,7 +304,10 @@ fn a_copy_step_counts_its_copies_and_says_when_one_goes_elsewhere() {
     assert!(take_back(&mut tools, note.place.unwrap()));
     assert_eq!(tools.state(false).placed, 0);
     assert_eq!(phase(&step, &tools), Phase::Click(2));
-    assert_eq!(click(&mut tools, &step, Taken::typed([5.2, 7.75], 0.0)), None);
+    assert_eq!(
+        click(&mut tools, &step, Taken::typed([5.2, 7.75], 0.0)),
+        None
+    );
     // Placed where it goes: no ring, Enter next, and a copy more is said.
     assert_eq!(phase(&step, &tools), Phase::Finish);
     assert_eq!(ring(&step, &tools), None);
@@ -335,7 +345,11 @@ fn do_it_for_me_sends_an_add_on_the_current_layer_and_space() {
     let add = json!({"op": "add_line", "sheet": "DP-LD-101", "from": [0, 0], "to": [1, 0]});
     assert_eq!(filled(&add, &tools)["layer"], "wire");
     let own = json!({"op": "add_line", "layer": "notes"});
-    assert_eq!(filled(&own, &tools)["layer"], "notes", "the step's own layer");
+    assert_eq!(
+        filled(&own, &tools)["layer"],
+        "notes",
+        "the step's own layer"
+    );
     let moved = json!({"op": "move", "target": {"id": "DP-LD-101/text-1"}, "by": [0, 1, 0]});
     assert_eq!(filled(&moved, &tools), moved, "only an add takes a layer");
 }

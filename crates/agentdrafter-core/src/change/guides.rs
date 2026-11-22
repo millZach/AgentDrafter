@@ -795,7 +795,8 @@ fn points_agree(s: usize, step: &StepGiven, walked: &StepWalked) -> Result<(), E
             };
             let fits = |c: &[[f64; 3]]| {
                 c.len() == 2
-                    && ((near(c[0], from) && near(c[1], to)) || (near(c[0], to) && near(c[1], from)))
+                    && ((near(c[0], from) && near(c[1], to))
+                        || (near(c[0], to) && near(c[1], from)))
             };
             if !fits(&clicks) {
                 return wrong(format!(
@@ -1522,7 +1523,11 @@ fn same_polyline(want: &[Value], got: &[Value], closed: bool) -> bool {
     }
     // Run the other way from vertex `s`: its k-th vertex is `s - k`, and
     // its k-th segment the one from `s - k - 1`, its bulge turned.
-    let ends: Vec<usize> = if closed { (0..n).collect() } else { vec![n - 1] };
+    let ends: Vec<usize> = if closed {
+        (0..n).collect()
+    } else {
+        vec![n - 1]
+    };
     ends.iter().any(|&s| {
         (0..n).all(|k| {
             let i = (s + n - k) % n;
@@ -1537,8 +1542,7 @@ fn same_polyline(want: &[Value], got: &[Value], closed: bool) -> bool {
 fn normal(op: &Value, name: &str) -> Value {
     let mut op = op.clone();
     if name == "move" || name == "copy" {
-        if let (Some(from), Some(to)) = (op.get("from").and_then(xyz), op.get("to").and_then(xyz))
-        {
+        if let (Some(from), Some(to)) = (op.get("from").and_then(xyz), op.get("to").and_then(xyz)) {
             let by = json!([to[0] - from[0], to[1] - from[1], to[2] - from[2]]);
             if let Value::Object(map) = &mut op {
                 map.remove("from");
