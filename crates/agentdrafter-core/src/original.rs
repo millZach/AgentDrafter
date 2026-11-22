@@ -28,7 +28,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::build::is_same_file;
+#[cfg(any(unix, windows))]
+use crate::build::file_id_of_file;
+use crate::build::{file_id_of_path, is_same_file, FileId};
 use crate::description::{number_text, ID_SEPARATOR};
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
@@ -284,15 +286,43 @@ pub(crate) fn handle_id(sheet: &str, handle: &str) -> String {
 }
 
 /// The name an original's objects' IDs start with: its on-disk file's name
-/// without its `.dwg`, resolved through the file system when the file
-/// exists so the same file gives the same IDs regardless of the case used
-/// to name its path.
+/// without its `.dwg`, resolved through the file system and its parent
+/// directory's own entry when the file exists so the same file gives the
+/// same IDs regardless of the case used to name its path (including on
+/// case-insensitive volumes mounted on Linux, where `realpath` keeps the
+/// caller's spelling).
 pub(crate) fn sheet_name(source: &Path) -> String {
-    let resolved = fs::canonicalize(source);
-    let path = resolved.as_deref().unwrap_or(source);
+    let path = on_disk_path(source);
     path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Resolves `source` to its canonical on-disk filename, scanning the parent
+/// directory and matching file identity + case-insensitive name so that on
+/// case-insensitive volumes (including under Linux) the directory entry's
+/// stored letter case wins over the caller's spelling.
+fn on_disk_path(source: &Path) -> PathBuf {
+    let resolved = fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    let (Some(parent), Some(wanted_name)) = (resolved.parent(), resolved.file_name()) else {
+        return resolved;
+    };
+    let Some(target_id) = file_id_of_path(&resolved) else {
+        return resolved;
+    };
+    let wanted_str = wanted_name.to_string_lossy();
+    let Ok(entries) = fs::read_dir(parent) else {
+        return resolved;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().eq_ignore_ascii_case(&wanted_str)
+            && file_id_of_path(&entry.path()) == Some(target_id)
+        {
+            return parent.join(name);
+        }
+    }
+    resolved
 }
 
 /// Whether `source` is read as a DWG: its name ends `.dwg`, in any case.
@@ -365,10 +395,21 @@ fn refuse_to_replace(source: &Path, mirror: &Path) -> Result<MirrorTarget, Error
         )
         .in_file(mirror));
     }
-    let is_mirror = read_mirror_prefix(mirror, &meta)
-        .map(|bytes| bytes.starts_with(MIRROR_MARK.as_bytes()))
-        .unwrap_or(false);
-    if is_mirror {
+    let source_id = file_id_of_path(source);
+    let prefix = match read_mirror_prefix(mirror, &meta, source_id) {
+        Ok(Some(prefix)) => prefix,
+        Ok(None) => {
+            return Err(Error::new(
+                ErrorCode::NotAnOutput,
+                "the mirror's path changed while inspecting it (or is a link or the original); \
+                 choose another path for the mirror",
+            )
+            .in_file(mirror));
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(MirrorTarget::CreateNew),
+        Err(_) => Vec::new(),
+    };
+    if prefix.starts_with(MIRROR_MARK.as_bytes()) {
         Ok(MirrorTarget::ReplaceExisting)
     } else {
         Err(Error::new(
@@ -381,27 +422,109 @@ fn refuse_to_replace(source: &Path, mirror: &Path) -> Result<MirrorTarget, Error
     }
 }
 
-/// Reads at most the first `MIRROR_MARK.len()` bytes of `mirror`, verifying
-/// the opened file is the same regular non-symlink file as `expected`.
-fn read_mirror_prefix(mirror: &Path, expected: &fs::Metadata) -> io::Result<Vec<u8>> {
-    let file = File::open(mirror)?;
+#[cfg(unix)]
+const O_NOFOLLOW: i32 = {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        0x0100
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "aarch64", target_arch = "arm")
+    ))]
+    {
+        0x10000
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(target_arch = "aarch64", target_arch = "arm"))
+    ))]
+    {
+        0x20000
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "linux",
+        target_os = "android"
+    )))]
+    {
+        0
+    }
+};
+
+/// Opens `mirror` without following a trailing symlink or reparse point,
+/// verifies on the opened handle that it is a regular non-symlink file that
+/// matches `expected` and is not `source_id`, and reads at most the first
+/// `MIRROR_MARK.len()` bytes. Returns `Ok(None)` when the opened handle
+/// fails those identity/type checks.
+fn read_mirror_prefix(
+    mirror: &Path,
+    expected: &fs::Metadata,
+    source_id: Option<FileId>,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if O_NOFOLLOW != 0 {
+            opts.custom_flags(O_NOFOLLOW);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(crate::build::win_file::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = opts.open(mirror)?;
     let opened = file.metadata()?;
     if !opened.file_type().is_file() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        if opened.dev() != expected.dev() || opened.ino() != expected.ino() {
-            return Ok(Vec::new());
+        let expected_id = crate::build::symlink_file_id(expected);
+        let opened_id = file_id_of_file(&file);
+        if opened_id != Some(expected_id) || (source_id.is_some() && opened_id == source_id) {
+            return Ok(None);
         }
     }
-    #[cfg(not(unix))]
-    let _ = expected;
+    #[cfg(windows)]
+    {
+        let _ = expected;
+        let Some(info) = crate::build::win_file::file_info(&file) else {
+            return Ok(None);
+        };
+        let bad = crate::build::win_file::FILE_ATTRIBUTE_DIRECTORY
+            | crate::build::win_file::FILE_ATTRIBUTE_REPARSE_POINT;
+        if (info.file_attributes & bad) != 0 {
+            return Ok(None);
+        }
+        let opened_id = file_id_of_file(&file);
+        if source_id.is_some() && opened_id == source_id {
+            return Ok(None);
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (expected, source_id);
+    }
     let mut prefix = Vec::with_capacity(MIRROR_MARK.len());
     file.take(MIRROR_MARK.len() as u64)
         .read_to_end(&mut prefix)?;
-    Ok(prefix)
+    Ok(Some(prefix))
 }
 
 /// Creates a brand-new temporary file beside `path` with an unpredictable
@@ -438,11 +561,177 @@ fn random_u64(path: &Path, salt: u64) -> u64 {
     hasher.finish()
 }
 
+/// Atomically moves `temporary` into place at `path` only when `path` does
+/// not already exist, never overwriting a file that appeared meanwhile and
+/// never streaming partially into `path`. Always cleans up `temporary`.
+fn place_new(temporary: &Path, path: &Path) -> Result<(), Error> {
+    let appeared = || {
+        Error::new(
+            ErrorCode::NotAnOutput,
+            "a file appeared at the mirror's path while reading; it may be someone's own file, \
+             which is never overwritten, so choose another path for the mirror",
+        )
+        .in_file(path)
+    };
+    let write_err = |e: io::Error| {
+        Error::new(
+            ErrorCode::WriteFailed,
+            format!("could not write the text mirror: {e}"),
+        )
+        .in_file(path)
+    };
+
+    #[cfg(windows)]
+    {
+        match rename_no_replace_windows(temporary, path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists || e.raw_os_error() == Some(183) => {
+                let _ = fs::remove_file(temporary);
+                Err(appeared())
+            }
+            Err(e) => {
+                let _ = fs::remove_file(temporary);
+                Err(write_err(e))
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match fs::hard_link(temporary, path) {
+            Ok(()) => {
+                let _ = fs::remove_file(temporary);
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(temporary);
+                Err(appeared())
+            }
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                match rename_no_replace_unix(temporary, path) {
+                    Ok(()) => Ok(()),
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                        let _ = fs::remove_file(temporary);
+                        Err(appeared())
+                    }
+                    Err(err) => {
+                        let _ = fs::remove_file(temporary);
+                        Err(write_err(err))
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = fs::remove_file(temporary);
+                Err(write_err(e))
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn rename_no_replace_windows(temporary: &Path, path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+
+    let src: Vec<u16> = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let dst: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `src` and `dst` are valid NUL-terminated UTF-16 paths; flags=0
+    // requests an atomic rename without `MOVEFILE_REPLACE_EXISTING`.
+    let ok = unsafe { MoveFileExW(src.as_ptr(), dst.as_ptr(), 0) };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rename_no_replace_unix(temporary: &Path, path: &Path) -> io::Result<()> {
+    use std::ffi::{c_char, c_int, c_uint, CString};
+    use std::os::unix::ffi::OsStrExt;
+
+    const AT_FDCWD: c_int = -100;
+    const RENAME_NOREPLACE: c_uint = 1;
+
+    extern "C" {
+        fn renameat2(
+            olddirfd: c_int,
+            oldpath: *const c_char,
+            newdirfd: c_int,
+            newpath: *const c_char,
+            flags: c_uint,
+        ) -> c_int;
+    }
+
+    let src = CString::new(temporary.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a nul byte"))?;
+    let dst = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a nul byte"))?;
+    // SAFETY: `src` and `dst` are valid NUL-terminated C strings.
+    let rc = unsafe {
+        renameat2(
+            AT_FDCWD,
+            src.as_ptr(),
+            AT_FDCWD,
+            dst.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_no_replace_unix(temporary: &Path, path: &Path) -> io::Result<()> {
+    use std::ffi::{c_char, c_int, c_uint, CString};
+    use std::os::unix::ffi::OsStrExt;
+
+    const RENAME_EXCL: c_uint = 0x0000_0004;
+
+    extern "C" {
+        fn renamex_np(from: *const c_char, to: *const c_char, flags: c_uint) -> c_int;
+    }
+
+    let src = CString::new(temporary.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a nul byte"))?;
+    let dst = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a nul byte"))?;
+    // SAFETY: `src` and `dst` are valid NUL-terminated C strings.
+    let rc = unsafe { renamex_np(src.as_ptr(), dst.as_ptr(), RENAME_EXCL) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn rename_no_replace_unix(_temporary: &Path, _path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this filesystem does not support atomic non-replacing placement",
+    ))
+}
+
 /// Writes `bytes` to a brand-new unpredictable temporary file beside
 /// `path`, then places it at `path` whole: without overwriting anything
-/// that appeared meanwhile when creating a new mirror, and only after
-/// re-verifying a regular non-symlink AgentDrafter mirror when replacing
-/// one.
+/// that appeared meanwhile when creating a new mirror (or if an existing
+/// mirror disappeared before replacement), and only after re-verifying a
+/// regular non-symlink AgentDrafter mirror when replacing one.
 fn write_whole(
     source: &Path,
     path: &Path,
@@ -464,59 +753,18 @@ fn write_whole(
         return Err(write_err(e));
     }
     match target {
-        MirrorTarget::CreateNew => match fs::hard_link(&temporary, path) {
-            Ok(()) => {
+        MirrorTarget::CreateNew => place_new(&temporary, path),
+        MirrorTarget::ReplaceExisting => match refuse_to_replace(source, path) {
+            Err(err) => {
                 let _ = fs::remove_file(&temporary);
-                Ok(())
+                Err(err)
             }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(&temporary);
-                Err(Error::new(
-                    ErrorCode::NotAnOutput,
-                    "a file appeared at the mirror's path while reading; it may be someone's own \
-                     file, which is never overwritten, so choose another path for the mirror",
-                )
-                .in_file(path))
-            }
-            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
-                let _ = fs::remove_file(&temporary);
-                let mut direct = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(path)
-                    .map_err(|err| {
-                        if err.kind() == io::ErrorKind::AlreadyExists {
-                            Error::new(
-                                ErrorCode::NotAnOutput,
-                                "a file appeared at the mirror's path while reading; it may be \
-                                 someone's own file, which is never overwritten, so choose \
-                                 another path for the mirror",
-                            )
-                            .in_file(path)
-                        } else {
-                            write_err(err)
-                        }
-                    })?;
-                direct
-                    .write_all(bytes)
-                    .and_then(|()| direct.sync_all())
-                    .map_err(write_err)
-            }
-            Err(e) => {
-                let _ = fs::remove_file(&temporary);
-                Err(write_err(e))
-            }
-        },
-        MirrorTarget::ReplaceExisting => {
-            if let Err(err) = refuse_to_replace(source, path) {
-                let _ = fs::remove_file(&temporary);
-                return Err(err);
-            }
-            fs::rename(&temporary, path).map_err(|e| {
+            Ok(MirrorTarget::CreateNew) => place_new(&temporary, path),
+            Ok(MirrorTarget::ReplaceExisting) => fs::rename(&temporary, path).map_err(|e| {
                 let _ = fs::remove_file(&temporary);
                 write_err(e)
-            })
-        }
+            }),
+        },
     }
 }
 
@@ -833,18 +1081,28 @@ fn pair(key: &str, value: &Value) -> String {
     format!("{}: {value}", scalar(key))
 }
 
-/// `text` in double quotes, escaped as JSON escapes it (plus Unicode line
-/// separators YAML 1.1 treats as line breaks), which YAML reads back as
-/// `text` on one line.
+/// `text` in double quotes, escaped as JSON escapes it plus DEL (`U+007F`),
+/// C1 control characters (`U+0080..=U+009F`), and Unicode line separators
+/// (`U+2028`, `U+2029`) that YAML 1.2 forbids unescaped or treats as line
+/// breaks, so YAML 1.1 and 1.2 always read it back as `text` on one line.
 fn quoted(text: &str) -> String {
     let raw = serde_json::to_string(text).unwrap_or_default();
-    if raw.contains(['\u{0085}', '\u{2028}', '\u{2029}']) {
-        raw.replace('\u{0085}', "\\u0085")
-            .replace('\u{2028}', "\\u2028")
-            .replace('\u{2029}', "\\u2029")
-    } else {
-        raw
+    if !raw
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return raw;
     }
+    let mut out = String::with_capacity(raw.len() + 8);
+    for c in raw.chars() {
+        if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+            use std::fmt::Write as _;
+            let _ = write!(out, "\\u{:04X}", c as u32);
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// `value` in YAML's flow style on one line: mappings in braces, lists in

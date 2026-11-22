@@ -597,3 +597,52 @@ fn read_through_the_registry_never_triggers_drawing_set_journal_recovery() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn read_schema_and_command_agree_on_mirror_null_and_no_mirror_combination() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("commands-read-schema");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let yaml = dir.join("one.yaml");
+    std::fs::write(
+        &yaml,
+        "units: mm\nobjects:\n  - line: {from: [0, 0, 0], to: [10, 0, 0]}\n",
+    )
+    .unwrap();
+    let built = run("build", json!({"source": yaml}));
+    assert_eq!(built["ok"], true, "{built}");
+    let dwg = dir.join("one.dwg");
+    let custom_mirror = dir.join("custom.mirror.yaml");
+
+    let command = commands().iter().find(|c| c.name() == "read").unwrap();
+    let validator = jsonschema::validator_for(&command.input_schema()).unwrap();
+
+    for (input, valid) in [
+        (json!({"source": dwg}), true),
+        (
+            json!({"source": dwg, "mirror": null, "no_mirror": true}),
+            true,
+        ),
+        (
+            json!({"source": dwg, "mirror": custom_mirror, "no_mirror": false}),
+            true,
+        ),
+        (
+            json!({"source": dwg, "mirror": custom_mirror, "no_mirror": true}),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            validator.is_valid(&input),
+            valid,
+            "read schema with {input}"
+        );
+        let reply = run("read", input.clone());
+        assert_eq!(reply["ok"], valid, "read command with {input}: {reply}");
+        if !valid {
+            assert_eq!(reply["error"]["code"], "usage", "{reply}");
+        }
+    }
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

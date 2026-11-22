@@ -148,7 +148,7 @@ fn styles_dictionary(drawing: &CadDocument) -> Option<Handle> {
     drawing
         .objects
         .iter()
-        .filter_map(|(handle, object)| match object {
+        .find_map(|(handle, object)| match object {
             ObjectType::Dictionary(d) => d
                 .entries
                 .iter()
@@ -162,7 +162,6 @@ fn styles_dictionary(drawing: &CadDocument) -> Option<Handle> {
                 .then_some(*handle),
             _ => None,
         })
-        .min_by_key(|h| h.value())
 }
 
 /// The handle of the multileader style named `name` in the drawing.
@@ -170,11 +169,10 @@ fn style_handle(drawing: &CadDocument, name: &str) -> Option<Handle> {
     drawing
         .objects
         .iter()
-        .filter_map(|(handle, object)| match object {
+        .find_map(|(handle, object)| match object {
             ObjectType::MultiLeaderStyle(style) if style.name == name => Some(*handle),
             _ => None,
         })
-        .min_by_key(|h| h.value())
 }
 
 /// The handle of the block AutoCAD draws `arrowhead` from, which the

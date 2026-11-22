@@ -54,7 +54,7 @@ The core reads what it has a model for, as `render`, `plot` and `display-list` r
 
 ## IDs
 
-Every object the core reads, both on the sheet and inside block definitions, has a unique [ID](../CONTEXT.md) an agent can name it by. An object AgentDrafter built carries its own in the DWG, such as `DEMO-001/border`, and keeps it when it does not collide with another object's ID or handle ID. Any other takes the drawing's name, its on-disk file's name without `.dwg`, joined to its handle: `P-101/handle:2F`. A handle is the DWG's own name for a record, which AutoCAD keeps for the object's life through every save, so the ID is the same each time the same file is read (whatever letter case is used to pass its path), and stays while the object does. The [text mirror](#the-text-mirror) gives each object's ID and handle, inside blocks as on the sheet; `display-list` gives each object of a DWG its ID the same way.
+Every object the core reads, both on the sheet and inside block definitions, has a unique [ID](../CONTEXT.md) an agent can name it by. An object AgentDrafter built carries its own in the DWG, such as `DEMO-001/border`, and keeps it when it does not collide with another object's ID or handle ID. Any other takes the drawing's name, its on-disk file's name without `.dwg`, joined to its handle: `P-101/handle:2F`. A handle is the DWG's own name for a record, which AutoCAD keeps for the object's life through every save, so the ID is the same each time the same file is read (whatever letter case is used to pass its path), and stays while the object does. The [text mirror](#the-text-mirror) gives each object's ID and handle for both sheet objects and block-definition objects; `display-list` gives IDs for sheet objects the same way.
 
 ## The text mirror
 

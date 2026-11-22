@@ -139,15 +139,17 @@ impl Command {
             || matches!(self.name, "propose" | "proposals" | "guide" | "guides");
         // What the drafter is looking at is kept beside the set's records,
         // not in them, and `read` reads a DWG on its own without touching any
-        // set: none of them rolls back or waits on an unfinished commit.
+        // set: none of them probes a set, rolls back, or waits on an
+        // unfinished commit.
         let beside = matches!(self.name, "look-at" | "looking-at" | "read");
-        let rolled_back = match set_read(&input)
-            .filter(|_| !previews && !beside)
-            .map(|set| recover(&set))
-        {
-            Some(Err(error)) => return Reply::from(Err(error)),
-            Some(Ok(rolled_back)) => rolled_back,
-            None => None,
+        let rolled_back = if previews || beside {
+            None
+        } else {
+            match set_read(&input).map(|set| recover(&set)) {
+                Some(Err(error)) => return Reply::from(Err(error)),
+                Some(Ok(rolled_back)) => rolled_back,
+                None => None,
+            }
         };
         let outcome = match input {
             Value::Object(input) => (self.run)(input, settings, via),
@@ -1712,33 +1714,46 @@ fn read_does() -> String {
         "Reads an original, `source`, a DWG someone else drew, whole, and never writes it. The \
          reply says whether the DWG library decoded every record of the file whole, `decoded`, \
          and names each record it could not—opaque, proxy and custom records kept as raw bytes, \
-         records cut short such as a mesh over the face budget, and damaged records skipped while \
-         reading past damage—under `not_decoded`, by `kind`, `count` and the `handles` AutoCAD \
-         lists them by, with how many it `skipped` unread, the errors it `recovered_errors` from, \
-         any non-fatal reader `warnings`, and `diagnostics_truncated` when the library hit its \
-         diagnostic cap (999 entries) so some diagnostics may be omitted; and it names in the same \
-         way, under `not_read`, the objects of the sheet the core has no model for or that were \
-         skipped unread, which render, plot and the viewer do not draw, with what of the drawing's \
-         tables, blocks and layouts it could not read under `tables_not_read`. Every object read \
-         has a unique ID: the one AgentDrafter wrote on it, or the drawing's name joined to its \
-         handle, such as P-101/{HANDLE_ID}2F, the same each time the file is read. It writes the \
-         drawing's text mirror, a readable YAML rendering of what it read with each object's ID \
-         and handle on a line of its own (in block definitions as on the sheet), for reading and \
-         comparing and never read back, beside the original as P-101.{MIRROR_EXTENSION}, or at \
-         `mirror`; a mirror is replaced only when AgentDrafter wrote it, as its first line shows, \
-         and never follows or replaces a symbolic link. With `no_mirror` it writes nothing."
+         records cut short such as a mesh over the face budget, failed or truncated sections, \
+         and damaged records skipped while reading past damage—under `not_decoded`, by `kind`, \
+         `count` and the `handles` AutoCAD lists them by, with how many it `skipped` unread, the \
+         errors it `recovered_errors` from, any non-fatal reader `warnings`, \
+         `diagnostics_truncated` when the library hit its diagnostic cap (999 entries) so some \
+         diagnostics may be omitted, and `read_past_damage` when the strict read failed and the \
+         file was read past its damage; and it names in the same way, under `not_read`, the \
+         objects of the sheet the core has no model for or that were skipped unread, which \
+         render, plot and the viewer do not draw, with what of the drawing's tables, blocks and \
+         layouts it could not read under `tables_not_read`. Every object read has a unique ID: \
+         the one AgentDrafter wrote on it, or the drawing's name joined to its handle, such as \
+         P-101/{HANDLE_ID}2F, the same each time the file is read. It writes the drawing's text \
+         mirror, a readable YAML rendering of what it read with each object's ID and handle on a \
+         line of its own (in block definitions as on the sheet), for reading and comparing and \
+         never read back, beside the original as P-101.{MIRROR_EXTENSION}, or at `mirror`; a \
+         mirror is replaced only when AgentDrafter wrote it, as its first line shows, and never \
+         follows or replaces a symbolic link. With `no_mirror` it writes nothing."
     )
 }
 
 fn read_input() -> Value {
-    input(
+    let mut schema = input(
         json!({
             "source": text("The original to read: a DWG."),
-            "mirror": text("Where to write the text mirror. Without it, beside the original, named after it with .mirror.yaml in place of .dwg. Not given with `no_mirror`."),
+            "mirror": {
+                "description": "Where to write the text mirror, or null for the default beside the original (named after it with .mirror.yaml in place of .dwg). Not given with `no_mirror: true`.",
+                "type": ["string", "null"],
+            },
             "no_mirror": flag("Read only, and write no text mirror."),
         }),
         &["source"],
-    )
+    );
+    schema["not"] = json!({
+        "required": ["mirror", "no_mirror"],
+        "properties": {
+            "mirror": { "type": "string" },
+            "no_mirror": { "const": true },
+        },
+    });
+    schema
 }
 
 fn run_read(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<JsonReply, Error> {

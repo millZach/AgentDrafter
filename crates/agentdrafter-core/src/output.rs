@@ -104,12 +104,14 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
     if kind == SourceKind::Dwg {
         let drawing = dwg::read_bytes(&bytes, source)?;
         let ids = crate::original::ids_of(source, &drawing);
-        let mut files = vec![(kind, source.to_path_buf(), bytes)];
         // Zach decided on 2026-11-13 that a DWG plots on the paper its
         // sheet declares, read from the set its build mark names; the DWG
-        // itself holds no paper.
+        // itself holds no paper. Read the build mark from the exact bytes
+        // already in memory so `source` is never reopened.
         let units = drawing.units.unwrap_or(Unit::Mm);
-        let paper = crate::set::paper_of_dwg(source).and_then(|found| {
+        let found_paper = crate::set::paper_of_dwg_bytes(source, &bytes);
+        let mut files = vec![(kind, source.to_path_buf(), bytes)];
+        let paper = found_paper.and_then(|found| {
             files.extend(found.read);
             // The paper in the DWG's own unit, should the set's have moved on.
             found.paper.map(|paper| Paper {

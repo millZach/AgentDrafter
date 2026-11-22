@@ -221,20 +221,151 @@ fn refuse_unless_built(output: &Path) -> Result<(), Error> {
     .in_file(output))
 }
 
+/// Platform file identity: `(dev, ino)` on Unix, `(volume, index_high,
+/// index_low)` via `GetFileInformationByHandle` on Windows.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileId {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileId {
+    volume: u32,
+    high: u32,
+    low: u32,
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileId;
+
+#[cfg(windows)]
+pub(crate) mod win_file {
+    use std::ffi::c_void;
+    use std::fs::File;
+    use std::os::windows::io::AsRawHandle;
+
+    pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    pub(crate) const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+    pub(crate) const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub(crate) struct ByHandleFileInformation {
+        pub file_attributes: u32,
+        creation_time: FileTime,
+        last_access_time: FileTime,
+        last_write_time: FileTime,
+        pub volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        pub file_index_high: u32,
+        pub file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileInformationByHandle(file: *mut c_void, info: *mut ByHandleFileInformation)
+            -> i32;
+    }
+
+    pub(crate) fn file_info(file: &File) -> Option<ByHandleFileInformation> {
+        let mut info = ByHandleFileInformation::default();
+        // SAFETY: `file.as_raw_handle()` is a valid open Windows handle for the
+        // duration of the call, and `info` points to an initialized struct.
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+        (ok != 0).then_some(info)
+    }
+}
+
+/// The identity of an already-opened file handle.
+#[cfg(unix)]
+pub(crate) fn file_id_of_file(file: &File) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().ok()?;
+    Some(FileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn file_id_of_file(file: &File) -> Option<FileId> {
+    let info = win_file::file_info(file)?;
+    Some(FileId {
+        volume: info.volume_serial_number,
+        high: info.file_index_high,
+        low: info.file_index_low,
+    })
+}
+
+/// The identity of the file at `path` (following links).
+#[cfg(unix)]
+pub(crate) fn file_id_of_path(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path).ok()?;
+    Some(FileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn file_id_of_path(path: &Path) -> Option<FileId> {
+    let file = File::open(path).ok()?;
+    file_id_of_file(&file)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn file_id_of_path(_path: &Path) -> Option<FileId> {
+    None
+}
+
+/// The identity of the entry at `path` without following a trailing link.
+#[cfg(unix)]
+pub(crate) fn symlink_file_id(meta: &fs::Metadata) -> FileId {
+    use std::os::unix::fs::MetadataExt;
+    FileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    }
+}
+
 /// Whether `a` and `b` name one file that is there, as the file system
-/// sees it: through links, `..`, and case where the file system ignores
-/// case. On Unix the file's device and number say; elsewhere its full
-/// path as the system resolves it does.
+/// sees it: through links (including hard links), `..`, and case where the
+/// file system ignores case. On Unix `(dev, ino)` says; on Windows
+/// `GetFileInformationByHandle` says for files (with `canonicalize` fallback
+/// for directories); elsewhere `canonicalize` says.
 pub(crate) fn is_same_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        match (fs::metadata(a), fs::metadata(b)) {
-            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        match (file_id_of_path(a), file_id_of_path(b)) {
+            (Some(a), Some(b)) => a == b,
             _ => false,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match (file_id_of_path(a), file_id_of_path(b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => match (fs::canonicalize(a), fs::canonicalize(b)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            },
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     match (fs::canonicalize(a), fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,

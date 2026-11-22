@@ -727,7 +727,7 @@ pub(crate) fn read(path: &Path) -> Result<DrawingContents, Error> {
 /// fingerprint and the geometry come from the exact same bytes.
 pub(crate) fn read_bytes(bytes: &[u8], path: &Path) -> Result<DrawingContents, Error> {
     let (drawing, stats) = read_drawing_bytes_with_stats(bytes, path, false)?;
-    contents(&drawing, &stats)
+    contents(&drawing, &stats, raw_dwg_version(bytes))
 }
 
 /// Reads the drawing in the DWG at `path` as [`read`] does; when the DWG
@@ -744,24 +744,39 @@ pub(crate) fn read_past_damage(path: &Path) -> Result<DrawingContents, Error> {
 /// Reads the drawing from `bytes`, already read from `path`, past damaged
 /// records as [`read_past_damage`] does.
 pub(crate) fn read_bytes_past_damage(bytes: &[u8], path: &Path) -> Result<DrawingContents, Error> {
+    let raw_version = raw_dwg_version(bytes);
     let strict = match read_drawing_bytes_with_stats(bytes, path, false) {
-        Ok((drawing, stats)) => return contents(&drawing, &stats),
+        Ok((drawing, stats)) => return contents(&drawing, &stats, raw_version),
         Err(error) => error,
     };
     let Ok((drawing, stats)) = read_drawing_bytes_with_stats(bytes, path, true) else {
         return Err(strict);
     };
-    if !stats.has_usable_drawing_data() {
-        return Err(strict);
-    }
-    let mut read = contents(&drawing, &stats)?;
+    let mut read = contents(&drawing, &stats, raw_version)?;
     read.decode.decoded = false;
     read.decode.read_past_damage = Some(strict.message);
     Ok(read)
 }
 
+/// The 6-byte ASCII version tag from the start of a DWG file (such as
+/// `AC1006`, `AC1021`, `AC1032`, or `AD1021`), preserving the exact version
+/// the original arrived in even when the DWG library normalizes older
+/// versions internally (such as `AC1006` -> `AC1009`).
+fn raw_dwg_version(bytes: &[u8]) -> Option<String> {
+    let header = bytes.get(..6)?;
+    let text = std::str::from_utf8(header).ok()?;
+    let digits = text
+        .strip_prefix("AC")
+        .or_else(|| text.strip_prefix("AD"))?;
+    (digits.len() == 4 && digits.bytes().all(|b| b.is_ascii_digit())).then(|| text.to_owned())
+}
+
 /// What the core reads of `drawing`, read with `stats`.
-fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<DrawingContents, Error> {
+fn contents(
+    drawing: &CadDocument,
+    stats: &acadrust::ReadStats,
+    raw_version: Option<String>,
+) -> Result<DrawingContents, Error> {
     let mut linetypes = Vec::new();
     let mut linetypes_not_read = 0;
     for dwg_linetype in drawing.line_types.iter() {
@@ -1025,7 +1040,7 @@ fn contents(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Result<Drawin
     let other_layouts: Vec<crate::model::Layout> = layouts.collect();
     let paper = layout.as_ref().and_then(|l| l.paper.clone());
     Ok(DrawingContents {
-        dwg_version: drawing.version.to_string(),
+        dwg_version: raw_version.unwrap_or_else(|| drawing.version.to_string()),
         units,
         linetypes,
         linetypes_not_read,
@@ -1141,7 +1156,7 @@ fn undecoded_object_kind(object: &EntityType) -> Option<String> {
 fn undecoded_non_graphical(
     object: &acadrust::objects::ObjectType,
 ) -> Option<(acadrust::types::Handle, String)> {
-    use acadrust::objects::{ClassObjectData, ObjectType};
+    use acadrust::objects::{ClassObjectData, DgnLineStyleData, ObjectType};
     match object {
         ObjectType::Unknown {
             type_name, handle, ..
@@ -1157,6 +1172,19 @@ fn undecoded_non_graphical(
                 non_empty(&data.cpp_class_name, || "REGISTERED_CLASS".to_owned())
             }),
         )),
+        ObjectType::DgnLineStyle(dgn) => match &dgn.data {
+            DgnLineStyleData::Definition {
+                undecoded_fields: Some(_),
+                ..
+            } => Some((dgn.handle, "LSDEFINITION".to_owned())),
+            DgnLineStyleData::Registered {
+                dxf_name, payload, ..
+            } if !payload.records.is_empty() => Some((
+                dgn.handle,
+                non_empty(dxf_name, || "DGN_LINESTYLE".to_owned()),
+            )),
+            _ => None,
+        },
         ObjectType::ClassObject(data) => match &data.data {
             ClassObjectData::CsacDocumentOptions(options) if options.raw_dwg_data.is_some() => {
                 Some((data.handle, "CSACDOCUMENTOPTIONS".to_owned()))
@@ -1350,12 +1378,65 @@ fn diagnostic_record_kind(record_type: Option<&str>, drawing: &CadDocument) -> (
     }
 }
 
+/// The `not_decoded` kind for a section-level extraction or decode failure
+/// diagnostic from the DWG library, when `code` names one.
+fn failed_section_kind(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "classes-decode-failed" | "classes-extract-failed" => "FAILED_CLASSES_SECTION",
+        "header-decode-failed" | "header-extract-failed" => "FAILED_HEADER_SECTION",
+        "template-decode-failed" => "FAILED_TEMPLATE_SECTION",
+        "handles-decode-failed" | "handles-extract-failed" => "FAILED_HANDLES_SECTION",
+        "objects-init-failed" | "objects-extract-failed" => "FAILED_OBJECTS_SECTION",
+        "decryption-failed" => "FAILED_SECURITY_SECTION",
+        "file-header-read-failed" => "FAILED_FILE_HEADER",
+        "legacy-read-failed" => "FAILED_LEGACY_READ",
+        _ => return None,
+    })
+}
+
+/// Whether `stats` carries any section extraction/decode failure or
+/// truncation diagnostic.
+fn has_section_failure_or_truncation(stats: &acadrust::ReadStats) -> bool {
+    stats.diagnostics.iter().any(|d| {
+        matches!(
+            d.code.as_str(),
+            "section-read-truncated" | "section-page-skipped"
+        ) || failed_section_kind(&d.code).is_some()
+    })
+}
+
+/// Whether a `NotificationType::Warning` message from acadrust is an
+/// informational trace emitted on healthy DWG reads (or a failsafe summary
+/// already recorded under `not_decoded`), rather than a genuine reader
+/// warning.
+fn is_informational_trace_warning(message: &str) -> bool {
+    [
+        "Reading DWG file version: ",
+        "AC15 file header: ",
+        "AC18 inner header: ",
+        "AC18: Read ",
+        "AC1021 header: ",
+        "AC1021 Header CRC-64 extracted: ",
+        "AC1021 CRC Seeds: ",
+        "AC1021 Pages Map CRC: ",
+        "AC1021 Sections Map CRC: ",
+        "AC1021: Read ",
+        "  Section '",
+        "AcDs: attached ",
+        "DWG build summary: ",
+        "Failsafe: ",
+    ]
+    .iter()
+    .any(|prefix| message.starts_with(prefix))
+}
+
 /// Whether the DWG library decoded every record of `drawing`, read with
 /// `stats`, and the records it did not: each object and non-graphical
 /// object it keeps only as raw, proxy or opaque bytes, each record cut
-/// short, and each damaged record skipped, by the kind the file gives it,
-/// with its handle. Also returns skipped graphical or unidentified records
-/// so `not_read` reflects what no output can draw.
+/// short, each failed or truncated section/page, and each damaged record
+/// skipped, by the kind the file gives it, with its handle. Also returns
+/// skipped graphical or unidentified records so `not_read` reflects what
+/// no output can draw.
 fn decode_report(
     drawing: &CadDocument,
     stats: &acadrust::ReadStats,
@@ -1376,8 +1457,17 @@ fn decode_report(
     let mut skipped_handleless: Vec<String> = Vec::new();
     let mut diagnostics_truncated = drawing.notifications.omitted_count() > 0;
     let mut warnings = 0usize;
+    let diagnostic_messages: std::collections::HashSet<&str> = stats
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
 
     for diagnostic in &stats.diagnostics {
+        if let Some(section_kind) = failed_section_kind(diagnostic.code.as_str()) {
+            handleless_not_decoded.push(section_kind.to_owned());
+            continue;
+        }
         match diagnostic.code.as_str() {
             "diagnostic-limit-reached" => {
                 diagnostics_truncated = true;
@@ -1425,18 +1515,6 @@ fn decode_report(
                     }
                 }
             }
-            "legacy-read-failed"
-            | "file-header-read-failed"
-            | "decryption-failed"
-            | "classes-decode-failed"
-            | "classes-extract-failed"
-            | "header-decode-failed"
-            | "header-extract-failed"
-            | "template-decode-failed"
-            | "handles-decode-failed"
-            | "handles-extract-failed"
-            | "objects-init-failed"
-            | "objects-extract-failed" => {}
             _ => {
                 warnings += 1;
             }
@@ -1445,11 +1523,22 @@ fn decode_report(
     for notification in drawing.notifications.iter() {
         use acadrust::notification::NotificationType;
         match notification.notification_type {
+            // AC1021 zero-filled failed page decodes emit an Error
+            // notification without pushing a `section-page-skipped`
+            // ReadDiagnostic.
+            NotificationType::Error
+                if notification
+                    .message
+                    .starts_with("Failsafe: skipped corrupt page ") =>
+            {
+                handleless_not_decoded.push("SKIPPED_SECTION_PAGE".to_owned());
+            }
             NotificationType::NotImplemented | NotificationType::NotSupported => {
                 warnings += 1;
             }
             NotificationType::Warning
-                if notification.message.starts_with("Unknown DWG code page") =>
+                if !is_informational_trace_warning(&notification.message)
+                    && !diagnostic_messages.contains(notification.message.as_str()) =>
             {
                 warnings += 1;
             }
@@ -1473,15 +1562,18 @@ fn decode_report(
         .map(|(handle, kind)| (kind, Some(format!("{handle:X}"))))
         .chain(skipped_handleless.into_iter().map(|kind| (kind, None)))
         .collect();
+    let recovered_errors = stats
+        .recovered_errors
+        .max(drawing.notifications.error_count());
     let report = DecodeReport {
         decoded: not_decoded.is_empty()
             && stats.skipped_source_records == 0
-            && stats.recovered_errors == 0
+            && recovered_errors == 0
             && stats.stream_completed
             && !diagnostics_truncated,
         not_decoded,
         skipped: stats.skipped_source_records,
-        recovered_errors: stats.recovered_errors,
+        recovered_errors,
         warnings,
         diagnostics_truncated,
         read_past_damage: None,
@@ -1892,6 +1984,15 @@ pub(crate) fn build_mark(path: &Path) -> Option<BuildMark> {
     read_build_mark(path).ok().flatten()
 }
 
+/// What the build mark of the DWG in `bytes` says, read from its summary
+/// section without reopening the file on disk.
+pub(crate) fn build_mark_bytes(bytes: &[u8]) -> Option<BuildMark> {
+    match catch_unwind(AssertUnwindSafe(|| drawing_properties_bytes(bytes))) {
+        Ok(Ok(Some(properties))) => mark_in(&properties),
+        _ => None,
+    }
+}
+
 /// What the build mark of the DWG at `path` says, as [`build_mark`] reads
 /// it, telling a file that carries no mark from one whose mark could not
 /// be read:
@@ -1945,6 +2046,29 @@ fn drawing_properties(path: &Path) -> Result<Option<Vec<(String, String)>>, Stri
     }
     let mut reader = DwgReader::from_file(path)
         .map_err(|e| format!("the DWG library could not open it: {e}"))?;
+    summary_properties(&mut reader)
+}
+
+/// Same as [`drawing_properties`], reading from `bytes` already in memory
+/// so the file is never opened a second time.
+fn drawing_properties_bytes(bytes: &[u8]) -> Result<Option<Vec<(String, String)>>, String> {
+    let start = bytes.get(..6).unwrap_or(bytes);
+    let version = std::str::from_utf8(start)
+        .ok()
+        .and_then(|text| text.strip_prefix("AC").or_else(|| text.strip_prefix("AD")))
+        .filter(|digits| digits.len() == 4)
+        .and_then(|digits| digits.parse::<u32>().ok());
+    match version {
+        Some(version) if version >= 1021 => {}
+        _ => return Ok(None),
+    }
+    let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
+    summary_properties(&mut reader)
+}
+
+fn summary_properties<R: std::io::Read + std::io::Seek>(
+    reader: &mut DwgReader<R>,
+) -> Result<Option<Vec<(String, String)>>, String> {
     let header = reader
         .read_file_header()
         .map_err(|e| format!("the DWG library could not read its header: {e}"))?;
@@ -2060,6 +2184,33 @@ fn read_drawing(path: &Path) -> Result<CadDocument, Error> {
     read_drawing_bytes_with_stats(&bytes, path, false).map(|(drawing, _)| drawing)
 }
 
+/// The first error message reported by the DWG library on `drawing` or
+/// `stats`, if any.
+fn first_read_error(drawing: &CadDocument, stats: &acadrust::ReadStats) -> Option<String> {
+    drawing
+        .notifications
+        .iter()
+        .find(|n| n.notification_type == acadrust::notification::NotificationType::Error)
+        .map(|n| n.message.clone())
+        .or_else(|| {
+            stats
+                .diagnostics
+                .iter()
+                .find(|d| {
+                    failed_section_kind(&d.code).is_some()
+                        || matches!(
+                            d.code.as_str(),
+                            "section-read-truncated"
+                                | "section-page-skipped"
+                                | "record-catalog-failed"
+                                | "record-read-failed"
+                                | "record-decode-failed"
+                        )
+                })
+                .map(|d| d.message.clone())
+        })
+}
+
 /// Reads the DWG from `bytes`, already read from `path`, with what the DWG
 /// library says of how it read each record: whole, or with `past_damage`
 /// past the records it cannot read, which it reports.
@@ -2068,30 +2219,73 @@ fn read_drawing_bytes_with_stats(
     path: &Path,
     past_damage: bool,
 ) -> Result<(CadDocument, acadrust::ReadStats), Error> {
-    let options = if past_damage {
+    let mut options = if past_damage {
         acadrust::DwgReadOptions::failsafe()
     } else {
         acadrust::DwgReadOptions::default()
     };
-    match catch_unwind(AssertUnwindSafe(|| {
+    // Pin the mesh face budget to the library's deterministic baseline cap
+    // rather than probing host RAM, so reads and mirrors stay byte-identical
+    // across machines and memory loads (and match WebAssembly).
+    options.max_mesh_faces = Some(acadrust::MeshFaceBudget::BASELINE.max_faces);
+    options.max_mesh_face_indices = Some(acadrust::MeshFaceBudget::BASELINE.max_face_indices);
+    let outcome = match catch_unwind(AssertUnwindSafe(|| {
         let mut reader = DwgReader::from_stream_with_options(std::io::Cursor::new(bytes), options);
         reader.read_with_stats()
     })) {
-        Ok(Ok(outcome)) => Ok((outcome.document, outcome.stats)),
-        Ok(Err(e)) => Err(Error::new(
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(e)) => {
+            return Err(Error::new(
+                ErrorCode::DwgRead,
+                format!("the DWG library could not read the drawing: {e}"),
+            )
+            .in_file(path))
+        }
+        Err(panic) => {
+            return Err(Error::new(
+                ErrorCode::DwgRead,
+                format!(
+                    "the DWG library failed while reading the drawing: {}",
+                    panic_message(panic)
+                ),
+            )
+            .in_file(path))
+        }
+    };
+    // Reject unreadable object streams on both strict and failsafe paths
+    // (valid empty drawings still have `record_stream_read == true`, and
+    // either `source_records == 0` for R10/R12 or `decoded_source_records > 0`
+    // for R13+).
+    if !outcome.stats.record_stream_read
+        || (outcome.stats.source_records > 0 && outcome.stats.decoded_source_records == 0)
+    {
+        let why = first_read_error(&outcome.document, &outcome.stats)
+            .unwrap_or_else(|| "the DWG's object record stream could not be read".to_owned());
+        return Err(Error::new(
             ErrorCode::DwgRead,
-            format!("the DWG library could not read the drawing: {e}"),
+            format!("the DWG library could not read the drawing: {why}"),
         )
-        .in_file(path)),
-        Err(panic) => Err(Error::new(
-            ErrorCode::DwgRead,
-            format!(
-                "the DWG library failed while reading the drawing: {}",
-                panic_message(panic)
-            ),
-        )
-        .in_file(path)),
+        .in_file(path));
     }
+    // On strict reads, refuse files where the library recovered from section
+    // or page errors (such as AC1021 zero-filled corrupt pages or failed
+    // named sections) so `render`, `plot` and `display-list` never silently
+    // accept corrupt pages and `read` records `read_past_damage`.
+    if !past_damage
+        && (outcome.document.notifications.error_count() > 0
+            || outcome.stats.recovered_errors > 0
+            || outcome.stats.skipped_source_records > 0
+            || has_section_failure_or_truncation(&outcome.stats))
+    {
+        let why = first_read_error(&outcome.document, &outcome.stats)
+            .unwrap_or_else(|| "the DWG had damaged sections or pages".to_owned());
+        return Err(Error::new(
+            ErrorCode::DwgRead,
+            format!("the DWG library could not read the drawing whole: {why}"),
+        )
+        .in_file(path));
+    }
+    Ok((outcome.document, outcome.stats))
 }
 
 /// The DWG's `INSUNITS` code for a unit.
@@ -2542,10 +2736,14 @@ mod tests {
         }
 
         // Opaque non-graphical objects: Arch, ProxyObject, RegisteredClass,
+        // DgnLineStyle with undecoded_fields or Registered payload,
         // CsacDocumentOptions with raw_dwg_data, and incomplete XRecord.
+        use acadrust::objects::{DgnLineStyleData, DgnLineStyleObject};
         let h_arch = next_h();
         let h_proxy = next_h();
         let h_reg = next_h();
+        let h_lsdef = next_h();
+        let h_lsreg = next_h();
         let h_csac = next_h();
         let h_xrec = next_h();
         let obj_cases: Vec<(&str, Handle, ObjectType)> = vec![
@@ -2569,6 +2767,49 @@ mod tests {
                     handle: h_reg,
                     dxf_name: "MADE_UP_REG_OBJ".into(),
                     ..Default::default()
+                }),
+            ),
+            (
+                "LSDEFINITION",
+                h_lsdef,
+                ObjectType::DgnLineStyle(DgnLineStyleObject {
+                    handle: h_lsdef,
+                    owner: Handle::NULL,
+                    reactors: Vec::new(),
+                    xdictionary_handle: None,
+                    data: DgnLineStyleData::Definition {
+                        description: String::new(),
+                        version: 1,
+                        style_number: 1,
+                        component_uid: [0; 16],
+                        is_continuous: false,
+                        unit_definition: 0.0,
+                        unit_scale: 1.0,
+                        units_type: 0,
+                        is_element: false,
+                        is_physical: false,
+                        is_scale_independent: false,
+                        is_snappable: false,
+                        root_component: Handle::NULL,
+                        undecoded_fields: Some(ProxyPayload::from_bytes(&[0xAB, 0xCD])),
+                        properties: Vec::new(),
+                    },
+                }),
+            ),
+            (
+                "LSUNKNOWNCOMPONENT",
+                h_lsreg,
+                ObjectType::DgnLineStyle(DgnLineStyleObject {
+                    handle: h_lsreg,
+                    owner: Handle::NULL,
+                    reactors: Vec::new(),
+                    xdictionary_handle: None,
+                    data: DgnLineStyleData::Registered {
+                        dxf_name: "LSUNKNOWNCOMPONENT".into(),
+                        properties: Vec::new(),
+                        payload: ProxyPayload::from_bytes(&[1, 2, 3]),
+                        object_ids: Vec::new(),
+                    },
                 }),
             ),
             (
@@ -2680,6 +2921,130 @@ mod tests {
         assert!(!rep.decoded, "{rep:?}");
         assert_eq!(rep.warnings, 0, "sentinel is not a warning: {rep:?}");
         assert!(rep.not_decoded.is_empty(), "{rep:?}");
+
+        // AC1021 zero-filled failed page decodes emit an Error notification
+        // without a `section-page-skipped` diagnostic; capture them in
+        // `not_decoded`, count `recovered_errors`, and force `decoded: false`.
+        let mut ac21_doc = CadDocument::with_version(NEW_SHEET_VERSION);
+        ac21_doc.notifications.notify(
+            acadrust::notification::NotificationType::Error,
+            "Failsafe: skipped corrupt page 2 in section 'AcDb:AcDbObjects': crc mismatch",
+        );
+        ac21_doc.notifications.notify(
+            acadrust::notification::NotificationType::Warning,
+            "Failsafe: 1 of 4 pages skipped in section 'AcDb:AcDbObjects'",
+        );
+        let clean_stats = acadrust::ReadStats {
+            stream_completed: true,
+            ..Default::default()
+        };
+        let (rep, _) = decode_report(&ac21_doc, &clean_stats);
+        assert!(!rep.decoded, "{rep:?}");
+        assert_eq!(rep.recovered_errors, 1, "{rep:?}");
+        assert_eq!(
+            rep.warnings, 0,
+            "failsafe summary is not a warning: {rep:?}"
+        );
+        assert_eq!(
+            rep.not_decoded,
+            vec![RecordsOfKind {
+                kind: "SKIPPED_SECTION_PAGE".into(),
+                count: 1,
+                handles: Vec::new(),
+            }]
+        );
+
+        // Named section extraction/decode failures are recorded in `not_decoded`
+        // and force `decoded: false`.
+        let sec_stats = acadrust::ReadStats {
+            stream_completed: true,
+            diagnostics: vec![
+                ReadDiagnostic::new(
+                    "classes-extract-failed",
+                    ReadStage::Classes,
+                    "Failed to extract classes section",
+                ),
+                ReadDiagnostic::new(
+                    "header-decode-failed",
+                    ReadStage::Header,
+                    "Failed to read header",
+                ),
+            ],
+            ..Default::default()
+        };
+        let (rep, _) = decode_report(&drawing, &sec_stats);
+        assert!(!rep.decoded, "{rep:?}");
+        assert_eq!(rep.warnings, 0, "{rep:?}");
+        assert_eq!(
+            rep.not_decoded,
+            vec![
+                RecordsOfKind {
+                    kind: "FAILED_CLASSES_SECTION".into(),
+                    count: 1,
+                    handles: Vec::new(),
+                },
+                RecordsOfKind {
+                    kind: "FAILED_HEADER_SECTION".into(),
+                    count: 1,
+                    handles: Vec::new(),
+                },
+            ]
+        );
+
+        // AC18 page-capacity warnings are counted in `warnings`, while normal
+        // informational traces are ignored.
+        let mut warn_doc = CadDocument::with_version(NEW_SHEET_VERSION);
+        warn_doc.notifications.notify(
+            acadrust::notification::NotificationType::Warning,
+            "Reading DWG file version: AC1032 (AC1032)",
+        );
+        warn_doc.notifications.notify(
+            acadrust::notification::NotificationType::Warning,
+            "AC18 section 'AcDb:AcDbObjects' declared size 1024 is slightly larger than its 1 page(s) of 512 bytes; retaining the bounded section",
+        );
+        let (rep, _) = decode_report(&warn_doc, &clean_stats);
+        assert!(rep.decoded, "{rep:?}");
+        assert_eq!(rep.warnings, 1, "{rep:?}");
+        assert!(rep.not_decoded.is_empty(), "{rep:?}");
+    }
+
+    #[test]
+    fn empty_valid_dwg_reads_raw_version_preserved_and_unreadable_stream_rejected() {
+        let empty_path = Path::new("empty.dwg");
+
+        // A valid empty DWG (0 sheet objects) reads cleanly on both strict and
+        // failsafe paths with `decoded: true`.
+        let empty_doc = CadDocument::with_version(NEW_SHEET_VERSION);
+        let bytes = acadrust::DwgWriter::write_to_vec(&empty_doc).unwrap();
+        let strict = read_bytes(&bytes, empty_path).unwrap();
+        assert!(strict.decode.decoded, "{:?}", strict.decode);
+        assert_eq!(strict.dwg_version, "AC1032");
+        assert!(strict.objects.is_empty());
+        let past = read_bytes_past_damage(&bytes, empty_path).unwrap();
+        assert!(past.decode.decoded, "{:?}", past.decode);
+
+        // Raw 6-byte DWG version header is preserved even when acadrust
+        // normalizes an older format internally (e.g. AC1006 -> AC1009).
+        assert_eq!(raw_dwg_version(b"AC1006\x00\x00"), Some("AC1006".into()));
+        assert_eq!(raw_dwg_version(b"AD1021\x00\x00"), Some("AD1021".into()));
+        assert_eq!(raw_dwg_version(b"NOTDWG"), None);
+        let r12_doc = CadDocument::with_version(acadrust::DxfVersion::AC1009);
+        let stats = acadrust::ReadStats {
+            stream_completed: true,
+            record_stream_read: true,
+            ..Default::default()
+        };
+        let c = contents(&r12_doc, &stats, raw_dwg_version(b"AC1006\x00\x00")).unwrap();
+        assert_eq!(c.dwg_version, "AC1006");
+
+        // Truncating an AC1032 file after the file header so the handles /
+        // objects stream cannot be read MUST fail on BOTH strict and failsafe
+        // paths (never returning an empty 0-object drawing).
+        let truncated = &bytes[..bytes.len().min(512)];
+        let err_strict = read_bytes(truncated, empty_path).unwrap_err();
+        assert_eq!(err_strict.code, ErrorCode::DwgRead);
+        let err_past = read_bytes_past_damage(truncated, empty_path).unwrap_err();
+        assert_eq!(err_past.code, ErrorCode::DwgRead);
     }
 
     #[test]
