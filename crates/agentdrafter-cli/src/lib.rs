@@ -51,6 +51,9 @@ const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [-
 const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
 const PROPOSE_USAGE: &str = "agentdrafter propose <drawing-set-folder> <change-set.json | -> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
 const PROPOSALS_USAGE: &str = "agentdrafter proposals <drawing-set-folder>";
+const GUIDE_USAGE: &str = "agentdrafter guide <drawing-set-folder> <guide.json | -> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
+const GUIDES_USAGE: &str =
+    "agentdrafter guides <drawing-set-folder> [--fonts <folder>]... [--no-system-fonts]";
 const KEEP_USAGE: &str = "agentdrafter keep <drawing-set-folder> <proposal> [--by <who>] [--fonts <folder>]... [--no-system-fonts]";
 const DISCARD_USAGE: &str = "agentdrafter discard <drawing-set-folder> <proposal> [--by <who>]";
 const LOOK_AT_USAGE: &str =
@@ -112,6 +115,8 @@ fn cli_form(command: &str) -> Option<(&'static str, Parse)> {
         "proposals" => (PROPOSALS_USAGE, parse_proposals),
         "keep" => (KEEP_USAGE, parse_keep),
         "discard" => (DISCARD_USAGE, parse_discard),
+        "guide" => (GUIDE_USAGE, parse_guide),
+        "guides" => (GUIDES_USAGE, parse_guides),
         "look-at" => (LOOK_AT_USAGE, parse_look_at),
         "looking-at" => (LOOKING_AT_USAGE, parse_looking_at),
         "check" => (CHECK_USAGE, parse_check),
@@ -635,12 +640,18 @@ fn parse_change(mut args: Args) -> Result<Value, Error> {
 /// Reads a change set from the file `given` names, or from standard input
 /// for `-`, as `change` and `display-list --change-set` take it.
 fn read_change_set(given: &OsString) -> Result<Value, Error> {
+    read_json(given, "change set")
+}
+
+/// Reads JSON, `what`, from the file `given` names, or from standard input
+/// for `-`.
+fn read_json(given: &OsString, what: &str) -> Result<Value, Error> {
     let text = if given == "-" {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|e| {
             Error::new(
                 ErrorCode::ReadFailed,
-                format!("could not read the change set from standard input: {e}"),
+                format!("could not read the {what} from standard input: {e}"),
             )
         })?;
         text
@@ -649,16 +660,12 @@ fn read_change_set(given: &OsString) -> Result<Value, Error> {
         std::fs::read_to_string(&path).map_err(|e| {
             Error::new(
                 ErrorCode::ReadFailed,
-                format!("could not read the change set `{}`: {e}", path.display()),
+                format!("could not read the {what} `{}`: {e}", path.display()),
             )
         })?
     };
-    serde_json::from_str(&text).map_err(|e| {
-        Error::new(
-            ErrorCode::WrongType,
-            format!("the change set is not JSON: {e}"),
-        )
-    })
+    serde_json::from_str(&text)
+        .map_err(|e| Error::new(ErrorCode::WrongType, format!("the {what} is not JSON: {e}")))
 }
 
 /// Reads `journal`'s argument: the set's folder.
@@ -784,6 +791,7 @@ fn parse_accept(mut args: Args) -> Result<Value, Error> {
 enum Second {
     ChangeSet,
     Proposal,
+    Guide,
 }
 
 /// Reads the arguments of `propose`, `keep` and `discard`: the set's
@@ -827,6 +835,7 @@ fn parse_proposing(
     let what = match second {
         Second::ChangeSet => "a change set",
         Second::Proposal => "a proposal's number",
+        Second::Guide => "a guide",
     };
     let [set, then] = <[OsString; 2]>::try_from(given).map_err(|given| {
         usage(format!(
@@ -840,6 +849,7 @@ fn parse_proposing(
     let mut input = json!({ "set": set });
     match second {
         Second::ChangeSet => input["change_set"] = read_change_set(&then)?,
+        Second::Guide => input["guide"] = read_json(&then, "guide")?,
         Second::Proposal => {
             let number = entry_number(&then).ok_or_else(|| {
                 usage(format!(
@@ -866,6 +876,40 @@ fn parse_keep(args: Args) -> Result<Value, Error> {
 
 fn parse_discard(args: Args) -> Result<Value, Error> {
     parse_proposing(args, "discard", DISCARD_USAGE, Second::Proposal, false)
+}
+
+fn parse_guide(args: Args) -> Result<Value, Error> {
+    parse_proposing(args, "guide", GUIDE_USAGE, Second::Guide, true)
+}
+
+/// Reads `guides`' arguments: the set's folder, and the font options.
+fn parse_guides(mut args: Args) -> Result<Value, Error> {
+    let usage = |message: String| Error::usage(format!("{message}; usage: {GUIDES_USAGE}"));
+    let mut given: Vec<OsString> = Vec::new();
+    let mut fonts = FontOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--no-system-fonts") => fonts.no_system = true,
+            Some("--fonts") => fonts.push(PathBuf::from(
+                args.next()
+                    .ok_or_else(|| usage("--fonts needs a folder".into()))?,
+            )),
+            Some(flag) if flag.starts_with('-') && flag.len() > 1 => {
+                return Err(usage(format!("guides takes no option `{flag}`")))
+            }
+            _ => given.push(arg),
+        }
+    }
+    let [set] = <[OsString; 1]>::try_from(given).map_err(|given| {
+        usage(format!(
+            "guides takes a drawing set's folder, found {} arguments",
+            given.len()
+        ))
+    })?;
+    let request = agentdrafter_core::GuidesRequest {
+        set: PathBuf::from(set),
+    };
+    input_of(request, fonts)
 }
 
 /// Reads `proposals`' argument: the set's folder.

@@ -66,6 +66,8 @@ export interface Focus {
   places: number[];
   /** Comes to what a preview marks, as the renderer finds it, in place of `places`. */
   preview?: boolean;
+  /** Comes to this box, `[left, bottom, right, top]` in drawing units, in place of `places`: a guide's points (#157). */
+  box?: [number, number, number, number];
 }
 
 /**
@@ -129,6 +131,14 @@ export interface DrawingProps {
   cards?: ReactNode;
   /** Changes when the cards do, to place them again. */
   cardsKey?: string;
+  /**
+   * A guide's step running on the sheet shown (#157): its number, for the
+   * ring's tag, and how far down the banner reaches, which the tag keeps
+   * below. The renderer says where the ring goes.
+   */
+  guide?: { step: number; top: number } | null;
+  /** Changes when the guide's step does: its ring is brought into sight. */
+  guideSee?: string;
   /** A sheet was drawn: what it is, and the text the renderer loaded, which a restored context loads again. */
   onLoaded(summary: Summary, text: string): void;
   /** A sheet could not be drawn. */
@@ -251,6 +261,8 @@ export function Drawing({
   ghosts = [],
   cards = null,
   cardsKey = '',
+  guide = null,
+  guideSee = '',
 }: DrawingProps) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -461,6 +473,84 @@ export function Drawing({
       if (left + el.offsetWidth > width - 4) el.style.left = `${Math.round(Math.max(4, width - el.offsetWidth - 4))}px`;
     }
   };
+  // The guide's ring (#157), in its own pink: round the point the step's
+  // next click wants, or the object it wants picked, with its tag, placed
+  // at each draw so it follows the view. It pulses by itself, in CSS.
+  const guideRing = useRef<HTMLDivElement>(null);
+  const guideNow = useRef(guide);
+  guideNow.current = guide;
+  const ringOf = (): { at?: [number, number]; box?: number[]; label: string } | null => {
+    const text = guideNow.current ? viewer.current?.guide_ring() : '';
+    return text ? (JSON.parse(text) as { at?: [number, number]; box?: number[]; label: string }) : null;
+  };
+  const placeGuideRing = () => {
+    const holder = guideRing.current;
+    const c = canvas.current;
+    if (!holder || !c) return;
+    const ring = ringOf();
+    const g = guideNow.current;
+    if (!ring || !g || (!ring.at && ring.box?.length !== 4)) {
+      if (holder.childElementCount) holder.replaceChildren();
+      return;
+    }
+    const width = c.clientWidth;
+    const height = c.clientHeight - covered.current;
+    const el = document.createElement('div');
+    let x: number;
+    let y: number;
+    if (ring.at) {
+      [x, y] = toScreen(view.current, ring.at[0], ring.at[1]);
+      el.className = 'gring';
+      el.style.left = `${Math.round(x)}px`;
+      el.style.top = `${Math.round(y)}px`;
+    } else {
+      const [bl, bb, br, bt] = ring.box as [number, number, number, number];
+      const [l, t] = toScreen(view.current, bl, bt);
+      const [r, bottom] = toScreen(view.current, br, bb);
+      el.className = 'gring box';
+      el.style.left = `${Math.round(l - 7)}px`;
+      el.style.top = `${Math.round(t - 7)}px`;
+      el.style.width = `${Math.round(r - l + 14)}px`;
+      el.style.height = `${Math.round(bottom - t + 14)}px`;
+      x = r;
+      y = t;
+    }
+    el.dataset.gring = ring.at ? 'point' : 'object';
+    const tag = document.createElement('div');
+    tag.className = 'gtag';
+    tag.dataset.gtag = '';
+    const n = document.createElement('b');
+    n.textContent = String(g.step);
+    tag.append(n, document.createTextNode(ring.label));
+    holder.replaceChildren(el, tag);
+    const w = tag.offsetWidth;
+    tag.style.left = `${Math.round(Math.max(4, Math.min(width - w - (narrow.current ? 4 : ZOOM_COLUMN + 8), x + 20)))}px`;
+    tag.style.top = `${Math.round(Math.max(4 + g.top, Math.min(height - 26, y - 38)))}px`;
+  };
+  // A new step's ring off the screen, or under the banner, is brought into
+  // sight, at the same zoom.
+  useEffect(() => {
+    const c = canvas.current;
+    const ring = ringOf();
+    if (!guideSee || !c || !ring) return;
+    let p: [number, number];
+    if (ring.at) p = ring.at;
+    else if (ring.box?.length === 4) {
+      const [bl, bb, br, bt] = ring.box as [number, number, number, number];
+      p = [(bl + br) / 2, (bb + bt) / 2];
+    }
+    else return;
+    const [x, y] = toScreen(view.current, p[0], p[1]);
+    const top = (guideNow.current?.top ?? 0) + 30;
+    const bottom = c.clientHeight - covered.current - 30;
+    const right = c.clientWidth - (narrow.current ? 30 : ZOOM_COLUMN + 60);
+    if (x > 40 && x < right && y > top && y < bottom) return;
+    followFit.current = false;
+    const scale = view.current.scale;
+    const target = { scale, left: p[0] - c.clientWidth / 2 / scale, top: p[1] + (top + bottom) / 2 / scale };
+    glide.current?.to(target, 400, middle());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guideSee]);
   // Array's copies (#66): one tag over them all, `3 × 2 · waits for
   // Enter`, at the top right of the box round the objects and their
   // copies, or what is wrong; and, on a laptop, its panel beside them.
@@ -656,6 +746,7 @@ export function Drawing({
     placeEditor();
     placeToolWords();
     placeCopyTags();
+    placeGuideRing();
     placeArrayTag();
     placeArrayPanel();
     placePreviewTags();
@@ -998,7 +1089,7 @@ export function Drawing({
     pendingFocus.current = null;
     const whole = fitted();
     if (!whole) return;
-    const b = f.preview ? v.preview_extent() : f.places.length ? v.bounds_of(Uint32Array.from(f.places)) : [];
+    const b = f.box ?? (f.preview ? v.preview_extent() : f.places.length ? v.bounds_of(Uint32Array.from(f.places)) : []);
     if (b.length !== 4) {
       fitSheet(450);
       return;
@@ -1380,6 +1471,7 @@ export function Drawing({
       <div className="typed" ref={typed} aria-hidden="true" data-typed />
       <div className="pvtags" ref={pvTags} data-pvtags />
       <div className="ctags" ref={copyTags} aria-hidden="true" data-copytags />
+      <div className="grings" ref={guideRing} aria-hidden="true" data-grings />
       <div className="ctags">
         <div className="ctag atag" ref={arrayTag} hidden aria-hidden="true" data-arraytag />
       </div>

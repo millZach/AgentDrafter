@@ -19,7 +19,9 @@
 //!   command's reply, sent when the stream opens and again each time the
 //!   set's journal changes on disk, whichever process changed it, or the
 //!   `proposals` command's, sent when the stream opens and again each time
-//!   a proposal is made, kept or discarded. Every
+//!   a proposal is made, kept or discarded, and the `guides` command's,
+//!   sent when the stream opens and again each time a guide is given or
+//!   the journal changes, which moves the guides' steps on. Every
 //!   change set and undo, and every accept, adds to the journal, so a
 //!   change set an agent sends from another process, through any
 //!   interface, reaches an open viewer without a reload. It is a POST with
@@ -77,8 +79,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use agentdrafter_core::{
-    commands, find_command, Error, ErrorCode, Interface, Reply, Settings, JOURNAL_FILE,
-    PROPOSALS_FOLDER,
+    commands, find_command, Error, ErrorCode, Interface, Reply, Settings, GUIDES_FOLDER,
+    JOURNAL_FILE, PROPOSALS_FOLDER,
 };
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
@@ -607,16 +609,23 @@ fn stream_journal(
     Deadline::after(limit).write(stream, head.as_bytes())?;
     let journal = find_command("journal").expect("the registry holds `journal`");
     let proposals = find_command("proposals").expect("the registry holds `proposals`");
-    type Seen = (Option<(u64, SystemTime)>, Vec<String>);
+    let guides = find_command("guides").expect("the registry holds `guides`");
+    type Seen = (Option<(u64, SystemTime)>, Vec<String>, Vec<String>);
     let mut seen: Option<Seen> = None;
     let (mut sent, mut sent_proposals): (Option<String>, Option<String>) = (None, None);
+    let mut sent_guides: Option<String> = None;
     let mut said = Instant::now();
     loop {
         // A proposal adds a file beside the journal; a keep or a discard
         // adds to the journal, which ends it.
-        let now = (journal_state(set), proposals_state(set));
+        let now = (
+            journal_state(set),
+            listed_state(set, PROPOSALS_FOLDER),
+            listed_state(set, GUIDES_FOLDER),
+        );
         if seen.as_ref() != Some(&now) {
             let journal_moved = seen.as_ref().is_none_or(|s| s.0 != now.0);
+            let guides_moved = journal_moved || seen.as_ref().is_none_or(|s| s.2 != now.2);
             seen = Some(now);
             let input = serde_json::json!({ "set": set });
             if journal_moved {
@@ -636,13 +645,25 @@ fn stream_journal(
                     said = Instant::now();
                 }
             }
-            let reply = proposals.run(input, settings, Interface::Http);
+            let reply = proposals.run(input.clone(), settings, Interface::Http);
             let data = serde_json::to_string(&reply).expect("a reply serializes to JSON");
             if sent_proposals.as_ref() != Some(&data) {
                 let event = format!("event: proposals\ndata: {data}\n\n");
                 Deadline::after(limit).write(stream, event.as_bytes())?;
                 sent_proposals = Some(data);
                 said = Instant::now();
+            }
+            // A guide's steps are worked out on the set as it stands, so a
+            // change set moves them on as a new guide does.
+            if guides_moved {
+                let reply = guides.run(input, settings, Interface::Http);
+                let data = serde_json::to_string(&reply).expect("a reply serializes to JSON");
+                if sent_guides.as_ref() != Some(&data) {
+                    let event = format!("event: guides\ndata: {data}\n\n");
+                    Deadline::after(limit).write(stream, event.as_bytes())?;
+                    sent_guides = Some(data);
+                    said = Instant::now();
+                }
             }
         } else if said.elapsed() >= KEEP_ALIVE {
             Deadline::after(limit).write(stream, b": still watching\n\n")?;
@@ -655,10 +676,10 @@ fn stream_journal(
     }
 }
 
-/// The files of the set's proposals, which change when one is proposed;
-/// none when it has none.
-fn proposals_state(set: &Path) -> Vec<String> {
-    let Ok(listing) = fs::read_dir(set.join(PROPOSALS_FOLDER)) else {
+/// The files of the set's proposals, or its guides, in `folder`, which
+/// change when one is proposed or given; none when it has none.
+fn listed_state(set: &Path, folder: &str) -> Vec<String> {
+    let Ok(listing) = fs::read_dir(set.join(folder)) else {
         return Vec::new();
     };
     let mut names: Vec<String> = listing
@@ -1660,6 +1681,7 @@ mod tests {
                         "Settings",
                         "JOURNAL_FILE",
                         "PROPOSALS_FOLDER",
+                        "GUIDES_FOLDER",
                         "looking_at_left_off",
                         "assistant_commands",
                         "Access",

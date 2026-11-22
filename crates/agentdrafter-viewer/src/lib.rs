@@ -42,6 +42,7 @@
 pub mod array;
 pub mod ghosts;
 pub mod grid;
+pub mod guide;
 pub mod mesh;
 pub mod overlay;
 pub mod preview;

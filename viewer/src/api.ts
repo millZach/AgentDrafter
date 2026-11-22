@@ -240,12 +240,14 @@ export function watch(
   state: (now: StreamState) => void,
   send: typeof fetch = fetch,
   proposals: (reply: string) => void = () => {},
+  guides: (reply: string) => void = () => {},
 ): () => void {
   return follow(
     () => eventsRequest(set, token),
     (e) => {
       if (e.event === 'journal') journal(e.data);
       else if (e.event === 'proposals') proposals(e.data);
+      else if (e.event === 'guides') guides(e.data);
     },
     state,
     send,

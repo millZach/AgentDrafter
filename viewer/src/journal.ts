@@ -55,6 +55,8 @@ export interface Entry {
   proposed_by?: string;
   kept_by?: string;
   discarded_by?: string;
+  /** The guide's step a change set was sent for (#157). */
+  guide?: { guide: number; step: number; of: number };
   undo_state?: 'kept' | 'pruned' | 'undone';
   undone_by?: number;
   pruned_by?: number;
@@ -149,6 +151,8 @@ export const capital = (text: string): string => text.charAt(0).toUpperCase() + 
  * · kept by you`, or `by you · proposed by Assistant`. Empty for any other.
  */
 export function entryByline(entry: Entry): string {
+  // A change set sent for a guide's step says which (#157).
+  if (entry.guide) return `guide step ${entry.guide.step} of ${entry.guide.of}`;
   if (entry.proposal === undefined) return '';
   if (entry.kind === 'discard') return `by ${whoWords(entry.discarded_by)} · proposed by ${whoWords(entry.proposed_by)}`;
   // A keep the set refused is an attempt: it kept nothing.

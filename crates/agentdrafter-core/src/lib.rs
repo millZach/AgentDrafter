@@ -104,14 +104,19 @@ pub use change::{
     StampRevision,
 };
 pub use change::{
-    change, change_set_schema, change_with, operations, AttributeRemoved, ChangeReport,
-    ChangeRequest, Copied, Failure, Fill, Inconsistent, OperationInfo, OperationList,
+    change, change_set_schema, change_with, operation_name, operations, AttributeRemoved,
+    ChangeReport, ChangeRequest, Copied, Failure, Fill, Inconsistent, OperationInfo, OperationList,
     OperationOutcome, RowValueSet, SheetChange, SnapResolved, MARK_FILE,
 };
 pub use change::{
     discard, keep_with, proposals, propose_with, DiscardReport, DiscardRequest, KeepReport,
     KeepRequest, ProposalListed, ProposalsReport, ProposalsRequest, ProposeReport, ProposeRequest,
     ASSISTANT, DRAFTER, PROPOSALS_FOLDER,
+};
+pub use change::{
+    guide_with, guides_with, GuideChecked, GuideGiven, GuideListed, GuideMark, GuidePoint,
+    GuideReport, GuideRequest, GuidesReport, GuidesRequest, PointListed, Setting, SnapNamed,
+    StepGiven, StepListed, GUIDES_FOLDER, GUIDE_TOOLS,
 };
 pub use change::{
     journal, undo, CommitState, Entry, EntryKind, FileState, FileUndone, JournalEntry,

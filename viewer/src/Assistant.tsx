@@ -28,6 +28,7 @@ import {
   pretty,
   proposalEnd,
   proposalMade,
+  guideMade,
   proposedTitle,
   sheetsLink,
   viaWords,
@@ -86,6 +87,8 @@ export interface AssistantPanelProps {
   lookingAgain: boolean;
   /** The input focused: a phone raises the sheet to full. */
   onInputFocus(): void;
+  /** The card of a guide the assistant gave, by its number (#157). */
+  guideCard?(n: number): ReactNode;
 }
 
 export function AssistantPanel(props: AssistantPanelProps) {
@@ -302,13 +305,16 @@ function AssistantMessage({ index, item, ...props }: MessageProps) {
   };
   const out: ReactNode[] = [];
   let lines: ReactNode[] = [];
-  let cards: { n: number; part: CommandPart }[] = [];
+  let cards: { n: number; part: CommandPart; guide?: boolean }[] = [];
   const flushLines = () => {
     if (lines.length) out.push(<div key={`l${out.length}`} className="tls">{lines}</div>);
     lines = [];
   };
   const flushCards = () => {
-    for (const c of cards) out.push(<ChatProposal key={`c${c.n}`} n={c.n} part={c.part} {...props} />);
+    for (const c of cards) {
+      if (c.guide) out.push(<Fragment key={`g${c.n}`}>{props.guideCard?.(c.n) ?? null}</Fragment>);
+      else out.push(<ChatProposal key={`c${c.n}`} n={c.n} part={c.part} {...props} />);
+    }
     cards = [];
   };
   item.parts.forEach((part, k) => {
@@ -349,6 +355,8 @@ function AssistantMessage({ index, item, ...props }: MessageProps) {
     );
     const made = proposalMade(part, props.source);
     if (made !== null) cards.push({ n: made, part });
+    const given = guideMade(part, props.source);
+    if (given !== null) cards.push({ n: given, part, guide: true });
   });
   flushLines();
   flushCards();

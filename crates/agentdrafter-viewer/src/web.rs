@@ -464,6 +464,8 @@ pub struct Viewer {
     /// The sheet loaded and its layout, which a ghost is drawn over only
     /// when it is its own.
     shown: (String, Option<String>),
+    /// The guide's step the drafter is doing, as `guides` lists it (#157).
+    guide: Option<crate::guide::StepPlan>,
 }
 
 #[wasm_bindgen]
@@ -576,6 +578,7 @@ impl Viewer {
             tool_pointer: None,
             ghosts: Vec::new(),
             shown: (String::new(), None),
+            guide: None,
         })
     }
 
@@ -1134,26 +1137,125 @@ impl Viewer {
     /// [`Viewer::hover`] at this point, or the point itself, held by Ortho.
     /// Gives what came of it, as [`Viewer::tool_start`] does.
     pub fn tool_click(&mut self, x: f64, y: f64, reach: f64) -> String {
+        // While a guide's step runs, what the step wants before the click,
+        // to say after it whether the click was the step's (#157).
+        let before = self
+            .guide
+            .as_ref()
+            .map(|step| crate::guide::phase(step, &self.tools));
+        let count = crate::guide::taken(&self.tools);
+        let mut note = None;
         let outcome = if self.tools.selecting() {
             let place = self
                 .sheet
                 .as_ref()
                 .and_then(|sheet| pick(&sheet.list, [x, y], reach, sheet.millimetres_per_unit));
-            self.tools.pick(place)
+            let outcome = self.tools.pick(place);
+            if let (Some(step), Some(before), Some(place)) = (&self.guide, before, place) {
+                note = crate::guide::after_pick(step, before, &self.tools, place);
+            }
+            outcome
         } else if self.tools.takes_points() {
             let aim = self.aim_at([x, y]);
-            self.tools.point(aim)
+            let outcome = self.tools.point(aim.clone());
+            if let (Some(step), Some(before)) = (&self.guide, before) {
+                note = crate::guide::after_point(step, before, &self.tools, &aim, count);
+            }
+            outcome
         } else {
             Default::default()
         };
-        to_json(&outcome)
+        with_note(&outcome, note)
     }
 
     /// What was typed in the command bar and entered; empty for Enter,
-    /// Space or a right-click. Gives what came of it.
+    /// Space or a right-click. Gives what came of it, with a guide's note
+    /// when a point typed is not the one its step wants.
     pub fn tool_input(&mut self, text: &str) -> String {
         let aim = self.pointer().map(|p| self.aim_at(p).at);
-        to_json(&self.tools.input(text, aim))
+        let before = self
+            .guide
+            .as_ref()
+            .map(|step| crate::guide::phase(step, &self.tools));
+        let count = crate::guide::taken(&self.tools);
+        let outcome = self.tools.input(text, aim);
+        let taken = self.tools.last_point();
+        let note = match (&self.guide, before, taken) {
+            (Some(step), Some(before), Some(at)) => {
+                crate::guide::after_point(step, before, &self.tools, &Taken::typed(at, 0.0), count)
+            }
+            _ => None,
+        };
+        with_note(&outcome, note)
+    }
+
+    /// The guide's step the drafter is doing, as JSON, as the core's
+    /// `guides` lists a step; empty when no guide runs (#157). A Text step
+    /// gives the tool its text's height.
+    pub fn guide_step(&mut self, step: &str) {
+        self.guide = serde_json::from_str::<crate::guide::StepPlan>(step).ok();
+        let height = self.guide.as_ref().and_then(crate::guide::text_height);
+        self.tools.set_guide_text_height(height);
+    }
+
+    /// The step's operation as Do it for me sends it, as JSON: on the
+    /// current layer and in the space the page shows, when it leaves them
+    /// out, as the drawing tools send theirs (#157).
+    pub fn guide_operation(&self, operation: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(operation)
+            .map(|op| crate::guide::filled(&op, &self.tools).to_string())
+            .unwrap_or_default()
+    }
+
+    /// Ends the tool running with nothing sent: a guide's Do it for me,
+    /// Skip and Stop drop what the drafter has not finished (#157).
+    pub fn tool_drop(&mut self) -> String {
+        to_json(&self.tools.drop_tool())
+    }
+
+    /// What the guide's step wants next, as JSON, `{"phase": "click",
+    /// "point": 1}`; empty when no guide runs.
+    pub fn guide_phase(&self) -> String {
+        self.guide
+            .as_ref()
+            .map(|step| to_json(&crate::guide::phase(step, &self.tools)))
+            .unwrap_or_default()
+    }
+
+    /// Where the guide's ring goes, as JSON: the step's point it marks,
+    /// its label, and the point to click, `at`, or the box round the object
+    /// to pick, `box`, `[left, bottom, right, top]` in drawing units; empty
+    /// when there is none.
+    pub fn guide_ring(&self) -> String {
+        let Some(ring) = self
+            .guide
+            .as_ref()
+            .and_then(|step| crate::guide::ring(step, &self.tools))
+        else {
+            return String::new();
+        };
+        let mut value = serde_json::to_value(&ring).unwrap_or_default();
+        if let Some(place) = ring.object {
+            value["box"] = serde_json::json!(self.bounds_of(&[place as u32]));
+        }
+        value.to_string()
+    }
+
+    /// The guide's Undo it: takes back the point its note was given for,
+    /// `point`, the tool's points then `place`, while it is still the last
+    /// taken, or the object picked at `place`, `pick`. Gives whether it did.
+    pub fn guide_take_back(&mut self, what: &str, place: u32) -> bool {
+        match what {
+            "point" => crate::guide::take_back(&mut self.tools, place as usize),
+            "pick" => {
+                let picked = self.tools.state(false).picked;
+                picked.contains(&(place as usize)) && {
+                    self.tools.pick(Some(place as usize));
+                    true
+                }
+            }
+            _ => false,
+        }
     }
 
     /// An option of the prompt clicked, by its act.
@@ -1956,6 +2058,16 @@ impl Viewer {
 /// A reply to the page, as JSON.
 fn to_json(value: &impl serde::Serialize) -> String {
     serde_json::to_string(value).unwrap_or_default()
+}
+
+/// A tool's outcome as JSON, with a guide's note under `guide` when there
+/// is one.
+fn with_note(outcome: &crate::tools::Outcome, note: Option<crate::guide::Note>) -> String {
+    let mut value = serde_json::to_value(outcome).unwrap_or_default();
+    if let Some(note) = note {
+        value["guide"] = serde_json::to_value(note).unwrap_or_default();
+    }
+    value.to_string()
 }
 
 /// Little-endian bytes of `values`, as WebAssembly and the GPU read them.

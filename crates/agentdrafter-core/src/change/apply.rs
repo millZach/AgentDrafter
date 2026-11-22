@@ -955,6 +955,7 @@ pub(super) fn apply(
             .collect(),
         inconsistent: (!failures.is_empty()).then(|| mark_report(&files.folder, &failures)),
         checks: None,
+        guide: None,
     })
 }
 
@@ -5788,4 +5789,377 @@ fn code_text(error: &Error) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_default()
+}
+
+/// One step of a guide, as the walk takes it (#157): its points and its
+/// operation as the guide gives them, `made_by` and all, or the layer a
+/// setting step makes current.
+pub(super) struct WalkStep<'a> {
+    pub points: &'a [super::guides::GuidePoint],
+    pub operation: Option<&'a Value>,
+    pub layer: Option<&'a str>,
+}
+
+/// What the walk found of one step.
+#[derive(Clone, Debug, Default)]
+pub(super) struct StepWalked {
+    /// Each point, in order.
+    pub points: Vec<PointWalked>,
+    /// The step's operation with each `made_by` named by its object's ID,
+    /// once every step it names has made its object.
+    pub operation: Option<Value>,
+    /// The ID of the object its operation adds.
+    pub made: Option<String>,
+    /// Its operation's name, as the core names it.
+    pub op_name: Option<&'static str>,
+    /// Its operation as it applied, each snapped point written as the
+    /// point it was worked out to.
+    pub resolved: Option<Value>,
+    /// The objects its operation moves, copies or deletes, by ID on the
+    /// guide's sheet.
+    pub targets: Vec<String>,
+    /// The layer a setting step makes current, as the sheet names it.
+    pub layer: Option<String>,
+}
+
+/// What the walk found of one point of a step.
+#[derive(Clone, Debug, Default)]
+pub(super) struct PointWalked {
+    /// Where it is, in the set's declared unit.
+    pub at: Option<[f64; 3]>,
+    /// The snap it names, worked out.
+    pub snapped: Option<SnapResolved>,
+    /// The object it picks, by ID.
+    pub object: Option<String>,
+    /// The step whose object it waits on, while that step has made none.
+    pub waits_on: Option<u64>,
+    /// Why it names no point now, such as an object since deleted.
+    pub error: Option<String>,
+}
+
+/// Walks a guide's steps on sheet `sheet` of the drawing set in `set`.
+///
+/// With `made` none, the guide is checked as it is given: each step's
+/// points are worked out on the sheet as the steps before it leave it, and
+/// its operation is applied in memory, as a dry run applies one, so a later
+/// step may name what an earlier one adds (`made_by`). Any point that names
+/// nothing, and any operation the set would refuse, is an error at its key
+/// under `guide.steps`, and nothing is written.
+///
+/// With `made` given, the object each step's change set made on the set as
+/// it stands, the steps are worked out on the set as it is now, with no
+/// operation applied: a point that waits on a step that has made nothing
+/// says so, and one that names nothing now says why.
+pub(super) fn walk_guide(
+    set: &Path,
+    sheet: &str,
+    steps: &[WalkStep],
+    made: Option<&BTreeMap<u64, String>>,
+    settings: &Settings,
+) -> Result<(String, Vec<StepWalked>), Error> {
+    let files = SetFiles::load(set)?;
+    let Some(k) = files.sheet(sheet) else {
+        return Err(Error::new(
+            ErrorCode::UnknownName,
+            format!(
+                "the set holds no sheet `{sheet}`; its sheets: {}",
+                files.sheet_names()
+            ),
+        )
+        .at_field("guide.sheet"));
+    };
+    let name = files.name(k).to_owned();
+    let checking = made.is_none();
+    let mut made_now: BTreeMap<u64, String> = made.cloned().unwrap_or_default();
+    let mut at = Attempt::new(&files)?;
+    let mut walked = Vec::with_capacity(steps.len());
+    for (s, step) in steps.iter().enumerate() {
+        let here = format!("guide.steps[{s}]");
+        let rows = at.rows_now()?;
+        let record = sheet_record(&at, &rows, k, &mut Vec::new()).map_err(|e| Error {
+            message: format!(
+                "step {}: sheet `{name}` cannot be read to work out its points: {}",
+                s + 1,
+                e.message
+            ),
+            ..e
+        })?;
+        let mut out = StepWalked::default();
+        if let Some(layer) = step.layer {
+            out.layer = if layer == "0" {
+                Some("0".to_owned())
+            } else {
+                record
+                    .sheet
+                    .layers
+                    .iter()
+                    .find(|l| l.name.eq_ignore_ascii_case(layer))
+                    .map(|l| l.name.clone())
+            };
+            if out.layer.is_none() {
+                let names: Vec<&str> = std::iter::once("0")
+                    .chain(record.sheet.layers.iter().map(|l| l.name.as_str()))
+                    .collect();
+                return Err(Error::new(
+                    ErrorCode::UnknownName,
+                    format!(
+                        "step {}: sheet `{name}` has no layer `{layer}`; its layers: {}",
+                        s + 1,
+                        names.join(", ")
+                    ),
+                )
+                .at_field(format!("{here}.setting.current_layer")));
+            }
+        }
+        for (p, point) in step.points.iter().enumerate() {
+            let mut found = PointWalked::default();
+            let (given, key) = match (&point.at, &point.object) {
+                (Some(given), _) => (given, "at"),
+                (None, Some(given)) => (given, "object"),
+                (None, None) => unreachable!("a point is read with `at` or `object`"),
+            };
+            let given = match super::guides::substituted(given, &made_now) {
+                Ok(given) => given,
+                Err(step) => {
+                    found.waits_on = Some(step);
+                    out.points.push(found);
+                    continue;
+                }
+            };
+            let field = format!("{here}.points[{p}].{key}");
+            let worked = if key == "at" {
+                guide_point(&record, &given, settings, &field).map(|(xyz, snapped)| {
+                    found.at = Some(xyz);
+                    found.snapped = snapped;
+                })
+            } else {
+                guide_object(&record, &given, &field).map(|id| found.object = Some(id))
+            };
+            if let Err(e) = worked {
+                if checking {
+                    return Err(Error {
+                        message: format!("step {}, point {}: {}", s + 1, p + 1, e.message),
+                        ..e
+                    });
+                }
+                found.error = Some(e.message);
+            }
+            out.points.push(found);
+        }
+        if let Some(op) = step.operation {
+            if let Ok(op) = super::guides::substituted(op, &made_now) {
+                out.operation = Some(op);
+            }
+        }
+        if let (true, Some(op)) = (checking, &out.operation) {
+            let applied = guide_op(&mut at, &files, k, op, s, settings)?;
+            out.op_name = Some(applied.name);
+            out.made = applied.made;
+            out.resolved = Some(applied.resolved);
+            out.targets = applied.targets;
+            if let Some(id) = &out.made {
+                made_now.insert(s as u64 + 1, id.clone());
+            }
+        }
+        walked.push(out);
+    }
+    Ok((name, walked))
+}
+
+/// A guide's point `given`, `[x, y]`, `[x, y, z]` or a snapped point, on
+/// `record`: where it is, and the snap it names, worked out.
+fn guide_point(
+    record: &SheetRecord,
+    given: &Value,
+    settings: &Settings,
+    field: &str,
+) -> Result<([f64; 3], Option<SnapResolved>), Error> {
+    match given {
+        Value::Array(items) if (2..=3).contains(&items.len()) => {
+            let mut xyz = [0.0; 3];
+            for (i, item) in items.iter().enumerate() {
+                xyz[i] = item.as_f64().ok_or_else(|| {
+                    Error::new(ErrorCode::WrongType, "expected a number")
+                        .at_field(format!("{field}[{i}]"))
+                })?;
+            }
+            Ok((xyz, None))
+        }
+        Value::Object(map) => {
+            let snap = super::operations::read_snap(map, field)
+                .map_err(|(code, message, at)| Error::new(code, message).at_field(at))?;
+            let (object, point) = crate::query::snap::one_point(
+                &[record],
+                &snap,
+                settings,
+                &format!("{field}.snap"),
+            )?;
+            Ok((
+                [point.at.x, point.at.y, point.at.z],
+                Some(SnapResolved {
+                    field: field.to_owned(),
+                    id: object.id,
+                    snap: point.snap,
+                    which: snap.which.clone().or(point.which),
+                    at: point.at,
+                }),
+            ))
+        }
+        _ => Err(Error::new(
+            ErrorCode::WrongType,
+            "expected a point, [x, y] or [x, y, z], or a snapped point, {\"snap\": {...}}",
+        )
+        .at_field(field)),
+    }
+}
+
+/// The object a guide's step picks, `given` as an operation's target
+/// names one, on `record`, by its ID.
+fn guide_object(record: &SheetRecord, given: &Value, field: &str) -> Result<String, Error> {
+    let wrong = || {
+        Error::new(
+            ErrorCode::WrongType,
+            "expected an object, {\"id\": ...}, {\"name\": ...} or {\"made_by\": <step>}",
+        )
+        .at_field(field)
+    };
+    let Value::Object(map) = given else {
+        return Err(wrong());
+    };
+    let found = match (map.get("id"), map.get("name")) {
+        (Some(Value::String(id)), None) => {
+            (0..record.objects.len()).find(|&i| record.id(i).eq_ignore_ascii_case(id))
+        }
+        (None, Some(Value::String(name))) => (0..record.objects.len()).find(|&i| {
+            record.objects[i]
+                .name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        }),
+        _ => return Err(wrong()),
+    };
+    found.map(|i| record.id(i)).ok_or_else(|| {
+        Error::new(
+            ErrorCode::UnknownName,
+            format!(
+                "sheet `{}` has no such object; its IDs: {}",
+                record.name,
+                (0..record.objects.len().min(LISTED_IDS))
+                    .map(|i| record.id(i))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .at_field(field)
+    })
+}
+
+/// The most IDs a guide's error lists.
+const LISTED_IDS: usize = 40;
+
+/// What a guide step's operation did, applied in memory.
+struct GuideOpDone {
+    name: &'static str,
+    /// The object it adds, or the one copy it makes, by its ID on the
+    /// guide's sheet.
+    made: Option<String>,
+    /// The operation, each snapped point written as its point.
+    resolved: Value,
+    /// The objects it moves, copies or deletes, by ID on the guide's sheet.
+    targets: Vec<String>,
+}
+
+/// Applies a guide step's operation `op` in memory, as a dry run does, on
+/// `at`, and says what it did. It must reach sheet `k`.
+fn guide_op(
+    at: &mut Attempt,
+    files: &SetFiles,
+    k: usize,
+    op: &Value,
+    s: usize,
+    settings: &Settings,
+) -> Result<GuideOpDone, Error> {
+    let here = format!("guide.steps[{s}].completes");
+    let step = s + 1;
+    let moved = |e: Error| -> Error {
+        let field = e
+            .field
+            .as_deref()
+            .map(|f| match f.strip_prefix("operations[0]") {
+                Some(rest) => format!("{here}{rest}"),
+                None => format!("{here}.{f}"),
+            });
+        let message = match e.message.strip_prefix("operation 0 (") {
+            Some(rest) => format!("step {step}'s operation ({rest}"),
+            None => format!("step {step}'s operation: {}", e.message),
+        };
+        Error {
+            message,
+            field: field.or(Some(here.clone())),
+            ..e
+        }
+    };
+    let set = serde_json::json!({ "operations": [op] });
+    let change_set = read_change_set(&set, files.units).map_err(moved)?;
+    precheck(files, &change_set.operations).map_err(moved)?;
+    let operation = &change_set.operations[0];
+    let applied = apply_op(at, operation, settings);
+    let done = applied.outcome.map_err(moved)?;
+    if !applied.sheets.contains(&k) {
+        return Err(Error::new(
+            ErrorCode::BadValue,
+            format!(
+                "step {step}'s operation does not reach sheet `{}`, the guide's sheet",
+                files.name(k)
+            ),
+        )
+        .at_field(here));
+    }
+    // The sheet is read as it now stands, as a dry run builds it, so an
+    // operation that leaves it unreadable, such as one naming a layer it
+    // does not have, is the step's.
+    let rows = at.rows_now()?;
+    sheet_record(at, &rows, k, &mut Vec::new()).map_err(|e| {
+        let key = e
+            .field
+            .as_deref()
+            .and_then(|f| f.rsplit('.').next())
+            .filter(|key| op.get(*key).is_some())
+            .map(|key| format!("{here}.{key}"));
+        Error {
+            message: format!("step {step}'s operation: {}", e.message),
+            field: key.or(Some(here.clone())),
+            ..e
+        }
+    })?;
+    let name = operation.spec.name;
+    // An object of a template's, added or copied through another sheet
+    // built from it, is on the guide's sheet with the same ID after its
+    // name.
+    let here = |id: &str| {
+        let local = id.split_once(ID_SEPARATOR).map_or(id, |(_, l)| l);
+        format!("{}{ID_SEPARATOR}{local}", files.name(k))
+    };
+    let made = if name.starts_with("add_") {
+        done.id.as_deref().map(here)
+    } else if let [one] = done.copies.as_slice() {
+        Some(here(&one.id))
+    } else {
+        None
+    };
+    let mut targets: Vec<String> = if name == "copy" {
+        done.copies.iter().map(|c| here(&c.source)).collect()
+    } else if name.starts_with("add_") {
+        Vec::new()
+    } else {
+        done.id.as_deref().map(here).into_iter().collect()
+    };
+    targets.sort_by_key(|t| t.to_lowercase());
+    targets.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    Ok(GuideOpDone {
+        name,
+        made,
+        resolved: super::guides::resolved(op, &done.snapped),
+        targets,
+    })
 }

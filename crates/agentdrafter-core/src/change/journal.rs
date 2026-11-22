@@ -205,6 +205,11 @@ pub struct Entry {
     /// Who discarded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discarded_by: Option<String>,
+    /// The guide step a change set or a failed attempt was sent for, as
+    /// its change set's `guide` names it (#157): the guide, the step and
+    /// how many steps the guide has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide: Option<super::guides::GuideMark>,
     /// How it was rolled back, when it was: read from the line that marks
     /// it so, not from its own.
     #[serde(skip)]
@@ -237,6 +242,7 @@ impl Entry {
             proposed_by: None,
             kept_by: None,
             discarded_by: None,
+            guide: None,
             rolled_back: None,
         }
     }
@@ -1006,6 +1012,7 @@ pub(super) fn commit_change_set(
         folders_made,
         pruned,
         objects: landing.objects,
+        guide: super::guides::mark_of(change_set),
         ..Entry::new(number, EntryKind::ChangeSet).keeping(keeping)
     };
     let written = Written {
@@ -1147,6 +1154,7 @@ pub(super) fn record_failed_attempt(
         landed_on: landing.landed_on,
         failed_on: landing.failed_on,
         error,
+        guide: super::guides::mark_of(&request.change_set),
         ..Entry::new(number, EntryKind::FailedAttempt).keeping(keeping)
     };
     let line = line_of(text.as_deref(), &entry);

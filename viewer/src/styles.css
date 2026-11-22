@@ -178,7 +178,7 @@ p.muted { margin: 6px 0; font-size: 12px; line-height: 1.45; }
 
 /* toasts, top left of the drawing */
 .va-overlays {
-  position: absolute; left: 12px; right: 58px; top: 12px; z-index: 6; display: flex; flex-direction: column;
+  position: absolute; left: 12px; right: 58px; top: calc(12px + var(--gtop, 0px)); z-index: 6; display: flex; flex-direction: column;
   gap: 8px; pointer-events: none; max-width: 430px;
 }
 .va-overlays > * { pointer-events: auto; }
@@ -893,3 +893,87 @@ p.err, p.ok, p.note { margin: 4px 0; font-size: 12px; line-height: 1.4; }
   /* Raised, the sheet is the panel itself: the peek shows only while it is down. */
   .va-sheet:not([data-snap="peek"]) .va-peek { display: none; }
 }
+
+/* Guides (#157): the guide's own pink. Proposal purple stays the proposal's,
+   green and amber the preview's, blue the selection's. */
+:root { --guide: #ff5cc8; }
+.gwrap { position: absolute; left: 50%; transform: translateX(-50%); top: 8px; width: min(880px, calc(100% - 84px)); z-index: 6; pointer-events: none; }
+.gbanner {
+  pointer-events: auto; background: rgba(38, 20, 34, .97); border: 1px solid #8a3d73; border-left: 4px solid var(--guide);
+  border-radius: 5px; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); padding: 7px 10px 8px 12px; display: grid;
+  grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; font: 13px var(--ui);
+}
+.g-tag { font: 700 10.5px/1.5 var(--ui); letter-spacing: .06em; color: #1c0d18; background: var(--guide); border-radius: 3px; padding: 0 6px; flex: none; }
+.g-head { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; color: #f6c9e8; }
+.g-head b { color: #fff; white-space: nowrap; }
+.g-dots { display: flex; gap: 4px; flex: none; }
+.g-dots i { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid #b86a9b; }
+.g-dots i.done { background: var(--ok); border-color: var(--ok); }
+.g-dots i.skip { background: #6b7584; border-color: #6b7584; }
+.g-dots i.now { background: var(--guide); border-color: var(--guide); box-shadow: 0 0 0 3px rgba(255, 92, 200, .25); }
+.g-title { color: #d9b3cc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.g-main { display: grid; gap: 4px; min-width: 0; }
+.g-say { font-size: 14px; color: #fff; line-height: 1.35; }
+.g-say.small { font-size: 12.5px; color: #e8dbe3; }
+.g-now { font-size: 12.5px; color: #f0d6e7; line-height: 1.35; }
+.g-now::before { content: '\25B8  '; color: var(--guide); }
+.g-last { font-size: 12px; color: #9be9bd; }
+.g-last.skip { color: #b5bdc8; }
+.g-note { border-radius: 4px; padding: 5px 8px; font-size: 12.5px; line-height: 1.35; display: flex; gap: 6px 10px; align-items: center; flex-wrap: wrap; }
+.g-note > span { flex: 1 1 200px; }
+.g-note.warn { background: #3d2f14; border: 1px solid #8a6a2a; color: #ffe2a8; }
+.g-note.info { background: #22303f; border: 1px solid #47617d; color: #cfe3f7; }
+.g-acts { display: flex; gap: 6px; align-items: flex-start; flex-wrap: wrap; justify-content: flex-end; align-content: flex-start; }
+.g-acts.start { justify-content: flex-end; }
+.btn.guide { background: #6b2456; border-color: var(--guide); color: #fff; font-weight: 600; }
+.btn.guide:hover:not(:disabled) { background: #82306a; }
+.g-sum { margin: 2px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; font-size: 12.5px; color: #e6e9ee; }
+.g-sum li, .gcc-l li { display: flex; gap: 7px; }
+.g-sum .m, .gcc-l .m { width: 12px; text-align: center; flex: none; font-weight: 700; }
+.g-sum small { color: var(--dim); font-size: 12px; }
+.gs-done .m, .gs-forme .m { color: var(--ok); }
+.gs-skipped .m, .gs-needs .m, .gs-todo .m { color: #8f99a6; }
+/* The chat's card. */
+.gcc { border: 1px solid #8a3d73; border-left: 3px solid var(--guide); border-radius: 5px; background: rgba(255, 92, 200, .07); padding: 7px 9px 8px; display: grid; gap: 5px; margin: 6px 0; }
+.gcc-h { display: flex; gap: 7px; align-items: center; min-width: 0; }
+.gcc-h b { flex: 1; min-width: 0; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gcc-h .o { color: #e8b8d8; font-size: 12px; white-space: nowrap; }
+.gcc-l { margin: 0; padding: 0; list-style: none; display: grid; gap: 1px; font-size: 12.5px; color: #dfe5ec; }
+.gcc-l .gs-now { color: #fff; font-weight: 600; }
+.gcc-l .gs-now .m { color: var(--guide); }
+.gcc-m { font-size: 12px; color: #e8cfe0; }
+/* The ring on the point the step's next click wants, or round the object to pick, and its tag. */
+.grings { position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: hidden; }
+.gring { position: absolute; width: 28px; height: 28px; margin: -14px 0 0 -14px; border: 2.5px solid var(--guide); border-radius: 50%; }
+.gring::after { content: ''; position: absolute; inset: -2.5px; border: 2px solid var(--guide); border-radius: 50%; animation: gring 1.4s ease-out infinite; }
+.gring.box { margin: 0; border-radius: 6px; }
+.gring.box::after { border-radius: 8px; }
+@keyframes gring { from { transform: scale(1); opacity: .85; } to { transform: scale(2.2); opacity: 0; } }
+.gring.box::after { animation-name: gbox; }
+@keyframes gbox { from { inset: -2.5px; opacity: .85; } to { inset: -14px; opacity: 0; } }
+.gtag {
+  position: absolute; display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px 0 3px; white-space: nowrap;
+  background: rgba(40, 16, 34, .95); border: 1.2px solid var(--guide); border-radius: 11px; color: #fff; font: 600 12px var(--ui);
+}
+.gtag b { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--guide); color: #1c0d18; font: 700 11px var(--ui); }
+/* The tool's button pulses, or the Layer box, or Done; on a phone, Tools while the ribbon is folded. */
+@keyframes gpulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 92, 200, .6), inset 0 0 0 1px rgba(255, 92, 200, .9); }
+  55% { box-shadow: 0 0 0 7px rgba(255, 92, 200, 0), inset 0 0 0 1px rgba(255, 92, 200, .9); }
+}
+.va[data-gpulse='line'] .rb[data-tool='line'], .va[data-gpulse='circle'] .rb[data-tool='circle'],
+.va[data-gpulse='rectangle'] .rb[data-tool='rectangle'], .va[data-gpulse='text'] .rb[data-tool='text'],
+.va[data-gpulse='move'] .rb[data-tool='move'], .va[data-gpulse='copy'] .rb[data-tool='copy'],
+.va[data-gpulse='erase'] .rb[data-tool='erase'], .va[data-gpulse='done'] [data-opt='tool:done'],
+.va[data-gpulse='layer'] .layerbox {
+  animation: gpulse 1.3s ease-in-out infinite; border-color: var(--guide); background: rgba(255, 92, 200, .16); color: #fff; border-radius: 4px;
+}
+.va[data-gpulse]:not(.tools-open):not([data-gpulse='done']) .toolsbtn { animation: gpulse 1.3s ease-in-out infinite; border-color: var(--guide); background: rgba(255, 92, 200, .18); }
+@media (max-width: 899px) {
+  .gwrap { left: 6px; right: 6px; width: auto; transform: none; top: 6px; }
+  .gbanner { grid-template-columns: minmax(0, 1fr); padding: 6px 8px 7px 10px; gap: 4px; }
+  .gbanner .g-acts { justify-content: flex-start; }
+  .g-say { font-size: 13.5px; }
+  .gbanner .g-acts .btn { padding: 6px 11px; font-size: 13px; }
+}
+.je-by.guide { color: #ff9ad9; }

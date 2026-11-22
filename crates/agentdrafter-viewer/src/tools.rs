@@ -503,6 +503,9 @@ pub struct Tools {
     /// The current layer, which new objects go on.
     pub layer: String,
     text_height: Option<f64>,
+    /// The height a guide's Text step gives, while the step runs (#157):
+    /// it wins over the last one typed, and goes when the step ends.
+    guide_text_height: Option<f64>,
     /// The last point taken, which `@dx,dy` is measured from when no tool
     /// has its own, as AutoCAD's LASTPOINT.
     last_point: Option<([f64; 2], f64)>,
@@ -521,6 +524,7 @@ impl Default for Tools {
             ortho: false,
             layer: "0".to_owned(),
             text_height: None,
+            guide_text_height: None,
             last_point: None,
             error: None,
             context: Context::default(),
@@ -758,7 +762,8 @@ impl Tools {
     /// The height new text is drawn at: the last one typed, or a beginner's
     /// size for the sheet's unit.
     pub fn text_height(&self) -> f64 {
-        self.text_height
+        self.guide_text_height
+            .or(self.text_height)
             .unwrap_or(match self.context.units.as_deref() {
                 Some("in") => 0.12,
                 Some("ft") => 0.01,
@@ -1040,6 +1045,86 @@ impl Tools {
     /// Clears what went wrong, as its OK does.
     pub fn clear_error(&mut self) {
         self.error = None;
+    }
+
+    /// Takes back the last point the tool running took, as a guide's Undo
+    /// it asks (#157): Line's last point, as its own Undo does, Circle's
+    /// centre, Rectangle's first corner, where a Text starts before anything
+    /// is typed, or Move's and Copy's base point before a copy is placed.
+    /// Gives whether there was one to take back.
+    pub fn take_back_point(&mut self) -> bool {
+        let Some(running) = &mut self.running else {
+            return false;
+        };
+        let step = std::mem::replace(&mut running.step, Step::LineFirst);
+        let (step, took) = match step {
+            Step::LineNext { mut points } => {
+                points.pop();
+                if points.is_empty() {
+                    (Step::LineFirst, true)
+                } else {
+                    (Step::LineNext { points }, true)
+                }
+            }
+            Step::CircleRadius { .. } => (Step::CircleCenter, true),
+            Step::RectangleSecond { .. } => (Step::RectangleFirst, true),
+            Step::TextType { lines, current, .. } if lines.is_empty() && current.is_empty() => {
+                (Step::TextStart, true)
+            }
+            Step::MoveSecond { picked, .. } => (Step::MoveBase { picked }, true),
+            Step::CopySecond { picked, placed, .. } if placed.is_empty() => {
+                (Step::CopyBase { picked }, true)
+            }
+            // Copy's last copy placed, from the same base point.
+            Step::CopySecond {
+                picked,
+                base,
+                mut placed,
+            } => {
+                placed.pop();
+                (
+                    Step::CopySecond {
+                        picked,
+                        base,
+                        placed,
+                    },
+                    true,
+                )
+            }
+            other => (other, false),
+        };
+        running.step = step;
+        self.error = None;
+        took
+    }
+
+    /// Sets the height a guide's Text step gives, while it runs, or none
+    /// once it has ended, which leaves the height the drafter last typed
+    /// (#157).
+    pub fn set_guide_text_height(&mut self, height: Option<f64>) {
+        self.guide_text_height = height.filter(|h| h.is_finite() && *h > 0.0);
+    }
+
+    /// Ends the tool running with nothing sent, whatever it holds: a
+    /// guide's Do it for me, Skip and Stop drop the points the drafter has
+    /// not finished, as leaving a sheet drops Copy's copies (#157).
+    pub fn drop_tool(&mut self) -> Outcome {
+        let Some(running) = self.running.take() else {
+            return Outcome::default();
+        };
+        self.error = None;
+        Outcome {
+            log: vec![format!(
+                "{}: dropped, nothing changed",
+                running.kind.command()
+            )],
+            sends: Vec::new(),
+        }
+    }
+
+    /// The last point taken, as `@dx,dy` measures from it.
+    pub fn last_point(&self) -> Option<[f64; 2]> {
+        self.last_point.map(|(at, _)| at)
     }
 
     /// The point the next one is measured from: Ortho, a length typed alone

@@ -218,7 +218,9 @@ pub struct DiscardReport {
 
 /// `by` as given: text, never `null`, which the input's schema refuses
 /// too; left out, it is `None`.
-fn text_given<'de, D: serde::Deserializer<'de>>(given: D) -> Result<Option<String>, D::Error> {
+pub(super) fn text_given<'de, D: serde::Deserializer<'de>>(
+    given: D,
+) -> Result<Option<String>, D::Error> {
     String::deserialize(given).map(Some)
 }
 
@@ -234,7 +236,7 @@ pub(crate) const BY_LONGEST: usize = MOST_BY;
 /// interface it came through. `by` is refused as the input's schema
 /// refuses it: more than [`MOST_BY`] characters, a control character, or
 /// nothing but spaces.
-fn who(by: Option<&str>, via: Interface) -> Result<String, Error> {
+pub(super) fn who(by: Option<&str>, via: Interface) -> Result<String, Error> {
     let Some(by) = by else {
         return Ok(match via {
             Interface::Cli => "agent (command line)",
@@ -279,6 +281,9 @@ pub fn propose_with(
     // It writes nothing to the set, so it rolls nothing back: a set whose
     // journal holds an unfinished commit is refused, as a preview is.
     refuse_unfinished(folder, Unfinished::Proposals)?;
+    // A change set sent for a guide's step names one the set holds, or
+    // `keep` would refuse it: so is the proposal.
+    super::guides::check_mark(folder, &request.change_set)?;
     let dry = ChangeRequest {
         set: folder.clone(),
         change_set: request.change_set.clone(),
@@ -565,7 +570,7 @@ fn ended(entries: &[Entry]) -> BTreeSet<u64> {
 }
 
 /// The journal's newest entry, 0 for none.
-fn newest(entries: &[Entry]) -> u64 {
+pub(super) fn newest(entries: &[Entry]) -> u64 {
     entries.iter().map(|e| e.entry).max().unwrap_or(0)
 }
 
@@ -595,7 +600,7 @@ fn waiting(folder: &Path, number: u64) -> Result<Proposal, Error> {
 
 /// The numbers of the proposals kept in `store`, the lowest first; none
 /// when there is no such folder.
-fn numbers(store: &Path) -> Result<Vec<u64>, Error> {
+pub(super) fn numbers(store: &Path) -> Result<Vec<u64>, Error> {
     let listing = match fs::read_dir(store) {
         Ok(listing) => listing,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
