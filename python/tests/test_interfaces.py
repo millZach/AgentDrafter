@@ -35,6 +35,7 @@ JOURNAL_FILE = Path(".agentdrafter", "journal.jsonl")
 UNDO_STATES_FOLDER = Path(".agentdrafter", "undo-states")
 PROPOSALS_FOLDER = Path(".agentdrafter", "proposals")
 LOOKING_AT_FILE = Path(".agentdrafter", "looking-at.json")
+GUIDES_FOLDER = Path(".agentdrafter", "guides")
 
 
 def installed_command():
@@ -71,8 +72,8 @@ def interface_folder(scratch, interface):
 def snapshot(set_folder):
     """Every file and folder of the set, each file with its bytes, but the
     journal's own, which is compared entry by entry, and each proposal's
-    record and what the drafter is looking at, compared without the time
-    each was recorded, its top-level `at`, as a journal entry is."""
+    and guide's record and what the drafter is looking at, compared without
+    the time each was recorded, its top-level `at`, as a journal entry is."""
     found = {}
     for path in set_folder.rglob("*"):
         relative = path.relative_to(set_folder)
@@ -82,7 +83,8 @@ def snapshot(set_folder):
             if relative != JOURNAL_FILE.parent:
                 found[relative] = None
         elif (
-            relative.is_relative_to(PROPOSALS_FOLDER) and relative.suffix == ".json"
+            any(relative.is_relative_to(f) for f in (PROPOSALS_FOLDER, GUIDES_FOLDER))
+            and relative.suffix == ".json"
         ) or relative == LOOKING_AT_FILE:
             record = json.loads(path.read_text(encoding="utf-8"))
             record.pop("at")
