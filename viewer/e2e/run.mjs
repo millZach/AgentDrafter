@@ -304,38 +304,69 @@ async function sheetAtRest(page, raised, timeout = 30000) {
 /**
  * Waits until the view has come to rest: no glide, fling or reveal moving
  * it, the same for 5 frames and 300 ms in a row. Gives the view it rests at.
+ * The deadline is kept by a timer in the page, not by the frames, which a
+ * page that stops drawing stops giving, and by one in Node past it, for a
+ * page that answers nothing at all.
  */
 async function viewAtRest(page, timeout = 15000) {
-  return page.evaluate(
+  const resting = page.evaluate(
     (timeout) =>
       new Promise((done, fail) => {
         const now = () => JSON.stringify(window.agentdrafterViewer.view());
-        const began = performance.now();
         let last = now();
-        let since = began;
+        let since = performance.now();
         let frames = 0;
+        let over = false;
+        const giveUp = setTimeout(() => {
+          over = true;
+          fail(new Error(`the view did not come to rest in ${timeout} ms: ${now()}, ${frames} frames still`));
+        }, timeout);
         const step = () => {
+          if (over) return;
           const view = now();
           const t = performance.now();
           if (view !== last) [last, since, frames] = [view, t, 0];
           else frames += 1;
-          if (frames >= 5 && t - since >= 300) done(JSON.parse(view));
-          else if (t - began > timeout) fail(new Error(`the view did not come to rest in ${timeout} ms: ${view}`));
-          else requestAnimationFrame(step);
+          if (frames >= 5 && t - since >= 300) {
+            clearTimeout(giveUp);
+            done(JSON.parse(view));
+          } else requestAnimationFrame(step);
         };
         requestAnimationFrame(step);
       }),
     timeout,
   );
+  // The page's answer, should it come after Node has given up, is let go.
+  resting.catch(() => {});
+  let timer;
+  const deadline = new Promise((_, fail) => {
+    timer = setTimeout(() => fail(new Error(`the view did not come to rest in ${timeout} ms: the page gave no answer in ${timeout + 5000} ms`)), timeout + 5000);
+  });
+  try {
+    return await Promise.race([resting, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
- * Whether the journal's `entries` hold more than `before` and the newest is
- * done. A change set's entry is written pending before its files are put in
- * place (`commit.rs`), and `journal` can read it so: its files are in place
- * only once it is done (#254).
+ * Whether the journal's `entry` finished: marked done, or written whole, as a
+ * failed attempt or a discard is, with no state. One pending has not
+ * finished yet. One rolled back changed nothing, so a wait for it to finish
+ * fails at once and says so, rather than taking it for done (`journal.rs`).
  */
-const grownAndDone = (entries, before) => entries.length > before && entries.at(-1).state !== 'pending';
+const finished = (entry) => {
+  if (entry.state === 'rolled_back') throw new Error(`entry ${entry.entry} was rolled back, not done: ${JSON.stringify(entry)}`);
+  return entry.state === undefined || entry.state === 'done';
+};
+
+/**
+ * Whether the journal's `entries` hold more than `before` and the newest
+ * has finished. A change set's entry is written pending before its files
+ * are put in place (`commit.rs`), and `journal` can read it so: its files
+ * are in place only once it is done (#254).
+ */
+const grownAndDone = (entries, before) => entries.length > before && finished(entries.at(-1));
 
 /** Opens the side panel's Journal tab: it opens on the assistant's Chat (#156). */
 async function journalTab(page) {
@@ -2364,7 +2395,7 @@ const checks = {
         // The journal's entry is written ahead of the files and marked done after: wait for both.
         const until = Date.now() + 20000;
         let undone = journal().at(-1);
-        while (!(undone.kind === 'undo' && undone.state !== 'pending' && template() === templateBefore)) {
+        while (!(undone.kind === 'undo' && finished(undone) && template() === templateBefore)) {
           assert(Date.now() < until, `Undo last undoes the drafter's edit and puts the template back: ${JSON.stringify(undone)}`);
           await sleep(100);
           undone = journal().at(-1);
@@ -3691,7 +3722,7 @@ const checks = {
         await page.click('.titlebar button[data-act="undo"]');
         const until = Date.now() + 20000;
         let undone = journal().at(-1);
-        while (!(undone.kind === 'undo' && undone.state !== 'pending' && template() === beforeMove)) {
+        while (!(undone.kind === 'undo' && finished(undone) && template() === beforeMove)) {
           assert(Date.now() < until, `Undo last takes the edit back: ${JSON.stringify(undone)}`);
           await sleep(100);
           undone = journal().at(-1);
@@ -3809,7 +3840,11 @@ const checks = {
         seen.phone.layer_box = entry.entry;
         if (await page.isVisible('.ribbon [data-toggle="osnap"]')) await page.tap('.toolsbtn');
 
-        // The circle's radius and diameter.
+        // The circle's radius and diameter. The sheet is drawn again with
+        // the device on `wire`, the revision the journal now ends at, before
+        // the washer is found: a sheet drawn again after the Fit would fit
+        // it again, and move the washer from under the tap (#180).
+        await page.waitForFunction(() => window.agentdrafterViewer.summary.objects.find((o) => o.id === 'DP-LD-101/device')?.layer === 'wire', null, { timeout: 15000 });
         const washer = await placeOf(page, "(o) => o.id === 'DP-LD-101/washer'");
         await select(page, washer, true);
         before = journal().length;
@@ -3863,7 +3898,7 @@ const checks = {
         await page.tap('button[data-act="undo"]:visible');
         const until = Date.now() + 20000;
         let undone = journal().at(-1);
-        while (!(undone.kind === 'undo' && undone.state !== 'pending' && template() === templateBefore)) {
+        while (!(undone.kind === 'undo' && finished(undone) && template() === templateBefore)) {
           assert(Date.now() < until, `Undo last takes the edit back, by touch: ${JSON.stringify(undone)}`);
           await sleep(100);
           undone = journal().at(-1);
@@ -4490,7 +4525,7 @@ const checks = {
         // Undone as any change set, as one, and the proposal does not come back.
         await page.click('[data-act="undo"]');
         const undone = await grows(folder, 5, 'Undo last');
-        assert(undone.kind === 'undo' && JSON.stringify(undone.undid) === JSON.stringify([second.entry]), `undone: ${JSON.stringify(undone)}`);
+        assert(undone.kind === 'undo' && undone.state === 'done' && JSON.stringify(undone.undid) === JSON.stringify([second.entry]), `undone: ${JSON.stringify(undone)}`);
         await sleep(500);
         assert(waiting(folder).length === 0 && (await page.locator('[data-pcard]').count()) === 0, 'the proposal does not come back');
 
