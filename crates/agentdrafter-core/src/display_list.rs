@@ -1113,10 +1113,14 @@ fn read(
         )
         .at_field("entry"));
     }
-    let name = source
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = if is_dwg(source) {
+        crate::original::sheet_name(source)
+    } else {
+        source
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
     if !named(&name) {
         return Err(no_such_sheet(sheet, std::slice::from_ref(&name)));
     }

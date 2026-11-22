@@ -560,3 +560,40 @@ fn a_proposal_s_schema_and_its_command_refuse_the_same_who_and_number() {
         );
     }
 }
+
+#[test]
+fn read_through_the_registry_never_triggers_drawing_set_journal_recovery() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("commands-read-no-recover");
+    let _ = std::fs::remove_dir_all(&dir);
+    let set = dir.join("demo-set");
+    demo_set::copy_demo_set(&set);
+    let moved = json!({"operations": [{"op": "move", "target": {"id": "DEMO-001/border"}, "by": [0.1, 0, 0]}]});
+    let landed = run("change", json!({"set": set, "change_set": moved}));
+    assert_eq!(landed["ok"], true, "{landed}");
+    let dwg = set.join("dwg").join("DEMO-001.dwg");
+    assert!(dwg.is_file());
+
+    // Leave the journal with a pending commit (strip the final "done" line).
+    let journal = set.join(agentdrafter_core::JOURNAL_FILE);
+    let text = std::fs::read_to_string(&journal).unwrap();
+    let (rest, last) = text.trim_end().rsplit_once('\n').unwrap();
+    assert!(last.contains(r#""state":"done""#), "{last}");
+    std::fs::write(&journal, format!("{rest}\n")).unwrap();
+    let before = every_file(&set);
+
+    // `read --no-mirror` on the set's DWG must NOT recover/mutate the set.
+    let reply = run("read", json!({"source": dwg, "no_mirror": true}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(reply.get("rolled_back").is_none(), "{reply}");
+    assert_eq!(every_file(&set), before, "no-mirror left set untouched");
+
+    // `read` writing a mirror elsewhere must ALSO leave the set untouched.
+    let mirror = dir.join("elsewhere.mirror.yaml");
+    let reply = run("read", json!({"source": dwg, "mirror": mirror}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(reply.get("rolled_back").is_none(), "{reply}");
+    assert!(mirror.is_file());
+    assert_eq!(every_file(&set), before, "read left set untouched");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

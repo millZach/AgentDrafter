@@ -138,9 +138,9 @@ impl Command {
         let previews = (self.name == "display-list" && input.get("change_set").is_some())
             || matches!(self.name, "propose" | "proposals" | "guide" | "guides");
         // What the drafter is looking at is kept beside the set's records,
-        // not in them: recording or reading it neither rolls back nor waits
-        // on an unfinished commit.
-        let beside = matches!(self.name, "look-at" | "looking-at");
+        // not in them, and `read` reads a DWG on its own without touching any
+        // set: none of them rolls back or waits on an unfinished commit.
+        let beside = matches!(self.name, "look-at" | "looking-at" | "read");
         let rolled_back = match set_read(&input)
             .filter(|_| !previews && !beside)
             .map(|set| recover(&set))
@@ -1709,7 +1709,24 @@ fn run_import_blocks(
 
 fn read_does() -> String {
     format!(
-        "Reads an original, `source`, a DWG someone else drew, whole, and never writes it. The          reply says whether the DWG library decoded every record of the file, `decoded`, and          names each record it could not, under `not_decoded`, by `kind`, `count` and the          `handles` AutoCAD lists them by, with how many it `skipped` unread and the errors it          `recovered_errors` from; and it names in the same way, under `not_read`, the objects          of the sheet the core has no model for, which render, plot and the viewer do not draw,          with what of the drawing's tables, blocks and layouts it could not read under          `tables_not_read`. Every object read has an ID: the one AgentDrafter wrote on it, or          the drawing's name joined to its handle, such as P-101/{HANDLE_ID}2F, the same each          time the file is read. It writes the drawing's text mirror, a readable YAML rendering          of what it read with each object's ID and handle on a line of its own, for reading          and comparing and never read back, beside the original as P-101.{MIRROR_EXTENSION},          or at `mirror`; a mirror is replaced only when AgentDrafter wrote it, as its first          line shows. With `no_mirror` it writes nothing."
+        "Reads an original, `source`, a DWG someone else drew, whole, and never writes it. The \
+         reply says whether the DWG library decoded every record of the file whole, `decoded`, \
+         and names each record it could not—opaque, proxy and custom records kept as raw bytes, \
+         records cut short such as a mesh over the face budget, and damaged records skipped while \
+         reading past damage—under `not_decoded`, by `kind`, `count` and the `handles` AutoCAD \
+         lists them by, with how many it `skipped` unread, the errors it `recovered_errors` from, \
+         any non-fatal reader `warnings`, and `diagnostics_truncated` when the library hit its \
+         diagnostic cap (999 entries) so some diagnostics may be omitted; and it names in the same \
+         way, under `not_read`, the objects of the sheet the core has no model for or that were \
+         skipped unread, which render, plot and the viewer do not draw, with what of the drawing's \
+         tables, blocks and layouts it could not read under `tables_not_read`. Every object read \
+         has a unique ID: the one AgentDrafter wrote on it, or the drawing's name joined to its \
+         handle, such as P-101/{HANDLE_ID}2F, the same each time the file is read. It writes the \
+         drawing's text mirror, a readable YAML rendering of what it read with each object's ID \
+         and handle on a line of its own (in block definitions as on the sheet), for reading and \
+         comparing and never read back, beside the original as P-101.{MIRROR_EXTENSION}, or at \
+         `mirror`; a mirror is replaced only when AgentDrafter wrote it, as its first line shows, \
+         and never follows or replaces a symbolic link. With `no_mirror` it writes nothing."
     )
 }
 

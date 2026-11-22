@@ -755,3 +755,24 @@ fn check_reports_each_failed_check_and_a_change_set_carries_them() {
         "agentdrafter check <drawing-set-folder | sheet-description> [--sheet <sheet>]... [--fonts <folder>]... [--no-system-fonts]"
     );
 }
+
+#[test]
+fn read_mirror_flag_rejects_another_option_as_its_path() {
+    let dir = scratch("read-flags");
+    copy_example(&dir);
+    let (code, json) = agentdrafter(&["build", "one-line.yaml"], &dir);
+    assert_eq!(code, 0, "{json}");
+
+    for args in [
+        &["read", "one-line.dwg", "--mirror", "--no-mirror"][..],
+        &["read", "one-line.dwg", "--mirror", "--other"],
+        &["read", "one-line.dwg", "--mirror"],
+    ] {
+        let (code, json) = agentdrafter(args, &dir);
+        assert_eq!(code, 2, "{args:?}: {json}");
+        assert_eq!(json["ok"], false, "{args:?}: {json}");
+        assert_eq!(json["error"]["code"], "usage", "{args:?}: {json}");
+    }
+    assert!(!dir.join("--no-mirror").exists());
+    assert!(!dir.join("--other").exists());
+}

@@ -311,7 +311,7 @@ A readable text rendering of an existing DWG, kept beside it for reading and com
 _Avoid_: dump, export
 
 **Decode report**:
-What a read of a DWG says of the DWG library's reading of it: whether it decoded every record of the file, and each record it did not, by kind, count and handle. A record not decoded is kept as the bytes read, so a revision in the original's version carries it through, but nothing draws, queries or changes it.
+What a read of a DWG says of the DWG library's reading of it: whether it decoded every record of the file whole, and each record it did not, by kind, count and handle. An undecoded custom, proxy or opaque record is kept as the bytes read, so a revision in the original's version carries it through, though nothing draws, queries or changes it; a damaged record skipped while reading past damage could not be read at all and is left out, and a record or section cut short is reported alongside any reader warnings and whether the library hit its diagnostic limit.
 _Avoid_: audit (AutoCAD's AUDIT checks a drawing's integrity), parse log
 
 **Untouched means unchanged**:

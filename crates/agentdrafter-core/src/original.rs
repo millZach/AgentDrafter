@@ -18,18 +18,21 @@
 //! wrote, as its first line shows; any other file may be someone's own,
 //! and the original itself is never written.
 
-use std::collections::BTreeMap;
-use std::fs;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
+use std::hash::{BuildHasher, Hasher};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::build::is_same_file;
 use crate::description::{number_text, ID_SEPARATOR};
 use crate::dwg;
 use crate::error::{Error, ErrorCode};
-use crate::model::{DrawingContents, Layout, Object, RecordsOfKind};
+use crate::model::{DrawingContents, IdAndName, Layout, Object, RecordsOfKind};
 use crate::stamp::fingerprint;
 use crate::units::Unit;
 
@@ -84,6 +87,16 @@ pub struct ReadReport {
     pub skipped: usize,
     /// How many errors the DWG library recovered from while reading.
     pub recovered_errors: usize,
+    /// How many non-fatal reader warnings the DWG library reported while
+    /// reading (such as inconsistent source references or unknown enum
+    /// values), left out when 0.
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub warnings: usize,
+    /// True when the DWG library hit its diagnostic cap (999 entries) or
+    /// notification limit and omitted further diagnostics, left out when
+    /// false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub diagnostics_truncated: bool,
     /// Why the DWG library could not read the file whole, when it could
     /// not: the read then went on past the records it could not read, as
     /// AutoCAD's RECOVER reads a damaged drawing, repairing nothing, and
@@ -92,8 +105,9 @@ pub struct ReadReport {
     pub read_past_damage: Option<String>,
     /// How many objects of each type the core read, such as `{"line": 12}`.
     pub objects: BTreeMap<String, usize>,
-    /// The sheet's objects the core has no model for, by kind, with the
-    /// handle of each: what no output draws.
+    /// The sheet's objects the core has no model for or that were skipped
+    /// unread while reading past damage, by kind, with the handle of each:
+    /// what no output draws.
     pub not_read: Vec<RecordsOfKind>,
     /// How many entries of each of the drawing's tables, and how many of
     /// its block definitions and layouts, the core has no model for, such
@@ -102,6 +116,11 @@ pub struct ReadReport {
     /// The text mirror written; none when none was asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirror: Option<String>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Reads the original `request.source` and, unless asked not to, writes
@@ -129,7 +148,7 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         )
         .in_file(source)
     })?;
-    let drawing = dwg::read_past_damage(source)?;
+    let drawing = dwg::read_bytes_past_damage(&bytes, source)?;
     let sheet = sheet_name(source);
     let mirror = if request.no_mirror {
         None
@@ -138,9 +157,9 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
             .mirror
             .clone()
             .unwrap_or_else(|| source.with_extension(MIRROR_EXTENSION));
-        refuse_to_replace(source, &path)?;
+        let target = refuse_to_replace(source, &path)?;
         let text = mirror_text(source, &bytes, &sheet, &drawing);
-        write_whole(&path, text.as_bytes())?;
+        write_whole(source, &path, text.as_bytes(), target)?;
         Some(path)
     };
     let mut objects = BTreeMap::new();
@@ -159,6 +178,8 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         not_decoded: drawing.decode.not_decoded,
         skipped: drawing.decode.skipped,
         recovered_errors: drawing.decode.recovered_errors,
+        warnings: drawing.decode.warnings,
+        diagnostics_truncated: drawing.decode.diagnostics_truncated,
         read_past_damage: drawing.decode.read_past_damage,
         objects,
         not_read: drawing.not_read,
@@ -167,23 +188,93 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
     })
 }
 
+/// One object's resolved unique ID and optional name.
+type ResolvedId = (String, Option<String>);
+
 /// The ID of each object the core read from the DWG at `source`, in the
 /// order of `drawing.objects`, with its name: the ID AgentDrafter's
-/// extended data on it gives, or the drawing's name joined to its handle.
-pub(crate) fn ids_of(source: &Path, drawing: &DrawingContents) -> Vec<(String, Option<String>)> {
+/// extended data on it gives when unique and not colliding with another
+/// object's handle ID, and otherwise the drawing's name joined to its
+/// handle.
+pub(crate) fn ids_of(source: &Path, drawing: &DrawingContents) -> Vec<ResolvedId> {
     let sheet = sheet_name(source);
-    drawing
-        .handles
+    resolve_all_ids(&sheet, drawing).0
+}
+
+/// Resolves unique IDs and names for both the sheet's objects and each
+/// block definition's objects in `drawing`, preventing a carried ID from
+/// colliding with another object's handle ID or duplicating an earlier ID
+/// (case-insensitively).
+fn resolve_all_ids(
+    sheet: &str,
+    drawing: &DrawingContents,
+) -> (Vec<ResolvedId>, Vec<Vec<ResolvedId>>) {
+    // Flatten every object (sheet first, then each block's objects) so
+    // handle-ID reservations and uniqueness hold across the whole drawing.
+    let mut flat_handles: Vec<&str> = Vec::with_capacity(
+        drawing.handles.len() + drawing.block_handles.iter().map(Vec::len).sum::<usize>(),
+    );
+    let mut flat_carried: Vec<Option<&IdAndName>> = Vec::with_capacity(flat_handles.capacity());
+    for (i, handle) in drawing.handles.iter().enumerate() {
+        flat_handles.push(handle.as_str());
+        flat_carried.push(drawing.ids_and_names.get(i));
+    }
+    for (bi, block_handles) in drawing.block_handles.iter().enumerate() {
+        let block_ids = drawing.block_ids_and_names.get(bi);
+        for (oi, handle) in block_handles.iter().enumerate() {
+            flat_handles.push(handle.as_str());
+            flat_carried.push(block_ids.and_then(|list| list.get(oi)));
+        }
+    }
+
+    let handle_ids: Vec<String> = flat_handles.iter().map(|h| handle_id(sheet, h)).collect();
+    let mut handle_owner: HashMap<String, usize> = HashMap::with_capacity(handle_ids.len());
+    for (i, hid) in handle_ids.iter().enumerate() {
+        handle_owner.entry(hid.to_lowercase()).or_insert(i);
+    }
+
+    let mut used: HashSet<String> = HashSet::with_capacity(handle_ids.len());
+    let mut resolved: Vec<(String, Option<String>)> = Vec::with_capacity(handle_ids.len());
+    for (i, carried) in flat_carried.iter().enumerate() {
+        let candidate = carried
+            .and_then(|c| c.id.as_deref())
+            .filter(|id| !id.is_empty());
+        let accepted = candidate.and_then(|id| {
+            let key = id.to_lowercase();
+            let steals_other_handle = handle_owner.get(&key).is_some_and(|&owner| owner != i);
+            (!used.contains(&key) && !steals_other_handle).then(|| id.to_owned())
+        });
+        let id = match accepted {
+            Some(id) => id,
+            None => {
+                let base = &handle_ids[i];
+                if !used.contains(&base.to_lowercase()) {
+                    base.clone()
+                } else {
+                    let mut n = 2usize;
+                    loop {
+                        let next = format!("{base}~{n}");
+                        if !used.contains(&next.to_lowercase()) {
+                            break next;
+                        }
+                        n += 1;
+                    }
+                }
+            }
+        };
+        used.insert(id.to_lowercase());
+        resolved.push((id, carried.and_then(|c| c.name.clone())));
+    }
+
+    let mut iter = resolved.into_iter();
+    let sheet_ids: Vec<(String, Option<String>)> =
+        iter.by_ref().take(drawing.handles.len()).collect();
+    let block_ids: Vec<Vec<(String, Option<String>)>> = drawing
+        .block_handles
         .iter()
-        .enumerate()
-        .map(|(i, handle)| {
-            let carried = drawing.ids_and_names.get(i);
-            let id = carried
-                .and_then(|c| c.id.clone())
-                .unwrap_or_else(|| handle_id(&sheet, handle));
-            (id, carried.and_then(|c| c.name.clone()))
-        })
-        .collect()
+        .map(|handles| iter.by_ref().take(handles.len()).collect())
+        .collect();
+    (sheet_ids, block_ids)
 }
 
 /// The ID of the object of handle `handle` on the original named `sheet`,
@@ -192,11 +283,14 @@ pub(crate) fn handle_id(sheet: &str, handle: &str) -> String {
     format!("{sheet}{ID_SEPARATOR}{HANDLE_ID}{handle}")
 }
 
-/// The name an original's objects' IDs start with: its file's name
-/// without its `.dwg`.
+/// The name an original's objects' IDs start with: its on-disk file's name
+/// without its `.dwg`, resolved through the file system when the file
+/// exists so the same file gives the same IDs regardless of the case used
+/// to name its path.
 pub(crate) fn sheet_name(source: &Path) -> String {
-    source
-        .file_stem()
+    let resolved = fs::canonicalize(source);
+    let path = resolved.as_deref().unwrap_or(source);
+    path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
@@ -209,9 +303,18 @@ fn is_dwg(source: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("dwg"))
 }
 
+/// Whether the mirror path is brand new or an existing AgentDrafter mirror
+/// to replace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MirrorTarget {
+    CreateNew,
+    ReplaceExisting,
+}
+
 /// Refuses to write the mirror at `mirror` when it is the original itself,
-/// or a file other than a mirror AgentDrafter wrote is there.
-fn refuse_to_replace(source: &Path, mirror: &Path) -> Result<(), Error> {
+/// a symbolic link, a folder, a special file, or a file other than a
+/// mirror AgentDrafter wrote.
+fn refuse_to_replace(source: &Path, mirror: &Path) -> Result<MirrorTarget, Error> {
     if mirror.file_name().is_none() {
         return Err(Error::usage("the mirror's path does not name a file").at_field("mirror"));
     }
@@ -221,23 +324,52 @@ fn refuse_to_replace(source: &Path, mirror: &Path) -> Result<(), Error> {
         )
         .at_field("mirror"));
     }
-    if fs::symlink_metadata(mirror).is_err() {
-        return Ok(());
-    }
-    if let (Ok(a), Ok(b)) = (fs::canonicalize(source), fs::canonicalize(mirror)) {
-        if a == b {
-            return Err(Error::usage(
-                "the mirror's path is the original itself, which is never written; choose \
-                 another path for the mirror",
+    let meta = match fs::symlink_metadata(mirror) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(MirrorTarget::CreateNew),
+        Err(e) => {
+            return Err(Error::new(
+                ErrorCode::WriteFailed,
+                format!("could not inspect the mirror's path: {e}"),
             )
             .in_file(mirror));
         }
+    };
+    if meta.file_type().is_symlink() {
+        return Err(Error::new(
+            ErrorCode::NotAnOutput,
+            "the mirror's path is a symbolic link; AgentDrafter never follows or replaces a \
+             symbolic link as a text mirror, so choose another path",
+        )
+        .in_file(mirror));
     }
-    let is_mirror = fs::read(mirror)
+    if meta.is_dir() {
+        return Err(Error::new(
+            ErrorCode::NotAnOutput,
+            "the mirror's path is a folder, not a text mirror AgentDrafter wrote; choose a file \
+             path for the mirror",
+        )
+        .in_file(mirror));
+    }
+    if is_same_file(source, mirror) {
+        return Err(Error::usage(
+            "the mirror's path is the original itself, which is never written; choose another \
+             path for the mirror",
+        )
+        .in_file(mirror));
+    }
+    if !meta.file_type().is_file() {
+        return Err(Error::new(
+            ErrorCode::NotAnOutput,
+            "the mirror's path is not a regular file; choose another path for the mirror",
+        )
+        .in_file(mirror));
+    }
+    let is_mirror = read_mirror_prefix(mirror, &meta)
         .map(|bytes| bytes.starts_with(MIRROR_MARK.as_bytes()))
         .unwrap_or(false);
     if is_mirror {
-        Ok(())
+        Ok(MirrorTarget::ReplaceExisting)
     } else {
         Err(Error::new(
             ErrorCode::NotAnOutput,
@@ -249,26 +381,143 @@ fn refuse_to_replace(source: &Path, mirror: &Path) -> Result<(), Error> {
     }
 }
 
-/// Writes `bytes` to a temporary file beside `path`, then moves it onto
-/// `path`, so a reader never sees a half-written mirror. The temporary
-/// file's name holds the process ID and a count, so no two writes, such as
-/// two reads the HTTP API serves at once, share one.
-fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+/// Reads at most the first `MIRROR_MARK.len()` bytes of `mirror`, verifying
+/// the opened file is the same regular non-symlink file as `expected`.
+fn read_mirror_prefix(mirror: &Path, expected: &fs::Metadata) -> io::Result<Vec<u8>> {
+    let file = File::open(mirror)?;
+    let opened = file.metadata()?;
+    if !opened.file_type().is_file() {
+        return Ok(Vec::new());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != expected.dev() || opened.ino() != expected.ino() {
+            return Ok(Vec::new());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = expected;
+    let mut prefix = Vec::with_capacity(MIRROR_MARK.len());
+    file.take(MIRROR_MARK.len() as u64)
+        .read_to_end(&mut prefix)?;
+    Ok(prefix)
+}
+
+/// Creates a brand-new temporary file beside `path` with an unpredictable
+/// name using `create_new(true)` so an existing path or symlink is never
+/// opened or followed.
+fn create_temp_beside(path: &Path) -> io::Result<(PathBuf, File)> {
     static WRITES: AtomicU64 = AtomicU64::new(0);
-    let temporary = path.with_file_name(format!(
-        ".agentdrafter-{}-{}.mirror.tmp",
-        std::process::id(),
-        WRITES.fetch_add(1, Ordering::Relaxed)
-    ));
-    let written = fs::write(&temporary, bytes).and_then(|()| fs::rename(&temporary, path));
-    written.map_err(|e| {
-        let _ = fs::remove_file(&temporary);
+    for _ in 0..64 {
+        let count = WRITES.fetch_add(1, Ordering::Relaxed);
+        let hi = random_u64(path, count);
+        let lo = random_u64(path, count ^ 0x9e37_79b9_7f4a_7c15);
+        let candidate = path.with_file_name(format!(".agentdrafter-{hi:016x}{lo:016x}.mirror.tmp"));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique temporary mirror file",
+    ))
+}
+
+fn random_u64(path: &Path, salt: u64) -> u64 {
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    hasher.write_u64(salt);
+    hasher.write(path.as_os_str().as_encoded_bytes());
+    hasher.finish()
+}
+
+/// Writes `bytes` to a brand-new unpredictable temporary file beside
+/// `path`, then places it at `path` whole: without overwriting anything
+/// that appeared meanwhile when creating a new mirror, and only after
+/// re-verifying a regular non-symlink AgentDrafter mirror when replacing
+/// one.
+fn write_whole(
+    source: &Path,
+    path: &Path,
+    bytes: &[u8],
+    target: MirrorTarget,
+) -> Result<(), Error> {
+    let write_err = |e: io::Error| {
         Error::new(
             ErrorCode::WriteFailed,
             format!("could not write the text mirror: {e}"),
         )
         .in_file(path)
-    })
+    };
+    let (temporary, mut file) = create_temp_beside(path).map_err(write_err)?;
+    let wrote = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(e) = wrote {
+        let _ = fs::remove_file(&temporary);
+        return Err(write_err(e));
+    }
+    match target {
+        MirrorTarget::CreateNew => match fs::hard_link(&temporary, path) {
+            Ok(()) => {
+                let _ = fs::remove_file(&temporary);
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&temporary);
+                Err(Error::new(
+                    ErrorCode::NotAnOutput,
+                    "a file appeared at the mirror's path while reading; it may be someone's own \
+                     file, which is never overwritten, so choose another path for the mirror",
+                )
+                .in_file(path))
+            }
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                let _ = fs::remove_file(&temporary);
+                let mut direct = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map_err(|err| {
+                        if err.kind() == io::ErrorKind::AlreadyExists {
+                            Error::new(
+                                ErrorCode::NotAnOutput,
+                                "a file appeared at the mirror's path while reading; it may be \
+                                 someone's own file, which is never overwritten, so choose \
+                                 another path for the mirror",
+                            )
+                            .in_file(path)
+                        } else {
+                            write_err(err)
+                        }
+                    })?;
+                direct
+                    .write_all(bytes)
+                    .and_then(|()| direct.sync_all())
+                    .map_err(write_err)
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&temporary);
+                Err(write_err(e))
+            }
+        },
+        MirrorTarget::ReplaceExisting => {
+            if let Err(err) = refuse_to_replace(source, path) {
+                let _ = fs::remove_file(&temporary);
+                return Err(err);
+            }
+            fs::rename(&temporary, path).map_err(|e| {
+                let _ = fs::remove_file(&temporary);
+                write_err(e)
+            })
+        }
+    }
 }
 
 /// The entries of each table, and the blocks and layouts, the core has no
@@ -320,14 +569,29 @@ fn message(source: &Path, drawing: &DrawingContents, mirror: Option<&Path>) -> S
                 plural(decode.recovered_errors)
             ));
         }
+        if decode.diagnostics_truncated {
+            parts.push("hit its diagnostic limit so some diagnostics may be omitted".to_owned());
+        }
+        if parts.is_empty() {
+            parts.push("did not finish decoding the file whole".to_owned());
+        }
         format!("the DWG library {}", parts.join(", "))
+    };
+    let warnings = if decode.warnings > 0 {
+        format!(
+            " ({} reader warning{})",
+            decode.warnings,
+            plural(decode.warnings)
+        )
+    } else {
+        String::new()
     };
     let read = drawing.objects.len();
     let not_read = if drawing.not_read.is_empty() {
         String::new()
     } else {
         format!(
-            "; {} the core has no model for, which no output draws: {}",
+            "; {} the core has no model for or skipped unread, which no output draws: {}",
             drawing.objects_not_read,
             kinds_in_words(&drawing.not_read)
         )
@@ -337,7 +601,7 @@ fn message(source: &Path, drawing: &DrawingContents, mirror: Option<&Path>) -> S
         None => String::new(),
     };
     format!(
-        "read {name} ({}): {decoded}; {read} object{} read{not_read}{written}",
+        "read {name} ({}): {decoded}{warnings}; {read} object{} read{not_read}{written}",
         drawing.dwg_version,
         plural(read)
     )
@@ -360,6 +624,19 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
+/// Strips or escapes line breaks and control characters so a filename
+/// placed in a `#` comment line can never split the line or inject YAML.
+fn comment_safe(text: &str) -> String {
+    if text
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{0085}' | '\u{2028}' | '\u{2029}'))
+    {
+        quoted(text)
+    } else {
+        text.to_owned()
+    }
+}
+
 /// The text mirror of the original at `source`, whose bytes are `bytes`,
 /// read as `drawing`: YAML, a key to a line, each entry of a table, each
 /// object of a block and each object of the sheet on a line of its own,
@@ -372,8 +649,9 @@ fn mirror_text(source: &Path, bytes: &[u8], sheet: &str, drawing: &DrawingConten
         .unwrap_or_default();
     let mut out = String::new();
     out.push_str(&format!(
-        "{MIRROR_MARK}{name}, for reading and comparing. The DWG is the record: this file is \
-         never read back, and editing it changes nothing.\n"
+        "{MIRROR_MARK}{}, for reading and comparing. The DWG is the record: this file is \
+         never read back, and editing it changes nothing.\n",
+        comment_safe(&name)
     ));
     let key = |out: &mut String, key: &str, value: Value| {
         out.push_str(&pair(key, &value));
@@ -389,6 +667,12 @@ fn mirror_text(source: &Path, bytes: &[u8], sheet: &str, drawing: &DrawingConten
     out.push_str(&format!("not_decoded: {}\n", records(&decode.not_decoded)));
     key(&mut out, "skipped", json!(decode.skipped));
     key(&mut out, "recovered_errors", json!(decode.recovered_errors));
+    if decode.warnings > 0 {
+        key(&mut out, "warnings", json!(decode.warnings));
+    }
+    if decode.diagnostics_truncated {
+        key(&mut out, "diagnostics_truncated", json!(true));
+    }
     if let Some(why) = &decode.read_past_damage {
         key(&mut out, "read_past_damage", json!(why));
     }
@@ -425,11 +709,12 @@ fn mirror_text(source: &Path, bytes: &[u8], sheet: &str, drawing: &DrawingConten
         })
         .collect();
     list(&mut out, "layouts", &layout_entries);
+    let (ids, block_ids) = resolve_all_ids(sheet, drawing);
     if drawing.blocks.is_empty() {
         out.push_str("blocks: []\n");
     } else {
         out.push_str("blocks:\n");
-        for block in &drawing.blocks {
+        for (bi, block) in drawing.blocks.iter().enumerate() {
             out.push_str(&format!("  - name: {}\n", flow(&json!(block.name))));
             out.push_str(&format!(
                 "    base_point: {}\n",
@@ -439,13 +724,24 @@ fn mirror_text(source: &Path, bytes: &[u8], sheet: &str, drawing: &DrawingConten
                 out.push_str("    objects: []\n");
             } else {
                 out.push_str("    objects:\n");
-                for object in &block.objects {
-                    out.push_str(&format!("      - {}\n", object_entry(object, [])));
+                let handles = drawing.block_handles.get(bi);
+                let object_ids = block_ids.get(bi);
+                for (oi, object) in block.objects.iter().enumerate() {
+                    let mut first = Vec::new();
+                    if let Some((id, name)) = object_ids.and_then(|list| list.get(oi)) {
+                        first.push(("id", json!(id)));
+                        if let Some(name) = name {
+                            first.push(("name", json!(name)));
+                        }
+                    }
+                    if let Some(handle) = handles.and_then(|list| list.get(oi)) {
+                        first.push(("handle", json!(handle)));
+                    }
+                    out.push_str(&format!("      - {}\n", object_entry(object, first)));
                 }
             }
         }
     }
-    let ids = ids_of(source, drawing);
     if drawing.objects.is_empty() {
         out.push_str("objects: []\n");
     } else {
@@ -537,10 +833,18 @@ fn pair(key: &str, value: &Value) -> String {
     format!("{}: {value}", scalar(key))
 }
 
-/// `text` in double quotes, escaped as JSON escapes it, which YAML reads
-/// the same.
+/// `text` in double quotes, escaped as JSON escapes it (plus Unicode line
+/// separators YAML 1.1 treats as line breaks), which YAML reads back as
+/// `text` on one line.
 fn quoted(text: &str) -> String {
-    serde_json::to_string(text).unwrap_or_default()
+    let raw = serde_json::to_string(text).unwrap_or_default();
+    if raw.contains(['\u{0085}', '\u{2028}', '\u{2029}']) {
+        raw.replace('\u{0085}', "\\u0085")
+            .replace('\u{2028}', "\\u2028")
+            .replace('\u{2029}', "\\u2029")
+    } else {
+        raw
+    }
 }
 
 /// `value` in YAML's flow style on one line: mappings in braces, lists in

@@ -1298,15 +1298,29 @@ fn parse_import_blocks(mut args: Args) -> Result<Value, Error> {
 /// mirror, or that none is written.
 fn parse_read(mut args: Args) -> Result<Value, Error> {
     let usage = |message: String| Error::usage(format!("{message}; usage: {READ_USAGE}"));
+    let value = |flag: &str, value: Option<OsString>| -> Result<OsString, Error> {
+        match value {
+            Some(path)
+                if path
+                    .to_str()
+                    .is_some_and(|text| text.starts_with('-') && text.len() > 1) =>
+            {
+                Err(usage(format!(
+                    "{flag} needs a path, not option `{}`",
+                    path.to_string_lossy()
+                )))
+            }
+            Some(path) => Ok(path),
+            None => Err(usage(format!("{flag} needs a path"))),
+        }
+    };
     let mut source: Option<PathBuf> = None;
     let mut mirror: Option<PathBuf> = None;
     let mut no_mirror = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--mirror") => {
-                let Some(path) = args.next() else {
-                    return Err(usage("--mirror needs a path".to_owned()));
-                };
+                let path = value("--mirror", args.next())?;
                 if mirror.replace(path.into()).is_some() {
                     return Err(usage("--mirror is given twice".to_owned()));
                 }

@@ -1071,6 +1071,14 @@ pub struct DrawingContents {
     /// The drawing's block definitions the core has a model for, in table
     /// order, leaving out model space and the layouts.
     pub blocks: Vec<Block>,
+    /// For each block in `blocks`, in the same order, the handle of each of
+    /// its `objects`, in hexadecimal as AutoCAD lists it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_handles: Vec<Vec<String>>,
+    /// For each block in `blocks`, in the same order, the ID and name each
+    /// of its `objects` carries in AgentDrafter's extended data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_ids_and_names: Vec<Vec<IdAndName>>,
     /// How many block definitions the core has no model for yet, such as
     /// anonymous blocks, external references and blocks holding an object
     /// the core has no model for. A table's own anonymous block, which
@@ -1152,14 +1160,19 @@ pub struct RecordsOfKind {
 /// object, table entry and non-graphical object into a model of its own.
 /// A record it did not decode it keeps as the bytes it read, which a save
 /// in the version the file arrived in writes back as they were (ADR-0004,
-/// ADR-0006), but nothing can draw, query or change it.
+/// ADR-0006), but nothing can draw, query or change it; a damaged record
+/// skipped while reading past damage is left out altogether.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecodeReport {
-    /// True when every record was decoded: none is under `not_decoded`,
-    /// none was skipped and the reader recovered from no error.
+    /// True when every record was decoded whole: none is under
+    /// `not_decoded`, none was skipped, the reader recovered from no error,
+    /// the record stream finished, and diagnostics were not cut off at the
+    /// library's limit.
     pub decoded: bool,
-    /// The records the library read but could not decode, by kind, such as
-    /// a custom object of an application AutoCAD loads.
+    /// The records the library could not decode whole, by kind: opaque,
+    /// proxy and custom records kept as raw bytes, records cut short such
+    /// as a mesh over the face budget, and damaged records skipped while
+    /// reading past damage.
     pub not_decoded: Vec<RecordsOfKind>,
     /// How many records the library could not read at all and left out.
     #[serde(default)]
@@ -1167,6 +1180,16 @@ pub struct DecodeReport {
     /// How many errors the library recovered from while reading.
     #[serde(default)]
     pub recovered_errors: usize,
+    /// How many non-fatal reader warnings the library reported while reading
+    /// (such as inconsistent source references or unknown enum values),
+    /// excluding records listed as skipped or errors.
+    #[serde(default, skip_serializing_if = "is_none_of")]
+    pub warnings: usize,
+    /// True when the DWG library hit its internal diagnostic cap (999
+    /// entries) or notification limit and omitted further diagnostics, so
+    /// `not_decoded` or `warnings` may be incomplete.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diagnostics_truncated: bool,
     /// Why the library could not read the file whole, when it could not:
     /// the read then went on past the records it could not read, as
     /// AutoCAD's RECOVER reads a damaged drawing, though repairing nothing,
@@ -1183,6 +1206,8 @@ impl Default for DecodeReport {
             not_decoded: Vec::new(),
             skipped: 0,
             recovered_errors: 0,
+            warnings: 0,
+            diagnostics_truncated: false,
             read_past_damage: None,
         }
     }

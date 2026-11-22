@@ -102,7 +102,7 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
         .in_file(source)
     })?;
     if kind == SourceKind::Dwg {
-        let drawing = dwg::read(source)?;
+        let drawing = dwg::read_bytes(&bytes, source)?;
         let ids = crate::original::ids_of(source, &drawing);
         let mut files = vec![(kind, source.to_path_buf(), bytes)];
         // Zach decided on 2026-11-13 that a DWG plots on the paper its

@@ -99,7 +99,7 @@ fn styles_dictionary(drawing: &CadDocument) -> Option<Handle> {
     drawing
         .objects
         .iter()
-        .find_map(|(handle, object)| match object {
+        .filter_map(|(handle, object)| match object {
             ObjectType::Dictionary(d) => d
                 .entries
                 .iter()
@@ -110,6 +110,7 @@ fn styles_dictionary(drawing: &CadDocument) -> Option<Handle> {
                 .then_some(*handle),
             _ => None,
         })
+        .min_by_key(|h| h.value())
 }
 
 /// The handle of the table style named `name` in the drawing.
@@ -117,10 +118,11 @@ fn style_handle(drawing: &CadDocument, name: &str) -> Option<Handle> {
     drawing
         .objects
         .iter()
-        .find_map(|(handle, object)| match object {
+        .filter_map(|(handle, object)| match object {
             ObjectType::TableStyle(style) if style.name == name => Some(*handle),
             _ => None,
         })
+        .min_by_key(|h| h.value())
 }
 
 /// Writes every table style the sheet's tables draw with, and every one it
