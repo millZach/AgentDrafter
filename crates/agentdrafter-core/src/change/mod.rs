@@ -32,13 +32,13 @@
 
 mod accept;
 mod apply;
-mod array;
+pub(crate) mod array;
 mod commit;
 mod from_dimension;
 mod guides;
 mod history;
 mod journal;
-mod operations;
+pub(crate) mod operations;
 mod proposals;
 mod recover;
 mod undo;

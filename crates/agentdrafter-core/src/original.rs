@@ -254,9 +254,7 @@ pub(crate) fn read_dwg_record(source: &Path, need_set_paper: bool) -> Result<Dwg
     let drawing = dwg::read_bytes(&bytes, source)?;
     let resolved_source = on_disk_path(source, source_id);
     let sheet_name = stem_of(&resolved_source);
-    let (resolved_ids, _) = resolve_all_ids(&sheet_name, &drawing);
-    let units = drawing.units;
-    let effective_units = units.unwrap_or(Unit::Mm);
+    let effective_units = drawing.units.unwrap_or(Unit::Mm);
     // Built DWGs may carry a build mark naming their set's template paper;
     // originals carry no build mark so `paper_of_dwg_bytes` inspects only the
     // bytes already in memory and compares against `source_id` without ever
@@ -272,6 +270,36 @@ pub(crate) fn read_dwg_record(source: &Path, need_set_paper: bool) -> Result<Dwg
     } else {
         None
     };
+    Ok(dwg_loaded_from_drawing(
+        source,
+        sheet_name,
+        drawing,
+        built_paper,
+    ))
+}
+
+/// Builds a [`DwgLoaded`] directly from DWG bytes in memory (used by revision
+/// checking without re-reading disk, including in `--dry-run`).
+pub(crate) fn read_dwg_record_bytes(
+    source: &Path,
+    sheet_name: String,
+    bytes: &[u8],
+) -> Result<DwgLoaded, Error> {
+    let drawing = dwg::read_bytes(bytes, source)?;
+    Ok(dwg_loaded_from_drawing(source, sheet_name, drawing, None))
+}
+
+/// Turns a parsed [`DrawingContents`] into a [`DwgLoaded`] using the same
+/// collision-free ID resolution as `read`, `query`, `check`, and `display-list`.
+pub(crate) fn dwg_loaded_from_drawing(
+    source: &Path,
+    sheet_name: String,
+    drawing: DrawingContents,
+    built_paper: Option<Paper>,
+) -> DwgLoaded {
+    let (resolved_ids, _) = resolve_all_ids(&sheet_name, &drawing);
+    let units = drawing.units;
+    let effective_units = units.unwrap_or(Unit::Mm);
     let mut ids = Vec::with_capacity(resolved_ids.len());
     let mut carried = Vec::with_capacity(resolved_ids.len());
     let mut objects = Vec::with_capacity(resolved_ids.len());
@@ -322,12 +350,12 @@ pub(crate) fn read_dwg_record(source: &Path, need_set_paper: bool) -> Result<Dwg
             extra_layout_setups: drawing.extra_layout_setups,
         }),
     };
-    Ok(DwgLoaded {
+    DwgLoaded {
         record,
         units,
         objects_not_read: drawing.objects_not_read,
         not_read: drawing.not_read,
-    })
+    }
 }
 
 /// One object's resolved unique ID and optional name.
@@ -366,7 +394,7 @@ pub(crate) fn ids_of_with_id(
 /// block definition's objects in `drawing`, preventing a carried ID from
 /// colliding with another object's handle ID or duplicating an earlier ID
 /// (case-insensitively).
-fn resolve_all_ids(
+pub(crate) fn resolve_all_ids(
     sheet: &str,
     drawing: &DrawingContents,
 ) -> (Vec<ResolvedEntry>, Vec<Vec<ResolvedEntry>>) {
@@ -454,7 +482,7 @@ pub(crate) fn sheet_name(source: &Path) -> String {
     stem_of(&on_disk_path(source, file_id_of_path(source)))
 }
 
-fn stem_of(path: &Path) -> String {
+pub(crate) fn stem_of(path: &Path) -> String {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default()
@@ -499,7 +527,7 @@ fn regular_file_id_no_follow(_path: &Path) -> Option<FileId> {
 /// 1. exact filename match,
 /// 2. Unicode case-folded match (`to_lowercase` or `to_uppercase`),
 /// 3. the lexicographically first same-inode entry.
-fn on_disk_path(source: &Path, target_id: Option<FileId>) -> PathBuf {
+pub(crate) fn on_disk_path(source: &Path, target_id: Option<FileId>) -> PathBuf {
     let resolved = fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
     let (Some(parent), Some(wanted_name)) = (resolved.parent(), resolved.file_name()) else {
         return resolved;
@@ -777,12 +805,18 @@ fn read_mirror_prefix(
 /// name using `create_new(true)` so an existing path or symlink is never
 /// opened or followed.
 fn create_temp_beside(path: &Path) -> io::Result<(PathBuf, File)> {
+    create_temp_beside_kind(path, "mirror")
+}
+
+/// Same as [`create_temp_beside`], tagging the temporary file with `kind`
+/// (such as `"mirror"`, `"rev"`, `"changes"`, or `"pdf"`).
+pub(crate) fn create_temp_beside_kind(path: &Path, kind: &str) -> io::Result<(PathBuf, File)> {
     static WRITES: AtomicU64 = AtomicU64::new(0);
     for _ in 0..64 {
         let count = WRITES.fetch_add(1, Ordering::Relaxed);
         let hi = random_u64(path, count);
         let lo = random_u64(path, count ^ 0x9e37_79b9_7f4a_7c15);
-        let candidate = path.with_file_name(format!(".agentdrafter-{hi:016x}{lo:016x}.mirror.tmp"));
+        let candidate = path.with_file_name(format!(".agentdrafter-{hi:016x}{lo:016x}.{kind}.tmp"));
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -795,7 +829,7 @@ fn create_temp_beside(path: &Path) -> io::Result<(PathBuf, File)> {
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
-        "could not allocate a unique temporary mirror file",
+        format!("could not allocate a unique temporary {kind} file"),
     ))
 }
 
@@ -811,18 +845,32 @@ fn random_u64(path: &Path, salt: u64) -> u64 {
 /// not already exist, never overwriting a file that appeared meanwhile and
 /// never streaming partially into `path`. Always cleans up `temporary`.
 fn place_new(temporary: &Path, path: &Path) -> Result<(), Error> {
+    place_new_file(temporary, path, "text mirror", ErrorCode::NotAnOutput)
+}
+
+/// Atomically moves `temporary` into place at `path` only when `path` does
+/// not already exist, never overwriting any existing file or symlink. Always
+/// cleans up `temporary`.
+pub(crate) fn place_new_file(
+    temporary: &Path,
+    path: &Path,
+    what: &str,
+    exists_code: ErrorCode,
+) -> Result<(), Error> {
     let appeared = || {
         Error::new(
-            ErrorCode::NotAnOutput,
-            "a file appeared at the mirror's path while reading; it may be someone's own file, \
-             which is never overwritten, so choose another path for the mirror",
+            exists_code,
+            format!(
+                "a file already exists at the {what}'s path; it may be someone's own file, which \
+                 is never overwritten, so choose another path"
+            ),
         )
         .in_file(path)
     };
     let write_err = |e: io::Error| {
         Error::new(
             ErrorCode::WriteFailed,
-            format!("could not write the text mirror: {e}"),
+            format!("could not write the {what}: {e}"),
         )
         .in_file(path)
     };

@@ -303,6 +303,24 @@ pub fn check_with(request: &CheckRequest, settings: &Settings) -> Result<CheckRe
     check_in(request, settings, None)
 }
 
+/// Checks a DWG already in memory (such as a revision DWG just serialized)
+/// without reopening the file on disk.
+pub(crate) fn check_dwg_bytes(
+    source: &Path,
+    sheet_name: String,
+    bytes: &[u8],
+    settings: &Settings,
+) -> Result<CheckReport, Error> {
+    let loaded = crate::original::read_dwg_record_bytes(source, sheet_name, bytes)?;
+    let loaded = Loaded {
+        units: loaded.units,
+        records: vec![loaded.record],
+        objects_not_read: loaded.objects_not_read,
+        not_read: loaded.not_read,
+    };
+    Ok(check_loaded(source, loaded, settings))
+}
+
 /// Checks a drawing set from its files as `files` reads them, such as the
 /// records as a change set would write them, for a preview: the checker
 /// reads them with its own reader, as it reads the saved files, never the
@@ -313,12 +331,17 @@ pub(crate) fn check_in(
     files: Option<Arc<dyn ReadFiles + Send + Sync>>,
 ) -> Result<CheckReport, Error> {
     let source = request.source.as_path();
+    let loaded = load(source, &request.sheets, files)?;
+    Ok(check_loaded(source, loaded, settings))
+}
+
+fn check_loaded(source: &Path, loaded: Loaded, settings: &Settings) -> CheckReport {
     let Loaded {
         units,
         records,
         objects_not_read,
         not_read,
-    } = load(source, &request.sheets, files)?;
+    } = loaded;
     let tolerance = Unit::Mm.convert(CHECK_TOLERANCE_MM, units.unwrap_or(Unit::Mm));
     let mut findings = Vec::new();
     let mut checks_skipped = Vec::new();
@@ -379,7 +402,7 @@ pub(crate) fn check_in(
             kinds_in_words(&not_read)
         ));
     }
-    Ok(CheckReport {
+    CheckReport {
         source: source.display().to_string(),
         units,
         message: report_message,
@@ -398,7 +421,7 @@ pub(crate) fn check_in(
             None
         },
         warnings,
-    })
+    }
 }
 
 /// The physical unit of `page`'s paper-space drawing units: for a DWG layout,

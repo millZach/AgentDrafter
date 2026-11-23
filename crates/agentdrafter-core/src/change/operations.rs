@@ -2662,6 +2662,25 @@ pub(crate) struct ChangeSet {
 /// not exist, is refused whole: the error names the operation and lists the
 /// valid choices.
 pub(crate) fn read_change_set(value: &Value, units: Unit) -> Result<ChangeSet, Error> {
+    read_change_set_inner(value, units, None)
+}
+
+/// Reads a change set sent against an original DWG whose sheet name is
+/// `default_sheet`: operations that take a `sheet` (`add_*`, `add_layer`,
+/// `change_layer`, etc.) may omit `sheet`, defaulting to `default_sheet`.
+pub(crate) fn read_change_set_for_original(
+    value: &Value,
+    units: Unit,
+    default_sheet: &str,
+) -> Result<ChangeSet, Error> {
+    read_change_set_inner(value, units, Some(default_sheet))
+}
+
+fn read_change_set_inner(
+    value: &Value,
+    units: Unit,
+    default_sheet: Option<&str>,
+) -> Result<ChangeSet, Error> {
     let Value::Object(map) = value else {
         return Err(Error::new(
             ErrorCode::WrongType,
@@ -2698,7 +2717,7 @@ pub(crate) fn read_change_set(value: &Value, units: Unit) -> Result<ChangeSet, E
     let operations = items
         .iter()
         .enumerate()
-        .map(|(index, item)| operation(index, item, units, &objects, &defs))
+        .map(|(index, item)| operation(index, item, units, &objects, &defs, default_sheet))
         .collect::<Result<_, _>>()?;
     let fixes = match map.get("fixes") {
         None => Vec::new(),
@@ -2948,6 +2967,7 @@ fn operation(
     units: Unit,
     objects: &Value,
     defs: &Map<String, Value>,
+    default_sheet: Option<&str>,
 ) -> Result<Operation, Error> {
     let Value::Object(map) = value else {
         return Err(Error::new(
@@ -3063,41 +3083,45 @@ fn operation(
                     &missing.first,
                 ));
             }
-            let to =
-                match (map.get("sheet"), map.get("template")) {
-                    (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
-                    (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
-                    (Some(_), Some(_)) => {
-                        return Err(fail(
-                            ErrorCode::Usage,
-                            "give sheet or template, not both: an object added to a sheet goes in \
+            let to = match (map.get("sheet"), map.get("template")) {
+                (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
+                (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
+                (Some(_), Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::Usage,
+                        "give sheet or template, not both: an object added to a sheet goes in \
                          its row, and one added to a template is on every sheet built from it"
-                                .to_owned(),
-                            "",
-                        ))
-                    }
-                    (None, None) => return Err(fail(
-                        ErrorCode::MissingKey,
-                        "missing key `sheet`: name the sheet to add it to, in its row, or give \
-                         template to add it to a template"
                             .to_owned(),
-                        "sheet",
-                    )),
-                    (Some(_), None) => {
+                        "",
+                    ))
+                }
+                (None, None) => match default_sheet {
+                    Some(sheet) => AddTo::Sheet(sheet.to_owned()),
+                    None => {
                         return Err(fail(
-                            ErrorCode::WrongType,
-                            "expected a sheet's name".to_owned(),
+                            ErrorCode::MissingKey,
+                            "missing key `sheet`: name the sheet to add it to, in its row, or \
+                                 give template to add it to a template"
+                                .to_owned(),
                             "sheet",
                         ))
                     }
-                    (None, Some(_)) => {
-                        return Err(fail(
-                            ErrorCode::WrongType,
-                            "expected a template's path".to_owned(),
-                            "template",
-                        ))
-                    }
-                };
+                },
+                (Some(_), None) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a sheet's name".to_owned(),
+                        "sheet",
+                    ))
+                }
+                (None, Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a template's path".to_owned(),
+                        "template",
+                    ))
+                }
+            };
             // A key sent as `null` is kept: the record writes it as a bare
             // null, and the sheet's reader reads it as it reads one in any
             // file (rule 8 of the YAML subset), so it leaves an optional text
@@ -3642,41 +3666,43 @@ fn operation(
                 TableOp::Delete => {}
             }
             keys(&allowed)?;
-            let to = match (map.get("sheet"), map.get("template")) {
-                (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
-                (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
-                (Some(_), Some(_)) => {
-                    return Err(fail(
-                        ErrorCode::Usage,
-                        "give sheet or template, not both: either names the template to edit"
-                            .to_owned(),
-                        "",
-                    ))
-                }
-                (None, None) => {
-                    return Err(fail(
-                        ErrorCode::MissingKey,
-                        "missing key `template`: name the template to edit, or a sheet built \
-                         from it with sheet"
-                            .to_owned(),
-                        "template",
-                    ))
-                }
-                (Some(_), None) => {
-                    return Err(fail(
-                        ErrorCode::WrongType,
-                        "expected a sheet's name".to_owned(),
-                        "sheet",
-                    ))
-                }
-                (None, Some(_)) => {
-                    return Err(fail(
-                        ErrorCode::WrongType,
-                        "expected a template's path".to_owned(),
-                        "template",
-                    ))
-                }
-            };
+            let to =
+                match (map.get("sheet"), map.get("template")) {
+                    (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
+                    (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
+                    (Some(_), Some(_)) => {
+                        return Err(fail(
+                            ErrorCode::Usage,
+                            "give sheet or template, not both: either names the template to edit"
+                                .to_owned(),
+                            "",
+                        ))
+                    }
+                    (None, None) => match default_sheet {
+                        Some(sheet) => AddTo::Sheet(sheet.to_owned()),
+                        None => return Err(fail(
+                            ErrorCode::MissingKey,
+                            "missing key `template`: name the template to edit, or a sheet built \
+                             from it with sheet"
+                                .to_owned(),
+                            "template",
+                        )),
+                    },
+                    (Some(_), None) => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected a sheet's name".to_owned(),
+                            "sheet",
+                        ))
+                    }
+                    (None, Some(_)) => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected a template's path".to_owned(),
+                            "template",
+                        ))
+                    }
+                };
             let text = |key: &str, what: &str| -> Result<String, Error> {
                 match map.get(key) {
                     Some(Value::String(text)) if !text.is_empty() => Ok(text.clone()),

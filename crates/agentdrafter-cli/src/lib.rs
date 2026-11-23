@@ -29,9 +29,9 @@ use std::process::ExitCode;
 
 use agentdrafter_core::{commands, find_command, Error, ErrorCode, Interface, Reply, Settings};
 use agentdrafter_core::{
-    AcceptRequest, ChangeRequest, CheckRequest, DisplayListRequest, ImportBlocksRequest,
-    JournalRequest, MeasureTextRequest, ReadRequest, RenderRequest, StaleRequest, UndoRequest,
-    Unit, FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE,
+    AcceptRequest, CheckRequest, DisplayListRequest, ImportBlocksRequest, JournalRequest,
+    MeasureTextRequest, ReadRequest, RenderRequest, StaleRequest, UndoRequest, Unit,
+    FONTS_VARIABLE, PLOT_STYLES_VARIABLE, SYSTEM_FONTS_VARIABLE,
 };
 use agentdrafter_core::{
     End, Matching, Measure, ObjectRef, Query, QueryRequest, Selection, SelectionBox, SnapKind,
@@ -45,7 +45,7 @@ const BUILD_USAGE: &str =
 const SCHEMA_USAGE: &str =
     "agentdrafter schema [sheet-description | block-library | template | set | rows | change-set]";
 const OPERATIONS_USAGE: &str = "agentdrafter operations";
-const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder> <change-set.json | -> [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
+const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder | original.dwg> <change-set.json | -> [--output <revision.dwg>] [--allow-loss] [--dry-run] [--fonts <folder>]... [--no-system-fonts] [--plot-style <name>] [--plot-styles <folder>]... [--no-pdf]";
 const JOURNAL_USAGE: &str = "agentdrafter journal <drawing-set-folder>";
 const UNDO_USAGE: &str = "agentdrafter undo <drawing-set-folder> <change-set> [--dry-run]";
 const ACCEPT_USAGE: &str = "agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]... [--no-system-fonts]";
@@ -604,16 +604,46 @@ fn parse_stale(mut args: Args) -> Result<Value, Error> {
     input_of(StaleRequest { output, source }, FontOptions::default())
 }
 
-/// Reads `change`'s arguments: the set's folder, the change set's JSON file
-/// or `-` for standard input, and the options.
+/// Reads `change`'s arguments: the drawing set's folder or an original `.dwg`,
+/// the change set's JSON file or `-` for standard input, and the options.
 fn parse_change(mut args: Args) -> Result<Value, Error> {
     let usage = |message: String| Error::usage(format!("{message}; usage: {CHANGE_USAGE}"));
     let mut given: Vec<OsString> = Vec::new();
     let mut dry_run = false;
+    let mut output: Option<PathBuf> = None;
+    let mut allow_loss = false;
+    let mut plot_style: Option<String> = None;
+    let mut plot_styles: Vec<PathBuf> = Vec::new();
+    let mut no_pdf = false;
     let mut fonts = FontOptions::default();
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--dry-run") => dry_run = true,
+            Some("--allow-loss") => allow_loss = true,
+            Some("--no-pdf") => no_pdf = true,
+            Some("--output" | "-o") => match args.next() {
+                Some(path) => {
+                    if output.replace(PathBuf::from(path)).is_some() {
+                        return Err(usage("--output is given twice".to_owned()));
+                    }
+                }
+                None => return Err(usage("--output needs a value".to_owned())),
+            },
+            Some("--plot-style") => match args.next() {
+                Some(name) => {
+                    let name = name
+                        .into_string()
+                        .map_err(|_| usage("the plot style's name is not valid text".to_owned()))?;
+                    if plot_style.replace(name).is_some() {
+                        return Err(usage("--plot-style is given twice".to_owned()));
+                    }
+                }
+                None => return Err(usage("--plot-style needs a value".to_owned())),
+            },
+            Some("--plot-styles") => match args.next() {
+                Some(folder) => plot_styles.push(PathBuf::from(folder)),
+                None => return Err(usage("--plot-styles needs a value".to_owned())),
+            },
             Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => match args.next() {
                 Some(folder) => fonts.push(PathBuf::from(folder)),
@@ -627,16 +657,30 @@ fn parse_change(mut args: Args) -> Result<Value, Error> {
     }
     let [set, change_set] = <[OsString; 2]>::try_from(given).map_err(|given| {
         usage(format!(
-            "change takes a drawing set's folder and a change set, found {} arguments",
+            "change takes a drawing set's folder (or original `.dwg`) and a change set, found {} \
+             arguments",
             given.len()
         ))
     })?;
-    let request = ChangeRequest {
+    let request = agentdrafter_core::ReviseRequest {
         set: PathBuf::from(set),
         change_set: read_change_set(&change_set)?,
         dry_run,
+        output,
+        allow_loss,
+        plot_style,
+        no_pdf,
     };
-    input_of(request, fonts)
+    let mut input = input_of(request, fonts)?;
+    if !plot_styles.is_empty() {
+        input["plot_styles"] = serde_json::to_value(plot_styles).map_err(|e| {
+            Error::new(
+                ErrorCode::Usage,
+                format!("could not encode plot styles: {e}"),
+            )
+        })?;
+    }
+    Ok(input)
 }
 
 /// Reads a change set from the file `given` names, or from standard input

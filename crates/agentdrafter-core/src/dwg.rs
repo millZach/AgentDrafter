@@ -47,11 +47,16 @@ mod ids;
 mod import;
 mod layout;
 mod leader;
+mod revise;
 mod table;
 mod text;
 
 pub(crate) use import::read_blocks;
 pub(crate) use layout::{PageSetup, PLOTTER, PLOT_STYLE};
+#[cfg(test)]
+pub(crate) use revise::{as_original_of_version, raw_record_bytes_of};
+pub(crate) use revise::{MutationHandles, RevisionSession, TargetSpace};
+pub use revise::{UnexpectedChange, UnexpectedChangeKind};
 
 /// The DWG version a new sheet is written in: the 2018 format, AC1032 (ADR-0006).
 const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;

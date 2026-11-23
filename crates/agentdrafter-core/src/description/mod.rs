@@ -838,6 +838,212 @@ fn describe(node: &Node) -> String {
     }
 }
 
+/// Converts a JSON value (as sent in a change set) into a strict-YAML [`Node`]
+/// so the sheet description's own parsers validate it identically.
+fn json_to_node(value: &serde_json::Value) -> Node {
+    match value {
+        serde_json::Value::Null => Node::bare_null(),
+        serde_json::Value::Bool(b) => Node::scalar(b.to_string()),
+        serde_json::Value::Number(n) => Node::scalar(n.to_string()),
+        serde_json::Value::String(s) => Node::scalar(s.clone()),
+        serde_json::Value::Array(items) => {
+            Node::new(Kind::Sequence(items.iter().map(json_to_node).collect()))
+        }
+        serde_json::Value::Object(map) => Node::new(Kind::Mapping(
+            map.iter()
+                .map(|(k, v)| Entry {
+                    key: k.clone(),
+                    key_at: Pos { line: 0, column: 0 },
+                    key_end: 0,
+                    value: json_to_node(v),
+                })
+                .collect(),
+        )),
+    }
+}
+
+/// One object parsed from a change-set `add_*` operation against an existing
+/// DWG's tables, together with any explicit `id`, `name`, and target layout
+/// index (`None` for model space).
+pub(crate) struct ParsedAddedObject {
+    pub object: crate::model::Object,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub space: Option<usize>,
+}
+
+/// Parses one added object of type `kind` (e.g. `"line"`, `"insert"`) from a
+/// JSON key map using the sheet description's own parsers and the drawing's
+/// tables.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn parse_added_object_json(
+    kind: &str,
+    keys: &serde_json::Map<String, serde_json::Value>,
+    units: Unit,
+    layers: &[crate::model::Layer],
+    linetypes: &[crate::model::Linetype],
+    styles: &[crate::text::TextStyle],
+    blocks: &[crate::model::Block],
+    layouts: &[String],
+) -> Result<ParsedAddedObject, Error> {
+    let wrapper = Node::new(Kind::Mapping(vec![Entry {
+        key: kind.to_owned(),
+        key_at: Pos { line: 0, column: 0 },
+        key_end: 0,
+        value: json_to_node(&serde_json::Value::Object(keys.clone())),
+    }]));
+    let library = crate::model::BlockLibrary {
+        units,
+        linetypes: linetypes.to_vec(),
+        layers: layers.to_vec(),
+        text_styles: styles.to_vec(),
+        blocks: blocks.to_vec(),
+    };
+    let tables = objects::Tables {
+        units,
+        linetypes,
+        layers,
+        hatch_patterns: &[],
+        styles,
+        table_styles: &[],
+        mleader_styles: &[],
+        dimension_styles: &[],
+        layouts,
+    };
+    let mut place = objects::Place::Sheet {
+        library: Some(&library),
+        objects: Vec::new(),
+        noticed: Vec::new(),
+        spaces: Vec::new(),
+    };
+    let object = objects::object(&wrapper, "", &tables, &mut place).map_err(strip_zero_pos)?;
+    let (id, name, space) = match place {
+        objects::Place::Sheet {
+            mut objects,
+            mut spaces,
+            ..
+        } => {
+            let record = objects.pop();
+            let space = spaces.pop().flatten();
+            let explicit_id = keys
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let name = record.and_then(|r| r.name);
+            (explicit_id, name, space)
+        }
+        objects::Place::Block { .. } => (None, None, None),
+    };
+    Ok(ParsedAddedObject {
+        object,
+        id,
+        name,
+        space,
+    })
+}
+
+/// Parses a new layer from an `add_layer` operation's JSON keys.
+pub(crate) fn parse_new_layer_json(
+    name: &str,
+    keys: &serde_json::Map<String, serde_json::Value>,
+    linetypes: &[crate::model::Linetype],
+) -> Result<crate::model::Layer, Error> {
+    layers::validate_layer_name(name, "name").map_err(strip_zero_pos)?;
+    let mut layer = crate::model::Layer::new(name.to_owned());
+    let node = json_to_node(&serde_json::Value::Object(keys.clone()));
+    layers::apply_layer_fields(&mut layer, &node, "", linetypes, false).map_err(strip_zero_pos)?;
+    Ok(layer)
+}
+
+/// Applies a `change_layer` operation's `set` JSON map onto `existing`.
+pub(crate) fn parse_layer_patch_json(
+    existing: &crate::model::Layer,
+    set: &serde_json::Map<String, serde_json::Value>,
+    linetypes: &[crate::model::Linetype],
+) -> Result<crate::model::Layer, Error> {
+    let mut updated = existing.clone();
+    let node = json_to_node(&serde_json::Value::Object(set.clone()));
+    layers::apply_layer_fields(&mut updated, &node, "set", linetypes, true)
+        .map_err(strip_zero_pos)?;
+    Ok(updated)
+}
+
+/// Parses an object property value from JSON using the sheet description's
+/// exact parsers (for `change` on an original DWG).
+pub(crate) fn parse_object_color_json(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<crate::model::ObjectColor, Error> {
+    if value.is_null() {
+        return Ok(crate::model::ObjectColor::ByLayer);
+    }
+    let node = json_to_node(value);
+    layers::object_color(&node, path).map_err(strip_zero_pos)
+}
+
+pub(crate) fn parse_object_lineweight_json(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<crate::model::ObjectLineweight, Error> {
+    if value.is_null() {
+        return Ok(crate::model::ObjectLineweight::ByLayer);
+    }
+    let node = json_to_node(value);
+    layers::object_lineweight(&node, path).map_err(strip_zero_pos)
+}
+
+pub(crate) fn parse_linetype_scale_json(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<f64, Error> {
+    if value.is_null() {
+        return Ok(1.0);
+    }
+    let node = json_to_node(value);
+    layers::linetype_scale(&node, path).map_err(strip_zero_pos)
+}
+
+pub(crate) fn parse_point_json(
+    value: &serde_json::Value,
+    units: Unit,
+    path: &str,
+) -> Result<crate::model::Point3, Error> {
+    let node = json_to_node(value);
+    point(&node, path, units).map_err(strip_zero_pos)
+}
+
+pub(crate) fn parse_length_json(
+    value: &serde_json::Value,
+    units: Unit,
+    path: &str,
+) -> Result<f64, Error> {
+    let node = json_to_node(value);
+    length(&node, path, units).map_err(strip_zero_pos)
+}
+
+pub(crate) fn parse_angle_json(value: &serde_json::Value, path: &str) -> Result<f64, Error> {
+    let node = json_to_node(value);
+    angle(&node, path).map_err(strip_zero_pos)
+}
+
+pub(crate) fn parse_plain_number_json(
+    value: &serde_json::Value,
+    path: &str,
+    shape: &str,
+) -> Result<f64, Error> {
+    let node = json_to_node(value);
+    plain_number(&node, path, shape).map_err(strip_zero_pos)
+}
+
+fn strip_zero_pos(mut err: Error) -> Error {
+    if err.line == Some(0) && err.column == Some(0) {
+        err.line = None;
+        err.column = None;
+    }
+    err
+}
+
 #[cfg(test)]
 mod tests;
 

@@ -127,6 +127,9 @@ pub enum ErrorCode {
     /// A message to the drafter's assistant, or a pick of its agent, when
     /// that agent, or any, was not found on the PATH.
     NoAgent,
+    /// Revising an original DWG was refused because the DWG library could not
+    /// decode every record of it and `allow_loss` was not set (ADR-0004).
+    IncompleteDecode,
 }
 
 /// An error from the core, ready to report through any interface.
