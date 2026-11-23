@@ -83,16 +83,16 @@ pub fn original_journal_file(source: &Path) -> Option<PathBuf> {
     OriginalJournal::open(source).ok().map(|oj| oj.journal_file)
 }
 
-/// Metadata of the latest active (finished, non-undone) working revision on
-/// disk for an original DWG, used so successive `change` operations accumulate
-/// on top of the active working revision rather than dropping earlier edits.
+/// Metadata of the latest active (finished, non-undone, non-standalone) working
+/// revision on disk for an original DWG, used so successive `change` operations
+/// accumulate on top of the active working revision rather than dropping earlier
+/// edits.
 pub(crate) struct ActiveRevisionTip {
     pub entry: u64,
     pub path: PathBuf,
+    pub file: String,
     pub original_sha256: String,
     pub revision_sha256: String,
-    pub dwg_version: String,
-    pub allowed_loss: bool,
 }
 
 /// Per-original journal paths and identity of the original DWG.
@@ -823,14 +823,20 @@ impl OriginalJournal {
             let Some(meta) = entry.original_revision.as_ref() else {
                 continue;
             };
+            if meta.standalone_output {
+                continue;
+            }
             let path = self.resolve_file(&meta.revision_dwg);
+            let file = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| meta.revision_dwg.clone());
             return Ok(Some(ActiveRevisionTip {
                 entry: entry.entry,
                 path,
+                file,
                 original_sha256: meta.original_sha256.clone(),
                 revision_sha256: meta.revision_sha256.clone(),
-                dwg_version: meta.dwg_version.clone(),
-                allowed_loss: meta.allowed_loss,
             }));
         }
         Ok(None)

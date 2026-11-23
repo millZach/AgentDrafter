@@ -753,7 +753,7 @@ function DrawingWorkspace({
   const [readError, setReadError] = useState<string | null>(null);
   const [decodeModalOpen, setDecodeModalOpen] = useState(false);
   const [plotting, setPlotting] = useState(false);
-  const [ownRev, setOwnRev] = useState<{ path: string; entry: number; sha256: string } | null>(null);
+  const [ownRev, setOwnRev] = useState<{ path: string; entry: number; sha256: string; originalSha256: string } | null>(null);
 
   useEffect(() => {
     if (!isDwg) {
@@ -1025,11 +1025,20 @@ function DrawingWorkspace({
     refreshTool();
   }, [refreshTool]);
 
-  const activeRev = isDwg ? latestActiveRevision(journal, source) : null;
-  const steppedRev = isDwg && at !== null ? revisionAtEntry(journal, at, source) : null;
+  const originalSha = readReport?.sha256 ?? null;
+  const originalShaRef = useRef<string | null>(originalSha);
+  originalShaRef.current = originalSha;
+  // Only select a journal revision made against the exact file currently on
+  // disk (matching `original_sha256`), never showing A's revision after A was
+  // replaced on disk by B.
+  const activeRev = isDwg && originalSha ? latestActiveRevision(journal, source, originalSha) : null;
+  const steppedRev = isDwg && at !== null && originalSha ? revisionAtEntry(journal, at, source, originalSha) : null;
   // When our own edit landed and wrote a revision newer than what the journal
   // snapshot currently shows, display it right away without waiting for SSE.
-  const ownRevFresh = ownRev && (!journal || newest(journal) < ownRev.entry) ? ownRev : null;
+  const ownRevFresh =
+    ownRev && (!originalSha || ownRev.originalSha256 === originalSha) && (!journal || newest(journal) < ownRev.entry)
+      ? ownRev
+      : null;
   const displaySource = isDwg
     ? at !== null
       ? (steppedRev?.path ?? source)
@@ -1279,8 +1288,8 @@ function DrawingWorkspace({
   // Once `read` finishes for a non-damaged plant DWG, run its initial check.
   useEffect(() => {
     if (!isDwg || readPending || damagedOriginal || !journal) return;
-    void check(null, latestActiveRevision(journal, source)?.path ?? source);
-  }, [isDwg, readPending, damagedOriginal, journal, source, check]);
+    void check(null, latestActiveRevision(journal, source, originalSha)?.path ?? source);
+  }, [isDwg, readPending, damagedOriginal, journal, source, originalSha, check]);
 
   // What a new entry says, as a toast.
   const toastFor = useCallback(
@@ -1388,7 +1397,7 @@ function DrawingWorkspace({
         // An open preview is drawn again on the first snapshot, which may
         // hold a change set that landed before the page read the journal.
         if (previewRedrawnOn(previewOpen.current, before === null)) redrawPreview();
-        const checkTarget = isDwg ? (latestActiveRevision(report, source)?.path ?? source) : source;
+        const checkTarget = isDwg ? (latestActiveRevision(report, source, originalShaRef.current)?.path ?? source) : source;
         if (before === null || replaced) {
           if (replaced) {
             replies.current.clear();
@@ -1789,7 +1798,7 @@ function DrawingWorkspace({
         const revPath = resolveBeside(source, reply.revision_dwg);
         const revSha = reply.revision?.sha256 ?? `${entry ?? Date.now()}`;
         if (entry !== undefined) {
-          setOwnRev({ path: revPath, entry, sha256: revSha });
+          setOwnRev({ path: revPath, entry, sha256: revSha, originalSha256: readReport?.sha256 ?? '' });
           setOwnLatest((n) => Math.max(n ?? 0, entry));
         }
         const revSheet = upper(reply.sheet ?? summary?.sheet ?? '');
@@ -1827,6 +1836,7 @@ function DrawingWorkspace({
           ? normalizeOriginalChangeSet(s.change_set, readReport.sheet, summary.sheet)
           : s.change_set;
       const changeInput: Record<string, unknown> = { set: source, change_set: prepared };
+      if (isDwg && readReport?.sha256) changeInput.expected_original_sha256 = readReport.sha256;
       if (isDwg && allowLoss) changeInput.allow_loss = true;
       // A proposal kept (#155) lands through `keep`, which records who
       // proposed it and who kept it; its reply is `change`'s.
@@ -1843,6 +1853,18 @@ function DrawingWorkspace({
       onReply?.(reply);
       return true;
     } catch (e) {
+      if (isDwg && e instanceof CommandError && e.code === 'changed_by_hand') {
+        try {
+          const fresh = await call<ReadReport>('read', { source, no_mirror: true }, token);
+          if (readReport?.sha256 && fresh.sha256 !== readReport.sha256) {
+            onRevokeLoss(readReport.sha256);
+            setOwnRev(null);
+            setReadReport(fresh);
+          }
+        } catch {
+          // Ignore follow-up read error; the original change error is shown below.
+        }
+      }
       if (e instanceof CommandError && e.result) landed(e.result as ChangeReply);
       say('warn', `${s.what}: not landed`, why(e, token));
       return !!(e instanceof CommandError && (e.result as ChangeReply | undefined)?.sheets?.some((x) => x.ok));

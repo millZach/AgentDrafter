@@ -144,6 +144,7 @@ fn revises_made_up_original_with_all_operations_and_preserves_untouched_objects(
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -240,6 +241,7 @@ fn revises_made_up_original_with_all_operations_and_preserves_untouched_objects(
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -283,6 +285,7 @@ fn revision_preserves_original_dwg_version_across_multiple_versions() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -332,6 +335,7 @@ fn decode_loss_gate_refuses_without_allow_loss_and_preserves_custom_object_with_
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -363,6 +367,7 @@ fn decode_loss_gate_refuses_without_allow_loss_and_preserves_custom_object_with_
             dry_run: false,
             output: None,
             allow_loss: true,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -411,6 +416,7 @@ fn safety_refuses_original_existing_symlink_dir_and_non_dwg_output() {
             dry_run: false,
             output: Some(orig.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -430,6 +436,7 @@ fn safety_refuses_original_existing_symlink_dir_and_non_dwg_output() {
             dry_run: false,
             output: Some(existing.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -449,6 +456,7 @@ fn safety_refuses_original_existing_symlink_dir_and_non_dwg_output() {
             dry_run: false,
             output: Some(subdir),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -465,6 +473,7 @@ fn safety_refuses_original_existing_symlink_dir_and_non_dwg_output() {
             dry_run: false,
             output: Some(dir.join("out.yaml")),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -485,6 +494,7 @@ fn safety_refuses_original_existing_symlink_dir_and_non_dwg_output() {
                 dry_run: false,
                 output: Some(link),
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -517,6 +527,7 @@ fn all_or_nothing_and_dry_run_write_zero_files() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -537,6 +548,7 @@ fn all_or_nothing_and_dry_run_write_zero_files() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -574,6 +586,7 @@ fn target_resolution_locked_layer_and_ambiguous_names() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -590,6 +603,7 @@ fn target_resolution_locked_layer_and_ambiguous_names() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -606,6 +620,7 @@ fn target_resolution_locked_layer_and_ambiguous_names() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -624,6 +639,7 @@ fn target_resolution_locked_layer_and_ambiguous_names() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -783,6 +799,7 @@ fn change_layer_in_place_preserves_unmodeled_true_color_linetype_and_lineweight(
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -817,6 +834,7 @@ fn refuses_non_exact_six_byte_dwg_header_like_ad1032() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -863,6 +881,7 @@ fn damaged_dwg_refused_without_allow_loss_and_revises_with_allow_loss() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -895,6 +914,7 @@ fn damaged_dwg_refused_without_allow_loss_and_revises_with_allow_loss() {
             dry_run: false,
             output: None,
             allow_loss: true,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -951,6 +971,7 @@ fn polyline3d_points_change_preserves_xdata_and_copy_allocates_distinct_vertex_h
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1027,6 +1048,7 @@ fn copy_strips_raw_dwg_eed_id_and_block_def_handle_is_refused() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1058,6 +1080,7 @@ fn copy_strips_raw_dwg_eed_id_and_block_def_handle_is_refused() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1139,6 +1162,7 @@ fn mirror_asymmetric_insert_and_move_neg_z_arc_roundtrip_accurately() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1184,6 +1208,7 @@ fn mirror_asymmetric_insert_and_move_neg_z_arc_roundtrip_accurately() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1222,6 +1247,7 @@ fn constant_and_locked_layer_attributes_and_locked_copies_refused() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1242,6 +1268,7 @@ fn constant_and_locked_layer_attributes_and_locked_copies_refused() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1264,6 +1291,7 @@ fn constant_and_locked_layer_attributes_and_locked_copies_refused() {
                 dry_run: true,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -1324,6 +1352,7 @@ fn duplicate_transform_and_copy_targets_refused_atomically() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -1357,6 +1386,7 @@ fn name_only_add_and_rename_keep_handle_id_and_unicode_id_does_not_panic() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1384,6 +1414,7 @@ fn name_only_add_and_rename_keep_handle_id_and_unicode_id_does_not_panic() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1511,6 +1542,7 @@ fn array_path_refuses_non_curve_insert() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1573,6 +1605,7 @@ fn allow_loss_never_publishes_missing_requested_add_or_surviving_delete() {
         false,
         true,
         &orig_meta,
+        None,
         Some(Unit::Mm),
         &decode,
         &[],
@@ -1618,6 +1651,7 @@ fn mirror_asymmetric_minsert_across_x_and_y_axes_mirrors_every_grid_instance() {
             dry_run: false,
             output: Some(dir.join("MINS.mx.dwg")),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1649,6 +1683,7 @@ fn mirror_asymmetric_minsert_across_x_and_y_axes_mirrors_every_grid_instance() {
             dry_run: false,
             output: Some(dir.join("MINS.my.dwg")),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1694,6 +1729,7 @@ fn unlocked_insert_with_locked_attribute_refuses_move_transform_copy_and_delete(
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -1760,6 +1796,7 @@ fn leading_zero_handle_alias_is_deduplicated_in_transform_and_copy() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -1780,6 +1817,7 @@ fn leading_zero_handle_alias_is_deduplicated_in_transform_and_copy() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1820,6 +1858,7 @@ fn scale_minsert_overflow_refused_with_bad_value() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1904,6 +1943,7 @@ fn original_journal_per_file_isolation_empty_read_and_safe_key() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1916,6 +1956,7 @@ fn original_journal_per_file_isolation_empty_read_and_safe_key() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1957,6 +1998,7 @@ fn original_change_journal_stack_undo_and_dry_run() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -1980,6 +2022,7 @@ fn original_change_journal_stack_undo_and_dry_run() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -2085,6 +2128,7 @@ fn original_undo_refuses_hand_edited_missing_symlink_and_original_file() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -2190,6 +2234,7 @@ fn original_failed_attempt_and_dry_run_refuses_pending() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -2224,6 +2269,7 @@ fn original_failed_attempt_and_dry_run_refuses_pending() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -2264,6 +2310,7 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -2306,6 +2353,7 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -2405,6 +2453,7 @@ fn original_accept_checks_newest_seen_blocks_undo_and_stamps_outputs_issued() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -2608,6 +2657,7 @@ fn original_accept_checks_newest_seen_blocks_undo_and_stamps_outputs_issued() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -2758,6 +2808,7 @@ fn original_dry_run_undo_and_accept_refuse_pending_and_never_write() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -2777,6 +2828,7 @@ fn original_dry_run_undo_and_accept_refuse_pending_and_never_write() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -2902,6 +2954,7 @@ fn original_recovery_cleanup_is_scoped_and_never_touches_bystanders() {
                 dry_run: false,
                 output: Some(shared_out.join("east-r1.dwg")),
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -2931,6 +2984,7 @@ fn original_recovery_cleanup_is_scoped_and_never_touches_bystanders() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -2990,6 +3044,7 @@ fn original_journal_and_prune_refuse_symlinks_without_modifying_targets() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3015,6 +3070,7 @@ fn original_journal_and_prune_refuse_symlinks_without_modifying_targets() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3048,6 +3104,7 @@ fn original_journal_and_prune_refuse_symlinks_without_modifying_targets() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3085,6 +3142,7 @@ fn original_cross_folder_output_stamps_issued_on_render_and_plot() {
             dry_run: false,
             output: Some(rev_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3196,6 +3254,7 @@ fn original_child_folder_output_stamps_issued_on_render_and_plot() {
             dry_run: false,
             output: Some(rev_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3301,6 +3360,7 @@ fn original_symlink_source_resolves_consistently_and_stamps_refuse_symlinks() {
             dry_run: false,
             output: Some(r1_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3337,6 +3397,7 @@ fn original_symlink_source_resolves_consistently_and_stamps_refuse_symlinks() {
                 dry_run: false,
                 output: Some(r2_dwg.clone()),
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -3366,6 +3427,7 @@ fn original_symlink_source_resolves_consistently_and_stamps_refuse_symlinks() {
             dry_run: false,
             output: Some(r3_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3469,6 +3531,7 @@ fn original_undo_refuses_symlinked_output_subdirectory() {
             dry_run: false,
             output: Some(rev_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3525,6 +3588,7 @@ fn original_external_output_refuses_symlinked_ancestor_in_undo_and_stamps() {
             dry_run: false,
             output: Some(r1_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3581,6 +3645,7 @@ fn original_external_output_refuses_symlinked_ancestor_in_undo_and_stamps() {
             dry_run: false,
             output: Some(r2_dwg),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3632,6 +3697,7 @@ fn original_recovery_verifies_undo_states_before_modifying_outputs() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -3695,6 +3761,7 @@ fn successive_revisions_accumulate_edits_and_stack_undo_restores_each_step() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3714,6 +3781,7 @@ fn successive_revisions_accumulate_edits_and_stack_undo_restores_each_step() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3749,6 +3817,332 @@ fn successive_revisions_accumulate_edits_and_stack_undo_restores_each_step() {
     assert!(u1.ok, "{u1:?}");
     assert!(!rev1.exists());
     assert_eq!(fs::read(&orig).unwrap(), orig_bytes);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn expected_original_sha256_accepts_matching_hash_and_refuses_mismatch_even_with_allow_loss() {
+    let dir = scratch("expected_sha256");
+    let orig = build_made_up_original(&dir, "SHA-BIND");
+    let orig_sha = crate::stamp::fingerprint(&fs::read(&orig).unwrap());
+    let settings = Settings::default().without_system_fonts();
+    let cs = json!({
+        "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+    });
+
+    // Mismatched hash is refused with ChangedByHand EVEN when allow_loss is true.
+    let wrong = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: cs.clone(),
+            dry_run: false,
+            output: None,
+            allow_loss: true,
+            expected_original_sha256: Some("0".repeat(64)),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(!wrong.ok);
+    assert_eq!(wrong.error.unwrap().code, ErrorCode::ChangedByHand);
+    assert!(!dir.join("SHA-BIND.rev1.dwg").exists());
+
+    // Matching hash (case-insensitive) succeeds.
+    let ok = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: cs,
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: Some(orig_sha.to_ascii_uppercase()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(ok.ok, "{ok:?}");
+    assert!(dir.join("SHA-BIND.rev1.dwg").is_file());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn chained_revisions_on_damaged_original_preserve_original_decode_report_and_parent_revision() {
+    let dir = scratch("chained_damaged_decode");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tests/fixtures/desktop-damaged-line.dwg");
+    let orig = dir.join("DAMAGED.dwg");
+    fs::copy(&fixture, &orig).unwrap();
+    let orig_read = crate::read_original(&crate::ReadRequest {
+        source: orig.clone(),
+        mirror: None,
+        no_mirror: true,
+    })
+    .unwrap();
+    assert!(!orig_read.decoded);
+    assert!(orig_read.read_past_damage.is_some());
+    assert!(orig_read.not_decoded.iter().any(|r| r.kind == "LINE"));
+
+    let settings = Settings::default().without_system_fonts();
+
+    // Edit 1 on damaged original with allow_loss: true -> rev1.dwg, no parent_revision.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [5, 5, 0], "to": [15, 5, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: true,
+            expected_original_sha256: Some(orig_read.sha256.clone()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "rev1 failed: {r1:?}");
+    let rep1 = r1.result.unwrap();
+    assert!(rep1.parent_revision.is_none());
+    assert!(!rep1.decode.decoded);
+    assert!(rep1.decode.read_past_damage.is_some());
+    let rev1_meta = rep1.revision.clone().unwrap();
+
+    // Edit 2 without allow_loss -> still refused because original is damaged!
+    let r2_refused = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [5, 15, 0], "to": [15, 15, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: Some(orig_read.sha256.clone()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(!r2_refused.ok);
+    assert_eq!(r2_refused.error.unwrap().code, ErrorCode::IncompleteDecode);
+    let refused_rep = r2_refused.result.unwrap();
+    assert!(!refused_rep.decode.decoded);
+    assert!(refused_rep.decode.read_past_damage.is_some());
+
+    // Edit 2 with allow_loss: true -> chains onto rev1, preserves ORIGINAL's decode report,
+    // AND names rev1 as parent_revision in both reply and .changes.json!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [5, 15, 0], "to": [15, 15, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: true,
+            expected_original_sha256: Some(orig_read.sha256.clone()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "rev2 failed: {r2:?}");
+    let rep2 = r2.result.unwrap();
+    assert!(
+        !rep2.decode.decoded && rep2.decode.read_past_damage.is_some(),
+        "chained rev2 must keep original's damaged DecodeReport: {:?}",
+        rep2.decode
+    );
+    assert!(rep2.decode.not_decoded.iter().any(|r| r.kind == "LINE"));
+    let parent = rep2
+        .parent_revision
+        .as_ref()
+        .expect("rev2 must trace parent working revision");
+    assert_eq!(parent.entry, rep1.journal_entry.unwrap());
+    assert_eq!(parent.file, rev1_meta.file);
+    assert_eq!(parent.sha256, rev1_meta.sha256);
+
+    let cl2: Value =
+        serde_json::from_str(&fs::read_to_string(rep2.change_list.unwrap()).unwrap()).unwrap();
+    assert_eq!(cl2["decode_report"]["decoded"], false);
+    assert_eq!(cl2["parent_revision"]["file"], rev1_meta.file);
+    assert_eq!(cl2["parent_revision"]["sha256"], rev1_meta.sha256);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn standalone_output_revision_never_becomes_next_working_revision_base() {
+    let dir = scratch("standalone_output_chain");
+    let orig = build_made_up_original(&dir, "CHAIN-SOLO");
+    let settings = Settings::default().without_system_fonts();
+
+    let circles_at_x = |path: &Path| -> Vec<i64> {
+        let mut xs: Vec<i64> = crate::original::read_dwg_record(path, false)
+            .unwrap()
+            .record
+            .sheet
+            .objects
+            .iter()
+            .filter_map(|o| match o {
+                Object::Circle(c) => Some(c.center.x.round() as i64),
+                _ => None,
+            })
+            .collect();
+        xs.sort();
+        xs
+    };
+
+    // Edit A (normal working revision -> rev1): circle at x=10.
+    let ra = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [10, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(ra.ok, "{ra:?}");
+    let rep_a = ra.result.unwrap();
+
+    // Edit B (standalone `--output alternate.dwg`): circle at x=20.
+    let alt = dir.join("alternate.dwg");
+    let rb = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [20, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: Some(alt.clone()),
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(rb.ok, "{rb:?}");
+    assert!(circles_at_x(&alt).contains(&20) && !circles_at_x(&alt).contains(&10));
+
+    // Edit C (normal working revision -> rev2): circle at x=30.
+    // Must chain onto A (rev1), NOT standalone B, so rev2 contains A + C (10 and 30, NOT 20)!
+    let rc = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [30, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(rc.ok, "{rc:?}");
+    let rep_c = rc.result.unwrap();
+    let rev_c_path = PathBuf::from(rep_c.revision_dwg.unwrap());
+    let xs = circles_at_x(&rev_c_path);
+    assert!(
+        xs.contains(&10) && xs.contains(&30) && !xs.contains(&20),
+        "rev2 must contain A(10) + C(30) and NOT standalone B(20): {xs:?}"
+    );
+    assert_eq!(
+        rep_c.parent_revision.as_ref().map(|p| p.entry),
+        rep_a.journal_entry,
+        "parent_revision must point at A, skipping standalone B"
+    );
+
+    let j = crate::journal(&crate::JournalRequest { set: orig.clone() })
+        .result
+        .unwrap();
+    assert!(
+        !j.entries[0]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output
+    );
+    assert!(
+        j.entries[1]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output
+    );
+    assert!(
+        !j.entries[2]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn passing_allow_loss_once_on_clean_original_does_not_lock_future_edits() {
+    let dir = scratch("clean_allow_loss_once");
+    let orig = build_made_up_original(&dir, "CLEAN-AL");
+    let settings = Settings::default().without_system_fonts();
+
+    // Edit 1 on a clean original passes allow_loss: true unnecessarily.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [8, 1, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: true,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+
+    // Edit 2 without allow_loss MUST succeed because the original itself decoded whole!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 3, 0], "to": [8, 3, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(
+        r2.ok,
+        "clean original must not require allow_loss after an earlier edit passed it: {r2:?}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

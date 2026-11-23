@@ -8,7 +8,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -212,7 +212,7 @@ pub fn resolve_sibling_path(base_file: &Path, rel_or_abs: &Path) -> PathBuf {
 }
 
 /// Ensures `dir` exists, is not a symlink, and on Unix has owner-only (`0700`)
-/// permissions when created.
+/// permissions — tightening any pre-existing directory (e.g. `0755`) as well.
 fn ensure_private_dir(dir: &Path) -> Result<(), String> {
     if let Ok(meta) = fs::symlink_metadata(dir) {
         if meta.file_type().is_symlink() {
@@ -226,6 +226,19 @@ fn ensure_private_dir(dir: &Path) -> Result<(), String> {
                 "app data path `{}` exists and is not a folder",
                 dir.display()
             ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o700 {
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| {
+                    format!(
+                        "could not restrict permissions on app data folder `{}`: {e}",
+                        dir.display()
+                    )
+                })?;
+            }
         }
         return Ok(());
     }
@@ -243,7 +256,12 @@ fn ensure_private_dir(dir: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| {
+            format!(
+                "could not restrict permissions on app data folder `{}`: {e}",
+                dir.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -259,6 +277,47 @@ fn refuse_symlink(path: &Path, label: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// Opens an existing regular file without following symlinks or Windows reparse
+/// points, verifying the open handle's own metadata (no TOCTOU window).
+fn open_regular_no_follow(path: &Path) -> Result<File, std::io::Error> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc_o_nofollow());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = opts.open(path)?;
+    let meta = file.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to follow reparse point",
+            ));
+        }
+    }
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 /// Acquires an OS-level cross-process exclusive file lock beside `recents_file`
@@ -277,9 +336,41 @@ fn lock_recents(recents_file: &Path) -> Result<File, String> {
         opts.mode(0o600);
         opts.custom_flags(libc_o_nofollow());
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let lock_file = opts
         .open(&lock_path)
         .map_err(|e| format!("could not open recents lock `{}`: {e}", lock_path.display()))?;
+    let meta = lock_file.metadata().map_err(|e| {
+        format!(
+            "could not inspect recents lock `{}`: {e}",
+            lock_path.display()
+        )
+    })?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return Err(format!(
+                "refusing to follow reparse-point recents lock `{}`",
+                lock_path.display()
+            ));
+        }
+    }
+    if !meta.is_file() {
+        return Err(format!(
+            "recents lock `{}` is not a regular file",
+            lock_path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = lock_file.set_permissions(fs::Permissions::from_mode(0o600));
+    }
     lock_file
         .lock()
         .map_err(|e| format!("could not lock recents `{}`: {e}", lock_path.display()))?;
@@ -320,16 +411,17 @@ fn libc_o_nofollow() -> i32 {
     }
 }
 
-/// Loads persisted recents from `file`. Returns an empty list if missing or
-/// unreadable/corrupt so the Start screen always opens cleanly. Refuses
-/// symlinks.
+/// Loads persisted recents from `file` using an open-time no-follow regular-file
+/// handle (no TOCTOU symlink race). Returns an empty list if missing, a symlink,
+/// or unreadable/corrupt so the Start screen always opens cleanly.
 pub fn load_recents(file: &Path) -> Vec<RecentEntry> {
-    if refuse_symlink(file, "recents file").is_err() {
-        return Vec::new();
-    }
-    let Ok(bytes) = fs::read(file) else {
+    let Ok(mut handle) = open_regular_no_follow(file) else {
         return Vec::new();
     };
+    let mut bytes = Vec::new();
+    if handle.read_to_end(&mut bytes).is_err() {
+        return Vec::new();
+    }
     let mut entries: Vec<RecentEntry> = serde_json::from_slice(&bytes).unwrap_or_default();
     entries.truncate(MAX_RECENTS);
     entries
@@ -397,6 +489,15 @@ pub fn save_recents(file: &Path, entries: &[RecentEntry]) -> Result<(), String> 
         }
     };
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = tmp_file.set_permissions(fs::Permissions::from_mode(0o600)) {
+            drop(tmp_file);
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("could not restrict temporary recents file: {e}"));
+        }
+    }
     if let Err(e) = tmp_file.write_all(&json).and_then(|()| tmp_file.sync_all()) {
         drop(tmp_file);
         let _ = fs::remove_file(&tmp_path);
@@ -771,13 +872,40 @@ mod tests {
             let file_mode = fs::metadata(&conc_file).unwrap().permissions().mode() & 0o777;
             assert_eq!(file_mode, 0o600, "recents.json must be 0600 on Unix");
 
-            // Symlink refusal.
+            // Symlink refusal on both load and save.
             let target = dir.join("victim.txt");
-            fs::write(&target, "keep-me").unwrap();
+            fs::write(&target, "[]").unwrap();
             let sym_recents = dir.join("sym-recents.json");
             std::os::unix::fs::symlink(&target, &sym_recents).unwrap();
+            assert!(load_recents(&sym_recents).is_empty());
             assert!(save_recents(&sym_recents, &merged).is_err());
-            assert_eq!(fs::read_to_string(&target).unwrap(), "keep-me");
+            assert_eq!(fs::read_to_string(&target).unwrap(), "[]");
+
+            // Symlinked app-data directory is refused.
+            let real_dir = dir.join("real-app-dir");
+            fs::create_dir_all(&real_dir).unwrap();
+            let sym_dir = dir.join("sym-app-dir");
+            std::os::unix::fs::symlink(&real_dir, &sym_dir).unwrap();
+            assert!(save_recents(&sym_dir.join("recents.json"), &merged).is_err());
+
+            // Pre-existing 0755 dir and 0644 file are tightened to 0700 and 0600.
+            let loose_dir = dir.join("loose-dir");
+            fs::create_dir_all(&loose_dir).unwrap();
+            fs::set_permissions(&loose_dir, fs::Permissions::from_mode(0o755)).unwrap();
+            let loose_file = loose_dir.join("recents.json");
+            fs::write(&loose_file, "[]").unwrap();
+            fs::set_permissions(&loose_file, fs::Permissions::from_mode(0o644)).unwrap();
+            save_recents(&loose_file, &merged).unwrap();
+            assert_eq!(
+                fs::metadata(&loose_dir).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "pre-existing 0755 dir must be tightened to 0700"
+            );
+            assert_eq!(
+                fs::metadata(&loose_file).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "pre-existing 0644 recents.json must be tightened to 0600"
+            );
         }
 
         let _ = fs::remove_dir_all(&dir);

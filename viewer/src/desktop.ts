@@ -145,15 +145,19 @@ export function classifySource(path: string, explicitKind?: SourceKind | null): 
   return 'set';
 }
 
+function displayNameWithMode(path: string, windows: boolean): string {
+  const trimmed = windows ? path.trim().replace(/[\\/]+$/, '') : path.trim().replace(/\/+$/, '');
+  if (!trimmed || trimmed === '.') return trimmed || '.';
+  const parts = windows ? trimmed.split(/[\\/]/) : trimmed.split('/');
+  return parts[parts.length - 1] || trimmed;
+}
+
 /**
  * Human-readable name for a source path (file or folder basename across POSIX
  * and Windows, preserving literal backslashes inside POSIX filenames).
  */
 export function sourceDisplayName(path: string): string {
-  const trimmed = stripTrailingSeparators(path);
-  if (!trimmed || trimmed === '.') return trimmed || '.';
-  const parts = isWindowsPath(trimmed) ? trimmed.split(/[\\/]/) : trimmed.split('/');
-  return parts[parts.length - 1] || trimmed;
+  return displayNameWithMode(path, isWindowsPath(path));
 }
 
 /** Whether `path` is absolute on POSIX (`/…`) or Windows (`C:\…`, `C:/…`, `\\server\…`). */
@@ -179,13 +183,22 @@ export function sourceParentDir(path: string): string {
   return trimmed.slice(0, slash);
 }
 
-/** Resolves a path `relOrAbs` (such as a revision DWG filename from the journal) beside `originalPath`. */
+/**
+ * Resolves a path `relOrAbs` (such as a revision DWG filename from the journal)
+ * beside `originalPath`.
+ *
+ * When `originalPath` is a POSIX path (not a Windows drive/UNC path), only a
+ * leading `/` counts as absolute so valid POSIX filenames starting with `\\`
+ * (e.g. `\\weird.rev1.dwg`) are resolved beside `originalPath` rather than
+ * misclassified as Windows UNC paths.
+ */
 export function resolveBeside(originalPath: string, relOrAbs: string): string {
   if (!relOrAbs) return originalPath;
-  if (isAbsolutePath(relOrAbs)) return relOrAbs;
+  const winOrig = isWindowsPath(originalPath);
+  if (winOrig ? isAbsolutePath(relOrAbs) : relOrAbs.startsWith('/')) return relOrAbs;
   const parent = sourceParentDir(originalPath);
   if (!parent) return relOrAbs;
-  if (isWindowsPath(originalPath)) {
+  if (winOrig) {
     const sep = originalPath.includes('\\') && !originalPath.includes('/') ? '\\' : '/';
     const cleanedRel = sep === '\\' ? relOrAbs.replace(/\//g, '\\') : relOrAbs;
     return parent.endsWith('/') || parent.endsWith('\\') ? `${parent}${cleanedRel}` : `${parent}${sep}${cleanedRel}`;
@@ -207,24 +220,41 @@ export interface ActiveRevision {
   entry: number;
   dwgVersion: string;
   sha256: string;
+  originalSha256: string;
 }
 
-/** Latest finished, non-undone revision DWG recorded in an original DWG's journal. */
-export function latestActiveRevision(journal: JournalReport | null, originalPath: string): ActiveRevision | null {
+function matchesOriginalSha(recorded: string | undefined, expected: string | null | undefined): boolean {
+  if (!expected) return true;
+  if (!recorded) return false;
+  return recorded.toLowerCase() === expected.toLowerCase();
+}
+
+/**
+ * Latest finished, non-undone, non-standalone working revision DWG recorded in
+ * an original DWG's journal. When `expectedOriginalSha256` is given, ignores
+ * revisions made against a different file that previously lived at this path.
+ */
+export function latestActiveRevision(
+  journal: JournalReport | null,
+  originalPath: string,
+  expectedOriginalSha256?: string | null,
+): ActiveRevision | null {
   if (!journal) return null;
+  const winOrig = isWindowsPath(originalPath);
   for (let i = journal.entries.length - 1; i >= 0; i -= 1) {
     const e = journal.entries[i] as Entry | undefined;
     if (!e || e.kind !== 'change_set' || e.undone_by || e.rolled_back) continue;
     const meta = e.original_revision;
-    if (meta?.revision_dwg) {
-      return {
-        path: resolveBeside(originalPath, meta.revision_dwg),
-        file: sourceDisplayName(meta.revision_dwg),
-        entry: e.entry,
-        dwgVersion: meta.dwg_version,
-        sha256: meta.revision_sha256,
-      };
-    }
+    if (!meta?.revision_dwg || meta.standalone_output) continue;
+    if (!matchesOriginalSha(meta.original_sha256, expectedOriginalSha256)) continue;
+    return {
+      path: resolveBeside(originalPath, meta.revision_dwg),
+      file: displayNameWithMode(meta.revision_dwg, winOrig),
+      entry: e.entry,
+      dwgVersion: meta.dwg_version,
+      sha256: meta.revision_sha256,
+      originalSha256: meta.original_sha256,
+    };
   }
   return null;
 }
@@ -237,17 +267,24 @@ export function revisionAtEntry(
   journal: JournalReport | null,
   entryNumber: number,
   originalPath: string,
+  expectedOriginalSha256?: string | null,
 ): { path: string; file: string; sha256: string } | null {
   if (!journal) return null;
+  const winOrig = isWindowsPath(originalPath);
   const target = journal.entries.find((e) => e.entry === entryNumber);
-  if (target?.kind === 'change_set' && target.original_revision?.revision_dwg && !target.undone_by) {
+  if (
+    target?.kind === 'change_set' &&
+    target.original_revision?.revision_dwg &&
+    !target.undone_by &&
+    matchesOriginalSha(target.original_revision.original_sha256, expectedOriginalSha256)
+  ) {
     return {
       path: resolveBeside(originalPath, target.original_revision.revision_dwg),
-      file: sourceDisplayName(target.original_revision.revision_dwg),
+      file: displayNameWithMode(target.original_revision.revision_dwg, winOrig),
       sha256: target.original_revision.revision_sha256,
     };
   }
-  // Walk backwards from entryNumber to find the newest non-undone revision at that point.
+  // Walk backwards from entryNumber to find the newest non-undone, non-standalone working revision at that point.
   const undoneByThen = new Set<number>();
   for (const e of journal.entries) {
     if (e.entry > entryNumber) break;
@@ -259,13 +296,14 @@ export function revisionAtEntry(
     const e = journal.entries[i];
     if (!e || e.entry > entryNumber) continue;
     if (e.kind !== 'change_set' || e.rolled_back || undoneByThen.has(e.entry) || e.undone_by) continue;
-    if (e.original_revision?.revision_dwg) {
-      return {
-        path: resolveBeside(originalPath, e.original_revision.revision_dwg),
-        file: sourceDisplayName(e.original_revision.revision_dwg),
-        sha256: e.original_revision.revision_sha256,
-      };
-    }
+    const meta = e.original_revision;
+    if (!meta?.revision_dwg || meta.standalone_output) continue;
+    if (!matchesOriginalSha(meta.original_sha256, expectedOriginalSha256)) continue;
+    return {
+      path: resolveBeside(originalPath, meta.revision_dwg),
+      file: displayNameWithMode(meta.revision_dwg, winOrig),
+      sha256: meta.revision_sha256,
+    };
   }
   return null;
 }

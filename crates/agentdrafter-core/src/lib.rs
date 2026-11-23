@@ -200,8 +200,8 @@ pub use query::{
 pub use render::{render, render_with, DrawnThrough, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;
 pub use revise::{
-    revise, revise_with, ReviseRequest, RevisionChangeListFile, RevisionCopy, RevisionFile,
-    RevisionOperationOutcome, RevisionReport, RevisionUnexpectedChange,
+    revise, revise_with, ParentRevision, ReviseRequest, RevisionChangeListFile, RevisionCopy,
+    RevisionFile, RevisionOperationOutcome, RevisionReport, RevisionUnexpectedChange,
     RevisionUnexpectedChangeKind, REVISION_CHANGES_EXTENSION,
 };
 pub use set::{

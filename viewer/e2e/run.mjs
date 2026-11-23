@@ -6133,12 +6133,14 @@ const checks = {
 
         // Observe real `change` payloads without mocking `read` or `change`!
         let sawAllowLossOnChange = false;
+        let sawExpectedShaOnChange = false;
         let lossChangeCount = 0;
         await page.route('**/commands/change', async (route) => {
           const post = route.request().postDataJSON();
           if (post?.set === lossDwg) {
             lossChangeCount += 1;
             if (post?.allow_loss === true) sawAllowLossOnChange = true;
+            if (post?.expected_original_sha256 === origLossShaA) sawExpectedShaOnChange = true;
           }
           await route.continue();
         });
@@ -6356,15 +6358,18 @@ const checks = {
           null,
           { timeout: 20000 },
         );
-        assert(sawAllowLossOnChange && lossChangeCount === 1, 'real change request carried allow_loss: true');
+        assert(
+          sawAllowLossOnChange && sawExpectedShaOnChange && lossChangeCount === 1,
+          `real change request carried allow_loss + expected_original_sha256: allow=${sawAllowLossOnChange} sha=${sawExpectedShaOnChange} count=${lossChangeCount}`,
+        );
         assert(
           createHash('sha256').update(readFileSync(lossDwg)).digest('hex') === origLossShaA,
           'loss-orig.dwg original untouched',
         );
 
-        // Blocker #6: Replace loss-orig.dwg on disk with a DIFFERENT undecoded DWG (distinct SHA-256)
+        // Blocker #6 + Re-review #4: Replace loss-orig.dwg on disk with a DIFFERENT undecoded DWG (distinct SHA-256)
         // while still in the unlocked session -> next edit MUST revoke consent, refuse without calling change,
-        // and re-engage view-only!
+        // re-engage view-only, AND display B (`loss-orig`) directly instead of A's `loss-orig.rev1`!
         cpSync(customFixtureB, lossDwg);
         const changesBeforeReplace = lossChangeCount;
         await page.click('.rb[data-tool="line"]');
@@ -6374,6 +6379,11 @@ const checks = {
         await page.keyboard.press('Enter');
         await page.keyboard.press('Enter');
         await page.waitForSelector('[data-dwg-banner="view-only"]', { timeout: 15000 });
+        await page.waitForFunction(
+          () => window.agentdrafterViewer?.summary?.sheet === 'loss-orig',
+          null,
+          { timeout: 15000 },
+        );
         assert(
           lossChangeCount === changesBeforeReplace,
           `replaced DWG did not send change with stale allow_loss: ${lossChangeCount} vs ${changesBeforeReplace}`,

@@ -47,7 +47,7 @@ const BUILD_USAGE: &str =
 const SCHEMA_USAGE: &str =
     "agentdrafter schema [sheet-description | block-library | template | set | rows | change-set]";
 const OPERATIONS_USAGE: &str = "agentdrafter operations";
-const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder | original.dwg> <change-set.json | -> [--output <revision.dwg>] [--allow-loss] [--dry-run] [--fonts <folder>]... [--no-system-fonts] [--plot-style <name>] [--plot-styles <folder>]... [--no-pdf]";
+const CHANGE_USAGE: &str = "agentdrafter change <drawing-set-folder | original.dwg> <change-set.json | -> [--output <revision.dwg>] [--allow-loss] [--expected-original-sha256 <sha256>] [--dry-run] [--fonts <folder>]... [--no-system-fonts] [--plot-style <name>] [--plot-styles <folder>]... [--no-pdf]";
 const JOURNAL_USAGE: &str = "agentdrafter journal <drawing-set-folder | original.dwg>";
 const UNDO_USAGE: &str =
     "agentdrafter undo <drawing-set-folder | original.dwg> <change-set> [--dry-run]";
@@ -636,6 +636,7 @@ fn parse_change(mut args: Args) -> Result<Value, Error> {
     let mut dry_run = false;
     let mut output: Option<PathBuf> = None;
     let mut allow_loss = false;
+    let mut expected_original_sha256: Option<String> = None;
     let mut plot_style: Option<String> = None;
     let mut plot_styles: Vec<PathBuf> = Vec::new();
     let mut no_pdf = false;
@@ -645,6 +646,18 @@ fn parse_change(mut args: Args) -> Result<Value, Error> {
             Some("--dry-run") => dry_run = true,
             Some("--allow-loss") => allow_loss = true,
             Some("--no-pdf") => no_pdf = true,
+            Some("--expected-original-sha256") => {
+                let hash = value("--expected-original-sha256", args.next())?
+                    .into_string()
+                    .map_err(|_| {
+                        usage("--expected-original-sha256 must be valid UTF-8 text".to_owned())
+                    })?;
+                if expected_original_sha256.replace(hash).is_some() {
+                    return Err(usage(
+                        "--expected-original-sha256 is given twice".to_owned(),
+                    ));
+                }
+            }
             Some("--output" | "-o") => {
                 let path = value("--output", args.next())?;
                 if output.replace(PathBuf::from(path)).is_some() {
@@ -687,6 +700,7 @@ fn parse_change(mut args: Args) -> Result<Value, Error> {
         dry_run,
         output,
         allow_loss,
+        expected_original_sha256,
         plot_style,
         no_pdf,
     };

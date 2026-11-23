@@ -84,6 +84,9 @@ test('resolves revision DWG paths beside POSIX and Windows originals', () => {
   assert.equal(resolveBeside('/tmp/plant/P-101.dwg', 'P-101.rev1.dwg'), '/tmp/plant/P-101.rev1.dwg');
   assert.equal(resolveBeside('C:\\Plant\\P-101.dwg', 'P-101.rev1.dwg'), 'C:\\Plant\\P-101.rev1.dwg');
   assert.equal(resolveBeside('/tmp/plant/P-101.dwg', '/other/custom.dwg'), '/other/custom.dwg');
+  // Valid POSIX filename starting with `\\` is resolved beside the POSIX original, NOT treated as a UNC path.
+  assert.equal(resolveBeside('/demo/\\\\weird.dwg', '\\\\weird.rev1.dwg'), '/demo/\\\\weird.rev1.dwg');
+  assert.equal(resolveBeside('\\\\server\\share\\P-101.dwg', '\\\\other\\share\\custom.dwg'), '\\\\other\\share\\custom.dwg');
 });
 
 test('parses desktop and plain browser URLs without changing browser defaults', () => {
@@ -222,17 +225,36 @@ test('resolves active and stepped revisions from an original DWG journal and nor
         at: '2026-11-22T18:06:00Z',
         undid: [2],
       },
+      {
+        entry: 4,
+        kind: 'change_set',
+        at: '2026-11-22T18:07:00Z',
+        landed_on: ['P-101'],
+        original_revision: {
+          original_file: 'P-101.dwg',
+          original_sha256: 'aaa',
+          dwg_version: 'AC1027',
+          revision_dwg: 'alternate.dwg',
+          revision_sha256: 'ddd',
+          standalone_output: true,
+        },
+      },
     ],
   };
 
-  assert.deepEqual(latestActiveRevision(journal, '/plant/P-101.dwg'), {
+  // Skips standalone `--output` entry 4 and matches original_sha256 'aaa' -> entry 1.
+  assert.deepEqual(latestActiveRevision(journal, '/plant/P-101.dwg', 'aaa'), {
     path: '/plant/P-101.rev1.dwg',
     file: 'P-101.rev1.dwg',
     entry: 1,
     dwgVersion: 'AC1027',
     sha256: 'bbb',
+    originalSha256: 'aaa',
   });
-  assert.deepEqual(revisionAtEntry(journal, 1, '/plant/P-101.dwg'), {
+  // If original file on disk was replaced by a different file ('zzz'), NEVER show A's revision!
+  assert.equal(latestActiveRevision(journal, '/plant/P-101.dwg', 'zzz'), null);
+  assert.equal(revisionAtEntry(journal, 1, '/plant/P-101.dwg', 'zzz'), null);
+  assert.deepEqual(revisionAtEntry(journal, 1, '/plant/P-101.dwg', 'aaa'), {
     path: '/plant/P-101.rev1.dwg',
     file: 'P-101.rev1.dwg',
     sha256: 'bbb',

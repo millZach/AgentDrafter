@@ -147,6 +147,10 @@ pub struct OriginalRevisionMeta {
     /// Whether `--allow-loss` was accepted for this revision.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allowed_loss: bool,
+    /// Whether this revision was written to an explicit `--output <file.dwg>`
+    /// standalone destination rather than the sequential working revision chain.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standalone_output: bool,
 }
 
 /// One entry of the journal, as its line holds it.

@@ -65,6 +65,7 @@ export interface Entry {
     revision_dwg: string;
     revision_sha256: string;
     allowed_loss?: boolean;
+    standalone_output?: boolean;
   };
   undo_state?: 'kept' | 'pruned' | 'undone';
   undone_by?: number;

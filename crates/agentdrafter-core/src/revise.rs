@@ -116,6 +116,17 @@ pub struct RevisionOperationOutcome {
     pub snapped: Vec<SnapResolved>,
 }
 
+/// The active working revision a chained revision was built on top of.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ParentRevision {
+    /// Journal entry number of the parent working revision.
+    pub entry: u64,
+    /// File name of the parent working revision.
+    pub file: String,
+    /// SHA-256 fingerprint of the parent working revision bytes.
+    pub sha256: String,
+}
+
 /// What `agentdrafter change <original.dwg> ...` returns.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RevisionReport {
@@ -133,6 +144,10 @@ pub struct RevisionReport {
     pub message: String,
     /// Metadata of the original DWG, read once and never modified.
     pub original: RevisionFile,
+    /// When chained onto an active working revision, identifies that parent
+    /// working revision. Absent when built directly from the original DWG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_revision: Option<ParentRevision>,
     /// Metadata of the revision DWG (same DWG version as the original).
     /// Absent when refused before writing (such as incomplete decode).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,6 +214,10 @@ pub struct RevisionChangeListFile {
     /// lives inside the original's folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_path: Option<String>,
+    /// When chained onto an active working revision, identifies that parent
+    /// working revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_revision: Option<ParentRevision>,
     pub revision: RevisionFile,
     pub sheet: String,
     pub units: Option<Unit>,
@@ -242,6 +261,11 @@ pub struct ReviseRequest {
     /// recording the accepted losses in the reply and report (ADR-0004).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_loss: bool,
+    /// Expected SHA-256 hex fingerprint of the original `.dwg` bytes read from
+    /// disk. When provided, `change` refuses with `changed_by_hand` if the
+    /// original's bytes do not match, even when `allow_loss` is true (ADR-0004).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_original_sha256: Option<String>,
     /// CTB plot style file name (such as `monochrome.ctb`) for the revision PDF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plot_style: Option<String>,
@@ -314,7 +338,7 @@ pub fn revise_with(request: &ReviseRequest, settings: &Settings) -> Reply<Revisi
             &original_bytes,
             source_id,
         ) {
-            Ok(PreparedRevision::Ready(ready)) => Reply::from(Ok(ready.report)),
+            Ok(PreparedRevision::Ready(ready)) => Reply::from(Ok(*ready.report)),
             Ok(PreparedRevision::Refused(report, error)) => Reply::partly(*report, error),
             Err(error) => Reply::from(Err(error)),
         };
@@ -366,11 +390,12 @@ pub fn revise_with(request: &ReviseRequest, settings: &Settings) -> Reply<Revisi
                 revision_dwg: oj.rel_path(&ready.paths.dwg),
                 revision_sha256: rev_meta.sha256.clone(),
                 allowed_loss: ready.report.allowed_loss,
+                standalone_output: request.output.is_some(),
             };
             match oj.commit_revision(&locked, &request.change_set, objects, meta, &new_files) {
                 Ok(entry_num) => {
                     ready.report.journal_entry = Some(entry_num);
-                    Reply::from(Ok(ready.report))
+                    Reply::from(Ok(*ready.report))
                 }
                 Err(error) => {
                     let _ = oj.record_failed_attempt(&locked, &request.change_set, &error);
@@ -400,52 +425,98 @@ struct ReadyRevision {
     revision_bytes: Vec<u8>,
     change_list_bytes: Vec<u8>,
     pdf_bytes: Option<Vec<u8>>,
-    report: RevisionReport,
+    report: Box<RevisionReport>,
 }
 
-fn prepare_revision(
-    request: &ReviseRequest,
-    settings: &Settings,
-    oj: &OriginalJournal,
-    resolved_source: &Path,
+enum OpenedRevisionBase {
+    Open {
+        session: Box<RevisionSession>,
+        original_meta: RevisionFile,
+        parent_revision: Option<ParentRevision>,
+        decode: DecodeReport,
+        units: Option<Unit>,
+    },
+    Refused(Box<RevisionReport>, Error),
+}
+
+#[inline(never)]
+fn open_session_boxed(bytes: &[u8], path: &Path) -> Result<Box<RevisionSession>, Error> {
+    RevisionSession::open(bytes, path).map(Box::new)
+}
+
+#[inline(never)]
+fn inspect_original_header_and_decode(
     original_bytes: &[u8],
+    source: &Path,
+) -> Result<(String, Option<Unit>, DecodeReport), Error> {
+    let session = open_session_boxed(original_bytes, source)?;
+    session
+        .check_writable_version()
+        .map_err(|e| e.or_in_file(source))?;
+    Ok((
+        session.dwg_version().to_owned(),
+        session.initial_contents().units,
+        session.decode_report().clone(),
+    ))
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_incomplete_decode_refusal(
+    source: &Path,
+    sheet_name: String,
+    dry_run: bool,
+    original_meta: RevisionFile,
+    parent_revision: Option<ParentRevision>,
+    units: Option<Unit>,
+    decode: DecodeReport,
+) -> OpenedRevisionBase {
+    let detail = decode_refusal_message(source, &decode);
+    let report = Box::new(RevisionReport {
+        source: source.display().to_string(),
+        sheet: sheet_name,
+        dry_run,
+        journal_entry: None,
+        message: detail.clone(),
+        original: original_meta,
+        parent_revision,
+        revision: None,
+        revision_dwg: None,
+        change_list: None,
+        pdf: None,
+        pdf_error: None,
+        plot: None,
+        units,
+        decode,
+        allowed_loss: false,
+        operations: Vec::new(),
+        requested_failures: Vec::new(),
+        unexpected_changes: Vec::new(),
+        checks: None,
+    });
+    let error = Error::new(ErrorCode::IncompleteDecode, detail).in_file(source);
+    OpenedRevisionBase::Refused(report, error)
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn open_revision_base(
+    request: &ReviseRequest,
+    oj: &OriginalJournal,
+    source: &Path,
     source_id: Option<FileId>,
-) -> Result<PreparedRevision, Error> {
-    let source = request.set.as_path();
-
-    // Validate plot style early (even in dry-run) so bad plot-style options fail
-    // cleanly before doing any work.
-    let style = if request.no_pdf {
-        if request.plot_style.is_some() {
-            return Err(Error::usage(
-                "`plot_style` names a plot style for the revision PDF, and `no_pdf` skips \
-                 plotting it; give one or the other",
-            )
-            .at_field("plot_style"));
-        }
-        None
-    } else {
-        Some(plot_style(request.plot_style.as_deref(), settings)?)
-    };
-
-    let original_sha256 = fingerprint(original_bytes);
-    let sheet_name = oj.sheet.clone();
-    let original_file_name = resolved_source
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| source.display().to_string());
-
-    // Validate/choose output paths before touching anything on disk.
-    let paths = resolve_output_paths(source, source_id, request.output.as_deref(), request.no_pdf)?;
-
+    original_bytes: &[u8],
+    original_file_name: String,
+    original_sha256: String,
+    sheet_name: &str,
+) -> Result<OpenedRevisionBase, Error> {
     // When no explicit `--output` is given (sequential working revisions
     // `<stem>.rev1.dwg`, `<stem>.rev2.dwg`, ...) and this original already has
-    // an active working revision in its per-original journal matching this
-    // exact original SHA-256, chain this change set on top of the verified
-    // active working revision so successive edits accumulate instead of
-    // dropping earlier edits, while keeping the original file strictly
-    // read-only and preserving its DWG version and ADR-0004 decode-loss gates.
-    // An explicit `--output <file.dwg>` revises the named `<dwg>` directly.
+    // an active non-standalone working revision matching this exact original
+    // SHA-256, chain this change set on top of the verified active working
+    // revision so successive edits accumulate instead of dropping earlier
+    // edits, while keeping the original file strictly read-only and preserving
+    // the original's DWG version and DecodeReport (ADR-0004, ADR-0006).
     let active_tip = if request.output.is_none() {
         oj.latest_active_revision()?
             .filter(|tip| tip.original_sha256 == original_sha256)
@@ -453,7 +524,7 @@ fn prepare_revision(
         None
     };
 
-    let (mut session, original_meta, decode) = if let Some(tip) = active_tip {
+    if let Some(tip) = active_tip {
         let rev_bytes = match read_regular_no_follow(source, source_id, &tip.path) {
             Ok(NoFollowRead::File(bytes)) => bytes,
             Ok(NoFollowRead::Missing) => {
@@ -513,96 +584,278 @@ fn prepare_revision(
             )
             .in_file(&tip.path));
         }
-        // If the original required `--allow-loss` (ADR-0004), continue requiring
-        // explicit `allow_loss: true` on subsequent edits too.
-        if tip.allowed_loss && !request.allow_loss {
-            let orig_session = RevisionSession::open(original_bytes, source)?;
-            let orig_decode = orig_session.decode_report().clone();
-            let orig_meta = RevisionFile {
-                file: original_file_name,
-                sha256: original_sha256,
-                dwg_version: orig_session.dwg_version().to_owned(),
-            };
-            let orig_units = orig_session.initial_contents().units;
-            let detail = decode_refusal_message(source, &orig_decode);
-            let report = RevisionReport {
-                source: source.display().to_string(),
-                sheet: sheet_name,
-                dry_run: request.dry_run,
-                journal_entry: None,
-                message: detail.clone(),
-                original: orig_meta,
-                revision: None,
-                revision_dwg: None,
-                change_list: None,
-                pdf: None,
-                pdf_error: None,
-                plot: None,
-                units: orig_units,
-                decode: orig_decode,
-                allowed_loss: false,
-                operations: Vec::new(),
-                requested_failures: Vec::new(),
-                unexpected_changes: Vec::new(),
-                checks: None,
-            };
-            let error = Error::new(ErrorCode::IncompleteDecode, detail).in_file(source);
-            return Ok(PreparedRevision::Refused(Box::new(report), error));
-        }
-        let tip_session = RevisionSession::open(&rev_bytes, &tip.path)?;
-        let tip_decode = tip_session.decode_report().clone();
-        let orig_meta = RevisionFile {
+        // Inspect the untouched original in a separate leaf frame so its
+        // `DecodeReport` stays authoritative (a clean original is never locked
+        // just because an earlier revision passed `--allow-loss`, and a damaged
+        // original keeps its full decode report in chained revisions).
+        let (orig_version, orig_units, orig_decode) =
+            inspect_original_header_and_decode(original_bytes, source)?;
+        let original_meta = RevisionFile {
             file: original_file_name,
             sha256: original_sha256,
-            dwg_version: tip.dwg_version,
+            dwg_version: orig_version,
         };
-        (tip_session, orig_meta, tip_decode)
+        let parent_revision = Some(ParentRevision {
+            entry: tip.entry,
+            file: tip.file,
+            sha256: tip.revision_sha256,
+        });
+        if !orig_decode.decoded && !request.allow_loss {
+            return Ok(build_incomplete_decode_refusal(
+                source,
+                sheet_name.to_owned(),
+                request.dry_run,
+                original_meta,
+                parent_revision,
+                orig_units,
+                orig_decode,
+            ));
+        }
+        let tip_session = open_session_boxed(&rev_bytes, &tip.path)?;
+        tip_session
+            .check_writable_version()
+            .map_err(|e| e.or_in_file(source))?;
+        let units = tip_session.initial_contents().units.or(orig_units);
+        // If the original was clean (`decoded: true`) but the tip somehow failed
+        // to decode whole, enforce the decode gate on the tip too.
+        let decode = if !orig_decode.decoded {
+            orig_decode
+        } else {
+            let tip_decode = tip_session.decode_report().clone();
+            if !tip_decode.decoded && !request.allow_loss {
+                return Ok(build_incomplete_decode_refusal(
+                    source,
+                    sheet_name.to_owned(),
+                    request.dry_run,
+                    original_meta,
+                    parent_revision,
+                    units,
+                    tip_decode,
+                ));
+            }
+            tip_decode
+        };
+        Ok(OpenedRevisionBase::Open {
+            session: tip_session,
+            original_meta,
+            parent_revision,
+            decode,
+            units,
+        })
     } else {
-        // Strictly parse the original DWG into an in-place revision session.
-        let orig_session = RevisionSession::open(original_bytes, source)?;
-        let orig_meta = RevisionFile {
+        let orig_session = open_session_boxed(original_bytes, source)?;
+        orig_session
+            .check_writable_version()
+            .map_err(|e| e.or_in_file(source))?;
+        let original_meta = RevisionFile {
             file: original_file_name,
             sha256: original_sha256,
             dwg_version: orig_session.dwg_version().to_owned(),
         };
-        let orig_decode = orig_session.decode_report().clone();
-        (orig_session, orig_meta, orig_decode)
-    };
-    let units = session.initial_contents().units;
-    let effective_units = units.unwrap_or(Unit::Mm);
-
-    // Refuse DWG versions acadrust cannot write back without converting (ADR-0006).
-    session
-        .check_writable_version()
-        .map_err(|e| e.or_in_file(source))?;
-
-    // Decode-loss gate (ADR-0004): refuse unless `allow_loss: true`.
-    if !decode.decoded && !request.allow_loss {
-        let detail = decode_refusal_message(source, &decode);
-        let report = RevisionReport {
-            source: source.display().to_string(),
-            sheet: sheet_name,
-            dry_run: request.dry_run,
-            journal_entry: None,
-            message: detail.clone(),
-            original: original_meta,
-            revision: None,
-            revision_dwg: None,
-            change_list: None,
-            pdf: None,
-            pdf_error: None,
-            plot: None,
-            units,
+        let decode = orig_session.decode_report().clone();
+        let units = orig_session.initial_contents().units;
+        if !decode.decoded && !request.allow_loss {
+            return Ok(build_incomplete_decode_refusal(
+                source,
+                sheet_name.to_owned(),
+                request.dry_run,
+                original_meta,
+                None,
+                units,
+                decode,
+            ));
+        }
+        Ok(OpenedRevisionBase::Open {
+            session: orig_session,
+            original_meta,
+            parent_revision: None,
             decode,
-            allowed_loss: false,
-            operations: Vec::new(),
-            requested_failures: Vec::new(),
-            unexpected_changes: Vec::new(),
-            checks: None,
-        };
-        let error = Error::new(ErrorCode::IncompleteDecode, detail).in_file(source);
-        return Ok(PreparedRevision::Refused(Box::new(report), error));
+            units,
+        })
     }
+}
+
+#[inline(never)]
+fn serialize_and_verify_boxed(
+    session: &RevisionSession,
+    dwg_path: &Path,
+) -> Result<Box<RevisionVerification>, Error> {
+    session.serialize_and_verify(dwg_path).map(Box::new)
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn build_ready_revision(
+    request: &ReviseRequest,
+    oj: &OriginalJournal,
+    source: &Path,
+    sheet_name: String,
+    paths: OutputPaths,
+    original_meta: RevisionFile,
+    parent_revision: Option<ParentRevision>,
+    revision_meta: RevisionFile,
+    revision_bytes: Vec<u8>,
+    units: Option<Unit>,
+    decode: DecodeReport,
+    outcomes: Vec<RevisionOperationOutcome>,
+    unexpected_changes: Vec<UnexpectedChange>,
+    checks: Option<Reply<CheckReport>>,
+    pdf_bytes: Option<Vec<u8>>,
+    plot_report: Option<PlotReport>,
+    pdf_error: Option<Error>,
+    pdf_written_path: Option<String>,
+) -> Result<Box<ReadyRevision>, Error> {
+    let original_path = if oj.is_directly_in_orig_dir(&paths.dwg) {
+        None
+    } else {
+        Some(oj.resolved_source.to_string_lossy().into_owned())
+    };
+    let change_list_file = RevisionChangeListFile {
+        format: 1,
+        original: original_meta.clone(),
+        original_path,
+        parent_revision: parent_revision.clone(),
+        revision: revision_meta.clone(),
+        sheet: sheet_name.clone(),
+        units,
+        decode_report: decode.clone(),
+        allowed_loss: request.allow_loss,
+        change_set: request.change_set.clone(),
+        operations: outcomes.clone(),
+        unexpected_changes: unexpected_changes.clone(),
+        pdf: pdf_written_path.clone(),
+        pdf_error: pdf_error.clone(),
+        checks: checks.clone(),
+    };
+    let mut change_list_bytes = serde_json::to_vec_pretty(&change_list_file).map_err(|e| {
+        Error::new(
+            ErrorCode::WriteFailed,
+            format!("could not serialize the revision change list: {e}"),
+        )
+    })?;
+    change_list_bytes.push(b'\n');
+
+    let message = revision_message(
+        source,
+        &paths.dwg,
+        &revision_meta.dwg_version,
+        outcomes.len(),
+        request.dry_run,
+        !decode.decoded && request.allow_loss,
+        unexpected_changes.len(),
+        pdf_written_path.as_deref(),
+        pdf_error.as_ref(),
+    );
+
+    let report = Box::new(RevisionReport {
+        source: source.display().to_string(),
+        sheet: sheet_name,
+        dry_run: request.dry_run,
+        journal_entry: None,
+        message,
+        original: original_meta,
+        parent_revision,
+        revision: Some(revision_meta),
+        revision_dwg: Some(paths.dwg.display().to_string()),
+        change_list: Some(paths.changes.display().to_string()),
+        pdf: pdf_written_path,
+        pdf_error,
+        plot: plot_report,
+        units,
+        decode,
+        allowed_loss: request.allow_loss,
+        operations: outcomes,
+        requested_failures: Vec::new(),
+        unexpected_changes,
+        checks,
+    });
+    Ok(Box::new(ReadyRevision {
+        paths,
+        revision_bytes,
+        change_list_bytes,
+        pdf_bytes,
+        report,
+    }))
+}
+
+#[inline(never)]
+fn prepare_revision(
+    request: &ReviseRequest,
+    settings: &Settings,
+    oj: &OriginalJournal,
+    resolved_source: &Path,
+    original_bytes: &[u8],
+    source_id: Option<FileId>,
+) -> Result<PreparedRevision, Error> {
+    let source = request.set.as_path();
+
+    // Validate plot style early (even in dry-run) so bad plot-style options fail
+    // cleanly before doing any work.
+    let style = if request.no_pdf {
+        if request.plot_style.is_some() {
+            return Err(Error::usage(
+                "`plot_style` names a plot style for the revision PDF, and `no_pdf` skips \
+                 plotting it; give one or the other",
+            )
+            .at_field("plot_style"));
+        }
+        None
+    } else {
+        Some(plot_style(request.plot_style.as_deref(), settings)?)
+    };
+
+    let original_sha256 = fingerprint(original_bytes);
+    // Core-enforced SHA-256 binding (ADR-0004): refuse even when `allow_loss`
+    // is true if the original file on disk no longer matches the exact content
+    // the caller inspected and approved.
+    if let Some(expected) = request.expected_original_sha256.as_deref() {
+        let trimmed = expected.trim();
+        if trimmed.is_empty() || !original_sha256.eq_ignore_ascii_case(trimmed) {
+            return Err(Error::new(
+                ErrorCode::ChangedByHand,
+                format!(
+                    "the original DWG `{}` changed on disk (expected sha256 `{}`, found `{}`): \
+                     re-read and re-confirm before revising",
+                    source.display(),
+                    trimmed,
+                    original_sha256
+                ),
+            )
+            .in_file(source));
+        }
+    }
+
+    let sheet_name = oj.sheet.clone();
+    let original_file_name = resolved_source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| source.display().to_string());
+
+    // Validate/choose output paths before touching anything on disk.
+    let paths = resolve_output_paths(source, source_id, request.output.as_deref(), request.no_pdf)?;
+
+    let (mut session, original_meta, parent_revision, decode, units) = match open_revision_base(
+        request,
+        oj,
+        source,
+        source_id,
+        original_bytes,
+        original_file_name,
+        original_sha256,
+        &sheet_name,
+    )? {
+        OpenedRevisionBase::Open {
+            session,
+            original_meta,
+            parent_revision,
+            decode,
+            units,
+        } => (session, original_meta, parent_revision, decode, units),
+        OpenedRevisionBase::Refused(report, error) => {
+            return Ok(PreparedRevision::Refused(report, error));
+        }
+    };
+    let effective_units = units.unwrap_or(Unit::Mm);
 
     // Refuse drawing-set-only change-set keys (`fixes`, `guide`) on originals.
     if let Value::Object(map) = &request.change_set {
@@ -654,22 +907,25 @@ fn prepare_revision(
 
     // Serialize revision bytes in the original's DWG version, re-read strictly,
     // and run the structural diff self-check.
-    let verified = session.serialize_and_verify(&paths.dwg)?;
+    let verified = serialize_and_verify_boxed(&session, &paths.dwg)?;
     if let Some((report, error)) = enforce_verification_gates(
         source,
         &sheet_name,
         request.dry_run,
         request.allow_loss,
         &original_meta,
+        parent_revision.as_ref(),
         units,
         &decode,
         &outcomes,
         &verified,
     ) {
-        return Ok(PreparedRevision::Refused(Box::new(report), error));
+        return Ok(PreparedRevision::Refused(report, error));
     }
     let revision_bytes = verified.bytes;
     let unexpected_changes = verified.unexpected_changes;
+    let revision_dwg_version = session.dwg_version().to_owned();
+    drop(session);
 
     let revision_sha256 = fingerprint(&revision_bytes);
     let revision_file_name = paths
@@ -680,7 +936,7 @@ fn prepare_revision(
     let revision_meta = RevisionFile {
         file: revision_file_name,
         sha256: revision_sha256,
-        dwg_version: session.dwg_version().to_owned(),
+        dwg_version: revision_dwg_version,
     };
 
     // Run checker on the serialized revision bytes (works in dry-run too!).
@@ -711,75 +967,27 @@ fn prepare_revision(
         }
     }
 
-    let original_path = if oj.is_directly_in_orig_dir(&paths.dwg) {
-        None
-    } else {
-        Some(oj.resolved_source.to_string_lossy().into_owned())
-    };
-    let change_list_file = RevisionChangeListFile {
-        format: 1,
-        original: original_meta.clone(),
-        original_path,
-        revision: revision_meta.clone(),
-        sheet: sheet_name.clone(),
-        units,
-        decode_report: decode.clone(),
-        allowed_loss: request.allow_loss,
-        change_set: request.change_set.clone(),
-        operations: outcomes.clone(),
-        unexpected_changes: unexpected_changes.clone(),
-        pdf: pdf_written_path.clone(),
-        pdf_error: pdf_error.clone(),
-        checks: checks.clone(),
-    };
-    let mut change_list_bytes = serde_json::to_vec_pretty(&change_list_file).map_err(|e| {
-        Error::new(
-            ErrorCode::WriteFailed,
-            format!("could not serialize the revision change list: {e}"),
-        )
-    })?;
-    change_list_bytes.push(b'\n');
-
-    let message = revision_message(
+    let ready = build_ready_revision(
+        request,
+        oj,
         source,
-        &paths.dwg,
-        &revision_meta.dwg_version,
-        outcomes.len(),
-        request.dry_run,
-        !decode.decoded && request.allow_loss,
-        unexpected_changes.len(),
-        pdf_written_path.as_deref(),
-        pdf_error.as_ref(),
-    );
-
-    let report = RevisionReport {
-        source: source.display().to_string(),
-        sheet: sheet_name,
-        dry_run: request.dry_run,
-        journal_entry: None,
-        message,
-        original: original_meta,
-        revision: Some(revision_meta),
-        revision_dwg: Some(paths.dwg.display().to_string()),
-        change_list: Some(paths.changes.display().to_string()),
-        pdf: pdf_written_path,
-        pdf_error,
-        plot: plot_report,
+        sheet_name,
+        paths,
+        original_meta,
+        parent_revision,
+        revision_meta,
+        revision_bytes,
         units,
         decode,
-        allowed_loss: request.allow_loss,
-        operations: outcomes,
-        requested_failures: Vec::new(),
+        outcomes,
         unexpected_changes,
         checks,
-    };
-    Ok(PreparedRevision::Ready(Box::new(ReadyRevision {
-        paths,
-        revision_bytes,
-        change_list_bytes,
         pdf_bytes,
-        report,
-    })))
+        plot_report,
+        pdf_error,
+        pdf_written_path,
+    )?;
+    Ok(PreparedRevision::Ready(ready))
 }
 
 fn objects_changed_from_outcomes(outcomes: &[RevisionOperationOutcome]) -> Vec<ObjectChanged> {
@@ -2027,6 +2235,7 @@ fn decode_refusal_message(source: &Path, decode: &DecodeReport) -> String {
     )
 }
 
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn enforce_verification_gates(
     source: &Path,
@@ -2034,23 +2243,25 @@ fn enforce_verification_gates(
     dry_run: bool,
     allow_loss: bool,
     original_meta: &RevisionFile,
+    parent_revision: Option<&ParentRevision>,
     units: Option<Unit>,
     decode: &DecodeReport,
     outcomes: &[RevisionOperationOutcome],
     verified: &RevisionVerification,
-) -> Option<(RevisionReport, Error)> {
+) -> Option<(Box<RevisionReport>, Error)> {
     // 1. Requested-edit integrity gate (ADR-0005): NEVER bypassable with
     //    `--allow-loss`. If any requested addition vanished or any requested
     //    deletion survived, refuse with zero files written.
     if !verified.requested_failures.is_empty() {
         let detail = requested_failures_refusal_message(source, &verified.requested_failures);
-        let report = RevisionReport {
+        let report = Box::new(RevisionReport {
             source: source.display().to_string(),
             sheet: sheet_name.to_owned(),
             dry_run,
             journal_entry: None,
             message: detail.clone(),
             original: original_meta.clone(),
+            parent_revision: parent_revision.cloned(),
             revision: None,
             revision_dwg: None,
             change_list: None,
@@ -2064,7 +2275,7 @@ fn enforce_verification_gates(
             requested_failures: verified.requested_failures.clone(),
             unexpected_changes: verified.unexpected_changes.clone(),
             checks: None,
-        };
+        });
         let error = Error::new(ErrorCode::DwgWrite, detail).in_file(source);
         return Some((report, error));
     }
@@ -2073,13 +2284,14 @@ fn enforce_verification_gates(
     //    outside the requested operations unless `allow_loss: true`.
     if !verified.unexpected_changes.is_empty() && !allow_loss {
         let detail = unexpected_changes_refusal_message(source, &verified.unexpected_changes);
-        let report = RevisionReport {
+        let report = Box::new(RevisionReport {
             source: source.display().to_string(),
             sheet: sheet_name.to_owned(),
             dry_run,
             journal_entry: None,
             message: detail.clone(),
             original: original_meta.clone(),
+            parent_revision: parent_revision.cloned(),
             revision: None,
             revision_dwg: None,
             change_list: None,
@@ -2093,7 +2305,7 @@ fn enforce_verification_gates(
             requested_failures: Vec::new(),
             unexpected_changes: verified.unexpected_changes.clone(),
             checks: None,
-        };
+        });
         let error = Error::new(ErrorCode::DwgWrite, detail).in_file(source);
         return Some((report, error));
     }
