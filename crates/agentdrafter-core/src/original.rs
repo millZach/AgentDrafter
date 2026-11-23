@@ -1043,6 +1043,48 @@ pub(crate) fn is_sha256_hex(name: &str) -> bool {
     name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// Checks every existing directory component of an already-canonicalized
+/// absolute directory path `dir` from its root/prefix down via
+/// `symlink_metadata`, refusing any symlink or non-directory ancestor.
+pub(crate) fn verify_no_symlink_ancestors(dir: &Path) -> io::Result<()> {
+    let mut cur = PathBuf::new();
+    for comp in dir.components() {
+        match comp {
+            std::path::Component::Prefix(p) => cur.push(p.as_os_str()),
+            std::path::Component::RootDir => cur.push(comp.as_os_str()),
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected `..` in canonical path `{}`", dir.display()),
+                ));
+            }
+            std::path::Component::Normal(seg) => {
+                cur.push(seg);
+                match fs::symlink_metadata(&cur) {
+                    Ok(meta) => {
+                        if meta.file_type().is_symlink() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("refusing to traverse symbolic link `{}`", cur.display()),
+                            ));
+                        }
+                        if !meta.file_type().is_dir() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("`{}` is not a directory", cur.display()),
+                            ));
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Checks every intermediate directory component of `relative` under `root`
 /// (excluding the final file name) via `symlink_metadata`, refusing symlinks
 /// or non-directory entries. Returns `Ok(())` if every existing intermediate

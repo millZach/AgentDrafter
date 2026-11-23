@@ -49,7 +49,8 @@ use crate::error::{Error, ErrorCode};
 use crate::original::{
     create_scoped_temp_beside, ensure_real_dir_chain, move_to_unique_backup_beside,
     open_no_follow_write, place_new_file, read_regular_no_follow, rename_no_replace_keep_src,
-    verify_no_symlink_intermediate_dirs, verify_real_dir_chain, NoFollowRead,
+    verify_no_symlink_ancestors, verify_no_symlink_intermediate_dirs, verify_real_dir_chain,
+    NoFollowRead,
 };
 use crate::stamp::fingerprint;
 
@@ -236,7 +237,14 @@ fn commit_impl(
         )
         .collect();
     let names = Names::new(ahead.entry, guard.map(|g| g.temp_scope), keys);
-    let placed = match put_in_place(replacements, expected, guard, &names, &mut seam) {
+    let placed = match put_in_place(
+        replacements,
+        expected,
+        guard,
+        Some(ahead.states),
+        &names,
+        &mut seam,
+    ) {
         Ok(placed) => placed,
         Err(unplaced) => {
             if let Some(g) = guard {
@@ -797,6 +805,20 @@ pub(super) fn restore_original_inspected(
     folders_made: &[PathBuf],
     guard: OriginalGuard<'_>,
 ) -> Result<Vec<Restored>, Error> {
+    // Verify the journal/undo-states directory chain BEFORE modifying any
+    // output file so a symlinked or corrupt `undo-states` refuses cleanly
+    // without touching disk.
+    verify_real_dir_chain(
+        guard.base_dir,
+        &[".agentdrafter", "originals", guard.key, "undo-states"],
+    )
+    .map_err(|e| {
+        Error::new(
+            ErrorCode::ReadFailed,
+            format!("cannot inspect the original's undo-states folder: {e}"),
+        )
+        .in_file(states)
+    })?;
     let mut replacements: Vec<Replacement> = Vec::new();
     let mut expected: Vec<ExpectedTarget> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
@@ -847,6 +869,7 @@ pub(super) fn restore_original_inspected(
         &replacements,
         Some(expected.as_slice()),
         Some(guard),
+        Some(states),
         &names,
         &mut Seam::restore(),
     )
@@ -930,23 +953,29 @@ fn restore_impl(
         keys.push(format!("back-f{j}"));
     }
     let names = Names::new(entry, guard.map(|g| g.temp_scope), keys);
-    let placed = put_in_place(&replacements, None, guard, &names, &mut Seam::restore()).map_err(
-        |unplaced| {
-            let Unplaced { error, not_back } = *unplaced;
-            if not_back.is_empty() {
-                error
-            } else {
-                Error {
-                    message: format!(
-                        "{}, and could not put back {} as the rollback found it",
-                        error.message,
-                        not_back.join(", ")
-                    ),
-                    ..error
-                }
+    let placed = put_in_place(
+        &replacements,
+        None,
+        guard,
+        Some(states),
+        &names,
+        &mut Seam::restore(),
+    )
+    .map_err(|unplaced| {
+        let Unplaced { error, not_back } = *unplaced;
+        if not_back.is_empty() {
+            error
+        } else {
+            Error {
+                message: format!(
+                    "{}, and could not put back {} as the rollback found it",
+                    error.message,
+                    not_back.join(", ")
+                ),
+                ..error
             }
-        },
-    )?;
+        }
+    })?;
     finish(&replacements, &placed, guard, remove_empty_parents);
     let paths: Vec<&Path> = before.iter().map(|f| f.path.as_path()).collect();
     cleanup_after_restore(&paths, states, folders_made, &names, guard)?;
@@ -1246,6 +1275,7 @@ fn put_in_place(
     replacements: &[Replacement],
     expected: Option<&[ExpectedTarget]>,
     guard: Option<OriginalGuard<'_>>,
+    states: Option<&Path>,
     names: &Names,
     seam: &mut Seam,
 ) -> Result<Vec<Placed>, Box<Unplaced>> {
@@ -1265,7 +1295,7 @@ fn put_in_place(
         match place(i, replacement, target, guard, temp_ref, names, seam) {
             Ok(done) => placed.push(done),
             Err(e) => {
-                let not_back = roll_back(&replacements[..placed.len()], &placed, guard);
+                let not_back = roll_back(&replacements[..placed.len()], &placed, guard, states);
                 clean(&staged[i..], &made);
                 let error = Error::new(
                     ErrorCode::WriteFailed,
@@ -1458,6 +1488,12 @@ fn place(
     if let (Some(g), Some(target)) = (guard, expected) {
         if let Ok(rel) = path.strip_prefix(g.orig_dir_real) {
             verify_no_symlink_intermediate_dirs(g.orig_dir_real, rel)?;
+        } else if let Ok(rel) = path.strip_prefix(g.base_dir) {
+            verify_no_symlink_intermediate_dirs(g.base_dir, rel)?;
+        } else if path.is_absolute() {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                verify_no_symlink_ancestors(parent)?;
+            }
         } else if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             let pmeta = fs::symlink_metadata(parent)?;
             if pmeta.file_type().is_symlink() || !pmeta.file_type().is_dir() {
@@ -1582,15 +1618,29 @@ fn place(
 }
 
 /// Puts back, last first, every file `placed` moved, and gives the files it
-/// could not put back.
+/// could not put back. When rolling back an original-DWG commit leaves any
+/// target file unrestored (`!not_back.is_empty()`), newly placed undo states
+/// under `states` are kept intact so subsequent crash recovery still has the
+/// saved bytes.
 fn roll_back(
     replacements: &[Replacement],
     placed: &[Placed],
     guard: Option<OriginalGuard<'_>>,
+    states: Option<&Path>,
 ) -> Vec<String> {
     let mut not_back = Vec::new();
     for (replacement, done) in replacements.iter().zip(placed).rev() {
         let path = &replacement.path;
+        if guard.is_some()
+            && !not_back.is_empty()
+            && done.aside.is_none()
+            && replacement.bytes.is_some()
+            && states.is_some_and(|dir| path.starts_with(dir))
+        {
+            // Keep newly saved undo-state bytes when the entry will stay
+            // pending so a later recovery can still restore the unrestored file.
+            continue;
+        }
         let back = match (guard, &done.aside, &replacement.bytes) {
             (Some(_), Some(aside), None) => {
                 // `path` was moved aside and should be absent: restore without
@@ -1911,6 +1961,102 @@ mod tests {
             fs::read(&journal).unwrap(),
             b"{\"entry\":1,\"kind\":\"change_set\"}\n"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn original_undo_rollback_keeps_undo_states_when_entry_stays_pending() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdrafter-commit-orig-keep-states-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+
+        let source = dir.join("ORIG.dwg");
+        fs::write(&source, b"original-dwg").unwrap();
+        let source_id = regular_file_id_no_follow(&source);
+
+        let key = "orig-000000000000";
+        let scope = "orig-000000000000-2222222222222222";
+        let states_dir = dir
+            .join(".agentdrafter")
+            .join("originals")
+            .join(key)
+            .join("undo-states");
+        fs::create_dir_all(&states_dir).unwrap();
+
+        let rev1_bytes = b"rev1-dwg-bytes";
+        let p1 = fingerprint(rev1_bytes);
+        let state_file = states_dir.join(&p1);
+        fs::write(&state_file, rev1_bytes).unwrap();
+        let state_id = regular_file_id_no_follow(&state_file);
+
+        let rev1 = dir.join("ORIG.rev1.dwg");
+        let aside1 = dir.join(format!(
+            ".agentdrafter-orig-{scope}-entry-2-f0-1111222233334444.agentdrafter-undo.old"
+        ));
+        fs::write(&aside1, rev1_bytes).unwrap();
+        // An unrelated occupant file now sits at `rev1`, blocking `aside1 -> rev1`!
+        fs::write(&rev1, b"unrelated-occupant").unwrap();
+
+        let replacements = vec![
+            Replacement {
+                path: state_file.clone(),
+                bytes: Some(rev1_bytes.to_vec()),
+                what: "an undo state",
+            },
+            Replacement {
+                path: rev1.clone(),
+                bytes: None,
+                what: "rev1 DWG",
+            },
+        ];
+        let placed = vec![
+            Placed {
+                aside: None,
+                placed_id: state_id,
+            },
+            Placed {
+                aside: Some(aside1.clone()),
+                placed_id: None,
+            },
+        ];
+        let guard = OriginalGuard {
+            key,
+            temp_scope: scope,
+            base_dir: &dir,
+            orig_dir_real: &dir,
+            source: &source,
+            source_id,
+        };
+
+        let not_back = roll_back(&replacements, &placed, Some(guard), Some(&states_dir));
+        assert_eq!(not_back, vec![rev1.display().to_string()]);
+        // Occupant untouched, backup still intact, AND newly saved undo state
+        // MUST still exist on disk because the entry remains pending!
+        assert_eq!(fs::read(&rev1).unwrap(), b"unrelated-occupant");
+        assert_eq!(fs::read(&aside1).unwrap(), rev1_bytes);
+        assert_eq!(
+            fs::read(&state_file).unwrap(),
+            rev1_bytes,
+            "undo state must not be deleted when rollback leaves entry pending"
+        );
+
+        // Once the occupant is cleared, recovery restores `rev1` from the kept
+        // undo state byte-for-byte!
+        fs::remove_file(&rev1).unwrap();
+        let inspected = vec![InspectedBefore {
+            path: rev1.clone(),
+            print: Some(p1),
+            found: None,
+            target: ExpectedTarget::Absent,
+        }];
+        let restored = restore_original_inspected(2, &inspected, &states_dir, &[], guard).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(fs::read(&rev1).unwrap(), rev1_bytes);
 
         let _ = fs::remove_dir_all(&dir);
     }

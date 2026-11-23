@@ -3498,3 +3498,167 @@ fn original_undo_refuses_symlinked_output_subdirectory() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn original_external_output_refuses_symlinked_ancestor_in_undo_and_stamps() {
+    use crate::change::{accept_with, undo, AcceptRequest, UndoRequest};
+    use crate::render::{render_with, RenderRequest};
+
+    let dir = scratch("orig_external_symlink_ancestor");
+    let drawings = dir.join("drawings");
+    let job1_sub = dir.join("external").join("job1").join("sub");
+    let job2_sub = dir.join("external").join("job2").join("sub");
+    fs::create_dir_all(&drawings).unwrap();
+    fs::create_dir_all(&job1_sub).unwrap();
+    fs::create_dir_all(&job2_sub).unwrap();
+    let orig = build_made_up_original(&drawings, "EXT-ANC");
+    let settings = Settings::default().without_system_fonts();
+    let cs = json!({"operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]});
+
+    // 1. Revise into external/job1/sub/R1.dwg and accept -> stamps issued.
+    let r1_dwg = job1_sub.join("R1.dwg");
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: cs.clone(),
+            dry_run: false,
+            output: Some(r1_dwg.clone()),
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+    let acc = accept_with(
+        &AcceptRequest {
+            set: orig.clone(),
+            despite_failed_checks: true,
+            newest_seen: Some(1),
+            dry_run: false,
+        },
+        &settings,
+        Interface::Cli,
+    );
+    assert!(acc.ok, "{acc:?}");
+    let ren_ok = render_with(
+        &RenderRequest {
+            output: Some(dir.join("ok.png")),
+            ..RenderRequest::new(r1_dwg.clone())
+        },
+        &settings,
+    )
+    .unwrap();
+    assert!(ren_ok.stamp.revision.as_ref().unwrap().issued);
+
+    // Replace ancestor `external/job1` with a symlink -> `render` must no
+    // longer treat `external/job1/sub/R1.dwg` as issued!
+    let job1 = dir.join("external").join("job1");
+    let moved_job1 = dir.join("external").join("moved-job1");
+    fs::rename(&job1, &moved_job1).unwrap();
+    std::os::unix::fs::symlink(&moved_job1, &job1).unwrap();
+    let ren_sym = render_with(
+        &RenderRequest {
+            output: Some(dir.join("sym.png")),
+            ..RenderRequest::new(r1_dwg)
+        },
+        &settings,
+    )
+    .unwrap();
+    assert!(
+        !ren_sym.stamp.revision.as_ref().unwrap().issued,
+        "external revision behind symlinked ancestor dir must not stamp issued"
+    );
+
+    // 2. Unaccepted revision in external/job2/sub/R2.dwg: replace ancestor
+    //    `external/job2` with a symlink -> `undo` refuses without deleting R2!
+    let r2_dwg = job2_sub.join("R2.dwg");
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: cs,
+            dry_run: false,
+            output: Some(r2_dwg),
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "{r2:?}");
+    let job2 = dir.join("external").join("job2");
+    let moved_job2 = dir.join("external").join("moved-job2");
+    fs::rename(&job2, &moved_job2).unwrap();
+    std::os::unix::fs::symlink(&moved_job2, &job2).unwrap();
+
+    let u = undo(&UndoRequest {
+        set: orig,
+        change_set: 3,
+        dry_run: false,
+    });
+    assert!(
+        !u.ok,
+        "undo through symlinked external ancestor must be refused"
+    );
+    assert_eq!(u.error.unwrap().code, ErrorCode::ChangedByHand);
+    assert!(
+        moved_job2.join("sub").join("R2.dwg").is_file(),
+        "R2.dwg behind symlinked ancestor must never be deleted"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn original_recovery_verifies_undo_states_before_modifying_outputs() {
+    use crate::change::original_journal::test_pending_journal_path;
+    use crate::change::{journal, JournalRequest, STOP_AT};
+
+    let dir = scratch("orig_recovery_symlink_undo_states_first");
+    let orig = build_made_up_original(&dir, "REC-SYM");
+    let settings = Settings::default().without_system_fonts();
+
+    // Stop revision 1 mid-commit after placing rev1.dwg on disk.
+    STOP_AT.with(|s| s.set(Some(3)));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        revise_with(
+            &ReviseRequest {
+                set: orig.clone(),
+                change_set: json!({
+                    "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+                }),
+                dry_run: false,
+                output: None,
+                allow_loss: false,
+                plot_style: None,
+                no_pdf: true,
+            },
+            &settings,
+        )
+    }));
+    STOP_AT.with(|s| s.set(None));
+    assert!(panicked.is_err());
+
+    let rev1_dwg = dir.join("REC-SYM.rev1.dwg");
+    assert!(rev1_dwg.is_file());
+    let rev1_bytes = fs::read(&rev1_dwg).unwrap();
+
+    // Plant a symlink at `undo-states` -> recovery MUST fail BEFORE touching
+    // or deleting `rev1.dwg`!
+    let jpath = test_pending_journal_path(&orig).unwrap();
+    let undo_states = jpath.parent().unwrap().join("undo-states");
+    let _ = fs::remove_dir_all(&undo_states);
+    std::os::unix::fs::symlink(&dir, &undo_states).unwrap();
+
+    let j = journal(&JournalRequest { set: orig });
+    assert!(!j.ok, "recovery with symlinked undo-states must refuse");
+    assert_eq!(
+        fs::read(&rev1_dwg).unwrap(),
+        rev1_bytes,
+        "partial output must not be modified before undo-states chain is verified"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

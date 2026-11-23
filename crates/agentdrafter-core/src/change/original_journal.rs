@@ -38,8 +38,8 @@ use crate::error::{Error, ErrorCode};
 use crate::interface::Interface;
 use crate::original::{
     ensure_real_dir_chain, is_dwg, on_disk_path, read_regular_no_follow,
-    read_regular_no_follow_with_id, stem_of, verify_no_symlink_intermediate_dirs,
-    verify_real_dir_chain, NoFollowRead, NoFollowReadWithId,
+    read_regular_no_follow_with_id, stem_of, verify_no_symlink_ancestors,
+    verify_no_symlink_intermediate_dirs, verify_real_dir_chain, NoFollowRead, NoFollowReadWithId,
 };
 use crate::reply::Reply;
 use crate::revise::REVISION_CHANGES_EXTENSION;
@@ -390,43 +390,17 @@ impl OriginalJournal {
                 .in_file(full)
             })?;
         } else if let Some(parent) = full.parent().filter(|d| !d.as_os_str().is_empty()) {
-            match fs::symlink_metadata(parent) {
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    return Err(Error::new(
-                        ErrorCode::ChangedByHand,
-                        format!(
-                            "`{}` parent `{}` is a symbolic link; AgentDrafter never follows a \
-                             symbolic link; nothing was changed",
-                            full.display(),
-                            parent.display()
-                        ),
-                    )
-                    .in_file(full));
-                }
-                Ok(meta) if !meta.file_type().is_dir() => {
-                    return Err(Error::new(
-                        ErrorCode::ChangedByHand,
-                        format!(
-                            "`{}` parent `{}` is not a directory; nothing was changed",
-                            full.display(),
-                            parent.display()
-                        ),
-                    )
-                    .in_file(full));
-                }
-                Ok(_) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(Error::new(
-                        ErrorCode::ReadFailed,
-                        format!(
-                            "could not inspect parent folder `{}`: {e}; nothing was changed",
-                            parent.display()
-                        ),
-                    )
-                    .in_file(full));
-                }
-            }
+            verify_no_symlink_ancestors(parent).map_err(|e| {
+                Error::new(
+                    ErrorCode::ChangedByHand,
+                    format!(
+                        "`{}` cannot be accessed safely: {e}; AgentDrafter never follows a \
+                         symbolic link; nothing was changed",
+                        full.display()
+                    ),
+                )
+                .in_file(full)
+            })?;
         }
         Ok(())
     }
@@ -2025,6 +1999,13 @@ pub(super) fn issued_of_revision_dwg(dwg: &Path, bytes: &[u8]) -> Option<StampRe
                     }
                     let recorded_path = Path::new(&f.path);
                     let resolved = if recorded_path.is_absolute() {
+                        if let Some(rec_parent) =
+                            recorded_path.parent().filter(|d| !d.as_os_str().is_empty())
+                        {
+                            if verify_no_symlink_ancestors(rec_parent).is_err() {
+                                return false;
+                            }
+                        }
                         recorded_path.to_path_buf()
                     } else {
                         if verify_no_symlink_intermediate_dirs(&orig_dir, recorded_path).is_err() {
