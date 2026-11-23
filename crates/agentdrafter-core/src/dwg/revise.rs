@@ -2871,15 +2871,29 @@ fn scale_entity(object: &mut EntityType, about: [f64; 3], factor: f64) -> Result
             e.rectangle_width *= factor;
         }
         EntityType::Insert(e) => {
+            let new_xs = e.x_scale() * factor;
+            let new_ys = e.y_scale() * factor;
+            let new_zs = e.z_scale() * factor;
+            if !new_xs.is_finite() || !new_ys.is_finite() || !new_zs.is_finite() {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    "scale factor overflows the insert's scale",
+                ));
+            }
+            let is_minsert = e.column_count > 1 || e.row_count > 1;
+            let new_col = e.column_spacing * factor;
+            let new_row = e.row_spacing * factor;
+            if is_minsert && (!new_col.is_finite() || !new_row.is_finite()) {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    "scale factor overflows the multi-insert's grid spacing",
+                ));
+            }
             e.insert_point = scale_pt(e.insert_point, about, factor);
-            e.set_scale_unchecked(
-                e.x_scale() * factor,
-                e.y_scale() * factor,
-                e.z_scale() * factor,
-            );
-            if e.column_count > 1 || e.row_count > 1 {
-                e.column_spacing *= factor;
-                e.row_spacing *= factor;
+            e.set_scale_unchecked(new_xs, new_ys, new_zs);
+            if is_minsert {
+                e.column_spacing = new_col;
+                e.row_spacing = new_row;
             }
             for att in &mut e.attributes {
                 scale_attribute(att, about, factor);
@@ -3334,7 +3348,6 @@ fn diff_app_id_table(
     app_registered: bool,
     out: &mut Vec<UnexpectedChange>,
 ) {
-    let expected_app = block::APPLICATION.to_lowercase();
     for (key, orig) in before {
         match after.get(key) {
             None => out.push(UnexpectedChange {
@@ -3353,7 +3366,9 @@ fn diff_app_id_table(
         }
     }
     for key in after.keys() {
-        if !before.contains_key(key) && !(app_registered && *key == expected_app) {
+        let name = key.rsplit_once('#').map(|(n, _)| n).unwrap_or(key.as_str());
+        let is_expected_app = app_registered && name.eq_ignore_ascii_case(block::APPLICATION);
+        if !before.contains_key(key) && !is_expected_app {
             out.push(UnexpectedChange {
                 kind: "APPID".to_owned(),
                 handle: key.clone(),
@@ -3472,24 +3487,39 @@ fn snapshot_drawing(
     let app_ids = drawing
         .app_ids
         .iter()
-        .map(|a| (a.name.to_lowercase(), format!("{a:?}")))
+        .map(|a| {
+            (
+                format!("{}#{:X}", a.name, a.handle.value()),
+                format!("{a:?}"),
+            )
+        })
         .collect();
     let ucss = drawing
         .ucss
         .iter()
-        .map(|u| (u.name.to_lowercase(), format!("{u:?}")))
+        .map(|u| {
+            (
+                format!("{}#{:X}", u.name, u.handle.value()),
+                format!("{u:?}"),
+            )
+        })
         .collect();
     let views = drawing
         .views
         .iter()
-        .map(|v| (v.name.to_lowercase(), format!("{v:?}")))
+        .map(|v| {
+            (
+                format!("{}#{:X}", v.name, v.handle.value()),
+                format!("{v:?}"),
+            )
+        })
         .collect();
     let vports = drawing
         .vports
         .iter()
         .map(|vp| {
             (
-                format!("{}#{:X}", vp.name.to_lowercase(), vp.handle.value()),
+                format!("{}#{:X}", vp.name, vp.handle.value()),
                 format!("{vp:?}"),
             )
         })
@@ -3795,9 +3825,9 @@ fn xdata_summary(c: &EntityCommon) -> String {
 }
 
 /// Formats a floating-point coordinate/angle/scale at 1e-9 precision while
-/// canonicalizing `-0.0` so real geometric drift is caught without `-0.0` noise.
+/// canonicalizing any value that rounds to `-0.000000000` into `0.000000000`.
 fn f9(v: f64) -> String {
-    let clean = if v.abs() < 1e-12 { 0.0 } else { v };
+    let clean = if v.abs() < 5e-10 { 0.0 } else { v };
     format!("{clean:.9}")
 }
 
@@ -4517,5 +4547,55 @@ mod diff_tests {
             "{unexpected_changes:?}"
         );
         let _ = &mut drawing;
+    }
+
+    #[test]
+    fn f9_normalizes_negative_zero_and_symbol_tables_keep_unicode_names_distinct() {
+        use acadrust::tables::{AppId, Ucs, View};
+
+        assert_eq!(f9(-1e-10), "0.000000000");
+        assert_eq!(f9(-1e-13), "0.000000000");
+        assert_eq!(f9(-0.0), "0.000000000");
+        assert_eq!(f9(-1e-9), "-0.000000001");
+
+        let mut drawing = CadDocument::with_version(DxfVersion::AC1032);
+        let mut a1 = AppId::new("K");
+        a1.set_handle(drawing.allocate_handle());
+        let mut a2 = AppId::new("\u{212A}"); // Kelvin sign, lowercases to 'k'
+        a2.set_handle(drawing.allocate_handle());
+        drawing.app_ids.add(a1).unwrap();
+        drawing.app_ids.add(a2).unwrap();
+
+        let mut u1 = Ucs::new("K");
+        u1.set_handle(drawing.allocate_handle());
+        let mut u2 = Ucs::new("\u{212A}");
+        u2.set_handle(drawing.allocate_handle());
+        drawing.ucss.add(u1).unwrap();
+        drawing.ucss.add(u2).unwrap();
+
+        let mut v1 = View::new("K");
+        v1.set_handle(drawing.allocate_handle());
+        let mut v2 = View::new("\u{212A}");
+        v2.set_handle(drawing.allocate_handle());
+        drawing.views.add(v1).unwrap();
+        drawing.views.add(v2).unwrap();
+
+        let snap = snapshot_drawing(
+            &drawing,
+            "AC1032",
+            &DecodeReport {
+                decoded: true,
+                not_decoded: Vec::new(),
+                skipped: 0,
+                recovered_errors: 0,
+                warnings: 0,
+                diagnostics_truncated: false,
+                read_past_damage: None,
+            },
+        );
+        assert!(snap.app_ids.keys().any(|k| k.starts_with("K#")));
+        assert!(snap.app_ids.keys().any(|k| k.starts_with("\u{212A}#")));
+        assert_eq!(snap.ucss.len(), 2);
+        assert_eq!(snap.views.len(), 2);
     }
 }

@@ -907,10 +907,18 @@ pub(crate) fn place_new_file(
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(cleanup(appeared())),
             Err(e) if is_rename_noreplace_unsupported(&e) => match fs::hard_link(temporary, path) {
-                Ok(()) => {
-                    let _ = fs::remove_file(temporary);
-                    Ok(())
-                }
+                Ok(()) => match fs::remove_file(temporary) {
+                    Ok(()) => Ok(()),
+                    Err(rm) if rm.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(rm) => Err(Error::new(
+                        ErrorCode::WriteFailed,
+                        format!(
+                            "placed the {what}, but could not remove temporary file `{}`: {rm}",
+                            temporary.display()
+                        ),
+                    )
+                    .in_file(path)),
+                },
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(cleanup(appeared())),
                 Err(err) => Err(cleanup(write_err(err))),
             },
@@ -920,10 +928,18 @@ pub(crate) fn place_new_file(
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         match fs::hard_link(temporary, path) {
-            Ok(()) => {
-                let _ = fs::remove_file(temporary);
-                Ok(())
-            }
+            Ok(()) => match fs::remove_file(temporary) {
+                Ok(()) => Ok(()),
+                Err(rm) if rm.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(rm) => Err(Error::new(
+                    ErrorCode::WriteFailed,
+                    format!(
+                        "placed the {what}, but could not remove temporary file `{}`: {rm}",
+                        temporary.display()
+                    ),
+                )
+                .in_file(path)),
+            },
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(cleanup(appeared())),
             Err(e) => Err(cleanup(write_err(e))),
         }

@@ -1530,10 +1530,16 @@ fn allow_loss_never_publishes_missing_requested_add_or_surviving_delete() {
                     .to_owned(),
             },
         ],
-        unexpected_changes: Vec::new(),
+        unexpected_changes: vec![UnexpectedChange {
+            kind: "DICTIONARY".to_owned(),
+            handle: "42".to_owned(),
+            change: crate::dwg::UnexpectedChangeKind::Changed,
+            detail: "untouched non-graphical DICTIONARY changed in the revision".to_owned(),
+        }],
     };
 
-    // Even with `allow_loss = true`, requested-edit failures MUST be refused!
+    // Even with `allow_loss = true`, requested-edit failures MUST be refused,
+    // and `requested_failures` stays distinct from `unexpected_changes`.
     let refusal = enforce_verification_gates(
         &source,
         "GATE",
@@ -1558,7 +1564,10 @@ fn allow_loss_never_publishes_missing_requested_add_or_surviving_delete() {
         "error should not suggest --allow-loss can bypass requested-edit failures: {}",
         refusal.error.as_ref().unwrap().message
     );
-    assert_eq!(refusal.result.unwrap().unexpected_changes.len(), 2);
+    let report = refusal.result.unwrap();
+    assert_eq!(report.requested_failures.len(), 2);
+    assert_eq!(report.unexpected_changes.len(), 1);
+    assert_eq!(report.unexpected_changes[0].handle, "42");
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1691,6 +1700,7 @@ fn leading_zero_handle_alias_is_deduplicated_in_transform_and_copy() {
     let hex = loaded.record.dwg.as_ref().unwrap().handles[0].clone();
     let id_plain = format!("ZPAD/handle:{hex}");
     let id_padded = format!("ZPAD/handle:0{hex}");
+    let id_spaced = format!("ZPAD/handle: 0{hex}");
     let before = dir_files(&dir);
     let settings = Settings::default().without_system_fonts();
 
@@ -1710,6 +1720,14 @@ fn leading_zero_handle_alias_is_deduplicated_in_transform_and_copy() {
                 "by": [10, 0, 0]
             }]
         }),
+        json!({
+            "operations": [{
+                "op": "rotate",
+                "targets": [{"id": id_plain}, {"id": id_spaced}],
+                "base_point": [0, 0, 0],
+                "angle": 45
+            }]
+        }),
     ] {
         let r = revise_with(
             &ReviseRequest {
@@ -1725,10 +1743,66 @@ fn leading_zero_handle_alias_is_deduplicated_in_transform_and_copy() {
         );
         assert!(
             !r.ok,
-            "leading-zero handle duplicate must be refused for {cs}"
+            "leading-zero or spaced handle duplicate must be refused for {cs}"
         );
         assert_eq!(r.error.unwrap().code, ErrorCode::BadValue);
     }
+    let single = revise_with(
+        &ReviseRequest {
+            set: orig,
+            change_set: json!({
+                "operations": [{"op": "move", "target": {"id": id_spaced}, "by": [1, 0, 0]}]
+            }),
+            dry_run: true,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(
+        single.ok,
+        "whitespace-padded handle should resolve: {single:?}"
+    );
+    assert_eq!(dir_files(&dir), before, "zero files may be written");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scale_minsert_overflow_refused_with_bad_value() {
+    let dir = scratch("scale_minsert_overflow");
+    let base = build_made_up_original(&dir, "BASE");
+    let orig = dir.join("OVF.dwg");
+    let hex = dwg::with_asymmetric_minsert_original(&base, &orig);
+    let before = dir_files(&dir);
+    let settings = Settings::default().without_system_fonts();
+
+    let reply = revise_with(
+        &ReviseRequest {
+            set: orig,
+            change_set: json!({
+                "operations": [{
+                    "op": "scale",
+                    "target": {"id": format!("OVF/handle:{hex}")},
+                    "base_point": [0, 0, 0],
+                    "factor": 1e308
+                }]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(
+        !reply.ok,
+        "scaling MINSERT spacing past f64::MAX must be refused"
+    );
+    assert_eq!(reply.error.unwrap().code, ErrorCode::BadValue);
     assert_eq!(dir_files(&dir), before, "zero files may be written");
 
     let _ = fs::remove_dir_all(&dir);

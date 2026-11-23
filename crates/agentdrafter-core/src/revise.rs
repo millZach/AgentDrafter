@@ -156,6 +156,11 @@ pub struct RevisionReport {
     pub allowed_loss: bool,
     /// Per-operation results in order.
     pub operations: Vec<RevisionOperationOutcome>,
+    /// Requested additions that failed to appear, or requested deletions
+    /// (including deleted child handles) that survived in the serialized
+    /// output. Never bypassable with `--allow-loss` (ADR-0005).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_failures: Vec<UnexpectedChange>,
     /// Any handle or layer added, removed, or changed outside what the change
     /// set requested, detected by re-reading the serialized revision bytes.
     pub unexpected_changes: Vec<UnexpectedChange>,
@@ -344,6 +349,7 @@ fn revise_inner(
             decode,
             allowed_loss: false,
             operations: Vec::new(),
+            requested_failures: Vec::new(),
             unexpected_changes: Vec::new(),
             checks: None,
         };
@@ -520,6 +526,7 @@ fn revise_inner(
         decode,
         allowed_loss: request.allow_loss,
         operations: outcomes,
+        requested_failures: Vec::new(),
         unexpected_changes,
         checks,
     };
@@ -895,8 +902,9 @@ fn resolve_target(
                         && id[..HANDLE_ID.len()].eq_ignore_ascii_case(HANDLE_ID))
                     .then(|| &id[HANDLE_ID.len()..])
                 }) {
-                    if let Ok(num) = u64::from_str_radix(hex, 16) {
-                        if num != 0 && session.locked_layer_of(hex).is_ok() {
+                    let trimmed = hex.trim();
+                    if let Ok(num) = u64::from_str_radix(trimmed, 16) {
+                        if num != 0 && session.locked_layer_of(trimmed).is_ok() {
                             let canonical = format!("{num:X}");
                             let model_index = dwg_origin
                                 .handles
@@ -1920,8 +1928,6 @@ fn enforce_verification_gates(
     //    deletion survived, refuse with zero files written.
     if !verified.requested_failures.is_empty() {
         let detail = requested_failures_refusal_message(source, &verified.requested_failures);
-        let mut combined = verified.requested_failures.clone();
-        combined.extend(verified.unexpected_changes.iter().cloned());
         let report = RevisionReport {
             source: source.display().to_string(),
             sheet: sheet_name.to_owned(),
@@ -1938,7 +1944,8 @@ fn enforce_verification_gates(
             decode: decode.clone(),
             allowed_loss: allow_loss,
             operations: outcomes.to_vec(),
-            unexpected_changes: combined,
+            requested_failures: verified.requested_failures.clone(),
+            unexpected_changes: verified.unexpected_changes.clone(),
             checks: None,
         };
         let error = Error::new(ErrorCode::DwgWrite, detail).in_file(source);
@@ -1965,6 +1972,7 @@ fn enforce_verification_gates(
             decode: decode.clone(),
             allowed_loss: false,
             operations: outcomes.to_vec(),
+            requested_failures: Vec::new(),
             unexpected_changes: verified.unexpected_changes.clone(),
             checks: None,
         };
