@@ -64,7 +64,7 @@ const LOOK_AT_USAGE: &str =
 const LOOKING_AT_USAGE: &str = "agentdrafter looking-at <drawing-set-folder>";
 const MEASURE_USAGE: &str = "agentdrafter measure-text <contents> --font <file> --height <height> [--width-factor <factor>] [--fonts <folder>]... [--no-system-fonts]";
 const RENDER_USAGE: &str = "agentdrafter render <sheet-description-or-dwg> [--output <png>] [--overwrite] [--dpi <dpi>] [--scale <scale> | --width <pixels> --height <pixels>] [--margin <mm>] [--plot-style <ctb> | --monochrome] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
-const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--change-set <change-set.json | -> [--all-or-none]] [--fonts <folder>]... [--no-system-fonts]";
+const DISPLAY_LIST_USAGE: &str = "agentdrafter display-list <sheet-description | dwg | drawing-set-folder> [--sheet <sheet>] [--layout <layout>] [--tolerance <length>] [--entry <journal-entry>] [--snaps] [--origins] [--values] [--change-set <change-set.json | -> [--all-or-none]] [--read-past-damage] [--fonts <folder>]... [--no-system-fonts]";
 const PLOT_USAGE: &str = "agentdrafter plot <sheet-description | dwg | drawing-set-folder> [--output <pdf>] [--overwrite] [--clean | --no-clean] [--plot-style <ctb>] [--plot-styles <folder>]... [--fonts <folder>]... [--no-system-fonts]";
 const STALE_USAGE: &str =
     "agentdrafter stale <png-or-pdf> [--source <sheet-description-dwg-or-template>]";
@@ -454,6 +454,12 @@ fn parse_display_list(mut args: Args) -> Result<Value, Error> {
                     return Err(Error::usage("--all-or-none is given twice"));
                 }
                 request.all_or_none = true;
+            }
+            Some("--read-past-damage") => {
+                if request.read_past_damage {
+                    return Err(Error::usage("--read-past-damage is given twice"));
+                }
+                request.read_past_damage = true;
             }
             Some("--no-system-fonts") => fonts.no_system = true,
             Some("--fonts") => fonts.push(value("--fonts", args.next())?.into()),

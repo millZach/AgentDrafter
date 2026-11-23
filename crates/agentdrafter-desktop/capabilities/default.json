@@ -1,13 +1,9 @@
 {
   "identifier": "default",
-  "description": "Allow local in-process AgentDrafter server windows to invoke desktop shell commands and native OS pickers.",
-  "windows": ["main", "win-*"],
+  "description": "Minimal local capability; runtime capabilities scope all desktop shell commands strictly to the exact bound loopback server origin.",
+  "windows": ["main"],
   "local": true,
-  "remote": {
-    "urls": ["http://127.0.0.1:*/*"]
-  },
   "permissions": [
-    "core:default",
-    "dialog:default"
+    "core:default"
   ]
 }

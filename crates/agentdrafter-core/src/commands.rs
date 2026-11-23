@@ -727,6 +727,10 @@ fn display_list_schema(change_set: Value) -> Value {
                 "description": "With change_set: apply it as a proposal is kept, on every sheet it reaches or on none, so a sheet that would take its part while another refuses is shown held back. Without it, as change applies it.",
                 "type": "boolean",
             },
+            "read_past_damage": {
+                "description": "On a damaged original DWG that `read` read past damage, draw the recoverable objects read-only instead of refusing with `dwg_read`. Without it, strict DWG reading applies.",
+                "type": "boolean",
+            },
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
         }),

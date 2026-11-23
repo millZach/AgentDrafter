@@ -19,6 +19,7 @@ init().then(
         <App
           token={token}
           source={initial.source ?? '.'}
+          kind={initial.kind}
           sheet={initial.sheet}
           layout={initial.layout}
           desktop={initial.desktop}

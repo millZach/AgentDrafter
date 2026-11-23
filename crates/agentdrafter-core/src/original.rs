@@ -82,6 +82,8 @@ pub struct ReadReport {
     /// The DWG version the original is saved in, such as `AC1032` for
     /// 2018, which a revision of it keeps (ADR-0006).
     pub dwg_version: String,
+    /// SHA-256 fingerprint of the original DWG bytes read.
+    pub sha256: String,
     /// The drawing's unit; none when it states none the core knows.
     pub units: Option<Unit>,
     /// True when the DWG library decoded every record of the file.
@@ -167,6 +169,7 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         .in_file(source)
     })?;
     drop(source_file);
+    let sha256 = fingerprint(&bytes);
     let drawing = dwg::read_bytes_past_damage(&bytes, source)?;
     let resolved_source = on_disk_path(source, source_id);
     let sheet = stem_of(&resolved_source);
@@ -193,6 +196,7 @@ pub fn read_original(request: &ReadRequest) -> Result<ReadReport, Error> {
         sheet,
         message,
         dwg_version: drawing.dwg_version,
+        sha256,
         units: drawing.units,
         decoded: drawing.decode.decoded,
         not_decoded: drawing.decode.not_decoded,

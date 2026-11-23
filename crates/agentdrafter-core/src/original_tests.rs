@@ -746,9 +746,28 @@ fn a_damaged_original_is_read_past_its_damage_which_the_reply_names() {
     let handle = dwg::with_a_damaged_line(&original, &damaged);
     let report = read_original(&request(&damaged)).unwrap();
     assert!(!report.decoded);
+    assert_eq!(
+        report.sha256,
+        crate::stamp::fingerprint(&fs::read(&damaged).unwrap())
+    );
     assert_eq!(report.skipped, 1, "{report:?}");
     assert!(report.recovered_errors >= 1, "{report:?}");
     assert!(report.read_past_damage.is_some(), "{report:?}");
+    // Strict `display-list` refuses the damaged DWG by default, while explicit
+    // `read_past_damage: true` draws the recoverable objects read-only (ADR-0004).
+    let strict_dl = crate::display_list(&crate::DisplayListRequest::new(&damaged));
+    assert!(
+        strict_dl.is_err(),
+        "default display-list must remain strict on damaged DWGs"
+    );
+    let mut recovered_req = crate::DisplayListRequest::new(&damaged);
+    recovered_req.read_past_damage = true;
+    let recovered_dl = crate::display_list(&recovered_req).unwrap();
+    assert_eq!(
+        recovered_dl.objects.len(),
+        2,
+        "recoverable circle + polyline must draw when read_past_damage is true"
+    );
     let expected = vec![RecordsOfKind {
         kind: "LINE".into(),
         count: 1,
@@ -3237,5 +3256,80 @@ fn check_preserves_sheet_units_for_viewport_dimensions_and_uses_inch_units_on_ex
         paper_off.units,
         Some(Unit::In),
         "paper-space findings on the same inch layout must still carry `units: Some(Unit::In)`: {paper_off:#?}"
+    );
+}
+
+fn desktop_fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tests/fixtures")
+}
+
+/// Regenerates the three tiny 100%-made-up synthetic DWG fixtures used by
+/// `viewer/e2e/run.mjs`'s desktop test (ADR-0008: zero real-plant material).
+#[test]
+#[ignore]
+fn generate_desktop_e2e_synthetic_fixtures() {
+    let fixtures = desktop_fixtures_dir();
+    fs::create_dir_all(&fixtures).unwrap();
+    let dir = scratch("gen-desktop-fixtures");
+    let (base, _) = made_up_original(&dir);
+
+    dwg::with_a_made_up_custom_object(
+        &base,
+        &fixtures.join("desktop-custom-undecoded-a.dwg"),
+        "MADE_UP_VALVE",
+    );
+    dwg::with_a_made_up_custom_object(
+        &base,
+        &fixtures.join("desktop-custom-undecoded-b.dwg"),
+        "MADE_UP_PUMP",
+    );
+    dwg::with_a_damaged_line(&base, &fixtures.join("desktop-damaged-line.dwg"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn desktop_e2e_synthetic_fixtures_decode_as_expected() {
+    let fixtures = desktop_fixtures_dir();
+    let a = fixtures.join("desktop-custom-undecoded-a.dwg");
+    let b = fixtures.join("desktop-custom-undecoded-b.dwg");
+    let damaged = fixtures.join("desktop-damaged-line.dwg");
+
+    let ra = read_original(&ReadRequest {
+        source: a,
+        mirror: None,
+        no_mirror: true,
+    })
+    .unwrap();
+    let rb = read_original(&ReadRequest {
+        source: b,
+        mirror: None,
+        no_mirror: true,
+    })
+    .unwrap();
+    assert!(!ra.decoded);
+    assert!(!rb.decoded);
+    assert_ne!(ra.sha256, rb.sha256);
+    assert!(ra.not_decoded.iter().any(|k| k.kind == "MADE_UP_VALVE"));
+    assert!(rb.not_decoded.iter().any(|k| k.kind == "MADE_UP_PUMP"));
+
+    let rd = read_original(&ReadRequest {
+        source: damaged.clone(),
+        mirror: None,
+        no_mirror: true,
+    })
+    .unwrap();
+    assert!(!rd.decoded);
+    assert!(rd.read_past_damage.is_some());
+    assert!(rd.not_decoded.iter().any(|k| k.kind == "LINE"));
+
+    let mut dl_req = crate::DisplayListRequest::new(damaged);
+    dl_req.read_past_damage = true;
+    let dl =
+        crate::display_list_with(&dl_req, &Settings::default().without_system_fonts()).unwrap();
+    assert!(
+        dl.objects.len() >= 2,
+        "damaged-line fixture must render recoverable circle+polyline under read_past_damage: {dl:?}"
     );
 }

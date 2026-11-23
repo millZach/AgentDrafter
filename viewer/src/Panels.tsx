@@ -116,12 +116,14 @@ export interface JournalListProps {
   /** The entry whose changes are marked. */
   focused: number | null;
   busy: string | null;
+  /** Locks per-entry Undo actions (e.g. view-only undecoded plant DWG under ADR-0004). */
+  undoDisabled?: boolean;
   onStep(by: number): void;
   onShow(entry: number): void;
   onUndo(changeSet: number): void;
 }
 
-export function JournalList({ journal, failing, at, focused, busy, onStep, onShow, onUndo }: JournalListProps) {
+export function JournalList({ journal, failing, at, focused, busy, undoDisabled = false, onStep, onShow, onUndo }: JournalListProps) {
   const [open, setOpen] = useState<ReadonlySet<number>>(new Set());
   const entries = journal.entries;
   const index = focused === null ? -1 : entries.findIndex((e) => e.entry === focused);
@@ -244,7 +246,8 @@ export function JournalList({ journal, failing, at, focused, busy, onStep, onSho
                       <button
                         type="button"
                         className="btn sm danger"
-                        disabled={busy !== null || at !== null}
+                        data-je-undo={e.entry}
+                        disabled={busy !== null || at !== null || undoDisabled}
                         onClick={() => onUndo(e.entry)}
                       >
                         Undo{later ? ` this and ${later} later` : ''}

@@ -40,8 +40,8 @@ use crate::model::{DecodeReport, Object};
 #[cfg(any(unix, windows))]
 use crate::original::regular_file_id_no_follow;
 use crate::original::{
-    dwg_loaded_from_drawing, handle_id, is_dwg, is_dwg_file, on_disk_path, plural, DwgLoaded,
-    HANDLE_ID,
+    dwg_loaded_from_drawing, handle_id, is_dwg, is_dwg_file, on_disk_path, plural,
+    read_regular_no_follow, DwgLoaded, NoFollowRead, HANDLE_ID,
 };
 use crate::plot::{plot_dwg_bytes, plot_style, PlotReport};
 use crate::query::snap::one_point;
@@ -438,16 +438,138 @@ fn prepare_revision(
     // Validate/choose output paths before touching anything on disk.
     let paths = resolve_output_paths(source, source_id, request.output.as_deref(), request.no_pdf)?;
 
-    // Strictly parse the original DWG into an in-place revision session.
-    let mut session = RevisionSession::open(original_bytes, source)?;
-    let original_meta = RevisionFile {
-        file: original_file_name,
-        sha256: original_sha256,
-        dwg_version: session.dwg_version().to_owned(),
+    // When no explicit `--output` is given (sequential working revisions
+    // `<stem>.rev1.dwg`, `<stem>.rev2.dwg`, ...) and this original already has
+    // an active working revision in its per-original journal matching this
+    // exact original SHA-256, chain this change set on top of the verified
+    // active working revision so successive edits accumulate instead of
+    // dropping earlier edits, while keeping the original file strictly
+    // read-only and preserving its DWG version and ADR-0004 decode-loss gates.
+    // An explicit `--output <file.dwg>` revises the named `<dwg>` directly.
+    let active_tip = if request.output.is_none() {
+        oj.latest_active_revision()?
+            .filter(|tip| tip.original_sha256 == original_sha256)
+    } else {
+        None
+    };
+
+    let (mut session, original_meta, decode) = if let Some(tip) = active_tip {
+        let rev_bytes = match read_regular_no_follow(source, source_id, &tip.path) {
+            Ok(NoFollowRead::File(bytes)) => bytes,
+            Ok(NoFollowRead::Missing) => {
+                return Err(Error::new(
+                    ErrorCode::ChangedByHand,
+                    format!(
+                        "cannot apply a further revision to `{}`: its active working revision \
+                         `{}` (from entry {}) is missing on disk; restore it or undo entry {} \
+                         first",
+                        source.display(),
+                        tip.path.display(),
+                        tip.entry,
+                        tip.entry
+                    ),
+                )
+                .in_file(&tip.path));
+            }
+            Ok(NoFollowRead::Symlink | NoFollowRead::NotRegular | NoFollowRead::SameAsOriginal) => {
+                return Err(Error::new(
+                    ErrorCode::ChangedByHand,
+                    format!(
+                        "cannot apply a further revision to `{}`: its active working revision \
+                         `{}` (from entry {}) is no longer a regular revision file; undo entry {} \
+                         first",
+                        source.display(),
+                        tip.path.display(),
+                        tip.entry,
+                        tip.entry
+                    ),
+                )
+                .in_file(&tip.path));
+            }
+            Err(e) => {
+                return Err(Error::new(
+                    ErrorCode::ReadFailed,
+                    format!(
+                        "could not read active working revision `{}`: {e}",
+                        tip.path.display()
+                    ),
+                )
+                .in_file(&tip.path));
+            }
+        };
+        let actual_rev_sha = fingerprint(&rev_bytes);
+        if actual_rev_sha != tip.revision_sha256 {
+            return Err(Error::new(
+                ErrorCode::ChangedByHand,
+                format!(
+                    "cannot apply a further revision to `{}`: its active working revision `{}` \
+                     (from entry {}) was modified outside AgentDrafter since it was written; \
+                     restore it or undo entry {} first",
+                    source.display(),
+                    tip.path.display(),
+                    tip.entry,
+                    tip.entry
+                ),
+            )
+            .in_file(&tip.path));
+        }
+        // If the original required `--allow-loss` (ADR-0004), continue requiring
+        // explicit `allow_loss: true` on subsequent edits too.
+        if tip.allowed_loss && !request.allow_loss {
+            let orig_session = RevisionSession::open(original_bytes, source)?;
+            let orig_decode = orig_session.decode_report().clone();
+            let orig_meta = RevisionFile {
+                file: original_file_name,
+                sha256: original_sha256,
+                dwg_version: orig_session.dwg_version().to_owned(),
+            };
+            let orig_units = orig_session.initial_contents().units;
+            let detail = decode_refusal_message(source, &orig_decode);
+            let report = RevisionReport {
+                source: source.display().to_string(),
+                sheet: sheet_name,
+                dry_run: request.dry_run,
+                journal_entry: None,
+                message: detail.clone(),
+                original: orig_meta,
+                revision: None,
+                revision_dwg: None,
+                change_list: None,
+                pdf: None,
+                pdf_error: None,
+                plot: None,
+                units: orig_units,
+                decode: orig_decode,
+                allowed_loss: false,
+                operations: Vec::new(),
+                requested_failures: Vec::new(),
+                unexpected_changes: Vec::new(),
+                checks: None,
+            };
+            let error = Error::new(ErrorCode::IncompleteDecode, detail).in_file(source);
+            return Ok(PreparedRevision::Refused(Box::new(report), error));
+        }
+        let tip_session = RevisionSession::open(&rev_bytes, &tip.path)?;
+        let tip_decode = tip_session.decode_report().clone();
+        let orig_meta = RevisionFile {
+            file: original_file_name,
+            sha256: original_sha256,
+            dwg_version: tip.dwg_version,
+        };
+        (tip_session, orig_meta, tip_decode)
+    } else {
+        // Strictly parse the original DWG into an in-place revision session.
+        let orig_session = RevisionSession::open(original_bytes, source)?;
+        let orig_meta = RevisionFile {
+            file: original_file_name,
+            sha256: original_sha256,
+            dwg_version: orig_session.dwg_version().to_owned(),
+        };
+        let orig_decode = orig_session.decode_report().clone();
+        (orig_session, orig_meta, orig_decode)
     };
     let units = session.initial_contents().units;
     let effective_units = units.unwrap_or(Unit::Mm);
-    let decode = session.decode_report().clone();
 
     // Refuse DWG versions acadrust cannot write back without converting (ADR-0006).
     session

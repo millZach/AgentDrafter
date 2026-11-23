@@ -275,6 +275,16 @@ export function SwitcherModal({
           >
             New window (folder)&#8230;
           </button>
+          <button
+            type="button"
+            className="btn"
+            data-sw-pick="file-newwin"
+            disabled={busy}
+            title="Pick a plant DWG or single YAML sheet to open in a second window"
+            onClick={() => onPickFile(undefined, true)}
+          >
+            New window (DWG/YAML)&#8230;
+          </button>
         </div>
         {recents.length > 0 ? (
           <div className="dk-recentlist dk-swrecents" data-switcher-recents>

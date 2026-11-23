@@ -83,6 +83,18 @@ pub fn original_journal_file(source: &Path) -> Option<PathBuf> {
     OriginalJournal::open(source).ok().map(|oj| oj.journal_file)
 }
 
+/// Metadata of the latest active (finished, non-undone) working revision on
+/// disk for an original DWG, used so successive `change` operations accumulate
+/// on top of the active working revision rather than dropping earlier edits.
+pub(crate) struct ActiveRevisionTip {
+    pub entry: u64,
+    pub path: PathBuf,
+    pub original_sha256: String,
+    pub revision_sha256: String,
+    pub dwg_version: String,
+    pub allowed_loss: bool,
+}
+
 /// Per-original journal paths and identity of the original DWG.
 pub(crate) struct OriginalJournal {
     /// The original DWG path as requested by the caller (for display).
@@ -788,6 +800,40 @@ impl OriginalJournal {
             files,
             cut_off_line: read.torn.map(|torn| torn.line),
         }))
+    }
+
+    /// Returns the latest active (finished, non-undone) revision tip recorded in
+    /// this original's journal, or `None` when no active revision exists yet.
+    /// Read-only: never creates any directory or file.
+    pub(crate) fn latest_active_revision(&self) -> Result<Option<ActiveRevisionTip>, Error> {
+        let entries = self.read_entries()?;
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        let f = fates(&entries);
+        for entry in entries.iter().rev() {
+            if entry.kind != EntryKind::ChangeSet || !entry.finished() {
+                continue;
+            }
+            if f.get(&entry.entry)
+                .is_some_and(|fate| fate.undone_by.is_some())
+            {
+                continue;
+            }
+            let Some(meta) = entry.original_revision.as_ref() else {
+                continue;
+            };
+            let path = self.resolve_file(&meta.revision_dwg);
+            return Ok(Some(ActiveRevisionTip {
+                entry: entry.entry,
+                path,
+                original_sha256: meta.original_sha256.clone(),
+                revision_sha256: meta.revision_sha256.clone(),
+                dwg_version: meta.dwg_version.clone(),
+                allowed_loss: meta.allowed_loss,
+            }));
+        }
+        Ok(None)
     }
 
     /// Commits an original-DWG revision write-ahead while holding `_locked`:

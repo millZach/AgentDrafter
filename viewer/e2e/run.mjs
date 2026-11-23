@@ -6011,15 +6011,25 @@ const checks = {
   desktop: async () => {
     const folder = freshPlant('desktop');
     const setPath = join(folder, 'demo-plant');
+    const dottedSetPath = join(folder, 'project.yaml');
+    cpSync(setPath, dottedSetPath, { recursive: true });
     const cleanDwg = join(folder, 'clean-orig.dwg');
     const lossDwg = join(folder, 'loss-orig.dwg');
+    const damagedDwg = join(folder, 'damaged-orig.dwg');
     const singleYaml = join(folder, 'geometry.yaml');
     cpSync(join(root, 'examples', 'geometry.yaml'), singleYaml);
     const builtClean = agentIn(folder, 'build', singleYaml, '--output', cleanDwg, '--overwrite');
     assert(builtClean.ok, `clean DWG built: ${JSON.stringify(builtClean.error)}`);
-    cpSync(cleanDwg, lossDwg);
+    // Real made-up synthetic fixtures (ADR-0008): NO mocking of `read`!
+    const customFixtureA = join(root, 'tests', 'fixtures', 'desktop-custom-undecoded-a.dwg');
+    const customFixtureB = join(root, 'tests', 'fixtures', 'desktop-custom-undecoded-b.dwg');
+    const damagedFixture = join(root, 'tests', 'fixtures', 'desktop-damaged-line.dwg');
+    cpSync(customFixtureA, lossDwg);
+    cpSync(damagedFixture, damagedDwg);
     const origCleanSha = createHash('sha256').update(readFileSync(cleanDwg)).digest('hex');
-    const origLossSha = createHash('sha256').update(readFileSync(lossDwg)).digest('hex');
+    const origLossShaA = createHash('sha256').update(readFileSync(lossDwg)).digest('hex');
+    const origLossShaB = createHash('sha256').update(readFileSync(customFixtureB)).digest('hex');
+    assert(origLossShaA !== origLossShaB, 'replacement undecoded fixture has distinct SHA-256');
 
     const server = await serve('127.0.0.1:0', folder);
     const b = await browser();
@@ -6029,14 +6039,15 @@ const checks = {
       shots.push(file);
     };
     const seen = {};
-    const installDesktopBridge = async (context) => {
+    const installDesktopBridge = async (context, initialRecents = []) => {
       await context.addInitScript(
-        ({ setPath: sp, cleanDwg: cd, lossDwg: ld, singleYaml: sy }) => {
-          const recents = [];
+        ({ setPath: sp, cleanDwg: cd, singleYaml: sy, initialRecents: ir }) => {
+          const recents = ir.slice();
           const newWindows = [];
           const titles = [];
           window.__desktopTest = {
             nextFolderError: null,
+            nextFolder: sp,
             nextDwg: cd,
             recents,
             newWindows,
@@ -6049,7 +6060,9 @@ const checks = {
                 window.__desktopTest.nextFolderError = null;
                 throw new Error(msg);
               }
-              return { kind: 'set', path: sp, name: 'demo-plant', detail: 'Drawing set folder · set.yaml' };
+              const p = window.__desktopTest.nextFolder;
+              const name = p.split(/[\\/]/).pop() || p;
+              return { kind: 'set', path: p, name, detail: 'Drawing set folder · set.yaml' };
             },
             async pickDrawingFile(filter) {
               if (filter === 'yaml') {
@@ -6061,7 +6074,14 @@ const checks = {
             },
             async inspectPath(path) {
               const name = path.split(/[\\/]/).pop() || path;
-              const kind = path.endsWith('.dwg') ? 'dwg' : path.endsWith('.yaml') ? 'sheet' : 'set';
+              const kind =
+                path === window.__desktopTest.nextFolder || path === sp
+                  ? 'set'
+                  : path.endsWith('.dwg')
+                    ? 'dwg'
+                    : path.endsWith('.yaml')
+                      ? 'sheet'
+                      : 'set';
               return { kind, path, name, detail: kind };
             },
             async listRecents() {
@@ -6078,8 +6098,8 @@ const checks = {
               if (idx >= 0) recents.splice(idx, 1);
               return recents.slice();
             },
-            async openInNewWindow(source, title) {
-              newWindows.push({ source, title });
+            async openInNewWindow(source, title, kind) {
+              newWindows.push({ source, title, kind });
               return `win-${newWindows.length + 1}`;
             },
             async setWindowTitle(title) {
@@ -6087,13 +6107,16 @@ const checks = {
             },
           };
         },
-        { setPath, cleanDwg, lossDwg, singleYaml },
+        { setPath, cleanDwg, singleYaml, initialRecents },
       );
     };
 
     try {
-      // 1. Laptop (1440x900): Start screen, invalid folder error, drawing set, switcher,
-      //    new window, clean plant DWG edit/undo/accept, decoded:false ADR-0004 guard, single YAML.
+      // 1. Laptop (1440x900): Start screen, invalid folder error, drawing set, dotted set folder,
+      //    switcher, New window (folder & file), clean plant DWG successive accumulation + undo +
+      //    cache-key invalidation + accept, REAL decoded:false custom-object DWG (view-only,
+      //    decode modal, allow_loss, view-only undo lock, SHA-256 consent revocation),
+      //    REAL damaged-line DWG rendering via read_past_damage, single YAML, and plain serve isolation.
       {
         const context = await b.newContext(LAPTOP);
         await installDesktopBridge(context);
@@ -6108,41 +6131,14 @@ const checks = {
           }
         });
 
-        // Intercept `read` for loss-orig.dwg to test the ADR-0004 decoded:false UI flow,
-        // and verify `change` sends `allow_loss: true` after unlocking.
+        // Observe real `change` payloads without mocking `read` or `change`!
         let sawAllowLossOnChange = false;
-        await page.route('**/commands/read', async (route) => {
-          const post = route.request().postDataJSON();
-          if (post?.source === lossDwg) {
-            await route.fulfill({
-              status: 200,
-              contentType: 'application/json',
-              body: JSON.stringify({
-                ok: true,
-                result: {
-                  source: lossDwg,
-                  sheet: 'loss-orig',
-                  message: 'read loss-orig.dwg (AC1032): 2 undecoded MADE_UP_DEVICE',
-                  dwg_version: 'AC1032',
-                  units: 'in',
-                  decoded: false,
-                  not_decoded: [{ kind: 'MADE_UP_DEVICE', count: 2, handles: ['2A7', '2A9'] }],
-                  skipped: 1,
-                  recovered_errors: 1,
-                  objects: { line: 4 },
-                  not_read: [{ kind: 'MADE_UP_DEVICE', count: 2, handles: ['2A7', '2A9'] }],
-                  tables_not_read: {},
-                },
-              }),
-            });
-            return;
-          }
-          await route.continue();
-        });
+        let lossChangeCount = 0;
         await page.route('**/commands/change', async (route) => {
           const post = route.request().postDataJSON();
-          if (post?.set === lossDwg && post?.allow_loss === true) {
-            sawAllowLossOnChange = true;
+          if (post?.set === lossDwg) {
+            lossChangeCount += 1;
+            if (post?.allow_loss === true) sawAllowLossOnChange = true;
           }
           await route.continue();
         });
@@ -6167,28 +6163,54 @@ const checks = {
         assert((await page.textContent('[data-act="desktop-switcher"]')).includes('demo-plant'), 'switcher shows demo-plant');
         await shot(page, 'desktop-laptop-2-set.png');
 
-        // Open switcher, test New window, then Go to Start screen.
+        // Open switcher, test New window (recent + DWG/YAML file picker button), then open dotted set folder `project.yaml/`.
         await page.click('[data-act="desktop-switcher"]');
         await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
         await page.click('[data-desktop-switcher] [data-recent-newwin]');
-        const newWins = await page.evaluate(() => window.__desktopTest.newWindows.length);
-        assert(newWins === 1, `New window invoked: ${newWins}`);
+        await page.click('[data-act="desktop-switcher"]');
+        await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
+        await page.click('[data-sw-pick="file-newwin"]');
+        const newWins = await page.evaluate(() => window.__desktopTest.newWindows.slice());
+        assert(
+          newWins.length === 2 && newWins[0].kind === 'set' && newWins[1].kind === 'dwg',
+          `New window invoked for both set and file: ${JSON.stringify(newWins)}`,
+        );
 
+        // Dotted set folder `project.yaml/` opens as a drawing set (`kind=set`), not a single YAML sheet (Blocker #11).
+        await page.evaluate((dp) => {
+          window.__desktopTest.nextFolder = dp;
+        }, dottedSetPath);
+        await page.click('[data-act="desktop-switcher"]');
+        await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
+        await page.click('[data-sw-pick="set"]');
+        await page.waitForFunction(
+          () =>
+            window.agentdrafterViewer?.summary?.sheet === 'DP-LD-101' &&
+            document.querySelector('[data-act="desktop-switcher"]')?.textContent?.includes('project.yaml'),
+          null,
+          { timeout: 20000 },
+        );
+        assert(!(await page.$('[data-dwg-banner="sheet"]')), 'dotted set folder project.yaml/ is NOT misclassified as a single sheet');
+        assert(await page.evaluate(() => location.search.includes('kind=set')), 'URL carries kind=set');
+
+        // Go back to Start screen and confirm recents.
         await page.click('[data-act="desktop-switcher"]');
         await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
         await page.click('[data-sw-start]');
         await page.waitForSelector('[data-desktop-start]', { timeout: 5000 });
         assert(await page.isVisible(`[data-recent="${setPath.replace(/\\/g, '\\\\')}"]`), 'demo-plant listed in Recents');
 
-        // Open clean plant DWG -> verify read-only badge, edit, live per-original journal, undo, accept.
+        // Open clean plant DWG -> verify read-only badge, successive edits accumulate (Blocker #4),
+        // stack undo, cache-key invalidation on reused rev1.dwg (Blocker #5), and accept.
         await page.click('[data-pick="dwg"]');
         await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'clean-orig', null, { timeout: 20000 });
         await page.waitForSelector('[data-dwg-banner="clean"]', { timeout: 10000 });
         assert((await page.textContent('[data-dwg-version]')).includes('AC1032'), 'shows DWG version pill');
         assert(!(await page.isDisabled('.rb[data-tool="line"]')), 'drawing tools enabled on clean DWG');
+        const origObjCount = await page.evaluate(() => window.agentdrafterViewer.summary.objects.length);
         await shot(page, 'desktop-laptop-3-dwg-clean.png');
 
-        // Draw a line on clean-orig.dwg through the real Line tool.
+        // Draw Line A (1,1 -> 4,1) on clean-orig.dwg -> clean-orig.rev1.dwg.
         await page.click('.rb[data-tool="line"]');
         await page.fill('.cmdin', '1,1');
         await page.keyboard.press('Enter');
@@ -6196,39 +6218,16 @@ const checks = {
         await page.keyboard.press('Enter');
         await page.keyboard.press('Enter');
         await page.waitForFunction(
-          () =>
+          (expectedCount) =>
             document.querySelector('.titlebar button[data-act="undo"]')?.textContent?.includes('(#1)') &&
             window.agentdrafterViewer?.summary?.sheet === 'clean-orig.rev1' &&
+            window.agentdrafterViewer?.summary?.objects?.length === expectedCount &&
             document.querySelector('[data-dwg-banner="clean"]')?.textContent?.includes('clean-orig.rev1.dwg'),
-          null,
+          origObjCount + 1,
           { timeout: 20000 },
         );
-        // Wait for the post-landing check of clean-orig.rev1.dwg to finish before undo removes it.
-        await sleep(300);
-        const rev1Path = join(folder, 'clean-orig.rev1.dwg');
-        assert(existsSync(rev1Path), 'revision DWG written beside original');
-        assert(
-          createHash('sha256').update(readFileSync(cleanDwg)).digest('hex') === origCleanSha,
-          'original DWG untouched after revision',
-        );
 
-        // Undo last removes revision 1 and restores original cleanly.
-        await page.click('.titlebar button[data-act="undo"]');
-        await page.waitForFunction(
-          () => {
-            const b = document.querySelector('.titlebar button[data-act="undo"]');
-            return b && b.disabled && !b.textContent?.includes('(#1)') && window.agentdrafterViewer?.summary?.sheet === 'clean-orig';
-          },
-          null,
-          { timeout: 20000 },
-        );
-        assert(!existsSync(rev1Path), 'undo removed clean-orig.rev1.dwg');
-        assert(
-          createHash('sha256').update(readFileSync(cleanDwg)).digest('hex') === origCleanSha,
-          'original DWG untouched after undo',
-        );
-
-        // Make another edit and Accept it.
+        // Draw Line B (1,2 -> 4,2) -> clean-orig.rev2.dwg MUST contain BOTH Line A and Line B (Blocker #4).
         await page.click('.rb[data-tool="line"]');
         await page.fill('.cmdin', '1,2');
         await page.keyboard.press('Enter');
@@ -6236,13 +6235,74 @@ const checks = {
         await page.keyboard.press('Enter');
         await page.keyboard.press('Enter');
         await page.waitForFunction(
-          () =>
-            document.querySelector('.titlebar button[data-act="undo"]')?.disabled === false &&
-            window.agentdrafterViewer?.summary?.sheet?.startsWith('clean-orig.rev') &&
-            document.querySelector('[data-dwg-banner="clean"]')?.textContent?.includes('clean-orig.rev'),
-          null,
+          (expectedCount) =>
+            document.querySelector('.titlebar button[data-act="undo"]')?.textContent?.includes('(#2)') &&
+            window.agentdrafterViewer?.summary?.sheet === 'clean-orig.rev2' &&
+            window.agentdrafterViewer?.summary?.objects?.length === expectedCount &&
+            document.querySelector('[data-dwg-banner="clean"]')?.textContent?.includes('clean-orig.rev2.dwg'),
+          origObjCount + 2,
           { timeout: 20000 },
         );
+        await sleep(250);
+        const rev1Path = join(folder, 'clean-orig.rev1.dwg');
+        const rev2Path = join(folder, 'clean-orig.rev2.dwg');
+        assert(existsSync(rev1Path) && existsSync(rev2Path), 'rev1 and rev2 DWGs written beside original');
+        assert(
+          createHash('sha256').update(readFileSync(cleanDwg)).digest('hex') === origCleanSha,
+          'original DWG untouched after two successive revisions',
+        );
+
+        // Undo #2 -> back to rev1 with origObjCount + 1.
+        await page.click('.titlebar button[data-act="undo"]');
+        await page.waitForFunction(
+          (expectedCount) =>
+            document.querySelector('.titlebar button[data-act="undo"]')?.textContent?.includes('(#1)') &&
+            window.agentdrafterViewer?.summary?.sheet === 'clean-orig.rev1' &&
+            window.agentdrafterViewer?.summary?.objects?.length === expectedCount,
+          origObjCount + 1,
+          { timeout: 20000 },
+        );
+        assert(!existsSync(rev2Path), 'undo #2 removed clean-orig.rev2.dwg');
+        await sleep(250);
+
+        // Undo #1 -> back to original with origObjCount.
+        await page.click('.titlebar button[data-act="undo"]');
+        await page.waitForFunction(
+          (expectedCount) => {
+            const b = document.querySelector('.titlebar button[data-act="undo"]');
+            return (
+              b &&
+              b.disabled &&
+              !b.textContent?.includes('(#1)') &&
+              window.agentdrafterViewer?.summary?.sheet === 'clean-orig' &&
+              window.agentdrafterViewer?.summary?.objects?.length === expectedCount
+            );
+          },
+          origObjCount,
+          { timeout: 20000 },
+        );
+        assert(!existsSync(rev1Path), 'undo #1 removed clean-orig.rev1.dwg');
+
+        // Draw Line C (1,5 -> 6,5), which reuses clean-orig.rev1.dwg -> rendered bounds MUST reflect y=5 (NOT stale Line A y=1, Blocker #5)!
+        await page.click('.rb[data-tool="line"]');
+        await page.fill('.cmdin', '1,5');
+        await page.keyboard.press('Enter');
+        await page.fill('.cmdin', '6,5');
+        await page.keyboard.press('Enter');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          (expectedCount) => {
+            const probe = window.agentdrafterViewer;
+            if (!probe || probe.summary?.sheet !== 'clean-orig.rev1' || probe.summary.objects.length !== expectedCount) return false;
+            const lastPlace = probe.summary.objects.length - 1;
+            const [, y0, , y1] = probe.bounds([lastPlace]);
+            return Math.abs(y0 - 5) < 0.05 && Math.abs(y1 - 5) < 0.05;
+          },
+          origObjCount + 1,
+          { timeout: 20000 },
+        );
+
+        // Accept the working revision.
         await page.click('.titlebar button[data-act="accept"]');
         await page.waitForSelector('.va-modal [data-ok]', { timeout: 10000 });
         await page.click('.va-modal [data-ok]');
@@ -6256,7 +6316,7 @@ const checks = {
           'original DWG untouched after accept',
         );
 
-        // Open undecoded plant DWG (decoded: false) -> view-only lock, decode modal, Allow Loss unlock.
+        // Open REAL undecoded custom-object DWG (desktop-custom-undecoded-a.dwg, NO mocked `read`!).
         await page.evaluate((ld) => {
           window.__desktopTest.nextDwg = ld;
         }, lossDwg);
@@ -6272,10 +6332,7 @@ const checks = {
         await page.click('[data-act="inspect-loss"]');
         await page.waitForSelector('[data-decode-modal]', { timeout: 5000 });
         const modalText = await page.textContent('[data-decode-modal]');
-        assert(
-          modalText.includes('MADE_UP_DEVICE') && modalText.includes('2A7, 2A9') && modalText.includes('Skipped records: 1'),
-          `decode modal lists undecoded details: ${modalText}`,
-        );
+        assert(modalText.includes('MADE_UP_VALVE'), `real decode modal lists MADE_UP_VALVE: ${modalText}`);
         assert(await page.isDisabled('[data-allow-loss-confirm]'), 'Allow button disabled before ticking checkbox');
         await shot(page, 'desktop-laptop-5-decode-modal.png');
 
@@ -6285,27 +6342,83 @@ const checks = {
         await page.waitForSelector('[data-dwg-banner="allowed-loss"]', { timeout: 5000 });
         assert(!(await page.isDisabled('.rb[data-tool="line"]')), 'drawing tools unlocked after Allow Loss');
 
-        // Draw a line on loss-orig.dwg and confirm `allow_loss: true` was passed on `change`.
+        // Draw a line on real undecoded loss-orig.dwg -> sends `allow_loss: true`, writes rev1 beside untouched original.
         await page.click('.rb[data-tool="line"]');
-        await page.fill('.cmdin', '1,3');
+        await page.fill('.cmdin', '10,10');
         await page.keyboard.press('Enter');
-        await page.fill('.cmdin', '3,3');
+        await page.fill('.cmdin', '40,10');
         await page.keyboard.press('Enter');
         await page.keyboard.press('Enter');
         await page.waitForFunction(
           () =>
             document.querySelector('.titlebar button[data-act="undo"]')?.disabled === false &&
-            window.agentdrafterViewer?.summary?.sheet?.startsWith('loss-orig.rev'),
+            window.agentdrafterViewer?.summary?.sheet === 'loss-orig.rev1',
           null,
           { timeout: 20000 },
         );
-        assert(sawAllowLossOnChange, 'change request carried allow_loss: true');
+        assert(sawAllowLossOnChange && lossChangeCount === 1, 'real change request carried allow_loss: true');
         assert(
-          createHash('sha256').update(readFileSync(lossDwg)).digest('hex') === origLossSha,
+          createHash('sha256').update(readFileSync(lossDwg)).digest('hex') === origLossShaA,
           'loss-orig.dwg original untouched',
         );
 
-        // Open single YAML sheet -> renders cleanly, read-only banner, Plot PDF works.
+        // Blocker #6: Replace loss-orig.dwg on disk with a DIFFERENT undecoded DWG (distinct SHA-256)
+        // while still in the unlocked session -> next edit MUST revoke consent, refuse without calling change,
+        // and re-engage view-only!
+        cpSync(customFixtureB, lossDwg);
+        const changesBeforeReplace = lossChangeCount;
+        await page.click('.rb[data-tool="line"]');
+        await page.fill('.cmdin', '10,20');
+        await page.keyboard.press('Enter');
+        await page.fill('.cmdin', '40,20');
+        await page.keyboard.press('Enter');
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('[data-dwg-banner="view-only"]', { timeout: 15000 });
+        assert(
+          lossChangeCount === changesBeforeReplace,
+          `replaced DWG did not send change with stale allow_loss: ${lossChangeCount} vs ${changesBeforeReplace}`,
+        );
+        assert(await page.isDisabled('.rb[data-tool="line"]'), 'drawing tools re-locked after file replacement');
+        // Restore original A so the unissued rev1 matches loss-orig.dwg for the view-only Undo lock test.
+        cpSync(customFixtureA, lossDwg);
+
+        // Blocker #7: Fresh page load on undecoded loss-orig.dwg (which has an unissued rev1 in its journal)
+        // opens view-only -> BOTH titlebar Undo last AND journal entry Undo button MUST be disabled!
+        await page.goto(`${server.base}/?desktop=1&source=${encodeURIComponent(lossDwg)}&kind=dwg`, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('[data-dwg-banner="view-only"]', { timeout: 20000 });
+        await journalTab(page);
+        await page.waitForSelector('li[data-entry="1"]', { timeout: 15000 });
+        assert(await page.isDisabled('.titlebar button[data-act="undo"]'), 'titlebar Undo disabled while view-only (Blocker #7)');
+        await page.click('li[data-entry="1"] .je-head');
+        await page.waitForSelector('[data-je-undo="1"]', { timeout: 5000 });
+        assert(await page.isDisabled('[data-je-undo="1"]'), 'journal entry Undo disabled while view-only (Blocker #7)');
+
+        // Blocker #9: Open REAL damaged-line DWG (`desktop-damaged-line.dwg`) -> MUST render its
+        // recoverable objects (circle + polyline, >= 2 objects) read-only via `display-list --read-past-damage`!
+        await page.evaluate((dd) => {
+          window.__desktopTest.nextDwg = dd;
+        }, damagedDwg);
+        await page.click('[data-act="desktop-switcher"]');
+        await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
+        await page.click('[data-sw-pick="file"]');
+        await page.waitForFunction(
+          () =>
+            window.agentdrafterViewer?.summary?.sheet === 'damaged-orig' &&
+            window.agentdrafterViewer?.summary?.objects?.length >= 2,
+          null,
+          { timeout: 20000 },
+        );
+        await page.waitForSelector('[data-dwg-banner="view-only"]', { timeout: 15000 });
+        await page.click('[data-act="inspect-loss"]');
+        await page.waitForSelector('[data-decode-modal]', { timeout: 5000 });
+        const damagedModal = await page.textContent('[data-decode-modal]');
+        assert(
+          damagedModal.includes('LINE') && damagedModal.includes('Read past damage'),
+          `damaged-line decode modal names LINE and Read past damage: ${damagedModal}`,
+        );
+        await page.click('[data-keep-viewonly]');
+
+        // Open single YAML sheet -> renders cleanly, read-only banner, drawing tools disabled.
         await page.click('[data-act="desktop-switcher"]');
         await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
         await page.click('[data-sw-start]');
@@ -6316,12 +6429,35 @@ const checks = {
         assert(await page.isDisabled('.rb[data-tool="line"]'), 'drawing tools disabled on single YAML sheet');
         await shot(page, 'desktop-laptop-6-single-sheet.png');
 
-        seen.laptop = { newWindows: newWins, sawAllowLossOnChange, problems };
+        seen.laptop = { newWindows: newWins.length, sawAllowLossOnChange, problems };
         assert(!problems.length, `laptop desktop errors: ${problems.join('; ')} | http4xx: ${http4xx.join(' || ')}`);
         await context.close();
       }
 
-      // 2. Phone (390x844): Start screen, drawing set title bar (zero overlap), switcher, single sheet.
+      // 2. Blocker #10: Plain browser `agentdrafter serve` opening a DWG (no desktop bridge, no ?desktop=1)
+      //    keeps existing behavior: NO desktop switcher, NO DWG banner, and WASM does NOT enable DWG tools.
+      {
+        const context = await b.newContext(LAPTOP);
+        const page = await context.newPage();
+        const problems = [];
+        page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
+        page.on('console', (m) => m.type() === 'error' && problems.push(`console: ${m.text()}`));
+
+        await page.goto(`${server.base}/?source=${encodeURIComponent(cleanDwg)}`, { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'clean-orig', null, { timeout: 20000 });
+        assert(!(await page.$('[data-act="desktop-switcher"]')), 'plain serve has no desktop switcher');
+        assert(!(await page.$('[data-dwg-banner]')), 'plain serve has no desktop DWG banner');
+        // Clicking Line in plain browser mode on a DWG must NOT start the Line tool (desktop_mode is false).
+        await page.click('.rb[data-tool="line"]');
+        await sleep(200);
+        const activeTool = await page.evaluate(() => document.querySelector('.rb[data-tool="line"]')?.classList.contains('on') ?? false);
+        assert(!activeTool, 'plain serve does not unlock desktop DWG drafting tools');
+        seen.plainServeDwg = { activeTool, problems };
+        assert(!problems.length, `plain serve errors: ${problems.join('; ')}`);
+        await context.close();
+      }
+
+      // 3. Phone (390x844): Start screen, drawing set title bar (zero overlap), switcher, single sheet.
       {
         const context = await b.newContext(PHONE);
         await installDesktopBridge(context);

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  allowLossKey,
   buildDesktopSearch,
+  canUndoDrawing,
   classifySource,
   dwgEditGuard,
   isAbsolutePath,
@@ -32,6 +34,7 @@ function sampleReadReport(overrides: Partial<ReadReport> = {}): ReadReport {
     sheet: 'DP-E-204',
     message: 'read DP-E-204.dwg',
     dwg_version: 'AC1032',
+    sha256: 'deadbeef0123456789abcdef',
     units: 'in',
     decoded: true,
     not_decoded: [],
@@ -52,9 +55,16 @@ test('classifies drawing set folders, plant DWGs, and single YAML sheets across 
   assert.equal(classifySource('C:\\Drawings\\DP-P-101.DWG'), 'dwg');
   assert.equal(classifySource('/home/drafter/geometry.yaml'), 'sheet');
   assert.equal(classifySource('examples/one-line.yml'), 'sheet');
+  // Explicit kind from native picker / URL overrides extension guessing (dotted folder names).
+  assert.equal(classifySource('/home/drafter/project.yaml', 'set'), 'set');
+  assert.equal(classifySource('/home/drafter/archive.dwg', 'set'), 'set');
 
   assert.equal(sourceDisplayName('/home/drafter/demo-plant/'), 'demo-plant');
   assert.equal(sourceDisplayName('C:\\Drawings\\DP-P-101.dwg'), 'DP-P-101.dwg');
+  // POSIX path containing a literal backslash keeps the backslash intact.
+  assert.equal(sourceDisplayName('/tmp/a\\b.dwg'), 'a\\b.dwg');
+  assert.equal(sourceParentDir('/tmp/dir\\1/a\\b.dwg'), '/tmp/dir\\1');
+  assert.equal(resolveBeside('/tmp/dir\\1/a\\b.dwg', 'a\\b.rev1.dwg'), '/tmp/dir\\1/a\\b.rev1.dwg');
   assert.equal(sourceDisplayName('.'), '.');
   assert.equal(kindBadge('set'), 'Set');
   assert.equal(kindBadge('dwg'), 'DWG');
@@ -82,6 +92,7 @@ test('parses desktop and plain browser URLs without changing browser defaults', 
     desktop: false,
     start: false,
     source: '.',
+    kind: null,
     sheet: null,
     layout: null,
   });
@@ -89,6 +100,7 @@ test('parses desktop and plain browser URLs without changing browser defaults', 
     desktop: false,
     start: false,
     source: 'examples/demo-plant',
+    kind: null,
     sheet: 'DP-LD-102',
     layout: null,
   });
@@ -98,6 +110,7 @@ test('parses desktop and plain browser URLs without changing browser defaults', 
     desktop: true,
     start: true,
     source: null,
+    kind: null,
     sheet: null,
     layout: null,
   });
@@ -105,25 +118,27 @@ test('parses desktop and plain browser URLs without changing browser defaults', 
     desktop: true,
     start: true,
     source: null,
+    kind: null,
     sheet: null,
     layout: null,
   });
-  // Desktop mode with a source opens it directly.
-  assert.deepEqual(parseDesktopUrl('?desktop=1&source=%2Ftmp%2FDP-P-101.dwg', true), {
+  // Desktop mode with a source and explicit kind opens it directly.
+  assert.deepEqual(parseDesktopUrl('?desktop=1&source=%2Ftmp%2Fproject.yaml&kind=set', true), {
     desktop: true,
     start: false,
-    source: '/tmp/DP-P-101.dwg',
+    source: '/tmp/project.yaml',
+    kind: 'set',
     sheet: null,
     layout: null,
   });
 
   assert.equal(
-    buildDesktopSearch({ desktop: true, start: true, source: null, sheet: null, layout: null }),
+    buildDesktopSearch({ desktop: true, start: true, source: null, kind: null, sheet: null, layout: null }),
     'desktop=1&start=1',
   );
   assert.equal(
-    buildDesktopSearch({ desktop: true, start: false, source: '/tmp/demo-plant', sheet: 'DP-LD-101', layout: null }),
-    'desktop=1&source=%2Ftmp%2Fdemo-plant&sheet=DP-LD-101',
+    buildDesktopSearch({ desktop: true, start: false, source: '/tmp/project.yaml', kind: 'set', sheet: 'DP-LD-101', layout: null }),
+    'desktop=1&source=%2Ftmp%2Fproject.yaml&kind=set&sheet=DP-LD-101',
   );
 });
 
@@ -146,6 +161,19 @@ test('ADR-0004 edit guard locks undecoded plant DWGs until explicit allowLoss', 
   });
   assert.equal(dwgEditGuard('dwg', undecoded, false, false), 'view-only');
   assert.equal(dwgEditGuard('dwg', undecoded, false, true), 'allowed-loss');
+
+  // Content-bound allow-loss key changes when the file at the same path is replaced.
+  assert.notEqual(allowLossKey('/tmp/a.dwg', 'sha-a'), allowLossKey('/tmp/a.dwg', 'sha-b'));
+  assert.equal(allowLossKey('/tmp/a.dwg', 'sha-a'), allowLossKey('/tmp/a.dwg', 'sha-a'));
+
+  // Undo is locked while a plant DWG is loading or view-only, unlocked once editable or allowed-loss.
+  assert.equal(canUndoDrawing('dwg', true, 'loading'), false);
+  assert.equal(canUndoDrawing('dwg', true, 'view-only'), false);
+  assert.equal(canUndoDrawing('dwg', true, 'editable'), true);
+  assert.equal(canUndoDrawing('dwg', true, 'allowed-loss'), true);
+  assert.equal(canUndoDrawing('sheet', true, 'sheet-readonly'), false);
+  assert.equal(canUndoDrawing('set', true, 'editable'), true);
+  assert.equal(canUndoDrawing('set', false, 'editable'), true);
 
   const summary = undecodedSummary(undecoded);
   assert.ok(summary.includes('2 undecoded MADE_UP_DEVICE records (2A7, 2A9)'), summary);
@@ -202,10 +230,12 @@ test('resolves active and stepped revisions from an original DWG journal and nor
     file: 'P-101.rev1.dwg',
     entry: 1,
     dwgVersion: 'AC1027',
+    sha256: 'bbb',
   });
   assert.deepEqual(revisionAtEntry(journal, 1, '/plant/P-101.dwg'), {
     path: '/plant/P-101.rev1.dwg',
     file: 'P-101.rev1.dwg',
+    sha256: 'bbb',
   });
 
   // Change set generated while displaying P-101.rev1.dwg rewrites sheet & handle prefix back to P-101.

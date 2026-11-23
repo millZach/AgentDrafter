@@ -11,6 +11,12 @@ import type { Entry, JournalReport } from './journal.ts';
 /** What kind of drawing source is open (Zach's A1, 2026-11-22). */
 export type SourceKind = 'set' | 'dwg' | 'sheet';
 
+/** Parses an explicit `?kind=` query parameter if valid. */
+export function parseSourceKind(value: string | null | undefined): SourceKind | null {
+  if (value === 'set' || value === 'dwg' || value === 'sheet') return value;
+  return null;
+}
+
 /** A folder or file classified by the desktop shell. */
 export interface InspectedPath {
   kind: SourceKind;
@@ -41,6 +47,8 @@ export interface ReadReport {
   sheet: string;
   message: string;
   dwg_version: string;
+  /** SHA-256 fingerprint of the original DWG bytes read. */
+  sha256: string;
   units: string | null;
   decoded: boolean;
   not_decoded: DecodeRecord[];
@@ -60,10 +68,11 @@ export interface DesktopBridge {
   pickDrawingSetFolder(): Promise<InspectedPath | null>;
   pickDrawingFile(filter?: 'dwg' | 'yaml'): Promise<InspectedPath | null>;
   inspectPath(path: string): Promise<InspectedPath>;
+  resolveSiblingPath?(base: string, sibling: string): Promise<string>;
   listRecents(): Promise<RecentEntry[]>;
   recordRecent(entry: { path: string; kind: SourceKind; name: string; subtitle?: string }): Promise<RecentEntry[]>;
   removeRecent(path: string): Promise<RecentEntry[]>;
-  openInNewWindow(source: string | null, title?: string): Promise<string>;
+  openInNewWindow(source: string | null, title?: string, kind?: SourceKind | null): Promise<string>;
   setWindowTitle(title: string): Promise<void>;
 }
 
@@ -94,21 +103,40 @@ export function getDesktopBridge(): DesktopBridge | null {
       pickDrawingSetFolder: () => tauri.invoke<InspectedPath | null>('pick_drawing_set_folder'),
       pickDrawingFile: (filter) => tauri.invoke<InspectedPath | null>('pick_drawing_file', { filter: filter ?? null }),
       inspectPath: (path) => tauri.invoke<InspectedPath>('inspect_path', { path }),
+      resolveSiblingPath: (base, sibling) => tauri.invoke<string>('resolve_sibling_path', { base, sibling }),
       listRecents: () => tauri.invoke<RecentEntry[]>('list_recents'),
       recordRecent: ({ path, kind, name, subtitle }) =>
         tauri.invoke<RecentEntry[]>('record_recent', { path, kind, name, subtitle: subtitle ?? null }),
       removeRecent: (path) => tauri.invoke<RecentEntry[]>('remove_recent', { path }),
-      openInNewWindow: (source, title) =>
-        tauri.invoke<string>('open_in_new_window', { source, title: title ?? null }),
+      openInNewWindow: (source, title, kind) =>
+        tauri.invoke<string>('open_in_new_window', { source, kind: kind ?? null, title: title ?? null }),
       setWindowTitle: (title) => tauri.invoke<void>('set_window_title', { title }),
     };
   }
   return null;
 }
 
-/** Classifies a path string as a drawing set folder, plant DWG, or single YAML sheet. */
-export function classifySource(path: string): SourceKind {
-  const trimmed = path.trim().replace(/[\\/]+$/, '');
+/**
+ * Whether `path` uses Windows path syntax (`C:\…`, `C:/…`, or UNC `\\server\…`).
+ * POSIX paths starting with `/` never treat literal `\` characters as separators.
+ */
+export function isWindowsPath(path: string): boolean {
+  return path.startsWith('\\\\') || /^[A-Za-z]:[\\/]/.test(path);
+}
+
+function stripTrailingSeparators(path: string): string {
+  const trimmed = path.trim();
+  if (isWindowsPath(trimmed)) return trimmed.replace(/[\\/]+$/, '');
+  return trimmed.replace(/\/+$/, '');
+}
+
+/**
+ * Fallback suffix-based source classifier when no explicit `kind` was provided
+ * by `inspect_path`, the native picker, Recents, or `?kind=set|dwg|sheet`.
+ */
+export function classifySource(path: string, explicitKind?: SourceKind | null): SourceKind {
+  if (explicitKind) return explicitKind;
+  const trimmed = stripTrailingSeparators(path);
   const lower = trimmed.toLowerCase();
   if (lower.endsWith('.dwg')) return 'dwg';
   const base = sourceDisplayName(trimmed).toLowerCase();
@@ -117,26 +145,37 @@ export function classifySource(path: string): SourceKind {
   return 'set';
 }
 
-/** Human-readable name for a source path (file or folder basename across POSIX and Windows). */
+/**
+ * Human-readable name for a source path (file or folder basename across POSIX
+ * and Windows, preserving literal backslashes inside POSIX filenames).
+ */
 export function sourceDisplayName(path: string): string {
-  const trimmed = path.trim().replace(/[\\/]+$/, '');
+  const trimmed = stripTrailingSeparators(path);
   if (!trimmed || trimmed === '.') return trimmed || '.';
-  const parts = trimmed.split(/[\\/]/);
+  const parts = isWindowsPath(trimmed) ? trimmed.split(/[\\/]/) : trimmed.split('/');
   return parts[parts.length - 1] || trimmed;
 }
 
 /** Whether `path` is absolute on POSIX (`/…`) or Windows (`C:\…`, `C:/…`, `\\server\…`). */
 export function isAbsolutePath(path: string): boolean {
-  return path.startsWith('/') || path.startsWith('\\\\') || /^[A-Za-z]:[\\/]/.test(path);
+  return path.startsWith('/') || isWindowsPath(path);
 }
 
-/** Parent directory of `path`, preserving `/` vs `\` separator style; empty string if none. */
+/**
+ * Parent directory of `path`, using Windows separators only for Windows paths
+ * so POSIX paths containing literal `\` stay intact.
+ */
 export function sourceParentDir(path: string): string {
-  const trimmed = path.trim().replace(/[\\/]+$/, '');
-  const slash = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  const trimmed = stripTrailingSeparators(path);
+  if (isWindowsPath(trimmed)) {
+    const slash = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+    if (slash < 0) return '';
+    if (slash === 2 && /^[A-Za-z]:[\\/]/.test(trimmed)) return trimmed.slice(0, 3);
+    return trimmed.slice(0, slash);
+  }
+  const slash = trimmed.lastIndexOf('/');
   if (slash < 0) return '';
-  if (slash === 0) return trimmed[0] ?? '/';
-  if (slash === 2 && /^[A-Za-z]:[\\/]/.test(trimmed)) return trimmed.slice(0, 3);
+  if (slash === 0) return '/';
   return trimmed.slice(0, slash);
 }
 
@@ -146,9 +185,12 @@ export function resolveBeside(originalPath: string, relOrAbs: string): string {
   if (isAbsolutePath(relOrAbs)) return relOrAbs;
   const parent = sourceParentDir(originalPath);
   if (!parent) return relOrAbs;
-  const sep = originalPath.includes('\\') && !originalPath.includes('/') ? '\\' : '/';
-  const cleanedRel = sep === '\\' ? relOrAbs.replace(/\//g, '\\') : relOrAbs;
-  return parent.endsWith('/') || parent.endsWith('\\') ? `${parent}${cleanedRel}` : `${parent}${sep}${cleanedRel}`;
+  if (isWindowsPath(originalPath)) {
+    const sep = originalPath.includes('\\') && !originalPath.includes('/') ? '\\' : '/';
+    const cleanedRel = sep === '\\' ? relOrAbs.replace(/\//g, '\\') : relOrAbs;
+    return parent.endsWith('/') || parent.endsWith('\\') ? `${parent}${cleanedRel}` : `${parent}${sep}${cleanedRel}`;
+  }
+  return parent.endsWith('/') ? `${parent}${relOrAbs}` : `${parent}/${relOrAbs}`;
 }
 
 /** Default filename the core chooses for the first revision beside `originalName`. */
@@ -164,6 +206,7 @@ export interface ActiveRevision {
   file: string;
   entry: number;
   dwgVersion: string;
+  sha256: string;
 }
 
 /** Latest finished, non-undone revision DWG recorded in an original DWG's journal. */
@@ -179,6 +222,7 @@ export function latestActiveRevision(journal: JournalReport | null, originalPath
         file: sourceDisplayName(meta.revision_dwg),
         entry: e.entry,
         dwgVersion: meta.dwg_version,
+        sha256: meta.revision_sha256,
       };
     }
   }
@@ -193,13 +237,14 @@ export function revisionAtEntry(
   journal: JournalReport | null,
   entryNumber: number,
   originalPath: string,
-): { path: string; file: string } | null {
+): { path: string; file: string; sha256: string } | null {
   if (!journal) return null;
   const target = journal.entries.find((e) => e.entry === entryNumber);
   if (target?.kind === 'change_set' && target.original_revision?.revision_dwg && !target.undone_by) {
     return {
       path: resolveBeside(originalPath, target.original_revision.revision_dwg),
       file: sourceDisplayName(target.original_revision.revision_dwg),
+      sha256: target.original_revision.revision_sha256,
     };
   }
   // Walk backwards from entryNumber to find the newest non-undone revision at that point.
@@ -218,6 +263,7 @@ export function revisionAtEntry(
       return {
         path: resolveBeside(originalPath, e.original_revision.revision_dwg),
         file: sourceDisplayName(e.original_revision.revision_dwg),
+        sha256: e.original_revision.revision_sha256,
       };
     }
   }
@@ -268,6 +314,16 @@ export function matchOriginalObjectId(changedId: string, objectId: string | unde
   return ah >= 0 && bh >= 0 && a.slice(ah) === b.slice(bh);
 }
 
+/**
+ * Content-bound consent key for ADR-0004 `allow_loss` approval: ties approval
+ * strictly to BOTH the path AND the original DWG's exact SHA-256 fingerprint so
+ * replacing the file at the same path always revokes prior consent.
+ */
+export function allowLossKey(source: string, sha256: string | null | undefined): string | null {
+  if (!source || !sha256) return null;
+  return `${source}::${sha256.toLowerCase()}`;
+}
+
 /** Editing guard state for the open drawing (ADR-0004). */
 export type EditGuard = 'editable' | 'view-only' | 'allowed-loss' | 'sheet-readonly' | 'loading';
 
@@ -276,7 +332,7 @@ export type EditGuard = 'editable' | 'view-only' | 'allowed-loss' | 'sheet-reado
  * - Drawing sets are always editable (live).
  * - Single YAML sheets are read-only (`sheet-readonly`).
  * - Plant DWGs fail closed (`loading` while `read` is in flight, `view-only` when
- *   `decoded: false` without explicit session `allowLoss` or if `read` failed).
+ *   `decoded: false` without explicit content-bound session `allowLoss` or if `read` failed).
  */
 export function dwgEditGuard(
   kind: SourceKind,
@@ -289,6 +345,19 @@ export function dwgEditGuard(
   if (!readReport) return readPending ? 'loading' : 'view-only';
   if (readReport.decoded) return 'editable';
   return allowLoss ? 'allowed-loss' : 'view-only';
+}
+
+/**
+ * Whether Undo is permitted on the open drawing (Blocker #7):
+ * view-only / loading undecoded plant DWGs lock Undo too so reopening an
+ * undecoded original with an unissued revision cannot delete its revision
+ * before explicit ADR-0004 acknowledgement.
+ */
+export function canUndoDrawing(kind: SourceKind, desktop: boolean, guard: EditGuard): boolean {
+  if (!desktop) return true;
+  if (kind === 'sheet') return false;
+  if (kind !== 'dwg') return true;
+  return guard === 'editable' || guard === 'allowed-loss';
 }
 
 /** Short human-readable summary of why a plant DWG has `decoded: false`. */
@@ -319,6 +388,8 @@ export interface DesktopUrlState {
   start: boolean;
   /** The drawing source to open (null when on the Start screen). */
   source: string | null;
+  /** Explicit validated source kind (`?kind=set|dwg|sheet`), or null if unspecified. */
+  kind: SourceKind | null;
   sheet: string | null;
   layout: string | null;
 }
@@ -336,6 +407,7 @@ export function parseDesktopUrl(search: string, hasBridge: boolean): DesktopUrlS
     desktop,
     start,
     source: start ? null : rawSource || '.',
+    kind: start ? null : parseSourceKind(query.get('kind')),
     sheet: start ? null : query.get('sheet') || null,
     layout: start ? null : query.get('layout') || null,
   };
@@ -349,6 +421,7 @@ export function buildDesktopSearch(state: DesktopUrlState): string {
     if (state.desktop) query.set('start', '1');
   } else {
     if (state.source !== '.' || state.desktop) query.set('source', state.source);
+    if (state.desktop && state.kind) query.set('kind', state.kind);
     if (state.sheet) query.set('sheet', state.sheet);
     if (state.layout) query.set('layout', state.layout);
   }

@@ -97,6 +97,17 @@ impl Record {
 /// Reads the record at `source`: a DWG when its name ends `.dwg`, and
 /// otherwise a sheet description, with the block library it names.
 pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
+    read_record_with_recovery(source, false)
+}
+
+/// Reads the record at `source`, optionally falling back to read-past-damage
+/// recovery on a damaged DWG when `read_past_damage` is true (used only when
+/// explicitly requested by `display-list` for view-only inspection of a
+/// recoverable damaged original under ADR-0004).
+pub(crate) fn read_record_with_recovery(
+    source: &Path,
+    read_past_damage: bool,
+) -> Result<Record, Error> {
     let kind = SourceKind::of(source);
     let mut file = File::open(source).map_err(|e| {
         Error::new(
@@ -119,7 +130,11 @@ pub(crate) fn read_record(source: &Path) -> Result<Record, Error> {
     })?;
     drop(file);
     if kind == SourceKind::Dwg {
-        let drawing = dwg::read_bytes(&bytes, source)?;
+        let drawing = if read_past_damage {
+            dwg::read_bytes_past_damage(&bytes, source)?
+        } else {
+            dwg::read_bytes(&bytes, source)?
+        };
         let ids = crate::original::ids_of_with_id(source, source_id, &drawing);
         // Zach decided on 2026-11-13 that a DWG plots on the paper its
         // sheet declares, read from the set its build mark names; the DWG

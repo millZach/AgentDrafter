@@ -76,7 +76,7 @@ use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAdd
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -232,6 +232,7 @@ pub struct LocalServer {
     address: SocketAddr,
     token: String,
     stop: Arc<AtomicBool>,
+    done: Option<mpsc::Receiver<()>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -257,12 +258,23 @@ impl LocalServer {
     }
 
     /// Stops accepting connections, signals open event streams to exit, and
-    /// joins the server thread.
+    /// waits briefly for the server thread to finish without ever hanging UI
+    /// teardown if an in-flight request is slow.
     pub fn shutdown(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        // Wake the blocking `accept()` call on the server thread.
-        let _ = TcpStream::connect(self.address);
-        if let Some(thread) = self.thread.take() {
+        // Wake the blocking `accept()` call on the server thread with a short timeout.
+        let _ = TcpStream::connect_timeout(&self.address, Duration::from_millis(200));
+        if let Some(done) = self.done.take() {
+            let exited = done.recv_timeout(Duration::from_millis(500)).is_ok();
+            if exited {
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            } else {
+                // Detach cleanly rather than stalling app exit behind a slow handler.
+                let _ = self.thread.take();
+            }
+        } else if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
@@ -290,9 +302,13 @@ pub fn start_local(settings: Settings) -> Result<LocalServer, Error> {
         )
     })?;
     let token = Guard::new_token()?;
-    let guard = Guard::DesktopToken(token.clone());
+    let guard = Guard::DesktopToken {
+        token: token.clone(),
+        host: address.to_string(),
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
+    let (done_tx, done_rx) = mpsc::channel();
     let thread = std::thread::Builder::new()
         .name("agentdrafter-local-server".into())
         .spawn(move || {
@@ -309,6 +325,8 @@ pub fn start_local(settings: Settings) -> Result<LocalServer, Error> {
                     Some(Arc::clone(&thread_stop)),
                 );
             }
+            drop(listener);
+            let _ = done_tx.send(());
         })
         .map_err(|e| {
             Error::new(
@@ -320,6 +338,7 @@ pub fn start_local(settings: Settings) -> Result<LocalServer, Error> {
         address,
         token,
         stop,
+        done: Some(done_rx),
         thread: Some(thread),
     })
 }
@@ -396,9 +415,10 @@ enum Guard {
     /// token.
     Token(String),
     /// In-process local desktop server: listens on loopback only, requires
-    /// both local Host/Origin addressing and this per-session bearer token,
-    /// and serves the page with [`page::DESKTOP_POLICY`].
-    DesktopToken(String),
+    /// an exact `Host: 127.0.0.1:<port>` (and exact `Origin` when sent) plus
+    /// this per-session bearer token, and serves the page with
+    /// [`page::DESKTOP_POLICY`].
+    DesktopToken { token: String, host: String },
 }
 
 impl Guard {
@@ -425,7 +445,7 @@ impl Guard {
     }
 
     fn is_desktop(&self) -> bool {
-        matches!(self, Self::DesktopToken(_))
+        matches!(self, Self::DesktopToken { .. })
     }
 }
 
@@ -501,10 +521,18 @@ fn respond(
     // The viewer's page needs no token, but on the local machine is served
     // only to a request addressed to it.
     if let Some(file) = page::file(head.route()) {
-        if matches!(guard, Guard::Local | Guard::DesktopToken(_)) {
-            if let Err(response) = addressed_locally(&head) {
-                return Some(Answer::Reply(response));
+        match guard {
+            Guard::Local => {
+                if let Err(response) = addressed_locally(&head) {
+                    return Some(Answer::Reply(response));
+                }
             }
+            Guard::DesktopToken { host, .. } => {
+                if let Err(response) = addressed_to_desktop(&head, host) {
+                    return Some(Answer::Reply(response));
+                }
+            }
+            Guard::Token(_) => {}
         }
         return Some(Answer::Reply(serve_page(&head, file, guard.is_desktop())));
     }
@@ -1023,8 +1051,8 @@ fn admit(head: &Head, guard: &Guard) -> Result<(), Response> {
                 ));
             }
         }
-        Guard::DesktopToken(token) => {
-            addressed_locally(head)?;
+        Guard::DesktopToken { token, host } => {
+            addressed_to_desktop(head, host)?;
             let given = head.header("authorization").and_then(bearer);
             let right =
                 given.is_some_and(|given| bool::from(given.as_bytes().ct_eq(token.as_bytes())));
@@ -1037,6 +1065,40 @@ fn admit(head: &Head, guard: &Guard) -> Result<(), Response> {
             }
         }
         Guard::Local => addressed_locally(head)?,
+    }
+    Ok(())
+}
+
+/// Requires an exact `Host: 127.0.0.1:<port>` header (never accepting a missing
+/// `Host` or any other port/host) and, when `Origin` is present, an exact
+/// `http://127.0.0.1:<port>` origin.
+fn addressed_to_desktop(head: &Head, expected_host: &str) -> Result<(), Response> {
+    let Some(host) = head.header("host").map(str::trim) else {
+        return Err(Response::refused(
+            403,
+            format!("this local desktop server requires Host: {expected_host}"),
+        ));
+    };
+    if !host.eq_ignore_ascii_case(expected_host) {
+        return Err(Response::refused(
+            403,
+            format!(
+                "this local desktop server takes requests addressed to `{expected_host}` only, \
+                 not `{host}`"
+            ),
+        ));
+    }
+    if let Some(origin) = head.header("origin").map(str::trim) {
+        let expected_origin = format!("http://{expected_host}");
+        if !origin.eq_ignore_ascii_case(&expected_origin) {
+            return Err(Response::refused(
+                403,
+                format!(
+                    "this local desktop server takes requests from `{expected_origin}` only, not \
+                     from `{origin}`"
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -1926,17 +1988,34 @@ mod tests {
         }
     }
 
+    fn post_host(host: &str, command: &str, headers: &str, body: &str) -> Vec<u8> {
+        format!(
+            "POST /commands/{command} HTTP/1.1\r\nHost: {host}\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn events_host(host: &str, headers: &str, body: &str) -> Vec<u8> {
+        format!(
+            "POST /events HTTP/1.1\r\nHost: {host}\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
     #[test]
     fn start_local_guards_commands_with_token_serves_desktop_csp_and_shuts_down() {
         let server = start_local(Settings::default()).unwrap();
+        let host = server.address().to_string();
         assert!(server.address().ip().is_loopback());
         assert_eq!(server.token().len(), 64);
-        assert_eq!(server.base_url(), format!("http://{}", server.address()));
+        assert_eq!(server.base_url(), format!("http://{host}"));
 
-        // Page served without token on loopback with desktop CSP.
+        // Page served without token on exact loopback Host:port with desktop CSP.
         let (status, head, body) = send_one(
             server.address(),
-            &get("GET", "/?desktop=1&start=1", "127.0.0.1", ""),
+            &get("GET", "/?desktop=1&start=1", &host, ""),
         );
         assert_eq!(status, 200);
         assert!(head.contains(&format!(
@@ -1945,16 +2024,48 @@ mod tests {
         )));
         assert_eq!(body.as_slice(), page::file("/").unwrap().bytes);
 
-        // Non-local Host refused even on page.
+        // Non-local Host, missing Host, wrong port Host, and wrong Origin all refused (403).
         let (status, _, _) = send_one(server.address(), &get("GET", "/", "rebound.example", ""));
         assert_eq!(status, 403);
+        let (status, _, _) = send_one(server.address(), b"GET / HTTP/1.1\r\n\r\n");
+        assert_eq!(status, 403, "missing Host must be refused in desktop mode");
+        let (status, _, _) = send_one(server.address(), &get("GET", "/", "127.0.0.1:9999", ""));
+        assert_eq!(
+            status, 403,
+            "wrong port Host must be refused in desktop mode"
+        );
+        let (status, _, _) = send_one(
+            server.address(),
+            &get("GET", "/", &host, "Origin: http://127.0.0.1:9999\r\n"),
+        );
+        assert_eq!(
+            status, 403,
+            "wrong port Origin must be refused in desktop mode"
+        );
 
-        // Command without token refused.
-        let (status, _, _) = send_one(server.address(), &post("operations", JSON, "{}"));
+        // Command without token refused (401) when Host matches.
+        let (status, _, _) = send_one(
+            server.address(),
+            &post_host(&host, "operations", JSON, "{}"),
+        );
         assert_eq!(status, 401);
 
-        // Command with token and absolute path works.
-        let auth = format!("{JSON}Authorization: Bearer {}\r\n", server.token());
+        // Command with token but missing Host refused (403).
+        let raw_no_host = format!(
+            "POST /commands/operations HTTP/1.1\r\n{JSON}Authorization: Bearer {}\r\nContent-Length: 2\r\n\r\n{{}}",
+            server.token()
+        );
+        let (status, _, _) = send_one(server.address(), raw_no_host.as_bytes());
+        assert_eq!(
+            status, 403,
+            "missing Host must be refused even with valid token"
+        );
+
+        // Command with exact Host, Origin, token and absolute path works.
+        let auth = format!(
+            "{JSON}Origin: http://{host}\r\nAuthorization: Bearer {}\r\n",
+            server.token()
+        );
         let abs_yaml = std::fs::canonicalize(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
@@ -1962,7 +2073,10 @@ mod tests {
         )
         .unwrap();
         let body = serde_json::to_string(&json!({ "source": abs_yaml })).unwrap();
-        let (status, _, raw) = send_one(server.address(), &post("display-list", &auth, &body));
+        let (status, _, raw) = send_one(
+            server.address(),
+            &post_host(&host, "display-list", &auth, &body),
+        );
         assert_eq!(status, 200);
         let reply: Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(reply["ok"], true, "{reply}");
@@ -1985,6 +2099,7 @@ mod tests {
         fs::create_dir_all(&tmp).unwrap();
 
         let server = start_local(Settings::default()).unwrap();
+        let host = server.address().to_string();
         let auth = format!("{JSON}Authorization: Bearer {}\r\n", server.token());
 
         // Build a made-up clean DWG from examples/geometry.yaml into tmp.
@@ -2001,14 +2116,18 @@ mod tests {
             "overwrite": true
         }))
         .unwrap();
-        let (status, _, raw) = send_one(server.address(), &post("build", &auth, &build_body));
+        let (status, _, raw) = send_one(
+            server.address(),
+            &post_host(&host, "build", &auth, &build_body),
+        );
         assert_eq!(status, 200, "{}", String::from_utf8_lossy(&raw));
 
         // Open POST /events watching the absolute original DWG path.
         let mut sse = TcpStream::connect(server.address()).unwrap();
         sse.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let watch_body = serde_json::to_string(&json!({ "set": dwg_path })).unwrap();
-        sse.write_all(&events_request(&auth, &watch_body)).unwrap();
+        sse.write_all(&events_host(&host, &auth, &watch_body))
+            .unwrap();
         let mut buf = String::new();
         let (ev1, r1) = read_sse_event(&mut sse, &mut buf);
         assert_eq!(ev1, "journal");
@@ -2029,7 +2148,10 @@ mod tests {
             }
         }))
         .unwrap();
-        let (status, _, raw) = send_one(server.address(), &post("change", &auth, &change_body));
+        let (status, _, raw) = send_one(
+            server.address(),
+            &post_host(&host, "change", &auth, &change_body),
+        );
         assert_eq!(status, 200, "{}", String::from_utf8_lossy(&raw));
 
         let (ev2, r2) = read_sse_event(&mut sse, &mut buf);
@@ -2046,7 +2168,7 @@ mod tests {
             .unwrap();
         let yaml_watch = serde_json::to_string(&json!({ "set": abs_yaml })).unwrap();
         yaml_sse
-            .write_all(&events_request(&auth, &yaml_watch))
+            .write_all(&events_host(&host, &auth, &yaml_watch))
             .unwrap();
         let mut ybuf = String::new();
         let (ev_y, r_y) = read_sse_event(&mut yaml_sse, &mut ybuf);

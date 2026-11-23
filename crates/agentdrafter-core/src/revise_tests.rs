@@ -3662,3 +3662,93 @@ fn original_recovery_verifies_undo_states_before_modifying_outputs() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn successive_revisions_accumulate_edits_and_stack_undo_restores_each_step() {
+    use crate::change::{undo, UndoRequest};
+    use crate::model::Object;
+
+    let dir = scratch("orig_accumulate");
+    let orig = build_made_up_original(&dir, "LOOP-ACC");
+    let orig_bytes = fs::read(&orig).unwrap();
+    let settings = Settings::default().without_system_fonts();
+
+    let count_lines = |path: &Path| {
+        crate::original::read_dwg_record(path, false)
+            .unwrap()
+            .record
+            .sheet
+            .objects
+            .iter()
+            .filter(|o| matches!(o, Object::Line(_)))
+            .count()
+    };
+    let base_lines = count_lines(&orig);
+
+    // Edit 1: add Line A -> rev1.dwg has base + 1 line.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+    let rev1 = PathBuf::from(r1.result.unwrap().revision_dwg.unwrap());
+    assert_eq!(count_lines(&rev1), base_lines + 1);
+
+    // Edit 2: add Line B -> rev2.dwg chains onto rev1 and has BOTH Line A and Line B!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 5, 0], "to": [10, 5, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "{r2:?}");
+    let rev2 = PathBuf::from(r2.result.unwrap().revision_dwg.unwrap());
+    assert_eq!(
+        count_lines(&rev2),
+        base_lines + 2,
+        "rev2 must retain edit 1 (Line A) alongside edit 2 (Line B)"
+    );
+    assert_eq!(count_lines(&rev1), base_lines + 1, "rev1 stays untouched");
+    assert_eq!(fs::read(&orig).unwrap(), orig_bytes, "original untouched");
+
+    // Undo entry 2 -> rev2 removed, rev1 still has Line A only.
+    let u2 = undo(&UndoRequest {
+        set: orig.clone(),
+        change_set: 2,
+        dry_run: false,
+    });
+    assert!(u2.ok, "{u2:?}");
+    assert!(!rev2.exists());
+    assert!(rev1.is_file());
+    assert_eq!(count_lines(&rev1), base_lines + 1);
+
+    // Undo entry 1 -> rev1 removed, original byte-for-byte untouched.
+    let u1 = undo(&UndoRequest {
+        set: orig.clone(),
+        change_set: 1,
+        dry_run: false,
+    });
+    assert!(u1.ok, "{u1:?}");
+    assert!(!rev1.exists());
+    assert_eq!(fs::read(&orig).unwrap(), orig_bytes);
+
+    let _ = fs::remove_dir_all(&dir);
+}

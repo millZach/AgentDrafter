@@ -46,7 +46,7 @@ use crate::display_snaps::{edge_fills, snaps_of, DisplaySnap};
 use crate::draw::{self, Bounds, DisplayList, HatchCutShort, Item};
 use crate::error::{Error, ErrorCode};
 use crate::model::{Attribute, Object, Paper, Sheet};
-use crate::output::read_record;
+use crate::output::read_record_with_recovery;
 use crate::reply::Reply;
 use crate::settings::Settings;
 use crate::text::fonts::FontSubstitution;
@@ -113,6 +113,11 @@ pub struct DisplayListRequest {
     /// another refuses is shown held back (`shared_edit_failed`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub all_or_none: bool,
+    /// On a damaged original DWG that `read` read past damage, draw the
+    /// recoverable objects read-only instead of refusing with `dwg_read`.
+    /// Default false: strict DWG reading stands unless asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_past_damage: bool,
 }
 
 /// A value given, even `null`, as itself: only a key left out is none.
@@ -134,6 +139,7 @@ impl DisplayListRequest {
             values: false,
             change_set: None,
             all_or_none: false,
+            read_past_damage: false,
         }
     }
 }
@@ -1125,7 +1131,7 @@ fn read(
     if !named(&name) {
         return Err(no_such_sheet(sheet, std::slice::from_ref(&name)));
     }
-    let record = read_record(source)?;
+    let record = read_record_with_recovery(source, request.read_past_damage)?;
     // A DWG's objects carry the IDs its read gives them.
     let ids: Vec<(String, Option<String>)> = if is_dwg(source) {
         record.ids.clone()
