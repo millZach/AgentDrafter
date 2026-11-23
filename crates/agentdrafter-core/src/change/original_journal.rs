@@ -802,49 +802,92 @@ impl OriginalJournal {
         }))
     }
 
-    /// Whether `revision_dwg` (as stored in `OriginalRevisionMeta::revision_dwg`)
-    /// is a sibling automatic working-revision filename (`<non-empty-stem>.rev<N>.dwg`
-    /// with no directory components), as opposed to a standalone `--output` path
-    /// (including legacy journal entries written before `standalone_output`).
-    ///
-    /// Accepts any non-empty stem so same-directory symlink aliases (e.g.
-    /// revising `Pump.dwg` through `Alias.dwg` -> `Alias.rev1.dwg`, then
-    /// reopening via `Pump.dwg`) stay recognized as valid working revisions.
-    fn is_default_working_revision_dwg(revision_dwg: &str) -> bool {
+    /// Parses a sibling automatic working-revision filename
+    /// (`<non-empty-stem>.rev<1+ ASCII digits>.dwg` with no directory
+    /// components) and returns `<stem>`, or `None` otherwise.
+    fn parse_sibling_working_revision_stem(revision_dwg: &str) -> Option<&str> {
         if revision_dwg.is_empty() || revision_dwg.contains('/') {
-            return false;
+            return None;
         }
         let mut comps = Path::new(revision_dwg).components();
-        let Some(Component::Normal(file_name)) = comps.next() else {
-            return false;
+        let Component::Normal(file_name) = comps.next()? else {
+            return None;
         };
         if comps.next().is_some() {
-            return false;
+            return None;
         }
-        let Some(name) = file_name.to_str() else {
-            return false;
-        };
-        let Some(without_ext) = name.strip_suffix(".dwg").or_else(|| {
+        let name = file_name.to_str()?;
+        let without_ext = name.strip_suffix(".dwg").or_else(|| {
             let ext_start = name.len().checked_sub(4)?;
             name.is_char_boundary(ext_start)
                 .then(|| &name[ext_start..])
                 .filter(|ext| ext.eq_ignore_ascii_case(".dwg"))
                 .map(|_| &name[..ext_start])
-        }) else {
-            return false;
-        };
-        let Some((stem, num)) = without_ext.rsplit_once(".rev") else {
-            return false;
-        };
+        })?;
+        let (stem, num) = without_ext.rsplit_once(".rev")?;
         if stem.is_empty()
             || num.is_empty()
             || num.starts_with('0')
             || !num.bytes().all(|b| b.is_ascii_digit())
             || num.parse::<u64>().ok().is_none_or(|v| v == 0)
         {
+            return None;
+        }
+        Some(stem)
+    }
+
+    /// Whether a sibling `<stem>.dwg` / `<stem>.DWG` in `self.orig_dir_real`
+    /// resolves to the exact same underlying file identity as this original
+    /// (e.g. a same-directory symlink `Alias.dwg -> Pump.dwg`).
+    fn sibling_dwg_is_same_original(&self, stem: &str) -> bool {
+        for ext in [".dwg", ".DWG"] {
+            let candidate = self.orig_dir_real.join(format!("{stem}{ext}"));
+            if let Ok(canon) = fs::canonicalize(&candidate) {
+                if canon == self.resolved_source {
+                    return true;
+                }
+            }
+            #[cfg(any(unix, windows))]
+            if let Some(orig_id) = self.source_id {
+                if let Ok(file) = File::open(&candidate) {
+                    if file_id_of_file(&file) == Some(orig_id) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Authoritatively classifies whether an `OriginalRevisionMeta` entry is a
+    /// standalone `--output` revision (`true`) or part of the sequential working
+    /// revision chain (`false`).
+    ///
+    /// - Entries written with an explicit `Some(flag)` use `flag` directly.
+    /// - Legacy pre-PR entries (`None` on disk) are classified as working ONLY
+    ///   when `revision_dwg` is a sibling `<stem>.rev<N>.dwg` whose `<stem>`
+    ///   either matches this original's stem or names a sibling `<stem>.dwg`
+    ///   pointing to the exact same underlying file identity (such as a
+    ///   same-directory symlink alias). Legacy `--output IssuedCopy.rev1.dwg`
+    ///   beside `Pump.dwg` has no `IssuedCopy.dwg -> Pump.dwg`, so it is
+    ///   authoritatively classified as standalone (`true`).
+    pub(crate) fn is_standalone_meta(&self, meta: &OriginalRevisionMeta) -> bool {
+        if let Some(standalone) = meta.standalone_output {
+            return standalone;
+        }
+        let Some(stem) = Self::parse_sibling_working_revision_stem(&meta.revision_dwg) else {
+            return true;
+        };
+        let source_stem = stem_of(&self.source);
+        #[cfg(any(windows, target_os = "macos"))]
+        let matches_self =
+            stem.eq_ignore_ascii_case(&self.sheet) || stem.eq_ignore_ascii_case(&source_stem);
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let matches_self = stem == self.sheet || stem == source_stem;
+        if matches_self {
             return false;
         }
-        true
+        !self.sibling_dwg_is_same_original(stem)
     }
 
     /// Returns the newest active (finished, non-undone, non-standalone) working
@@ -871,8 +914,7 @@ impl OriginalJournal {
             let Some(meta) = entry.original_revision.as_ref() else {
                 continue;
             };
-            if meta.standalone_output || !Self::is_default_working_revision_dwg(&meta.revision_dwg)
-            {
+            if self.is_standalone_meta(meta) {
                 continue;
             }
             let path = self.resolve_file(&meta.revision_dwg);
@@ -1139,6 +1181,9 @@ pub(super) fn journal_original(request: &JournalRequest) -> Reply<JournalReport>
     };
     for entry in &mut entries {
         if let Some(meta) = entry.original_revision.as_mut() {
+            if meta.standalone_output.is_none() {
+                meta.standalone_output = Some(oj.is_standalone_meta(meta));
+            }
             meta.revision_path = Some(oj.display_file(&meta.revision_dwg));
         }
     }

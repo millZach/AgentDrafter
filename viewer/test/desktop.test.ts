@@ -17,12 +17,14 @@ import {
   loadLocalRecents,
   matchOriginalObjectId,
   mergeRecent,
+  newestActiveOriginalRevision,
   newestActiveOriginalSha,
   nextRevisionHint,
   normalizeOriginalChangeSet,
   noteJournalOriginalSha,
   parseDesktopUrl,
   removeRecentLocal,
+  resetDwgReadJournalState,
   resolveBeside,
   revisionAtEntry,
   saveLocalRecents,
@@ -288,12 +290,13 @@ test('resolves active and stepped revisions from an original DWG journal and nor
     sha256: 'bbb',
   });
 
-  // Legacy journal entry omitting `standalone_output` whose `revision_dwg` is a custom name or in a subdir
-  // must ALSO be treated as standalone by both `latestActiveRevision` and `revisionAtEntry`.
+  // Legacy journal entry omitting `standalone_output` whose `revision_dwg` is a custom name,
+  // an unrelated stem like `IssuedCopy.rev1.dwg`, or in a subdir must ALSO be treated as standalone
+  // by both `latestActiveRevision` and `revisionAtEntry`.
   const legacyStandaloneJournal: JournalReport = {
     set: '/plant/P-101.dwg',
-    message: '2 entries',
-    can_undo: [1, 2],
+    message: '3 entries',
+    can_undo: [1, 2, 3],
     entries: [
       {
         entry: 1,
@@ -317,6 +320,19 @@ test('resolves active and stepped revisions from an original DWG journal and nor
           original_file: 'P-101.dwg',
           original_sha256: 'aaa',
           dwg_version: 'AC1027',
+          revision_dwg: 'IssuedCopy.rev1.dwg',
+          revision_sha256: 'alt1b',
+        },
+      },
+      {
+        entry: 3,
+        kind: 'change_set',
+        at: '2026-11-22T18:02:00Z',
+        landed_on: ['P-101'],
+        original_revision: {
+          original_file: 'P-101.dwg',
+          original_sha256: 'aaa',
+          dwg_version: 'AC1027',
           revision_dwg: 'sub/P-101.rev1.dwg',
           revision_sha256: 'alt2',
         },
@@ -326,6 +342,7 @@ test('resolves active and stepped revisions from an original DWG journal and nor
   assert.equal(latestActiveRevision(legacyStandaloneJournal, '/plant/P-101.dwg', 'aaa'), null);
   assert.equal(revisionAtEntry(legacyStandaloneJournal, 1, '/plant/P-101.dwg', 'aaa'), null);
   assert.equal(revisionAtEntry(legacyStandaloneJournal, 2, '/plant/P-101.dwg', 'aaa'), null);
+  assert.equal(revisionAtEntry(legacyStandaloneJournal, 3, '/plant/P-101.dwg', 'aaa'), null);
 
   // A -> B -> A disk swap: entry 1 for hashA, newer entry 2 for hashB.
   // Inspect ONLY the newest active non-standalone entry (entry 2):
@@ -347,6 +364,7 @@ test('resolves active and stepped revisions from an original DWG journal and nor
           dwg_version: 'AC1032',
           revision_dwg: 'P-101.rev1.dwg',
           revision_sha256: 'revA',
+          standalone_output: false,
         },
       },
       {
@@ -360,10 +378,12 @@ test('resolves active and stepped revisions from an original DWG journal and nor
           dwg_version: 'AC1032',
           revision_dwg: 'P-101.rev2.dwg',
           revision_sha256: 'revB',
+          standalone_output: false,
         },
       },
     ],
   };
+  assert.deepEqual(newestActiveOriginalRevision(swapJournal), { entry: 2, sha: 'hashB' });
   assert.equal(newestActiveOriginalSha(swapJournal), 'hashB');
   assert.equal(latestActiveRevision(swapJournal, '/plant/P-101.dwg', 'hashA'), null);
   assert.deepEqual(latestActiveRevision(swapJournal, '/plant/P-101.dwg', 'hashB'), {
@@ -386,8 +406,9 @@ test('resolves active and stepped revisions from an original DWG journal and nor
     sha256: 'revA',
   });
 
-  // Same-directory symlink alias: Pump.dwg revised via Alias.dwg -> Alias.rev1.dwg,
-  // plus core-provided native `revision_path` preferred over client-side `resolveBeside`.
+  // Same-directory symlink alias: core resolves `standalone_output: false`
+  // authoritatively (both for new entries and verified legacy symlinks) and
+  // provides native `revision_path` preferred over client-side `resolveBeside`.
   const aliasAndNativePathJournal: JournalReport = {
     set: '/plant/Pump.dwg',
     message: '1 entry',
@@ -404,6 +425,7 @@ test('resolves active and stepped revisions from an original DWG journal and nor
           dwg_version: 'AC1032',
           revision_dwg: 'Alias.rev1.dwg',
           revision_sha256: 'aliasRev1Sha',
+          standalone_output: false,
           revision_path: '/real-plant/Alias.rev1.dwg',
         },
       },
@@ -474,68 +496,86 @@ test('merges, caps, removes, and persists fallback local recents cleanly', () =>
   assert.deepEqual(loadLocalRecents(store), list);
 });
 
-test('DwgReadTracker rejects out-of-order read completions and refreshes after SSE during initial read', () => {
+test('DwgReadTracker rejects out-of-order read completions and keys refreshes by monotonic journal entry', () => {
   // 1. Out-of-order completions: slow read B (gen 2) arriving after newer read A (gen 3) is ignored.
   const t1 = createDwgReadTracker();
-  const g1 = beginDwgRead(t1);
-  assert.deepEqual(completeDwgRead(t1, g1, 'hashA'), {
+  const r1 = beginDwgRead(t1);
+  assert.deepEqual(completeDwgRead(t1, r1.gen, r1.startedForEntry, 'hashA'), {
     accept: true,
     prevSha: null,
     changed: false,
-    needsFollowUpRead: false,
+    followUp: false,
   });
-  assert.equal(noteJournalOriginalSha(t1, 'hashB'), true);
+  assert.equal(noteJournalOriginalSha(t1, 1, 'hashB'), true);
   const slowB = beginDwgRead(t1);
   // Newer read starts and finishes before slowB resolves.
   const fastA = beginDwgRead(t1);
-  assert.deepEqual(completeDwgRead(t1, fastA, 'hashA'), {
+  assert.deepEqual(completeDwgRead(t1, fastA.gen, fastA.startedForEntry, 'hashA'), {
     accept: true,
     prevSha: 'hasha',
     changed: false,
-    needsFollowUpRead: false,
+    followUp: false,
   });
-  // Slow B finally returns -> rejected because slowB !== t1.gen!
-  assert.deepEqual(completeDwgRead(t1, slowB, 'hashB'), {
+  // Slow B finally returns -> rejected because slowB.gen !== t1.gen!
+  assert.deepEqual(completeDwgRead(t1, slowB.gen, slowB.startedForEntry, 'hashB'), {
     accept: false,
     prevSha: null,
     changed: false,
-    needsFollowUpRead: false,
+    followUp: false,
   });
-  assert.equal(t1.cachedSha, 'hasha');
+  assert.equal(t1.lastReadSha, 'hasha');
 
-  // 2. SSE arrives while initial read is in flight with a different original_sha256 ->
-  //    once initial read finishes with hashA, tracker requests ONE follow-up read.
+  // 2. SSE entry 2 (hashB) arrives while initial read (startedForEntry 0) is in flight ->
+  //    once initial read finishes with hashA, tracker requests ONE follow-up read for entry 2.
   const t2 = createDwgReadTracker();
-  const initGen = beginDwgRead(t2);
-  // SSE arrives during initial read: returns false (don't race), remembers hashB.
-  assert.equal(noteJournalOriginalSha(t2, 'hashB'), false);
-  assert.deepEqual(completeDwgRead(t2, initGen, 'hashA'), {
+  const initRead = beginDwgRead(t2);
+  assert.equal(noteJournalOriginalSha(t2, 2, 'hashB'), false);
+  assert.deepEqual(completeDwgRead(t2, initRead.gen, initRead.startedForEntry, 'hashA'), {
     accept: true,
     prevSha: null,
     changed: false,
-    needsFollowUpRead: true,
+    followUp: true,
   });
-  // Follow-up read runs and discovers disk is now hashB (changed = true, no second follow-up).
-  const followGen = beginDwgRead(t2);
-  assert.deepEqual(completeDwgRead(t2, followGen, 'hashB'), {
+  // Follow-up read runs (startedForEntry 2) and discovers disk is now hashB.
+  const followRead = beginDwgRead(t2);
+  assert.equal(followRead.startedForEntry, 2);
+  assert.deepEqual(completeDwgRead(t2, followRead.gen, followRead.startedForEntry, 'hashB'), {
     accept: true,
     prevSha: 'hasha',
     changed: true,
-    needsFollowUpRead: false,
+    followUp: false,
   });
-  // Repeat SSE with same hashB does not loop.
-  assert.equal(noteJournalOriginalSha(t2, 'hashB'), false);
+  // Repeat SSE with same entry 2 does not loop.
+  assert.equal(noteJournalOriginalSha(t2, 2, 'hashB'), false);
 
-  // 3. Even if disk was swapped back to hashA while journal stays on hashB, follow-up does NOT infinite-loop.
+  // 3. Follow-up read for entry 2 captures A (disk swapped back to A, or read raced before swap to B):
+  //    - No infinite loop when no newer entry arrives.
+  //    - When a NEWER SSE entry 3 arrives (even with the SAME SHA hashB!), it MUST trigger a refresh!
   const t3 = createDwgReadTracker();
   const gInit = beginDwgRead(t3);
-  assert.equal(noteJournalOriginalSha(t3, 'hashB'), false);
-  assert.equal(completeDwgRead(t3, gInit, 'hashA').needsFollowUpRead, true);
+  assert.equal(noteJournalOriginalSha(t3, 2, 'hashB'), false);
+  assert.equal(completeDwgRead(t3, gInit.gen, gInit.startedForEntry, 'hashA').followUp, true);
   const gFollow = beginDwgRead(t3);
-  assert.deepEqual(completeDwgRead(t3, gFollow, 'hashA'), {
+  assert.deepEqual(completeDwgRead(t3, gFollow.gen, gFollow.startedForEntry, 'hashA'), {
     accept: true,
     prevSha: 'hasha',
     changed: false,
-    needsFollowUpRead: false,
+    followUp: false,
   });
+  // Same entry 2 repeated -> no loop.
+  assert.equal(noteJournalOriginalSha(t3, 2, 'hashB'), false);
+  // Newer entry 3 with SHA hashB -> MUST trigger refresh instead of being dropped!
+  assert.equal(noteJournalOriginalSha(t3, 3, 'hashB'), true);
+  const gEntry3 = beginDwgRead(t3);
+  assert.equal(gEntry3.startedForEntry, 3);
+  assert.deepEqual(completeDwgRead(t3, gEntry3.gen, gEntry3.startedForEntry, 'hashB'), {
+    accept: true,
+    prevSha: 'hasha',
+    changed: true,
+    followUp: false,
+  });
+
+  // 4. Journal replacement resets entry watermarks so a fresh journal starting at entry 1 triggers refresh.
+  resetDwgReadJournalState(t3);
+  assert.equal(noteJournalOriginalSha(t3, 1, 'hashC'), true);
 });

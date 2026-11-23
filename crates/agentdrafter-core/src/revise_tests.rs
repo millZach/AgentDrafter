@@ -4071,29 +4071,32 @@ fn standalone_output_revision_never_becomes_next_working_revision_base() {
     let j = crate::journal(&crate::JournalRequest { set: orig.clone() })
         .result
         .unwrap();
-    assert!(
-        !j.entries[0]
+    assert_eq!(
+        j.entries[0]
             .recorded
             .original_revision
             .as_ref()
             .unwrap()
-            .standalone_output
+            .standalone_output,
+        Some(false)
     );
-    assert!(
+    assert_eq!(
         j.entries[1]
             .recorded
             .original_revision
             .as_ref()
             .unwrap()
-            .standalone_output
+            .standalone_output,
+        Some(true)
     );
-    assert!(
-        !j.entries[2]
+    assert_eq!(
+        j.entries[2]
             .recorded
             .original_revision
             .as_ref()
             .unwrap()
-            .standalone_output
+            .standalone_output,
+        Some(false)
     );
 
     let _ = fs::remove_dir_all(&dir);
@@ -4405,7 +4408,8 @@ fn legacy_journal_entry_without_standalone_output_never_becomes_working_revision
     assert!(r1.ok, "{r1:?}");
     let rep1 = r1.result.unwrap();
 
-    // 2. Explicit `--output alternate.dwg` (circle at x=20) and `--output sub/LEGACY-SOLO.rev1.dwg` (x=25).
+    // 2. Explicit `--output alternate.dwg` (x=20), `--output IssuedCopy.rev1.dwg` (x=22),
+    //    and `--output sub/LEGACY-SOLO.rev1.dwg` (x=25).
     let alt = dir.join("alternate.dwg");
     let r_alt = revise_with(
         &ReviseRequest {
@@ -4423,6 +4427,24 @@ fn legacy_journal_entry_without_standalone_output_never_becomes_working_revision
         &settings,
     );
     assert!(r_alt.ok, "{r_alt:?}");
+
+    let issued_copy = dir.join("IssuedCopy.rev1.dwg");
+    let r_issued = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [22, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: Some(issued_copy),
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r_issued.ok, "{r_issued:?}");
 
     let sub_rev = sub.join("LEGACY-SOLO.rev1.dwg");
     let r_sub = revise_with(
@@ -4442,17 +4464,61 @@ fn legacy_journal_entry_without_standalone_output_never_becomes_working_revision
     );
     assert!(r_sub.ok, "{r_sub:?}");
 
-    // Strip `"standalone_output":true` from journal.jsonl to simulate legacy
-    // pre-PR journal entries written before `standalone_output` existed.
+    // Strip `"standalone_output":true` and `"standalone_output":false` from
+    // journal.jsonl to simulate legacy pre-PR journal entries written before
+    // `standalone_output` existed.
     let jfile = original_journal_file(&orig).expect("journal file exists");
     let raw = fs::read_to_string(&jfile).unwrap();
     assert!(raw.contains("\"standalone_output\":true"));
-    let legacy = raw.replace(",\"standalone_output\":true", "");
+    assert!(raw.contains("\"standalone_output\":false"));
+    let legacy = raw
+        .replace(",\"standalone_output\":true", "")
+        .replace(",\"standalone_output\":false", "");
     assert!(!legacy.contains("standalone_output"));
     fs::write(&jfile, legacy).unwrap();
 
-    // 3. Next working revision (circle at x=30) MUST skip both legacy standalone
-    //    entries and chain onto entry 1 (`LEGACY-SOLO.rev1.dwg`)!
+    // Journal reply MUST authoritatively resolve every legacy entry:
+    // entry 1 (`LEGACY-SOLO.rev1.dwg`) -> standalone_output: false,
+    // entries 2/3/4 (`alternate.dwg`, `IssuedCopy.rev1.dwg`, `sub/LEGACY-SOLO.rev1.dwg`) -> standalone_output: true!
+    let jrep = crate::journal(&crate::JournalRequest { set: orig.clone() })
+        .result
+        .unwrap();
+    assert_eq!(
+        jrep.entries[0]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(false)
+    );
+    assert_eq!(
+        jrep.entries[1]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(true)
+    );
+    assert_eq!(
+        jrep.entries[2].recorded.original_revision.as_ref().unwrap().standalone_output,
+        Some(true),
+        "legacy `--output IssuedCopy.rev1.dwg` without a matching symlink must resolve standalone_output: true"
+    );
+    assert_eq!(
+        jrep.entries[3]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(true)
+    );
+
+    // 3. Next working revision (circle at x=30) MUST skip all three legacy
+    //    standalone entries (including `IssuedCopy.rev1.dwg`) and chain onto
+    //    entry 1 (`LEGACY-SOLO.rev1.dwg`)!
     let r2 = revise_with(
         &ReviseRequest {
             set: orig.clone(),
@@ -4477,8 +4543,8 @@ fn legacy_journal_entry_without_standalone_output_never_becomes_working_revision
     );
     let xs = circles_at_x(Path::new(&rep2.revision_dwg.unwrap()));
     assert!(
-        xs.contains(&10) && xs.contains(&30) && !xs.contains(&20) && !xs.contains(&25),
-        "rev2 must contain entry 1 (10) + entry 4 (30), NOT alternate (20) or sub (25): {xs:?}"
+        xs.contains(&10) && xs.contains(&30) && !xs.contains(&20) && !xs.contains(&22) && !xs.contains(&25),
+        "rev2 must contain entry 1 (10) + entry 5 (30), NOT alternate (20), IssuedCopy (22), or sub (25): {xs:?}"
     );
 
     let _ = fs::remove_dir_all(&dir);
@@ -4537,13 +4603,18 @@ fn same_directory_symlink_alias_working_revision_chains_when_reopened_via_origin
         "Alias.rev1.dwg"
     );
 
-    // Journal reply populates native OS-resolved `revision_path`, while `journal.jsonl`
-    // on disk does NOT persist `revision_path`.
+    // Journal reply populates native OS-resolved `revision_path` AND explicit
+    // `standalone_output: Some(false)`, while `journal.jsonl` on disk does NOT
+    // persist `revision_path`.
     let jfile = original_journal_file(&pump).expect("journal file exists");
     let raw_jsonl = fs::read_to_string(&jfile).unwrap();
     assert!(
         !raw_jsonl.contains("revision_path"),
         "revision_path must be computed on read, never persisted to journal.jsonl: {raw_jsonl}"
+    );
+    assert!(
+        raw_jsonl.contains("\"standalone_output\":false"),
+        "new working revision persists explicit standalone_output:false: {raw_jsonl}"
     );
     let jrep = journal(&JournalRequest { set: pump.clone() })
         .result
@@ -4553,6 +4624,7 @@ fn same_directory_symlink_alias_working_revision_chains_when_reopened_via_origin
         .original_revision
         .as_ref()
         .expect("entry 1 has original_revision");
+    assert_eq!(meta1.standalone_output, Some(false));
     let rev_path = meta1
         .revision_path
         .as_deref()
@@ -4560,6 +4632,27 @@ fn same_directory_symlink_alias_working_revision_chains_when_reopened_via_origin
     assert_eq!(
         fs::canonicalize(rev_path).unwrap(),
         fs::canonicalize(&alias_rev1).unwrap()
+    );
+
+    // Also test legacy pre-PR entry (omitting `standalone_output` on disk):
+    // because `Alias.dwg` in the same directory resolves to `Pump.dwg`,
+    // `Alias.rev1.dwg` MUST still resolve `standalone_output: Some(false)` and
+    // chain when reopened via `Pump.dwg`!
+    let legacy_jsonl = raw_jsonl.replace(",\"standalone_output\":false", "");
+    assert!(!legacy_jsonl.contains("standalone_output"));
+    fs::write(&jfile, legacy_jsonl).unwrap();
+    let jrep_legacy = journal(&JournalRequest { set: pump.clone() })
+        .result
+        .unwrap();
+    assert_eq!(
+        jrep_legacy.entries[0]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(false),
+        "legacy Alias.rev1.dwg with sibling Alias.dwg -> Pump.dwg must resolve standalone_output: false"
     );
 
     // 2. Reopen and revise via `Pump.dwg` -> must chain onto `Alias.rev1.dwg`

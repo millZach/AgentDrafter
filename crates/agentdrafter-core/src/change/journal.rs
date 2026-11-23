@@ -148,9 +148,12 @@ pub struct OriginalRevisionMeta {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allowed_loss: bool,
     /// Whether this revision was written to an explicit `--output <file.dwg>`
-    /// standalone destination rather than the sequential working revision chain.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub standalone_output: bool,
+    /// standalone destination (`Some(true)`) rather than the sequential working
+    /// revision chain (`Some(false)`). `None` appears only on legacy pre-PR
+    /// journal lines on disk and is resolved authoritatively when `journal`
+    /// builds its report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standalone_output: Option<bool>,
     /// Native OS-resolved path of `revision_dwg`, populated at read time when
     /// building a `journal` reply and never persisted into `journal.jsonl`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

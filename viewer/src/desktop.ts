@@ -235,110 +235,168 @@ function matchesOriginalSha(recorded: string | undefined, expected: string | nul
   return recorded.toLowerCase() === expected.toLowerCase();
 }
 
-function isDefaultWorkingRevisionName(revisionDwg: string, winOrig: boolean): boolean {
-  if (!revisionDwg) return false;
+function parseSiblingWorkingRevisionStem(revisionDwg: string, winOrig: boolean): string | null {
+  if (!revisionDwg) return null;
   if (winOrig) {
-    if (revisionDwg.includes('/') || revisionDwg.includes('\\') || isAbsolutePath(revisionDwg)) return false;
+    if (revisionDwg.includes('/') || revisionDwg.includes('\\') || isAbsolutePath(revisionDwg)) return null;
   } else if (revisionDwg.includes('/')) {
-    return false;
+    return null;
   }
-  if (!/\.dwg$/i.test(revisionDwg)) return false;
+  if (!/\.dwg$/i.test(revisionDwg)) return null;
   const withoutExt = revisionDwg.slice(0, -4);
   const revIdx = withoutExt.lastIndexOf('.rev');
-  if (revIdx <= 0) return false;
+  if (revIdx <= 0) return null;
   const num = withoutExt.slice(revIdx + 4);
-  return /^[1-9]\d*$/.test(num);
+  if (!/^[1-9]\d*$/.test(num)) return null;
+  return withoutExt.slice(0, revIdx);
+}
+
+function dwgStem(path: string, winOrig: boolean): string {
+  const base = displayNameWithMode(path, winOrig);
+  return base.replace(/\.dwg$/i, '');
+}
+
+function stemsMatch(a: string, b: string, winOrig: boolean): boolean {
+  if (!a || !b) return false;
+  return winOrig ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 function isWorkingRevisionMeta(
   meta: NonNullable<Entry['original_revision']> | undefined,
+  originalPath: string,
   winOrig: boolean,
 ): meta is NonNullable<Entry['original_revision']> {
-  if (!meta?.revision_dwg || meta.standalone_output) return false;
-  return isDefaultWorkingRevisionName(meta.revision_dwg, winOrig);
+  if (!meta?.revision_dwg) return false;
+  // Core `journal` always resolves `standalone_output` to an explicit boolean
+  // (including legacy pre-PR entries via symlink/file-identity verification).
+  if (typeof meta.standalone_output === 'boolean') {
+    return !meta.standalone_output;
+  }
+  // Fallback for synthetic/mocked journal objects that omit `standalone_output`:
+  // require a sibling `<stem>.rev<N>.dwg` matching the original's own stem.
+  const stem = parseSiblingWorkingRevisionStem(meta.revision_dwg, winOrig);
+  if (!stem) return false;
+  if (stemsMatch(stem, dwgStem(originalPath, winOrig), winOrig)) return true;
+  if (meta.original_file && stemsMatch(stem, dwgStem(meta.original_file, winOrig), winOrig)) return true;
+  return false;
 }
 
 /**
- * Monotonic generation tracker for async `read --no-mirror` requests on a plant
- * DWG, coordinating initial reads, SSE-triggered refreshes, and pre-edit checks:
+ * Monotonic generation + journal-entry tracker for async `read --no-mirror`
+ * requests on a plant DWG, coordinating initial reads, SSE-triggered refreshes,
+ * and pre-edit checks:
  * - Any response with `gen !== tracker.gen` is rejected so slow out-of-order
  *   reads never overwrite a newer read.
- * - Any journal SSE `original_sha256` arriving while a read is in flight is
- *   remembered so `completeDwgRead` triggers a single follow-up read if the
- *   completed read's SHA-256 differs from the journal's newest active entry.
+ * - Refresh state is keyed by monotonic journal entry number (`latestEntry` vs
+ *   `startedForEntry` / `refreshedUpToEntry`), NOT by SHA string, so if a read
+ *   started for entry N returns A and a newer entry N+1 arrives with SHA B,
+ *   the tracker ALWAYS triggers a fresh read — while never looping when no
+ *   newer entry arrives.
  */
 export interface DwgReadTracker {
   gen: number;
   inFlight: boolean;
-  cachedSha: string | null;
-  latestJournalSha: string | null;
-  refreshedForJournalSha: string | null;
+  lastReadSha: string | null;
+  latestEntry: number;
+  latestSha: string | null;
+  refreshedUpToEntry: number;
 }
 
 export function createDwgReadTracker(): DwgReadTracker {
   return {
     gen: 0,
     inFlight: false,
-    cachedSha: null,
-    latestJournalSha: null,
-    refreshedForJournalSha: null,
+    lastReadSha: null,
+    latestEntry: 0,
+    latestSha: null,
+    refreshedUpToEntry: 0,
   };
 }
 
-/** Starts a new async `read --no-mirror` and returns its monotonic generation ID. */
-export function beginDwgRead(tracker: DwgReadTracker): number {
-  tracker.gen += 1;
-  tracker.inFlight = true;
-  return tracker.gen;
+/** Clears journal-entry watermarks (e.g., when a journal is replaced or cut back). */
+export function resetDwgReadJournalState(tracker: DwgReadTracker): void {
+  tracker.latestEntry = 0;
+  tracker.latestSha = null;
+  tracker.refreshedUpToEntry = 0;
 }
 
 /**
- * Notes the newest active `original_sha256` from a journal SSE snapshot.
- * Returns `true` when the caller should immediately start a fresh `read --no-mirror`.
- * While a read is already in flight, records the SHA so `completeDwgRead` triggers
- * a follow-up read once the in-flight read finishes with a different SHA-256.
+ * Starts a new async `read --no-mirror` and returns its monotonic generation ID
+ * along with the latest journal entry number observed when the read began.
  */
-export function noteJournalOriginalSha(tracker: DwgReadTracker, journalSha: string | null): boolean {
-  if (!journalSha) return false;
+export function beginDwgRead(tracker: DwgReadTracker): { gen: number; startedForEntry: number } {
+  tracker.gen += 1;
+  tracker.inFlight = true;
+  return { gen: tracker.gen, startedForEntry: tracker.latestEntry };
+}
+
+/**
+ * Notes the newest active `(entryNumber, original_sha256)` from a journal SSE
+ * snapshot. Returns `true` when the caller should immediately start a fresh
+ * `read --no-mirror`. While a read is in flight, updates `latestEntry` /
+ * `latestSha` so `completeDwgRead` triggers a follow-up read if `latestEntry`
+ * advanced past `startedForEntry` with a different SHA-256.
+ */
+export function noteJournalOriginalSha(
+  tracker: DwgReadTracker,
+  entryNumber: number | null,
+  journalSha: string | null,
+): boolean {
+  if (!entryNumber || entryNumber <= 0 || !journalSha) return false;
   const norm = journalSha.toLowerCase();
-  if (tracker.latestJournalSha !== norm) {
-    tracker.latestJournalSha = norm;
-    tracker.refreshedForJournalSha = null;
+  if (entryNumber > tracker.latestEntry) {
+    tracker.latestEntry = entryNumber;
+    tracker.latestSha = norm;
   }
   if (tracker.inFlight) return false;
-  if (tracker.cachedSha && tracker.cachedSha === norm) return false;
-  if (tracker.refreshedForJournalSha === norm) return false;
-  tracker.refreshedForJournalSha = norm;
+  if (tracker.latestEntry <= tracker.refreshedUpToEntry) return false;
+  if (!tracker.latestSha) return false;
+  if (tracker.lastReadSha && tracker.lastReadSha === tracker.latestSha) {
+    tracker.refreshedUpToEntry = Math.max(tracker.refreshedUpToEntry, tracker.latestEntry);
+    return false;
+  }
   return true;
 }
 
 /**
- * Completes an async `read --no-mirror` for `gen`. Rejects stale/out-of-order
- * responses (`gen !== tracker.gen`) without mutating state.
+ * Completes an async `read --no-mirror` for `(gen, startedForEntry)`.
+ * Rejects stale/out-of-order responses (`gen !== tracker.gen`) without mutating
+ * state.
  */
 export function completeDwgRead(
   tracker: DwgReadTracker,
   gen: number,
-  freshSha: string | null,
-): { accept: boolean; prevSha: string | null; changed: boolean; needsFollowUpRead: boolean } {
+  startedForEntry: number,
+  readSha: string | null,
+): { accept: boolean; prevSha: string | null; changed: boolean; followUp: boolean } {
   if (gen !== tracker.gen) {
-    return { accept: false, prevSha: null, changed: false, needsFollowUpRead: false };
+    return { accept: false, prevSha: null, changed: false, followUp: false };
   }
-  const prevSha = tracker.cachedSha;
-  const normFresh = freshSha ? freshSha.toLowerCase() : null;
+  const prevSha = tracker.lastReadSha;
+  const normRead = readSha ? readSha.toLowerCase() : null;
   tracker.inFlight = false;
-  tracker.cachedSha = normFresh;
-  const changed = !!prevSha && (!normFresh || normFresh !== prevSha);
-  let needsFollowUpRead = false;
-  if (
-    tracker.latestJournalSha &&
-    tracker.latestJournalSha !== normFresh &&
-    tracker.refreshedForJournalSha !== tracker.latestJournalSha
-  ) {
-    tracker.refreshedForJournalSha = tracker.latestJournalSha;
-    needsFollowUpRead = true;
+  tracker.lastReadSha = normRead;
+  tracker.refreshedUpToEntry = Math.max(tracker.refreshedUpToEntry, startedForEntry);
+  const changed = !!prevSha && (!normRead || normRead !== prevSha);
+  const followUp =
+    tracker.latestEntry > startedForEntry && tracker.latestSha !== null && tracker.latestSha !== normRead;
+  return { accept: true, prevSha, changed, followUp };
+}
+
+/**
+ * The `(entry, original_sha256)` recorded on the newest active (finished,
+ * non-undone, non-rolled-back) original-DWG revision entry in `journal`, or
+ * null if none.
+ */
+export function newestActiveOriginalRevision(journal: JournalReport | null): { entry: number; sha: string } | null {
+  if (!journal) return null;
+  for (let i = journal.entries.length - 1; i >= 0; i -= 1) {
+    const e = journal.entries[i] as Entry | undefined;
+    if (!e || e.kind !== 'change_set' || e.undone_by || e.rolled_back) continue;
+    const sha = e.original_revision?.original_sha256;
+    if (sha) return { entry: e.entry, sha };
   }
-  return { accept: true, prevSha, changed, needsFollowUpRead };
+  return null;
 }
 
 /**
@@ -346,14 +404,7 @@ export function completeDwgRead(
  * non-rolled-back) original-DWG revision entry in `journal`, or null if none.
  */
 export function newestActiveOriginalSha(journal: JournalReport | null): string | null {
-  if (!journal) return null;
-  for (let i = journal.entries.length - 1; i >= 0; i -= 1) {
-    const e = journal.entries[i] as Entry | undefined;
-    if (!e || e.kind !== 'change_set' || e.undone_by || e.rolled_back) continue;
-    const sha = e.original_revision?.original_sha256;
-    if (sha) return sha;
-  }
-  return null;
+  return newestActiveOriginalRevision(journal)?.sha ?? null;
 }
 
 /**
@@ -373,7 +424,7 @@ export function latestActiveRevision(
     const e = journal.entries[i] as Entry | undefined;
     if (!e || e.kind !== 'change_set' || e.undone_by || e.rolled_back) continue;
     const meta = e.original_revision;
-    if (!isWorkingRevisionMeta(meta, winOrig)) continue;
+    if (!isWorkingRevisionMeta(meta, originalPath, winOrig)) continue;
     if (!matchesOriginalSha(meta.original_sha256, expectedOriginalSha256)) return null;
     const path = meta.revision_path || resolveBeside(originalPath, meta.revision_dwg);
     return {
@@ -416,7 +467,7 @@ export function revisionAtEntry(
     if (!e || e.entry > entryNumber) continue;
     if (e.kind !== 'change_set' || e.rolled_back || undoneByThen.has(e.entry) || e.undone_by) continue;
     const meta = e.original_revision;
-    if (!isWorkingRevisionMeta(meta, winOrig)) continue;
+    if (!isWorkingRevisionMeta(meta, originalPath, winOrig)) continue;
     if (!matchesOriginalSha(meta.original_sha256, expectedOriginalSha256)) return null;
     const path = meta.revision_path || resolveBeside(originalPath, meta.revision_dwg);
     return {
