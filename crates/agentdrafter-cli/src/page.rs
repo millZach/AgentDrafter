@@ -41,6 +41,13 @@ pub const POLICY: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eva
      style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; \
      form-action 'none'; frame-ancestors 'none'";
 
+/// Content-Security-Policy for the in-process desktop shell server: identical
+/// to [`POLICY`], plus Tauri v2's local IPC transport (`ipc:` on macOS/Linux,
+/// `http://ipc.localhost` on Windows WebView2).
+pub const DESKTOP_POLICY: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; \
+     style-src 'self'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; \
+     base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -68,6 +68,7 @@ fn tools() -> Tools {
             path: "templates/loop-2-wire.yaml".to_owned(),
             sheets: vec!["DP-LD-101".to_owned()],
         }),
+        editable_dwg: false,
         past: false,
         space: None,
         layout: None,

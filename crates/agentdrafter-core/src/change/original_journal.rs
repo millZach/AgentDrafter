@@ -71,6 +71,18 @@ use super::undo::{
 /// `undo-states/`).
 pub const ORIGINALS_JOURNAL_FOLDER: &str = ".agentdrafter/originals";
 
+/// Returns the on-disk path of the per-original `journal.jsonl` for an
+/// existing `.dwg` file, using the same canonical key resolution as `change`,
+/// `journal`, `undo`, and `accept`. Never creates any folder or file.
+///
+/// Returns `None` when `source` is not an existing `.dwg` file.
+pub fn original_journal_file(source: &Path) -> Option<PathBuf> {
+    if !crate::original::is_dwg_file(source) {
+        return None;
+    }
+    OriginalJournal::open(source).ok().map(|oj| oj.journal_file)
+}
+
 /// Per-original journal paths and identity of the original DWG.
 pub(crate) struct OriginalJournal {
     /// The original DWG path as requested by the caller (for display).

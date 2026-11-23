@@ -160,6 +160,27 @@ import {
   type ProposalsReport,
   type Standing,
 } from './proposals.ts';
+import {
+  buildDesktopSearch,
+  classifySource,
+  dwgEditGuard,
+  getDesktopBridge,
+  kindBadge,
+  latestActiveRevision,
+  loadLocalRecents,
+  matchOriginalObjectId,
+  mergeRecent,
+  normalizeOriginalChangeSet,
+  removeRecentLocal,
+  resolveBeside,
+  revisionAtEntry,
+  saveLocalRecents,
+  sourceDisplayName,
+  type ReadReport,
+  type RecentEntry,
+  type SourceKind,
+} from './desktop.ts';
+import { DecodeReportModal, DwgBanner, StartScreen, SwitcherModal } from './DesktopShell.tsx';
 import type { Summary } from './probe.ts';
 
 export interface AppProps {
@@ -171,6 +192,10 @@ export interface AppProps {
   sheet: string | null;
   /** The layout of that sheet to show first, when it is drawn in several; its first without one. */
   layout: string | null;
+  /** Whether the desktop shell chrome (Start screen, Open…, switcher) is active (#158). */
+  desktop?: boolean;
+  /** Whether to show the Start screen instead of opening `source` immediately. */
+  start?: boolean;
 }
 
 type Status =
@@ -252,10 +277,12 @@ interface Picked {
   summary: Summary;
 }
 
-/** What `change` replies, as the page reads it. */
+/** What `change` replies, as the page reads it (drawing set or original DWG revision). */
 interface ChangeReply {
   journal_entry?: number;
   sheets?: { sheet: string; ok: boolean }[];
+  sheet?: string;
+  revision_dwg?: string;
   message?: string;
   /** For a change set sent for a guide's step, the core's check of it against the step (#157). */
   guide?: GuideChecked;
@@ -324,7 +351,350 @@ const toolWord = (word: string): boolean => {
 const toolName = (word: string): string | null =>
   PANELS.flatMap((p) => p.tools).find((t) => [t.label, t.command, t.alias, t.key].some((x) => upper(x) === upper(word)))?.label ?? null;
 
-export function App({ token, source, sheet, layout }: AppProps) {
+interface WorkspaceProps {
+  token: string | null;
+  source: string;
+  sheet: string | null;
+  layout: string | null;
+  desktop: boolean;
+  allowLoss: boolean;
+  onAllowLoss(): void;
+  onOpenSwitcher(): void;
+}
+
+/**
+ * Top-level App shell: in plain `agentdrafter serve` browser mode it renders
+ * the drawing workspace immediately with zero extra chrome; in the Tauri
+ * desktop shell (or `?desktop=1` / `?start=1`) it adds the Start screen,
+ * native OS folder/file pickers, Recents, title-bar switcher, multi-window
+ * launcher, and per-session ADR-0004 allow-loss scope.
+ */
+export function App({ token, source, sheet, layout, desktop = false, start = false }: AppProps) {
+  const bridge = useMemo(() => getDesktopBridge(), []);
+  const isDesktop = Boolean(desktop || start || bridge);
+  const storage = useMemo(() => {
+    try {
+      return window.localStorage;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const [onStart, setOnStart] = useState(Boolean(isDesktop && start));
+  const [activeSource, setActiveSource] = useState(source);
+  const [initialSheet, setInitialSheet] = useState<string | null>(sheet);
+  const [initialLayout, setInitialLayout] = useState<string | null>(layout);
+  const [recents, setRecents] = useState<RecentEntry[]>(() => (bridge ? [] : loadLocalRecents(storage)));
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [desktopError, setDesktopError] = useState<string | null>(null);
+  const [desktopBusy, setDesktopBusy] = useState(false);
+  const [allowLossPaths, setAllowLossPaths] = useState<ReadonlySet<string>>(() => new Set());
+
+  const syncTitle = useCallback(
+    (name: string | null) => {
+      document.title = name ? `AgentDrafter — ${name}` : 'AgentDrafter';
+      if (bridge && name) {
+        void bridge.setWindowTitle(name).catch(() => {});
+      }
+    },
+    [bridge],
+  );
+
+  const recordOpened = useCallback(
+    async (path: string, kind: SourceKind, name: string, subtitle?: string) => {
+      if (bridge) {
+        try {
+          const updated = await bridge.recordRecent({ path, kind, name, subtitle });
+          setRecents(updated);
+          return;
+        } catch {
+          // Fall back to local state if bridge fails.
+        }
+      }
+      setRecents((prev) => {
+        const next = mergeRecent(prev, { path, kind, name, opened_at_ms: Date.now(), subtitle });
+        saveLocalRecents(storage, next);
+        return next;
+      });
+    },
+    [bridge, storage],
+  );
+
+  const removeRecent = useCallback(
+    async (path: string) => {
+      if (bridge) {
+        try {
+          const updated = await bridge.removeRecent(path);
+          setRecents(updated);
+          return;
+        } catch {
+          // Fall back to local removal.
+        }
+      }
+      setRecents((prev) => {
+        const next = removeRecentLocal(prev, path);
+        saveLocalRecents(storage, next);
+        return next;
+      });
+    },
+    [bridge, storage],
+  );
+
+  // Load persisted recents when desktop mode starts.
+  useEffect(() => {
+    if (!isDesktop || !bridge) return;
+    let current = true;
+    bridge
+      .listRecents()
+      .then((list) => current && setRecents(list))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [isDesktop, bridge]);
+
+  // Keep native window title and recents in sync when opening directly via URL/CLI arg.
+  useEffect(() => {
+    if (!isDesktop) return;
+    if (onStart) {
+      syncTitle('Start');
+      return;
+    }
+    const kind = classifySource(activeSource);
+    const name = sourceDisplayName(activeSource);
+    syncTitle(name);
+    if (activeSource && activeSource !== '.') {
+      void recordOpened(activeSource, kind, name);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDesktop, onStart, activeSource]);
+
+  const openSource = useCallback(
+    (path: string, kind?: SourceKind, name?: string, subtitle?: string) => {
+      const k = kind ?? classifySource(path);
+      const n = name ?? sourceDisplayName(path);
+      setActiveSource(path);
+      setInitialSheet(null);
+      setInitialLayout(null);
+      setOnStart(false);
+      setSwitcherOpen(false);
+      setDesktopError(null);
+      const qs = buildDesktopSearch({ desktop: true, start: false, source: path, sheet: null, layout: null });
+      window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+      syncTitle(n);
+      void recordOpened(path, k, n, subtitle);
+    },
+    [recordOpened, syncTitle],
+  );
+
+  const goToStart = useCallback(() => {
+    setOnStart(true);
+    setSwitcherOpen(false);
+    setDesktopError(null);
+    const qs = buildDesktopSearch({ desktop: true, start: true, source: null, sheet: null, layout: null });
+    window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+    syncTitle('Start');
+  }, [syncTitle]);
+
+  const openInNewWindow = useCallback(
+    async (path: string | null, title?: string) => {
+      setSwitcherOpen(false);
+      setDesktopError(null);
+      if (bridge) {
+        try {
+          await bridge.openInNewWindow(path, title);
+          return;
+        } catch (e) {
+          setDesktopError(e instanceof Error ? e.message : String(e));
+          return;
+        }
+      }
+      const qs = buildDesktopSearch({
+        desktop: true,
+        start: !path,
+        source: path,
+        sheet: null,
+        layout: null,
+      });
+      const url = `${window.location.pathname}${qs ? `?${qs}` : ''}${token ? `#token=${token}` : ''}`;
+      window.open(url, '_blank', 'noopener');
+    },
+    [bridge, token],
+  );
+
+  const pickSet = useCallback(
+    async (newWindow = false) => {
+      if (!bridge) {
+        setDesktopError('Native OS folder picker is available in the AgentDrafter desktop app.');
+        return;
+      }
+      setDesktopBusy(true);
+      setDesktopError(null);
+      try {
+        const picked = await bridge.pickDrawingSetFolder();
+        if (!picked) return;
+        if (newWindow) await openInNewWindow(picked.path, picked.name);
+        else openSource(picked.path, picked.kind, picked.name, picked.detail);
+      } catch (e) {
+        setDesktopError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setDesktopBusy(false);
+      }
+    },
+    [bridge, openInNewWindow, openSource],
+  );
+
+  const pickFile = useCallback(
+    async (filter?: 'dwg' | 'yaml', newWindow = false) => {
+      if (!bridge) {
+        setDesktopError('Native OS file picker is available in the AgentDrafter desktop app.');
+        return;
+      }
+      setDesktopBusy(true);
+      setDesktopError(null);
+      try {
+        const picked = await bridge.pickDrawingFile(filter);
+        if (!picked) return;
+        if (newWindow) await openInNewWindow(picked.path, picked.name);
+        else openSource(picked.path, picked.kind, picked.name, picked.detail);
+      } catch (e) {
+        setDesktopError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setDesktopBusy(false);
+      }
+    },
+    [bridge, openInNewWindow, openSource],
+  );
+
+  // Desktop keyboard shortcuts: Ctrl+O (Open / Switcher), Ctrl+Shift+O (New window), Esc (close switcher).
+  useEffect(() => {
+    if (!isDesktop) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.shiftKey) {
+          void pickSet(true);
+        } else if (onStart) {
+          void pickSet(false);
+        } else {
+          setDesktopError(null);
+          setSwitcherOpen(true);
+        }
+      } else if (e.key === 'Escape' && switcherOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSwitcherOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [isDesktop, onStart, pickSet, switcherOpen]);
+
+  if (isDesktop && onStart) {
+    return (
+      <StartScreen
+        recents={recents}
+        error={desktopError}
+        busy={desktopBusy}
+        onDismissError={() => setDesktopError(null)}
+        onPickSet={() => void pickSet(false)}
+        onPickDwg={() => void pickFile('dwg', false)}
+        onPickSheet={() => void pickFile('yaml', false)}
+        onOpenRecent={(entry, newWin) => {
+          if (newWin) void openInNewWindow(entry.path, entry.name);
+          else openSource(entry.path, entry.kind, entry.name, entry.subtitle);
+        }}
+        onRemoveRecent={(path) => void removeRecent(path)}
+      />
+    );
+  }
+
+  return (
+    <>
+      <DrawingWorkspace
+        key={activeSource}
+        token={token}
+        source={activeSource}
+        sheet={initialSheet}
+        layout={initialLayout}
+        desktop={isDesktop}
+        allowLoss={allowLossPaths.has(activeSource)}
+        onAllowLoss={() =>
+          setAllowLossPaths((prev) => {
+            const next = new Set(prev);
+            next.add(activeSource);
+            return next;
+          })
+        }
+        onOpenSwitcher={() => {
+          setDesktopError(null);
+          setSwitcherOpen(true);
+        }}
+      />
+      {isDesktop && switcherOpen && (
+        <SwitcherModal
+          currentPath={activeSource}
+          recents={recents}
+          error={desktopError}
+          busy={desktopBusy}
+          onClose={() => setSwitcherOpen(false)}
+          onGoStart={goToStart}
+          onPickSet={(newWin) => void pickSet(newWin)}
+          onPickFile={(filter, newWin) => void pickFile(filter, newWin)}
+          onOpenRecent={(entry, newWin) => {
+            if (newWin) void openInNewWindow(entry.path, entry.name);
+            else openSource(entry.path, entry.kind, entry.name, entry.subtitle);
+          }}
+          onRemoveRecent={(path) => void removeRecent(path)}
+        />
+      )}
+    </>
+  );
+}
+
+function DrawingWorkspace({ token, source, sheet, layout, desktop, allowLoss, onAllowLoss, onOpenSwitcher }: WorkspaceProps) {
+  const sourceKind = classifySource(source);
+  const isDwg = sourceKind === 'dwg';
+  const isSheet = sourceKind === 'sheet';
+  const [readReport, setReadReport] = useState<ReadReport | null>(null);
+  const [readPending, setReadPending] = useState(isDwg);
+  const [readError, setReadError] = useState<string | null>(null);
+  const [decodeModalOpen, setDecodeModalOpen] = useState(false);
+  const [plotting, setPlotting] = useState(false);
+  const [ownRevDwg, setOwnRevDwg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isDwg) {
+      setReadReport(null);
+      setReadPending(false);
+      setReadError(null);
+      return;
+    }
+    let current = true;
+    setReadPending(true);
+    setReadError(null);
+    call<ReadReport>('read', { source, no_mirror: true }, token).then(
+      (report) => {
+        if (!current) return;
+        setReadReport(report);
+        setReadPending(false);
+      },
+      (e) => {
+        if (!current) return;
+        setReadReport(null);
+        setReadError(why(e, token));
+        setReadPending(false);
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [isDwg, source, token]);
+
+  const editGuard = dwgEditGuard(sourceKind, readReport, readPending, allowLoss);
+  const dwgLocked = isDwg && (editGuard === 'view-only' || editGuard === 'loading');
+  const editingDisabled = dwgLocked || isSheet;
   const wide = useWide();
   const [wanted, setWanted] = useState<string | null>(sheet);
   // The layout asked for, of a sheet drawn in several; its first without one.
@@ -562,6 +932,20 @@ export function App({ token, source, sheet, layout }: AppProps) {
     refreshTool();
   }, [refreshTool]);
 
+  const activeRev = isDwg ? latestActiveRevision(journal, source) : null;
+  const steppedRev = isDwg && at !== null ? revisionAtEntry(journal, at, source) : null;
+  const displaySource = isDwg
+    ? at !== null
+      ? (steppedRev?.path ?? source)
+      : (activeRev?.path ?? ownRevDwg ?? source)
+    : source;
+
+  useEffect(() => {
+    if (isDwg && journal) {
+      setOwnRevDwg(null);
+    }
+  }, [isDwg, journal]);
+
   const sheetKey = upper(wanted ?? '');
   const layoutKey = upper(wantedLayout ?? '');
   // The set as it is comes with its object snaps, for the cursor to catch,
@@ -569,7 +953,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // sheet drawn without them is asked for again when it is turned on.
   // A preview is drawn without them: nothing is picked or snapped there.
   const withSnaps = at === null && toggles.osnap && !preview;
-  const cacheKey = `${preview ? `pv${preview.key}` : (at ?? 'live')}|${sheetKey}|${layoutKey}|${withSnaps ? 'snaps' : ''}`;
+  const dwgPrefix = isDwg ? `${displaySource}|` : '';
+  const cacheKey = `${dwgPrefix}${preview ? `pv${preview.key}` : (at ?? 'live')}|${sheetKey}|${layoutKey}|${withSnaps ? 'snaps' : ''}`;
   // A preview is the change set applied to the whole set: any change to
   // any sheet may change it.
   const version = preview ? (versions[ANY] ?? 0) : at === null ? (versions[sheetKey || ANY] ?? 0) : 0;
@@ -620,10 +1005,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
     if (at === null || !summary) {
       setStatus({ kind: 'loading', message: wanted ? `Drawing ${wanted}…` : 'Drawing the sheet…' });
     }
-    const input: Record<string, string | number | boolean> = { source };
-    if (wanted) input.sheet = wanted;
+    const input: Record<string, string | number | boolean> = { source: displaySource };
+    if (wanted && !isDwg) input.sheet = wanted;
     if (wantedLayout) input.layout = wantedLayout;
-    if (at !== null) input.entry = at;
+    if (at !== null && !isDwg) input.entry = at;
     if (withSnaps) input.snaps = true;
     // The set as it is says where each object comes from, which the tools
     // and quick properties need.
@@ -679,7 +1064,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     // The key holds the sheet and the entry; the version and the epoch say
     // it changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cacheKey, version, epoch, source, token]);
+  }, [cacheKey, version, epoch, source, displaySource, token]);
 
   // The text the summary shown was read from: a reply of the same text is
   // not drawn again, and its summary is that one's.
@@ -693,7 +1078,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       setStatus({ kind: 'shown' });
       // Kept by its sheet's own name too, while it is still current; a
       // preview's drawing is never the set as it is.
-      if (reply && !reply.preview && generationOf(reply.at, reply.sheetKey) === reply.generation) {
+      if (reply && !reply.preview && !isDwg && generationOf(reply.at, reply.sheetKey) === reply.generation) {
         replies.current.set(
           `${shown.entry ?? 'live'}|${upper(shown.sheet)}|${upper(shown.layout ?? '')}|${reply.snaps ? 'snaps' : ''}`,
           reply.text,
@@ -709,12 +1094,15 @@ export function App({ token, source, sheet, layout }: AppProps) {
       if (!wantedLayout && shown.layout) setWantedLayout(shown.layout);
       // The address names the sheet and the layout shown, so a reload shows them again.
       const query = new URLSearchParams(window.location.search);
-      query.set('sheet', shown.sheet);
+      query.delete('start');
+      if (!isDwg) query.set('sheet', shown.sheet);
+      else query.delete('sheet');
       if (shown.layout) query.set('layout', shown.layout);
       else query.delete('layout');
-      window.history.replaceState(null, '', `${window.location.pathname}?${query}`);
+      const qs = query.toString();
+      window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
     },
-    [reply, wanted, wantedLayout, refreshTool],
+    [reply, wanted, wantedLayout, refreshTool, isDwg],
   );
   const failed = useCallback((message: string) => setStatus({ kind: 'failed', message }), []);
 
@@ -744,14 +1132,16 @@ export function App({ token, source, sheet, layout }: AppProps) {
 
   // The checker's findings, sheet by sheet: all of them once, then those
   // of the sheets each new entry touched.
+  const checkSourceRef = useRef(displaySource);
+  checkSourceRef.current = displaySource;
   const check = useCallback(
-    async (sheets: string[] | null): Promise<Finding[]> => {
+    async (sheets: string[] | null, explicitSource?: string): Promise<Finding[]> => {
       try {
-        const input: Record<string, unknown> = { source };
-        if (sheets) input.sheets = sheets;
+        const input: Record<string, unknown> = { source: explicitSource ?? checkSourceRef.current };
+        if (sheets && sourceKind === 'set') input.sheets = sheets;
         const result = await call<{ sheets: string[]; findings: Finding[] }>('check', input, token);
         setFindings((before) => {
-          const next = new Map(sheets ? before : []);
+          const next = new Map(sheets && sourceKind === 'set' ? before : []);
           for (const s of result.sheets) next.set(upper(s), []);
           for (const f of result.findings) next.get(upper(f.sheet))?.push(f);
           return next;
@@ -761,7 +1151,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
         return [];
       }
     },
-    [source, token],
+    [sourceKind, token],
   );
 
   // What a new entry says, as a toast.
@@ -829,8 +1219,17 @@ export function App({ token, source, sheet, layout }: AppProps) {
     [say],
   );
 
-  // The journal, from the server's event stream.
+  // The journal, from the server's event stream (drawing sets and original DWGs;
+  // single YAML sheets have no set journal).
   useEffect(() => {
+    if (isSheet) {
+      setJournalRead(true);
+      setJournal(null);
+      setNoJournal('single sheet descriptions have no journal');
+      setStream('open');
+      void check(null);
+      return;
+    }
     const stop = watch(
       source,
       token,
@@ -861,13 +1260,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
         // An open preview is drawn again on the first snapshot, which may
         // hold a change set that landed before the page read the journal.
         if (previewRedrawnOn(previewOpen.current, before === null)) redrawPreview();
+        const checkTarget = isDwg ? (latestActiveRevision(report, source)?.path ?? source) : source;
         if (before === null || replaced) {
           if (replaced) {
             replies.current.clear();
             epochNow.current += 1;
             setEpoch(epochNow.current);
           }
-          void check(null);
+          void check(null, checkTarget);
           return;
         }
         const fresh = since(report, before);
@@ -888,7 +1288,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
           setPulseSince(performance.now());
         }
         if (touched.length) {
-          void check(touched).then((found) => toastFor(last, found));
+          void check(touched, checkTarget).then((found) => toastFor(last, found));
         } else {
           toastFor(last, []);
         }
@@ -951,7 +1351,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       proposalsSeen.current = null;
       guidesSeen.current = null;
     };
-  }, [source, token, check, toastFor, log, drawAgain, redrawPreview]);
+  }, [source, isSheet, token, check, toastFor, log, drawAgain, redrawPreview]);
 
   // The objects the focused entry changed on the sheet shown, marked.
   const focusedEntry = journal?.entries.find((e) => e.entry === focused);
@@ -962,11 +1362,22 @@ export function App({ token, source, sheet, layout }: AppProps) {
   }, [summary]);
   const marks = useMemo<Mark[]>(() => {
     const showing = focusedEntry && (!focusedEntry.undone_by || at === focusedEntry.entry);
-    const changed = showing && summary ? changedOn(focusedEntry, summary.sheet) : [];
+    if (!showing || !summary) return [];
+    if (isDwg) {
+      const origSheet = readReport?.sheet ?? summary.sheet;
+      const changed = changedOn(focusedEntry, origSheet);
+      const out: Mark[] = [];
+      for (const o of changed) {
+        const idx = summary.objects.findIndex((obj) => matchOriginalObjectId(o.id, obj.id));
+        if (idx >= 0) out.push({ place: idx, added: o.how === 'added' });
+      }
+      return out;
+    }
+    const changed = changedOn(focusedEntry, summary.sheet);
     return changed
       .filter((o) => places.has(upper(o.id)))
       .map((o) => ({ place: places.get(upper(o.id)) as number, added: o.how === 'added' }));
-  }, [focusedEntry, summary, places, at]);
+  }, [focusedEntry, summary, places, at, isDwg, readReport]);
 
   // The picked object, followed by its ID as the sheet is drawn again; one
   // gone from the sheet is no longer picked.
@@ -1049,8 +1460,10 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const undo = async (changeSet: number | null) => {
     if (!changeSet) return;
     setBusy('undo');
+    if (isDwg) setOwnRevDwg(null);
     try {
       await call('undo', { set: source, change_set: changeSet }, token);
+      if (ownLatest !== null && changeSet <= ownLatest) setOwnLatest(null);
     } catch (e) {
       say('warn', `Change set ${changeSet} was not undone`, why(e, token));
     } finally {
@@ -1062,7 +1475,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // checks, without writing; the reviewer confirms.
   const askAccept = async () => {
     if (!journal) return;
-    const newestSeen = newest(journal);
+    const newestSeen = Math.max(newest(journal), ownLatest ?? 0);
     setBusy('accept');
     try {
       const report = await call<AcceptReport>('accept', { set: source, dry_run: true, newest_seen: newestSeen }, token);
@@ -1240,6 +1653,13 @@ export function App({ token, source, sheet, layout }: AppProps) {
     const landed = (reply: ChangeReply | undefined) => {
       const sheets = (reply?.sheets ?? []).filter((x) => x.ok).map((x) => upper(x.sheet));
       const entry = reply?.journal_entry;
+      if (isDwg && reply?.revision_dwg) {
+        setOwnRevDwg(resolveBeside(source, reply.revision_dwg));
+        if (entry !== undefined) setOwnLatest((n) => Math.max(n ?? 0, entry));
+        const revSheet = upper(reply.sheet ?? summary?.sheet ?? '');
+        if (revSheet) drawAgain([revSheet]);
+        return;
+      }
       if (entry !== undefined) {
         if (sheets.length) setOwnLatest((n) => Math.max(n ?? 0, entry));
         // The journal's event drew its sheets already. A first reading of
@@ -1250,14 +1670,24 @@ export function App({ token, source, sheet, layout }: AppProps) {
       drawAgain(sheets);
     };
     try {
+      const prepared =
+        isDwg && readReport && summary
+          ? normalizeOriginalChangeSet(s.change_set, readReport.sheet, summary.sheet)
+          : s.change_set;
+      const changeInput: Record<string, unknown> = { set: source, change_set: prepared };
+      if (isDwg && allowLoss) changeInput.allow_loss = true;
       // A proposal kept (#155) lands through `keep`, which records who
       // proposed it and who kept it; its reply is `change`'s.
       const reply =
         keep === undefined
-          ? await call<ChangeReply>('change', { set: source, change_set: s.change_set }, token)
+          ? await call<ChangeReply>('change', changeInput, token)
           : await call<ChangeReply>('keep', { set: source, proposal: keep, by: DRAFTER }, token);
       landed(reply);
-      log(`${s.what}${keep === undefined ? '' : ' kept'}: change set ${reply.journal_entry ?? ''} landed`.replace('  ', ' '));
+      log(
+        reply.revision_dwg
+          ? `${s.what}: saved revision ${sourceDisplayName(reply.revision_dwg)} (original untouched)`
+          : `${s.what}${keep === undefined ? '' : ' kept'}: change set ${reply.journal_entry ?? ''} landed`.replace('  ', ' '),
+      );
       onReply?.(reply);
       return true;
     } catch (e) {
@@ -1278,6 +1708,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
     return sent;
   };
   const startTool = (word: string, fromSelection = true) => {
+    if (editingDisabled) {
+      log(
+        dwgLocked
+          ? 'View-only (ADR-0004): inspect the decode report to allow revising this original DWG'
+          : 'Single sheet view is read-only',
+      );
+      return;
+    }
     if (onPreview) {
       log(preview ? 'Change all or Cancel the preview first' : 'Drawing the sheet as it is first');
       return;
@@ -1433,7 +1871,8 @@ export function App({ token, source, sheet, layout }: AppProps) {
     // Esc drops what is typed, as AutoCAD's does.
     if (field.current) field.current.value = '';
     setTyped('');
-    if (editing) setEditing(null);
+    if (decodeModalOpen) setDecodeModalOpen(false);
+    else if (editing) setEditing(null);
     else if (preview) cancelPreview();
     else if (asking) setAsking(null);
     else if (snapMenu) setSnapMenu(null);
@@ -1449,7 +1888,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   keys2.current = (e: KeyboardEvent) => {
     const target = e.target as Element | null;
     if (target?.closest?.('input, select, textarea')) return;
-    if (asking) return;
+    if (asking || decodeModalOpen) return;
     if (preview) {
       // The arrow keys step through the sheets it reaches; nothing else is typed.
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -2001,7 +2440,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // when the box is reopened, they stay until the reply replaces them.
   const layersOf = useRef('');
   useEffect(() => {
-    if (!summary || summary.entry !== null || !hasTemplate) {
+    if (!summary || summary.entry !== null || (!hasTemplate && !isDwg)) {
       // None held for a sheet as it is: the next ask starts from nothing.
       layersOf.current = '';
       setLayers([]);
@@ -2009,14 +2448,14 @@ export function App({ token, source, sheet, layout }: AppProps) {
     }
     // Another sheet's are still coming: the layer kept is the current one
     // until they come. The same sheet's stay as they are meanwhile.
-    const of = `${source}|${upper(summary.sheet)}`;
+    const of = `${displaySource}|${upper(summary.sheet)}`;
     const was = layersOf.current;
     layersOf.current = of;
     setLayers((held) => layersWhileAsked(was, of, held));
     let current = true;
     call<{ layers: { sheet: string; layers: LayerEntry[] }[] }>(
       'query',
-      { source, sheet: summary.sheet, query: { kind: 'layers' } },
+      { source: displaySource, ...(isDwg ? {} : { sheet: summary.sheet }), query: { kind: 'layers' } },
       token,
     ).then(
       (r) => current && setLayers(r.layers[0]?.layers ?? []),
@@ -2027,7 +2466,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
     };
     // The summary itself changes with each drawing: only what is asked by matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [summary?.sheet, summary?.entry, hasTemplate, layersAsked, source, token]);
+  }, [summary?.sheet, summary?.entry, hasTemplate, isDwg, layersAsked, displaySource, token]);
   const currentLayer = currentLayerOf(keptLayer, layers);
   const layerEntry = layers?.find((l) => l.name === currentLayer);
   const chooseLayer = (name: string) => {
@@ -2116,7 +2555,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   const undoable = ownLatest !== null && (!journal || newest(journal) < ownLatest) ? ownLatest : journal ? lastUndoable(journal) : null;
   // Undo last and Accept wait while anything is busy, or any change set this page sent has not replied.
   const busyNow = busy ?? (sending > 0 ? 'change' : null);
-  const blocked = !!journal && (!!journal.inconsistent || (!!lastAccept && pending.length === 0));
+  const blocked = !!journal && (!!journal.inconsistent || (!!lastAccept && pending.length === 0) || (isDwg && pending.length === 0));
 
   const sheets = summary?.sheets ?? [];
   const name = summary?.name ?? '';
@@ -2127,10 +2566,12 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // They edit only while the drawing on the canvas is the view asked for
   // and the set as it is: a step back to an entry whose drawing is still
   // coming leaves the live drawing there, which is not edited then.
-  const editable = editsHere(
-    { at, sheet: wanted, layout: wantedLayout },
-    summary ? { at: summary.entry, sheet: summary.sheet, layout: summary.layout, layouts: summary.layouts } : null,
-  );
+  const editable =
+    !editingDisabled &&
+    editsHere(
+      { at, sheet: isDwg ? null : wanted, layout: wantedLayout },
+      summary ? { at: summary.entry, sheet: summary.sheet, layout: summary.layout, layouts: summary.layouts } : null,
+    );
   const fieldsOf = (place: number | null): PropField[] => {
     const v = renderer();
     if (!v || place === null || !summary) return [];
@@ -2256,7 +2697,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   }, [token]);
   // The conversation, from its stream: each event holds the whole of it.
   // The assistant works on a drawing set, which has a journal.
-  const isSet = !!journal;
+  const isSet = sourceKind === 'set' && !!journal;
   useEffect(() => {
     if (!isSet) return;
     return watchAssistant(
@@ -2276,7 +2717,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   }, [source, token, isSet]);
   const unreachable =
     agentsDown ??
-    (noJournal ? 'The assistant works on a drawing set’s folder, and this is not one.' : null) ??
+    (sourceKind !== 'set' || noJournal ? 'The assistant works on a drawing set’s folder, and this is not one.' : null) ??
     conversationDown ??
     (assistantStream === 'refused' ? 'The assistant can’t be reached here: it works on a drawing set, in the viewer opened from the address agentdrafter serve printed.' : null);
   const runningAgent = agentName(agents, conversation?.agent ?? null);
@@ -2286,7 +2727,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   // The same, recorded in the core with `look-at` for the agent to read
   // through `looking-at`: on a drawing set's sheet as it is, once it is
   // drawn and each time it changes, a moment after. A failure says nothing.
-  const recordable = !!journal && at === null && !preview && !onPreview && !!summary && summary.entry === null && summary.preview == null;
+  const recordable = isSet && at === null && !preview && !onPreview && !!summary && summary.entry === null && summary.preview == null;
   const lookToRecord = recordable ? look : null;
   const lookToRecordKey = lookKey(lookToRecord);
   const lookRecorded = useRef('');
@@ -2379,8 +2820,21 @@ export function App({ token, source, sheet, layout }: AppProps) {
     return { standing: null, lines: cardLines(p, null, journal), checking: false, acts: chatCardActs({ stepping, drawn: false, checking: false, refused: false }) };
   };
 
+  const plotPdf = async () => {
+    setPlotting(true);
+    try {
+      const plotted = await call<{ output?: string; message?: string }>('plot', { source: displaySource, overwrite: true }, token);
+      say('ok', 'Plotted PDF', plotted.output ? `Wrote ${plotted.output}` : (plotted.message ?? 'Exact-size PDF written.'));
+    } catch (e) {
+      say('warn', 'Could not plot PDF', why(e, token));
+    } finally {
+      setPlotting(false);
+    }
+  };
+
   const undoLabel = `Undo last${undoable ? ` (#${undoable})` : ''}`;
   const acceptLabel = busy === 'accept' ? 'Checking…' : 'Accept…';
+  const acceptDisabled = editingDisabled || !journal || busyNow !== null || at !== null;
   const peek = wide ? null : (
     <Peek
       line={line}
@@ -2388,9 +2842,9 @@ export function App({ token, source, sheet, layout }: AppProps) {
       journal={journal}
       failing={failing}
       undoable={undoable}
-      blocked={blocked}
+      blocked={blocked || editingDisabled}
       busy={busyNow}
-      stepping={at !== null}
+      stepping={at !== null || editingDisabled}
       onShow={(n) => showEntry(n)}
       onUndo={() => void undo(undoable)}
       onAccept={() => void askAccept()}
@@ -2509,6 +2963,29 @@ export function App({ token, source, sheet, layout }: AppProps) {
       <button type="button" className="pill past" data-act="live" onClick={backToLive}>
         Entry {at} of {newest(journal)} &middot; Live &rsaquo;
       </button>
+    ) : isDwg && readReport ? (
+      <>
+        <span className="pill dk-pill-ro" data-dwg-version>
+          {readReport.dwg_version} &middot; original read-only
+        </span>
+        {!readReport.decoded ? (
+          <button
+            type="button"
+            className="pill warn dk-pill-warnbtn"
+            data-act="dwg-loss-pill"
+            onClick={() => setDecodeModalOpen(true)}
+          >
+            {allowLoss ? 'allow-loss' : 'view-only'}
+          </button>
+        ) : lastAccept && pending.length === 0 ? (
+          <span className="pill dk-pill-ok">Issued (entry {lastAccept.entry})</span>
+        ) : pending.length > 0 ? (
+          <span className="pill">{pending.length} not issued</span>
+        ) : (
+          <span className="pill dk-pill-ok">decoded whole</span>
+        )}
+        {failCount > 0 && <span className="pill bad">{plural(failCount, 'failed check')}</span>}
+      </>
     ) : (
       journal && (
         <>
@@ -2562,7 +3039,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
   });
   return (
     <div
-      className={`va${toolsOpen ? ' tools-open' : ''}`}
+      className={`va${toolsOpen ? ' tools-open' : ''}${desktop ? ' dk-mode' : ''}`}
       style={{ ['--peek' as string]: `${peekHeight}px`, ['--gtop' as string]: `${bannerHeight}px` }}
       data-gpulse={gpulse}
     >
@@ -2576,6 +3053,17 @@ export function App({ token, source, sheet, layout }: AppProps) {
         {wide ? (
           <>
             <span className="appname">AgentDrafter</span>
+            {desktop && (
+              <button
+                type="button"
+                className="qa dk-openbtn"
+                data-act="desktop-open"
+                title="Switch drawing or open another (Ctrl+O)"
+                onClick={onOpenSwitcher}
+              >
+                Open&#8230;
+              </button>
+            )}
             <button
               type="button"
               className="qa"
@@ -2589,21 +3077,70 @@ export function App({ token, source, sheet, layout }: AppProps) {
               </svg>
               {undoLabel}
             </button>
-            <span className="file">
-              {name}
-              {summary ? ` / ${summary.sheet}` : ''}
-            </span>
+            {desktop ? (
+              <div className="dk-switcher">
+                <button
+                  type="button"
+                  className="dk-switchbtn"
+                  data-act="desktop-switcher"
+                  title="Switch open drawing or return to Start (Ctrl+O)"
+                  onClick={onOpenSwitcher}
+                >
+                  <span className={`dk-kbadge ${sourceKind}`}>{kindBadge(sourceKind)}</span>
+                  <span className="sname">{name || sourceDisplayName(source)}</span>
+                  <span className="spath">{source}</span>
+                  <span className="caret" aria-hidden="true">
+                    &#9662;
+                  </span>
+                </button>
+              </div>
+            ) : (
+              <span className="file">
+                {name}
+                {summary ? ` / ${summary.sheet}` : ''}
+              </span>
+            )}
           </>
         ) : (
-          <button
-            type="button"
-            className="qa toolsbtn"
-            aria-expanded={toolsOpen}
-            aria-controls="ribbon"
-            onClick={() => setToolsOpen((o) => !o)}
-          >
-            Tools &#9662;
-          </button>
+          <>
+            {desktop && (
+              <button
+                type="button"
+                className="qa dk-openbtn"
+                data-act="desktop-open"
+                title="Switch drawing or open another"
+                onClick={onOpenSwitcher}
+              >
+                Open&#8230;
+              </button>
+            )}
+            <button
+              type="button"
+              className="qa toolsbtn"
+              aria-expanded={toolsOpen}
+              aria-controls="ribbon"
+              onClick={() => setToolsOpen((o) => !o)}
+            >
+              Tools &#9662;
+            </button>
+            {desktop && (
+              <div className="dk-switcher">
+                <button
+                  type="button"
+                  className="dk-switchbtn"
+                  data-act="desktop-switcher"
+                  title="Switch open drawing or return to Start"
+                  onClick={onOpenSwitcher}
+                >
+                  <span className={`dk-kbadge ${sourceKind}`}>{kindBadge(sourceKind)}</span>
+                  <span className="sname">{name || sourceDisplayName(source)}</span>
+                  <span className="caret" aria-hidden="true">
+                    &#9662;
+                  </span>
+                </button>
+              </div>
+            )}
+          </>
         )}
         <div className="va-status">{pills}</div>
         {wide && (
@@ -2611,7 +3148,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
             type="button"
             className={`btn primary${blocked ? ' blocked' : ''}`}
             data-act="accept"
-            disabled={!journal || busyNow !== null || at !== null}
+            disabled={acceptDisabled}
             onClick={() => void askAccept()}
           >
             {acceptLabel}
@@ -2621,6 +3158,7 @@ export function App({ token, source, sheet, layout }: AppProps) {
       <div id="ribbon" className={`ribbonwrap${wide || toolsOpen ? ' open' : ''}`}>
         <Ribbon
           folded={!wide}
+          disabled={editingDisabled}
           toggles={toggles}
           onToggle={toggle}
           onTool={ribbonTool}
@@ -2694,6 +3232,19 @@ export function App({ token, source, sheet, layout }: AppProps) {
         })}
       </nav>
       {!wide && layoutTabs}
+      {(isDwg || (isSheet && desktop)) && (
+        <DwgBanner
+          kind={sourceKind}
+          source={source}
+          guard={editGuard}
+          readReport={readReport}
+          readError={readError}
+          latestRevisionFile={activeRev?.file ?? (ownRevDwg ? sourceDisplayName(ownRevDwg) : null)}
+          plotting={plotting}
+          onInspectDecode={() => setDecodeModalOpen(true)}
+          onPlotPdf={() => void plotPdf()}
+        />
+      )}
       <div className="va-main">
         <div
           className={`va-vp${at !== null ? ' past' : ''}`}
@@ -3015,6 +3566,23 @@ export function App({ token, source, sheet, layout }: AppProps) {
             </div>
           </div>
         </div>
+      )}
+      {decodeModalOpen && readReport && (
+        <DecodeReportModal
+          source={source}
+          report={readReport}
+          alreadyAllowed={allowLoss}
+          onClose={() => setDecodeModalOpen(false)}
+          onAllowLoss={() => {
+            onAllowLoss();
+            setDecodeModalOpen(false);
+            say(
+              'warn',
+              `Enabled revising ${sourceDisplayName(source)} with loss`,
+              `Revisions save beside the untouched original in ${readReport.dwg_version}.`,
+            );
+          }}
+        />
       )}
     </div>
   );

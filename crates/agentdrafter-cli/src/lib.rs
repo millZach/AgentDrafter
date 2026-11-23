@@ -19,9 +19,11 @@
 //! wrong.
 
 mod assistant;
-mod http;
+pub mod http;
 mod mcp;
 mod page;
+
+pub use http::{start_local, LocalServer};
 
 use std::ffi::OsString;
 use std::path::PathBuf;

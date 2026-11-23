@@ -621,11 +621,13 @@ impl Viewer {
             }
         }
         self.shown = (sheet.sheet.clone(), sheet.layout.clone());
+        let editable_dwg = sheet.source.to_ascii_lowercase().ends_with(".dwg");
         self.tools.load(Context {
             sheet: sheet.sheet.clone(),
             units: sheet.units.clone(),
             objects,
             template: sheet.template.clone(),
+            editable_dwg,
             past: sheet.entry.is_some(),
             space: sheet.space.clone(),
             layout: sheet.layout.clone(),

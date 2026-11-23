@@ -260,8 +260,8 @@ fn chip_and_note(lands: &Lands, tag: Option<&str>) -> (Option<Chip>, Option<Stri
 fn not_editable(object: &ObjectInfo, context: &Context) -> Option<&'static str> {
     if context.past {
         Some("The set as it was is read-only: go back to live to edit it.")
-    } else if context.template.is_none() {
-        Some("Only a drawing set's sheet is edited here, through change sets.")
+    } else if context.template.is_none() && !context.editable_dwg {
+        Some("Only a drawing set's sheet or a DWG is edited here, through change sets.")
     } else if object.id.is_none() {
         Some("It has no ID, so a change set cannot name it.")
     } else {

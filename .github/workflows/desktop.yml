@@ -1,0 +1,101 @@
+name: Desktop
+
+# The Tauri v2 desktop shell (crates/agentdrafter-desktop, docs/viewer.md#the-desktop-app):
+# builds the viewer page (WASM + React), checks formatting, lints, unit tests, and compiles the
+# native desktop binary across Linux, Windows, and macOS. Separate from CI's required merge-bar
+# jobs (Zach's A5 decision, 2026-11-22), so existing CI runners need no GTK/WebKit system packages.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  desktop:
+    name: desktop (${{ matrix.os }}, not on the merge bar)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bin: crates/agentdrafter-desktop/target/release/agentdrafter-desktop
+          - os: windows-latest
+            bin: crates/agentdrafter-desktop/target/release/agentdrafter-desktop.exe
+          - os: macos-latest
+            bin: crates/agentdrafter-desktop/target/release/agentdrafter-desktop
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux GTK and WebKit2GTK system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            patchelf \
+            libssl-dev
+
+      - name: Install the toolchain named in rust-toolchain.toml, and its WebAssembly target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.os }}
+          workspaces: |
+            . -> target
+            crates/agentdrafter-desktop -> crates/agentdrafter-desktop/target
+
+      - name: wasm-bindgen-cli, the version the viewer crate pins
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.130
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
+
+      - name: Build the viewer page (WASM renderer, type checks, Vite)
+        working-directory: viewer
+        run: |
+          npm ci
+          npm run build
+
+      - name: Check formatting of the desktop shell crate
+        run: cargo fmt --manifest-path crates/agentdrafter-desktop/Cargo.toml --check
+
+      - name: Lint the desktop shell crate, warnings as errors
+        run: cargo clippy --manifest-path crates/agentdrafter-desktop/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: Run the desktop shell unit tests
+        run: cargo test --manifest-path crates/agentdrafter-desktop/Cargo.toml --locked
+
+      - name: Build the Tauri desktop binary in release with the viewer embedded
+        run: cargo build --release --manifest-path crates/agentdrafter-desktop/Cargo.toml --locked
+
+      - name: Upload desktop binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: agentdrafter-desktop-${{ matrix.os }}
+          path: ${{ matrix.bin }}
+          if-no-files-found: error
+          retention-days: 7

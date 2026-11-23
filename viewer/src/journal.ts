@@ -57,6 +57,15 @@ export interface Entry {
   discarded_by?: string;
   /** The guide's step a change set was sent for (#157). */
   guide?: { guide: number; step: number; of: number };
+  /** Metadata recorded on an original-DWG revision entry (#71). */
+  original_revision?: {
+    original_file: string;
+    original_sha256: string;
+    dwg_version: string;
+    revision_dwg: string;
+    revision_sha256: string;
+    allowed_loss?: boolean;
+  };
   undo_state?: 'kept' | 'pruned' | 'undone';
   undone_by?: number;
   pruned_by?: number;

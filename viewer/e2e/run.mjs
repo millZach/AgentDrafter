@@ -6007,6 +6007,370 @@ const checks = {
       await server.stop();
     }
   },
+
+  desktop: async () => {
+    const folder = freshPlant('desktop');
+    const setPath = join(folder, 'demo-plant');
+    const cleanDwg = join(folder, 'clean-orig.dwg');
+    const lossDwg = join(folder, 'loss-orig.dwg');
+    const singleYaml = join(folder, 'geometry.yaml');
+    cpSync(join(root, 'examples', 'geometry.yaml'), singleYaml);
+    const builtClean = agentIn(folder, 'build', singleYaml, '--output', cleanDwg, '--overwrite');
+    assert(builtClean.ok, `clean DWG built: ${JSON.stringify(builtClean.error)}`);
+    cpSync(cleanDwg, lossDwg);
+    const origCleanSha = createHash('sha256').update(readFileSync(cleanDwg)).digest('hex');
+    const origLossSha = createHash('sha256').update(readFileSync(lossDwg)).digest('hex');
+
+    const server = await serve('127.0.0.1:0', folder);
+    const b = await browser();
+    const shots = [];
+    const shot = async (page, file) => {
+      await page.screenshot({ path: join(out, file) });
+      shots.push(file);
+    };
+    const seen = {};
+    const installDesktopBridge = async (context) => {
+      await context.addInitScript(
+        ({ setPath: sp, cleanDwg: cd, lossDwg: ld, singleYaml: sy }) => {
+          const recents = [];
+          const newWindows = [];
+          const titles = [];
+          window.__desktopTest = {
+            nextFolderError: null,
+            nextDwg: cd,
+            recents,
+            newWindows,
+            titles,
+          };
+          window.__AGENTDRAFTER_DESKTOP__ = {
+            async pickDrawingSetFolder() {
+              if (window.__desktopTest.nextFolderError) {
+                const msg = window.__desktopTest.nextFolderError;
+                window.__desktopTest.nextFolderError = null;
+                throw new Error(msg);
+              }
+              return { kind: 'set', path: sp, name: 'demo-plant', detail: 'Drawing set folder · set.yaml' };
+            },
+            async pickDrawingFile(filter) {
+              if (filter === 'yaml') {
+                return { kind: 'sheet', path: sy, name: 'geometry.yaml', detail: 'Single sheet description · YAML' };
+              }
+              const p = window.__desktopTest.nextDwg;
+              const name = p.split(/[\\/]/).pop();
+              return { kind: 'dwg', path: p, name, detail: 'Plant DWG · original read-only' };
+            },
+            async inspectPath(path) {
+              const name = path.split(/[\\/]/).pop() || path;
+              const kind = path.endsWith('.dwg') ? 'dwg' : path.endsWith('.yaml') ? 'sheet' : 'set';
+              return { kind, path, name, detail: kind };
+            },
+            async listRecents() {
+              return recents.slice();
+            },
+            async recordRecent(entry) {
+              const idx = recents.findIndex((r) => r.path === entry.path);
+              if (idx >= 0) recents.splice(idx, 1);
+              recents.unshift({ ...entry, opened_at_ms: Date.now() });
+              return recents.slice();
+            },
+            async removeRecent(path) {
+              const idx = recents.findIndex((r) => r.path === path);
+              if (idx >= 0) recents.splice(idx, 1);
+              return recents.slice();
+            },
+            async openInNewWindow(source, title) {
+              newWindows.push({ source, title });
+              return `win-${newWindows.length + 1}`;
+            },
+            async setWindowTitle(title) {
+              titles.push(title);
+            },
+          };
+        },
+        { setPath, cleanDwg, lossDwg, singleYaml },
+      );
+    };
+
+    try {
+      // 1. Laptop (1440x900): Start screen, invalid folder error, drawing set, switcher,
+      //    new window, clean plant DWG edit/undo/accept, decoded:false ADR-0004 guard, single YAML.
+      {
+        const context = await b.newContext(LAPTOP);
+        await installDesktopBridge(context);
+        const page = await context.newPage();
+        const problems = [];
+        const http4xx = [];
+        page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
+        page.on('console', (m) => m.type() === 'error' && problems.push(`console: ${m.text()}`));
+        page.on('response', async (r) => {
+          if (r.status() >= 400) {
+            http4xx.push(`${r.status()} ${r.url()} ${r.request().postData() ?? ''} => ${await r.text().catch(() => '')}`);
+          }
+        });
+
+        // Intercept `read` for loss-orig.dwg to test the ADR-0004 decoded:false UI flow,
+        // and verify `change` sends `allow_loss: true` after unlocking.
+        let sawAllowLossOnChange = false;
+        await page.route('**/commands/read', async (route) => {
+          const post = route.request().postDataJSON();
+          if (post?.source === lossDwg) {
+            await route.fulfill({
+              status: 200,
+              contentType: 'application/json',
+              body: JSON.stringify({
+                ok: true,
+                result: {
+                  source: lossDwg,
+                  sheet: 'loss-orig',
+                  message: 'read loss-orig.dwg (AC1032): 2 undecoded MADE_UP_DEVICE',
+                  dwg_version: 'AC1032',
+                  units: 'in',
+                  decoded: false,
+                  not_decoded: [{ kind: 'MADE_UP_DEVICE', count: 2, handles: ['2A7', '2A9'] }],
+                  skipped: 1,
+                  recovered_errors: 1,
+                  objects: { line: 4 },
+                  not_read: [{ kind: 'MADE_UP_DEVICE', count: 2, handles: ['2A7', '2A9'] }],
+                  tables_not_read: {},
+                },
+              }),
+            });
+            return;
+          }
+          await route.continue();
+        });
+        await page.route('**/commands/change', async (route) => {
+          const post = route.request().postDataJSON();
+          if (post?.set === lossDwg && post?.allow_loss === true) {
+            sawAllowLossOnChange = true;
+          }
+          await route.continue();
+        });
+
+        await page.goto(`${server.base}/?desktop=1&start=1`, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('[data-desktop-start]', { timeout: 15000 });
+        await shot(page, 'desktop-laptop-1-start.png');
+
+        // Invalid folder error on Start screen.
+        await page.evaluate(() => {
+          window.__desktopTest.nextFolderError = 'Not a drawing set: `misc-notes` has no `set.yaml`.';
+        });
+        await page.click('[data-pick="set"]');
+        await page.waitForSelector('[data-desktop-error]', { timeout: 5000 });
+        const errText = await page.textContent('[data-desktop-error]');
+        assert(errText.includes('set.yaml'), `invalid folder error shown: ${errText}`);
+
+        // Pick valid drawing set folder -> opens demo-plant.
+        await page.click('[data-pick="set"]');
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'DP-LD-101', null, { timeout: 20000 });
+        await live(page);
+        assert((await page.textContent('[data-act="desktop-switcher"]')).includes('demo-plant'), 'switcher shows demo-plant');
+        await shot(page, 'desktop-laptop-2-set.png');
+
+        // Open switcher, test New window, then Go to Start screen.
+        await page.click('[data-act="desktop-switcher"]');
+        await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
+        await page.click('[data-desktop-switcher] [data-recent-newwin]');
+        const newWins = await page.evaluate(() => window.__desktopTest.newWindows.length);
+        assert(newWins === 1, `New window invoked: ${newWins}`);
+
+        await page.click('[data-act="desktop-switcher"]');
+        await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
+        await page.click('[data-sw-start]');
+        await page.waitForSelector('[data-desktop-start]', { timeout: 5000 });
+        assert(await page.isVisible(`[data-recent="${setPath.replace(/\\/g, '\\\\')}"]`), 'demo-plant listed in Recents');
+
+        // Open clean plant DWG -> verify read-only badge, edit, live per-original journal, undo, accept.
+        await page.click('[data-pick="dwg"]');
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'clean-orig', null, { timeout: 20000 });
+        await page.waitForSelector('[data-dwg-banner="clean"]', { timeout: 10000 });
+        assert((await page.textContent('[data-dwg-version]')).includes('AC1032'), 'shows DWG version pill');
+        assert(!(await page.isDisabled('.rb[data-tool="line"]')), 'drawing tools enabled on clean DWG');
+        await shot(page, 'desktop-laptop-3-dwg-clean.png');
+
+        // Draw a line on clean-orig.dwg through the real Line tool.
+        await page.click('.rb[data-tool="line"]');
+        await page.fill('.cmdin', '1,1');
+        await page.keyboard.press('Enter');
+        await page.fill('.cmdin', '4,1');
+        await page.keyboard.press('Enter');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () =>
+            document.querySelector('.titlebar button[data-act="undo"]')?.textContent?.includes('(#1)') &&
+            window.agentdrafterViewer?.summary?.sheet === 'clean-orig.rev1' &&
+            document.querySelector('[data-dwg-banner="clean"]')?.textContent?.includes('clean-orig.rev1.dwg'),
+          null,
+          { timeout: 20000 },
+        );
+        // Wait for the post-landing check of clean-orig.rev1.dwg to finish before undo removes it.
+        await sleep(300);
+        const rev1Path = join(folder, 'clean-orig.rev1.dwg');
+        assert(existsSync(rev1Path), 'revision DWG written beside original');
+        assert(
+          createHash('sha256').update(readFileSync(cleanDwg)).digest('hex') === origCleanSha,
+          'original DWG untouched after revision',
+        );
+
+        // Undo last removes revision 1 and restores original cleanly.
+        await page.click('.titlebar button[data-act="undo"]');
+        await page.waitForFunction(
+          () => {
+            const b = document.querySelector('.titlebar button[data-act="undo"]');
+            return b && b.disabled && !b.textContent?.includes('(#1)') && window.agentdrafterViewer?.summary?.sheet === 'clean-orig';
+          },
+          null,
+          { timeout: 20000 },
+        );
+        assert(!existsSync(rev1Path), 'undo removed clean-orig.rev1.dwg');
+        assert(
+          createHash('sha256').update(readFileSync(cleanDwg)).digest('hex') === origCleanSha,
+          'original DWG untouched after undo',
+        );
+
+        // Make another edit and Accept it.
+        await page.click('.rb[data-tool="line"]');
+        await page.fill('.cmdin', '1,2');
+        await page.keyboard.press('Enter');
+        await page.fill('.cmdin', '4,2');
+        await page.keyboard.press('Enter');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () =>
+            document.querySelector('.titlebar button[data-act="undo"]')?.disabled === false &&
+            window.agentdrafterViewer?.summary?.sheet?.startsWith('clean-orig.rev') &&
+            document.querySelector('[data-dwg-banner="clean"]')?.textContent?.includes('clean-orig.rev'),
+          null,
+          { timeout: 20000 },
+        );
+        await page.click('.titlebar button[data-act="accept"]');
+        await page.waitForSelector('.va-modal [data-ok]', { timeout: 10000 });
+        await page.click('.va-modal [data-ok]');
+        await page.waitForFunction(
+          () => document.querySelector('.va-status')?.textContent?.includes('Issued'),
+          null,
+          { timeout: 20000 },
+        );
+        assert(
+          createHash('sha256').update(readFileSync(cleanDwg)).digest('hex') === origCleanSha,
+          'original DWG untouched after accept',
+        );
+
+        // Open undecoded plant DWG (decoded: false) -> view-only lock, decode modal, Allow Loss unlock.
+        await page.evaluate((ld) => {
+          window.__desktopTest.nextDwg = ld;
+        }, lossDwg);
+        await page.click('[data-act="desktop-switcher"]');
+        await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
+        await page.click('[data-sw-pick="file"]');
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'loss-orig', null, { timeout: 20000 });
+        await page.waitForSelector('[data-dwg-banner="view-only"]', { timeout: 15000 });
+        assert(await page.isDisabled('.rb[data-tool="line"]'), 'drawing tools locked while view-only');
+        assert(await page.isDisabled('.titlebar button[data-act="accept"]'), 'Accept locked while view-only');
+        await shot(page, 'desktop-laptop-4-dwg-viewonly.png');
+
+        await page.click('[data-act="inspect-loss"]');
+        await page.waitForSelector('[data-decode-modal]', { timeout: 5000 });
+        const modalText = await page.textContent('[data-decode-modal]');
+        assert(
+          modalText.includes('MADE_UP_DEVICE') && modalText.includes('2A7, 2A9') && modalText.includes('Skipped records: 1'),
+          `decode modal lists undecoded details: ${modalText}`,
+        );
+        assert(await page.isDisabled('[data-allow-loss-confirm]'), 'Allow button disabled before ticking checkbox');
+        await shot(page, 'desktop-laptop-5-decode-modal.png');
+
+        await page.check('[data-allow-loss-check]');
+        assert(!(await page.isDisabled('[data-allow-loss-confirm]')), 'Allow button enabled after ticking checkbox');
+        await page.click('[data-allow-loss-confirm]');
+        await page.waitForSelector('[data-dwg-banner="allowed-loss"]', { timeout: 5000 });
+        assert(!(await page.isDisabled('.rb[data-tool="line"]')), 'drawing tools unlocked after Allow Loss');
+
+        // Draw a line on loss-orig.dwg and confirm `allow_loss: true` was passed on `change`.
+        await page.click('.rb[data-tool="line"]');
+        await page.fill('.cmdin', '1,3');
+        await page.keyboard.press('Enter');
+        await page.fill('.cmdin', '3,3');
+        await page.keyboard.press('Enter');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () =>
+            document.querySelector('.titlebar button[data-act="undo"]')?.disabled === false &&
+            window.agentdrafterViewer?.summary?.sheet?.startsWith('loss-orig.rev'),
+          null,
+          { timeout: 20000 },
+        );
+        assert(sawAllowLossOnChange, 'change request carried allow_loss: true');
+        assert(
+          createHash('sha256').update(readFileSync(lossDwg)).digest('hex') === origLossSha,
+          'loss-orig.dwg original untouched',
+        );
+
+        // Open single YAML sheet -> renders cleanly, read-only banner, Plot PDF works.
+        await page.click('[data-act="desktop-switcher"]');
+        await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
+        await page.click('[data-sw-start]');
+        await page.waitForSelector('[data-desktop-start]', { timeout: 5000 });
+        await page.click('[data-pick="sheet"]');
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'geometry', null, { timeout: 20000 });
+        await page.waitForSelector('[data-dwg-banner="sheet"]', { timeout: 5000 });
+        assert(await page.isDisabled('.rb[data-tool="line"]'), 'drawing tools disabled on single YAML sheet');
+        await shot(page, 'desktop-laptop-6-single-sheet.png');
+
+        seen.laptop = { newWindows: newWins, sawAllowLossOnChange, problems };
+        assert(!problems.length, `laptop desktop errors: ${problems.join('; ')} | http4xx: ${http4xx.join(' || ')}`);
+        await context.close();
+      }
+
+      // 2. Phone (390x844): Start screen, drawing set title bar (zero overlap), switcher, single sheet.
+      {
+        const context = await b.newContext(PHONE);
+        await installDesktopBridge(context);
+        const page = await context.newPage();
+        const problems = [];
+        page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
+        page.on('console', (m) => m.type() === 'error' && problems.push(`console: ${m.text()}`));
+
+        await page.goto(`${server.base}/?desktop=1&start=1`, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('[data-desktop-start]', { timeout: 15000 });
+        const startOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+        assert(!startOverflow, 'phone Start screen has no horizontal overflow');
+        await shot(page, 'desktop-phone-1-start.png');
+
+        await page.tap('[data-pick="set"]');
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'DP-LD-101', null, { timeout: 20000 });
+        await live(page);
+        const barFit = await page.evaluate(() => {
+          const items = [...document.querySelectorAll('.titlebar > *')].filter((el) => getComputedStyle(el).display !== 'none');
+          const rects = items.map((el) => el.getBoundingClientRect());
+          let overlap = false;
+          for (let i = 1; i < rects.length; i += 1) {
+            if (rects[i].left < rects[i - 1].right - 1) overlap = true;
+          }
+          const rightMost = Math.max(...rects.map((r) => r.right));
+          return { overlap, rightMost, innerWidth: window.innerWidth };
+        });
+        assert(!barFit.overlap && barFit.rightMost <= barFit.innerWidth + 1, `phone titlebar clean: ${JSON.stringify(barFit)}`);
+        await shot(page, 'desktop-phone-2-set.png');
+
+        await page.tap('[data-act="desktop-switcher"]');
+        await page.waitForSelector('[data-desktop-switcher]', { timeout: 5000 });
+        await page.tap('[data-sw-start]');
+        await page.waitForSelector('[data-desktop-start]', { timeout: 5000 });
+        await page.tap('[data-pick="sheet"]');
+        await page.waitForFunction(() => window.agentdrafterViewer?.summary?.sheet === 'geometry', null, { timeout: 20000 });
+        await page.waitForSelector('[data-dwg-banner="sheet"]', { timeout: 5000 });
+        await shot(page, 'desktop-phone-3-sheet.png');
+
+        seen.phone = { barFit, problems };
+        assert(!problems.length, `phone desktop errors: ${problems.join('; ')}`);
+        await context.close();
+      }
+      return { seen, shots };
+    } finally {
+      await b.close();
+      await server.stop();
+    }
+  },
 };
 
 const results = {};

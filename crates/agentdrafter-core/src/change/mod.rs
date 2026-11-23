@@ -82,7 +82,7 @@ pub use journal::{
     RollBack, SheetFailed, UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, LOCK_FILE,
     UNDO_STATES_FOLDER,
 };
-pub use original_journal::ORIGINALS_JOURNAL_FOLDER;
+pub use original_journal::{original_journal_file, ORIGINALS_JOURNAL_FOLDER};
 pub use proposals::{
     discard, keep_with, proposals, propose_with, DiscardReport, DiscardRequest, KeepReport,
     KeepRequest, ProposalListed, ProposalsReport, ProposalsRequest, ProposeReport, ProposeRequest,

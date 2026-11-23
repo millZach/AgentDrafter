@@ -1,0 +1,13 @@
+{
+  "identifier": "default",
+  "description": "Allow local in-process AgentDrafter server windows to invoke desktop shell commands and native OS pickers.",
+  "windows": ["main", "win-*"],
+  "local": true,
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*"]
+  },
+  "permissions": [
+    "core:default",
+    "dialog:default"
+  ]
+}
