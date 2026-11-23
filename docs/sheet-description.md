@@ -249,6 +249,7 @@ Every object takes a `layer` key: the name of the layer it sits on, `0` or one u
 | `hatch` | `pattern`, `boundary`; `scale`, `angle` | An area filled solid or with a pattern, inside a boundary; see below. |
 | `donut` | `center`, `outside_diameter`; `inside_diameter` | A ring, or a filled dot when its inside diameter is 0, as AutoCAD's DONUT draws it, such as a wire's junction dot. See [Polylines](#polylines). |
 | `solid` | `corners` | A filled triangle or quadrilateral, AutoCAD's 2D solid: 3 or 4 corners sharing one `z`, listed in order round the outline. AgentDrafter writes them in AutoCAD's own order, which crosses the third and fourth. |
+| `revision_cloud` | `rectangle` or `polygon`, `arc_length`; `style`, `reverse` | A revision cloud, as AutoCAD's REVCLOUD draws it: a closed lightweight polyline of arcs around a rectangle (`{from, to}`) or closed polygon of 3+ points, in `normal` or tapered `calligraphy` style, carrying AutoCAD's `RevcloudProps` extended data. See [Revision clouds](revision-clouds.md). |
 | `text` | `contents`, `position`, `height`; `style`, `width_factor`, `rotation`, `justify` | A single line of text, as AutoCAD's TEXT draws it. See [Text](#text). |
 | `mtext` | `contents`, `position`, `height`; `width`, `style`, `width_factor`, `rotation`, `justify` | Text of one or more lines in a box, as AutoCAD's MTEXT draws it. See [Text](#text). |
 | `insert` | `block`, `position`; `scale`, `rotation`, `attributes` | A block from the sheet's block library, placed as AutoCAD's INSERT places it. See [Inserts](#inserts). |

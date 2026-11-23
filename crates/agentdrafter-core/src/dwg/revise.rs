@@ -195,6 +195,7 @@ pub(crate) struct RevisionSession {
     expected_layers_added: HashSet<String>,
     expected_layers_changed: HashSet<String>,
     app_registered: bool,
+    revcloud_app_registered: bool,
 }
 
 impl RevisionSession {
@@ -243,6 +244,7 @@ impl RevisionSession {
             expected_layers_added: HashSet::new(),
             expected_layers_changed: HashSet::new(),
             app_registered: false,
+            revcloud_app_registered: false,
         })
     }
 
@@ -548,6 +550,9 @@ impl RevisionSession {
         start_of: &dyn Fn(&TextObject) -> Point3,
     ) -> Result<(String, MutationHandles), Error> {
         let blocks = self.all_insertable_blocks();
+        if matches!(object, Object::RevisionCloud(_)) {
+            self.ensure_revcloud_application_registered()?;
+        }
         let mut dwg_obj = dwg_object(object, start_of, &blocks)?;
         match (explicit_id, explicit_name) {
             (Some(id_part), name_part) => {
@@ -667,10 +672,30 @@ impl RevisionSession {
     }
 
     fn ensure_application_registered(&mut self) -> Result<(), Error> {
-        if self.drawing.app_ids.get(block::APPLICATION).is_none() {
+        if !self
+            .drawing
+            .app_ids
+            .iter()
+            .any(|a| a.name.eq_ignore_ascii_case(block::APPLICATION))
+        {
             block::register_application(&mut self.drawing)?;
             self.drawing.assign_table_entry_handles();
             self.app_registered = true;
+        }
+        Ok(())
+    }
+
+    fn ensure_revcloud_application_registered(&mut self) -> Result<(), Error> {
+        if !self.drawing.app_ids.iter().any(|a| {
+            a.name
+                .eq_ignore_ascii_case(crate::model::REVCLOUD_APPLICATION)
+        }) {
+            block::register_named_application(
+                &mut self.drawing,
+                crate::model::REVCLOUD_APPLICATION,
+            )?;
+            self.drawing.assign_table_entry_handles();
+            self.revcloud_app_registered = true;
         }
         Ok(())
     }
@@ -1702,6 +1727,7 @@ impl RevisionSession {
             &before.app_ids,
             &after.app_ids,
             self.app_registered,
+            self.revcloud_app_registered,
             &mut unexpected,
         );
         diff_named_table("UCS", &before.ucss, &after.ucss, &mut unexpected);
@@ -3346,6 +3372,7 @@ fn diff_app_id_table(
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
     app_registered: bool,
+    revcloud_app_registered: bool,
     out: &mut Vec<UnexpectedChange>,
 ) {
     for (key, orig) in before {
@@ -3367,7 +3394,9 @@ fn diff_app_id_table(
     }
     for key in after.keys() {
         let name = key.rsplit_once('#').map(|(n, _)| n).unwrap_or(key.as_str());
-        let is_expected_app = app_registered && name.eq_ignore_ascii_case(block::APPLICATION);
+        let is_expected_app = (app_registered && name.eq_ignore_ascii_case(block::APPLICATION))
+            || (revcloud_app_registered
+                && name.eq_ignore_ascii_case(crate::model::REVCLOUD_APPLICATION));
         if !before.contains_key(key) && !is_expected_app {
             out.push(UnexpectedChange {
                 kind: "APPID".to_owned(),

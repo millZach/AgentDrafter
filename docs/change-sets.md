@@ -82,6 +82,7 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `add_mtext` | `MTEXT` | Adds multiline text. |
 | `add_donut` | `DONUT` | Adds a donut. |
 | `add_solid` | `SOLID` | Adds a 2D solid. |
+| `add_revision_cloud` | `REVCLOUD` | Adds a revision cloud around a rectangle, a polygon or existing objects' extents (`around` + optional `margin`), in `normal` or `calligraphy` style. See [Revision clouds](revision-clouds.md). |
 | `insert_block` | `INSERT` | Adds an insert of a block from the block library. |
 | `add_table` | `TABLE` | Adds a table. |
 | `add_mleader` | `MLEADER` | Adds a multileader: leader lines from their arrows to a landing, and its text or block. |

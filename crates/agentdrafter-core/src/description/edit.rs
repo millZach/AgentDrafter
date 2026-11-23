@@ -1557,8 +1557,20 @@ impl RecordFile {
                 }
                 ("polyline" | "leader" | "dimension", "points")
                 | ("spline", "fit_points" | "control_points")
-                | ("solid", "corners") => {
+                | ("solid", "corners")
+                | ("revision_cloud", "polygon") => {
                     move_points(&mut entry.value, by, units, &field)?;
+                }
+                ("revision_cloud", "rectangle") => {
+                    let Kind::Mapping(parts) = &mut entry.value.kind else {
+                        return Err(not_a_point(&field));
+                    };
+                    for part in parts.iter_mut() {
+                        if matches!(part.key.as_str(), "from" | "to") {
+                            let at = key_path(&field, &part.key);
+                            move_point(&mut part.value, by, units, &at)?;
+                        }
+                    }
                 }
                 ("mleader", "leaders") | ("dimension", "lines") => {
                     let Kind::Sequence(lines) = &mut entry.value.kind else {

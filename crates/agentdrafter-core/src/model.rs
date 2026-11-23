@@ -21,6 +21,7 @@ pub(crate) mod hatch;
 pub(crate) mod layout;
 pub(crate) mod leader;
 pub(crate) mod leader_block;
+pub(crate) mod revision_cloud;
 pub(crate) mod table;
 pub use block::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
@@ -38,6 +39,10 @@ pub use leader::{
     MLeaderBlock, MLeaderContent, MLeaderStyle, MLeaderText, MTextBox, STANDARD_MLEADER_STYLE,
 };
 pub use leader_block::{BlockConnection, Outline};
+pub use revision_cloud::{
+    RevisionCloud, RevisionCloudBoundary, RevisionCloudStyle, MOST_REVCLOUD_ARCS,
+    REVCLOUD_APPLICATION, REVCLOUD_BULGE, REVCLOUD_CALLIGRAPHY_WIDTH_FACTOR,
+};
 pub use table::{
     LaidCell, RowKind, RowStyle, Table, TableCell, TableStyle, LINE_BOX, LINE_STEP,
     STANDARD_TABLE_STYLE,
@@ -316,6 +321,7 @@ pub enum Object {
     Hatch(Hatch),
     Donut(Donut),
     Solid(Solid),
+    RevisionCloud(RevisionCloud),
     Text(Text),
     #[serde(rename = "mtext")]
     MText(MText),
@@ -350,6 +356,7 @@ impl Object {
             Object::Hatch(_) => "hatch",
             Object::Donut(_) => "donut",
             Object::Solid(_) => "solid",
+            Object::RevisionCloud(_) => "revision_cloud",
             Object::Text(_) => "text",
             Object::MText(_) => "mtext",
             Object::AttributeDefinition(_) => "attdef",
@@ -374,6 +381,7 @@ impl Object {
             Object::Hatch(o) => &o.layer,
             Object::Donut(o) => &o.layer,
             Object::Solid(o) => &o.layer,
+            Object::RevisionCloud(o) => &o.layer,
             Object::Text(o) => &o.layer,
             Object::MText(o) => &o.layer,
             Object::AttributeDefinition(o) => &o.layer,
@@ -398,6 +406,7 @@ impl Object {
             Object::Hatch(o) => &o.properties,
             Object::Donut(o) => &o.properties,
             Object::Solid(o) => &o.properties,
+            Object::RevisionCloud(o) => &o.properties,
             Object::Text(o) => &o.properties,
             Object::MText(o) => &o.properties,
             Object::AttributeDefinition(o) => &o.properties,
@@ -421,6 +430,7 @@ impl Object {
             Object::Hatch(o) => &mut o.properties,
             Object::Donut(o) => &mut o.properties,
             Object::Solid(o) => &mut o.properties,
+            Object::RevisionCloud(o) => &mut o.properties,
             Object::Text(o) => &mut o.properties,
             Object::MText(o) => &mut o.properties,
             Object::AttributeDefinition(o) => &mut o.properties,

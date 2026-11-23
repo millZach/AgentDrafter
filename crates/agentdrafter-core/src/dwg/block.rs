@@ -63,13 +63,25 @@ const TOLERANCE: f64 = 1e-9;
 /// Registers AgentDrafter's application, whose extended data holds the IDs
 /// of objects and the names of inserts.
 pub(super) fn register_application(drawing: &mut CadDocument) -> Result<(), Error> {
-    if drawing.app_ids.get(APPLICATION).is_some() {
+    register_named_application(drawing, APPLICATION)
+}
+
+/// Registers an application name in the drawing's APPID table if absent.
+pub(super) fn register_named_application(
+    drawing: &mut CadDocument,
+    name: &str,
+) -> Result<(), Error> {
+    if drawing
+        .app_ids
+        .iter()
+        .any(|a| a.name.eq_ignore_ascii_case(name))
+    {
         return Ok(());
     }
-    drawing.app_ids.add(AppId::new(APPLICATION)).map_err(|e| {
+    drawing.app_ids.add(AppId::new(name)).map_err(|e| {
         Error::new(
             ErrorCode::DwgWrite,
-            format!("could not register the application `{APPLICATION}` in the drawing: {e}"),
+            format!("could not register the application `{name}` in the drawing: {e}"),
         )
     })
 }

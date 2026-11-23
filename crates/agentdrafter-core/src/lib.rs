@@ -182,6 +182,10 @@ pub use model::{
 };
 pub use model::{Cell, Clip, Layout, Paper, Viewport};
 pub use model::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
+pub use model::{
+    RevisionCloud, RevisionCloudBoundary, RevisionCloudStyle, MOST_REVCLOUD_ARCS,
+    REVCLOUD_APPLICATION, REVCLOUD_BULGE, REVCLOUD_CALLIGRAPHY_WIDTH_FACTOR,
+};
 pub use model::{RowKind, RowStyle, Table, TableCell, TableStyle, STANDARD_TABLE_STYLE};
 pub use original::{
     read_original, ReadReport, ReadRequest, HANDLE_ID, MIRROR_EXTENSION, MIRROR_MARK,

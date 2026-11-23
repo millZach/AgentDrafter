@@ -36,6 +36,7 @@ pub(crate) mod paper;
 pub(crate) mod parts;
 mod polyline;
 mod records;
+mod revision_cloud;
 pub(crate) mod schema;
 mod set;
 mod set_schema;

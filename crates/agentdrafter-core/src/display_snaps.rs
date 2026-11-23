@@ -183,7 +183,12 @@ pub(crate) fn edge_fills(sheet: &Sheet, list: &DisplayList) -> Vec<usize> {
         .filter(|(_, item)| {
             matches!(
                 drawer(sheet, item),
-                Some(Object::Polyline(_) | Object::Solid(_) | Object::Donut(_))
+                Some(
+                    Object::Polyline(_)
+                        | Object::Solid(_)
+                        | Object::Donut(_)
+                        | Object::RevisionCloud(_)
+                )
             )
         })
         .map(|(k, _)| k)

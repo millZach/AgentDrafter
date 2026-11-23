@@ -28,7 +28,9 @@ use crate::change::operations::{
 use crate::change::original_journal::OriginalJournal;
 use crate::change::{HowChanged, ObjectChanged, OriginalRevisionMeta, SnapResolved};
 use crate::check::{check_dwg_bytes, CheckReport};
-use crate::description::{parse_added_object_json, parse_layer_patch_json, parse_new_layer_json};
+use crate::description::{
+    parse_added_object_json, parse_layer_patch_json, parse_length_json, parse_new_layer_json,
+};
 use crate::dwg::{
     LockedLayerHit, MutationHandles, RevisionSession, RevisionVerification, TargetSpace,
     UnexpectedChange,
@@ -1508,6 +1510,7 @@ fn apply_revision_op(
                             | "mtext"
                             | "donut"
                             | "solid"
+                            | "revision_cloud"
                             | "insert"
                     ) =>
                 {
@@ -1634,6 +1637,223 @@ fn apply_revision_op(
                 handles_deleted: handles.deleted,
                 copies: Vec::new(),
                 snapped,
+            })
+        }
+        Body::AddRevisionCloud {
+            to,
+            around,
+            margin,
+            keys,
+        } => {
+            if let Some(to) = to {
+                check_add_target_sheet(to, sheet_name, op)?;
+            }
+            let record = ensure_record(session, cached, source, sheet_name)?;
+            let mut found = Vec::with_capacity(around.len());
+            for (target, key) in around {
+                found.push((
+                    resolve_target(session, record, target, sheet_name, op, key)?,
+                    key.as_str(),
+                ));
+            }
+            let fonts = SheetFonts::find(&record.record.sheet, settings);
+            let drawn = crate::query::measuring_objects(&record.record.sheet, &fonts);
+            let mut points: Vec<[f64; 2]> = Vec::new();
+            for (f, key) in &found {
+                let Some(place) = record
+                    .record
+                    .objects
+                    .iter()
+                    .position(|o| o.id.eq_ignore_ascii_case(&f.id))
+                else {
+                    continue;
+                };
+                let before = points.len();
+                points.extend(
+                    drawn
+                        .items
+                        .iter()
+                        .filter(|item| item.object == place)
+                        .flat_map(|item| item.points()),
+                );
+                points.extend(
+                    drawn
+                        .boundaries
+                        .iter()
+                        .filter(|(object, _)| *object == place)
+                        .flat_map(|(_, b)| [b.min, b.max]),
+                );
+                if points.len() == before {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{}` draws nothing, so it has no extents to frame with `around`",
+                            f.id
+                        ),
+                        key,
+                    ));
+                }
+            }
+            if points.is_empty() {
+                return Err(op_error(
+                    index,
+                    op_name,
+                    ErrorCode::BadValue,
+                    "the `around` objects have no drawn extents to frame",
+                    "around",
+                ));
+            }
+            let (min, max) = points.iter().fold(
+                ([f64::MAX, f64::MAX], [f64::MIN, f64::MIN]),
+                |(min, max), p| {
+                    (
+                        [min[0].min(p[0]), min[1].min(p[1])],
+                        [max[0].max(p[0]), max[1].max(p[1])],
+                    )
+                },
+            );
+            let raw_w = (max[0] - min[0]).max(0.0);
+            let raw_h = (max[1] - min[1]).max(0.0);
+            let (arc_length, write_arc_length) =
+                match keys.get("arc_length").filter(|v| !v.is_null()) {
+                    Some(value) => match parse_length_json(value, units, "arc_length") {
+                        Ok(len) if len.is_finite() && len > 0.0 => (len, false),
+                        Ok(_) => {
+                            return Err(op_error(
+                                index,
+                                op_name,
+                                ErrorCode::BadValue,
+                                "a revision cloud's arc_length is more than 0",
+                                "arc_length",
+                            ))
+                        }
+                        Err(e) => {
+                            return Err(op_error(index, op_name, e.code, e.message, "arc_length"))
+                        }
+                    },
+                    None => (
+                        crate::model::RevisionCloud::default_arc_length(raw_w, raw_h),
+                        true,
+                    ),
+                };
+            let margin_len = match margin {
+                Some(value) => match parse_length_json(value, units, "margin") {
+                    Ok(m) if m.is_finite() && m >= 0.0 => m,
+                    Ok(_) => {
+                        return Err(op_error(
+                            index,
+                            op_name,
+                            ErrorCode::BadValue,
+                            "a revision cloud's margin cannot be negative",
+                            "margin",
+                        ))
+                    }
+                    Err(e) => return Err(op_error(index, op_name, e.code, e.message, "margin")),
+                },
+                None => crate::model::RevisionCloud::default_margin(arc_length),
+            };
+            let x0 = min[0] - margin_len;
+            let y0 = min[1] - margin_len;
+            let x1 = max[0] + margin_len;
+            let y1 = max[1] + margin_len;
+            if !(x1 > x0 && y1 > y0) {
+                return Err(op_error(
+                    index,
+                    op_name,
+                    ErrorCode::BadValue,
+                    "the framed extents have zero width or height; give a margin more than 0",
+                    "margin",
+                ));
+            }
+            let mut resolved_keys = keys.clone();
+            resolved_keys.insert(
+                "rectangle".into(),
+                json!({ "from": [x0, y0, 0.0], "to": [x1, y1, 0.0] }),
+            );
+            if write_arc_length {
+                resolved_keys.insert("arc_length".into(), json!(arc_length));
+            }
+            let tables = session.tables_for_parsing();
+            let parsed = parse_added_object_json(
+                "revision_cloud",
+                &resolved_keys,
+                units,
+                &tables.layers,
+                &tables.linetypes,
+                &tables.styles,
+                &tables.blocks,
+                &tables.layouts,
+            )
+            .map_err(|e| {
+                let field = e.field.as_deref().unwrap_or("");
+                let trimmed = field.strip_prefix("revision_cloud.").unwrap_or(field);
+                op_error(index, op_name, e.code, e.message, trimmed)
+            })?;
+            if let Some(explicit_id) = &parsed.id {
+                let full = format!("{sheet_name}/{explicit_id}");
+                if record
+                    .record
+                    .objects
+                    .iter()
+                    .any(|o| o.id.eq_ignore_ascii_case(&full))
+                {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::DuplicateId,
+                        format!("an object with ID `{full}` already exists on `{sheet_name}`"),
+                        "id",
+                    ));
+                }
+            }
+            if let Some(explicit_name) = &parsed.name {
+                if record.record.objects.iter().any(|o| {
+                    o.name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(explicit_name))
+                }) {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::DuplicateName,
+                        format!(
+                            "an object named `{explicit_name}` already exists on `{sheet_name}`"
+                        ),
+                        "name",
+                    ));
+                }
+            }
+            let space = match parsed.space {
+                None => TargetSpace::Model,
+                Some(idx) => TargetSpace::Layout(tables.layouts[idx].clone()),
+            };
+            let start_of = |t: &crate::text::Text| fonts.start(t);
+            let (hex, handles) = session.add_object(
+                &parsed.object,
+                &space,
+                sheet_name,
+                parsed.id.as_deref(),
+                parsed.name.as_deref(),
+                &start_of,
+            )?;
+            let id = match &parsed.id {
+                Some(explicit) => format!("{sheet_name}/{explicit}"),
+                None => handle_id(sheet_name, &hex),
+            };
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!("added revision_cloud `{id}` (handle `{hex}`)"),
+                id: Some(id),
+                handle: Some(hex),
+                handles_touched: handles.touched,
+                handles_added: handles.added,
+                handles_deleted: handles.deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
             })
         }
         Body::SetAttribute {

@@ -1454,6 +1454,30 @@ fn object_value(object: &Object, names: &Names) -> Value {
             let corners: Vec<Value> = solid.corners.iter().map(|&p| point_value(p)).collect();
             put("corners", Value::Array(corners));
         }
+        Object::RevisionCloud(cloud) => {
+            match &cloud.boundary {
+                crate::model::RevisionCloudBoundary::Rectangle { from, to } => {
+                    put(
+                        "rectangle",
+                        json!({
+                            "from": point_value(*from),
+                            "to": point_value(*to),
+                        }),
+                    );
+                }
+                crate::model::RevisionCloudBoundary::Polygon(points) => {
+                    let pts: Vec<Value> = points.iter().map(|&p| point_value(p)).collect();
+                    put("polygon", Value::Array(pts));
+                }
+            }
+            put("arc_length", json!(cloud.arc_length));
+            if !cloud.style.is_normal() {
+                put("style", json!(cloud.style.as_str()));
+            }
+            if cloud.reverse {
+                put("reverse", json!(true));
+            }
+        }
         Object::Text(text) => {
             put("contents", json!(text.contents));
             put("position", point_value(text.position));

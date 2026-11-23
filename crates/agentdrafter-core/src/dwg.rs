@@ -26,6 +26,7 @@ use acadrust::entities::{
 };
 use acadrust::tables::{BlockRecord, Layer as DwgLayer, LineType, LineTypeElement};
 use acadrust::types::{Color, DxfVersion, LineWeight, Vector2, Vector3};
+use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 use acadrust::{CadDocument, DwgReader, DwgWriter};
 
 use crate::description::{normalize_degrees, SheetRecord};
@@ -34,8 +35,8 @@ use crate::model::MTextBox;
 use crate::model::{
     is_one, Arc, Block, Circle, DecodeReport, DrawingContents, Ellipse, IdAndName, Layer, Line,
     Linetype, Lineweight, Object, ObjectColor, ObjectLinetype, ObjectLineweight, Point3, Polyline,
-    Properties, RecordsOfKind, Solid, Spline, BUILT_IN_LINETYPES, BY_BLOCK, BY_LAYER, CONTINUOUS,
-    FIT_DEGREE, LAYER_ZERO,
+    Properties, RecordsOfKind, RevisionCloud, Solid, Spline, BUILT_IN_LINETYPES, BY_BLOCK,
+    BY_LAYER, CONTINUOUS, FIT_DEGREE, LAYER_ZERO, REVCLOUD_APPLICATION,
 };
 use crate::text::{MText as MTextObject, Text as TextObject};
 use crate::units::Unit;
@@ -191,6 +192,14 @@ pub(crate) fn write_new_sheet(
     // Every object carries its ID in AgentDrafter's extended data.
     if !sheet.objects.is_empty() {
         block::register_application(&mut drawing)?;
+    }
+    let has_revcloud = sheet
+        .objects
+        .iter()
+        .chain(sheet.blocks.iter().flat_map(|b| b.objects.iter()))
+        .any(|o| matches!(o, Object::RevisionCloud(_)));
+    if has_revcloud {
+        block::register_named_application(&mut drawing, REVCLOUD_APPLICATION)?;
     }
     dimension::prepare(&mut drawing, sheet)?;
     // Layers, linetypes, text styles and applications take their handles
@@ -527,6 +536,7 @@ fn dwg_object(
         Object::Hatch(hatch) => EntityType::Hatch(Box::new(hatch::dwg_hatch(hatch))),
         Object::Donut(donut) => dwg_polyline(&donut.polyline()),
         Object::Solid(solid) => EntityType::Solid(dwg_solid(solid)),
+        Object::RevisionCloud(cloud) => dwg_revision_cloud(cloud),
         Object::Text(t) => EntityType::Text(text::dwg_text(t, start_of(t))),
         Object::MText(t) => EntityType::MText(Box::new(text::dwg_mtext(t))),
         Object::AttributeDefinition(definition) => {
@@ -573,6 +583,18 @@ fn dwg_object(
     object.layer().clone_into(&mut common.layer);
     set_properties(common, object.properties());
     Ok(dwg_object)
+}
+
+/// A revision cloud is written as a closed lightweight polyline with
+/// AutoCAD's `RevcloudProps` extended data (`1070 = 0`, `1040 = arc_length`)
+/// so AutoCAD recognizes and edits it as a revision cloud (#72).
+fn dwg_revision_cloud(cloud: &RevisionCloud) -> EntityType {
+    let mut entity = dwg_polyline(&cloud.polyline());
+    let mut record = ExtendedDataRecord::new(REVCLOUD_APPLICATION);
+    record.add_value(XDataValue::Integer16(0));
+    record.add_value(XDataValue::Real(cloud.arc_length));
+    entity.common_mut().extended_data.upsert_record(record);
+    entity
 }
 
 /// Writes an object's own colour, linetype, lineweight and linetype scale
@@ -3925,6 +3947,109 @@ mod tests {
         assert_eq!(common.line_weight, LineWeight::Default);
         assert_eq!(common.linetype_scale, 2.0);
         assert_eq!(read_properties(&common), Some(own));
+    }
+
+    #[test]
+    fn revision_cloud_dwg_carries_revcloud_props_bulge_and_calligraphy_widths() {
+        use crate::model::{
+            REVCLOUD_APPLICATION, REVCLOUD_BULGE, REVCLOUD_CALLIGRAPHY_WIDTH_FACTOR,
+        };
+        let dir =
+            std::env::temp_dir().join(format!("agentdrafter-dwg-revcloud-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let yaml_path = dir.join("clouds.yaml");
+        let dwg_path = dir.join("clouds.dwg");
+        std::fs::write(
+            &yaml_path,
+            "\
+units: in
+objects:
+  - revision_cloud:
+      id: rc-normal
+      rectangle: { from: [0, 0, 0], to: [4, 2, 0] }
+      arc_length: 0.5
+      style: normal
+  - revision_cloud:
+      id: rc-cal
+      name: cal-cloud
+      rectangle: { from: [5, 0, 0], to: [9, 2, 0] }
+      arc_length: 0.5
+      style: calligraphy
+      reverse: true
+",
+        )
+        .expect("write yaml");
+        let settings = crate::Settings::default();
+        crate::build_with(
+            &crate::BuildRequest {
+                description: yaml_path.clone(),
+                output: Some(dwg_path.clone()),
+                overwrite: true,
+            },
+            &settings,
+        )
+        .expect("build DWG");
+        let drawing = acadrust::io::dwg::DwgReader::from_file(&dwg_path)
+            .expect("open DWG")
+            .read()
+            .expect("read back DWG");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            drawing.app_ids.get(REVCLOUD_APPLICATION).is_some(),
+            "RevcloudProps APPID must be registered"
+        );
+        let polylines: Vec<&LwPolyline> = drawing
+            .model_space_entities()
+            .filter_map(|e| match e {
+                EntityType::LwPolyline(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(polylines.len(), 2);
+
+        let normal = polylines[0];
+        assert!(normal.is_closed);
+        assert_eq!(normal.vertices.len(), 24);
+        assert_eq!(normal.constant_width, 0.0);
+        for v in &normal.vertices {
+            assert!((v.bulge - REVCLOUD_BULGE).abs() < 1e-9);
+            assert_eq!(v.start_width, 0.0);
+            assert_eq!(v.end_width, 0.0);
+        }
+        let rec = normal
+            .common
+            .extended_data
+            .records()
+            .iter()
+            .find(|r| r.application_name == REVCLOUD_APPLICATION)
+            .expect("normal cloud carries RevcloudProps XData");
+        assert_eq!(
+            rec.values,
+            vec![XDataValue::Integer16(0), XDataValue::Real(0.5)]
+        );
+
+        let cal = polylines[1];
+        assert!(cal.is_closed);
+        assert_eq!(cal.vertices.len(), 24);
+        assert_eq!(cal.constant_width, 0.0);
+        let expected_end_width = 0.5 * REVCLOUD_CALLIGRAPHY_WIDTH_FACTOR;
+        for v in &cal.vertices {
+            assert!((v.bulge + REVCLOUD_BULGE).abs() < 1e-9);
+            assert_eq!(v.start_width, 0.0);
+            assert!((v.end_width - expected_end_width).abs() < 1e-9);
+        }
+        let cal_rec = cal
+            .common
+            .extended_data
+            .records()
+            .iter()
+            .find(|r| r.application_name == REVCLOUD_APPLICATION)
+            .expect("calligraphy cloud carries RevcloudProps XData");
+        assert_eq!(
+            cal_rec.values,
+            vec![XDataValue::Integer16(0), XDataValue::Real(0.5)]
+        );
     }
 
     /// `CONTEXT.md` says drawing and object. acadrust's own names, which

@@ -287,6 +287,7 @@ impl Outline {
                     )],
                     true,
                 ),
+                Object::RevisionCloud(c) => crossed(polyline_pieces(&c.polyline()), true),
                 Object::Arc(a) => crossed(
                     vec![degrees_arc(a.center, a.radius, a.start_angle, a.end_angle)],
                     true,

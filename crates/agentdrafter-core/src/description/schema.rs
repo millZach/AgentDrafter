@@ -809,6 +809,53 @@ fn defs() -> Map<String, Value> {
             }),
         ),
     );
+    defs.insert("revision_cloud".into(), {
+        let mut cloud = object_def(
+            "A revision cloud, AutoCAD's REVCLOUD: a closed chain of outward-bulging arcs round \
+             a rectangle or a polygon, written as a closed lightweight polyline with RevcloudProps \
+             extended data so AutoCAD can modify it.",
+            &["arc_length"],
+            json!({
+                "rectangle": {
+                    "description": "An axis-aligned rectangle given by two opposite corners \
+                                    sharing one z, with width and height more than 0.",
+                    "type": "object",
+                    "required": ["from", "to"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "from": { "$ref": "#/$defs/point" },
+                        "to": { "$ref": "#/$defs/point" },
+                    },
+                },
+                "polygon": {
+                    "description": "At least 3 corners round the boundary, sharing one z, \
+                                    enclosing an area more than 0.",
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/point" },
+                    "minItems": 3,
+                },
+                "arc_length": {
+                    "$ref": "#/$defs/length_more_than_0",
+                    "description": "Target chord length of each cloud arc, more than 0.",
+                },
+                "style": {
+                    "description": "How the cloud arcs draw: `normal` (uniform lineweight) or \
+                                    `calligraphy` (tapered strokes). Without it, `normal`.",
+                    "enum": super::revision_cloud::STYLE_NAMES,
+                },
+                "reverse": {
+                    "description": "When true, arcs bulge inward instead of outward. Without it, \
+                                    false.",
+                    "anyOf": [{ "type": "boolean" }, { "enum": ["true", "false"] }],
+                },
+            }),
+        );
+        cloud["oneOf"] = json!([
+            { "required": ["rectangle"], "not": { "required": ["polygon"] } },
+            { "required": ["polygon"], "not": { "required": ["rectangle"] } },
+        ]);
+        cloud
+    });
     defs.insert(
         "arc".into(),
         object_def(
