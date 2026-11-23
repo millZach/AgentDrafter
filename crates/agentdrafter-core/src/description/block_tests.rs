@@ -342,7 +342,7 @@ fn an_inserts_values_are_checked() {
             "insert: {block: MARKER, position: [0, 0, 0], colour: red}",
             ErrorCode::UnknownKey,
             "objects[0].insert.colour",
-            &["an insert takes block, position, scale, rotation, mirrored, readable_attributes, attributes, layer, color, linetype, lineweight, linetype_scale, id, name"],
+            &["an insert takes block, position, scale, rotation, mirrored, readable_attributes, attributes, state, layer, color, linetype, lineweight, linetype_scale, id, name"],
         ),
         (
             "insert: {position: [0, 0, 0]}",
@@ -534,7 +534,7 @@ fn a_block_library_is_checked_as_a_sheet_is() {
             "units: mm\nblocks:\n  A: {base: [0, 0, 0], objects: [{line: {from: [0, 0, 0], to: [1, 0, 0]}}]}\n",
             ErrorCode::UnknownKey,
             "blocks.A.base",
-            &["a block takes base_point, objects"],
+            &["a block takes base_point, objects, parameters"],
         ),
         (
             "units: mm\nblocks:\n  A: {objects: [{insert: {block: B, position: [0, 0, 0]}}]}\n",
