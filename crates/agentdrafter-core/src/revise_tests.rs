@@ -4146,3 +4146,340 @@ fn passing_allow_loss_once_on_clean_original_does_not_lock_future_edits() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn chained_revisions_preserve_original_decode_warnings() {
+    let dir = scratch("chained_decode_warnings");
+    let orig = build_made_up_original(&dir, "WARN-ORIG");
+    // Patch the DWG file header's 2-byte LE code page (bytes 19..21) to 65535
+    // so acadrust decodes the file completely (`decoded: true`) while emitting
+    // a non-fatal reader warning (`warnings >= 1`).
+    let mut bytes = fs::read(&orig).unwrap();
+    bytes[19] = 0xFF;
+    bytes[20] = 0xFF;
+    fs::write(&orig, &bytes).unwrap();
+
+    let orig_read = crate::read_original(&crate::ReadRequest {
+        source: orig.clone(),
+        mirror: None,
+        no_mirror: true,
+    })
+    .unwrap();
+    assert!(
+        orig_read.decoded,
+        "expected decoded: true with warning: {orig_read:?}"
+    );
+    assert!(
+        orig_read.warnings >= 1,
+        "expected >= 1 decode warning on patched code-page original: {orig_read:?}"
+    );
+
+    let settings = Settings::default().without_system_fonts();
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: Some(orig_read.sha256.clone()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "rev1 failed: {r1:?}");
+    let rep1 = r1.result.unwrap();
+    assert!(rep1.decode.decoded);
+    assert_eq!(rep1.decode.warnings, orig_read.warnings);
+
+    // Chained rev2 writes on top of rev1 (whose saved header has a clean code
+    // page with 0 warnings), yet rev2's report and `.changes.json` MUST still
+    // preserve the original's decode warnings.
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 5, 0], "to": [10, 5, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: Some(orig_read.sha256.clone()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "rev2 failed: {r2:?}");
+    let rep2 = r2.result.unwrap();
+    assert_eq!(
+        rep2.parent_revision.as_ref().map(|p| p.entry),
+        rep1.journal_entry
+    );
+    assert!(rep2.decode.decoded);
+    assert_eq!(
+        rep2.decode.warnings, orig_read.warnings,
+        "chained rev2 report must preserve original's decode warnings: {:?}",
+        rep2.decode
+    );
+
+    let cl2: Value =
+        serde_json::from_str(&fs::read_to_string(rep2.change_list.unwrap()).unwrap()).unwrap();
+    assert_eq!(cl2["decode_report"]["decoded"], true);
+    assert_eq!(cl2["decode_report"]["warnings"], orig_read.warnings);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_to_b_to_a_original_swap_does_not_chain_past_b_back_to_a() {
+    let dir = scratch("orig_swap_aba");
+    let orig_a = build_made_up_original(&dir, "SRC-A");
+    let orig_b = build_made_up_original(&dir, "SRC-B");
+    let settings = Settings::default().without_system_fonts();
+
+    // Give B a distinct circle at x=20 so A and B have different SHA-256 and geometry.
+    let b_prep = dir.join("SRC-B-DISTINCT.dwg");
+    let rb_prep = revise_with(
+        &ReviseRequest {
+            set: orig_b.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [20, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: Some(b_prep.clone()),
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(rb_prep.ok, "{rb_prep:?}");
+
+    let bytes_a = fs::read(&orig_a).unwrap();
+    let bytes_b = fs::read(&b_prep).unwrap();
+    assert_ne!(bytes_a, bytes_b);
+
+    let live = dir.join("SWAP.dwg");
+    fs::write(&live, &bytes_a).unwrap();
+
+    let circles_at_x = |path: &Path| -> Vec<i64> {
+        let mut xs: Vec<i64> = crate::original::read_dwg_record(path, false)
+            .unwrap()
+            .record
+            .sheet
+            .objects
+            .iter()
+            .filter_map(|o| match o {
+                Object::Circle(c) => Some(c.center.x.round() as i64),
+                _ => None,
+            })
+            .collect();
+        xs.sort();
+        xs
+    };
+
+    // 1. Revise live=A -> entry 1 (rev1) with circle x=11.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: live.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [11, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+
+    // 2. Swap live -> B, revise -> entry 2 (rev2) with circle x=21 (starts fresh from B).
+    fs::write(&live, &bytes_b).unwrap();
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: live.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [21, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "{r2:?}");
+    let rep2 = r2.result.unwrap();
+    assert!(rep2.parent_revision.is_none());
+
+    // 3. Swap live back -> A, revise -> entry 3 (rev3) with circle x=12.
+    //    Newest active entry is entry 2 (hash B != hash A), so core MUST NOT
+    //    skip past B back to A's entry 1; rev3 starts fresh from A!
+    fs::write(&live, &bytes_a).unwrap();
+    let r3 = revise_with(
+        &ReviseRequest {
+            set: live.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [12, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r3.ok, "{r3:?}");
+    let rep3 = r3.result.unwrap();
+    assert!(
+        rep3.parent_revision.is_none(),
+        "A -> B -> A swap must not chain past B back to A's entry 1: {:?}",
+        rep3.parent_revision
+    );
+    let rev3_xs = circles_at_x(Path::new(&rep3.revision_dwg.unwrap()));
+    assert!(
+        rev3_xs.contains(&12)
+            && !rev3_xs.contains(&11)
+            && !rev3_xs.contains(&20)
+            && !rev3_xs.contains(&21),
+        "rev3 must contain only A + edit 3 (12), not entry 1 (11) or B (20, 21): {rev3_xs:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_journal_entry_without_standalone_output_never_becomes_working_revision_base() {
+    use crate::change::original_journal::original_journal_file;
+
+    let dir = scratch("legacy_standalone_output");
+    let sub = dir.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let orig = build_made_up_original(&dir, "LEGACY-SOLO");
+    let settings = Settings::default().without_system_fonts();
+
+    let circles_at_x = |path: &Path| -> Vec<i64> {
+        let mut xs: Vec<i64> = crate::original::read_dwg_record(path, false)
+            .unwrap()
+            .record
+            .sheet
+            .objects
+            .iter()
+            .filter_map(|o| match o {
+                Object::Circle(c) => Some(c.center.x.round() as i64),
+                _ => None,
+            })
+            .collect();
+        xs.sort();
+        xs
+    };
+
+    // 1. Working revision 1 (circle at x=10 -> LEGACY-SOLO.rev1.dwg).
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [10, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+    let rep1 = r1.result.unwrap();
+
+    // 2. Explicit `--output alternate.dwg` (circle at x=20) and `--output sub/LEGACY-SOLO.rev1.dwg` (x=25).
+    let alt = dir.join("alternate.dwg");
+    let r_alt = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [20, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: Some(alt),
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r_alt.ok, "{r_alt:?}");
+
+    let sub_rev = sub.join("LEGACY-SOLO.rev1.dwg");
+    let r_sub = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [25, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: Some(sub_rev),
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r_sub.ok, "{r_sub:?}");
+
+    // Strip `"standalone_output":true` from journal.jsonl to simulate legacy
+    // pre-PR journal entries written before `standalone_output` existed.
+    let jfile = original_journal_file(&orig).expect("journal file exists");
+    let raw = fs::read_to_string(&jfile).unwrap();
+    assert!(raw.contains("\"standalone_output\":true"));
+    let legacy = raw.replace(",\"standalone_output\":true", "");
+    assert!(!legacy.contains("standalone_output"));
+    fs::write(&jfile, legacy).unwrap();
+
+    // 3. Next working revision (circle at x=30) MUST skip both legacy standalone
+    //    entries and chain onto entry 1 (`LEGACY-SOLO.rev1.dwg`)!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [30, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "{r2:?}");
+    let rep2 = r2.result.unwrap();
+    assert_eq!(
+        rep2.parent_revision.as_ref().map(|p| p.entry),
+        rep1.journal_entry,
+        "must skip legacy standalone entries and chain onto entry 1"
+    );
+    let xs = circles_at_x(Path::new(&rep2.revision_dwg.unwrap()));
+    assert!(
+        xs.contains(&10) && xs.contains(&30) && !xs.contains(&20) && !xs.contains(&25),
+        "rev2 must contain entry 1 (10) + entry 4 (30), NOT alternate (20) or sub (25): {xs:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

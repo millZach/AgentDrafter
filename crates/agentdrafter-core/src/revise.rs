@@ -617,29 +617,27 @@ fn open_revision_base(
             .map_err(|e| e.or_in_file(source))?;
         let units = tip_session.initial_contents().units.or(orig_units);
         // If the original was clean (`decoded: true`) but the tip somehow failed
-        // to decode whole, enforce the decode gate on the tip too.
-        let decode = if !orig_decode.decoded {
-            orig_decode
-        } else {
+        // to decode whole, enforce the decode gate on the tip too. Otherwise
+        // unconditionally preserve `orig_decode` so non-fatal warnings on a
+        // `decoded: true` original (such as header code-page warnings) are never
+        // dropped by chaining through `rev1`.
+        if orig_decode.decoded && !tip_session.decode_report().decoded && !request.allow_loss {
             let tip_decode = tip_session.decode_report().clone();
-            if !tip_decode.decoded && !request.allow_loss {
-                return Ok(build_incomplete_decode_refusal(
-                    source,
-                    sheet_name.to_owned(),
-                    request.dry_run,
-                    original_meta,
-                    parent_revision,
-                    units,
-                    tip_decode,
-                ));
-            }
-            tip_decode
-        };
+            return Ok(build_incomplete_decode_refusal(
+                source,
+                sheet_name.to_owned(),
+                request.dry_run,
+                original_meta,
+                parent_revision,
+                units,
+                tip_decode,
+            ));
+        }
         Ok(OpenedRevisionBase::Open {
             session: tip_session,
             original_meta,
             parent_revision,
-            decode,
+            decode: orig_decode,
             units,
         })
     } else {

@@ -172,6 +172,7 @@ import {
   loadLocalRecents,
   matchOriginalObjectId,
   mergeRecent,
+  newestActiveOriginalSha,
   normalizeOriginalChangeSet,
   removeRecentLocal,
   resolveBeside,
@@ -754,6 +755,11 @@ function DrawingWorkspace({
   const [decodeModalOpen, setDecodeModalOpen] = useState(false);
   const [plotting, setPlotting] = useState(false);
   const [ownRev, setOwnRev] = useState<{ path: string; entry: number; sha256: string; originalSha256: string } | null>(null);
+  const readSeqRef = useRef(0);
+  const readPendingRef = useRef(readPending);
+  readPendingRef.current = readPending;
+  const revokeLossRef = useRef(onRevokeLoss);
+  revokeLossRef.current = onRevokeLoss;
 
   useEffect(() => {
     if (!isDwg) {
@@ -763,16 +769,17 @@ function DrawingWorkspace({
       return;
     }
     let current = true;
+    const seq = ++readSeqRef.current;
     setReadPending(true);
     setReadError(null);
     call<ReadReport>('read', { source, no_mirror: true }, token).then(
       (report) => {
-        if (!current) return;
+        if (!current || seq !== readSeqRef.current) return;
         setReadReport(report);
         setReadPending(false);
       },
       (e) => {
-        if (!current) return;
+        if (!current || seq !== readSeqRef.current) return;
         setReadReport(null);
         setReadError(why(e, token));
         setReadPending(false);
@@ -1367,6 +1374,7 @@ function DrawingWorkspace({
       void check(null);
       return;
     }
+    let active = true;
     const stop = watch(
       source,
       token,
@@ -1382,6 +1390,45 @@ function DrawingWorkspace({
         const report = replied.result;
         setNoJournal(null);
         setJournal(report);
+        // When a plant DWG's journal gains an active revision made against a
+        // different original SHA-256 than our cached `readReport.sha256`,
+        // immediately re-read the live original so `sha256`, decode state, and
+        // any stale `allow_loss` consent stay in sync with disk.
+        if (isDwg && !readPendingRef.current) {
+          const newestSha = newestActiveOriginalSha(report);
+          const cachedSha = originalShaRef.current;
+          if (newestSha && (!cachedSha || newestSha.toLowerCase() !== cachedSha.toLowerCase())) {
+            const seq = ++readSeqRef.current;
+            void call<ReadReport>('read', { source, no_mirror: true }, token).then(
+              (fresh) => {
+                if (!active || seq !== readSeqRef.current) return;
+                const prevSha = originalShaRef.current;
+                if (prevSha && fresh.sha256.toLowerCase() !== prevSha.toLowerCase()) {
+                  revokeLossRef.current(prevSha);
+                  setOwnRev(null);
+                }
+                setReadError(null);
+                setReadReport((prev) =>
+                  prev &&
+                  prev.sha256 === fresh.sha256 &&
+                  prev.decoded === fresh.decoded &&
+                  prev.warnings === fresh.warnings &&
+                  prev.read_past_damage === fresh.read_past_damage
+                    ? prev
+                    : fresh,
+                );
+              },
+              (e) => {
+                if (!active || seq !== readSeqRef.current) return;
+                const prevSha = originalShaRef.current;
+                if (prevSha) revokeLossRef.current(prevSha);
+                setOwnRev(null);
+                setReadReport(null);
+                setReadError(why(e, token));
+              },
+            );
+          }
+        }
         const before = seen.current;
         // A journal cut back, as a commit rolled back cuts it, or whose
         // entries seen were taken away or replaced, is not the one the
@@ -1483,12 +1530,13 @@ function DrawingWorkspace({
       },
     );
     return () => {
+      active = false;
       stop();
       seen.current = null;
       proposalsSeen.current = null;
       guidesSeen.current = null;
     };
-  }, [source, isSheet, token, check, toastFor, log, drawAgain, redrawPreview]);
+  }, [source, isDwg, isSheet, token, check, toastFor, log, drawAgain, redrawPreview]);
 
   // The objects the focused entry changed on the sheet shown, marked.
   const focusedEntry = journal?.entries.find((e) => e.entry === focused);

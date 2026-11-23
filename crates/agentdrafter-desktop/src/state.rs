@@ -418,6 +418,15 @@ pub fn load_recents(file: &Path) -> Vec<RecentEntry> {
     let Ok(mut handle) = open_regular_no_follow(file) else {
         return Vec::new();
     };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = handle.metadata() {
+            if (meta.permissions().mode() & 0o077) != 0 {
+                let _ = handle.set_permissions(fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
     let mut bytes = Vec::new();
     if handle.read_to_end(&mut bytes).is_err() {
         return Vec::new();
@@ -905,6 +914,38 @@ mod tests {
                 fs::metadata(&loose_file).unwrap().permissions().mode() & 0o777,
                 0o600,
                 "pre-existing 0644 recents.json must be tightened to 0600"
+            );
+
+            // Reading (launching) with a pre-existing 0755 dir and 0644 recents.json
+            // immediately tightens BOTH dir (0700) and recents.json (0600) on read.
+            let read_loose_dir = dir.join("loose-read-dir");
+            fs::create_dir_all(&read_loose_dir).unwrap();
+            fs::set_permissions(&read_loose_dir, fs::Permissions::from_mode(0o755)).unwrap();
+            let read_loose_file = read_loose_dir.join("recents.json");
+            let one_recent = vec![RecentEntry {
+                path: "/drawings/existing".to_owned(),
+                kind: SourceKind::Set,
+                name: "existing".to_owned(),
+                opened_at_ms: 42,
+                subtitle: None,
+            }];
+            fs::write(
+                &read_loose_file,
+                serde_json::to_vec_pretty(&one_recent).unwrap(),
+            )
+            .unwrap();
+            fs::set_permissions(&read_loose_file, fs::Permissions::from_mode(0o644)).unwrap();
+            let loaded_loose = load_recents_locked(&read_loose_file).unwrap();
+            assert_eq!(loaded_loose, one_recent);
+            assert_eq!(
+                fs::metadata(&read_loose_dir).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "pre-existing 0755 dir must be tightened to 0700 on read"
+            );
+            assert_eq!(
+                fs::metadata(&read_loose_file).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "pre-existing 0644 recents.json must be tightened to 0600 on read"
             );
         }
 

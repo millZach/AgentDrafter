@@ -802,8 +802,53 @@ impl OriginalJournal {
         }))
     }
 
-    /// Returns the latest active (finished, non-undone) revision tip recorded in
-    /// this original's journal, or `None` when no active revision exists yet.
+    /// Whether `revision_dwg` (as stored in `OriginalRevisionMeta::revision_dwg`)
+    /// is a sibling automatic working-revision filename (`<orig-stem>.rev<N>.dwg`
+    /// with no directory components), as opposed to a standalone `--output` path
+    /// (including legacy journal entries written before `standalone_output`).
+    fn is_default_working_revision_dwg(&self, revision_dwg: &str) -> bool {
+        if revision_dwg.is_empty() || revision_dwg.contains('/') {
+            return false;
+        }
+        let mut comps = Path::new(revision_dwg).components();
+        let Some(Component::Normal(file_name)) = comps.next() else {
+            return false;
+        };
+        if comps.next().is_some() {
+            return false;
+        }
+        let Some(name) = file_name.to_str() else {
+            return false;
+        };
+        let Some(without_ext) = name.strip_suffix(".dwg") else {
+            return false;
+        };
+        let Some((stem, num)) = without_ext.rsplit_once(".rev") else {
+            return false;
+        };
+        if num.is_empty()
+            || num.starts_with('0')
+            || !num.bytes().all(|b| b.is_ascii_digit())
+            || num.parse::<u64>().ok().is_none_or(|v| v == 0)
+        {
+            return false;
+        }
+        let source_stem = stem_of(&self.source);
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            stem.eq_ignore_ascii_case(&self.sheet) || stem.eq_ignore_ascii_case(&source_stem)
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            stem == self.sheet || stem == source_stem
+        }
+    }
+
+    /// Returns the newest active (finished, non-undone, non-standalone) working
+    /// revision tip recorded in this original's journal, or `None` when none
+    /// exists yet. Only inspects the newest active non-standalone entry so
+    /// callers checking `original_sha256` never skip past a newer original's
+    /// entry back to an older original's revision.
     /// Read-only: never creates any directory or file.
     pub(crate) fn latest_active_revision(&self) -> Result<Option<ActiveRevisionTip>, Error> {
         let entries = self.read_entries()?;
@@ -823,7 +868,7 @@ impl OriginalJournal {
             let Some(meta) = entry.original_revision.as_ref() else {
                 continue;
             };
-            if meta.standalone_output {
+            if meta.standalone_output || !self.is_default_working_revision_dwg(&meta.revision_dwg) {
                 continue;
             }
             let path = self.resolve_file(&meta.revision_dwg);

@@ -118,10 +118,13 @@ export function getDesktopBridge(): DesktopBridge | null {
 
 /**
  * Whether `path` uses Windows path syntax (`C:\…`, `C:/…`, or UNC `\\server\…`).
- * POSIX paths starting with `/` never treat literal `\` characters as separators.
+ * Any POSIX path (including relative POSIX paths containing `/` such as
+ * `\\yard/\\part.dwg` or bare POSIX filenames starting with `\\`) never treats
+ * literal `\` characters as directory separators.
  */
 export function isWindowsPath(path: string): boolean {
-  return path.startsWith('\\\\') || /^[A-Za-z]:[\\/]/.test(path);
+  if (/^[A-Za-z]:[\\/]/.test(path)) return true;
+  return path.startsWith('\\\\') && !path.includes('/') && path.indexOf('\\', 2) > 2;
 }
 
 function stripTrailingSeparators(path: string): string {
@@ -229,10 +232,56 @@ function matchesOriginalSha(recorded: string | undefined, expected: string | nul
   return recorded.toLowerCase() === expected.toLowerCase();
 }
 
+function matchesWorkingRevisionStem(revisionDwg: string, origPathOrName: string, winOrig: boolean): boolean {
+  if (!revisionDwg) return false;
+  if (winOrig) {
+    if (revisionDwg.includes('/') || revisionDwg.includes('\\') || isAbsolutePath(revisionDwg)) return false;
+  } else if (revisionDwg.includes('/')) {
+    return false;
+  }
+  if (!revisionDwg.endsWith('.dwg')) return false;
+  const withoutExt = revisionDwg.slice(0, -4);
+  const revIdx = withoutExt.lastIndexOf('.rev');
+  if (revIdx < 0) return false;
+  const stem = withoutExt.slice(0, revIdx);
+  const num = withoutExt.slice(revIdx + 4);
+  if (!/^[1-9]\d*$/.test(num)) return false;
+  const origStem = displayNameWithMode(origPathOrName, winOrig).replace(/\.dwg$/i, '');
+  return winOrig ? stem.toLowerCase() === origStem.toLowerCase() : stem === origStem;
+}
+
+function isWorkingRevisionMeta(
+  meta: NonNullable<Entry['original_revision']> | undefined,
+  originalPath: string,
+  winOrig: boolean,
+): meta is NonNullable<Entry['original_revision']> {
+  if (!meta?.revision_dwg || meta.standalone_output) return false;
+  return (
+    matchesWorkingRevisionStem(meta.revision_dwg, originalPath, winOrig) ||
+    (!!meta.original_file && matchesWorkingRevisionStem(meta.revision_dwg, meta.original_file, winOrig))
+  );
+}
+
+/**
+ * The `original_sha256` recorded on the newest active (finished, non-undone,
+ * non-rolled-back) original-DWG revision entry in `journal`, or null if none.
+ */
+export function newestActiveOriginalSha(journal: JournalReport | null): string | null {
+  if (!journal) return null;
+  for (let i = journal.entries.length - 1; i >= 0; i -= 1) {
+    const e = journal.entries[i] as Entry | undefined;
+    if (!e || e.kind !== 'change_set' || e.undone_by || e.rolled_back) continue;
+    const sha = e.original_revision?.original_sha256;
+    if (sha) return sha;
+  }
+  return null;
+}
+
 /**
  * Latest finished, non-undone, non-standalone working revision DWG recorded in
- * an original DWG's journal. When `expectedOriginalSha256` is given, ignores
- * revisions made against a different file that previously lived at this path.
+ * an original DWG's journal. Inspects ONLY the newest active non-standalone
+ * working revision entry so an A -> B -> A disk swap never skips past B's newer
+ * entry back to A's older revision (staying 100% aligned with the core).
  */
 export function latestActiveRevision(
   journal: JournalReport | null,
@@ -245,8 +294,8 @@ export function latestActiveRevision(
     const e = journal.entries[i] as Entry | undefined;
     if (!e || e.kind !== 'change_set' || e.undone_by || e.rolled_back) continue;
     const meta = e.original_revision;
-    if (!meta?.revision_dwg || meta.standalone_output) continue;
-    if (!matchesOriginalSha(meta.original_sha256, expectedOriginalSha256)) continue;
+    if (!isWorkingRevisionMeta(meta, originalPath, winOrig)) continue;
+    if (!matchesOriginalSha(meta.original_sha256, expectedOriginalSha256)) return null;
     return {
       path: resolveBeside(originalPath, meta.revision_dwg),
       file: displayNameWithMode(meta.revision_dwg, winOrig),
@@ -260,8 +309,11 @@ export function latestActiveRevision(
 }
 
 /**
- * The revision DWG that was active just after `entryNumber` in an original DWG's
- * journal, or null when stepping back to before any revision (so the original is shown).
+ * The working revision DWG that was active just after `entryNumber` in an
+ * original DWG's journal, or null when stepping back to before any working
+ * revision (or when the newest active working revision at `entryNumber` was
+ * made against a different original SHA-256). Standalone `--output` entries
+ * never enter working-revision selection.
  */
 export function revisionAtEntry(
   journal: JournalReport | null,
@@ -271,19 +323,6 @@ export function revisionAtEntry(
 ): { path: string; file: string; sha256: string } | null {
   if (!journal) return null;
   const winOrig = isWindowsPath(originalPath);
-  const target = journal.entries.find((e) => e.entry === entryNumber);
-  if (
-    target?.kind === 'change_set' &&
-    target.original_revision?.revision_dwg &&
-    !target.undone_by &&
-    matchesOriginalSha(target.original_revision.original_sha256, expectedOriginalSha256)
-  ) {
-    return {
-      path: resolveBeside(originalPath, target.original_revision.revision_dwg),
-      file: displayNameWithMode(target.original_revision.revision_dwg, winOrig),
-      sha256: target.original_revision.revision_sha256,
-    };
-  }
   // Walk backwards from entryNumber to find the newest non-undone, non-standalone working revision at that point.
   const undoneByThen = new Set<number>();
   for (const e of journal.entries) {
@@ -297,8 +336,8 @@ export function revisionAtEntry(
     if (!e || e.entry > entryNumber) continue;
     if (e.kind !== 'change_set' || e.rolled_back || undoneByThen.has(e.entry) || e.undone_by) continue;
     const meta = e.original_revision;
-    if (!meta?.revision_dwg || meta.standalone_output) continue;
-    if (!matchesOriginalSha(meta.original_sha256, expectedOriginalSha256)) continue;
+    if (!isWorkingRevisionMeta(meta, originalPath, winOrig)) continue;
+    if (!matchesOriginalSha(meta.original_sha256, expectedOriginalSha256)) return null;
     return {
       path: resolveBeside(originalPath, meta.revision_dwg),
       file: displayNameWithMode(meta.revision_dwg, winOrig),

@@ -8,11 +8,13 @@ import {
   classifySource,
   dwgEditGuard,
   isAbsolutePath,
+  isWindowsPath,
   kindBadge,
   latestActiveRevision,
   loadLocalRecents,
   matchOriginalObjectId,
   mergeRecent,
+  newestActiveOriginalSha,
   nextRevisionHint,
   normalizeOriginalChangeSet,
   parseDesktopUrl,
@@ -86,6 +88,16 @@ test('resolves revision DWG paths beside POSIX and Windows originals', () => {
   assert.equal(resolveBeside('/tmp/plant/P-101.dwg', '/other/custom.dwg'), '/other/custom.dwg');
   // Valid POSIX filename starting with `\\` is resolved beside the POSIX original, NOT treated as a UNC path.
   assert.equal(resolveBeside('/demo/\\\\weird.dwg', '\\\\weird.rev1.dwg'), '/demo/\\\\weird.rev1.dwg');
+  assert.equal(resolveBeside('/demo/\\weird.dwg', '\\weird.rev1.dwg'), '/demo/\\weird.rev1.dwg');
+  // Relative POSIX path containing `/` with leading backslashes must NOT be mistaken for a Windows UNC path.
+  assert.equal(isWindowsPath('\\\\yard/\\\\part.dwg'), false);
+  assert.equal(isWindowsPath('\\yard/\\part.dwg'), false);
+  assert.equal(isWindowsPath('\\\\server\\share\\A.dwg'), true);
+  assert.equal(isWindowsPath('C:\\demo\\A.dwg'), true);
+  assert.equal(resolveBeside('\\yard/\\part.dwg', '\\part.rev1.dwg'), '\\yard/\\part.rev1.dwg');
+  assert.equal(resolveBeside('\\\\yard/\\\\part.dwg', '\\\\part.rev1.dwg'), '\\\\yard/\\\\part.rev1.dwg');
+  assert.equal(resolveBeside('C:\\demo\\A.dwg', 'A.rev1.dwg'), 'C:\\demo\\A.rev1.dwg');
+  assert.equal(resolveBeside('\\\\server\\share\\A.dwg', 'A.rev1.dwg'), '\\\\server\\share\\A.rev1.dwg');
   assert.equal(resolveBeside('\\\\server\\share\\P-101.dwg', '\\\\other\\share\\custom.dwg'), '\\\\other\\share\\custom.dwg');
 });
 
@@ -258,6 +270,110 @@ test('resolves active and stepped revisions from an original DWG journal and nor
     path: '/plant/P-101.rev1.dwg',
     file: 'P-101.rev1.dwg',
     sha256: 'bbb',
+  });
+  // Stepping directly to standalone `--output` entry 4 must NEVER select `alternate.dwg` as a working revision!
+  assert.deepEqual(revisionAtEntry(journal, 4, '/plant/P-101.dwg', 'aaa'), {
+    path: '/plant/P-101.rev1.dwg',
+    file: 'P-101.rev1.dwg',
+    sha256: 'bbb',
+  });
+
+  // Legacy journal entry omitting `standalone_output` whose `revision_dwg` is a custom name or in a subdir
+  // must ALSO be treated as standalone by both `latestActiveRevision` and `revisionAtEntry`.
+  const legacyStandaloneJournal: JournalReport = {
+    set: '/plant/P-101.dwg',
+    message: '2 entries',
+    can_undo: [1, 2],
+    entries: [
+      {
+        entry: 1,
+        kind: 'change_set',
+        at: '2026-11-22T18:00:00Z',
+        landed_on: ['P-101'],
+        original_revision: {
+          original_file: 'P-101.dwg',
+          original_sha256: 'aaa',
+          dwg_version: 'AC1027',
+          revision_dwg: 'alternate.dwg',
+          revision_sha256: 'alt1',
+        },
+      },
+      {
+        entry: 2,
+        kind: 'change_set',
+        at: '2026-11-22T18:01:00Z',
+        landed_on: ['P-101'],
+        original_revision: {
+          original_file: 'P-101.dwg',
+          original_sha256: 'aaa',
+          dwg_version: 'AC1027',
+          revision_dwg: 'sub/P-101.rev1.dwg',
+          revision_sha256: 'alt2',
+        },
+      },
+    ],
+  };
+  assert.equal(latestActiveRevision(legacyStandaloneJournal, '/plant/P-101.dwg', 'aaa'), null);
+  assert.equal(revisionAtEntry(legacyStandaloneJournal, 1, '/plant/P-101.dwg', 'aaa'), null);
+  assert.equal(revisionAtEntry(legacyStandaloneJournal, 2, '/plant/P-101.dwg', 'aaa'), null);
+
+  // A -> B -> A disk swap: entry 1 for hashA, newer entry 2 for hashB.
+  // Inspect ONLY the newest active non-standalone entry (entry 2):
+  // `latestActiveRevision(swapJournal, path, hashA)` MUST return null (never skip past B back to A!),
+  // while `latestActiveRevision(swapJournal, path, hashB)` returns entry 2!
+  const swapJournal: JournalReport = {
+    set: '/plant/P-101.dwg',
+    message: '2 entries',
+    can_undo: [1, 2],
+    entries: [
+      {
+        entry: 1,
+        kind: 'change_set',
+        at: '2026-11-22T18:00:00Z',
+        landed_on: ['P-101'],
+        original_revision: {
+          original_file: 'P-101.dwg',
+          original_sha256: 'hashA',
+          dwg_version: 'AC1032',
+          revision_dwg: 'P-101.rev1.dwg',
+          revision_sha256: 'revA',
+        },
+      },
+      {
+        entry: 2,
+        kind: 'change_set',
+        at: '2026-11-22T18:05:00Z',
+        landed_on: ['P-101'],
+        original_revision: {
+          original_file: 'P-101.dwg',
+          original_sha256: 'hashB',
+          dwg_version: 'AC1032',
+          revision_dwg: 'P-101.rev2.dwg',
+          revision_sha256: 'revB',
+        },
+      },
+    ],
+  };
+  assert.equal(newestActiveOriginalSha(swapJournal), 'hashB');
+  assert.equal(latestActiveRevision(swapJournal, '/plant/P-101.dwg', 'hashA'), null);
+  assert.deepEqual(latestActiveRevision(swapJournal, '/plant/P-101.dwg', 'hashB'), {
+    path: '/plant/P-101.rev2.dwg',
+    file: 'P-101.rev2.dwg',
+    entry: 2,
+    dwgVersion: 'AC1032',
+    sha256: 'revB',
+    originalSha256: 'hashB',
+  });
+  assert.equal(revisionAtEntry(swapJournal, 2, '/plant/P-101.dwg', 'hashA'), null);
+  assert.deepEqual(revisionAtEntry(swapJournal, 2, '/plant/P-101.dwg', 'hashB'), {
+    path: '/plant/P-101.rev2.dwg',
+    file: 'P-101.rev2.dwg',
+    sha256: 'revB',
+  });
+  assert.deepEqual(revisionAtEntry(swapJournal, 1, '/plant/P-101.dwg', 'hashA'), {
+    path: '/plant/P-101.rev1.dwg',
+    file: 'P-101.rev1.dwg',
+    sha256: 'revA',
   });
 
   // Change set generated while displaying P-101.rev1.dwg rewrites sheet & handle prefix back to P-101.

@@ -6403,6 +6403,48 @@ const checks = {
         await page.waitForSelector('[data-je-undo="1"]', { timeout: 5000 });
         assert(await page.isDisabled('[data-je-undo="1"]'), 'journal entry Undo disabled while view-only (Blocker #7)');
 
+        // Fix #2 (A -> B -> A alignment + SSE `read --no-mirror` refresh):
+        // Return to live view (clicking entry 1 above stepped back), unlock allow_loss on A,
+        // then externally swap disk A -> B and revise B via HTTP API ->
+        // SSE MUST re-run `read --no-mirror`, revoke A's stale allow_loss (back to view-only),
+        // and display B's `loss-orig.rev2`; then swapping disk back B -> A MUST display `loss-orig`
+        // directly (NEVER skipping past B's entry 2 back to A's older entry 1 `loss-orig.rev1`)!
+        if (await page.$('button[data-act="live"]')) {
+          await page.click('button[data-act="live"]');
+        }
+        await page.click('[data-act="inspect-loss"]');
+        await page.waitForSelector('[data-decode-modal]', { timeout: 5000 });
+        await page.check('[data-allow-loss-check]');
+        await page.click('[data-allow-loss-confirm]');
+        await page.waitForSelector('[data-dwg-banner="allowed-loss"]', { timeout: 5000 });
+        cpSync(customFixtureB, lossDwg);
+        const extRes = await fetch(`${server.base}/commands/change`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            set: lossDwg,
+            allow_loss: true,
+            no_pdf: true,
+            change_set: { operations: [{ op: 'add_line', from: [12, 12, 0], to: [24, 12, 0] }] },
+          }),
+        });
+        const extJson = await extRes.json();
+        assert(extJson.ok, `external revision on swapped B succeeded: ${JSON.stringify(extJson)}`);
+        await page.waitForSelector('[data-dwg-banner="view-only"]', { timeout: 15000 });
+        await page.waitForFunction(
+          () => window.agentdrafterViewer?.summary?.sheet === 'loss-orig.rev2',
+          null,
+          { timeout: 15000 },
+        );
+        cpSync(customFixtureA, lossDwg);
+        await page.goto(`${server.base}/?desktop=1&source=${encodeURIComponent(lossDwg)}&kind=dwg`, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('[data-dwg-banner="view-only"]', { timeout: 20000 });
+        await page.waitForFunction(
+          () => window.agentdrafterViewer?.summary?.sheet === 'loss-orig',
+          null,
+          { timeout: 15000 },
+        );
+
         // Blocker #9: Open REAL damaged-line DWG (`desktop-damaged-line.dwg`) -> MUST render its
         // recoverable objects (circle + polyline, >= 2 objects) read-only via `display-list --read-past-damage`!
         await page.evaluate((dd) => {
