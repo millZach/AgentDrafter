@@ -124,6 +124,14 @@ _Avoid_: solid (alone it is a hatch's `SOLID` fill, or AutoCAD's 3D solid), fill
 A closed lightweight polyline of outward-bowing (or reversed, inward-bowing) arcs drawn round a rectangle, a polygon or an existing object's extents to call out a revised region, as AutoCAD's REVCLOUD draws it, in `normal` or tapered `calligraphy` style and carrying AutoCAD's `RevcloudProps` extended data so AutoCAD's REVCLOUD can modify it.
 _Avoid_: revcloud (alone it is AutoCAD's command name), markup bubble
 
+**Wipeout**:
+A closed polygonal mask, AutoCAD's WIPEOUT object, that hides whatever is drawn beneath it in the background colour (white on paper and in plotted PDFs and PNGs, the model-space background on screen) without trimming or deleting the geometry underneath; its boundary outline is controlled drawing-wide by `wipeout_frame` (`off`, `on`, or `display`, AutoCAD's `WIPEOUTFRAME` / `ACAD_WIPEOUT_VARS`). May appear on a sheet, in a template, in a row, or inside a block.
+_Avoid_: mask (a mask is the display-list shape a wipeout draws), cover, blanking box
+
+**Draw order**:
+The back-to-front sequence in which objects draw: earlier objects draw behind later ones, so a wipeout hides objects drawn before it while objects drawn after it appear on top. Controlled in sheet descriptions by list order, in change sets by `draw_order` (`DRAWORDER` / `DR`), `text_to_front` (`TEXTTOFRONT`), and the optional `draw_order` key on every `add_*` operation, and in DWGs by each space's `ACAD_SORTENTS` (`SORTENTSTABLE`) extension dictionary.
+_Avoid_: z-order (Z is the vertical coordinate axis), layer order (layers do not set draw order)
+
 **Table**:
 A grid of cells with text, AutoCAD's TABLE object, hung from its top left corner: rows of given heights running down, columns of given widths across, each cell's text laid out in its margins, and cells merged across rows and columns. Its first row may be a title row and the next a header row; the rest are data rows.
 _Avoid_: grid, schedule (a schedule is one use of a table), spreadsheet

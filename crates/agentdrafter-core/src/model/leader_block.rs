@@ -288,6 +288,16 @@ impl Outline {
                     true,
                 ),
                 Object::RevisionCloud(c) => crossed(polyline_pieces(&c.polyline()), true),
+                Object::Wipeout(w) => {
+                    let mut pieces = Vec::new();
+                    for i in 0..w.points.len() {
+                        pieces.push(Piece::Segment(
+                            flat(w.points[i]),
+                            flat(w.points[(i + 1) % w.points.len()]),
+                        ));
+                    }
+                    crossed(pieces, true)
+                }
                 Object::Arc(a) => crossed(
                     vec![degrees_arc(a.center, a.radius, a.start_angle, a.end_angle)],
                     true,

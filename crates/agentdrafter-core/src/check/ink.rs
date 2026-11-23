@@ -54,6 +54,7 @@ impl Ink {
                     self.fills.push(contour.clone());
                 }
             }
+            Shape::Mask { .. } => {}
         }
         if let Some(b) = Bounds::of(points.into_iter()) {
             let grown = [

@@ -624,27 +624,38 @@ impl Sheet<'_> {
     /// touch.
     fn text_on_line(&self, printed: &DisplayList) -> Vec<Finding> {
         let units_per_mm = Unit::Mm.convert(1.0, self.effective_units());
-        let mut letters: BTreeMap<Seen, Ink> = BTreeMap::new();
-        let mut lines: BTreeMap<Seen, Ink> = BTreeMap::new();
-        for item in &printed.items {
+        let mut letters: BTreeMap<Seen, (usize, Ink)> = BTreeMap::new();
+        let mut lines: BTreeMap<Seen, (usize, Ink)> = BTreeMap::new();
+        // Wipeout masks hide lines drawn before them from text drawn after them.
+        type MaskEntry<'a> = (usize, Option<usize>, &'a [Vec<Point2>]);
+        let mut masks: Vec<MaskEntry<'_>> = Vec::new();
+        for (order, item) in printed.items.iter().enumerate() {
+            if let crate::draw::Shape::Mask { contours } = &item.shape {
+                masks.push((order, item.viewport, contours));
+                continue;
+            }
             let key = (item.object, item_path(item.part, &item.nested, item.cell));
             let drawn = self.drawn_as(&key);
             let seen = (key, item.viewport);
             match drawn {
-                Drawn::Letters => letters
-                    .entry(seen)
-                    .or_default()
-                    .add(&item.shape, units_per_mm),
-                Drawn::Line => lines
-                    .entry(seen)
-                    .or_default()
-                    .add(&item.shape, units_per_mm),
+                Drawn::Letters => {
+                    let entry = letters
+                        .entry(seen)
+                        .or_insert_with(|| (order, Ink::default()));
+                    entry.0 = entry.0.min(order);
+                    entry.1.add(&item.shape, units_per_mm);
+                }
+                Drawn::Line => {
+                    let entry = lines.entry(seen).or_insert_with(|| (order, Ink::default()));
+                    entry.0 = entry.0.max(order);
+                    entry.1.add(&item.shape, units_per_mm);
+                }
                 Drawn::Fill => {}
             }
         }
         let mut findings = Vec::new();
-        for ((text, text_through), letter_ink) in &letters {
-            for ((line, line_through), line_ink) in &lines {
+        for ((text, text_through), (text_order, letter_ink)) in &letters {
+            for ((line, line_through), (line_order, line_ink)) in &lines {
                 // An insert's own lines, such as its cell lines, never
                 // count against its own text.
                 if line.0 == text.0 {
@@ -653,6 +664,19 @@ impl Sheet<'_> {
                 let Some(at) = line_ink.touches(letter_ink, self.tolerance) else {
                     continue;
                 };
+                // A wipeout drawn strictly after the line and before the text
+                // in the same viewport hides the line behind the letters.
+                let masked = masks.iter().any(|&(mask_order, mask_vp, contours)| {
+                    mask_vp == *text_through
+                        && mask_order > *line_order
+                        && mask_order < *text_order
+                        && contours
+                            .iter()
+                            .any(|c| c.len() >= 3 && inside_outline(at, c))
+                });
+                if masked {
+                    continue;
+                }
                 let says = printed
                     .text
                     .iter()
@@ -702,9 +726,11 @@ impl Sheet<'_> {
             | Object::Spline(_)
             | Object::RevisionCloud(_)
             | Object::Viewport(_) => Drawn::Line,
-            Object::Hatch(_) | Object::Solid(_) | Object::Donut(_) | Object::Insert(_) => {
-                Drawn::Fill
-            }
+            Object::Hatch(_)
+            | Object::Solid(_)
+            | Object::Donut(_)
+            | Object::Wipeout(_)
+            | Object::Insert(_) => Drawn::Fill,
             // A table's borders are lines; its cells' text, letters. A
             // leader's lines, landing and arrowhead are lines; its text,
             // drawn as its part 0, letters.

@@ -46,6 +46,7 @@ mod table_schema;
 mod template;
 mod text;
 pub(crate) use text::{shown_mtext, TEXT_STYLE_KEYS};
+mod wipeout;
 mod written;
 pub(crate) use written::{ObjectSources, SheetSources, Source};
 
@@ -84,10 +85,11 @@ pub(crate) use template::{
 };
 
 /// The keys at the top of a sheet description.
-pub(crate) const SHEET_KEYS: [&str; 14] = [
+pub(crate) const SHEET_KEYS: [&str; 15] = [
     "units",
     "block_library",
     "ltscale",
+    "wipeout_frame",
     "linetypes",
     "layers",
     "hatch_patterns",
@@ -400,6 +402,10 @@ fn sheet_and_records(
         Some(node) => layers::linetype_scale(node, "ltscale")?,
         None => 1.0,
     };
+    let wipeout_frame = match fields.get("wipeout_frame") {
+        Some(node) => wipeout::wipeout_frame(node, "wipeout_frame")?,
+        None => crate::model::WipeoutFrame::Off,
+    };
     let paper = match fields.get(paper::PAPER_KEY) {
         Some(node) => Some(paper::paper(node, paper::PAPER_KEY, units)?),
         None => None,
@@ -515,6 +521,7 @@ fn sheet_and_records(
         ltscale,
         layout,
         other_layouts,
+        wipeout_frame,
     };
     if let Some(library) = &library {
         blocks::take_from_library(&mut sheet, library, &fields)?;

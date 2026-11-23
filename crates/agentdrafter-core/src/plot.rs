@@ -556,6 +556,7 @@ pub(crate) fn plot_dwg_bytes(
         ltscale: drawing.ltscale,
         layout: drawing.layout,
         other_layouts: drawing.other_layouts,
+        wipeout_frame: drawing.wipeout_frame,
     };
     let record = Record {
         sheet,

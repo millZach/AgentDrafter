@@ -338,6 +338,7 @@ pub(crate) fn dwg_loaded_from_drawing(
         ltscale: drawing.ltscale,
         layout: drawing.layout,
         other_layouts: drawing.other_layouts,
+        wipeout_frame: drawing.wipeout_frame,
     };
     let record = SheetRecord {
         name: sheet_name,

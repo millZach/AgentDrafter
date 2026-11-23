@@ -619,7 +619,7 @@ impl Viewer {
             }
             let runs = match &item.shape {
                 Shape::Stroke { runs, .. } => runs,
-                Shape::Fill { contours, .. } => contours,
+                Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
             };
             for p in runs.iter().flatten() {
                 let b = o.bounds.get_or_insert([p[0], p[1], p[0], p[1]]);
@@ -1547,7 +1547,7 @@ impl Viewer {
                 {
                     let runs = match &item.shape {
                         Shape::Stroke { runs, .. } => runs,
-                        Shape::Fill { contours, .. } => contours,
+                        Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
                     };
                     for run in runs {
                         let pieces: Vec<Segment> = run
@@ -1606,7 +1606,7 @@ impl Viewer {
                 {
                     let shape = match &item.shape {
                         Shape::Stroke { runs, .. } => runs,
-                        Shape::Fill { contours, .. } => contours,
+                        Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
                     };
                     for run in shape {
                         let pieces: Vec<Segment> = run

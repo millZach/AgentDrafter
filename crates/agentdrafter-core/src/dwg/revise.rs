@@ -194,6 +194,8 @@ pub(crate) struct RevisionSession {
     expected_spaces_mutated: HashSet<u64>,
     expected_layers_added: HashSet<String>,
     expected_layers_changed: HashSet<String>,
+    expected_non_graphical_changed: HashSet<u64>,
+    expected_non_graphical_added: HashSet<u64>,
     app_registered: bool,
     revcloud_app_registered: bool,
 }
@@ -243,6 +245,8 @@ impl RevisionSession {
             expected_spaces_mutated: HashSet::new(),
             expected_layers_added: HashSet::new(),
             expected_layers_changed: HashSet::new(),
+            expected_non_graphical_changed: HashSet::new(),
+            expected_non_graphical_added: HashSet::new(),
             app_registered: false,
             revcloud_app_registered: false,
         })
@@ -553,6 +557,9 @@ impl RevisionSession {
         if matches!(object, Object::RevisionCloud(_)) {
             self.ensure_revcloud_application_registered()?;
         }
+        if matches!(object, Object::Wipeout(_)) {
+            self.ensure_wipeout_variables();
+        }
         let mut dwg_obj = dwg_object(object, start_of, &blocks)?;
         match (explicit_id, explicit_name) {
             (Some(id_part), name_part) => {
@@ -581,6 +588,119 @@ impl RevisionSession {
         }
         self.assign_child_handles(handle, &mut record);
         Ok((hex, record))
+    }
+
+    fn ensure_wipeout_variables(&mut self) {
+        let has_existing = self
+            .drawing
+            .objects
+            .values()
+            .any(|o| matches!(o, ObjectType::WipeoutVariables(_)));
+        if has_existing {
+            return;
+        }
+        if let Some((root, vars_h, created)) =
+            super::wipeout::write_wipeout_frame(&mut self.drawing, crate::model::WipeoutFrame::Off)
+        {
+            self.expected_non_graphical_changed.insert(root.value());
+            if created {
+                self.expected_non_graphical_added.insert(vars_h.value());
+            } else {
+                self.expected_non_graphical_changed.insert(vars_h.value());
+            }
+        }
+    }
+
+    fn space_block_record(&self, space: &TargetSpace) -> Result<(Handle, String), Error> {
+        match space {
+            TargetSpace::Model => self
+                .drawing
+                .block_records
+                .iter()
+                .find(|r| r.is_model_space())
+                .map(|r| (r.handle, r.name.clone()))
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::DwgWrite,
+                        "drawing has no model-space block record",
+                    )
+                }),
+            TargetSpace::Layout(name) => {
+                let block_handle = self
+                    .drawing
+                    .objects
+                    .values()
+                    .find_map(|obj| match obj {
+                        ObjectType::Layout(l) if l.name.eq_ignore_ascii_case(name) => {
+                            Some(l.block_record)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::UnknownName,
+                            format!("no layout named `{name}` in the drawing"),
+                        )
+                    })?;
+                self.drawing
+                    .block_records
+                    .iter()
+                    .find(|r| r.handle == block_handle)
+                    .map(|r| (r.handle, r.name.clone()))
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::DwgWrite,
+                            format!("layout `{name}` has no block record"),
+                        )
+                    })
+            }
+        }
+    }
+
+    /// Returns the sheet space (`Model` or `Layout(name)`) that owns `hex`.
+    pub(crate) fn space_of_handle(&self, hex: &str) -> Result<TargetSpace, Error> {
+        let handle = parse_hex_handle(hex)?;
+        self.ensure_sheet_entity(handle, hex)
+    }
+
+    /// Returns all sheet entity handles in `space` (excluding paper-space overall
+    /// viewports) in their current AutoCAD draw order (`ACAD_SORTENTS`).
+    pub(crate) fn space_handles_in_draw_order(
+        &self,
+        space: &TargetSpace,
+    ) -> Result<Vec<String>, Error> {
+        let (block_handle, block_name) = self.space_block_record(space)?;
+        let raw: Vec<&EntityType> = match space {
+            TargetSpace::Model => self.drawing.model_space_entities().collect(),
+            TargetSpace::Layout(_) => self
+                .drawing
+                .entities_in_block(&block_name)
+                .filter(|e| !super::layout::is_overall(e))
+                .collect(),
+        };
+        let sorted = super::wipeout::sorted_block_objects(&self.drawing, block_handle, raw);
+        Ok(sorted
+            .into_iter()
+            .map(|e| handle_text(e.common().handle))
+            .collect())
+    }
+
+    /// Sets the `ACAD_SORTENTS` draw order of `space` to `ordered_hex`.
+    pub(crate) fn set_draw_order(
+        &mut self,
+        space: &TargetSpace,
+        ordered_hex: &[String],
+    ) -> Result<(), Error> {
+        let (block_handle, _) = self.space_block_record(space)?;
+        let handles: Vec<Handle> = ordered_hex
+            .iter()
+            .map(|h| parse_hex_handle(h))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (changed, added) =
+            super::wipeout::apply_sort_order(&mut self.drawing, block_handle, &handles);
+        self.expected_non_graphical_changed.extend(changed);
+        self.expected_non_graphical_added.extend(added);
+        Ok(())
     }
 
     /// Assigns concrete handles to any unallocated owned sub-entities on an
@@ -1648,20 +1768,26 @@ impl RevisionSession {
                         orig.kind
                     ),
                 }),
-                Some(now) if orig != now => unexpected.push(UnexpectedChange {
-                    kind: orig.kind.clone(),
-                    handle: format!("{handle:X}"),
-                    change: UnexpectedChangeKind::Changed,
-                    detail: format!(
-                        "untouched non-graphical {} changed in the revision",
-                        orig.kind
-                    ),
-                }),
+                Some(now)
+                    if orig != now && !self.expected_non_graphical_changed.contains(&handle) =>
+                {
+                    unexpected.push(UnexpectedChange {
+                        kind: orig.kind.clone(),
+                        handle: format!("{handle:X}"),
+                        change: UnexpectedChangeKind::Changed,
+                        detail: format!(
+                            "untouched non-graphical {} changed in the revision",
+                            orig.kind
+                        ),
+                    });
+                }
                 Some(_) => {}
             }
         }
         for (&handle, now) in &after.non_graphical {
-            if !before.non_graphical.contains_key(&handle) {
+            if !before.non_graphical.contains_key(&handle)
+                && !self.expected_non_graphical_added.contains(&handle)
+            {
                 unexpected.push(UnexpectedChange {
                     kind: now.kind.clone(),
                     handle: format!("{handle:X}"),
@@ -2545,7 +2671,8 @@ fn translate_entity(object: &mut EntityType, delta: Vector3) -> Result<(), Error
         | EntityType::Text(_)
         | EntityType::MText(_)
         | EntityType::Insert(_)
-        | EntityType::Hatch(_) => {
+        | EntityType::Hatch(_)
+        | EntityType::Wipeout(_) => {
             // acadrust's `Entity::translate` applies WCS->OCS arbitrary-axis
             // projection for all OCS entities (handling -Z and tilted normals
             // accurately) and translates world-space XDATA along with the entity.

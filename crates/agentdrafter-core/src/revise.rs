@@ -22,8 +22,8 @@ use crate::build::is_same_file;
 use crate::build::FileId;
 use crate::change::array::{self, At, Place};
 use crate::change::operations::{
-    op_error, read_change_set_for_original, AddTo, Body, Motion, OpPoint, Operation, Pattern,
-    Table, TableOp, Target, TransformBy,
+    op_error, read_change_set_for_original, AddTo, Body, DrawOrderPlace, Motion, OpPoint,
+    Operation, Pattern, Table, TableOp, Target, TransformBy,
 };
 use crate::change::original_journal::OriginalJournal;
 use crate::change::{HowChanged, ObjectChanged, OriginalRevisionMeta, SnapResolved};
@@ -1493,7 +1493,12 @@ fn apply_revision_op(
     let op_name = op.spec.name;
     let index = op.index;
     match &op.body {
-        Body::Add { to, keys, snaps } => {
+        Body::Add {
+            to,
+            keys,
+            snaps,
+            draw_order,
+        } => {
             check_add_target_sheet(to, sheet_name, op)?;
             let kind = match op.spec.kind {
                 crate::change::operations::Kind::Add(object, None)
@@ -1511,6 +1516,7 @@ fn apply_revision_op(
                             | "donut"
                             | "solid"
                             | "revision_cloud"
+                            | "wipeout"
                             | "insert"
                     ) =>
                 {
@@ -1611,6 +1617,18 @@ fn apply_revision_op(
                 None => TargetSpace::Model,
                 Some(idx) => TargetSpace::Layout(tables.layouts[idx].clone()),
             };
+            let resolved_order = match draw_order {
+                Some(place) => Some(resolve_revise_draw_order(
+                    session,
+                    record,
+                    place,
+                    &space,
+                    sheet_name,
+                    op,
+                    "draw_order",
+                )?),
+                None => None,
+            };
             let fonts = SheetFonts::find(&record.record.sheet, settings);
             let start_of = |t: &crate::text::Text| fonts.start(t);
             let (hex, handles) = session.add_object(
@@ -1621,6 +1639,9 @@ fn apply_revision_op(
                 parsed.name.as_deref(),
                 &start_of,
             )?;
+            if let Some(order) = resolved_order {
+                apply_revise_draw_order(session, &space, std::slice::from_ref(&hex), &order)?;
+            }
             let id = match &parsed.id {
                 Some(explicit) => format!("{sheet_name}/{explicit}"),
                 None => handle_id(sheet_name, &hex),
@@ -1644,6 +1665,7 @@ fn apply_revision_op(
             around,
             margin,
             keys,
+            draw_order,
         } => {
             if let Some(to) = to {
                 check_add_target_sheet(to, sheet_name, op)?;
@@ -1829,6 +1851,18 @@ fn apply_revision_op(
                 None => TargetSpace::Model,
                 Some(idx) => TargetSpace::Layout(tables.layouts[idx].clone()),
             };
+            let resolved_order = match draw_order {
+                Some(place) => Some(resolve_revise_draw_order(
+                    session,
+                    record,
+                    place,
+                    &space,
+                    sheet_name,
+                    op,
+                    "draw_order",
+                )?),
+                None => None,
+            };
             let start_of = |t: &crate::text::Text| fonts.start(t);
             let (hex, handles) = session.add_object(
                 &parsed.object,
@@ -1838,6 +1872,9 @@ fn apply_revision_op(
                 parsed.name.as_deref(),
                 &start_of,
             )?;
+            if let Some(order) = resolved_order {
+                apply_revise_draw_order(session, &space, std::slice::from_ref(&hex), &order)?;
+            }
             let id = match &parsed.id {
                 Some(explicit) => format!("{sheet_name}/{explicit}"),
                 None => handle_id(sheet_name, &hex),
@@ -1852,6 +1889,146 @@ fn apply_revision_op(
                 handles_touched: handles.touched,
                 handles_added: handles.added,
                 handles_deleted: handles.deleted,
+                copies: Vec::new(),
+                snapped: Vec::new(),
+            })
+        }
+        Body::DrawOrder { targets, order } => {
+            let record = ensure_record(session, cached, source, sheet_name)?;
+            let mut resolved = Vec::with_capacity(targets.len());
+            let mut seen_handles: HashSet<u64> = HashSet::with_capacity(targets.len());
+            for (target, field) in targets {
+                let found = resolve_target(session, record, target, sheet_name, op, field)?;
+                let Some(handle_num) = canonical_handle_value(&found.handle) else {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::BadValue,
+                        format!("invalid handle `{}` on `{}`", found.handle, found.id),
+                        field,
+                    ));
+                };
+                if !seen_handles.insert(handle_num) {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::BadValue,
+                        format!(
+                            "object `{}` (handle `{:X}`) is listed more than once in the target \
+                             list",
+                            found.id, handle_num
+                        ),
+                        field,
+                    ));
+                }
+                resolved.push((found, field.as_str()));
+            }
+            let first_space = session.space_of_handle(&resolved[0].0.handle)?;
+            for (found, field) in &resolved[1..] {
+                let sp = session.space_of_handle(&found.handle)?;
+                if sp != first_space {
+                    return Err(op_error(
+                        index,
+                        op_name,
+                        ErrorCode::BadValue,
+                        format!(
+                            "`{}` and `{}` live in different spaces; draw_order reorders objects \
+                             within one space",
+                            resolved[0].0.id, found.id
+                        ),
+                        field,
+                    ));
+                }
+            }
+            let resolved_order = resolve_revise_draw_order(
+                session,
+                record,
+                order,
+                &first_space,
+                sheet_name,
+                op,
+                "order",
+            )?;
+            if let ResolvedDrawOrder::Above(ref_h) | ResolvedDrawOrder::Under(ref_h) =
+                &resolved_order
+            {
+                if let Some(ref_num) = canonical_handle_value(ref_h) {
+                    if seen_handles.contains(&ref_num) {
+                        return Err(op_error(
+                            index,
+                            op_name,
+                            ErrorCode::BadValue,
+                            "the reference object in `order` cannot also be one of the objects \
+                             being reordered",
+                            "order",
+                        ));
+                    }
+                }
+            }
+            let moving: Vec<String> = resolved.iter().map(|(f, _)| f.handle.clone()).collect();
+            apply_revise_draw_order(session, &first_space, &moving, &resolved_order)?;
+            let first = &resolved[0].0;
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!(
+                    "moved {} object{} {} in draw order",
+                    resolved.len(),
+                    plural(resolved.len()),
+                    order.words()
+                ),
+                id: Some(first.id.clone()),
+                handle: Some(first.handle.clone()),
+                handles_touched: Vec::new(),
+                handles_added: Vec::new(),
+                handles_deleted: Vec::new(),
+                copies: Vec::new(),
+                snapped: Vec::new(),
+            })
+        }
+        Body::TextToFront { to, which } => {
+            check_add_target_sheet(to, sheet_name, op)?;
+            let record = ensure_record(session, cached, source, sheet_name)?;
+            let dwg_origin = record
+                .record
+                .dwg
+                .as_ref()
+                .expect("DWG record has DwgOrigin");
+            let mut by_space: Vec<(TargetSpace, Vec<String>)> = Vec::new();
+            let mut total_matched = 0usize;
+            for (i, obj) in record.record.sheet.objects.iter().enumerate() {
+                if !which.matches_object(obj) {
+                    continue;
+                }
+                let handle = &dwg_origin.handles[i];
+                let Ok(space) = session.space_of_handle(handle) else {
+                    continue;
+                };
+                total_matched += 1;
+                if let Some((_, list)) = by_space.iter_mut().find(|(s, _)| *s == space) {
+                    list.push(handle.clone());
+                } else {
+                    by_space.push((space, vec![handle.clone()]));
+                }
+            }
+            for (space, moving) in &by_space {
+                apply_revise_draw_order(session, space, moving, &ResolvedDrawOrder::Front)?;
+            }
+            Ok(RevisionOperationOutcome {
+                index,
+                op: op_name.to_owned(),
+                ok: true,
+                message: format!(
+                    "brought {total_matched} {} object{} to the front",
+                    which.name(),
+                    plural(total_matched)
+                ),
+                id: None,
+                handle: None,
+                handles_touched: Vec::new(),
+                handles_added: Vec::new(),
+                handles_deleted: Vec::new(),
                 copies: Vec::new(),
                 snapped: Vec::new(),
             })
@@ -2352,6 +2529,101 @@ fn apply_revision_op(
             "",
         )),
     }
+}
+
+enum ResolvedDrawOrder {
+    Front,
+    Back,
+    Above(String),
+    Under(String),
+}
+
+fn resolve_revise_draw_order(
+    session: &RevisionSession,
+    record: &DwgLoaded,
+    place: &DrawOrderPlace,
+    space: &TargetSpace,
+    sheet_name: &str,
+    op: &Operation,
+    field: &str,
+) -> Result<ResolvedDrawOrder, Error> {
+    match place {
+        DrawOrderPlace::Front => Ok(ResolvedDrawOrder::Front),
+        DrawOrderPlace::Back => Ok(ResolvedDrawOrder::Back),
+        DrawOrderPlace::Above(target) | DrawOrderPlace::Under(target) => {
+            let sub = if matches!(place, DrawOrderPlace::Above(_)) {
+                "above"
+            } else {
+                "under"
+            };
+            let full_field = format!("{field}.{sub}");
+            let found = resolve_target(session, record, target, sheet_name, op, &full_field)?;
+            let ref_space = session.space_of_handle(&found.handle)?;
+            if &ref_space != space {
+                return Err(op_error(
+                    op.index,
+                    op.spec.name,
+                    ErrorCode::BadValue,
+                    format!(
+                        "reference object `{}` is in a different space; draw order applies within \
+                         one space",
+                        found.id
+                    ),
+                    &full_field,
+                ));
+            }
+            if matches!(place, DrawOrderPlace::Above(_)) {
+                Ok(ResolvedDrawOrder::Above(found.handle))
+            } else {
+                Ok(ResolvedDrawOrder::Under(found.handle))
+            }
+        }
+    }
+}
+
+fn apply_revise_draw_order(
+    session: &mut RevisionSession,
+    space: &TargetSpace,
+    moving: &[String],
+    order: &ResolvedDrawOrder,
+) -> Result<(), Error> {
+    if moving.is_empty() {
+        return Ok(());
+    }
+    let current = session.space_handles_in_draw_order(space)?;
+    let is_moving = |h: &str| moving.iter().any(|m| m.eq_ignore_ascii_case(h));
+    let mut stay: Vec<String> = Vec::with_capacity(current.len());
+    let mut moved: Vec<String> = Vec::with_capacity(moving.len());
+    for h in &current {
+        if is_moving(h) {
+            moved.push(h.clone());
+        } else {
+            stay.push(h.clone());
+        }
+    }
+    if moved.is_empty() {
+        return Ok(());
+    }
+    let insert_pos = match order {
+        ResolvedDrawOrder::Front => stay.len(),
+        ResolvedDrawOrder::Back => 0,
+        ResolvedDrawOrder::Above(ref_h) => stay
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case(ref_h))
+            .map_or(stay.len(), |p| p + 1),
+        ResolvedDrawOrder::Under(ref_h) => stay
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case(ref_h))
+            .unwrap_or(0),
+    };
+    let mut reordered = Vec::with_capacity(current.len());
+    reordered.extend_from_slice(&stay[..insert_pos]);
+    reordered.extend(moved);
+    reordered.extend_from_slice(&stay[insert_pos..]);
+    if reordered != current {
+        session.set_draw_order(space, &reordered)?;
+    }
+    Ok(())
 }
 
 fn extend_handles(dst: &mut MutationHandles, src: MutationHandles) {

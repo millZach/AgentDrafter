@@ -352,6 +352,55 @@ impl Mesh {
                             .map(|t| t.map(|corner| base + corner)),
                     );
                 }
+                Shape::Mask { contours } => {
+                    let mut builder = Path::builder();
+                    for contour in contours.iter().filter(|c| c.len() >= 3) {
+                        let mut points = contour.iter().map(|&p| {
+                            let p = at(p);
+                            point(p[0], p[1])
+                        });
+                        if let Some(first) = points.next() {
+                            builder.begin(first);
+                            for p in points {
+                                builder.line_to(p);
+                            }
+                            builder.end(true);
+                        }
+                    }
+                    let path = builder.build();
+                    let mut buffers: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
+                    let done = tessellator.tessellate_path(
+                        &path,
+                        &FillOptions::default().with_fill_rule(LyonFillRule::EvenOdd),
+                        &mut BuffersBuilder::new(&mut buffers, |v: FillVertex| {
+                            v.position().to_array()
+                        }),
+                    );
+                    if done.is_err() {
+                        mesh.fills_not_drawn += 1;
+                        continue;
+                    }
+                    let base = mesh.fill_points.len() as u32;
+                    mesh.fill_colors.extend(std::iter::repeat_n(
+                        [255, 255, 255, 255],
+                        buffers.vertices.len(),
+                    ));
+                    mesh.fill_screen_colors.extend(std::iter::repeat_n(
+                        [0x21, 0x28, 0x30, 255],
+                        buffers.vertices.len(),
+                    ));
+                    mesh.fill_items
+                        .extend(std::iter::repeat_n(place, buffers.vertices.len()));
+                    mesh.fill_points.extend(buffers.vertices);
+                    mesh.triangles.extend(
+                        buffers
+                            .indices
+                            .as_chunks::<3>()
+                            .0
+                            .iter()
+                            .map(|t| t.map(|corner| base + corner)),
+                    );
+                }
             }
             let added = [
                 (Kind::Strokes, segments, mesh.segments.len()),
@@ -848,7 +897,7 @@ mod tests {
                     .iter()
                     .map(|run| run.len().saturating_sub(1).max(usize::from(run.len() == 1)))
                     .sum(),
-                Shape::Fill { .. } => 0,
+                Shape::Fill { .. } | Shape::Mask { .. } => 0,
             })
             .sum();
         assert!(expected > 1000, "a loop sheet draws {expected} segments");
@@ -861,5 +910,22 @@ mod tests {
         assert_eq!(summary.paper_name.as_deref(), Some("ANSI B landscape"));
         assert!(summary.paper_declared);
         assert_eq!(summary.units.as_deref(), Some("in"));
+    }
+
+    #[test]
+    fn wipeout_mask_tessellates_in_background_color() {
+        let mask = item(
+            1,
+            Shape::Mask {
+                contours: vec![vec![[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0]]],
+            },
+        );
+        let mesh = Mesh::of(&sheet(vec![mask], None));
+        assert!((area(&mesh) - 8.0).abs() < 1e-4);
+        assert_eq!(mesh.fill_colors.first(), Some(&[255, 255, 255, 255]));
+        assert_eq!(
+            mesh.fill_screen_colors.first(),
+            Some(&[0x21, 0x28, 0x30, 255])
+        );
     }
 }

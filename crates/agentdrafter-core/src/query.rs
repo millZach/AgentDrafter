@@ -1165,6 +1165,9 @@ impl Space {
                 match item.shape {
                     draw::Shape::Stroke { runs, .. } => d.runs.extend(runs),
                     draw::Shape::Fill { rule, contours } => d.fills.push((rule, contours)),
+                    draw::Shape::Mask { contours } => {
+                        d.fills.push((draw::FillRule::EvenOdd, contours))
+                    }
                 }
             }
             for (object, loops) in list.hatch_loops {
@@ -1829,6 +1832,7 @@ fn points_of(object: &Object) -> Vec<(String, Point3)> {
         Object::Hatch(_) => Vec::new(),
         Object::Donut(donut) => one("center", donut.center),
         Object::Solid(solid) => listed("corners", &solid.corners),
+        Object::Wipeout(wipeout) => listed("points", &wipeout.points),
         Object::RevisionCloud(cloud) => match &cloud.boundary {
             crate::model::RevisionCloudBoundary::Rectangle { from, to } => {
                 vec![("from".to_owned(), *from), ("to".to_owned(), *to)]

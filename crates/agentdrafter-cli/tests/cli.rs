@@ -291,26 +291,31 @@ fn operations_are_listed_and_a_change_set_is_applied_from_a_file() {
     let (code, json) = agentdrafter(&["operations"], &dir);
     assert_eq!(code, 0, "{json}");
     let listed = json["result"]["operations"].as_array().unwrap();
-    assert_eq!(listed.len(), 65);
+    assert_eq!(listed.len(), 68);
     assert_eq!(listed[11]["name"], "add_revision_cloud");
     assert_eq!(listed[11]["alias"], "REVCLOUD");
-    assert_eq!(listed[30]["name"], "move");
-    assert_eq!(listed[33]["name"], "array");
+    assert_eq!(listed[12]["name"], "add_wipeout");
+    assert_eq!(listed[12]["alias"], "WIPEOUT");
+    assert_eq!(listed[31]["name"], "move");
+    assert_eq!(listed[34]["name"], "array");
     assert_eq!(
-        listed[33]["other_aliases"],
+        listed[34]["other_aliases"],
         serde_json::json!(["ARRAYRECT", "ARRAYPOLAR", "ARRAYPATH"])
     );
     for (i, name, alias, short) in [
-        (34, "rotate", "ROTATE", "RO"),
-        (35, "scale", "SCALE", "SC"),
-        (36, "mirror", "MIRROR", "MI"),
+        (35, "rotate", "ROTATE", "RO"),
+        (36, "scale", "SCALE", "SC"),
+        (37, "mirror", "MIRROR", "MI"),
+        (38, "draw_order", "DRAWORDER", "DR"),
     ] {
         assert_eq!(listed[i]["name"], name);
         assert_eq!(listed[i]["alias"], alias);
         assert_eq!(listed[i]["other_aliases"], serde_json::json!([short]));
     }
-    assert_eq!(listed[30]["alias"], "MOVE");
-    assert!(listed[30]["schema"]["$defs"]["point"].is_object());
+    assert_eq!(listed[39]["name"], "text_to_front");
+    assert_eq!(listed[39]["alias"], "TEXTTOFRONT");
+    assert_eq!(listed[31]["alias"], "MOVE");
+    assert!(listed[31]["schema"]["$defs"]["point"].is_object());
     let (code, json) = agentdrafter(&["schema", "change-set"], &dir);
     assert_eq!(code, 0, "{json}");
     assert_eq!(json["result"]["title"], "AgentDrafter change set");

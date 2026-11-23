@@ -292,6 +292,10 @@ pub enum Shape {
         rule: FillRule,
         contours: Vec<Vec<Point2>>,
     },
+    /// An opaque background mask that hides everything drawn before it, as
+    /// AutoCAD's WIPEOUT does: white on paper (PNG, PDF, paper look) and the
+    /// canvas background on a dark screen.
+    Mask { contours: Vec<Vec<Point2>> },
 }
 
 /// Which points of a fill's contours are inside.
@@ -340,7 +344,7 @@ impl Shape {
     pub fn points(&self) -> impl Iterator<Item = Point2> + '_ {
         let lists = match self {
             Shape::Stroke { runs, .. } => runs,
-            Shape::Fill { contours, .. } => contours,
+            Shape::Fill { contours, .. } | Shape::Mask { contours } => contours,
         };
         lists.iter().flatten().copied()
     }
@@ -539,6 +543,9 @@ impl Placed {
             },
             Shape::Fill { rule, contours } => Shape::Fill {
                 rule,
+                contours: place(contours),
+            },
+            Shape::Mask { contours } => Shape::Mask {
                 contours: place(contours),
             },
         }
@@ -1006,6 +1013,23 @@ impl<'a> Drawer<'a> {
                     solid.corners.iter().map(|&p| flat(p)).collect(),
                 )],
             }]),
+            Object::Wipeout(wipeout) => {
+                let mut out = shapes(vec![Shape::Mask {
+                    contours: vec![polyline::anticlockwise(
+                        wipeout.points.iter().map(|&p| flat(p)).collect(),
+                    )],
+                }]);
+                let draw_frame = match self.sheet.wipeout_frame {
+                    crate::model::WipeoutFrame::Off => false,
+                    crate::model::WipeoutFrame::On => true,
+                    crate::model::WipeoutFrame::Display => self.purpose == Purpose::Screen,
+                };
+                if draw_frame {
+                    let frame = flat_polyline(&wipeout.boundary_polyline());
+                    out.shapes.extend(frame.shapes);
+                }
+                out
+            }
             Object::Polyline(polyline) => {
                 let mut points = path(polyline.points.iter().map(|&p| flat(p)).collect());
                 if polyline.closed && !points.is_empty() {

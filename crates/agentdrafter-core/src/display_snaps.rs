@@ -179,7 +179,9 @@ pub(crate) fn edge_fills(sheet: &Sheet, list: &DisplayList) -> Vec<usize> {
     list.items
         .iter()
         .enumerate()
-        .filter(|(_, item)| item.viewport.is_none() && matches!(item.shape, Shape::Fill { .. }))
+        .filter(|(_, item)| {
+            item.viewport.is_none() && matches!(item.shape, Shape::Fill { .. } | Shape::Mask { .. })
+        })
         .filter(|(_, item)| {
             matches!(
                 drawer(sheet, item),
@@ -188,6 +190,7 @@ pub(crate) fn edge_fills(sheet: &Sheet, list: &DisplayList) -> Vec<usize> {
                         | Object::Solid(_)
                         | Object::Donut(_)
                         | Object::RevisionCloud(_)
+                        | Object::Wipeout(_)
                 )
             )
         })

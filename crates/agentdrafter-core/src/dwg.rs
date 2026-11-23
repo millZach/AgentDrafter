@@ -51,6 +51,7 @@ mod leader;
 mod revise;
 mod table;
 mod text;
+mod wipeout;
 
 pub(crate) use import::read_blocks;
 pub(crate) use layout::{PageSetup, PLOTTER, PLOT_STYLE};
@@ -205,6 +206,14 @@ pub(crate) fn write_new_sheet(
     // Layers, linetypes, text styles and applications take their handles
     // before the blocks and objects take theirs.
     drawing.assign_table_entry_handles();
+    let has_wipeout = sheet
+        .objects
+        .iter()
+        .chain(sheet.blocks.iter().flat_map(|b| b.objects.iter()))
+        .any(|o| matches!(o, Object::Wipeout(_)));
+    if has_wipeout || !sheet.wipeout_frame.is_off() {
+        wipeout::write_wipeout_frame(&mut drawing, sheet.wipeout_frame);
+    }
     table::add_table_styles(&mut drawing, sheet)?;
     let units = insertion_units(sheet.units);
     for definition in &sheet.blocks {
@@ -537,6 +546,7 @@ fn dwg_object(
         Object::Donut(donut) => dwg_polyline(&donut.polyline()),
         Object::Solid(solid) => EntityType::Solid(dwg_solid(solid)),
         Object::RevisionCloud(cloud) => dwg_revision_cloud(cloud),
+        Object::Wipeout(w) => wipeout::dwg_wipeout(w),
         Object::Text(t) => EntityType::Text(text::dwg_text(t, start_of(t))),
         Object::MText(t) => EntityType::MText(Box::new(text::dwg_mtext(t))),
         Object::AttributeDefinition(definition) => {
@@ -1099,6 +1109,7 @@ fn contents(
         ids_and_names,
         objects_not_read: not_read.len(),
         ltscale: drawing.header.linetype_scale,
+        wipeout_frame: wipeout::read_wipeout_frame(drawing),
         layout,
         other_layouts,
         opens_on: layout::opened_on(drawing).map(|(name, _)| name),
@@ -1684,15 +1695,37 @@ fn sheet_objects<'a>(
     drawing: &'a CadDocument,
     layouts: &[acadrust::types::Handle],
 ) -> Vec<(&'a EntityType, Option<usize>)> {
-    let mut lists: Vec<Vec<(&EntityType, Option<usize>)>> =
-        vec![drawing.model_space_entities().map(|e| (e, None)).collect()];
+    let model_record = drawing
+        .block_records
+        .iter()
+        .find(|r| r.is_model_space())
+        .map(|r| r.handle);
+    let model_sorted = match model_record {
+        Some(h) => {
+            wipeout::sorted_block_objects(drawing, h, drawing.model_space_entities().collect())
+        }
+        None => drawing.model_space_entities().collect(),
+    };
+    let model_table = model_record.and_then(|h| wipeout::sort_table_for_block(drawing, h));
+    let mut lists: Vec<Vec<(&EntityType, Option<usize>, u64)>> = vec![model_sorted
+        .into_iter()
+        .map(|e| (e, None, wipeout::sort_key(model_table, e.common().handle)))
+        .collect()];
     for (k, block) in layouts.iter().enumerate() {
         if let Some(record) = drawing.block_records.iter().find(|r| r.handle == *block) {
-            lists.push(
+            let sorted = wipeout::sorted_block_objects(
+                drawing,
+                record.handle,
                 drawing
                     .entities_in_block(&record.name)
                     .filter(|e| !layout::is_overall(e))
-                    .map(|e| (e, Some(k)))
+                    .collect(),
+            );
+            let table = wipeout::sort_table_for_block(drawing, record.handle);
+            lists.push(
+                sorted
+                    .into_iter()
+                    .map(|e| (e, Some(k), wipeout::sort_key(table, e.common().handle)))
                     .collect(),
             );
         }
@@ -1700,12 +1733,13 @@ fn sheet_objects<'a>(
     let mut merged = Vec::with_capacity(lists.iter().map(Vec::len).sum());
     let mut heads = vec![0_usize; lists.len()];
     loop {
-        // The list whose next object was made first; model space's on a tie.
+        // The list whose next object draws first; model space's on a tie.
         let next = (0..lists.len())
             .filter(|&l| heads[l] < lists[l].len())
-            .min_by_key(|&l| lists[l][heads[l]].0.common().handle.value());
+            .min_by_key(|&l| lists[l][heads[l]].2);
         let Some(l) = next else { break };
-        merged.push(lists[l][heads[l]]);
+        let (obj, space, _) = lists[l][heads[l]];
+        merged.push((obj, space));
         heads[l] += 1;
     }
     merged
@@ -1733,7 +1767,12 @@ fn read_block(drawing: &CadDocument, record: &BlockRecord, blocks: &[Block]) -> 
     let mut objects = Vec::new();
     let mut handles = Vec::new();
     let mut ids_and_names = Vec::new();
-    for dwg_object in drawing.entities_in_block(&record.name) {
+    let block_objects = wipeout::sorted_block_objects(
+        drawing,
+        record.handle,
+        drawing.entities_in_block(&record.name).collect(),
+    );
+    for dwg_object in block_objects {
         if matches!(dwg_object, EntityType::Block(_) | EntityType::BlockEnd(_)) {
             continue;
         }
@@ -1843,6 +1882,7 @@ pub(super) fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<O
                 properties: Default::default(),
             })
         }
+        EntityType::Wipeout(w) => Object::Wipeout(wipeout::read_wipeout(w, layer)?),
         EntityType::Polyline3D(spatial)
             if !spatial.flags.spline_fit
                 && !spatial.flags.is_3d_mesh
@@ -2840,6 +2880,7 @@ mod tests {
             ltscale: 1.0,
             layout: None,
             other_layouts: Vec::new(),
+            wipeout_frame: crate::model::WipeoutFrame::Off,
         }
     }
 
@@ -4050,6 +4091,108 @@ objects:
             cal_rec.values,
             vec![XDataValue::Integer16(0), XDataValue::Real(0.5)]
         );
+    }
+
+    #[test]
+    fn wipeout_dwg_writes_closed_vertices_wipeout_vars_and_sortents_order() {
+        let dir =
+            std::env::temp_dir().join(format!("agentdrafter-dwg-wipeout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let yaml_path = dir.join("wipeout.yaml");
+        let dwg_path = dir.join("wipeout.dwg");
+        std::fs::write(
+            &yaml_path,
+            "\
+units: in
+wipeout_frame: display
+objects:
+  - line:
+      id: wire
+      from: [0, 1, 0]
+      to: [6, 1, 0]
+  - wipeout:
+      id: mask
+      points:
+        - [2, 0.5, 0]
+        - [4, 0.5, 0]
+        - [4, 1.5, 0]
+        - [2, 1.5, 0]
+  - text:
+      id: label
+      contents: TAG
+      position: [3, 1, 0]
+      height: 0.25
+",
+        )
+        .expect("write yaml");
+        let settings = crate::Settings::default();
+        crate::build_with(
+            &crate::BuildRequest {
+                description: yaml_path,
+                output: Some(dwg_path.clone()),
+                overwrite: true,
+            },
+            &settings,
+        )
+        .expect("build DWG");
+
+        let mut drawing = acadrust::io::dwg::DwgReader::from_file(&dwg_path)
+            .expect("open DWG")
+            .read()
+            .expect("read back DWG");
+
+        // 1. ACAD_WIPEOUT_VARS must be written with display_frame = Display (2).
+        assert_eq!(
+            wipeout::read_wipeout_frame(&drawing),
+            crate::WipeoutFrame::Display
+        );
+
+        // 2. The Wipeout entity must repeat its first vertex to close the polygon.
+        let wipeouts: Vec<&acadrust::entities::Wipeout> = drawing
+            .model_space_entities()
+            .filter_map(|e| match e {
+                EntityType::Wipeout(w) => Some(w),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(wipeouts.len(), 1);
+        assert_eq!(wipeouts[0].clip_boundary_vertices.len(), 5);
+        assert_eq!(
+            wipeouts[0].clip_boundary_vertices.first(),
+            wipeouts[0].clip_boundary_vertices.last()
+        );
+
+        // 3. Read back via our reader preserves Wipeout + WipeoutFrame.
+        let read_back = crate::read_dwg(&dwg_path).expect("read_dwg");
+        assert_eq!(read_back.wipeout_frame, crate::WipeoutFrame::Display);
+        assert!(matches!(read_back.objects[1], Object::Wipeout(_)));
+
+        // 4. Applying an ACAD_SORTENTS permutation reverses draw order on read-back!
+        let ms_handle = drawing
+            .block_records
+            .get("*Model_Space")
+            .expect("*Model_Space")
+            .handle;
+        let orig_handles: Vec<acadrust::types::Handle> = drawing
+            .model_space_entities()
+            .map(|e| e.common().handle)
+            .collect();
+        assert_eq!(orig_handles.len(), 3);
+        let reversed = vec![orig_handles[2], orig_handles[1], orig_handles[0]];
+        wipeout::apply_sort_order(&mut drawing, ms_handle, &reversed);
+        let sorted_dwg = dir.join("sorted.dwg");
+        let bytes = DwgWriter::write_to_vec(&drawing).expect("write sorted");
+        std::fs::write(&sorted_dwg, &bytes).expect("save sorted");
+        let after = crate::read_dwg(&sorted_dwg).expect("read sorted");
+        let ids: Vec<String> = after
+            .ids_and_names
+            .iter()
+            .filter_map(|i| i.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["wipeout/label", "wipeout/mask", "wipeout/wire"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `CONTEXT.md` says drawing and object. acadrust's own names, which

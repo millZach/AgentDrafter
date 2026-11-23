@@ -160,6 +160,18 @@ impl DisplayList {
                     }
                     Shape::Fill { rule, contours }
                 }
+                Shape::Mask { contours } => {
+                    let contours: Vec<Vec<Point2>> = contours
+                        .into_iter()
+                        .map(|c| clip_polygon(&c, model_min, model_max))
+                        .filter(|c| !c.is_empty())
+                        .map(placed)
+                        .collect();
+                    if contours.is_empty() {
+                        continue;
+                    }
+                    Shape::Mask { contours }
+                }
             };
             self.items.push(Item {
                 viewport: Some(index),

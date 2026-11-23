@@ -53,6 +53,11 @@ pub(crate) enum Kind {
     /// Mirrors objects across a line, as copies or in place: AutoCAD's
     /// MIRROR.
     Mirror,
+    /// Changes the draw order of objects: AutoCAD's DRAWORDER.
+    DrawOrder,
+    /// Brings text, dimensions, leaders, or all of them to the front:
+    /// AutoCAD's TEXTTOFRONT.
+    TextToFront,
     SetAttribute,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
@@ -221,6 +226,7 @@ impl Spec {
             Kind::Rotate => &["RO"],
             Kind::Scale => &["SC"],
             Kind::Mirror => &["MI"],
+            Kind::DrawOrder => &["DR"],
             _ => &[],
         }
     }
@@ -272,7 +278,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 65] = [
+pub(crate) const SPECS: [Spec; 68] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -285,6 +291,7 @@ pub(crate) const SPECS: [Spec; 65] = [
     add("add_donut", "DONUT", "donut"),
     add("add_solid", "SOLID", "solid"),
     add("add_revision_cloud", "REVCLOUD", "revision_cloud"),
+    add("add_wipeout", "WIPEOUT", "wipeout"),
     add("insert_block", "INSERT", "insert"),
     add("add_table", "TABLE", "table"),
     add("add_mleader", "MLEADER", "mleader"),
@@ -365,6 +372,16 @@ pub(crate) const SPECS: [Spec; 65] = [
         name: "mirror",
         alias: "MIRROR",
         kind: Kind::Mirror,
+    },
+    Spec {
+        name: "draw_order",
+        alias: "DRAWORDER",
+        kind: Kind::DrawOrder,
+    },
+    Spec {
+        name: "text_to_front",
+        alias: "TEXTTOFRONT",
+        kind: Kind::TextToFront,
     },
     Spec {
         name: "set_attribute",
@@ -752,6 +769,21 @@ fn does(spec: &Spec) -> String {
                          mirrored. \
                          AutoCAD's MIRROR."
             .to_owned(),
+        Kind::DrawOrder => "Changes the draw order of target, one object, or targets, several of \
+                            one sheet or template, putting them at order: front (drawn last, on \
+                            top), back (drawn first, behind), {\"above\": target}, or {\"under\": \
+                            target}. Each object keeps its ID; any un-named object whose place \
+                            shifts is given its previous place as its id so its ID never moves. \
+                            On an original DWG, updates the space's ACAD_SORTENTS table. \
+                            AutoCAD's DRAWORDER (DR)."
+            .to_owned(),
+        Kind::TextToFront => "Brings annotations to the front of draw order so they draw on top \
+                              of geometry and wipeouts: which may be text (text and mtext), \
+                              dimensions, leaders (mleader and leader), or all (all of them, the \
+                              default when omitted), on sheet or template (or the drawing itself \
+                              when revising an original DWG). Each object keeps its ID. \
+                              AutoCAD's TEXTTOFRONT."
+            .to_owned(),
         Kind::Table(op, table) => {
             let word = table.word();
             let what = match op {
@@ -1076,6 +1108,39 @@ fn definitions() -> Map<String, Value> {
                             "minLength": 1,
                         },
                         "sheet": { "$ref": "#/$defs/sheet_name" },
+                    },
+                },
+            ],
+        }),
+    );
+    defs.insert(
+        "draw_order".into(),
+        json!({
+            "description": "Where to place the object(s) in draw order: \"front\" (drawn last, \
+                            on top), \"back\" (drawn first, behind), {\"above\": target}, or \
+                            {\"under\": target}.",
+            "oneOf": [
+                { "enum": ["front", "back"] },
+                {
+                    "type": "object",
+                    "required": ["above"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "above": {
+                            "description": "Place immediately above this object (drawn right after it).",
+                            "$ref": "#/$defs/target",
+                        },
+                    },
+                },
+                {
+                    "type": "object",
+                    "required": ["under"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "under": {
+                            "description": "Place immediately under this object (drawn right before it).",
+                            "$ref": "#/$defs/target",
+                        },
                     },
                 },
             ],
@@ -1465,6 +1530,15 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                     "$ref": "#/$defs/template_path",
                 }),
             );
+            properties.insert(
+                "draw_order".into(),
+                json!({
+                    "description": "Where in draw order to place the new object: \"front\" \
+                                    (default, drawn last), \"back\" (drawn first), {\"above\": \
+                                    target}, or {\"under\": target}.",
+                    "$ref": "#/$defs/draw_order",
+                }),
+            );
             let place = if allow_omitted_sheet {
                 json!({ "not": { "required": ["sheet", "template"] } })
             } else if object == "revision_cloud" {
@@ -1659,6 +1733,69 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
         }
         Kind::Array => array_schema(),
         Kind::Rotate | Kind::Scale | Kind::Mirror => transform_schema(spec.kind),
+        Kind::DrawOrder => {
+            let mut schema = json!({
+                "type": "object",
+                "required": ["order"],
+                "additionalProperties": false,
+                "allOf": [copied_objects_rule()],
+                "properties": {
+                    "order": {
+                        "description": "Where to move the object(s) in draw order: \"front\", \
+                                        \"back\", {\"above\": target}, or {\"under\": target}.",
+                        "$ref": "#/$defs/draw_order",
+                    },
+                },
+            });
+            schema["properties"]["target"] = json!({
+                "description": "The object to reorder, by its ID or its name. Give target or targets.",
+                "$ref": "#/$defs/target",
+            });
+            schema["properties"]["targets"] = json!({
+                "description": "The objects to reorder, each by its ID or its name, all in one \
+                                record or space, preserving their relative order.",
+                "type": "array",
+                "items": { "$ref": "#/$defs/target" },
+                "minItems": 1,
+            });
+            schema
+        }
+        Kind::TextToFront => {
+            let mut schema = json!({
+                "type": "object",
+                "required": [],
+                "additionalProperties": false,
+                "properties": {
+                    "sheet": {
+                        "description": if allow_omitted_sheet {
+                            "The sheet whose annotations to bring to the front; on an original \
+                             `.dwg`, omit sheet to target that drawing."
+                        } else {
+                            "The sheet whose row's annotations to bring to the front. Give sheet \
+                             or template, not both."
+                        },
+                        "$ref": "#/$defs/sheet_name",
+                    },
+                    "template": {
+                        "description": "The template whose annotations to bring to the front. \
+                                        Give sheet or template, not both.",
+                        "$ref": "#/$defs/template_path",
+                    },
+                    "which": {
+                        "description": "Which annotations to bring to the front: \"text\" (text \
+                                        and mtext), \"dimensions\", \"leaders\" (mleader and \
+                                        leader), or \"all\" (default when omitted).",
+                        "enum": TEXT_TO_FRONT_KINDS,
+                    },
+                },
+            });
+            if allow_omitted_sheet {
+                schema["not"] = json!({ "required": ["sheet", "template"] });
+            } else {
+                schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+            }
+            schema
+        }
         Kind::Table(op, table) => table_schema(op, table, defs, allow_omitted_sheet),
         Kind::Block(op) => block_schema(op, defs),
         Kind::Grid(op) => grid_schema(op, defs),
@@ -2521,6 +2658,9 @@ pub(crate) enum Body {
         keys: Map<String, Value>,
         /// The snapped points its keys hold, to be written as coordinates.
         snaps: Vec<PointSnap>,
+        /// Where in draw order to place the added object; `None` appends at
+        /// the front.
+        draw_order: Option<DrawOrderPlace>,
     },
     Change {
         target: Target,
@@ -2555,6 +2695,17 @@ pub(crate) enum Body {
         targets: Vec<(Target, String)>,
         by: TransformBy,
     },
+    /// Moves `targets` in draw order to `order`: AutoCAD's DRAWORDER.
+    DrawOrder {
+        targets: Vec<(Target, String)>,
+        order: DrawOrderPlace,
+    },
+    /// Brings text, dimensions, leaders, or all of them to the front of draw
+    /// order: AutoCAD's TEXTTOFRONT.
+    TextToFront {
+        to: AddTo,
+        which: TextToFrontWhich,
+    },
     SetAttribute {
         target: Target,
         tag: String,
@@ -2585,6 +2736,7 @@ pub(crate) enum Body {
         around: Vec<(Target, String)>,
         margin: Option<Value>,
         keys: Map<String, Value>,
+        draw_order: Option<DrawOrderPlace>,
     },
     /// A dimension added from another, `target`, to `point`, with the id
     /// and the name it is given.
@@ -2739,6 +2891,66 @@ pub(crate) enum AddTo {
     Sheet(String),
     /// To the template, as the rows write its path.
     Template(String),
+}
+
+/// Where an object is placed in draw order: at the front (drawn last, on top),
+/// at the back (drawn first, behind), immediately above another object, or
+/// immediately under another object.
+#[derive(Clone, Debug)]
+pub(crate) enum DrawOrderPlace {
+    Front,
+    Back,
+    Above(Target),
+    Under(Target),
+}
+
+impl DrawOrderPlace {
+    pub(crate) fn words(&self) -> String {
+        match self {
+            DrawOrderPlace::Front => "to the front".to_owned(),
+            DrawOrderPlace::Back => "to the back".to_owned(),
+            DrawOrderPlace::Above(t) => format!("above {}", t.words()),
+            DrawOrderPlace::Under(t) => format!("under {}", t.words()),
+        }
+    }
+}
+
+/// The kinds `text_to_front` accepts under `which`.
+pub(crate) const TEXT_TO_FRONT_KINDS: [&str; 4] = ["text", "dimensions", "leaders", "all"];
+
+/// Which objects `text_to_front` brings to the front: AutoCAD's TEXTTOFRONT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextToFrontWhich {
+    Text,
+    Dimensions,
+    Leaders,
+    All,
+}
+
+impl TextToFrontWhich {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            TextToFrontWhich::Text => "text",
+            TextToFrontWhich::Dimensions => "dimensions",
+            TextToFrontWhich::Leaders => "leaders",
+            TextToFrontWhich::All => "all",
+        }
+    }
+
+    pub(crate) fn matches_kind(self, kind: &str) -> bool {
+        match self {
+            TextToFrontWhich::Text => matches!(kind, "text" | "mtext"),
+            TextToFrontWhich::Dimensions => kind == "dimension",
+            TextToFrontWhich::Leaders => matches!(kind, "mleader" | "leader"),
+            TextToFrontWhich::All => {
+                matches!(kind, "text" | "mtext" | "dimension" | "mleader" | "leader")
+            }
+        }
+    }
+
+    pub(crate) fn matches_object(self, object: &crate::model::Object) -> bool {
+        self.matches_kind(object.type_name())
+    }
 }
 
 /// How an operation names the object it edits.
@@ -3161,13 +3373,20 @@ fn operation(
                 .filter(|k| kind.is_none() || *k != DIMENSION_KIND_KEY)
                 .filter(|k| !others.contains(k))
                 .collect();
-            let mut allowed = vec!["sheet", "template"];
+            let mut allowed = vec!["sheet", "template", "draw_order"];
             allowed.extend(&own);
             if object == "revision_cloud" {
                 allowed.push("around");
                 allowed.push("margin");
             }
             keys(&allowed)?;
+            let draw_order = match map.get("draw_order") {
+                None => None,
+                Some(v) => Some(
+                    read_draw_order_place(v, "draw_order")
+                        .map_err(|(code, message, field)| fail(code, message, &field))?,
+                ),
+            };
             if object == "revision_cloud" && map.contains_key("around") {
                 if map.contains_key("rectangle") {
                     return Err(fail(
@@ -3260,7 +3479,7 @@ fn operation(
                     .filter(|(k, _)| {
                         !matches!(
                             k.as_str(),
-                            OP_KEY | "sheet" | "template" | "around" | "margin"
+                            OP_KEY | "sheet" | "template" | "around" | "margin" | "draw_order"
                         )
                     })
                     .map(|(k, v)| (k.clone(), v.clone()))
@@ -3270,6 +3489,7 @@ fn operation(
                     around,
                     margin,
                     keys,
+                    draw_order,
                 }
             } else {
                 if object == "revision_cloud" && map.contains_key("margin") {
@@ -3357,7 +3577,9 @@ fn operation(
                 }
                 keys.extend(
                     map.iter()
-                        .filter(|(k, _)| !matches!(k.as_str(), OP_KEY | "sheet" | "template"))
+                        .filter(|(k, _)| {
+                            !matches!(k.as_str(), OP_KEY | "sheet" | "template" | "draw_order")
+                        })
                         .map(|(k, v)| (k.clone(), v.clone())),
                 );
                 let schema = defs.get(&format!("op_{object}")).unwrap_or(&defs[object]);
@@ -3367,7 +3589,12 @@ fn operation(
                     snaps_in(value, &slots, defs, &format!("/{key}"), key, &mut snaps)
                         .map_err(|(code, message, field)| fail(code, message, &field))?;
                 }
-                Body::Add { to, keys, snaps }
+                Body::Add {
+                    to,
+                    keys,
+                    snaps,
+                    draw_order,
+                }
             }
         }
         Kind::Change => {
@@ -3628,6 +3855,90 @@ fn operation(
         }
         Kind::Rotate | Kind::Scale | Kind::Mirror => read_transform(map, spec, units)
             .map_err(|(code, message, field)| fail(code, message, &field))?,
+        Kind::DrawOrder => {
+            keys(&["target", "targets", "order"])?;
+            let targets = read_targets_to(map, "reorder")
+                .map_err(|(code, message, field)| fail(code, message, &field))?;
+            let Some(order_val) = map.get("order") else {
+                return Err(fail(
+                    ErrorCode::MissingKey,
+                    "missing key `order`: \"front\", \"back\", {\"above\": target}, or \
+                     {\"under\": target}"
+                        .to_owned(),
+                    "order",
+                ));
+            };
+            let order = read_draw_order_place(order_val, "order")
+                .map_err(|(code, message, field)| fail(code, message, &field))?;
+            Body::DrawOrder { targets, order }
+        }
+        Kind::TextToFront => {
+            keys(&["sheet", "template", "which"])?;
+            let to = match (map.get("sheet"), map.get("template")) {
+                (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
+                (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
+                (Some(_), Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::Usage,
+                        "give sheet or template, not both".to_owned(),
+                        "",
+                    ));
+                }
+                (None, None) => match default_sheet {
+                    Some(sheet) => AddTo::Sheet(sheet.to_owned()),
+                    None => {
+                        return Err(fail(
+                            ErrorCode::MissingKey,
+                            "missing key `sheet`: name the sheet whose row's annotations to bring \
+                             to the front, or give template for a template"
+                                .to_owned(),
+                            "sheet",
+                        ));
+                    }
+                },
+                (Some(_), None) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a sheet's name".to_owned(),
+                        "sheet",
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a template's path".to_owned(),
+                        "template",
+                    ));
+                }
+            };
+            let which = match map.get("which") {
+                None => TextToFrontWhich::All,
+                Some(Value::String(s)) => match s.as_str() {
+                    "text" => TextToFrontWhich::Text,
+                    "dimensions" => TextToFrontWhich::Dimensions,
+                    "leaders" => TextToFrontWhich::Leaders,
+                    "all" => TextToFrontWhich::All,
+                    other => {
+                        return Err(fail(
+                            ErrorCode::BadValue,
+                            format!(
+                                "unknown `which` value `{other}`; expected one of {}",
+                                TEXT_TO_FRONT_KINDS.join(", ")
+                            ),
+                            "which",
+                        ));
+                    }
+                },
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        format!("expected one of {}", TEXT_TO_FRONT_KINDS.join(", ")),
+                        "which",
+                    ));
+                }
+            };
+            Body::TextToFront { to, which }
+        }
         Kind::SetAttribute => {
             keys(&["target", "tag", "occurrence", "value", ROW_VALUE_KEY])?;
             let target = target()?;
@@ -4645,6 +4956,64 @@ fn missing_required(object: &Value, keys: &Map<String, Value>) -> Option<Missing
         .collect::<Vec<_>>()
         .join(" or ");
     Some(Missing { first, needs })
+}
+
+/// Reads a `draw_order` / `order` placement: `"front"`, `"back"`,
+/// `{"above": target}`, or `{"under": target}`.
+fn read_draw_order_place(value: &Value, field: &str) -> Result<DrawOrderPlace, KeyError> {
+    match value {
+        Value::String(s) => match s.as_str() {
+            "front" => Ok(DrawOrderPlace::Front),
+            "back" => Ok(DrawOrderPlace::Back),
+            other => Err((
+                ErrorCode::BadValue,
+                format!(
+                    "unknown draw order `{other}`; expected \"front\", \"back\", \
+                     {{\"above\": target}}, or {{\"under\": target}}"
+                ),
+                field.to_owned(),
+            )),
+        },
+        Value::Object(map) => {
+            if let Some(key) = map
+                .keys()
+                .find(|k| !matches!(k.as_str(), "above" | "under"))
+            {
+                return Err((
+                    ErrorCode::UnknownKey,
+                    format!("unknown key `{key}`; expected `above` or `under`"),
+                    format!("{field}.{key}"),
+                ));
+            }
+            match (map.get("above"), map.get("under")) {
+                (Some(_), Some(_)) => Err((
+                    ErrorCode::Usage,
+                    "give `above` or `under`, not both".to_owned(),
+                    field.to_owned(),
+                )),
+                (Some(t), None) => {
+                    let target =
+                        read_target(t).map_err(|e| target_at(&format!("{field}.above"), e))?;
+                    Ok(DrawOrderPlace::Above(target))
+                }
+                (None, Some(t)) => {
+                    let target =
+                        read_target(t).map_err(|e| target_at(&format!("{field}.under"), e))?;
+                    Ok(DrawOrderPlace::Under(target))
+                }
+                (None, None) => Err((
+                    ErrorCode::MissingKey,
+                    "expected `above` or `under` naming a reference object".to_owned(),
+                    field.to_owned(),
+                )),
+            }
+        }
+        _ => Err((
+            ErrorCode::WrongType,
+            "expected \"front\", \"back\", {\"above\": target}, or {\"under\": target}".to_owned(),
+            field.to_owned(),
+        )),
+    }
 }
 
 /// Reads a target: `{"id": "SHEET/ID"}` or `{"name": ..., "sheet": ...}`.

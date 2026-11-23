@@ -222,7 +222,7 @@ pub fn moved(old: Bounds, new: Bounds) -> Option<Line> {
 pub fn outline(item: &Item) -> Vec<Line> {
     let (lists, closed) = match &item.shape {
         Shape::Stroke { runs, .. } => (runs, false),
-        Shape::Fill { contours, .. } => (contours, true),
+        Shape::Fill { contours, .. } | Shape::Mask { contours } => (contours, true),
     };
     let mut lines = Vec::new();
     for run in lists {
@@ -246,7 +246,7 @@ pub fn outline(item: &Item) -> Vec<Line> {
 pub fn pen(item: &Item) -> Option<f64> {
     match &item.shape {
         Shape::Stroke { lineweight, .. } => Some(*lineweight),
-        Shape::Fill { .. } => None,
+        Shape::Fill { .. } | Shape::Mask { .. } => None,
     }
 }
 

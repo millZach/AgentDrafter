@@ -169,6 +169,7 @@ pub(crate) fn read_record_with_recovery(
             ltscale: drawing.ltscale,
             layout: drawing.layout,
             other_layouts: drawing.other_layouts,
+            wipeout_frame: drawing.wipeout_frame,
         };
         return Ok(Record {
             sheet,

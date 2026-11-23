@@ -227,7 +227,7 @@ pub(crate) struct Resolved {
 
 /// The object types a transform takes: every type a sheet holds but a
 /// viewport, which is a window on the paper.
-const TRANSFORMED_TYPES: [&str; 17] = [
+const TRANSFORMED_TYPES: [&str; 18] = [
     "line",
     "polyline",
     "arc",
@@ -240,6 +240,7 @@ const TRANSFORMED_TYPES: [&str; 17] = [
     "donut",
     "solid",
     "revision_cloud",
+    "wipeout",
     "insert",
     "table",
     "mleader",
@@ -400,6 +401,7 @@ impl At<'_> {
                 ("polyline", "points") => self.vertices(&mut entry.value, &field)?,
                 ("spline", "fit_points" | "control_points")
                 | ("solid", "corners")
+                | ("wipeout", "points")
                 | ("revision_cloud", "polygon")
                 | ("leader" | "dimension", "points") => self.points(&mut entry.value, &field)?,
                 ("revision_cloud", "rectangle") => {

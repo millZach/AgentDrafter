@@ -48,6 +48,7 @@ fn reads_one_line() {
             })],
             paper: None,
             ltscale: 1.0,
+            wipeout_frame: Default::default(),
             layout: None,
             other_layouts: Vec::new(),
         }
@@ -155,7 +156,7 @@ fn an_unknown_object_type_is_named() {
     assert_eq!(e.field.as_deref(), Some("objects[0].hexagon"));
     assert_eq!(
         e.message,
-        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline, hatch, text, mtext, donut, solid, revision_cloud, insert, table, mleader, leader, dimension, viewport"
+        "unknown object type `hexagon`; known types: line, polyline, arc, circle, ellipse, spline, hatch, text, mtext, donut, solid, revision_cloud, wipeout, insert, table, mleader, leader, dimension, viewport"
     );
 }
 

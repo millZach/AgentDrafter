@@ -46,6 +46,7 @@ Keys are spelled as AutoCAD spells them: `color`, `center`.
 | `units` | yes | The sheet's declared unit: `mm`, `cm`, `m`, `in` or `ft`. Every length on the sheet is in this unit unless it carries its own. It becomes the DWG's insertion unit. |
 | `block_library` | no | The block library the sheet's inserts draw their blocks from: the path of its file. See [Inserts](#inserts). |
 | `ltscale` | no | What every linetype on the sheet is enlarged by, AutoCAD's LTSCALE: a number more than 0, with no unit. Without it, 1. See [An object's own colour, linetype and lineweight](#an-objects-own-colour-linetype-and-lineweight). |
+| `wipeout_frame` | no | Whether [wipeout](wipeouts.md) frames draw: `off` (default, hidden everywhere), `on` (drawn on screen and plotted), or `display` (drawn on screen, hidden when plotted), matching AutoCAD's `WIPEOUTFRAME`. |
 | `linetypes` | no | The sheet's linetypes: a mapping from each linetype's name to its definition. |
 | `layers` | no | The sheet's layers: a mapping from each layer's name to its colour, linetype and lineweight. |
 | `hatch_patterns` | no | The sheet's hatch patterns: a mapping from each pattern's name to its lines. |

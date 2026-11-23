@@ -3005,6 +3005,7 @@ fn check_preserves_sheet_units_for_viewport_dimensions_and_uses_inch_units_on_ex
         ltscale: read_ref.ltscale,
         layout: read_ref.layout,
         other_layouts: read_ref.other_layouts,
+        wipeout_frame: read_ref.wipeout_frame,
     };
     let ref_fonts = crate::text::placement::SheetFonts::find(&ref_sheet, &Settings::default());
     let metric_dl = crate::query::measuring_drawing(&ref_sheet, &ref_fonts);

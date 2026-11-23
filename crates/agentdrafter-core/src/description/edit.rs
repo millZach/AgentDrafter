@@ -1278,6 +1278,23 @@ impl RecordFile {
         keys: &Map<String, Value>,
         operation: usize,
     ) -> Result<usize, Error> {
+        self.add_at(list, kind, keys, None, operation)
+            .map(|(index, _)| index)
+    }
+
+    /// Adds an object of type `kind` with `keys` to `list`, inserted at
+    /// `insert_at` (or at the end when `None` or past the end). Any existing
+    /// object whose index shifts and which carries no explicit `id` has its
+    /// prior place written into `id` so its ID never moves; those written IDs
+    /// are returned beside the inserted object's index.
+    pub(crate) fn add_at(
+        &mut self,
+        list: ObjectList,
+        kind: &str,
+        keys: &Map<String, Value>,
+        insert_at: Option<usize>,
+        operation: usize,
+    ) -> Result<(usize, Vec<String>), Error> {
         let order: Vec<&str> = OBJECT_TYPES
             .iter()
             .find(|(name, _)| *name == kind)
@@ -1299,14 +1316,101 @@ impl RecordFile {
         )]));
         self.state(list);
         let items = self.items_mut(list)?;
-        items.push(object);
-        let index = items.len() - 1;
-        self.list_state(list).items.push(Item {
-            origin: None,
-            edited: true,
-            touches: vec![(operation, Touch::Whole)],
-        });
-        Ok(index)
+        let pos = insert_at.map_or(items.len(), |at| at.min(items.len()));
+        let mut kept: Vec<(usize, String)> = Vec::new();
+        if pos < items.len() {
+            for (old_i, item) in items.iter_mut().enumerate().skip(pos) {
+                let place = list.place(old_i);
+                if let Some(obj_keys) = object_keys_mut(item) {
+                    match obj_keys.iter_mut().find(|e| e.key == ID_KEY) {
+                        Some(id) if id.value.is_bare_null() => {
+                            id.value = Node::scalar(place.clone());
+                            kept.push((old_i + 1, place));
+                        }
+                        Some(_) => {}
+                        None => {
+                            obj_keys.push(new_entry(ID_KEY, Node::scalar(place.clone())));
+                            kept.push((old_i + 1, place));
+                        }
+                    }
+                }
+            }
+            items.insert(pos, object);
+        } else {
+            items.push(object);
+        }
+        let state = self.list_state(list);
+        state.items.insert(
+            pos,
+            Item {
+                origin: None,
+                edited: true,
+                touches: vec![(operation, Touch::Whole)],
+            },
+        );
+        for (new_i, _) in &kept {
+            let item = &mut state.items[*new_i];
+            item.edited = true;
+            item.touches
+                .push((operation, Touch::Keys(vec![ID_KEY.to_owned()])));
+        }
+        Ok((pos, kept.into_iter().map(|(_, place)| place).collect()))
+    }
+
+    /// Reorders the objects of `list` into `new_order`, a permutation of
+    /// `0..len` giving the old index for each new position. Any object whose
+    /// index moves and which carries no explicit `id` has its prior place
+    /// written into `id` so its ID stays fixed; those written IDs are returned.
+    pub(crate) fn reorder(
+        &mut self,
+        list: ObjectList,
+        new_order: &[usize],
+        operation: usize,
+    ) -> Result<Vec<String>, Error> {
+        self.state(list);
+        let items = self.items_mut(list)?;
+        if new_order.len() != items.len() {
+            return Err(record_shape("draw order permutation"));
+        }
+        let mut kept: Vec<(usize, String)> = Vec::new();
+        for (new_i, &old_i) in new_order.iter().enumerate() {
+            if old_i != new_i {
+                let place = list.place(old_i);
+                if let Some(obj_keys) = object_keys_mut(&mut items[old_i]) {
+                    match obj_keys.iter_mut().find(|e| e.key == ID_KEY) {
+                        Some(id) if id.value.is_bare_null() => {
+                            id.value = Node::scalar(place.clone());
+                            kept.push((new_i, place));
+                        }
+                        Some(_) => {}
+                        None => {
+                            obj_keys.push(new_entry(ID_KEY, Node::scalar(place.clone())));
+                            kept.push((new_i, place));
+                        }
+                    }
+                }
+            }
+        }
+        let old_nodes = std::mem::take(items);
+        let mut slots: Vec<Option<Node>> = old_nodes.into_iter().map(Some).collect();
+        for &old_i in new_order {
+            items.push(slots[old_i].take().expect("valid permutation"));
+        }
+        let state = self.list_state(list);
+        let old_items = std::mem::take(&mut state.items);
+        let mut item_slots: Vec<Option<Item>> = old_items.into_iter().map(Some).collect();
+        for &old_i in new_order {
+            state
+                .items
+                .push(item_slots[old_i].take().expect("valid permutation"));
+        }
+        for (new_i, _) in &kept {
+            let item = &mut state.items[*new_i];
+            item.edited = true;
+            item.touches
+                .push((operation, Touch::Keys(vec![ID_KEY.to_owned()])));
+        }
+        Ok(kept.into_iter().map(|(_, place)| place).collect())
     }
 
     /// Deletes the object of `list` at `index`, as operation `operation`.
@@ -1555,7 +1659,7 @@ impl RecordFile {
                 ("dimension", "center" | "point" | "location" | "feature") => {
                     move_point(&mut entry.value, by, units, &field)?;
                 }
-                ("polyline" | "leader" | "dimension", "points")
+                ("polyline" | "leader" | "dimension" | "wipeout", "points")
                 | ("spline", "fit_points" | "control_points")
                 | ("solid", "corners")
                 | ("revision_cloud", "polygon") => {
@@ -2668,6 +2772,52 @@ impl RecordFile {
                 emitter.item(node, column + 2)
             )
         };
+        // Detect whether existing items were reordered or a new item was
+        // inserted before an existing one. When so, rewrite the list's span in
+        // its new order while keeping unedited original items byte-for-byte.
+        let mut saw_added = false;
+        let mut prev_origin: Option<usize> = None;
+        let mut reordered = false;
+        for item in &state.items {
+            match item.origin {
+                Some(origin) => {
+                    if saw_added || prev_origin.is_some_and(|p| origin <= p) {
+                        reordered = true;
+                        break;
+                    }
+                    prev_origin = Some(origin);
+                }
+                None => saw_added = true,
+            }
+        }
+        if reordered && !ranges.is_empty() {
+            let span_start = ranges.first().unwrap().0;
+            let span_end = ranges.last().unwrap().1;
+            let trailing_nl = span_end < self.text.len() || self.text.ends_with('\n');
+            let mut out = String::new();
+            for (idx, (node, item)) in items.iter().zip(&state.items).enumerate() {
+                let is_last = idx + 1 == items.len();
+                let chunk = match item.origin {
+                    Some(origin) if !item.edited => {
+                        let (s, e) = ranges[origin];
+                        let raw = &self.text[s..e];
+                        if raw.ends_with('\n') {
+                            raw.to_owned()
+                        } else {
+                            format!("{raw}{nl}")
+                        }
+                    }
+                    _ => item_text(node),
+                };
+                if is_last && !trailing_nl {
+                    out.push_str(chunk.strip_suffix(nl).unwrap_or(&chunk));
+                } else {
+                    out.push_str(&chunk);
+                }
+            }
+            splices.push((span_start, span_end, out));
+            return Ok(());
+        }
         let mut kept = vec![false; ranges.len()];
         for (node, item) in items.iter().zip(&state.items) {
             if let Some(origin) = item.origin {
