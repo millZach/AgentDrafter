@@ -809,7 +809,7 @@ impl Selection {
                 Object::Leader(l)
                     if l.annotation.as_ref().is_some_and(|a| m.text(&a.text, text)) => {}
                 Object::Insert(insert) => {
-                    in_block = block_text(record, &insert.block, |c| m.text(c, text));
+                    in_block = block_text(record, insert, |c| m.text(c, text));
                     if in_block.is_empty() {
                         return None;
                     }
@@ -921,17 +921,23 @@ pub(crate) fn space_of(sheet: &Sheet, index: usize) -> Option<String> {
     ))
 }
 
-/// The text and multiline text of `block`, as the block library or DWG of
-/// `record`'s sheet defines it, and the values of its constant attributes,
-/// which its definition holds, whose contents `wanted` takes.
-fn block_text(record: &SheetRecord, block: &str, wanted: impl Fn(&str) -> bool) -> Vec<BlockText> {
-    let Some((bi, definition)) = record
+/// The text and multiline text of `insert`'s block (evaluated at `insert.state`),
+/// as the block library or DWG of `record`'s sheet defines it, and the values
+/// of its constant attributes, which its definition holds, whose contents
+/// `wanted` takes.
+fn block_text(
+    record: &SheetRecord,
+    insert: &crate::model::Insert,
+    wanted: impl Fn(&str) -> bool,
+) -> Vec<BlockText> {
+    let block_name = insert.evaluated_block.as_deref().unwrap_or(&insert.block);
+    let bi = record
         .sheet
         .blocks
         .iter()
-        .enumerate()
-        .find(|(_, b)| b.name == block)
-    else {
+        .position(|b| b.name == block_name)
+        .unwrap_or(0);
+    let Some(definition) = record.sheet.block_for_insert(insert) else {
         return Vec::new();
     };
     let file = if record.is_dwg() {

@@ -74,6 +74,7 @@ pub(super) fn add_cells(defs: &mut Map<String, Value>) {
 
 /// Adds the definitions blocks, attribute definitions and inserts use to `defs`.
 pub(super) fn add_defs(defs: &mut Map<String, Value>) {
+    super::dynamic_block::add_schema_defs(defs);
     defs.insert(
         "attribute_tag".into(),
         json!({
@@ -195,6 +196,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                         ],
                     },
                 },
+                "state": { "$ref": "#/$defs/dynamic_state" },
             }),
         ),
     );
@@ -274,7 +276,7 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
             }),
         ),
     );
-    let [base_point_key, objects_key] = BLOCK_KEYS;
+    let [base_point_key, objects_key, parameters_key] = BLOCK_KEYS;
     defs.insert(
         "block".into(),
         json!({
@@ -299,6 +301,13 @@ pub(super) fn add_defs(defs: &mut Map<String, Value>) {
                     "type": "array",
                     "minItems": 1,
                     "items": { "oneOf": super::schema::object_choices(&super::objects::BLOCK_OBJECT_TYPES) },
+                },
+                parameters_key: {
+                    "description": "Optional dynamic block parameters (visibility states, flips, \
+                                    linear stretch distances, rotations, and lookup tables), \
+                                    mapped from parameter name to definition.",
+                    "type": "object",
+                    "additionalProperties": { "$ref": "#/$defs/dynamic_parameter" },
                 },
             },
         }),

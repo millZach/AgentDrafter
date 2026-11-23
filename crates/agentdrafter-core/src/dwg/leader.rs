@@ -1560,6 +1560,8 @@ objects:
             mirrored: false,
             readable_attributes: false,
             attributes: Vec::new(),
+            state: std::collections::BTreeMap::new(),
+            evaluated_block: None,
             name: None,
             layer: "0".into(),
             properties: Default::default(),

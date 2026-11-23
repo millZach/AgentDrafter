@@ -1,0 +1,92 @@
+units: mm
+block_library: blocks.yaml
+
+paper: [210, 148]
+
+layers:
+  border:
+    color: 7
+    linetype: Continuous
+    lineweight: 0.35
+  symbols:
+    color: 7
+    linetype: Continuous
+    lineweight: 0.25
+  labels:
+    color: 3
+    linetype: Continuous
+    lineweight: 0.18
+
+objects:
+  - polyline:
+      id: border
+      points: [[0, 0, 0], [210, 0, 0], [210, 148, 0], [0, 148, 0]]
+      closed: true
+      layer: border
+
+  - text:
+      id: heading
+      contents: DYNAMIC BLOCKS EXAMPLE
+      position: [105, 136, 0]
+      height: 5
+      justify: middle_center
+      layer: border
+
+  - insert:
+      id: sw-default
+      name: sw-default
+      block: SELECTOR_SWITCH
+      position: [35, 95, 0]
+      attributes:
+        TAG: HS-101
+
+  - insert:
+      id: sw-3pos
+      name: sw-3pos
+      block: SELECTOR_SWITCH
+      position: [85, 95, 0]
+      attributes:
+        TAG: HS-102
+      state:
+        Visibility: 3-POS
+
+  - insert:
+      id: sw-rotated
+      name: sw-rotated
+      block: SELECTOR_SWITCH
+      position: [135, 95, 0]
+      attributes:
+        TAG: HS-103
+      state:
+        Visibility: 2-POS
+        Angle: 90
+
+  - insert:
+      id: sw-lookup
+      name: sw-lookup
+      block: SELECTOR_SWITCH
+      position: [180, 95, 0]
+      attributes:
+        TAG: HS-104
+      state:
+        Preset: Keyed-Reversed
+
+  - insert:
+      id: rail-short
+      name: rail-short
+      block: TERMINAL_RAIL
+      position: [30, 35, 0]
+      attributes:
+        RAIL: TB-1
+      state:
+        Length: 20
+
+  - insert:
+      id: rail-long
+      name: rail-long
+      block: TERMINAL_RAIL
+      position: [95, 35, 0]
+      attributes:
+        RAIL: TB-2
+      state:
+        Length: 60

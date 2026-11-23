@@ -1997,6 +1997,7 @@ blocks:
                 base_point: Point3::new(0.0, 0.0, 0.0),
                 objects: Vec::new(),
                 cells: Vec::new(),
+                parameters: Vec::new(),
             },
             not_carried: vec![("DIMENSION", 2), ("LEADER", 1)],
         });

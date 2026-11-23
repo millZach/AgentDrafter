@@ -1,0 +1,97 @@
+units: mm
+
+layers:
+  symbols:
+    color: 7
+    linetype: Continuous
+    lineweight: 0.25
+  labels:
+    color: 3
+    linetype: Continuous
+    lineweight: 0.18
+
+blocks:
+  SELECTOR_SWITCH:
+    base_point: [0, 0, 0]
+    objects:
+      # 0: body circle (always visible)
+      - circle: { center: [0, 0, 0], radius: 5, layer: symbols }
+      # 1: 2-POS arm (right)
+      - line: { from: [0, 0, 0], to: [9, 0, 0], layer: symbols }
+      # 2: 3-POS center arm (up)
+      - line: { from: [0, 0, 0], to: [0, 9, 0], layer: symbols }
+      # 3: 3-POS / KEYED left-up arm
+      - line: { from: [0, 0, 0], to: [-6.5, 6.5, 0], layer: symbols }
+      # 4: KEYED cap box
+      - polyline:
+          points: [[-2, 5, 0], [2, 5, 0], [2, 7.5, 0], [-2, 7.5, 0]]
+          closed: true
+          layer: symbols
+      # 5: TAG attribute
+      - attdef:
+          tag: TAG
+          prompt: Switch tag
+          default: HS-100
+          position: [0, -8.5, 0]
+          height: 2.5
+          justify: middle_center
+          layer: labels
+    parameters:
+      Visibility:
+        kind: visibility
+        default: 2-POS
+        states:
+          2-POS: [0, 1, 5]
+          3-POS: [0, 1, 2, 3, 5]
+          KEYED: [0, 1, 2, 4, 5]
+      Flip:
+        kind: flip
+        axis: [[0, 0, 0], [0, 10, 0]]
+        default: false
+        labels: [Normal, Reversed]
+        objects: [0, 1, 2, 3, 4]
+      Angle:
+        kind: rotation
+        base_point: [0, 0, 0]
+        default: 0
+        allowed: [0, 90, 180, 270]
+        objects: [1, 2, 3, 4]
+      Preset:
+        kind: lookup
+        default: Standard-2P
+        rows:
+          Standard-2P: { Visibility: 2-POS, Flip: false, Angle: 0 }
+          Standard-3P: { Visibility: 3-POS, Flip: false, Angle: 0 }
+          Keyed-Reversed: { Visibility: KEYED, Flip: true, Angle: 0 }
+
+  TERMINAL_RAIL:
+    base_point: [0, 0, 0]
+    objects:
+      # 0: rail outline stretched at right end
+      - polyline:
+          points: [[0, 0, 0], [20, 0, 0], [20, 8, 0], [0, 8, 0]]
+          closed: true
+          layer: symbols
+      # 1: right end-stop circle moved with stretch
+      - circle: { center: [18, 4, 0], radius: 1.5, layer: symbols }
+      # 2: left end-stop circle (fixed)
+      - circle: { center: [2, 4, 0], radius: 1.5, layer: symbols }
+      # 3: rail label attribute
+      - attdef:
+          tag: RAIL
+          default: TB-1
+          position: [10, -4, 0]
+          height: 2.5
+          justify: middle_center
+          layer: labels
+    parameters:
+      Length:
+        kind: linear
+        from: [0, 0, 0]
+        to: [20, 0, 0]
+        default: 20
+        min: 15
+        max: 80
+        stretch_box: [[15, -2], [25, 10]]
+        stretch_objects: [0]
+        move_objects: [1]

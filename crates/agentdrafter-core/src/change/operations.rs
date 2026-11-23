@@ -59,6 +59,8 @@ pub(crate) enum Kind {
     /// AutoCAD's TEXTTOFRONT.
     TextToFront,
     SetAttribute,
+    /// Sets dynamic block parameter values on an insert: AutoCAD's PROPERTIES.
+    SetBlockState,
     /// Adds, changes, renames or deletes a layer, a linetype or a text
     /// style of a template.
     Table(TableOp, Table),
@@ -278,7 +280,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 68] = [
+pub(crate) const SPECS: [Spec; 69] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -387,6 +389,11 @@ pub(crate) const SPECS: [Spec; 68] = [
         name: "set_attribute",
         alias: "ATTEDIT",
         kind: Kind::SetAttribute,
+    },
+    Spec {
+        name: "set_block_state",
+        alias: "PROPERTIES",
+        kind: Kind::SetBlockState,
     },
     grid("set_cell", "TABLEDIT", GridOp::SetCell),
     grid("add_row", "", GridOp::Add(Axis::Row)),
@@ -932,6 +939,12 @@ fn does(spec: &Spec) -> String {
                                refused when the fixed text differs or the value splits more \
                                than one way, and row_value sets one part alone. AutoCAD's \
                                ATTEDIT."
+            .to_owned(),
+        Kind::SetBlockState => "Sets one or more dynamic block parameter values (visibility \
+                                state, lookup row, flip, linear distance, or rotation) on an \
+                                insert, named by each parameter's name as AutoCAD's Properties \
+                                palette lists it. A null value resets a parameter to its default. \
+                                AutoCAD's PROPERTIES."
             .to_owned(),
     }
 }
@@ -1887,6 +1900,26 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 ROW_VALUE_KEY: row_value_key(),
             },
         }),
+        Kind::SetBlockState => json!({
+            "type": "object",
+            "required": ["target", "state"],
+            "additionalProperties": false,
+            "properties": {
+                "target": target,
+                "state": {
+                    "description": "Dynamic parameter values to set on the insert, mapped from \
+                                    parameter name to value (or null to reset to default).",
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": {
+                        "anyOf": [
+                            { "$ref": "#/$defs/dynamic_value" },
+                            { "type": "null" },
+                        ],
+                    },
+                },
+            },
+        }),
     };
     schema["description"] = json!(does(spec));
     schema["properties"][OP_KEY] = op;
@@ -2713,6 +2746,12 @@ pub(crate) enum Body {
         /// block defines it more than once.
         occurrence: Option<usize>,
         value: String,
+    },
+    /// Sets one or more dynamic block parameter values on an insert: AutoCAD's
+    /// PROPERTIES.
+    SetBlockState {
+        target: Target,
+        state: Map<String, Value>,
     },
     /// A table operation: on the entry `name` of the template `to` names,
     /// with the keys it adds or sets, and the new name a rename gives.
@@ -3993,6 +4032,60 @@ fn operation(
                 occurrence,
                 value,
             }
+        }
+        Kind::SetBlockState => {
+            keys(&["target", "state"])?;
+            let target = target()?;
+            let state = match map.get("state") {
+                Some(Value::Object(entries)) if !entries.is_empty() => {
+                    for (k, v) in entries {
+                        if k.trim().is_empty() {
+                            return Err(fail(
+                                ErrorCode::BadValue,
+                                "a dynamic parameter name cannot be empty".to_owned(),
+                                "state",
+                            ));
+                        }
+                        if !matches!(
+                            v,
+                            Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null
+                        ) {
+                            return Err(fail(
+                                ErrorCode::WrongType,
+                                format!(
+                                    "dynamic parameter `{k}` takes a string, number, boolean, or \
+                                     null"
+                                ),
+                                &format!("state.{k}"),
+                            ));
+                        }
+                    }
+                    entries.clone()
+                }
+                Some(Value::Object(_)) => {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`state` must name at least one dynamic parameter to set".to_owned(),
+                        "state",
+                    ))
+                }
+                Some(_) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected `state`, a mapping from dynamic parameter names to values"
+                            .to_owned(),
+                        "state",
+                    ))
+                }
+                None => {
+                    return Err(fail(
+                        ErrorCode::MissingKey,
+                        "missing key `state`, the dynamic block parameters to set".to_owned(),
+                        "state",
+                    ))
+                }
+            };
+            Body::SetBlockState { target, state }
         }
         Kind::Grid(grid_op) => {
             let allowed: Vec<&str> = match grid_op {

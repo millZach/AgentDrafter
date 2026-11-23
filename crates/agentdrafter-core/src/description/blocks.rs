@@ -73,7 +73,7 @@ pub(crate) const LIBRARY_KEYS: [&str; 6] = [
 ];
 
 /// The keys a block takes.
-pub(crate) const BLOCK_KEYS: [&str; 2] = ["base_point", "objects"];
+pub(crate) const BLOCK_KEYS: [&str; 3] = ["base_point", "objects", "parameters"];
 
 /// The key a block's text or attribute definition declares its cell under.
 pub(crate) const CELL_KEY: &str = "cell";
@@ -121,7 +121,7 @@ pub(crate) const BLOCK_TEXT_KEYS: [&str; 13] = [
 ];
 
 /// The keys an insert takes, besides those every object on a sheet takes.
-pub(crate) const INSERT_KEYS: [&str; 12] = [
+pub(crate) const INSERT_KEYS: [&str; 13] = [
     "block",
     "position",
     "scale",
@@ -129,6 +129,7 @@ pub(crate) const INSERT_KEYS: [&str; 12] = [
     "mirrored",
     "readable_attributes",
     "attributes",
+    "state",
     "layer",
     "color",
     "linetype",
@@ -415,11 +416,21 @@ fn block(
     let Place::Block { noticed, .. } = place else {
         unreachable!("a block's objects are read in a block")
     };
+    let parameters = match fields.get("parameters") {
+        Some(node) => super::dynamic_block::parameters(
+            node,
+            &fields.path_of("parameters"),
+            tables.units,
+            objects.len(),
+        )?,
+        None => Vec::new(),
+    };
     let block = Block {
         name: name.to_owned(),
         base_point,
         objects,
         cells,
+        parameters,
     };
     Ok((block, noticed))
 }
@@ -585,6 +596,7 @@ pub(super) fn insert(
         None => false,
     };
     let attributes = attributes(fields, block, library, noticed)?;
+    let state = super::dynamic_block::insert_state(fields, block, units)?;
     Ok(Insert {
         block: block.name.clone(),
         position: point(
@@ -597,6 +609,8 @@ pub(super) fn insert(
         mirrored,
         readable_attributes,
         attributes,
+        state,
+        evaluated_block: None,
         name: None,
         layer,
         properties: Default::default(),

@@ -19,6 +19,7 @@ mod block_schema;
 pub(crate) mod blocks;
 mod dimension;
 mod dimension_schema;
+pub(crate) mod dynamic_block;
 pub(crate) mod edit;
 mod emit;
 mod hatch;

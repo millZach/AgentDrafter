@@ -662,6 +662,7 @@ mod tests {
             base_point: p(0.0, 0.0),
             objects,
             cells: Vec::new(),
+            parameters: Vec::new(),
         }
     }
 
@@ -914,6 +915,8 @@ mod tests {
             mirrored: false,
             readable_attributes: false,
             attributes: Vec::new(),
+            state: std::collections::BTreeMap::new(),
+            evaluated_block: None,
             name: None,
             layer: "0".into(),
             properties: Properties::default(),

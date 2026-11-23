@@ -679,15 +679,6 @@ impl<'a> Drawer<'a> {
         }
     }
 
-    /// The block an insert places, by its name.
-    fn block(&self, name: &str) -> Option<&'a Block> {
-        let blocks = &self.sheet.blocks;
-        blocks
-            .iter()
-            .find(|b| b.name == name)
-            .or_else(|| blocks.iter().find(|b| b.name.eq_ignore_ascii_case(name)))
-    }
-
     /// Adds what the sheet's object at `index` draws to `list`.
     fn sheet_object(&self, index: usize, object: &Object, tolerance: f64, list: &mut DisplayList) {
         if let Object::Insert(insert) = object {
@@ -764,7 +755,8 @@ impl<'a> Drawer<'a> {
         tolerance: f64,
         list: &mut DisplayList,
     ) -> Option<[Point2; 4]> {
-        let block = self.block(&insert.block)?;
+        let block = self.sheet.block_for_insert(insert)?;
+        let block = block.as_ref();
         // An insert on layer `0` in a block takes the enclosing insert's.
         let insert_layer = match (insert.layer.as_str(), enclosing) {
             (LAYER_ZERO, Some((layer, _))) => layer,

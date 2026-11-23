@@ -194,6 +194,7 @@ pub(crate) struct RevisionSession {
     expected_spaces_mutated: HashSet<u64>,
     expected_layers_added: HashSet<String>,
     expected_layers_changed: HashSet<String>,
+    expected_block_records_added: HashSet<String>,
     expected_non_graphical_changed: HashSet<u64>,
     expected_non_graphical_added: HashSet<u64>,
     app_registered: bool,
@@ -245,6 +246,7 @@ impl RevisionSession {
             expected_spaces_mutated: HashSet::new(),
             expected_layers_added: HashSet::new(),
             expected_layers_changed: HashSet::new(),
+            expected_block_records_added: HashSet::new(),
             expected_non_graphical_changed: HashSet::new(),
             expected_non_graphical_added: HashSet::new(),
             app_registered: false,
@@ -402,6 +404,7 @@ impl RevisionSession {
                     base_point: point(record.base_point),
                     objects,
                     cells: Vec::new(),
+                    parameters: Vec::new(),
                 }
             })
             .collect()
@@ -818,6 +821,66 @@ impl RevisionSession {
             self.revcloud_app_registered = true;
         }
         Ok(())
+    }
+
+    /// Switches the dynamic block visibility state on the `Insert` at `hex`,
+    /// preserving all untouched entities and dynamic block metadata verbatim
+    /// (ADR-0004).
+    pub(crate) fn set_block_state(
+        &mut self,
+        hex: &str,
+        state: &BTreeMap<String, crate::model::DynamicValue>,
+    ) -> Result<(String, MutationHandles), Error> {
+        let handle = parse_hex_handle(hex)?;
+        let _ = self.ensure_sheet_entity(handle, hex)?;
+        let insert_layer = match self.drawing.get_entity(handle) {
+            Some(EntityType::Insert(ins)) => layer_of(&ins.common),
+            Some(other) => {
+                return Err(Error::new(
+                    ErrorCode::BadValue,
+                    format!(
+                        "set_block_state works on an insert, not a {}",
+                        kind_of(other)
+                    ),
+                ))
+            }
+            None => {
+                return Err(Error::new(
+                    ErrorCode::UnknownName,
+                    format!("no object with handle `{hex}` in the drawing"),
+                ))
+            }
+        };
+        if self.is_layer_locked(&insert_layer) {
+            return Err(Error::new(
+                ErrorCode::Locked,
+                format!(
+                    "insert `{hex}` sits on layer `{insert_layer}`, which is locked; unlock it \
+                     first with change_layer, set: {{\"locked\": false}}"
+                ),
+            ));
+        }
+        let result =
+            super::dynamic_block::switch_original_visibility(&mut self.drawing, handle, state)?;
+        self.expected_touched.insert(handle.value());
+        self.expected_block_records_added
+            .insert(result.added_block_name.to_lowercase());
+        let mut added_hex = Vec::with_capacity(result.added_entity_handles.len());
+        for h in &result.added_entity_handles {
+            self.expected_added.insert(h.value());
+            added_hex.push(handle_text(*h));
+        }
+        if let Some(xrec_h) = result.updated_xrecord_handle {
+            self.expected_non_graphical_changed.insert(xrec_h.value());
+        }
+        Ok((
+            result.message,
+            MutationHandles {
+                touched: vec![hex.to_owned()],
+                added: added_hex,
+                deleted: Vec::new(),
+            },
+        ))
     }
 
     /// Sets one attribute value on the `Insert` at `hex`, preserving its
@@ -1888,7 +1951,9 @@ impl RevisionSession {
             }
         }
         for (key, now) in &after.block_records {
-            if !before.block_records.contains_key(key) {
+            if !before.block_records.contains_key(key)
+                && !self.expected_block_records_added.contains(key)
+            {
                 unexpected.push(UnexpectedChange {
                     kind: "BLOCK_RECORD".to_owned(),
                     handle: now.name.clone(),

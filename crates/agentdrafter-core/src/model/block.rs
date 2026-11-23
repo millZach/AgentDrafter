@@ -10,8 +10,11 @@
 //! and turned with the insert ([`attribute_text`]); the DWG holds it so, and
 //! a reader checks it is so before it reads the insert back.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
+use super::dynamic_block::{DynamicParameter, DynamicValue};
 use super::{is_false, layer_zero, Layer, Linetype, Object, Point3, LAYER_ZERO};
 use crate::description::normalize_degrees;
 use crate::text::{Justify, Text, TextStyle, STANDARD};
@@ -41,6 +44,10 @@ pub struct Block {
     /// block read from a DWG has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cells: Vec<Cell>,
+    /// Dynamic block parameters (visibility states, flips, linear distances,
+    /// rotations, and lookup tables). Empty for an ordinary static block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<DynamicParameter>,
 }
 
 /// The box a block's text or attribute definition draws within, such as
@@ -95,6 +102,20 @@ impl Block {
                 .get(carried)
                 .map_or(definition.default.as_str(), |a| a.value.as_str()),
         )
+    }
+
+    /// Evaluates this block at the dynamic `state` of an insert, returning a
+    /// borrowed reference when the block has no local dynamic actions.
+    pub fn evaluated<'a>(
+        &'a self,
+        state: &BTreeMap<String, DynamicValue>,
+    ) -> std::borrow::Cow<'a, Block> {
+        super::dynamic_block::evaluate_block(self, state)
+    }
+
+    /// Whether this block declares any dynamic parameters.
+    pub fn is_dynamic(&self) -> bool {
+        !self.parameters.is_empty()
     }
 }
 
@@ -196,6 +217,15 @@ pub struct Insert {
     /// defines them.
     #[serde(default)]
     pub attributes: Vec<Attribute>,
+    /// Chosen dynamic block parameter values, from parameter name to value.
+    /// Empty for an ordinary static block or a dynamic block in default state.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub state: BTreeMap<String, DynamicValue>,
+    /// When read from a DWG whose dynamic insert references an anonymous
+    /// evaluated block (`*U<n>`), the name of that evaluated block in
+    /// `sheet.blocks` while `block` keeps the effective dynamic block name.
+    #[serde(skip)]
+    pub(crate) evaluated_block: Option<String>,
     /// The name an agent selects the insert by, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -432,6 +462,8 @@ mod tests {
             mirrored: false,
             readable_attributes: false,
             attributes: Vec::new(),
+            state: BTreeMap::new(),
+            evaluated_block: None,
             name: None,
             layer: "symbols".into(),
             properties: Default::default(),
@@ -444,6 +476,7 @@ mod tests {
             base_point,
             objects: Vec::new(),
             cells: Vec::new(),
+            parameters: Vec::new(),
         }
     }
 

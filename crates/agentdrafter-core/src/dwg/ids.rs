@@ -11,11 +11,14 @@
 //! `/`, such as `DEMO-001/border`. An object with a name carries `name` and
 //! its name after them. AutoCAD carries extended data through a save.
 
+use std::collections::BTreeMap;
+
 use acadrust::entities::EntityCommon;
 use acadrust::xdata::{ExtendedData, ExtendedDataRecord, XDataValue};
 
 use super::block::APPLICATION;
 use crate::description::ids::ID_SEPARATOR;
+use crate::model::DynamicValue;
 
 /// The key of the name of an object's sheet in its extended data.
 const SHEET_KEY: &str = "sheet";
@@ -25,6 +28,14 @@ const ID_KEY: &str = "id";
 
 /// The key of an object's name in its extended data.
 pub(super) const NAME_KEY: &str = "name";
+
+/// The key of an insert's effective dynamic block name in its extended data.
+const DYN_BLOCK_KEY: &str = "dyn_block";
+
+/// The key of a dynamic parameter name in an insert's extended data, followed
+/// immediately by a [`DYN_VAL_KEY`] pair holding its encoded value.
+const DYN_PARAM_KEY: &str = "dyn_p";
+const DYN_VAL_KEY: &str = "dyn_v";
 
 /// Writes an object's ID, the name of its `sheet` and the `id` it carries
 /// in its file, and its `name`, if it has one, as AgentDrafter's record in
@@ -99,6 +110,62 @@ pub(super) fn read_id(common: &EntityCommon) -> Option<String> {
         Some(sheet) => Some(format!("{sheet}{ID_SEPARATOR}{own}")),
         None => Some(own),
     }
+}
+
+/// Appends dynamic block name (`dyn_block`) and parameter state pairs
+/// (`dyn_p` / `dyn_v`) to AgentDrafter's extended-data record on an insert.
+pub(super) fn write_dynamic_block(
+    common: &mut EntityCommon,
+    effective_block: &str,
+    state: &BTreeMap<String, DynamicValue>,
+) {
+    let mut record = common
+        .extended_data
+        .records()
+        .iter()
+        .find(|r| r.application_name.eq_ignore_ascii_case(APPLICATION))
+        .cloned()
+        .unwrap_or_else(|| ExtendedDataRecord::new(APPLICATION));
+    record.add_value(XDataValue::String(DYN_BLOCK_KEY.to_owned()));
+    record.add_value(XDataValue::String(effective_block.to_owned()));
+    for (param, value) in state {
+        record.add_value(XDataValue::String(DYN_PARAM_KEY.to_owned()));
+        record.add_value(XDataValue::String(param.clone()));
+        record.add_value(XDataValue::String(DYN_VAL_KEY.to_owned()));
+        record.add_value(XDataValue::String(value.encode_xdata()));
+    }
+    common.extended_data.upsert_record(record);
+}
+
+/// Reads the effective dynamic block name and state recorded by
+/// [`write_dynamic_block`], if present.
+pub(super) fn read_dynamic_block(
+    common: &EntityCommon,
+) -> Option<(String, BTreeMap<String, DynamicValue>)> {
+    let record = common
+        .extended_data
+        .records()
+        .iter()
+        .find(|r| r.application_name.eq_ignore_ascii_case(APPLICATION))?;
+    let mut effective_block: Option<String> = None;
+    let mut state = BTreeMap::new();
+    let mut pending_param: Option<String> = None;
+    for pair in record.values.chunks(2) {
+        let [XDataValue::String(k), XDataValue::String(v)] = pair else {
+            continue;
+        };
+        if k == DYN_BLOCK_KEY {
+            effective_block = Some(v.clone());
+        } else if k == DYN_PARAM_KEY {
+            pending_param = Some(v.clone());
+        } else if k == DYN_VAL_KEY {
+            if let (Some(param), Some(val)) = (pending_param.take(), DynamicValue::decode_xdata(v))
+            {
+                state.insert(param, val);
+            }
+        }
+    }
+    effective_block.map(|b| (b, state))
 }
 
 /// The object's name, from AgentDrafter's extended data on it.

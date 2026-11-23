@@ -42,6 +42,7 @@ A block's name follows the rules for a layer's name: 1 to 255 characters, not st
 |---|---|---|
 | `base_point` | no | The point of the block that sits at an insert's position, in the block's own coordinates: a point. Without it, `[0, 0, 0]`. |
 | `objects` | yes | The block's objects, in drawing order: at least one. Each is a mapping with one key, its type: any [object a sheet holds](sheet-description.md#objects), an `insert` of another of the library's blocks among them (see [Nested blocks](#nested-blocks)), or `attdef`. An object names a layer, text style or hatch pattern of the library's. It takes no `id` and no `name`: an insert of the block is the object on a sheet, with an [ID and a name](sheet-description.md#ids-and-names) of its own. A `text` takes a [`cell`](#cells) as well. |
+| `parameters` | no | Optional dynamic block parameters (`visibility`, `flip`, `linear`, `rotation`, and `lookup`), mapped from parameter name to definition. See [Dynamic blocks](dynamic-blocks.md). |
 
 An object on layer `0` in a block draws with the layer of the insert it is drawn by, as in AutoCAD; an object on any other layer draws with that layer. An object, or an attribute definition, whose `color`, `linetype` or `lineweight` is `ByBlock` draws with the insert's own, as AutoCAD draws it; see [An object's own colour, linetype and lineweight](sheet-description.md#an-objects-own-colour-linetype-and-lineweight).
 

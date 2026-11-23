@@ -17,6 +17,7 @@ use crate::units::Unit;
 
 pub(crate) mod block;
 pub(crate) mod dimension;
+pub(crate) mod dynamic_block;
 pub(crate) mod hatch;
 pub(crate) mod layout;
 pub(crate) mod leader;
@@ -32,6 +33,10 @@ pub use dimension::{
     FractionFormat, LaidDimension, Lettered, Measured, OrdinateAxis, TextPiece, TextPlacement,
     UnitFormat, DEGREE_SIGN, DIAMETER_SIGN, ISO_DIMENSION_STYLE, MEASURED,
     STANDARD_DIMENSION_STYLE,
+};
+pub use dynamic_block::{
+    is_default_state, resolve_state, DynamicParameter, DynamicParameterKind, DynamicValue,
+    LookupRow, VisibilityState,
 };
 pub use hatch::{Hatch, HatchEdge, HatchLoop, HatchPattern, HatchPatternLine, SOLID};
 pub use layout::{Clip, Layout, Viewport};
@@ -887,6 +892,32 @@ pub struct Sheet {
 }
 
 impl Sheet {
+    /// Returns the evaluated block definition for `insert`: for a dynamic
+    /// insert read from a DWG that references an evaluated anonymous block
+    /// (`*U<n>`), borrows that evaluated block; otherwise evaluates the named
+    /// block at `insert.state`.
+    pub fn block_for_insert(&self, insert: &Insert) -> Option<std::borrow::Cow<'_, Block>> {
+        if let Some(eval_name) = &insert.evaluated_block {
+            if let Some(eval_block) = self
+                .blocks
+                .iter()
+                .find(|b| b.name == *eval_name || b.name.eq_ignore_ascii_case(eval_name))
+            {
+                return Some(std::borrow::Cow::Borrowed(eval_block));
+            }
+        }
+        let block = self
+            .blocks
+            .iter()
+            .find(|b| b.name == insert.block)
+            .or_else(|| {
+                self.blocks
+                    .iter()
+                    .find(|b| b.name.eq_ignore_ascii_case(&insert.block))
+            })?;
+        Some(block.evaluated(&insert.state))
+    }
+
     /// Whether the sheet's object at `index` is in the paper space of the
     /// layout it draws, `layout`: never on a sheet without a layout.
     pub fn in_paper_space(&self, index: usize) -> bool {

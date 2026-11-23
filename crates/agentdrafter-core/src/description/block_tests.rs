@@ -181,6 +181,8 @@ fn an_insert_reads_every_key_and_fills_in_attributes_it_leaves_out() {
                     value: "SEE NOTE 2".into(),
                 },
             ],
+            state: std::collections::BTreeMap::new(),
+            evaluated_block: None,
             name: Some("m1".into()),
             layer: "0".into(),
             properties: Default::default(),

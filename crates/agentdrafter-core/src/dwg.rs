@@ -43,6 +43,7 @@ use crate::units::Unit;
 
 mod block;
 mod dimension;
+mod dynamic_block;
 mod hatch;
 mod ids;
 mod import;
@@ -217,8 +218,12 @@ pub(crate) fn write_new_sheet(
     table::add_table_styles(&mut drawing, sheet)?;
     let units = insertion_units(sheet.units);
     for definition in &sheet.blocks {
-        let owner = block::add_block_record(&mut drawing, definition, units)?;
-        for object in &definition.objects {
+        // Dynamic blocks write their default-evaluated geometry into the named
+        // block record so default-state inserts draw cleanly without overlapping
+        // hidden visibility states.
+        let master = definition.evaluated(&std::collections::BTreeMap::new());
+        let owner = block::add_block_record(&mut drawing, master.as_ref(), units)?;
+        for object in &master.objects {
             let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
             dwg_object.common_mut().owner_handle = owner;
             drawing.add_entity(dwg_object).map_err(|e| {
@@ -233,6 +238,7 @@ pub(crate) fn write_new_sheet(
             })?;
         }
     }
+    let mut dynamic_writer = dynamic_block::DynamicBlockWriter::new();
     // After the sheet's blocks, so that a block of its library drawn as
     // AutoCAD's arrowhead block is the one a leader draws with.
     leader::add_leader_styles(&mut drawing, sheet)?;
@@ -364,6 +370,45 @@ pub(crate) fn write_new_sheet(
                     .map_err(added)?;
                 leader::link_annotation(&mut drawing, handle, text);
             }
+            continue;
+        }
+        if let Object::Insert(insert) = object {
+            let Some(definition) = sheet.blocks.iter().find(|b| b.name == insert.block) else {
+                return Err(Error::new(
+                    ErrorCode::DwgWrite,
+                    format!(
+                        "an insert places block `{}`, which the sheet does not define",
+                        insert.block
+                    ),
+                ));
+            };
+            let mut dwg_ins = dynamic_writer.dwg_insert(
+                &mut drawing,
+                insert,
+                definition,
+                &sheet.blocks,
+                units,
+                start_of,
+            )?;
+            insert.layer.clone_into(&mut dwg_ins.common.layer);
+            set_properties(&mut dwg_ins.common, &insert.properties);
+            ids::write_id_and_name(
+                &mut dwg_ins.common,
+                &record.name,
+                &written.id,
+                written.name.as_deref(),
+            );
+            if definition.is_dynamic()
+                && (!insert.state.is_empty() || dwg_ins.block_name != insert.block)
+            {
+                ids::write_dynamic_block(&mut dwg_ins.common, &insert.block, &insert.state);
+            }
+            add_to(&mut drawing, EntityType::Insert(dwg_ins), paper).map_err(|e| {
+                Error::new(
+                    ErrorCode::DwgWrite,
+                    format!("could not add an insert to the drawing: {e}"),
+                )
+            })?;
             continue;
         }
         let mut dwg_object = dwg_object(object, start_of, &sheet.blocks)?;
@@ -923,13 +968,15 @@ fn contents(
             && !inserted.contains(&r.name.to_lowercase())
             && !content_blocks.contains(&r.handle)
     };
+    let ad_evaluated_blocks = dynamic_block::agentdrafter_evaluated_blocks(drawing);
     let mut read: Vec<Option<ReadBlock>> = records.iter().map(|_| None).collect();
     loop {
         let known: Vec<Block> = read.iter().flatten().map(|r| r.block.clone()).collect();
         let mut more = false;
         for (slot, record) in read.iter_mut().zip(&records) {
             if slot.is_none() {
-                if let Some(definition) = read_block(drawing, record, &known) {
+                if let Some(definition) = read_block(drawing, record, &known, &ad_evaluated_blocks)
+                {
                     *slot = Some(definition);
                     more = true;
                 }
@@ -1048,7 +1095,7 @@ fn contents(
                 .iter()
                 .find(|(h, _)| *h == v.common.handle)
                 .and_then(|(_, read)| read.clone()),
-            _ => read_object(dwg_object, &blocks),
+            _ => read_object_in(Some(drawing), dwg_object, &blocks),
         };
         match read {
             Some(object) => {
@@ -1753,11 +1800,20 @@ struct ReadBlock {
     ids_and_names: Vec<IdAndName>,
 }
 
-/// A block definition the core can read back whole: named, not an
-/// external reference, and holding only objects the core has a model for,
-/// an insert among them only of one of `blocks`.
-fn read_block(drawing: &CadDocument, record: &BlockRecord, blocks: &[Block]) -> Option<ReadBlock> {
-    if record.is_anonymous()
+/// A block definition the core can read back whole: named (or an evaluated
+/// anonymous `*U<n>` block belonging to a dynamic block), not an external
+/// reference, and holding only objects the core has a model for, an insert
+/// among them only of one of `blocks`. Inside dynamic blocks, entities marked
+/// invisible (such as objects hidden by a visibility state) are skipped rather
+/// than failing the whole block.
+fn read_block(
+    drawing: &CadDocument,
+    record: &BlockRecord,
+    blocks: &[Block],
+    ad_evaluated: &std::collections::HashSet<String>,
+) -> Option<ReadBlock> {
+    let is_dynamic_block = dynamic_block::is_dynamic_or_evaluated(drawing, record, ad_evaluated);
+    if (record.is_anonymous() && !is_dynamic_block)
         || record.flags.is_xref
         || record.flags.is_xref_overlay
         || !record.xref_path.is_empty()
@@ -1776,7 +1832,14 @@ fn read_block(drawing: &CadDocument, record: &BlockRecord, blocks: &[Block]) -> 
         if matches!(dwg_object, EntityType::Block(_) | EntityType::BlockEnd(_)) {
             continue;
         }
-        objects.push(read_object(dwg_object, blocks)?);
+        // Inside dynamic blocks (both master definitions and evaluated `*U<n>`
+        // blocks), AutoCAD hides inactive visibility-state objects with
+        // `common.invisible = true`; skip them cleanly so the visible state
+        // reads and draws faithfully.
+        if is_dynamic_block && dwg_object.common().invisible {
+            continue;
+        }
+        objects.push(read_object_in(Some(drawing), dwg_object, blocks)?);
         let common = dwg_object.common();
         handles.push(handle_text(common.handle));
         ids_and_names.push(IdAndName {
@@ -1784,12 +1847,14 @@ fn read_block(drawing: &CadDocument, record: &BlockRecord, blocks: &[Block]) -> 
             name: ids::read_name(common),
         });
     }
+    let parameters = dynamic_block::read_block_parameters(drawing, record);
     Some(ReadBlock {
         block: Block {
             name: record.name.clone(),
             base_point: point(record.base_point),
             objects,
             cells: Vec::new(),
+            parameters,
         },
         handles,
         ids_and_names,
@@ -1845,6 +1910,14 @@ fn read_layer(dwg_layer: &DwgLayer) -> Option<Layer> {
 /// lineweight and linetype scale have a model in the core. An insert is
 /// read only when its block is one of `blocks`.
 pub(super) fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<Object> {
+    read_object_in(None, dwg_object, blocks)
+}
+
+fn read_object_in(
+    drawing: Option<&CadDocument>,
+    dwg_object: &EntityType,
+    blocks: &[Block],
+) -> Option<Object> {
     let common = dwg_object.common();
     if common.invisible {
         return None;
@@ -1942,7 +2015,9 @@ pub(super) fn read_object(dwg_object: &EntityType, blocks: &[Block]) -> Option<O
         EntityType::AttributeDefinition(definition) => {
             Object::AttributeDefinition(block::read_attribute_definition(definition, layer)?)
         }
-        EntityType::Insert(insert) => Object::Insert(block::read_insert(insert, layer, blocks)?),
+        EntityType::Insert(insert) => {
+            Object::Insert(block::read_insert_in(drawing, insert, layer, blocks)?)
+        }
         _ => return None,
     };
     let mut object = object;
