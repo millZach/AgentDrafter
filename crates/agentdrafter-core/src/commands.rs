@@ -727,6 +727,10 @@ fn display_list_schema(change_set: Value) -> Value {
                 "description": "With change_set: apply it as a proposal is kept, on every sheet it reaches or on none, so a sheet that would take its part while another refuses is shown held back. Without it, as change applies it.",
                 "type": "boolean",
             },
+            "read_past_damage": {
+                "description": "On a damaged original DWG that `read` read past damage, draw the recoverable objects read-only instead of refusing with `dwg_read`. Without it, strict DWG reading applies.",
+                "type": "boolean",
+            },
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
         }),
@@ -1173,6 +1177,10 @@ fn change_input() -> Value {
                 "type": ["string", "null"],
             },
             "allow_loss": flag("Original DWG only: allow revising an original the DWG library could not decode whole, recording accepted losses in the reply and report."),
+            "expected_original_sha256": {
+                "description": "Original DWG only: expected SHA-256 hex fingerprint of the original `.dwg` bytes. When given, refuses with `changed_by_hand` if the file on disk does not match, even when `allow_loss` is true. `null` acts as if it were left out.",
+                "type": ["string", "null"],
+            },
             "plot_style": plot_style_name("Original DWG only: CTB plot style file name (such as `monochrome.ctb`) for the revision PDF. `null` acts as if it were left out."),
             "plot_styles": plot_styles(),
             "no_pdf": flag("Original DWG only: skip plotting the revision PDF beside the revision."),
@@ -1218,6 +1226,7 @@ fn run_change(
         for option in [
             "output",
             "allow_loss",
+            "expected_original_sha256",
             "plot_style",
             "plot_styles",
             "no_pdf",

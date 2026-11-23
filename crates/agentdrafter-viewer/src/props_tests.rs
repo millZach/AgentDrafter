@@ -76,6 +76,7 @@ fn context() -> Context {
                 "DP-LD-104".to_owned(),
             ],
         }),
+        editable_dwg: false,
         past: false,
         space: None,
         layout: None,
@@ -484,6 +485,12 @@ fn an_object_that_cannot_be_edited_shows_its_fields_read_only() {
     let fields_alone = fields(&alone, WASHER);
     assert!(fields_alone.iter().all(|f| !f.editable && f.chip.is_none()));
     assert!(edit(&alone, WASHER, "radius", "2").error.is_some());
+    // An editable DWG allows editing objects with IDs without a drawing-set template.
+    let mut dwg = alone.clone();
+    dwg.editable_dwg = true;
+    let fields_dwg = fields(&dwg, WASHER);
+    assert!(fields_dwg.iter().all(|f| f.editable));
+    assert!(edit(&dwg, WASHER, "radius", "2").send.is_some());
     // An object with nothing but its layer to edit.
     let keys: Vec<String> = fields(&context, BORDER)
         .into_iter()

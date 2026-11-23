@@ -112,9 +112,11 @@ export interface RibbonProps {
   onMoveTo?(name: string): void;
   /** Opens the Object snap menu, from a phone's Status panel. */
   onSnaps(): void;
+  /** Disables all drawing tools (e.g. view-only undecoded plant DWG or single YAML sheet). */
+  disabled?: boolean;
 }
 
-export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, current, onLayer, onLayersOpen, swatch, selected, onMoveTo, onSnaps }: RibbonProps) {
+export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, current, onLayer, onLayersOpen, swatch, selected, onMoveTo, onSnaps, disabled = false }: RibbonProps) {
   const [tip, setTip] = useState<{ tool: Tool; left: number; top: number } | null>(null);
   // While an object is selected and no tool runs, the box shows its layer,
   // as the frame did; otherwise the current layer, which it sets.
@@ -131,6 +133,7 @@ export function Ribbon({ folded, toggles, onToggle, onTool, running, layers, cur
                 type="button"
                 className={`rb${running === tool.key ? ' on' : ''}`}
                 data-tool={tool.key}
+                disabled={disabled}
                 aria-pressed={running === tool.key}
                 aria-label={`${tool.label} (${tool.alias}${tool.also ? ` or ${tool.also}` : ''})`}
                 onPointerEnter={(e) => {

@@ -71,6 +71,30 @@ use super::undo::{
 /// `undo-states/`).
 pub const ORIGINALS_JOURNAL_FOLDER: &str = ".agentdrafter/originals";
 
+/// Returns the on-disk path of the per-original `journal.jsonl` for an
+/// existing `.dwg` file, using the same canonical key resolution as `change`,
+/// `journal`, `undo`, and `accept`. Never creates any folder or file.
+///
+/// Returns `None` when `source` is not an existing `.dwg` file.
+pub fn original_journal_file(source: &Path) -> Option<PathBuf> {
+    if !crate::original::is_dwg_file(source) {
+        return None;
+    }
+    OriginalJournal::open(source).ok().map(|oj| oj.journal_file)
+}
+
+/// Metadata of the latest active (finished, non-undone, non-standalone) working
+/// revision on disk for an original DWG, used so successive `change` operations
+/// accumulate on top of the active working revision rather than dropping earlier
+/// edits.
+pub(crate) struct ActiveRevisionTip {
+    pub entry: u64,
+    pub path: PathBuf,
+    pub file: String,
+    pub original_sha256: String,
+    pub revision_sha256: String,
+}
+
 /// Per-original journal paths and identity of the original DWG.
 pub(crate) struct OriginalJournal {
     /// The original DWG path as requested by the caller (for display).
@@ -778,6 +802,137 @@ impl OriginalJournal {
         }))
     }
 
+    /// Parses a sibling automatic working-revision filename
+    /// (`<non-empty-stem>.rev<1+ ASCII digits>.dwg` with no directory
+    /// components) and returns `<stem>`, or `None` otherwise.
+    fn parse_sibling_working_revision_stem(revision_dwg: &str) -> Option<&str> {
+        if revision_dwg.is_empty() || revision_dwg.contains('/') {
+            return None;
+        }
+        let mut comps = Path::new(revision_dwg).components();
+        let Component::Normal(file_name) = comps.next()? else {
+            return None;
+        };
+        if comps.next().is_some() {
+            return None;
+        }
+        let name = file_name.to_str()?;
+        let without_ext = name.strip_suffix(".dwg").or_else(|| {
+            let ext_start = name.len().checked_sub(4)?;
+            name.is_char_boundary(ext_start)
+                .then(|| &name[ext_start..])
+                .filter(|ext| ext.eq_ignore_ascii_case(".dwg"))
+                .map(|_| &name[..ext_start])
+        })?;
+        let (stem, num) = without_ext.rsplit_once(".rev")?;
+        if stem.is_empty()
+            || num.is_empty()
+            || num.starts_with('0')
+            || !num.bytes().all(|b| b.is_ascii_digit())
+            || num.parse::<u64>().ok().is_none_or(|v| v == 0)
+        {
+            return None;
+        }
+        Some(stem)
+    }
+
+    /// Whether a sibling `<stem>.dwg` / `<stem>.DWG` in `self.orig_dir_real`
+    /// resolves to the exact same underlying file identity as this original
+    /// (e.g. a same-directory symlink `Alias.dwg -> Pump.dwg`).
+    fn sibling_dwg_is_same_original(&self, stem: &str) -> bool {
+        for ext in [".dwg", ".DWG"] {
+            let candidate = self.orig_dir_real.join(format!("{stem}{ext}"));
+            if let Ok(canon) = fs::canonicalize(&candidate) {
+                if canon == self.resolved_source {
+                    return true;
+                }
+            }
+            #[cfg(any(unix, windows))]
+            if let Some(orig_id) = self.source_id {
+                if let Ok(file) = File::open(&candidate) {
+                    if file_id_of_file(&file) == Some(orig_id) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Authoritatively classifies whether an `OriginalRevisionMeta` entry is a
+    /// standalone `--output` revision (`true`) or part of the sequential working
+    /// revision chain (`false`).
+    ///
+    /// - Entries written with an explicit `Some(flag)` use `flag` directly.
+    /// - Legacy pre-PR entries (`None` on disk) are classified as working ONLY
+    ///   when `revision_dwg` is a sibling `<stem>.rev<N>.dwg` whose `<stem>`
+    ///   either matches this original's stem or names a sibling `<stem>.dwg`
+    ///   pointing to the exact same underlying file identity (such as a
+    ///   same-directory symlink alias). Legacy `--output IssuedCopy.rev1.dwg`
+    ///   beside `Pump.dwg` has no `IssuedCopy.dwg -> Pump.dwg`, so it is
+    ///   authoritatively classified as standalone (`true`).
+    pub(crate) fn is_standalone_meta(&self, meta: &OriginalRevisionMeta) -> bool {
+        if let Some(standalone) = meta.standalone_output {
+            return standalone;
+        }
+        let Some(stem) = Self::parse_sibling_working_revision_stem(&meta.revision_dwg) else {
+            return true;
+        };
+        let source_stem = stem_of(&self.source);
+        #[cfg(any(windows, target_os = "macos"))]
+        let matches_self =
+            stem.eq_ignore_ascii_case(&self.sheet) || stem.eq_ignore_ascii_case(&source_stem);
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let matches_self = stem == self.sheet || stem == source_stem;
+        if matches_self {
+            return false;
+        }
+        !self.sibling_dwg_is_same_original(stem)
+    }
+
+    /// Returns the newest active (finished, non-undone, non-standalone) working
+    /// revision tip recorded in this original's journal, or `None` when none
+    /// exists yet. Only inspects the newest active non-standalone entry so
+    /// callers checking `original_sha256` never skip past a newer original's
+    /// entry back to an older original's revision.
+    /// Read-only: never creates any directory or file.
+    pub(crate) fn latest_active_revision(&self) -> Result<Option<ActiveRevisionTip>, Error> {
+        let entries = self.read_entries()?;
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        let f = fates(&entries);
+        for entry in entries.iter().rev() {
+            if entry.kind != EntryKind::ChangeSet || !entry.finished() {
+                continue;
+            }
+            if f.get(&entry.entry)
+                .is_some_and(|fate| fate.undone_by.is_some())
+            {
+                continue;
+            }
+            let Some(meta) = entry.original_revision.as_ref() else {
+                continue;
+            };
+            if self.is_standalone_meta(meta) {
+                continue;
+            }
+            let path = self.resolve_file(&meta.revision_dwg);
+            let file = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| meta.revision_dwg.clone());
+            return Ok(Some(ActiveRevisionTip {
+                entry: entry.entry,
+                path,
+                file,
+                original_sha256: meta.original_sha256.clone(),
+                revision_sha256: meta.revision_sha256.clone(),
+            }));
+        }
+        Ok(None)
+    }
+
     /// Commits an original-DWG revision write-ahead while holding `_locked`:
     /// appends `pending`, atomically places the new revision files with
     /// non-clobbering [`crate::original::place_new_file`], appends `done`, and
@@ -1020,10 +1175,18 @@ pub(super) fn journal_original(request: &JournalRequest) -> Reply<JournalReport>
         Ok(rb) => rb,
         Err(error) => return Reply::from(Err(error)),
     };
-    let entries = match oj.read_entries() {
+    let mut entries = match oj.read_entries() {
         Ok(entries) => entries,
         Err(error) => return Reply::from(Err(error)).after(rolled_back),
     };
+    for entry in &mut entries {
+        if let Some(meta) = entry.original_revision.as_mut() {
+            if meta.standalone_output.is_none() {
+                meta.standalone_output = Some(oj.is_standalone_meta(meta));
+            }
+            meta.revision_path = Some(oj.display_file(&meta.revision_dwg));
+        }
+    }
     let report = build_journal_report(
         &oj.source,
         &oj.journal_file,

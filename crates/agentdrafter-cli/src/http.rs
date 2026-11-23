@@ -75,12 +75,14 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use agentdrafter_core::{
-    commands, find_command, Error, ErrorCode, Interface, Reply, Settings, GUIDES_FOLDER,
-    JOURNAL_FILE, PROPOSALS_FOLDER,
+    commands, find_command, original_journal_file, Error, ErrorCode, Interface, Reply, Settings,
+    GUIDES_FOLDER, JOURNAL_FILE, PROPOSALS_FOLDER,
 };
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
@@ -215,9 +217,130 @@ pub fn serve(args: Args) -> ExitCode {
     let _ = assistant();
     // A connection that failed to open is passed over.
     for stream in listener.incoming().flatten() {
-        handle(stream, &guard, &settings, DEADLINE);
+        handle(stream, &guard, &settings, DEADLINE, None);
     }
     ExitCode::SUCCESS
+}
+
+/// An in-process local HTTP server for the desktop shell (`crates/agentdrafter-desktop`).
+///
+/// Binds `127.0.0.1:0`, guards every command, event stream and assistant route
+/// with a per-session random bearer token plus loopback `Host`/`Origin` checks,
+/// serves the embedded viewer page (`viewer/dist/`), and shuts down cleanly on
+/// [`LocalServer::shutdown`] or [`Drop`].
+pub struct LocalServer {
+    address: SocketAddr,
+    token: String,
+    stop: Arc<AtomicBool>,
+    done: Option<mpsc::Receiver<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl LocalServer {
+    /// The loopback socket address the server is bound to.
+    pub fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    /// The server's base HTTP URL, such as `http://127.0.0.1:54321`.
+    pub fn base_url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+
+    /// The per-session random bearer token required on every API and stream request.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Whether the built viewer page (`viewer/dist/`) was embedded into this binary.
+    pub fn viewer_built(&self) -> bool {
+        page::VIEWER_BUILT
+    }
+
+    /// Stops accepting connections, signals open event streams to exit, and
+    /// waits briefly for the server thread to finish without ever hanging UI
+    /// teardown if an in-flight request is slow.
+    pub fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Wake the blocking `accept()` call on the server thread with a short timeout.
+        let _ = TcpStream::connect_timeout(&self.address, Duration::from_millis(200));
+        if let Some(done) = self.done.take() {
+            let exited = done.recv_timeout(Duration::from_millis(500)).is_ok();
+            if exited {
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            } else {
+                // Detach cleanly rather than stalling app exit behind a slow handler.
+                let _ = self.thread.take();
+            }
+        } else if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for LocalServer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Starts an in-process local server on `127.0.0.1:0` with a fresh per-session
+/// random bearer token for the desktop shell.
+pub fn start_local(settings: Settings) -> Result<LocalServer, Error> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| {
+        Error::new(
+            ErrorCode::ListenFailed,
+            format!("could not start the local server on 127.0.0.1:0: {e}"),
+        )
+    })?;
+    let address = listener.local_addr().map_err(|e| {
+        Error::new(
+            ErrorCode::ListenFailed,
+            format!("could not read the local server's address: {e}"),
+        )
+    })?;
+    let token = Guard::new_token()?;
+    let guard = Guard::DesktopToken {
+        token: token.clone(),
+        host: address.to_string(),
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let (done_tx, done_rx) = mpsc::channel();
+    let thread = std::thread::Builder::new()
+        .name("agentdrafter-local-server".into())
+        .spawn(move || {
+            let _ = assistant();
+            for stream in listener.incoming().flatten() {
+                if thread_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                handle(
+                    stream,
+                    &guard,
+                    &settings,
+                    DEADLINE,
+                    Some(Arc::clone(&thread_stop)),
+                );
+            }
+            drop(listener);
+            let _ = done_tx.send(());
+        })
+        .map_err(|e| {
+            Error::new(
+                ErrorCode::ListenFailed,
+                format!("could not start the local server thread: {e}"),
+            )
+        })?;
+    Ok(LocalServer {
+        address,
+        token,
+        stop,
+        done: Some(done_rx),
+        thread: Some(thread),
+    })
 }
 
 fn print((line, code): (String, ExitCode)) -> ExitCode {
@@ -291,16 +414,16 @@ enum Guard {
     /// It listens beyond the local machine: every request carries this
     /// token.
     Token(String),
+    /// In-process local desktop server: listens on loopback only, requires
+    /// an exact `Host: 127.0.0.1:<port>` (and exact `Origin` when sent) plus
+    /// this per-session bearer token, and serves the page with
+    /// [`page::DESKTOP_POLICY`].
+    DesktopToken { token: String, host: String },
 }
 
 impl Guard {
-    /// The guard a server listening on `ip` needs: none beyond the local
-    /// machine's own for a loopback address, and a new token for any other,
-    /// the unspecified address that listens on every network among them.
-    fn for_address(ip: IpAddr) -> Result<Self, Error> {
-        if is_local(ip) {
-            return Ok(Self::Local);
-        }
+    /// Generates a fresh 32-byte random hexadecimal token.
+    fn new_token() -> Result<String, Error> {
         let mut bytes = [0u8; 32];
         getrandom::fill(&mut bytes).map_err(|e| {
             Error::new(
@@ -308,9 +431,21 @@ impl Guard {
                 format!("could not make a token to guard the server: {e}"),
             )
         })?;
-        Ok(Self::Token(
-            bytes.iter().map(|b| format!("{b:02x}")).collect(),
-        ))
+        Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// The guard a server listening on `ip` needs: none beyond the local
+    /// machine's own for a loopback address, and a new token for any other,
+    /// the unspecified address that listens on every network among them.
+    fn for_address(ip: IpAddr) -> Result<Self, Error> {
+        if is_local(ip) {
+            return Ok(Self::Local);
+        }
+        Ok(Self::Token(Self::new_token()?))
+    }
+
+    fn is_desktop(&self) -> bool {
+        matches!(self, Self::DesktopToken { .. })
     }
 }
 
@@ -340,14 +475,20 @@ fn started(address: SocketAddr, guard: &Guard) -> Value {
 
 /// Takes one request on `stream`, answers it, and closes it. The request
 /// must arrive within `limit`, and the reply be taken within it.
-fn handle(mut stream: TcpStream, guard: &Guard, settings: &Settings, limit: Duration) {
+fn handle(
+    mut stream: TcpStream,
+    guard: &Guard,
+    settings: &Settings,
+    limit: Duration,
+    stop: Option<Arc<AtomicBool>>,
+) {
     let arrive_by = Deadline::after(limit);
     match respond(&mut stream, guard, settings, arrive_by) {
         Some(Answer::Reply(response)) => {
             let _ = Deadline::after(limit).write(&mut stream, &response.bytes());
         }
-        Some(Answer::Watch(set)) => return watch(stream, set, settings.clone(), limit),
-        Some(Answer::Converse(set)) => return converse(stream, set, limit),
+        Some(Answer::Watch(set)) => return watch(stream, set, settings.clone(), limit, stop),
+        Some(Answer::Converse(set)) => return converse(stream, set, limit, stop),
         None => {}
     }
     // A refused request's body is not read: the connection is closed with
@@ -380,12 +521,20 @@ fn respond(
     // The viewer's page needs no token, but on the local machine is served
     // only to a request addressed to it.
     if let Some(file) = page::file(head.route()) {
-        if let Guard::Local = guard {
-            if let Err(response) = addressed_locally(&head) {
-                return Some(Answer::Reply(response));
+        match guard {
+            Guard::Local => {
+                if let Err(response) = addressed_locally(&head) {
+                    return Some(Answer::Reply(response));
+                }
             }
+            Guard::DesktopToken { host, .. } => {
+                if let Err(response) = addressed_to_desktop(&head, host) {
+                    return Some(Answer::Reply(response));
+                }
+            }
+            Guard::Token(_) => {}
         }
-        return Some(Answer::Reply(serve_page(&head, file)));
+        return Some(Answer::Reply(serve_page(&head, file, guard.is_desktop())));
     }
     if let Err(response) = admit(&head, guard) {
         return Some(Answer::Reply(response));
@@ -541,12 +690,12 @@ fn converse_route(
 /// Streams the assistant's conversation on `set` on `stream`, on a thread
 /// of its own: all of it when the stream opens, and again each time it
 /// changes, until the page lets the stream go.
-fn converse(mut stream: TcpStream, set: PathBuf, limit: Duration) {
+fn converse(mut stream: TcpStream, set: PathBuf, limit: Duration, stop: Option<Arc<AtomicBool>>) {
     WATCHERS.fetch_add(1, Ordering::SeqCst);
     let spawned = std::thread::Builder::new()
         .name("agentdrafter-assistant-events".into())
         .spawn(move || {
-            let _ = stream_conversation(&mut stream, &set, limit);
+            let _ = stream_conversation(&mut stream, &set, limit, stop.as_deref());
             let _ = stream.shutdown(Shutdown::Both);
             WATCHERS.fetch_sub(1, Ordering::SeqCst);
         });
@@ -555,7 +704,12 @@ fn converse(mut stream: TcpStream, set: PathBuf, limit: Duration) {
     }
 }
 
-fn stream_conversation(stream: &mut TcpStream, set: &Path, limit: Duration) -> io::Result<()> {
+fn stream_conversation(
+    stream: &mut TcpStream,
+    set: &Path,
+    limit: Duration,
+    stop: Option<&AtomicBool>,
+) -> io::Result<()> {
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\
                 X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
     Deadline::after(limit).write(stream, head.as_bytes())?;
@@ -563,6 +717,9 @@ fn stream_conversation(stream: &mut TcpStream, set: &Path, limit: Duration) -> i
     let mut sent: Option<u64> = None;
     let mut said = Instant::now();
     loop {
+        if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+            return Ok(());
+        }
         let (version, data) = assistant.snapshot(set);
         if sent != Some(version) {
             let event = format!("event: assistant\ndata: {data}\n\n");
@@ -573,23 +730,29 @@ fn stream_conversation(stream: &mut TcpStream, set: &Path, limit: Duration) -> i
             Deadline::after(limit).write(stream, b": still watching\n\n")?;
             said = Instant::now();
         }
-        if closed(stream) {
+        if closed(stream) || stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
             return Ok(());
         }
         assistant.wait(set, version, WATCH_EVERY * 5);
     }
 }
 
-/// Streams the journal of the drawing set in `set` on `stream`, on a
-/// thread of its own: the `journal` command's reply as an event when the
-/// stream opens, and again each time the journal changes on disk, until
-/// the page lets the stream go.
-fn watch(mut stream: TcpStream, set: PathBuf, settings: Settings, limit: Duration) {
+/// Streams the journal of the drawing set or original DWG in `set` on
+/// `stream`, on a thread of its own: the `journal` command's reply as an
+/// event when the stream opens, and again each time the journal changes on
+/// disk, until the page lets the stream go.
+fn watch(
+    mut stream: TcpStream,
+    set: PathBuf,
+    settings: Settings,
+    limit: Duration,
+    stop: Option<Arc<AtomicBool>>,
+) {
     WATCHERS.fetch_add(1, Ordering::SeqCst);
     let spawned = std::thread::Builder::new()
         .name("agentdrafter-events".into())
         .spawn(move || {
-            let _ = stream_journal(&mut stream, &set, &settings, limit);
+            let _ = stream_journal(&mut stream, &set, &settings, limit, stop.as_deref());
             let _ = stream.shutdown(Shutdown::Both);
             WATCHERS.fetch_sub(1, Ordering::SeqCst);
         });
@@ -598,11 +761,36 @@ fn watch(mut stream: TcpStream, set: PathBuf, settings: Settings, limit: Duratio
     }
 }
 
+/// What `POST /events` is watching on disk.
+enum WatchKind {
+    /// A drawing set folder: watches `<set>/.agentdrafter/journal.jsonl`,
+    /// proposals and guides.
+    Set(PathBuf),
+    /// An original `.dwg` file: watches its per-original `journal.jsonl`
+    /// resolved by the core's own [`original_journal_file`] helper.
+    OriginalDwg(PathBuf),
+    /// Anything else (such as a single `.yaml` sheet description or a
+    /// missing path): sends the initial `journal` reply once and idles
+    /// cleanly without error spam.
+    Other,
+}
+
+fn watch_kind(set: &Path) -> WatchKind {
+    if set.is_dir() {
+        WatchKind::Set(set.join(JOURNAL_FILE))
+    } else if let Some(journal_path) = original_journal_file(set) {
+        WatchKind::OriginalDwg(journal_path)
+    } else {
+        WatchKind::Other
+    }
+}
+
 fn stream_journal(
     stream: &mut TcpStream,
     set: &Path,
     settings: &Settings,
     limit: Duration,
+    stop: Option<&AtomicBool>,
 ) -> io::Result<()> {
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\
                 X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
@@ -610,19 +798,29 @@ fn stream_journal(
     let journal = find_command("journal").expect("the registry holds `journal`");
     let proposals = find_command("proposals").expect("the registry holds `proposals`");
     let guides = find_command("guides").expect("the registry holds `guides`");
+    let kind = watch_kind(set);
     type Seen = (Option<(u64, SystemTime)>, Vec<String>, Vec<String>);
     let mut seen: Option<Seen> = None;
     let (mut sent, mut sent_proposals): (Option<String>, Option<String>) = (None, None);
     let mut sent_guides: Option<String> = None;
     let mut said = Instant::now();
     loop {
+        if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+            return Ok(());
+        }
         // A proposal adds a file beside the journal; a keep or a discard
         // adds to the journal, which ends it.
-        let now = (
-            journal_state(set),
-            listed_state(set, PROPOSALS_FOLDER),
-            listed_state(set, GUIDES_FOLDER),
-        );
+        let now = match &kind {
+            WatchKind::Set(journal_file) => (
+                file_state(journal_file),
+                listed_state(set, PROPOSALS_FOLDER),
+                listed_state(set, GUIDES_FOLDER),
+            ),
+            WatchKind::OriginalDwg(journal_file) => {
+                (file_state(journal_file), Vec::new(), Vec::new())
+            }
+            WatchKind::Other => (None, Vec::new(), Vec::new()),
+        };
         if seen.as_ref() != Some(&now) {
             let journal_moved = seen.as_ref().is_none_or(|s| s.0 != now.0);
             let guides_moved = journal_moved || seen.as_ref().is_none_or(|s| s.2 != now.2);
@@ -645,31 +843,33 @@ fn stream_journal(
                     said = Instant::now();
                 }
             }
-            let reply = proposals.run(input.clone(), settings, Interface::Http);
-            let data = serde_json::to_string(&reply).expect("a reply serializes to JSON");
-            if sent_proposals.as_ref() != Some(&data) {
-                let event = format!("event: proposals\ndata: {data}\n\n");
-                Deadline::after(limit).write(stream, event.as_bytes())?;
-                sent_proposals = Some(data);
-                said = Instant::now();
-            }
-            // A guide's steps are worked out on the set as it stands, so a
-            // change set moves them on as a new guide does.
-            if guides_moved {
-                let reply = guides.run(input, settings, Interface::Http);
+            if matches!(kind, WatchKind::Set(_)) {
+                let reply = proposals.run(input.clone(), settings, Interface::Http);
                 let data = serde_json::to_string(&reply).expect("a reply serializes to JSON");
-                if sent_guides.as_ref() != Some(&data) {
-                    let event = format!("event: guides\ndata: {data}\n\n");
+                if sent_proposals.as_ref() != Some(&data) {
+                    let event = format!("event: proposals\ndata: {data}\n\n");
                     Deadline::after(limit).write(stream, event.as_bytes())?;
-                    sent_guides = Some(data);
+                    sent_proposals = Some(data);
                     said = Instant::now();
+                }
+                // A guide's steps are worked out on the set as it stands, so a
+                // change set moves them on as a new guide does.
+                if guides_moved {
+                    let reply = guides.run(input, settings, Interface::Http);
+                    let data = serde_json::to_string(&reply).expect("a reply serializes to JSON");
+                    if sent_guides.as_ref() != Some(&data) {
+                        let event = format!("event: guides\ndata: {data}\n\n");
+                        Deadline::after(limit).write(stream, event.as_bytes())?;
+                        sent_guides = Some(data);
+                        said = Instant::now();
+                    }
                 }
             }
         } else if said.elapsed() >= KEEP_ALIVE {
             Deadline::after(limit).write(stream, b": still watching\n\n")?;
             said = Instant::now();
         }
-        if closed(stream) {
+        if closed(stream) || stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
             return Ok(());
         }
         std::thread::sleep(WATCH_EVERY);
@@ -691,10 +891,10 @@ fn listed_state(set: &Path, folder: &str) -> Vec<String> {
     names
 }
 
-/// The journal's length and when it was last written, which change when an
-/// entry is added; none when there is no journal.
-fn journal_state(set: &Path) -> Option<(u64, SystemTime)> {
-    let metadata = fs::metadata(set.join(JOURNAL_FILE)).ok()?;
+/// A journal file's length and when it was last written, which change when an
+/// entry is added; none when there is no journal file yet.
+fn file_state(path: &Path) -> Option<(u64, SystemTime)> {
+    let metadata = fs::metadata(path).ok()?;
     Some((metadata.len(), metadata.modified().ok()?))
 }
 
@@ -725,7 +925,7 @@ fn interface_of(head: &Head) -> Interface {
 
 /// One of the viewer's page's files, to a GET, or its headers alone to a
 /// HEAD.
-fn serve_page(head: &Head, file: page::File) -> Response {
+fn serve_page(head: &Head, file: page::File, desktop: bool) -> Response {
     if !matches!(head.method.as_str(), "GET" | "HEAD") {
         return Response::usage(405, "the viewer's page is had with GET").allow("GET, HEAD");
     }
@@ -739,6 +939,7 @@ fn serve_page(head: &Head, file: page::File) -> Response {
             "no-store"
         },
         page: file.content_type.starts_with("text/html"),
+        desktop,
         headers_only: head.method == "HEAD",
         allow: None,
     }
@@ -850,7 +1051,54 @@ fn admit(head: &Head, guard: &Guard) -> Result<(), Response> {
                 ));
             }
         }
+        Guard::DesktopToken { token, host } => {
+            addressed_to_desktop(head, host)?;
+            let given = head.header("authorization").and_then(bearer);
+            let right =
+                given.is_some_and(|given| bool::from(given.as_bytes().ct_eq(token.as_bytes())));
+            if !right {
+                return Err(Response::refused(
+                    401,
+                    "this local desktop server requires its session token as Authorization: \
+                     Bearer <token>",
+                ));
+            }
+        }
         Guard::Local => addressed_locally(head)?,
+    }
+    Ok(())
+}
+
+/// Requires an exact `Host: 127.0.0.1:<port>` header (never accepting a missing
+/// `Host` or any other port/host) and, when `Origin` is present, an exact
+/// `http://127.0.0.1:<port>` origin.
+fn addressed_to_desktop(head: &Head, expected_host: &str) -> Result<(), Response> {
+    let Some(host) = head.header("host").map(str::trim) else {
+        return Err(Response::refused(
+            403,
+            format!("this local desktop server requires Host: {expected_host}"),
+        ));
+    };
+    if !host.eq_ignore_ascii_case(expected_host) {
+        return Err(Response::refused(
+            403,
+            format!(
+                "this local desktop server takes requests addressed to `{expected_host}` only, \
+                 not `{host}`"
+            ),
+        ));
+    }
+    if let Some(origin) = head.header("origin").map(str::trim) {
+        let expected_origin = format!("http://{expected_host}");
+        if !origin.eq_ignore_ascii_case(&expected_origin) {
+            return Err(Response::refused(
+                403,
+                format!(
+                    "this local desktop server takes requests from `{expected_origin}` only, not \
+                     from `{origin}`"
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -1044,6 +1292,8 @@ struct Response {
     /// Whether it is the viewer's page, which is sent with what the page
     /// may do.
     page: bool,
+    /// Whether this response comes from the in-process desktop shell server.
+    desktop: bool,
     /// Whether it answers a HEAD: its headers, without the body they size.
     headers_only: bool,
     allow: Option<&'static str>,
@@ -1059,6 +1309,7 @@ impl Response {
             content_type: "application/json",
             cache: "no-store",
             page: false,
+            desktop: false,
             headers_only: false,
             allow: None,
         }
@@ -1113,10 +1364,14 @@ impl Response {
             head.push_str("WWW-Authenticate: Bearer\r\n");
         }
         if self.page {
-            head.push_str(&format!(
-                "Content-Security-Policy: {}\r\nReferrer-Policy: no-referrer\r\n\
-                 X-Frame-Options: DENY\r\n",
+            let policy = if self.desktop {
+                page::DESKTOP_POLICY
+            } else {
                 page::POLICY
+            };
+            head.push_str(&format!(
+                "Content-Security-Policy: {policy}\r\nReferrer-Policy: no-referrer\r\n\
+                 X-Frame-Options: DENY\r\n",
             ));
         }
         head.push_str("\r\n");
@@ -1216,7 +1471,7 @@ mod tests {
             let settings = Settings::default();
             for _ in 0..count {
                 let (stream, _) = listener.accept().unwrap();
-                handle(stream, &guard, &settings, DEADLINE);
+                handle(stream, &guard, &settings, DEADLINE, None);
             }
         });
         let responses = requests
@@ -1488,7 +1743,7 @@ mod tests {
             let settings = Settings::default();
             for _ in 0..4 {
                 let (stream, _) = listener.accept().unwrap();
-                handle(stream, &guard, &settings, limit);
+                handle(stream, &guard, &settings, limit, None);
             }
         });
         let head = "POST /commands/operations HTTP/1.1\r\nHost: 127.0.0.1\r\n";
@@ -1582,7 +1837,7 @@ mod tests {
         let guard = Guard::Token(token);
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            handle(stream, &guard, &Settings::default(), DEADLINE);
+            handle(stream, &guard, &Settings::default(), DEADLINE, None);
         });
         let mut stream = TcpStream::connect(address).unwrap();
         stream
@@ -1682,6 +1937,7 @@ mod tests {
                         "JOURNAL_FILE",
                         "PROPOSALS_FOLDER",
                         "GUIDES_FOLDER",
+                        "original_journal_file",
                         "looking_at_left_off",
                         "assistant_commands",
                         "Access",
@@ -1693,5 +1949,234 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn send_one(address: SocketAddr, request: &[u8]) -> (u16, String, Vec<u8>) {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.write_all(request).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        let split = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8(response[..split].to_vec()).unwrap();
+        let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+        (status, head, response[split + 4..].to_vec())
+    }
+
+    fn read_sse_event(stream: &mut TcpStream, buf: &mut String) -> (String, Value) {
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(end) = buf.find("\n\n") {
+                let block = buf[..end].to_owned();
+                buf.drain(..end + 2);
+                let mut event = String::new();
+                let mut data = String::new();
+                for line in block.lines() {
+                    if let Some(ev) = line.strip_prefix("event: ") {
+                        event = ev.to_owned();
+                    } else if let Some(d) = line.strip_prefix("data: ") {
+                        data.push_str(d);
+                    }
+                }
+                if !data.is_empty() {
+                    let parsed: Value = serde_json::from_str(&data).unwrap();
+                    return (event, parsed);
+                }
+            }
+            let n = stream.read(&mut chunk).unwrap();
+            assert!(n > 0, "stream closed before next event: {buf}");
+            buf.push_str(std::str::from_utf8(&chunk[..n]).unwrap());
+        }
+    }
+
+    fn post_host(host: &str, command: &str, headers: &str, body: &str) -> Vec<u8> {
+        format!(
+            "POST /commands/{command} HTTP/1.1\r\nHost: {host}\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn events_host(host: &str, headers: &str, body: &str) -> Vec<u8> {
+        format!(
+            "POST /events HTTP/1.1\r\nHost: {host}\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn start_local_guards_commands_with_token_serves_desktop_csp_and_shuts_down() {
+        let server = start_local(Settings::default()).unwrap();
+        let host = server.address().to_string();
+        assert!(server.address().ip().is_loopback());
+        assert_eq!(server.token().len(), 64);
+        assert_eq!(server.base_url(), format!("http://{host}"));
+
+        // Page served without token on exact loopback Host:port with desktop CSP.
+        let (status, head, body) = send_one(
+            server.address(),
+            &get("GET", "/?desktop=1&start=1", &host, ""),
+        );
+        assert_eq!(status, 200);
+        assert!(head.contains(&format!(
+            "Content-Security-Policy: {}",
+            page::DESKTOP_POLICY
+        )));
+        assert_eq!(body.as_slice(), page::file("/").unwrap().bytes);
+
+        // Non-local Host, missing Host, wrong port Host, and wrong Origin all refused (403).
+        let (status, _, _) = send_one(server.address(), &get("GET", "/", "rebound.example", ""));
+        assert_eq!(status, 403);
+        let (status, _, _) = send_one(server.address(), b"GET / HTTP/1.1\r\n\r\n");
+        assert_eq!(status, 403, "missing Host must be refused in desktop mode");
+        let (status, _, _) = send_one(server.address(), &get("GET", "/", "127.0.0.1:9999", ""));
+        assert_eq!(
+            status, 403,
+            "wrong port Host must be refused in desktop mode"
+        );
+        let (status, _, _) = send_one(
+            server.address(),
+            &get("GET", "/", &host, "Origin: http://127.0.0.1:9999\r\n"),
+        );
+        assert_eq!(
+            status, 403,
+            "wrong port Origin must be refused in desktop mode"
+        );
+
+        // Command without token refused (401) when Host matches.
+        let (status, _, _) = send_one(
+            server.address(),
+            &post_host(&host, "operations", JSON, "{}"),
+        );
+        assert_eq!(status, 401);
+
+        // Command with token but missing Host refused (403).
+        let raw_no_host = format!(
+            "POST /commands/operations HTTP/1.1\r\n{JSON}Authorization: Bearer {}\r\nContent-Length: 2\r\n\r\n{{}}",
+            server.token()
+        );
+        let (status, _, _) = send_one(server.address(), raw_no_host.as_bytes());
+        assert_eq!(
+            status, 403,
+            "missing Host must be refused even with valid token"
+        );
+
+        // Command with exact Host, Origin, token and absolute path works.
+        let auth = format!(
+            "{JSON}Origin: http://{host}\r\nAuthorization: Bearer {}\r\n",
+            server.token()
+        );
+        let abs_yaml = std::fs::canonicalize(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("examples/geometry.yaml"),
+        )
+        .unwrap();
+        let body = serde_json::to_string(&json!({ "source": abs_yaml })).unwrap();
+        let (status, _, raw) = send_one(
+            server.address(),
+            &post_host(&host, "display-list", &auth, &body),
+        );
+        assert_eq!(status, 200);
+        let reply: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["result"]["sheet"], "geometry");
+
+        // Drop shuts down the server cleanly.
+        let addr = server.address();
+        drop(server);
+        assert!(
+            TcpStream::connect(addr).is_err(),
+            "local server stops accepting connections after drop"
+        );
+    }
+
+    #[test]
+    fn events_stream_watches_original_dwg_journal_and_handles_single_yaml_cleanly() {
+        let tmp =
+            std::env::temp_dir().join(format!("agentdrafter-http-events-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let server = start_local(Settings::default()).unwrap();
+        let host = server.address().to_string();
+        let auth = format!("{JSON}Authorization: Bearer {}\r\n", server.token());
+
+        // Build a made-up clean DWG from examples/geometry.yaml into tmp.
+        let abs_yaml = std::fs::canonicalize(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("examples/geometry.yaml"),
+        )
+        .unwrap();
+        let dwg_path = tmp.join("sample-orig.dwg");
+        let build_body = serde_json::to_string(&json!({
+            "source": abs_yaml,
+            "output": dwg_path,
+            "overwrite": true
+        }))
+        .unwrap();
+        let (status, _, raw) = send_one(
+            server.address(),
+            &post_host(&host, "build", &auth, &build_body),
+        );
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&raw));
+
+        // Open POST /events watching the absolute original DWG path.
+        let mut sse = TcpStream::connect(server.address()).unwrap();
+        sse.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let watch_body = serde_json::to_string(&json!({ "set": dwg_path })).unwrap();
+        sse.write_all(&events_host(&host, &auth, &watch_body))
+            .unwrap();
+        let mut buf = String::new();
+        let (ev1, r1) = read_sse_event(&mut sse, &mut buf);
+        assert_eq!(ev1, "journal");
+        assert_eq!(r1["ok"], true, "{r1}");
+        assert_eq!(r1["result"]["entries"].as_array().unwrap().len(), 0);
+
+        // Apply a change set to the original DWG -> live journal event arrives!
+        let change_body = serde_json::to_string(&json!({
+            "set": dwg_path,
+            "no_pdf": true,
+            "change_set": {
+                "operations": [{
+                    "op": "add_line",
+                    "layer": "0",
+                    "from": [1, 1, 0],
+                    "to": [2, 1, 0]
+                }]
+            }
+        }))
+        .unwrap();
+        let (status, _, raw) = send_one(
+            server.address(),
+            &post_host(&host, "change", &auth, &change_body),
+        );
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&raw));
+
+        let (ev2, r2) = read_sse_event(&mut sse, &mut buf);
+        assert_eq!(ev2, "journal");
+        assert_eq!(r2["ok"], true, "{r2}");
+        assert_eq!(r2["result"]["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(r2["result"]["can_undo"], json!([1]));
+        drop(sse);
+
+        // Single YAML sheet on POST /events responds cleanly without panic/crash.
+        let mut yaml_sse = TcpStream::connect(server.address()).unwrap();
+        yaml_sse
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let yaml_watch = serde_json::to_string(&json!({ "set": abs_yaml })).unwrap();
+        yaml_sse
+            .write_all(&events_host(&host, &auth, &yaml_watch))
+            .unwrap();
+        let mut ybuf = String::new();
+        let (ev_y, r_y) = read_sse_event(&mut yaml_sse, &mut ybuf);
+        assert_eq!(ev_y, "journal");
+        assert_eq!(r_y["ok"], false, "single yaml has no set journal: {r_y}");
+        drop(yaml_sse);
+
+        drop(server);
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

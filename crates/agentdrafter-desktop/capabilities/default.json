@@ -1,0 +1,9 @@
+{
+  "identifier": "default",
+  "description": "Minimal local capability; runtime capabilities scope all desktop shell commands strictly to the exact bound loopback server origin.",
+  "windows": ["main"],
+  "local": true,
+  "permissions": [
+    "core:default"
+  ]
+}

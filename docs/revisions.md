@@ -13,8 +13,9 @@ agentdrafter change P-101.dwg edits.json --allow-loss --no-pdf
 |---|---|
 | `<dwg>` | The original `.dwg` file to revise. Opened once, read-only, never overwritten. |
 | `<change-set.json \| ->` | The change set as JSON, from a file or standard input. |
-| `--output <revision.dwg>` | Where to write the revision DWG (must end `.dwg`, must not be the original or any existing file, symlink, or folder). Without it, `<stem>.rev1.dwg`, `<stem>.rev2.dwg`, ... beside the original. |
+| `--output <revision.dwg>` | Where to write the revision DWG (must end `.dwg`, must not be the original or any existing file, symlink, or folder). Without it, `<stem>.rev1.dwg`, `<stem>.rev2.dwg`, ... beside the original, each building on the latest verified active working revision so successive edits accumulate while keeping the original untouched; with `--output`, revises the named `<dwg>` directly. |
 | `--allow-loss` | Allow revising an original the DWG library could not decode whole; accepted losses are recorded in both the reply and `.changes.json` (ADR-0004). |
+| `--expected-original-sha256 <sha256>` | Expected SHA-256 fingerprint of the original `.dwg` bytes; refuses with `changed_by_hand` if the file on disk does not match, even when `--allow-loss` is set (ADR-0004). |
 | `--dry-run` | Validate, apply in memory, serialize + re-read diff check, and run `check`, writing zero files to disk. |
 | `--plot-style <name>` | CTB plot style name (such as `monochrome.ctb`) for the revision PDF. |
 | `--plot-styles <folder>` | Additional folder to search for CTB plot styles (repeatable). |

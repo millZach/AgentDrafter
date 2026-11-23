@@ -187,8 +187,28 @@ test('showing a change set\'s objects zooms in on them, no less than the fit and
 });
 
 test('a change set makes stale every drawing kept of the sheets it touched, each layout among them', () => {
-  const kept = ['live|A|', 'live|A|FRONT', 'live|A|BACK', 'live|B|', 'live||', '3|A|FRONT'];
-  assert.deepEqual(staleDrawings(kept, ['A']), ['live|A|', 'live|A|FRONT', 'live|A|BACK', 'live||']);
+  const kept = [
+    'live|A|',
+    'live|A|FRONT',
+    'live|A|BACK',
+    'live|B|',
+    'live||',
+    '3|A|FRONT',
+    'live||snaps|dwg:/tmp/orig.rev1.dwg@1:abc123',
+    'live|ORIG||snaps|dwg:/tmp/orig.rev1.dwg@1:abc123',
+  ];
+  assert.deepEqual(staleDrawings(kept, ['A']), [
+    'live|A|',
+    'live|A|FRONT',
+    'live|A|BACK',
+    'live||',
+    'live||snaps|dwg:/tmp/orig.rev1.dwg@1:abc123',
+  ]);
+  assert.deepEqual(staleDrawings(kept, ['ORIG']), [
+    'live||',
+    'live||snaps|dwg:/tmp/orig.rev1.dwg@1:abc123',
+    'live|ORIG||snaps|dwg:/tmp/orig.rev1.dwg@1:abc123',
+  ]);
   assert.deepEqual(staleDrawings(kept, []), []);
   // A preview's drawings go with any change: the change set would apply to another set.
   assert.deepEqual(staleDrawings(['pv2|A|', 'pv2|B|', 'live|B|'], ['A']), ['pv2|A|', 'pv2|B|']);

@@ -368,6 +368,7 @@ fn the_pipeline_draws_a_dimensions_lines_and_its_text_as_its_part() {
             values: false,
             change_set: None,
             all_or_none: false,
+            read_past_damage: false,
         },
         &Settings::default(),
     )
@@ -762,6 +763,7 @@ fn drawn(source: &Path, index: usize) -> Vec<String> {
             values: false,
             change_set: None,
             all_or_none: false,
+            read_past_damage: false,
         },
         &Settings::default(),
     )

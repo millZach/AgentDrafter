@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/agentdrafter-core", "crates/agentdrafter-cli", "crates/agentdrafter-py", "crates/agentdrafter-viewer"]
+exclude = ["crates/agentdrafter-desktop"]
 
 [workspace.package]
 version = "0.0.0"

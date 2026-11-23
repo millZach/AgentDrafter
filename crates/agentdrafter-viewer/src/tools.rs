@@ -266,8 +266,10 @@ pub struct Context {
     pub units: Option<String>,
     pub objects: Vec<ObjectInfo>,
     /// Its template, on a drawing set's sheet: none for a sheet description
-    /// or a DWG, which a change set does not edit.
+    /// or a DWG.
     pub template: Option<Reach>,
+    /// Whether this sheet is an original DWG that `change` can revise (#71).
+    pub editable_dwg: bool,
     /// Whether it is the set as it was at an entry, read-only.
     pub past: bool,
     /// On a sheet drawn in a layout, the space a new object goes in, as an
@@ -843,13 +845,13 @@ impl Tools {
         array_kind: Option<ArrayKind>,
     ) -> Outcome {
         self.error = None;
-        if self.context.template.is_none() || self.context.past {
+        if (self.context.template.is_none() && !self.context.editable_dwg) || self.context.past {
             self.error = Some(if self.context.past {
                 "This is the set as it was at an entry, read-only: go back to live to draw."
                     .to_owned()
             } else {
-                "The drawing tools change a drawing set; this is a sheet description or a DWG, \
-                 which a change set does not edit."
+                "The drawing tools change a drawing set or a DWG; this is a single sheet \
+                 description, which a change set does not edit."
                     .to_owned()
             });
             return Outcome::default();

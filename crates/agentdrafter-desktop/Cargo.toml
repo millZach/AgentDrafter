@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "agentdrafter-desktop"
+description = "The Tauri v2 desktop shell for AgentDrafter: runs the core in-process and shows the drafting app with native OS folder and file pickers."
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/millZach/AgentDrafter"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+agentdrafter-cli = { path = "../agentdrafter-cli" }
+agentdrafter-core = { path = "../agentdrafter-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"

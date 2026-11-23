@@ -466,6 +466,10 @@ pub struct Viewer {
     shown: (String, Option<String>),
     /// The guide's step the drafter is doing, as `guides` lists it (#157).
     guide: Option<crate::guide::StepPlan>,
+    /// Whether the page is running in desktop shell mode (#158), which allows
+    /// revising plant `.dwg` originals while keeping plain `agentdrafter serve`
+    /// browser behavior unchanged.
+    desktop_mode: bool,
 }
 
 #[wasm_bindgen]
@@ -579,7 +583,14 @@ impl Viewer {
             ghosts: Vec::new(),
             shown: (String::new(), None),
             guide: None,
+            desktop_mode: false,
         })
+    }
+
+    /// Enables or disables desktop-shell editing for original `.dwg` sheets.
+    /// Defaults to false so plain `agentdrafter serve` browser behavior is unchanged.
+    pub fn set_desktop_mode(&mut self, desktop: bool) {
+        self.desktop_mode = desktop;
     }
 
     /// Loads a sheet from the text of a `display-list` reply, replacing the
@@ -621,11 +632,13 @@ impl Viewer {
             }
         }
         self.shown = (sheet.sheet.clone(), sheet.layout.clone());
+        let editable_dwg = self.desktop_mode && sheet.source.to_ascii_lowercase().ends_with(".dwg");
         self.tools.load(Context {
             sheet: sheet.sheet.clone(),
             units: sheet.units.clone(),
             objects,
             template: sheet.template.clone(),
+            editable_dwg,
             past: sheet.entry.is_some(),
             space: sheet.space.clone(),
             layout: sheet.layout.clone(),

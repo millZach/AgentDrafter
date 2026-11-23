@@ -180,6 +180,8 @@ export interface DrawingProps {
    * object at each draw, so it follows it as the view moves.
    */
   editor?: RefObject<HTMLElement | null>;
+  /** Whether the page is running in desktop shell mode (#158), enabling DWG edits. */
+  desktop?: boolean;
   /**
    * A double click or double tap on an object, or a tap on the object
    * already picked on a phone: true when the page opened it, as a text to
@@ -256,6 +258,7 @@ export function Drawing({
   layer,
   handle,
   editor,
+  desktop = false,
   onOpen,
   previewTags = [],
   ghosts = [],
@@ -1147,6 +1150,7 @@ export function Drawing({
         viewer.current = new Viewer(c);
         // What the page holds that the renderer draws by: a renderer made
         // anew, as after a lost context, starts from it, not its defaults.
+        viewer.current.set_desktop_mode(desktop);
         viewer.current.set_grid(gridNow.current);
         viewer.current.set_running(mask.current);
         viewer.current.set_ortho(orthoNow.current);

@@ -44,6 +44,7 @@ fn context() -> Context {
                 "DP-LD-104".to_owned(),
             ],
         }),
+        editable_dwg: false,
         past: false,
         space: None,
         layout: None,
@@ -445,6 +446,14 @@ fn a_sheet_that_is_not_a_sets_or_the_set_as_it_was_is_not_drawn_on() {
     });
     t.input("L", None);
     assert_eq!(t.running(), None);
+    // An editable DWG allows drawing tools even without a drawing-set template.
+    t.load(Context {
+        template: None,
+        editable_dwg: true,
+        ..context()
+    });
+    t.input("L", None);
+    assert_eq!(t.running(), Some(ToolKind::Line));
 }
 
 #[test]

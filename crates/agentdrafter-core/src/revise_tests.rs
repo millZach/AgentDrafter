@@ -144,6 +144,7 @@ fn revises_made_up_original_with_all_operations_and_preserves_untouched_objects(
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -240,6 +241,7 @@ fn revises_made_up_original_with_all_operations_and_preserves_untouched_objects(
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -283,6 +285,7 @@ fn revision_preserves_original_dwg_version_across_multiple_versions() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -332,6 +335,7 @@ fn decode_loss_gate_refuses_without_allow_loss_and_preserves_custom_object_with_
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -363,6 +367,7 @@ fn decode_loss_gate_refuses_without_allow_loss_and_preserves_custom_object_with_
             dry_run: false,
             output: None,
             allow_loss: true,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -411,6 +416,7 @@ fn safety_refuses_original_existing_symlink_dir_and_non_dwg_output() {
             dry_run: false,
             output: Some(orig.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -430,6 +436,7 @@ fn safety_refuses_original_existing_symlink_dir_and_non_dwg_output() {
             dry_run: false,
             output: Some(existing.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -449,6 +456,7 @@ fn safety_refuses_original_existing_symlink_dir_and_non_dwg_output() {
             dry_run: false,
             output: Some(subdir),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -465,6 +473,7 @@ fn safety_refuses_original_existing_symlink_dir_and_non_dwg_output() {
             dry_run: false,
             output: Some(dir.join("out.yaml")),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -485,6 +494,7 @@ fn safety_refuses_original_existing_symlink_dir_and_non_dwg_output() {
                 dry_run: false,
                 output: Some(link),
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -517,6 +527,7 @@ fn all_or_nothing_and_dry_run_write_zero_files() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -537,6 +548,7 @@ fn all_or_nothing_and_dry_run_write_zero_files() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -574,6 +586,7 @@ fn target_resolution_locked_layer_and_ambiguous_names() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -590,6 +603,7 @@ fn target_resolution_locked_layer_and_ambiguous_names() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -606,6 +620,7 @@ fn target_resolution_locked_layer_and_ambiguous_names() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -624,6 +639,7 @@ fn target_resolution_locked_layer_and_ambiguous_names() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -783,6 +799,7 @@ fn change_layer_in_place_preserves_unmodeled_true_color_linetype_and_lineweight(
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -817,6 +834,7 @@ fn refuses_non_exact_six_byte_dwg_header_like_ad1032() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -863,6 +881,7 @@ fn damaged_dwg_refused_without_allow_loss_and_revises_with_allow_loss() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -895,6 +914,7 @@ fn damaged_dwg_refused_without_allow_loss_and_revises_with_allow_loss() {
             dry_run: false,
             output: None,
             allow_loss: true,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -951,6 +971,7 @@ fn polyline3d_points_change_preserves_xdata_and_copy_allocates_distinct_vertex_h
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1027,6 +1048,7 @@ fn copy_strips_raw_dwg_eed_id_and_block_def_handle_is_refused() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1058,6 +1080,7 @@ fn copy_strips_raw_dwg_eed_id_and_block_def_handle_is_refused() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1139,6 +1162,7 @@ fn mirror_asymmetric_insert_and_move_neg_z_arc_roundtrip_accurately() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1184,6 +1208,7 @@ fn mirror_asymmetric_insert_and_move_neg_z_arc_roundtrip_accurately() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1222,6 +1247,7 @@ fn constant_and_locked_layer_attributes_and_locked_copies_refused() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1242,6 +1268,7 @@ fn constant_and_locked_layer_attributes_and_locked_copies_refused() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1264,6 +1291,7 @@ fn constant_and_locked_layer_attributes_and_locked_copies_refused() {
                 dry_run: true,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -1324,6 +1352,7 @@ fn duplicate_transform_and_copy_targets_refused_atomically() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -1357,6 +1386,7 @@ fn name_only_add_and_rename_keep_handle_id_and_unicode_id_does_not_panic() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1384,6 +1414,7 @@ fn name_only_add_and_rename_keep_handle_id_and_unicode_id_does_not_panic() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1511,6 +1542,7 @@ fn array_path_refuses_non_curve_insert() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1573,6 +1605,7 @@ fn allow_loss_never_publishes_missing_requested_add_or_surviving_delete() {
         false,
         true,
         &orig_meta,
+        None,
         Some(Unit::Mm),
         &decode,
         &[],
@@ -1618,6 +1651,7 @@ fn mirror_asymmetric_minsert_across_x_and_y_axes_mirrors_every_grid_instance() {
             dry_run: false,
             output: Some(dir.join("MINS.mx.dwg")),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1649,6 +1683,7 @@ fn mirror_asymmetric_minsert_across_x_and_y_axes_mirrors_every_grid_instance() {
             dry_run: false,
             output: Some(dir.join("MINS.my.dwg")),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1694,6 +1729,7 @@ fn unlocked_insert_with_locked_attribute_refuses_move_transform_copy_and_delete(
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -1760,6 +1796,7 @@ fn leading_zero_handle_alias_is_deduplicated_in_transform_and_copy() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -1780,6 +1817,7 @@ fn leading_zero_handle_alias_is_deduplicated_in_transform_and_copy() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1820,6 +1858,7 @@ fn scale_minsert_overflow_refused_with_bad_value() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1904,6 +1943,7 @@ fn original_journal_per_file_isolation_empty_read_and_safe_key() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1916,6 +1956,7 @@ fn original_journal_per_file_isolation_empty_read_and_safe_key() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -1957,6 +1998,7 @@ fn original_change_journal_stack_undo_and_dry_run() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -1980,6 +2022,7 @@ fn original_change_journal_stack_undo_and_dry_run() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -2085,6 +2128,7 @@ fn original_undo_refuses_hand_edited_missing_symlink_and_original_file() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -2190,6 +2234,7 @@ fn original_failed_attempt_and_dry_run_refuses_pending() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -2224,6 +2269,7 @@ fn original_failed_attempt_and_dry_run_refuses_pending() {
             dry_run: true,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -2264,6 +2310,7 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -2306,6 +2353,7 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: false,
         },
@@ -2405,6 +2453,7 @@ fn original_accept_checks_newest_seen_blocks_undo_and_stamps_outputs_issued() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -2608,6 +2657,7 @@ fn original_accept_checks_newest_seen_blocks_undo_and_stamps_outputs_issued() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -2758,6 +2808,7 @@ fn original_dry_run_undo_and_accept_refuse_pending_and_never_write() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -2777,6 +2828,7 @@ fn original_dry_run_undo_and_accept_refuse_pending_and_never_write() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -2902,6 +2954,7 @@ fn original_recovery_cleanup_is_scoped_and_never_touches_bystanders() {
                 dry_run: false,
                 output: Some(shared_out.join("east-r1.dwg")),
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -2931,6 +2984,7 @@ fn original_recovery_cleanup_is_scoped_and_never_touches_bystanders() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -2990,6 +3044,7 @@ fn original_journal_and_prune_refuse_symlinks_without_modifying_targets() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3015,6 +3070,7 @@ fn original_journal_and_prune_refuse_symlinks_without_modifying_targets() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3048,6 +3104,7 @@ fn original_journal_and_prune_refuse_symlinks_without_modifying_targets() {
             dry_run: false,
             output: None,
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3085,6 +3142,7 @@ fn original_cross_folder_output_stamps_issued_on_render_and_plot() {
             dry_run: false,
             output: Some(rev_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3196,6 +3254,7 @@ fn original_child_folder_output_stamps_issued_on_render_and_plot() {
             dry_run: false,
             output: Some(rev_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3301,6 +3360,7 @@ fn original_symlink_source_resolves_consistently_and_stamps_refuse_symlinks() {
             dry_run: false,
             output: Some(r1_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3337,6 +3397,7 @@ fn original_symlink_source_resolves_consistently_and_stamps_refuse_symlinks() {
                 dry_run: false,
                 output: Some(r2_dwg.clone()),
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -3366,6 +3427,7 @@ fn original_symlink_source_resolves_consistently_and_stamps_refuse_symlinks() {
             dry_run: false,
             output: Some(r3_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3469,6 +3531,7 @@ fn original_undo_refuses_symlinked_output_subdirectory() {
             dry_run: false,
             output: Some(rev_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3525,6 +3588,7 @@ fn original_external_output_refuses_symlinked_ancestor_in_undo_and_stamps() {
             dry_run: false,
             output: Some(r1_dwg.clone()),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3581,6 +3645,7 @@ fn original_external_output_refuses_symlinked_ancestor_in_undo_and_stamps() {
             dry_run: false,
             output: Some(r2_dwg),
             allow_loss: false,
+            expected_original_sha256: None,
             plot_style: None,
             no_pdf: true,
         },
@@ -3632,6 +3697,7 @@ fn original_recovery_verifies_undo_states_before_modifying_outputs() {
                 dry_run: false,
                 output: None,
                 allow_loss: false,
+                expected_original_sha256: None,
                 plot_style: None,
                 no_pdf: true,
             },
@@ -3658,6 +3724,969 @@ fn original_recovery_verifies_undo_states_before_modifying_outputs() {
         fs::read(&rev1_dwg).unwrap(),
         rev1_bytes,
         "partial output must not be modified before undo-states chain is verified"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn successive_revisions_accumulate_edits_and_stack_undo_restores_each_step() {
+    use crate::change::{undo, UndoRequest};
+    use crate::model::Object;
+
+    let dir = scratch("orig_accumulate");
+    let orig = build_made_up_original(&dir, "LOOP-ACC");
+    let orig_bytes = fs::read(&orig).unwrap();
+    let settings = Settings::default().without_system_fonts();
+
+    let count_lines = |path: &Path| {
+        crate::original::read_dwg_record(path, false)
+            .unwrap()
+            .record
+            .sheet
+            .objects
+            .iter()
+            .filter(|o| matches!(o, Object::Line(_)))
+            .count()
+    };
+    let base_lines = count_lines(&orig);
+
+    // Edit 1: add Line A -> rev1.dwg has base + 1 line.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+    let rev1 = PathBuf::from(r1.result.unwrap().revision_dwg.unwrap());
+    assert_eq!(count_lines(&rev1), base_lines + 1);
+
+    // Edit 2: add Line B -> rev2.dwg chains onto rev1 and has BOTH Line A and Line B!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 5, 0], "to": [10, 5, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "{r2:?}");
+    let rev2 = PathBuf::from(r2.result.unwrap().revision_dwg.unwrap());
+    assert_eq!(
+        count_lines(&rev2),
+        base_lines + 2,
+        "rev2 must retain edit 1 (Line A) alongside edit 2 (Line B)"
+    );
+    assert_eq!(count_lines(&rev1), base_lines + 1, "rev1 stays untouched");
+    assert_eq!(fs::read(&orig).unwrap(), orig_bytes, "original untouched");
+
+    // Undo entry 2 -> rev2 removed, rev1 still has Line A only.
+    let u2 = undo(&UndoRequest {
+        set: orig.clone(),
+        change_set: 2,
+        dry_run: false,
+    });
+    assert!(u2.ok, "{u2:?}");
+    assert!(!rev2.exists());
+    assert!(rev1.is_file());
+    assert_eq!(count_lines(&rev1), base_lines + 1);
+
+    // Undo entry 1 -> rev1 removed, original byte-for-byte untouched.
+    let u1 = undo(&UndoRequest {
+        set: orig.clone(),
+        change_set: 1,
+        dry_run: false,
+    });
+    assert!(u1.ok, "{u1:?}");
+    assert!(!rev1.exists());
+    assert_eq!(fs::read(&orig).unwrap(), orig_bytes);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn expected_original_sha256_accepts_matching_hash_and_refuses_mismatch_even_with_allow_loss() {
+    let dir = scratch("expected_sha256");
+    let orig = build_made_up_original(&dir, "SHA-BIND");
+    let orig_sha = crate::stamp::fingerprint(&fs::read(&orig).unwrap());
+    let settings = Settings::default().without_system_fonts();
+    let cs = json!({
+        "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+    });
+
+    // Mismatched hash is refused with ChangedByHand EVEN when allow_loss is true.
+    let wrong = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: cs.clone(),
+            dry_run: false,
+            output: None,
+            allow_loss: true,
+            expected_original_sha256: Some("0".repeat(64)),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(!wrong.ok);
+    assert_eq!(wrong.error.unwrap().code, ErrorCode::ChangedByHand);
+    assert!(!dir.join("SHA-BIND.rev1.dwg").exists());
+
+    // Matching hash (case-insensitive) succeeds.
+    let ok = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: cs,
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: Some(orig_sha.to_ascii_uppercase()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(ok.ok, "{ok:?}");
+    assert!(dir.join("SHA-BIND.rev1.dwg").is_file());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn chained_revisions_on_damaged_original_preserve_original_decode_report_and_parent_revision() {
+    let dir = scratch("chained_damaged_decode");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tests/fixtures/desktop-damaged-line.dwg");
+    let orig = dir.join("DAMAGED.dwg");
+    fs::copy(&fixture, &orig).unwrap();
+    let orig_read = crate::read_original(&crate::ReadRequest {
+        source: orig.clone(),
+        mirror: None,
+        no_mirror: true,
+    })
+    .unwrap();
+    assert!(!orig_read.decoded);
+    assert!(orig_read.read_past_damage.is_some());
+    assert!(orig_read.not_decoded.iter().any(|r| r.kind == "LINE"));
+
+    let settings = Settings::default().without_system_fonts();
+
+    // Edit 1 on damaged original with allow_loss: true -> rev1.dwg, no parent_revision.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [5, 5, 0], "to": [15, 5, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: true,
+            expected_original_sha256: Some(orig_read.sha256.clone()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "rev1 failed: {r1:?}");
+    let rep1 = r1.result.unwrap();
+    assert!(rep1.parent_revision.is_none());
+    assert!(!rep1.decode.decoded);
+    assert!(rep1.decode.read_past_damage.is_some());
+    let rev1_meta = rep1.revision.clone().unwrap();
+
+    // Edit 2 without allow_loss -> still refused because original is damaged!
+    let r2_refused = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [5, 15, 0], "to": [15, 15, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: Some(orig_read.sha256.clone()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(!r2_refused.ok);
+    assert_eq!(r2_refused.error.unwrap().code, ErrorCode::IncompleteDecode);
+    let refused_rep = r2_refused.result.unwrap();
+    assert!(!refused_rep.decode.decoded);
+    assert!(refused_rep.decode.read_past_damage.is_some());
+
+    // Edit 2 with allow_loss: true -> chains onto rev1, preserves ORIGINAL's decode report,
+    // AND names rev1 as parent_revision in both reply and .changes.json!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [5, 15, 0], "to": [15, 15, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: true,
+            expected_original_sha256: Some(orig_read.sha256.clone()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "rev2 failed: {r2:?}");
+    let rep2 = r2.result.unwrap();
+    assert!(
+        !rep2.decode.decoded && rep2.decode.read_past_damage.is_some(),
+        "chained rev2 must keep original's damaged DecodeReport: {:?}",
+        rep2.decode
+    );
+    assert!(rep2.decode.not_decoded.iter().any(|r| r.kind == "LINE"));
+    let parent = rep2
+        .parent_revision
+        .as_ref()
+        .expect("rev2 must trace parent working revision");
+    assert_eq!(parent.entry, rep1.journal_entry.unwrap());
+    assert_eq!(parent.file, rev1_meta.file);
+    assert_eq!(parent.sha256, rev1_meta.sha256);
+
+    let cl2: Value =
+        serde_json::from_str(&fs::read_to_string(rep2.change_list.unwrap()).unwrap()).unwrap();
+    assert_eq!(cl2["decode_report"]["decoded"], false);
+    assert_eq!(cl2["parent_revision"]["file"], rev1_meta.file);
+    assert_eq!(cl2["parent_revision"]["sha256"], rev1_meta.sha256);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn standalone_output_revision_never_becomes_next_working_revision_base() {
+    let dir = scratch("standalone_output_chain");
+    let orig = build_made_up_original(&dir, "CHAIN-SOLO");
+    let settings = Settings::default().without_system_fonts();
+
+    let circles_at_x = |path: &Path| -> Vec<i64> {
+        let mut xs: Vec<i64> = crate::original::read_dwg_record(path, false)
+            .unwrap()
+            .record
+            .sheet
+            .objects
+            .iter()
+            .filter_map(|o| match o {
+                Object::Circle(c) => Some(c.center.x.round() as i64),
+                _ => None,
+            })
+            .collect();
+        xs.sort();
+        xs
+    };
+
+    // Edit A (normal working revision -> rev1): circle at x=10.
+    let ra = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [10, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(ra.ok, "{ra:?}");
+    let rep_a = ra.result.unwrap();
+
+    // Edit B (standalone `--output alternate.dwg`): circle at x=20.
+    let alt = dir.join("alternate.dwg");
+    let rb = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [20, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: Some(alt.clone()),
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(rb.ok, "{rb:?}");
+    assert!(circles_at_x(&alt).contains(&20) && !circles_at_x(&alt).contains(&10));
+
+    // Edit C (normal working revision -> rev2): circle at x=30.
+    // Must chain onto A (rev1), NOT standalone B, so rev2 contains A + C (10 and 30, NOT 20)!
+    let rc = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [30, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(rc.ok, "{rc:?}");
+    let rep_c = rc.result.unwrap();
+    let rev_c_path = PathBuf::from(rep_c.revision_dwg.unwrap());
+    let xs = circles_at_x(&rev_c_path);
+    assert!(
+        xs.contains(&10) && xs.contains(&30) && !xs.contains(&20),
+        "rev2 must contain A(10) + C(30) and NOT standalone B(20): {xs:?}"
+    );
+    assert_eq!(
+        rep_c.parent_revision.as_ref().map(|p| p.entry),
+        rep_a.journal_entry,
+        "parent_revision must point at A, skipping standalone B"
+    );
+
+    let j = crate::journal(&crate::JournalRequest { set: orig.clone() })
+        .result
+        .unwrap();
+    assert_eq!(
+        j.entries[0]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(false)
+    );
+    assert_eq!(
+        j.entries[1]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(true)
+    );
+    assert_eq!(
+        j.entries[2]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(false)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn passing_allow_loss_once_on_clean_original_does_not_lock_future_edits() {
+    let dir = scratch("clean_allow_loss_once");
+    let orig = build_made_up_original(&dir, "CLEAN-AL");
+    let settings = Settings::default().without_system_fonts();
+
+    // Edit 1 on a clean original passes allow_loss: true unnecessarily.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [8, 1, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: true,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+
+    // Edit 2 without allow_loss MUST succeed because the original itself decoded whole!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 3, 0], "to": [8, 3, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(
+        r2.ok,
+        "clean original must not require allow_loss after an earlier edit passed it: {r2:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn chained_revisions_preserve_original_decode_warnings() {
+    let dir = scratch("chained_decode_warnings");
+    let orig = build_made_up_original(&dir, "WARN-ORIG");
+    // Patch the DWG file header's 2-byte LE code page (bytes 19..21) to 65535
+    // so acadrust decodes the file completely (`decoded: true`) while emitting
+    // a non-fatal reader warning (`warnings >= 1`).
+    let mut bytes = fs::read(&orig).unwrap();
+    bytes[19] = 0xFF;
+    bytes[20] = 0xFF;
+    fs::write(&orig, &bytes).unwrap();
+
+    let orig_read = crate::read_original(&crate::ReadRequest {
+        source: orig.clone(),
+        mirror: None,
+        no_mirror: true,
+    })
+    .unwrap();
+    assert!(
+        orig_read.decoded,
+        "expected decoded: true with warning: {orig_read:?}"
+    );
+    assert!(
+        orig_read.warnings >= 1,
+        "expected >= 1 decode warning on patched code-page original: {orig_read:?}"
+    );
+
+    let settings = Settings::default().without_system_fonts();
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: Some(orig_read.sha256.clone()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "rev1 failed: {r1:?}");
+    let rep1 = r1.result.unwrap();
+    assert!(rep1.decode.decoded);
+    assert_eq!(rep1.decode.warnings, orig_read.warnings);
+
+    // Chained rev2 writes on top of rev1 (whose saved header has a clean code
+    // page with 0 warnings), yet rev2's report and `.changes.json` MUST still
+    // preserve the original's decode warnings.
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 5, 0], "to": [10, 5, 0]}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: Some(orig_read.sha256.clone()),
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "rev2 failed: {r2:?}");
+    let rep2 = r2.result.unwrap();
+    assert_eq!(
+        rep2.parent_revision.as_ref().map(|p| p.entry),
+        rep1.journal_entry
+    );
+    assert!(rep2.decode.decoded);
+    assert_eq!(
+        rep2.decode.warnings, orig_read.warnings,
+        "chained rev2 report must preserve original's decode warnings: {:?}",
+        rep2.decode
+    );
+
+    let cl2: Value =
+        serde_json::from_str(&fs::read_to_string(rep2.change_list.unwrap()).unwrap()).unwrap();
+    assert_eq!(cl2["decode_report"]["decoded"], true);
+    assert_eq!(cl2["decode_report"]["warnings"], orig_read.warnings);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_to_b_to_a_original_swap_does_not_chain_past_b_back_to_a() {
+    let dir = scratch("orig_swap_aba");
+    let orig_a = build_made_up_original(&dir, "SRC-A");
+    let orig_b = build_made_up_original(&dir, "SRC-B");
+    let settings = Settings::default().without_system_fonts();
+
+    // Give B a distinct circle at x=20 so A and B have different SHA-256 and geometry.
+    let b_prep = dir.join("SRC-B-DISTINCT.dwg");
+    let rb_prep = revise_with(
+        &ReviseRequest {
+            set: orig_b.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [20, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: Some(b_prep.clone()),
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(rb_prep.ok, "{rb_prep:?}");
+
+    let bytes_a = fs::read(&orig_a).unwrap();
+    let bytes_b = fs::read(&b_prep).unwrap();
+    assert_ne!(bytes_a, bytes_b);
+
+    let live = dir.join("SWAP.dwg");
+    fs::write(&live, &bytes_a).unwrap();
+
+    let circles_at_x = |path: &Path| -> Vec<i64> {
+        let mut xs: Vec<i64> = crate::original::read_dwg_record(path, false)
+            .unwrap()
+            .record
+            .sheet
+            .objects
+            .iter()
+            .filter_map(|o| match o {
+                Object::Circle(c) => Some(c.center.x.round() as i64),
+                _ => None,
+            })
+            .collect();
+        xs.sort();
+        xs
+    };
+
+    // 1. Revise live=A -> entry 1 (rev1) with circle x=11.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: live.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [11, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+
+    // 2. Swap live -> B, revise -> entry 2 (rev2) with circle x=21 (starts fresh from B).
+    fs::write(&live, &bytes_b).unwrap();
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: live.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [21, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "{r2:?}");
+    let rep2 = r2.result.unwrap();
+    assert!(rep2.parent_revision.is_none());
+
+    // 3. Swap live back -> A, revise -> entry 3 (rev3) with circle x=12.
+    //    Newest active entry is entry 2 (hash B != hash A), so core MUST NOT
+    //    skip past B back to A's entry 1; rev3 starts fresh from A!
+    fs::write(&live, &bytes_a).unwrap();
+    let r3 = revise_with(
+        &ReviseRequest {
+            set: live.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [12, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r3.ok, "{r3:?}");
+    let rep3 = r3.result.unwrap();
+    assert!(
+        rep3.parent_revision.is_none(),
+        "A -> B -> A swap must not chain past B back to A's entry 1: {:?}",
+        rep3.parent_revision
+    );
+    let rev3_xs = circles_at_x(Path::new(&rep3.revision_dwg.unwrap()));
+    assert!(
+        rev3_xs.contains(&12)
+            && !rev3_xs.contains(&11)
+            && !rev3_xs.contains(&20)
+            && !rev3_xs.contains(&21),
+        "rev3 must contain only A + edit 3 (12), not entry 1 (11) or B (20, 21): {rev3_xs:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_journal_entry_without_standalone_output_never_becomes_working_revision_base() {
+    use crate::change::original_journal::original_journal_file;
+
+    let dir = scratch("legacy_standalone_output");
+    let sub = dir.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let orig = build_made_up_original(&dir, "LEGACY-SOLO");
+    let settings = Settings::default().without_system_fonts();
+
+    let circles_at_x = |path: &Path| -> Vec<i64> {
+        let mut xs: Vec<i64> = crate::original::read_dwg_record(path, false)
+            .unwrap()
+            .record
+            .sheet
+            .objects
+            .iter()
+            .filter_map(|o| match o {
+                Object::Circle(c) => Some(c.center.x.round() as i64),
+                _ => None,
+            })
+            .collect();
+        xs.sort();
+        xs
+    };
+
+    // 1. Working revision 1 (circle at x=10 -> LEGACY-SOLO.rev1.dwg).
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [10, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+    let rep1 = r1.result.unwrap();
+
+    // 2. Explicit `--output alternate.dwg` (x=20), `--output IssuedCopy.rev1.dwg` (x=22),
+    //    and `--output sub/LEGACY-SOLO.rev1.dwg` (x=25).
+    let alt = dir.join("alternate.dwg");
+    let r_alt = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [20, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: Some(alt),
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r_alt.ok, "{r_alt:?}");
+
+    let issued_copy = dir.join("IssuedCopy.rev1.dwg");
+    let r_issued = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [22, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: Some(issued_copy),
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r_issued.ok, "{r_issued:?}");
+
+    let sub_rev = sub.join("LEGACY-SOLO.rev1.dwg");
+    let r_sub = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [25, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: Some(sub_rev),
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r_sub.ok, "{r_sub:?}");
+
+    // Strip `"standalone_output":true` and `"standalone_output":false` from
+    // journal.jsonl to simulate legacy pre-PR journal entries written before
+    // `standalone_output` existed.
+    let jfile = original_journal_file(&orig).expect("journal file exists");
+    let raw = fs::read_to_string(&jfile).unwrap();
+    assert!(raw.contains("\"standalone_output\":true"));
+    assert!(raw.contains("\"standalone_output\":false"));
+    let legacy = raw
+        .replace(",\"standalone_output\":true", "")
+        .replace(",\"standalone_output\":false", "");
+    assert!(!legacy.contains("standalone_output"));
+    fs::write(&jfile, legacy).unwrap();
+
+    // Journal reply MUST authoritatively resolve every legacy entry:
+    // entry 1 (`LEGACY-SOLO.rev1.dwg`) -> standalone_output: false,
+    // entries 2/3/4 (`alternate.dwg`, `IssuedCopy.rev1.dwg`, `sub/LEGACY-SOLO.rev1.dwg`) -> standalone_output: true!
+    let jrep = crate::journal(&crate::JournalRequest { set: orig.clone() })
+        .result
+        .unwrap();
+    assert_eq!(
+        jrep.entries[0]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(false)
+    );
+    assert_eq!(
+        jrep.entries[1]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(true)
+    );
+    assert_eq!(
+        jrep.entries[2].recorded.original_revision.as_ref().unwrap().standalone_output,
+        Some(true),
+        "legacy `--output IssuedCopy.rev1.dwg` without a matching symlink must resolve standalone_output: true"
+    );
+    assert_eq!(
+        jrep.entries[3]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(true)
+    );
+
+    // 3. Next working revision (circle at x=30) MUST skip all three legacy
+    //    standalone entries (including `IssuedCopy.rev1.dwg`) and chain onto
+    //    entry 1 (`LEGACY-SOLO.rev1.dwg`)!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [30, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "{r2:?}");
+    let rep2 = r2.result.unwrap();
+    assert_eq!(
+        rep2.parent_revision.as_ref().map(|p| p.entry),
+        rep1.journal_entry,
+        "must skip legacy standalone entries and chain onto entry 1"
+    );
+    let xs = circles_at_x(Path::new(&rep2.revision_dwg.unwrap()));
+    assert!(
+        xs.contains(&10) && xs.contains(&30) && !xs.contains(&20) && !xs.contains(&22) && !xs.contains(&25),
+        "rev2 must contain entry 1 (10) + entry 5 (30), NOT alternate (20), IssuedCopy (22), or sub (25): {xs:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn same_directory_symlink_alias_working_revision_chains_when_reopened_via_original() {
+    use crate::change::original_journal::original_journal_file;
+    use crate::change::{journal, JournalRequest};
+
+    let dir = scratch("same_dir_symlink_chain");
+    let pump = build_made_up_original(&dir, "Pump");
+    let alias = dir.join("Alias.dwg");
+    std::os::unix::fs::symlink(&pump, &alias).unwrap();
+    let settings = Settings::default().without_system_fonts();
+
+    let circles_at_x = |path: &Path| -> Vec<i64> {
+        let mut xs: Vec<i64> = crate::original::read_dwg_record(path, false)
+            .unwrap()
+            .record
+            .sheet
+            .objects
+            .iter()
+            .filter_map(|o| match o {
+                Object::Circle(c) => Some(c.center.x.round() as i64),
+                _ => None,
+            })
+            .collect();
+        xs.sort();
+        xs
+    };
+
+    // 1. Revise via same-directory symlink `Alias.dwg` -> writes sibling `Alias.rev1.dwg`
+    //    recorded in `Pump.dwg`'s journal.
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: alias,
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [10, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+    let rep1 = r1.result.unwrap();
+    let alias_rev1 = PathBuf::from(rep1.revision_dwg.unwrap());
+    assert_eq!(
+        alias_rev1.file_name().unwrap().to_str().unwrap(),
+        "Alias.rev1.dwg"
+    );
+
+    // Journal reply populates native OS-resolved `revision_path` AND explicit
+    // `standalone_output: Some(false)`, while `journal.jsonl` on disk does NOT
+    // persist `revision_path`.
+    let jfile = original_journal_file(&pump).expect("journal file exists");
+    let raw_jsonl = fs::read_to_string(&jfile).unwrap();
+    assert!(
+        !raw_jsonl.contains("revision_path"),
+        "revision_path must be computed on read, never persisted to journal.jsonl: {raw_jsonl}"
+    );
+    assert!(
+        raw_jsonl.contains("\"standalone_output\":false"),
+        "new working revision persists explicit standalone_output:false: {raw_jsonl}"
+    );
+    let jrep = journal(&JournalRequest { set: pump.clone() })
+        .result
+        .unwrap();
+    let meta1 = jrep.entries[0]
+        .recorded
+        .original_revision
+        .as_ref()
+        .expect("entry 1 has original_revision");
+    assert_eq!(meta1.standalone_output, Some(false));
+    let rev_path = meta1
+        .revision_path
+        .as_deref()
+        .expect("journal reply populates native revision_path");
+    assert_eq!(
+        fs::canonicalize(rev_path).unwrap(),
+        fs::canonicalize(&alias_rev1).unwrap()
+    );
+
+    // Also test legacy pre-PR entry (omitting `standalone_output` on disk):
+    // because `Alias.dwg` in the same directory resolves to `Pump.dwg`,
+    // `Alias.rev1.dwg` MUST still resolve `standalone_output: Some(false)` and
+    // chain when reopened via `Pump.dwg`!
+    let legacy_jsonl = raw_jsonl.replace(",\"standalone_output\":false", "");
+    assert!(!legacy_jsonl.contains("standalone_output"));
+    fs::write(&jfile, legacy_jsonl).unwrap();
+    let jrep_legacy = journal(&JournalRequest { set: pump.clone() })
+        .result
+        .unwrap();
+    assert_eq!(
+        jrep_legacy.entries[0]
+            .recorded
+            .original_revision
+            .as_ref()
+            .unwrap()
+            .standalone_output,
+        Some(false),
+        "legacy Alias.rev1.dwg with sibling Alias.dwg -> Pump.dwg must resolve standalone_output: false"
+    );
+
+    // 2. Reopen and revise via `Pump.dwg` -> must chain onto `Alias.rev1.dwg`
+    //    (keeping circle x=10 alongside new circle x=30)!
+    let r2 = revise_with(
+        &ReviseRequest {
+            set: pump,
+            change_set: json!({
+                "operations": [{"op": "add_circle", "center": [30, 10, 0], "radius": 2}]
+            }),
+            dry_run: false,
+            output: None,
+            allow_loss: false,
+            expected_original_sha256: None,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r2.ok, "{r2:?}");
+    let rep2 = r2.result.unwrap();
+    assert_eq!(
+        rep2.parent_revision.as_ref().map(|p| p.entry),
+        rep1.journal_entry,
+        "reopening Pump.dwg must chain on Alias.rev1.dwg"
+    );
+    assert_eq!(
+        rep2.parent_revision.as_ref().map(|p| p.file.as_str()),
+        Some("Alias.rev1.dwg")
+    );
+    let xs = circles_at_x(Path::new(&rep2.revision_dwg.unwrap()));
+    assert!(
+        xs.contains(&10) && xs.contains(&30),
+        "Pump revision must retain Alias.rev1.dwg edit (10) alongside new edit (30): {xs:?}"
     );
 
     let _ = fs::remove_dir_all(&dir);
