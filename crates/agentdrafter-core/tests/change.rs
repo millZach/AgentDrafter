@@ -537,11 +537,8 @@ fn every_operation_is_listed_with_its_alias_and_a_schema_that_takes_it() {
     }
     let whole = jsonschema::validator_for(&change_set_schema()).unwrap();
     assert!(whole.is_valid(&json!({"operations": samples.to_vec(), "fixes": ["DEMO-002"]})));
-    // On an original DWG, `add_*` and `add_layer`/`change_layer` may omit `sheet`.
-    assert!(whole.is_valid(
-        &json!({"operations": [{"op": "add_line", "from": [0, 0, 0], "to": [1, 1, 0]}]})
-    ));
     for wrong in [
+        json!({"operations": [{"op": "add_line", "from": [0, 0, 0], "to": [1, 1, 0]}]}),
         json!({"operations": [{"op": "add_line", "sheet": "S", "template": "t.yaml", "from": [0, 0, 0], "to": [1, 1, 0]}]}),
         json!({"operations": [{"op": "change", "target": {"id": "S/a"}, "set": {"id": "b"}}]}),
         json!({"operations": [{"op": "move", "target": {"id": "S/a", "name": "n"}, "by": [1, 0, 0]}]}),

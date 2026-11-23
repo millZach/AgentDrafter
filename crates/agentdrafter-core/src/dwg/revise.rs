@@ -86,6 +86,25 @@ pub(crate) enum TargetSpace {
     Layout(String),
 }
 
+/// Result of serializing and structurally verifying a revised DWG.
+pub(crate) struct RevisionVerification {
+    pub bytes: Vec<u8>,
+    /// Requested additions that failed to appear, or requested deletions
+    /// (including deleted child handles) that survived in the output. Never
+    /// bypassable with `--allow-loss` (ADR-0005).
+    pub requested_failures: Vec<UnexpectedChange>,
+    /// Collateral differences outside the requested edits; refused unless
+    /// `--allow-loss` is explicitly set (ADR-0004).
+    pub unexpected_changes: Vec<UnexpectedChange>,
+}
+
+/// Which locked layer prevented editing an object (either its own layer or one
+/// of its owned attributes' layers).
+pub(crate) struct LockedLayerHit {
+    pub layer: String,
+    pub attribute_tag: Option<String>,
+}
+
 /// What a single direct mutation touched in the drawing, by hex handles.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MutationHandles {
@@ -152,6 +171,10 @@ struct DrawingSnapshot {
     line_types: BTreeMap<String, String>,
     text_styles: BTreeMap<String, String>,
     dim_styles: BTreeMap<String, String>,
+    app_ids: BTreeMap<String, String>,
+    ucss: BTreeMap<String, String>,
+    views: BTreeMap<String, String>,
+    vports: BTreeMap<String, String>,
     block_records: BTreeMap<String, BlockRecordDigest>,
 }
 
@@ -417,6 +440,42 @@ impl RevisionSession {
         };
         let layer = layer_of(object.common());
         Ok(self.is_layer_locked(&layer).then_some(layer))
+    }
+
+    /// Checks whether the sheet object at `hex` OR any owned attribute on an
+    /// `Insert` sits on a locked layer. Used before whole-entity transforms,
+    /// moves, copies, and deletions that also move/clone/delete owned attributes.
+    pub(crate) fn locked_layer_with_children(
+        &self,
+        hex: &str,
+    ) -> Result<Option<LockedLayerHit>, Error> {
+        let handle = parse_hex_handle(hex)?;
+        let _ = self.ensure_sheet_entity(handle, hex)?;
+        let Some(object) = self.drawing.get_entity(handle) else {
+            return Err(Error::new(
+                ErrorCode::UnknownName,
+                format!("no object with handle `{hex}` in the drawing"),
+            ));
+        };
+        let layer = layer_of(object.common());
+        if self.is_layer_locked(&layer) {
+            return Ok(Some(LockedLayerHit {
+                layer,
+                attribute_tag: None,
+            }));
+        }
+        if let EntityType::Insert(ins) = object {
+            for att in &ins.attributes {
+                let att_layer = layer_of(&att.common);
+                if self.is_layer_locked(&att_layer) {
+                    return Ok(Some(LockedLayerHit {
+                        layer: att_layer,
+                        attribute_tag: Some(att.tag.clone()),
+                    }));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn sheet_space_of_owner(&self, owner: Handle) -> Option<TargetSpace> {
@@ -1378,7 +1437,7 @@ impl RevisionSession {
     pub(crate) fn serialize_and_verify(
         &self,
         revision_path: &Path,
-    ) -> Result<(Vec<u8>, Vec<UnexpectedChange>), Error> {
+    ) -> Result<RevisionVerification, Error> {
         self.check_writable_version()?;
         let bytes = match catch_unwind(AssertUnwindSafe(|| DwgWriter::write_to_vec(&self.drawing)))
         {
@@ -1420,11 +1479,19 @@ impl RevisionSession {
         let (re_read, re_stats) = read_drawing_bytes_with_stats(&bytes, revision_path, false)?;
         let re_contents = contents(&re_read, &re_stats, Some(written_version.clone()))?;
         let after = snapshot_drawing(&re_read, &written_version, &re_contents.decode);
-        let unexpected = self.diff_snapshots(&after);
-        Ok((bytes, unexpected))
+        let (requested_failures, unexpected_changes) = self.diff_snapshots(&after);
+        Ok(RevisionVerification {
+            bytes,
+            requested_failures,
+            unexpected_changes,
+        })
     }
 
-    fn diff_snapshots(&self, after: &DrawingSnapshot) -> Vec<UnexpectedChange> {
+    fn diff_snapshots(
+        &self,
+        after: &DrawingSnapshot,
+    ) -> (Vec<UnexpectedChange>, Vec<UnexpectedChange>) {
+        let mut requested_failures = Vec::new();
         let mut unexpected = Vec::new();
         let before = &self.snapshot;
         if before.dwg_version != after.dwg_version {
@@ -1440,21 +1507,61 @@ impl RevisionSession {
         }
         check_decode_regression(&before.decode, &after.decode, &mut unexpected);
 
+        // 0. Requested-edit verification (never bypassable with --allow-loss):
+        //    every requested deletion (including child handles in `sub_handles`)
+        //    must be absent, and every requested addition / added layer must be
+        //    present in the serialized output.
+        for &handle in &self.expected_deleted {
+            if let Some(survivor) = after.objects.get(&handle) {
+                requested_failures.push(UnexpectedChange {
+                    kind: survivor.kind.clone(),
+                    handle: format!("{handle:X}"),
+                    change: UnexpectedChangeKind::Added,
+                    detail: format!(
+                        "requested deleted {} was still present in the revision after writing",
+                        survivor.kind
+                    ),
+                });
+            } else if after.sub_handles.contains(&handle) {
+                requested_failures.push(UnexpectedChange {
+                    kind: "CHILD_OBJECT".to_owned(),
+                    handle: format!("{handle:X}"),
+                    change: UnexpectedChangeKind::Added,
+                    detail: "requested deleted child object was still present in the revision \
+                             after writing"
+                        .to_owned(),
+                });
+            }
+        }
+        for &handle in &self.expected_added {
+            if self.expected_deleted.contains(&handle) {
+                continue;
+            }
+            if !after.objects.contains_key(&handle) && !after.sub_handles.contains(&handle) {
+                requested_failures.push(UnexpectedChange {
+                    kind: "ADDED_OBJECT".to_owned(),
+                    handle: format!("{handle:X}"),
+                    change: UnexpectedChangeKind::Removed,
+                    detail: "requested added object was missing after writing the revision"
+                        .to_owned(),
+                });
+            }
+        }
+        for key in &self.expected_layers_added {
+            if !after.layers.contains_key(key) {
+                requested_failures.push(UnexpectedChange {
+                    kind: "LAYER".to_owned(),
+                    handle: key.clone(),
+                    change: UnexpectedChangeKind::Removed,
+                    detail: format!("requested added layer `{key}` was missing after writing"),
+                });
+            }
+        }
+
         // 1. Untouched entities must survive with identical owner, raw bytes (when
         //    passthrough-eligible), and field-complete logical digest.
         for (&handle, orig) in &before.objects {
             if self.expected_deleted.contains(&handle) {
-                if after.objects.contains_key(&handle) {
-                    unexpected.push(UnexpectedChange {
-                        kind: orig.kind.clone(),
-                        handle: format!("{handle:X}"),
-                        change: UnexpectedChangeKind::Added,
-                        detail: format!(
-                            "deleted {} was still present in the revision after writing",
-                            orig.kind
-                        ),
-                    });
-                }
                 continue;
             }
             match after.objects.get(&handle) {
@@ -1503,21 +1610,6 @@ impl RevisionSession {
                 });
             }
         }
-        // Verify every requested addition actually appeared in the written DWG.
-        for &handle in &self.expected_added {
-            if self.expected_deleted.contains(&handle) {
-                continue;
-            }
-            if !after.objects.contains_key(&handle) && !after.sub_handles.contains(&handle) {
-                unexpected.push(UnexpectedChange {
-                    kind: "ADDED_OBJECT".to_owned(),
-                    handle: format!("{handle:X}"),
-                    change: UnexpectedChangeKind::Removed,
-                    detail: "requested added object was missing after writing the revision"
-                        .to_owned(),
-                });
-            }
-        }
 
         // 2. Non-graphical objects (dictionaries, layouts, xrecords, custom objects).
         for (&handle, orig) in &before.non_graphical {
@@ -1557,7 +1649,8 @@ impl RevisionSession {
             }
         }
 
-        // 3. Symbol tables: layers, linetypes, text styles, dim styles, block records.
+        // 3. Symbol tables: layers, linetypes, text styles, dim styles, app IDs,
+        //    UCSs, views, vports, and block records.
         for (key, orig) in &before.layers {
             match after.layers.get(key) {
                 None => unexpected.push(UnexpectedChange {
@@ -1587,16 +1680,6 @@ impl RevisionSession {
                 });
             }
         }
-        for key in &self.expected_layers_added {
-            if !after.layers.contains_key(key) {
-                unexpected.push(UnexpectedChange {
-                    kind: "LAYER".to_owned(),
-                    handle: key.clone(),
-                    change: UnexpectedChangeKind::Removed,
-                    detail: format!("requested added layer `{key}` was missing after writing"),
-                });
-            }
-        }
         diff_named_table(
             "LTYPE",
             &before.line_types,
@@ -1615,6 +1698,15 @@ impl RevisionSession {
             &after.dim_styles,
             &mut unexpected,
         );
+        diff_app_id_table(
+            &before.app_ids,
+            &after.app_ids,
+            self.app_registered,
+            &mut unexpected,
+        );
+        diff_named_table("UCS", &before.ucss, &after.ucss, &mut unexpected);
+        diff_named_table("VIEW", &before.views, &after.views, &mut unexpected);
+        diff_named_table("VPORT", &before.vports, &after.vports, &mut unexpected);
         for (key, orig) in &before.block_records {
             match after.block_records.get(key) {
                 None => unexpected.push(UnexpectedChange {
@@ -1656,7 +1748,7 @@ impl RevisionSession {
                 });
             }
         }
-        unexpected
+        (requested_failures, unexpected)
     }
 }
 
@@ -2785,6 +2877,10 @@ fn scale_entity(object: &mut EntityType, about: [f64; 3], factor: f64) -> Result
                 e.y_scale() * factor,
                 e.z_scale() * factor,
             );
+            if e.column_count > 1 || e.row_count > 1 {
+                e.column_spacing *= factor;
+                e.row_spacing *= factor;
+            }
             for att in &mut e.attributes {
                 scale_attribute(att, about, factor);
             }
@@ -3029,8 +3125,14 @@ fn mirror_entity(object: &mut EntityType, first: [f64; 3], second: [f64; 3]) -> 
             // Reflecting an insert across a line at angle `axis` negates X scale
             // (reversing local +X to -X) and adds a compensating half turn (+180°)
             // to the mirrored rotation, matching AutoCAD and `transform.rs`.
+            // For a multi-insert (MINSERT), the rotated column axis flips sign
+            // under `r' = 2*axis - r + pi` while the rotated row axis matches
+            // directly, so `column_spacing` is negated and `row_spacing` stays.
             e.set_scale_unchecked(-e.x_scale(), e.y_scale(), e.z_scale());
             e.rotation = normalize_degrees(mdeg(e.rotation.to_degrees()) + 180.0).to_radians();
+            if e.column_count > 1 || e.row_count > 1 {
+                e.column_spacing = -e.column_spacing;
+            }
             for att in &mut e.attributes {
                 att.insertion_point = mp(att.insertion_point);
                 if att.horizontal_alignment != HorizontalAlignment::Left
@@ -3226,6 +3328,42 @@ fn diff_named_table(
     }
 }
 
+fn diff_app_id_table(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+    app_registered: bool,
+    out: &mut Vec<UnexpectedChange>,
+) {
+    let expected_app = block::APPLICATION.to_lowercase();
+    for (key, orig) in before {
+        match after.get(key) {
+            None => out.push(UnexpectedChange {
+                kind: "APPID".to_owned(),
+                handle: key.clone(),
+                change: UnexpectedChangeKind::Removed,
+                detail: format!("untouched APPID `{key}` was removed"),
+            }),
+            Some(now) if now != orig => out.push(UnexpectedChange {
+                kind: "APPID".to_owned(),
+                handle: key.clone(),
+                change: UnexpectedChangeKind::Changed,
+                detail: format!("untouched APPID `{key}` changed in the revision"),
+            }),
+            Some(_) => {}
+        }
+    }
+    for key in after.keys() {
+        if !before.contains_key(key) && !(app_registered && *key == expected_app) {
+            out.push(UnexpectedChange {
+                kind: "APPID".to_owned(),
+                handle: key.clone(),
+                change: UnexpectedChangeKind::Added,
+                detail: format!("unexpected APPID `{key}` appeared in the revision"),
+            });
+        }
+    }
+}
+
 fn snapshot_drawing(
     drawing: &CadDocument,
     dwg_version: &str,
@@ -3331,6 +3469,31 @@ fn snapshot_drawing(
         .iter()
         .map(|ds| (ds.name.to_lowercase(), format!("{ds:?}")))
         .collect();
+    let app_ids = drawing
+        .app_ids
+        .iter()
+        .map(|a| (a.name.to_lowercase(), format!("{a:?}")))
+        .collect();
+    let ucss = drawing
+        .ucss
+        .iter()
+        .map(|u| (u.name.to_lowercase(), format!("{u:?}")))
+        .collect();
+    let views = drawing
+        .views
+        .iter()
+        .map(|v| (v.name.to_lowercase(), format!("{v:?}")))
+        .collect();
+    let vports = drawing
+        .vports
+        .iter()
+        .map(|vp| {
+            (
+                format!("{}#{:X}", vp.name.to_lowercase(), vp.handle.value()),
+                format!("{vp:?}"),
+            )
+        })
+        .collect();
     let block_records = drawing
         .block_records
         .iter()
@@ -3357,6 +3520,10 @@ fn snapshot_drawing(
         line_types,
         text_styles,
         dim_styles,
+        app_ids,
+        ucss,
+        views,
+        vports,
         block_records,
     }
 }
@@ -3627,14 +3794,21 @@ fn xdata_summary(c: &EntityCommon) -> String {
     format!("xd=[{}] reed=[{}]", parts.join(","), raw_eed.join(","))
 }
 
+/// Formats a floating-point coordinate/angle/scale at 1e-9 precision while
+/// canonicalizing `-0.0` so real geometric drift is caught without `-0.0` noise.
+fn f9(v: f64) -> String {
+    let clean = if v.abs() < 1e-12 { 0.0 } else { v };
+    format!("{clean:.9}")
+}
+
 fn common_summary(kind: &str, c: &EntityCommon) -> String {
     format!(
-        "{kind} layer={} color={:?} cname={:?} lt={} lts={:.6} lw={:?} inv={} tr={:?} {}",
+        "{kind} layer={} color={:?} cname={:?} lt={} lts={} lw={:?} inv={} tr={:?} {}",
         c.layer,
         c.color,
         c.color_name,
         c.linetype,
-        c.linetype_scale,
+        f9(c.linetype_scale),
         c.line_weight,
         c.invisible,
         c.transparency,
@@ -3644,29 +3818,29 @@ fn common_summary(kind: &str, c: &EntityCommon) -> String {
 
 fn attribute_logical_summary(att: &AttributeEntity) -> String {
     format!(
-        "{} tag={:?} value={:?} pos=({:.6},{:.6},{:.6}) align=({:.6},{:.6},{:.6}) \
-         ha={:?} va={:?} h={:.6} r={:.6} wf={:.6} obl={:.6} style={} flags={:?} \
-         n=({:.6},{:.6},{:.6}) mtext={:?}",
+        "{} tag={:?} value={:?} pos=({},{},{}) align=({},{},{}) \
+         ha={:?} va={:?} h={} r={} wf={} obl={} style={} flags={:?} \
+         n=({},{},{}) mtext={:?}",
         common_summary("ATTRIB", &att.common),
         att.tag,
         att.value,
-        att.insertion_point.x,
-        att.insertion_point.y,
-        att.insertion_point.z,
-        att.alignment_point.x,
-        att.alignment_point.y,
-        att.alignment_point.z,
+        f9(att.insertion_point.x),
+        f9(att.insertion_point.y),
+        f9(att.insertion_point.z),
+        f9(att.alignment_point.x),
+        f9(att.alignment_point.y),
+        f9(att.alignment_point.z),
         att.horizontal_alignment,
         att.vertical_alignment,
-        att.height,
-        att.rotation,
-        att.width_factor,
-        att.oblique_angle,
+        f9(att.height),
+        f9(att.rotation),
+        f9(att.width_factor),
+        f9(att.oblique_angle),
         att.text_style,
         att.flags,
-        att.normal.x,
-        att.normal.y,
-        att.normal.z,
+        f9(att.normal.x),
+        f9(att.normal.y),
+        f9(att.normal.z),
         att.embedded_mtext.as_ref().map(|m| (
             &m.value,
             m.insertion_point,
@@ -3683,39 +3857,53 @@ fn logical_summary(entity: &EntityType) -> String {
     let base = common_summary(&kind, c);
     match entity {
         EntityType::Line(e) => format!(
-            "{base} ({:.6},{:.6},{:.6})->({:.6},{:.6},{:.6}) n=({:.6},{:.6},{:.6})",
-            e.start.x, e.start.y, e.start.z, e.end.x, e.end.y, e.end.z, e.normal.x, e.normal.y, e.normal.z
+            "{base} ({},{},{})->({},{},{}) n=({},{},{})",
+            f9(e.start.x),
+            f9(e.start.y),
+            f9(e.start.z),
+            f9(e.end.x),
+            f9(e.end.y),
+            f9(e.end.z),
+            f9(e.normal.x),
+            f9(e.normal.y),
+            f9(e.normal.z)
         ),
         EntityType::Circle(e) => format!(
-            "{base} ({:.6},{:.6},{:.6}) r={:.6} n=({:.6},{:.6},{:.6})",
-            e.center.x, e.center.y, e.center.z, e.radius, e.normal.x, e.normal.y, e.normal.z
+            "{base} ({},{},{}) r={} n=({},{},{})",
+            f9(e.center.x),
+            f9(e.center.y),
+            f9(e.center.z),
+            f9(e.radius),
+            f9(e.normal.x),
+            f9(e.normal.y),
+            f9(e.normal.z)
         ),
         EntityType::Arc(e) => format!(
-            "{base} ({:.6},{:.6},{:.6}) r={:.6} a=({:.6},{:.6}) n=({:.6},{:.6},{:.6})",
-            e.center.x,
-            e.center.y,
-            e.center.z,
-            e.radius,
-            e.start_angle,
-            e.end_angle,
-            e.normal.x,
-            e.normal.y,
-            e.normal.z
+            "{base} ({},{},{}) r={} a=({},{}) n=({},{},{})",
+            f9(e.center.x),
+            f9(e.center.y),
+            f9(e.center.z),
+            f9(e.radius),
+            f9(e.start_angle),
+            f9(e.end_angle),
+            f9(e.normal.x),
+            f9(e.normal.y),
+            f9(e.normal.z)
         ),
         EntityType::Ellipse(e) => format!(
-            "{base} ({:.6},{:.6},{:.6}) maj=({:.6},{:.6},{:.6}) mr={:.6} p=({:.6},{:.6}) n=({:.6},{:.6},{:.6})",
-            e.center.x,
-            e.center.y,
-            e.center.z,
-            e.major_axis.x,
-            e.major_axis.y,
-            e.major_axis.z,
-            e.minor_axis_ratio,
-            e.start_parameter,
-            e.end_parameter,
-            e.normal.x,
-            e.normal.y,
-            e.normal.z
+            "{base} ({},{},{}) maj=({},{},{}) mr={} p=({},{}) n=({},{},{})",
+            f9(e.center.x),
+            f9(e.center.y),
+            f9(e.center.z),
+            f9(e.major_axis.x),
+            f9(e.major_axis.y),
+            f9(e.major_axis.z),
+            f9(e.minor_axis_ratio),
+            f9(e.start_parameter),
+            f9(e.end_parameter),
+            f9(e.normal.x),
+            f9(e.normal.y),
+            f9(e.normal.z)
         ),
         EntityType::LwPolyline(e) => {
             let verts: Vec<String> = e
@@ -3723,19 +3911,23 @@ fn logical_summary(entity: &EntityType) -> String {
                 .iter()
                 .map(|v| {
                     format!(
-                        "({:.6},{:.6},b={:.6},sw={:.6},ew={:.6})",
-                        v.location.x, v.location.y, v.bulge, v.start_width, v.end_width
+                        "({},{},b={},sw={},ew={})",
+                        f9(v.location.x),
+                        f9(v.location.y),
+                        f9(v.bulge),
+                        f9(v.start_width),
+                        f9(v.end_width)
                     )
                 })
                 .collect();
             format!(
-                "{base} closed={} cw={:.6} elev={:.6} n=({:.6},{:.6},{:.6}) v=[{}]",
+                "{base} closed={} cw={} elev={} n=({},{},{}) v=[{}]",
                 e.is_closed,
-                e.constant_width,
-                e.elevation,
-                e.normal.x,
-                e.normal.y,
-                e.normal.z,
+                f9(e.constant_width),
+                f9(e.elevation),
+                f9(e.normal.x),
+                f9(e.normal.y),
+                f9(e.normal.z),
                 verts.join(",")
             )
         }
@@ -3745,20 +3937,25 @@ fn logical_summary(entity: &EntityType) -> String {
                 .iter()
                 .map(|v| {
                     format!(
-                        "({:.6},{:.6},{:.6},b={:.6},sw={:.6},ew={:.6})",
-                        v.location.x, v.location.y, v.location.z, v.bulge, v.start_width, v.end_width
+                        "({},{},{},b={},sw={},ew={})",
+                        f9(v.location.x),
+                        f9(v.location.y),
+                        f9(v.location.z),
+                        f9(v.bulge),
+                        f9(v.start_width),
+                        f9(v.end_width)
                     )
                 })
                 .collect();
             format!(
-                "{base} flags={:?} sw={:.6} ew={:.6} elev={:.6} n=({:.6},{:.6},{:.6}) v=[{}]",
+                "{base} flags={:?} sw={} ew={} elev={} n=({},{},{}) v=[{}]",
                 e.flags,
-                e.start_width,
-                e.end_width,
-                e.elevation,
-                e.normal.x,
-                e.normal.y,
-                e.normal.z,
+                f9(e.start_width),
+                f9(e.end_width),
+                f9(e.elevation),
+                f9(e.normal.x),
+                f9(e.normal.y),
+                f9(e.normal.z),
                 verts.join(",")
             )
         }
@@ -3766,7 +3963,14 @@ fn logical_summary(entity: &EntityType) -> String {
             let verts: Vec<String> = e
                 .vertices
                 .iter()
-                .map(|v| format!("({:.6},{:.6},{:.6})", v.position.x, v.position.y, v.position.z))
+                .map(|v| {
+                    format!(
+                        "({},{},{})",
+                        f9(v.position.x),
+                        f9(v.position.y),
+                        f9(v.position.z)
+                    )
+                })
                 .collect();
             format!("{base} flags={:?} v=[{}]", e.flags, verts.join(","))
         }
@@ -3786,76 +3990,75 @@ fn logical_summary(entity: &EntityType) -> String {
             e.first_corner, e.second_corner, e.third_corner, e.fourth_corner, e.normal
         ),
         EntityType::Text(e) => format!(
-            "{base} {:?} pos=({:.6},{:.6},{:.6}) align={:?} ha={:?} va={:?} h={:.6} r={:.6} \
-             wf={:.6} obl={:.6} style={} gen={} n=({:.6},{:.6},{:.6})",
+            "{base} {:?} pos=({},{},{}) align={:?} ha={:?} va={:?} h={} r={} \
+             wf={} obl={} style={} gen={} n=({},{},{})",
             e.value,
-            e.insertion_point.x,
-            e.insertion_point.y,
-            e.insertion_point.z,
+            f9(e.insertion_point.x),
+            f9(e.insertion_point.y),
+            f9(e.insertion_point.z),
             e.alignment_point,
             e.horizontal_alignment,
             e.vertical_alignment,
-            e.height,
-            e.rotation,
-            e.width_factor,
-            e.oblique_angle,
+            f9(e.height),
+            f9(e.rotation),
+            f9(e.width_factor),
+            f9(e.oblique_angle),
             e.style,
             e.generation_flags,
-            e.normal.x,
-            e.normal.y,
-            e.normal.z
+            f9(e.normal.x),
+            f9(e.normal.y),
+            f9(e.normal.z)
         ),
         EntityType::MText(e) => format!(
-            "{base} {:?} pos=({:.6},{:.6},{:.6}) h={:.6} rw={:.6} r={:.6} att={:?} style={} \
-             n=({:.6},{:.6},{:.6})",
+            "{base} {:?} pos=({},{},{}) h={} rw={} r={} att={:?} style={} \
+             n=({},{},{})",
             e.value,
-            e.insertion_point.x,
-            e.insertion_point.y,
-            e.insertion_point.z,
-            e.height,
-            e.rectangle_width,
-            e.rotation,
+            f9(e.insertion_point.x),
+            f9(e.insertion_point.y),
+            f9(e.insertion_point.z),
+            f9(e.height),
+            f9(e.rectangle_width),
+            f9(e.rotation),
             e.attachment_point,
             e.style,
-            e.normal.x,
-            e.normal.y,
-            e.normal.z
+            f9(e.normal.x),
+            f9(e.normal.y),
+            f9(e.normal.z)
         ),
         EntityType::Insert(e) => format!(
-            "{base} block={} pos=({:.6},{:.6},{:.6}) s=({:.6},{:.6},{:.6}) r={:.6} \
-             n=({:.6},{:.6},{:.6}) grid=({},{},{:.6},{:.6}) atts={}",
+            "{base} block={} pos=({},{},{}) s=({},{},{}) r={} \
+             n=({},{},{}) grid=({},{},{},{}) atts={}",
             e.block_name,
-            e.insert_point.x,
-            e.insert_point.y,
-            e.insert_point.z,
-            e.x_scale(),
-            e.y_scale(),
-            e.z_scale(),
-            e.rotation,
-            e.normal.x,
-            e.normal.y,
-            e.normal.z,
+            f9(e.insert_point.x),
+            f9(e.insert_point.y),
+            f9(e.insert_point.z),
+            f9(e.x_scale()),
+            f9(e.y_scale()),
+            f9(e.z_scale()),
+            f9(e.rotation),
+            f9(e.normal.x),
+            f9(e.normal.y),
+            f9(e.normal.z),
             e.column_count,
             e.row_count,
-            e.column_spacing,
-            e.row_spacing,
+            f9(e.column_spacing),
+            f9(e.row_spacing),
             e.attributes.len()
         ),
         EntityType::Hatch(e) => format!(
-            "{base} solid={} pat={} ang={:.6} scale={:.6} elev={:.6} n={:?} paths={:?} seeds={:?}",
+            "{base} solid={} pat={} ang={} scale={} elev={} n={:?} paths={:?} seeds={:?}",
             e.is_solid,
             e.pattern.name,
-            e.pattern_angle,
-            e.pattern_scale,
-            e.elevation,
+            f9(e.pattern_angle),
+            f9(e.pattern_scale),
+            f9(e.elevation),
             e.normal,
             e.paths,
             e.seed_points
         ),
-        EntityType::Unknown(u) => format!(
-            "{base} code={} raw={:?}",
-            u.dwg_type_code, u.raw_dwg_data
-        ),
+        EntityType::Unknown(u) => {
+            format!("{base} code={} raw={:?}", u.dwg_type_code, u.raw_dwg_data)
+        }
         _ => base,
     }
 }
@@ -4186,9 +4389,133 @@ pub(crate) fn carried_id_and_name_of(dwg: &Path, hex: &str) -> (Option<String>, 
     )
 }
 
+/// Only for tests: adds an asymmetric 2x2 MINSERT (`column_count: 2`,
+/// `row_count: 2`, `column_spacing: 10`, `row_spacing: 5`, `rotation: 30°`) at
+/// `(20, 10, 0)` to an original DWG and returns its hex handle.
+#[cfg(test)]
+pub(crate) fn with_asymmetric_minsert_original(dwg: &Path, out: &Path) -> String {
+    use acadrust::tables::BlockRecord;
+
+    let mut drawing = super::read_drawing(dwg).expect("the DWG reads");
+    super::strip_build_metadata(&mut drawing);
+    if !drawing
+        .block_records
+        .iter()
+        .any(|b| b.name.eq_ignore_ascii_case("MBLK"))
+    {
+        let mut br = BlockRecord::new("MBLK");
+        br.set_handle(drawing.allocate_handle());
+        drawing.block_records.add(br).expect("add MBLK");
+    }
+    let mut ins = DwgInsert::new("MBLK", Vector3::new(20.0, 10.0, 0.0));
+    ins.common.layer = LAYER_ZERO.to_owned();
+    ins.rotation = 30.0_f64.to_radians();
+    ins.column_count = 2;
+    ins.row_count = 2;
+    ins.column_spacing = 10.0;
+    ins.row_spacing = 5.0;
+    let handle = drawing
+        .add_entity(EntityType::Insert(ins))
+        .expect("add MINSERT");
+    let bytes = DwgWriter::write_to_vec(&drawing).expect("write DWG");
+    std::fs::write(out, bytes).expect("save DWG");
+    handle_text(handle)
+}
+
+/// Only for tests: computes the world coordinates of every `(col, row)` grid
+/// instance of an `Insert` / `MINSERT` at `hex` from its DWG fields.
+#[cfg(test)]
+pub(crate) fn minsert_grid_positions_of(dwg: &Path, hex: &str) -> Option<Vec<[f64; 2]>> {
+    let drawing = super::read_drawing(dwg).expect("the DWG reads");
+    let handle = parse_hex_handle(hex).ok()?;
+    let EntityType::Insert(ins) = drawing.get_entity(handle)? else {
+        return None;
+    };
+    let cos = ins.rotation.cos();
+    let sin = ins.rotation.sin();
+    let mut out = Vec::new();
+    for r in 0..ins.row_count.max(1) {
+        for c in 0..ins.column_count.max(1) {
+            let lx = (c as f64) * ins.column_spacing;
+            let ly = (r as f64) * ins.row_spacing;
+            out.push([
+                ins.insert_point.x + lx * cos - ly * sin,
+                ins.insert_point.y + lx * sin + ly * cos,
+            ]);
+        }
+    }
+    Some(out)
+}
+
 // Keep unused imports clean; `attribute_text` / `read_properties` / `set_properties`
 // are kept available via module imports if needed.
 const _: fn(&crate::model::Insert, &Block, &crate::model::AttributeDefinition, &str) -> TextObject =
     attribute_text;
 const _: fn(&EntityCommon) -> Option<Properties> = read_properties;
 const _: fn(&mut EntityCommon, &Properties) = set_properties;
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+
+    #[test]
+    fn requested_add_and_delete_failures_are_separated_from_collateral_changes() {
+        let mut drawing = CadDocument::with_version(DxfVersion::AC1032);
+        let bytes = DwgWriter::write_to_vec(&drawing).unwrap();
+        let path = Path::new("diff-test.dwg");
+        let mut session = RevisionSession::open(&bytes, path).unwrap();
+
+        // Simulate a requested addition (0xDEAD), a requested added layer
+        // ("missing_layer"), a surviving top-level deletion, and a surviving
+        // deleted child handle (0xBEEF) in `sub_handles`.
+        let existing_handle = 0x5000u64;
+        session.expected_added.insert(0xDEAD);
+        session
+            .expected_layers_added
+            .insert("missing_layer".to_owned());
+        session.expected_deleted.insert(existing_handle);
+        session.expected_deleted.insert(0xBEEF);
+
+        let mut after = snapshot_drawing(&drawing, "AC1032", session.decode_report());
+        after.objects.insert(
+            existing_handle,
+            ObjectDigest {
+                kind: "LINE".to_owned(),
+                owner: 0,
+                raw_bytes: None,
+                logical: "LINE".to_owned(),
+            },
+        );
+        after.sub_handles.insert(0xBEEF);
+
+        let (requested_failures, unexpected_changes) = session.diff_snapshots(&after);
+        assert_eq!(requested_failures.len(), 4, "{requested_failures:?}");
+        assert!(
+            requested_failures.iter().any(|f| f.handle == "DEAD"),
+            "missing requested add must be a requested_failure"
+        );
+        assert!(
+            requested_failures
+                .iter()
+                .any(|f| f.handle == "missing_layer"),
+            "missing requested layer must be a requested_failure"
+        );
+        assert!(
+            requested_failures.iter().any(|f| f.handle == "5000"),
+            "surviving requested delete must be a requested_failure"
+        );
+        assert!(
+            requested_failures.iter().any(|f| f.handle == "BEEF"),
+            "surviving deleted child sub_handle must be a requested_failure"
+        );
+        // None of the requested-edit failures should leak into collateral
+        // unexpected_changes where `--allow-loss` could waive them.
+        assert!(
+            !unexpected_changes
+                .iter()
+                .any(|u| u.handle == "DEAD" || u.handle == "BEEF" || u.handle == "missing_layer"),
+            "{unexpected_changes:?}"
+        );
+        let _ = &mut drawing;
+    }
+}

@@ -350,13 +350,40 @@ fn a_command_gives_what_the_core_entry_point_gives() {
         "{text}"
     );
 
-    // A change set's input schema holds the change set's own schema.
+    // Drawing-set change schemas hold the strict change-set schema; `change`
+    // relaxes `sheet` omission only when `set` ends in `.dwg`.
     let input = find_command("change").unwrap().input_schema();
     let mut own = change_set_schema();
     let defs = own.as_object_mut().unwrap().remove("$defs").unwrap();
     own.as_object_mut().unwrap().remove("$schema");
-    assert_eq!(input["properties"]["change_set"], own);
+    assert_eq!(input["else"]["properties"]["change_set"], own);
     assert_eq!(input["$defs"], defs);
+
+    let propose_schema = find_command("propose").unwrap().input_schema();
+    assert_eq!(propose_schema["properties"]["change_set"], own);
+    assert_eq!(propose_schema["$defs"], defs);
+
+    let sheetless_add =
+        json!({"operations": [{"op": "add_line", "from": [0, 0, 0], "to": [1, 1, 0]}]});
+    let change_validator = jsonschema::validator_for(&input).unwrap();
+    let propose_validator = jsonschema::validator_for(&propose_schema).unwrap();
+    let dl_validator =
+        jsonschema::validator_for(&find_command("display-list").unwrap().input_schema()).unwrap();
+
+    // Drawing-set commands reject sheetless `add_line`.
+    assert!(!change_validator.is_valid(&json!({"set": "demo-set", "change_set": sheetless_add})));
+    assert!(!propose_validator.is_valid(&json!({"set": "demo-set", "change_set": sheetless_add})));
+    assert!(!propose_validator.is_valid(&json!({"set": "P-101.dwg", "change_set": sheetless_add})));
+    assert!(!dl_validator.is_valid(&json!({"source": "demo-set", "change_set": sheetless_add})));
+
+    // `change` on a `.dwg` path accepts sheetless `add_line` and `add_layer`,
+    // while still rejecting both `sheet` and `template` together.
+    assert!(change_validator.is_valid(&json!({"set": "P-101.dwg", "change_set": sheetless_add})));
+    assert!(change_validator.is_valid(&json!({"set": "P-101.DWG", "change_set": sheetless_add})));
+    assert!(!change_validator.is_valid(&json!({
+        "set": "P-101.dwg",
+        "change_set": {"operations": [{"op": "add_line", "sheet": "S", "template": "t.yaml", "from": [0, 0, 0], "to": [1, 1, 0]}]}
+    })));
 }
 
 #[test]

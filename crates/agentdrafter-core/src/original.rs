@@ -874,19 +874,26 @@ pub(crate) fn place_new_file(
         )
         .in_file(path)
     };
+    let cleanup = |mut err: Error| -> Error {
+        if let Err(rm) = fs::remove_file(temporary) {
+            if rm.kind() != io::ErrorKind::NotFound {
+                err.message.push_str(&format!(
+                    "; could not remove temporary file `{}`: {rm}",
+                    temporary.display()
+                ));
+            }
+        }
+        err
+    };
 
     #[cfg(windows)]
     {
         match rename_no_replace_windows(temporary, path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists || e.raw_os_error() == Some(183) => {
-                let _ = fs::remove_file(temporary);
-                Err(appeared())
+                Err(cleanup(appeared()))
             }
-            Err(e) => {
-                let _ = fs::remove_file(temporary);
-                Err(write_err(e))
-            }
+            Err(e) => Err(cleanup(write_err(e))),
         }
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -898,28 +905,16 @@ pub(crate) fn place_new_file(
         // filesystem or kernel does not support non-replacing rename.
         match rename_no_replace_unix(temporary, path) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(temporary);
-                Err(appeared())
-            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(cleanup(appeared())),
             Err(e) if is_rename_noreplace_unsupported(&e) => match fs::hard_link(temporary, path) {
                 Ok(()) => {
                     let _ = fs::remove_file(temporary);
                     Ok(())
                 }
-                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                    let _ = fs::remove_file(temporary);
-                    Err(appeared())
-                }
-                Err(err) => {
-                    let _ = fs::remove_file(temporary);
-                    Err(write_err(err))
-                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(cleanup(appeared())),
+                Err(err) => Err(cleanup(write_err(err))),
             },
-            Err(e) => {
-                let _ = fs::remove_file(temporary);
-                Err(write_err(e))
-            }
+            Err(e) => Err(cleanup(write_err(e))),
         }
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
@@ -929,14 +924,8 @@ pub(crate) fn place_new_file(
                 let _ = fs::remove_file(temporary);
                 Ok(())
             }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(temporary);
-                Err(appeared())
-            }
-            Err(e) => {
-                let _ = fs::remove_file(temporary);
-                Err(write_err(e))
-            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(cleanup(appeared())),
+            Err(e) => Err(cleanup(write_err(e))),
         }
     }
 }

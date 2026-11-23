@@ -5,7 +5,7 @@
 *.mirror.yaml
 *.mirror.tmp
 *.changes.json
-*.rev[0-9]*.pdf
+*.rev*.pdf
 *.rev.tmp
 .agentdrafter-*.tmp
 *.bak

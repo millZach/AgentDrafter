@@ -59,6 +59,7 @@ use crate::set::Notice;
 use crate::settings::Settings;
 use crate::units::Unit;
 
+pub(crate) use operations::original_change_set_schema;
 pub use operations::{change_set_schema, operation_name, operations, OperationInfo, OperationList};
 
 pub use accept::{accept_with, AcceptReport, AcceptRequest, StampRevision};

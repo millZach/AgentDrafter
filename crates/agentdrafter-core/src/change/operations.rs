@@ -542,7 +542,7 @@ pub fn operations() -> OperationList {
                     .map(|a| (*a).to_owned())
                     .collect(),
                 does: does(spec),
-                schema: with_definitions(operation_schema(spec, &defs), &defs),
+                schema: with_definitions(operation_schema(spec, &defs, false), &defs),
             })
             .collect(),
     }
@@ -945,10 +945,22 @@ fn grid_does(op: GridOp) -> String {
 /// The change set's schema: a JSON Schema (draft 2020-12) of every key a
 /// change set may hold, with what each means.
 pub fn change_set_schema() -> Value {
+    build_change_set_schema(false)
+}
+
+/// JSON Schema of a change set targeting an original `.dwg` file, where
+/// `add_*`, `add_layer`, and `change_layer` may omit `sheet` to default to
+/// that drawing's sheet (while still forbidding `sheet` and `template`
+/// together). Drawing-set commands keep [`change_set_schema`] strict.
+pub(crate) fn original_change_set_schema() -> Value {
+    build_change_set_schema(true)
+}
+
+fn build_change_set_schema(allow_omitted_sheet: bool) -> Value {
     let defs = definitions();
     let choices: Vec<Value> = SPECS
         .iter()
-        .map(|spec| operation_schema(spec, &defs))
+        .map(|spec| operation_schema(spec, &defs, allow_omitted_sheet))
         .collect();
     let [operations_key, fixes_key, guide_key] = CHANGE_SET_KEYS;
     let schema = json!({
@@ -1302,7 +1314,7 @@ fn add_block_definitions(defs: &mut Map<String, Value>) {
 }
 
 /// The schema of one operation, referring to `defs`.
-fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
+fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet: bool) -> Value {
     let op = if spec.alias.is_empty() {
         json!({
             "description": format!("The operation: {}.", spec.name),
@@ -1374,9 +1386,13 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             properties.insert(
                 "sheet".into(),
                 json!({
-                    "description": "The sheet to add it to, in its row: it is on this sheet \
-                                    alone. On a drawing set give sheet or template; on an \
-                                    original `.dwg`, omit sheet to target that drawing.",
+                    "description": if allow_omitted_sheet {
+                        "The sheet to add it to; on an original `.dwg`, omit sheet to target that \
+                         drawing."
+                    } else {
+                        "The sheet to add it to, in its row: it is on this sheet alone. Give \
+                         sheet or template, not both."
+                    },
                     "$ref": "#/$defs/sheet_name",
                 }),
             );
@@ -1384,15 +1400,15 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                 "template".into(),
                 json!({
                     "description": "The template to add it to: it is on every sheet built \
-                                    from it. On a drawing set give sheet or template.",
+                                    from it. Give sheet or template, not both.",
                     "$ref": "#/$defs/template_path",
                 }),
             );
-            // Drawing sets require `sheet` or `template` (enforced at runtime
-            // by `read_change_set`); original `.dwg` revisions allow omitting
-            // both to default to the original's sheet. Giving both is always
-            // forbidden.
-            let place = json!({ "not": { "required": ["sheet", "template"] } });
+            let place = if allow_omitted_sheet {
+                json!({ "not": { "required": ["sheet", "template"] } })
+            } else {
+                json!({ "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }] })
+            };
             let own = schema.as_object_mut().expect("an object's definition");
             let mut all_of = vec![place];
             if let Some(one_of) = own.remove("oneOf") {
@@ -1569,7 +1585,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
         }
         Kind::Array => array_schema(),
         Kind::Rotate | Kind::Scale | Kind::Mirror => transform_schema(spec.kind),
-        Kind::Table(op, table) => table_schema(op, table, defs),
+        Kind::Table(op, table) => table_schema(op, table, defs, allow_omitted_sheet),
         Kind::Block(op) => block_schema(op, defs),
         Kind::Grid(op) => grid_schema(op, defs),
         Kind::LeaderLine(LeaderLineOp::Add) => json!({
@@ -2037,7 +2053,12 @@ fn row_value_key() -> Value {
 }
 
 /// The schema of a table operation, before its `op`.
-fn table_schema(op: TableOp, table: Table, defs: &Map<String, Value>) -> Value {
+fn table_schema(
+    op: TableOp,
+    table: Table,
+    defs: &Map<String, Value>,
+    allow_omitted_sheet: bool,
+) -> Value {
     let word = table.word();
     let mut properties = Map::new();
     properties.insert(
@@ -2111,7 +2132,8 @@ fn table_schema(op: TableOp, table: Table, defs: &Map<String, Value>) -> Value {
         "additionalProperties": false,
         "properties": properties,
     });
-    if matches!((op, table), (TableOp::Add | TableOp::Change, Table::Layer)) {
+    if allow_omitted_sheet && matches!((op, table), (TableOp::Add | TableOp::Change, Table::Layer))
+    {
         schema["not"] = json!({ "required": ["sheet", "template"] });
     } else {
         schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);

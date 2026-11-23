@@ -28,7 +28,10 @@ use crate::change::operations::{
 use crate::change::SnapResolved;
 use crate::check::{check_dwg_bytes, CheckReport};
 use crate::description::{parse_added_object_json, parse_layer_patch_json, parse_new_layer_json};
-use crate::dwg::{MutationHandles, RevisionSession, TargetSpace, UnexpectedChange};
+use crate::dwg::{
+    LockedLayerHit, MutationHandles, RevisionSession, RevisionVerification, TargetSpace,
+    UnexpectedChange,
+};
 use crate::error::{Error, ErrorCode};
 use crate::geometry::curve::Curve;
 use crate::geometry::Reader;
@@ -398,35 +401,22 @@ fn revise_inner(
 
     // Serialize revision bytes in the original's DWG version, re-read strictly,
     // and run the structural diff self-check.
-    let (revision_bytes, unexpected_changes) = session.serialize_and_verify(&paths.dwg)?;
-
-    // Untouched-means-unchanged gate (ADR-0004): refuse to publish when the
-    // structural diff detects collateral changes outside the requested
-    // operations unless `allow_loss: true`.
-    if !unexpected_changes.is_empty() && !request.allow_loss {
-        let detail = unexpected_changes_refusal_message(source, &unexpected_changes);
-        let report = RevisionReport {
-            source: source.display().to_string(),
-            sheet: sheet_name,
-            dry_run: request.dry_run,
-            message: detail.clone(),
-            original: original_meta,
-            revision: None,
-            revision_dwg: None,
-            change_list: None,
-            pdf: None,
-            pdf_error: None,
-            plot: None,
-            units,
-            decode,
-            allowed_loss: false,
-            operations: outcomes,
-            unexpected_changes,
-            checks: None,
-        };
-        let error = Error::new(ErrorCode::DwgWrite, detail).in_file(source);
-        return Ok(Reply::partly(report, error));
+    let verified = session.serialize_and_verify(&paths.dwg)?;
+    if let Some(refusal) = enforce_verification_gates(
+        source,
+        &sheet_name,
+        request.dry_run,
+        request.allow_loss,
+        &original_meta,
+        units,
+        &decode,
+        &outcomes,
+        &verified,
+    ) {
+        return Ok(refusal);
     }
+    let revision_bytes = verified.bytes;
+    let unexpected_changes = verified.unexpected_changes;
 
     let revision_sha256 = fingerprint(&revision_bytes);
     let revision_file_name = paths
@@ -896,8 +886,8 @@ fn resolve_target(
                     });
                 }
             }
-            // Also allow targeting an unmodeled entity in this original directly
-            // by `{sheet}/handle:{HEX}`!
+            // Also allow targeting an unmodeled entity (or a canonical/zero-padded
+            // hex handle alias) in this original directly by `{sheet}/handle:{HEX}`.
             if sheet.eq_ignore_ascii_case(sheet_name) {
                 if let Some(hex) = id.strip_prefix(HANDLE_ID).or_else(|| {
                     (id.len() > HANDLE_ID.len()
@@ -905,13 +895,22 @@ fn resolve_target(
                         && id[..HANDLE_ID.len()].eq_ignore_ascii_case(HANDLE_ID))
                     .then(|| &id[HANDLE_ID.len()..])
                 }) {
-                    if session.locked_layer_of(hex).is_ok() {
-                        let upper = hex.to_ascii_uppercase();
-                        return Ok(ResolvedTarget {
-                            id: handle_id(sheet_name, &upper),
-                            handle: upper,
-                            model_index: None,
-                        });
+                    if let Ok(num) = u64::from_str_radix(hex, 16) {
+                        if num != 0 && session.locked_layer_of(hex).is_ok() {
+                            let canonical = format!("{num:X}");
+                            let model_index = dwg_origin
+                                .handles
+                                .iter()
+                                .position(|h| h.eq_ignore_ascii_case(&canonical));
+                            let resolved_id = model_index
+                                .map(|i| record.record.objects[i].id.clone())
+                                .unwrap_or_else(|| handle_id(sheet_name, &canonical));
+                            return Ok(ResolvedTarget {
+                                id: resolved_id,
+                                handle: canonical,
+                                model_index,
+                            });
+                        }
                     }
                 }
             }
@@ -996,6 +995,10 @@ fn resolve_target(
     }
 }
 
+fn canonical_handle_value(hex: &str) -> Option<u64> {
+    u64::from_str_radix(hex.trim(), 16).ok().filter(|&v| v != 0)
+}
+
 fn resolve_unique_targets(
     session: &RevisionSession,
     record: &DwgLoaded,
@@ -1004,22 +1007,31 @@ fn resolve_unique_targets(
     op: &Operation,
 ) -> Result<Vec<ResolvedTarget>, Error> {
     let mut resolved = Vec::with_capacity(targets.len());
-    let mut seen_handles = HashSet::with_capacity(targets.len());
+    let mut seen_handles: HashSet<u64> = HashSet::with_capacity(targets.len());
     for (target, field) in targets {
         let found = resolve_target(session, record, target, sheet_name, op, field)?;
-        if !seen_handles.insert(found.handle.clone()) {
+        let Some(handle_num) = canonical_handle_value(&found.handle) else {
+            return Err(op_error(
+                op.index,
+                op.spec.name,
+                ErrorCode::BadValue,
+                format!("invalid handle `{}` on `{}`", found.handle, found.id),
+                field,
+            ));
+        };
+        if !seen_handles.insert(handle_num) {
             return Err(op_error(
                 op.index,
                 op.spec.name,
                 ErrorCode::BadValue,
                 format!(
-                    "object `{}` (handle `{}`) is listed more than once in the target list",
-                    found.id, found.handle
+                    "object `{}` (handle `{:X}`) is listed more than once in the target list",
+                    found.id, handle_num
                 ),
                 field,
             ));
         }
-        check_unlocked(session, &found.handle, &found.id, op, field)?;
+        check_unlocked_with_children(session, &found.handle, &found.id, op, field)?;
         resolved.push(found);
     }
     Ok(resolved)
@@ -1038,6 +1050,33 @@ fn check_unlocked(
             op.spec.name,
             ErrorCode::Locked,
             format!("object `{id}` is on locked layer `{layer}`"),
+            field,
+        ));
+    }
+    Ok(())
+}
+
+fn check_unlocked_with_children(
+    session: &RevisionSession,
+    handle: &str,
+    id: &str,
+    op: &Operation,
+    field: &str,
+) -> Result<(), Error> {
+    if let Some(LockedLayerHit {
+        layer,
+        attribute_tag,
+    }) = session.locked_layer_with_children(handle)?
+    {
+        let message = match attribute_tag {
+            Some(tag) => format!("object `{id}` has attribute `{tag}` on locked layer `{layer}`"),
+            None => format!("object `{id}` is on locked layer `{layer}`"),
+        };
+        return Err(op_error(
+            op.index,
+            op.spec.name,
+            ErrorCode::Locked,
+            message,
             field,
         ));
     }
@@ -1332,7 +1371,14 @@ fn apply_revision_op(
             }
             let record = ensure_record(session, cached, source, sheet_name)?;
             let found = resolve_target(session, record, target, sheet_name, op, "target")?;
-            check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            let moves_children = set.contains_key("position")
+                || set.contains_key("rotation")
+                || set.contains_key("scale");
+            if moves_children {
+                check_unlocked_with_children(session, &found.handle, &found.id, op, "target")?;
+            } else {
+                check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            }
             let existing_names: HashSet<String> = record
                 .record
                 .objects
@@ -1371,7 +1417,7 @@ fn apply_revision_op(
         Body::Move { target, motion } => {
             let record = ensure_record(session, cached, source, sheet_name)?;
             let found = resolve_target(session, record, target, sheet_name, op, "target")?;
-            check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            check_unlocked_with_children(session, &found.handle, &found.id, op, "target")?;
             let mut snapped = Vec::new();
             let delta = resolve_motion(motion, record, settings, op, &mut snapped)?;
             let handles = session
@@ -1397,7 +1443,7 @@ fn apply_revision_op(
         Body::Delete { target } => {
             let record = ensure_record(session, cached, source, sheet_name)?;
             let found = resolve_target(session, record, target, sheet_name, op, "target")?;
-            check_unlocked(session, &found.handle, &found.id, op, "target")?;
+            check_unlocked_with_children(session, &found.handle, &found.id, op, "target")?;
             let handles = session
                 .delete_object(&found.handle)
                 .map_err(|e| op_error(index, op_name, e.code, e.message, "target"))?;
@@ -1854,6 +1900,97 @@ fn decode_refusal_message(source: &Path, decode: &DecodeReport) -> String {
          `--allow-loss` (or `allow_loss: true`) to allow revising this drawing and record the \
          accepted loss in the revision report (ADR-0004)",
         parts.join(", ")
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enforce_verification_gates(
+    source: &Path,
+    sheet_name: &str,
+    dry_run: bool,
+    allow_loss: bool,
+    original_meta: &RevisionFile,
+    units: Option<Unit>,
+    decode: &DecodeReport,
+    outcomes: &[RevisionOperationOutcome],
+    verified: &RevisionVerification,
+) -> Option<Reply<RevisionReport>> {
+    // 1. Requested-edit integrity gate (ADR-0005): NEVER bypassable with
+    //    `--allow-loss`. If any requested addition vanished or any requested
+    //    deletion survived, refuse with zero files written.
+    if !verified.requested_failures.is_empty() {
+        let detail = requested_failures_refusal_message(source, &verified.requested_failures);
+        let mut combined = verified.requested_failures.clone();
+        combined.extend(verified.unexpected_changes.iter().cloned());
+        let report = RevisionReport {
+            source: source.display().to_string(),
+            sheet: sheet_name.to_owned(),
+            dry_run,
+            message: detail.clone(),
+            original: original_meta.clone(),
+            revision: None,
+            revision_dwg: None,
+            change_list: None,
+            pdf: None,
+            pdf_error: None,
+            plot: None,
+            units,
+            decode: decode.clone(),
+            allowed_loss: allow_loss,
+            operations: outcomes.to_vec(),
+            unexpected_changes: combined,
+            checks: None,
+        };
+        let error = Error::new(ErrorCode::DwgWrite, detail).in_file(source);
+        return Some(Reply::partly(report, error));
+    }
+
+    // 2. Untouched-means-unchanged gate (ADR-0004): refuse collateral changes
+    //    outside the requested operations unless `allow_loss: true`.
+    if !verified.unexpected_changes.is_empty() && !allow_loss {
+        let detail = unexpected_changes_refusal_message(source, &verified.unexpected_changes);
+        let report = RevisionReport {
+            source: source.display().to_string(),
+            sheet: sheet_name.to_owned(),
+            dry_run,
+            message: detail.clone(),
+            original: original_meta.clone(),
+            revision: None,
+            revision_dwg: None,
+            change_list: None,
+            pdf: None,
+            pdf_error: None,
+            plot: None,
+            units,
+            decode: decode.clone(),
+            allowed_loss: false,
+            operations: outcomes.to_vec(),
+            unexpected_changes: verified.unexpected_changes.clone(),
+            checks: None,
+        };
+        let error = Error::new(ErrorCode::DwgWrite, detail).in_file(source);
+        return Some(Reply::partly(report, error));
+    }
+    None
+}
+
+fn requested_failures_refusal_message(source: &Path, failures: &[UnexpectedChange]) -> String {
+    let name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| source.display().to_string());
+    let preview: Vec<String> = failures
+        .iter()
+        .take(5)
+        .map(|u| format!("{} {} ({})", u.kind, u.handle, u.detail))
+        .collect();
+    let extra = if failures.len() > 5 { ", ..." } else { "" };
+    format!(
+        "refused to revise {name} because {} requested edit{} did not verify after writing \
+         ({}{extra}); nothing was written (ADR-0005)",
+        failures.len(),
+        plural(failures.len()),
+        preview.join("; ")
     )
 }
 

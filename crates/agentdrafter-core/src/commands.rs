@@ -35,7 +35,10 @@ use serde_json::{json, Map, Value};
 
 use crate::build::{build_with, BuildRequest};
 use crate::change::{accept_with, recover, AcceptRequest, JournalRequest, UndoRequest};
-use crate::change::{change_set_schema, change_with, journal, operations, undo, ChangeRequest};
+use crate::change::{
+    change_set_schema, change_with, journal, operations, original_change_set_schema, undo,
+    ChangeRequest,
+};
 use crate::change::{
     discard, keep_with, proposals, propose_with, DiscardRequest, KeepRequest, ProposalsRequest,
     ProposeRequest, BY_LONGEST, BY_PATTERN, DRAFTER, PROPOSALS_FOLDER,
@@ -1137,20 +1140,33 @@ fn change_does() -> String {
 }
 
 fn change_input() -> Value {
-    // The change set's own schema, its definitions moved up beside the
-    // input's, where its references point.
-    let mut change_set = change_set_schema();
-    let defs = change_set
+    // Both drawing-set and original-DWG change-set schemas share identical
+    // `$defs`; move `$defs` up beside the input's where references point, and
+    // apply strict drawing-set rules unless `set` names a `.dwg` file.
+    let mut set_change_set = change_set_schema();
+    let defs = set_change_set
         .as_object_mut()
         .and_then(|schema| {
             schema.remove("$schema");
             schema.remove("$defs")
         })
         .unwrap_or_else(|| json!({}));
+    let mut orig_change_set = original_change_set_schema();
+    if let Some(schema) = orig_change_set.as_object_mut() {
+        schema.remove("$schema");
+        schema.remove("$defs");
+    }
+    let change_set_desc = set_change_set
+        .get("description")
+        .cloned()
+        .unwrap_or_else(|| json!("The change set to apply."));
     let mut schema = input(
         json!({
             "set": text("The drawing set's folder, or an original `.dwg` file to revise."),
-            "change_set": change_set,
+            "change_set": {
+                "description": change_set_desc,
+                "type": "object",
+            },
             "dry_run": flag("Report what the change set would do, and write nothing."),
             "output": {
                 "description": "Original DWG only: where to write the revision `.dwg` (never overwriting the original or any existing file). `null` acts as if it were left out. Without it, `<stem>.rev1.dwg`, `<stem>.rev2.dwg`, ... beside the original.",
@@ -1165,6 +1181,22 @@ fn change_input() -> Value {
         }),
         &["set", "change_set"],
     );
+    schema["if"] = json!({
+        "properties": {
+            "set": { "type": "string", "pattern": "\\.[dD][wW][gG]$" }
+        },
+        "required": ["set"]
+    });
+    schema["then"] = json!({
+        "properties": {
+            "change_set": orig_change_set
+        }
+    });
+    schema["else"] = json!({
+        "properties": {
+            "change_set": set_change_set
+        }
+    });
     schema["$defs"] = defs;
     schema
 }
@@ -1320,22 +1352,25 @@ fn propose_does() -> String {
 }
 
 fn propose_input() -> Value {
-    let mut schema = change_input();
-    let properties = schema["properties"]
+    let mut change_set = change_set_schema();
+    let defs = change_set
         .as_object_mut()
-        .expect("change's input has properties");
-    for key in [
-        "dry_run",
-        "output",
-        "allow_loss",
-        "plot_style",
-        "plot_styles",
-        "no_pdf",
-    ] {
-        properties.remove(key);
-    }
-    properties.insert("set".to_owned(), text("The drawing set's folder."));
-    properties.insert("by".to_owned(), by("proposes it", "Assistant"));
+        .and_then(|schema| {
+            schema.remove("$schema");
+            schema.remove("$defs")
+        })
+        .unwrap_or_else(|| json!({}));
+    let mut schema = input(
+        json!({
+            "set": text("The drawing set's folder."),
+            "change_set": change_set,
+            "by": by("proposes it", "Assistant"),
+            "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
+        }),
+        &["set", "change_set"],
+    );
+    schema["$defs"] = defs;
     schema
 }
 

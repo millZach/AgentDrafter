@@ -1494,3 +1494,242 @@ fn array_path_refuses_non_curve_insert() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn allow_loss_never_publishes_missing_requested_add_or_surviving_delete() {
+    let dir = scratch("allow_loss_requested_gate");
+    let source = dir.join("GATE.dwg");
+    let orig_meta = RevisionFile {
+        file: "GATE.dwg".to_owned(),
+        sha256: "0".repeat(64),
+        dwg_version: "AC1032".to_owned(),
+    };
+    let decode = DecodeReport {
+        decoded: true,
+        not_decoded: Vec::new(),
+        skipped: 0,
+        recovered_errors: 0,
+        warnings: 0,
+        diagnostics_truncated: false,
+        read_past_damage: None,
+    };
+    let verified = RevisionVerification {
+        bytes: Vec::new(),
+        requested_failures: vec![
+            UnexpectedChange {
+                kind: "ADDED_OBJECT".to_owned(),
+                handle: "DEAD".to_owned(),
+                change: crate::dwg::UnexpectedChangeKind::Removed,
+                detail: "requested added object was missing after writing the revision".to_owned(),
+            },
+            UnexpectedChange {
+                kind: "LINE".to_owned(),
+                handle: "BEEF".to_owned(),
+                change: crate::dwg::UnexpectedChangeKind::Added,
+                detail: "requested deleted LINE was still present in the revision after writing"
+                    .to_owned(),
+            },
+        ],
+        unexpected_changes: Vec::new(),
+    };
+
+    // Even with `allow_loss = true`, requested-edit failures MUST be refused!
+    let refusal = enforce_verification_gates(
+        &source,
+        "GATE",
+        false,
+        true,
+        &orig_meta,
+        Some(Unit::Mm),
+        &decode,
+        &[],
+        &verified,
+    )
+    .expect("allow_loss must not waive missing adds or surviving deletes");
+    assert!(!refusal.ok);
+    assert_eq!(refusal.error.as_ref().unwrap().code, ErrorCode::DwgWrite);
+    assert!(
+        !refusal
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("--allow-loss"),
+        "error should not suggest --allow-loss can bypass requested-edit failures: {}",
+        refusal.error.as_ref().unwrap().message
+    );
+    assert_eq!(refusal.result.unwrap().unexpected_changes.len(), 2);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mirror_asymmetric_minsert_across_x_and_y_axes_mirrors_every_grid_instance() {
+    let dir = scratch("mirror_minsert");
+    let base = build_made_up_original(&dir, "BASE");
+    let orig = dir.join("MINS.dwg");
+    let hex = dwg::with_asymmetric_minsert_original(&base, &orig);
+    let before = dwg::minsert_grid_positions_of(&orig, &hex).expect("MINSERT grid before");
+    assert_eq!(before.len(), 4);
+    let settings = Settings::default().without_system_fonts();
+
+    // 1. Mirror across X axis: (x, y) -> (x, -y) for all 4 grid instances.
+    let rx = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{
+                    "op": "mirror",
+                    "target": {"id": format!("MINS/handle:{hex}")},
+                    "first_point": [0, 0, 0],
+                    "second_point": [100, 0, 0],
+                    "erase_source": true
+                }]
+            }),
+            dry_run: false,
+            output: Some(dir.join("MINS.mx.dwg")),
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(rx.ok, "mirror MINSERT across X axis failed: {rx:?}");
+    let after_x =
+        dwg::minsert_grid_positions_of(&dir.join("MINS.mx.dwg"), &hex).expect("grid after X");
+    for (b, a) in before.iter().zip(after_x.iter()) {
+        assert!(
+            (a[0] - b[0]).abs() < 1e-6 && (a[1] - -b[1]).abs() < 1e-6,
+            "X mirror mismatch: before={b:?}, after={a:?}"
+        );
+    }
+
+    // 2. Mirror across Y axis: (x, y) -> (-x, y) for all 4 grid instances.
+    let ry = revise_with(
+        &ReviseRequest {
+            set: orig,
+            change_set: json!({
+                "operations": [{
+                    "op": "mirror",
+                    "target": {"id": format!("MINS/handle:{hex}")},
+                    "first_point": [0, 0, 0],
+                    "second_point": [0, 100, 0],
+                    "erase_source": true
+                }]
+            }),
+            dry_run: false,
+            output: Some(dir.join("MINS.my.dwg")),
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(ry.ok, "mirror MINSERT across Y axis failed: {ry:?}");
+    let after_y =
+        dwg::minsert_grid_positions_of(&dir.join("MINS.my.dwg"), &hex).expect("grid after Y");
+    for (b, a) in before.iter().zip(after_y.iter()) {
+        assert!(
+            (a[0] - -b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6,
+            "Y mirror mismatch: before={b:?}, after={a:?}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unlocked_insert_with_locked_attribute_refuses_move_transform_copy_and_delete() {
+    let dir = scratch("locked_child_attr");
+    let base = build_made_up_original(&dir, "BASE");
+    let orig = dir.join("CHILDLOCK.dwg");
+    let ins_hex = dwg::with_constant_and_locked_attrs(&base, &orig);
+    let ins_id = format!("CHILDLOCK/handle:{ins_hex}");
+    let before = dir_files(&dir);
+    let settings = Settings::default().without_system_fonts();
+
+    for cs in [
+        json!({"operations": [{"op": "move", "target": {"id": ins_id}, "by": [10, 0, 0]}]}),
+        json!({"operations": [{"op": "rotate", "target": {"id": ins_id}, "base_point": [0, 0, 0], "angle": 90}]}),
+        json!({"operations": [{"op": "scale", "target": {"id": ins_id}, "base_point": [0, 0, 0], "factor": 2}]}),
+        json!({"operations": [{"op": "mirror", "target": {"id": ins_id}, "first_point": [0, 0, 0], "second_point": [10, 0, 0], "erase_source": true}]}),
+        json!({"operations": [{"op": "mirror", "target": {"id": ins_id}, "first_point": [0, 0, 0], "second_point": [10, 0, 0], "erase_source": false}]}),
+        json!({"operations": [{"op": "copy", "target": {"id": ins_id}, "by": [10, 0, 0]}]}),
+        json!({"operations": [{"op": "delete", "target": {"id": ins_id}}]}),
+        json!({"operations": [{"op": "change", "target": {"id": ins_id}, "set": {"position": [60, 60, 0]}}]}),
+    ] {
+        let r = revise_with(
+            &ReviseRequest {
+                set: orig.clone(),
+                change_set: cs.clone(),
+                dry_run: false,
+                output: None,
+                allow_loss: false,
+                plot_style: None,
+                no_pdf: true,
+            },
+            &settings,
+        );
+        assert!(!r.ok, "insert with locked attribute must refuse {cs}");
+        assert_eq!(
+            r.error.as_ref().unwrap().code,
+            ErrorCode::Locked,
+            "expected Locked for {cs}, got {:?}",
+            r.error
+        );
+    }
+    assert_eq!(dir_files(&dir), before, "no files may be written");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn leading_zero_handle_alias_is_deduplicated_in_transform_and_copy() {
+    let dir = scratch("zero_pad_dup");
+    let orig = build_made_up_original(&dir, "ZPAD");
+    let loaded = crate::original::read_dwg_record(&orig, false).unwrap();
+    let hex = loaded.record.dwg.as_ref().unwrap().handles[0].clone();
+    let id_plain = format!("ZPAD/handle:{hex}");
+    let id_padded = format!("ZPAD/handle:0{hex}");
+    let before = dir_files(&dir);
+    let settings = Settings::default().without_system_fonts();
+
+    for cs in [
+        json!({
+            "operations": [{
+                "op": "rotate",
+                "targets": [{"id": id_plain}, {"id": id_padded}],
+                "base_point": [0, 0, 0],
+                "angle": 45
+            }]
+        }),
+        json!({
+            "operations": [{
+                "op": "copy",
+                "targets": [{"id": id_plain}, {"id": id_padded}],
+                "by": [10, 0, 0]
+            }]
+        }),
+    ] {
+        let r = revise_with(
+            &ReviseRequest {
+                set: orig.clone(),
+                change_set: cs.clone(),
+                dry_run: false,
+                output: None,
+                allow_loss: false,
+                plot_style: None,
+                no_pdf: true,
+            },
+            &settings,
+        );
+        assert!(
+            !r.ok,
+            "leading-zero handle duplicate must be refused for {cs}"
+        );
+        assert_eq!(r.error.unwrap().code, ErrorCode::BadValue);
+    }
+    assert_eq!(dir_files(&dir), before, "zero files may be written");
+
+    let _ = fs::remove_dir_all(&dir);
+}
