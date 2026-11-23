@@ -530,6 +530,47 @@ pub(crate) fn plot_style(
     Ok((style, used))
 }
 
+/// Plots a DWG already in memory (such as a revision DWG just serialized) to
+/// PDF bytes stamped with `source` (the revision DWG's path), returning both
+/// the PDF bytes and its [`PlotReport`] without writing any file.
+pub(crate) fn plot_dwg_bytes(
+    source: &Path,
+    bytes: &[u8],
+    output: &Path,
+    style: &(PlotStyle, PlotStyleUsed),
+    settings: &Settings,
+) -> Result<(Vec<u8>, PlotReport), Error> {
+    let drawing = crate::dwg::read_bytes(bytes, source)?;
+    let sheet = Sheet {
+        units: drawing.units.unwrap_or(Unit::Mm),
+        block_library: None,
+        linetypes: drawing.linetypes,
+        layers: drawing.layers,
+        text_styles: drawing.text_styles,
+        table_styles: drawing.table_styles,
+        mleader_styles: drawing.mleader_styles,
+        dimension_styles: drawing.dimension_styles,
+        blocks: drawing.blocks,
+        objects: drawing.objects,
+        paper: drawing.paper,
+        ltscale: drawing.ltscale,
+        layout: drawing.layout,
+        other_layouts: drawing.other_layouts,
+    };
+    let record = Record {
+        sheet,
+        units: drawing.units,
+        objects_not_drawn: drawing.objects_not_read,
+        not_drawn: drawing.not_read,
+        ids: Vec::new(),
+        files: vec![(SourceKind::Dwg, source.to_path_buf(), bytes.to_vec())],
+    };
+    let title = source
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    render_pdf_record(&record, source, output, &title, style, settings)
+}
+
 /// Plots the sheet `record` holds, read from `source`, to a PDF at
 /// `output`, written whole or not at all.
 fn plot_record(
@@ -538,10 +579,23 @@ fn plot_record(
     output: &Path,
     overwrite: bool,
     title: &str,
-    (style, used): &(PlotStyle, PlotStyleUsed),
+    style: &(PlotStyle, PlotStyleUsed),
     settings: &Settings,
 ) -> Result<PlotReport, Error> {
     refuse_to_replace(source, output, overwrite, OutputKind::Pdf)?;
+    let (bytes, report) = render_pdf_record(record, source, output, title, style, settings)?;
+    write_whole(output, &bytes, OutputKind::Pdf)?;
+    Ok(report)
+}
+
+fn render_pdf_record(
+    record: &Record,
+    source: &Path,
+    output: &Path,
+    title: &str,
+    (style, used): &(PlotStyle, PlotStyleUsed),
+    settings: &Settings,
+) -> Result<(Vec<u8>, PlotReport), Error> {
     let sheet = &record.sheet;
     let fonts = SheetFonts::find(sheet, settings);
     let millimetres_per_unit = sheet.units.convert(1.0, Unit::Mm);
@@ -596,8 +650,7 @@ fn plot_record(
         Vec::new()
     };
     let (list, page) = drawn.swap_remove(0);
-    write_whole(output, &bytes, OutputKind::Pdf)?;
-    Ok(PlotReport {
+    let report = PlotReport {
         source: source.display().to_string(),
         pdf: output.display().to_string(),
         sheet_size: page.1,
@@ -621,7 +674,8 @@ fn plot_record(
         ),
         stamp,
         layouts,
-    })
+    };
+    Ok((bytes, report))
 }
 
 /// The page `sheet`, drawn as `list`, plots on at 1:1: the paper it

@@ -95,6 +95,7 @@ mod query;
 mod raster;
 mod render;
 mod reply;
+mod revise;
 mod set;
 mod settings;
 mod stamp;
@@ -198,6 +199,11 @@ pub use query::{
 };
 pub use render::{render, render_with, DrawnThrough, HatchCutShort, RenderReport, RenderRequest};
 pub use reply::Reply;
+pub use revise::{
+    revise, revise_with, ReviseRequest, RevisionChangeListFile, RevisionCopy, RevisionFile,
+    RevisionOperationOutcome, RevisionReport, RevisionUnexpectedChange,
+    RevisionUnexpectedChangeKind, REVISION_CHANGES_EXTENSION,
+};
 pub use set::{
     build_set, build_set_with, Notice, NoticeCode, SetBuildRequest, SetReport, SheetOutcome,
     SET_SETTINGS_FILE,

@@ -95,33 +95,95 @@ pub(super) fn layers(node: &Node, linetypes: &[Linetype]) -> Result<Vec<Layer>, 
     let mut layers = Vec::with_capacity(entries.len());
     for entry in entries {
         let path = key_path("layers", &entry.key);
-        let fields = Fields::of(&entry.value, &path, &LAYER_KEYS, "a layer")?;
         let mut layer = Layer::new(entry.key.clone());
-        if let Some(node) = fields.get("color") {
-            layer.color = colour(node, &fields.path_of("color"), "")?;
-        }
-        if let Some(node) = fields.text("linetype") {
-            layer.linetype = linetype_name(node, &fields.path_of("linetype"), linetypes)?;
-        }
-        if let Some(node) = fields.get("lineweight") {
-            layer.lineweight = Some(lineweight(node, &fields.path_of("lineweight"))?);
-        }
-        for (key, state) in [
-            ("on", &mut layer.on),
-            ("frozen", &mut layer.frozen),
-            ("locked", &mut layer.locked),
-            ("plot", &mut layer.plot),
-        ] {
-            if let Some(node) = fields.get(key) {
-                *state = boolean(node, &fields.path_of(key))?;
-            }
-        }
-        if let Some(node) = fields.text("description") {
-            layer.description = layer_description(node, &fields.path_of("description"))?;
-        }
+        apply_layer_fields(&mut layer, &entry.value, &path, linetypes, false)?;
         layers.push(layer);
     }
     Ok(layers)
+}
+
+/// Validates `name` as an AutoCAD layer name and applies the keys of `node`
+/// onto `layer`. When `allow_clear` is true (`change_layer`), a bare null
+/// clears an optional key (`lineweight` -> `None`, `description` -> `""`,
+/// `linetype` -> `"Continuous"`).
+pub(super) fn apply_layer_fields(
+    layer: &mut Layer,
+    node: &Node,
+    path: &str,
+    linetypes: &[Linetype],
+    allow_clear: bool,
+) -> Result<(), Error> {
+    let fields = Fields::of(node, path, &LAYER_KEYS, "a layer")?;
+    if let Some(node) = fields.get("color") {
+        layer.color = colour(node, &fields.path_of("color"), "")?;
+    }
+    if let Some(raw) = fields.get("linetype") {
+        if allow_clear && raw.is_bare_null() {
+            layer.linetype = CONTINUOUS.to_owned();
+        } else if let Some(node) = fields.text("linetype") {
+            layer.linetype = linetype_name(node, &fields.path_of("linetype"), linetypes)?;
+        }
+    }
+    if let Some(node) = fields.get("lineweight") {
+        if allow_clear && node.is_bare_null() {
+            layer.lineweight = None;
+        } else {
+            layer.lineweight = Some(lineweight(node, &fields.path_of("lineweight"))?);
+        }
+    }
+    for (key, state) in [
+        ("on", &mut layer.on),
+        ("frozen", &mut layer.frozen),
+        ("locked", &mut layer.locked),
+        ("plot", &mut layer.plot),
+    ] {
+        if let Some(node) = fields.get(key) {
+            *state = boolean(node, &fields.path_of(key))?;
+        }
+    }
+    if let Some(raw) = fields.get("description") {
+        if allow_clear && raw.is_bare_null() {
+            layer.description.clear();
+        } else if let Some(node) = fields.text("description") {
+            layer.description = layer_description(node, &fields.path_of("description"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Validates a new layer's name against AutoCAD's naming rules.
+pub(super) fn validate_layer_name(name: &str, path: &str) -> Result<(), Error> {
+    let dummy = Entry {
+        key: name.to_owned(),
+        key_at: super::strict_yaml::Pos { line: 0, column: 0 },
+        key_end: 0,
+        value: Node::scalar(""),
+    };
+    if name.trim().is_empty() {
+        return Err(name_error(
+            &dummy,
+            path,
+            "a layer's name cannot be empty".to_owned(),
+        ));
+    }
+    if name.chars().count() > LONGEST_NAME {
+        return Err(name_error(
+            &dummy,
+            path,
+            format!("a layer's name is at most {LONGEST_NAME} characters"),
+        ));
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| FORBIDDEN_IN_NAMES.contains(*c) || c.is_control())
+    {
+        return Err(name_error(
+            &dummy,
+            path,
+            format!("layer name `{name}` holds `{bad}`, which AutoCAD does not allow in a name"),
+        ));
+    }
+    Ok(())
 }
 
 /// The keys every object takes for a colour, linetype, lineweight and

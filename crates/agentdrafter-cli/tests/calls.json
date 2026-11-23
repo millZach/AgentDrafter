@@ -9,7 +9,8 @@
     "copy.json": {"operations": [{"op": "copy", "target": {"id": "DEMO-002/heading"}, "by": [0, -0.5, 0]}, {"op": "arraypolar", "target": {"id": "DEMO-002/heading-1"}, "center": [8.5, 5.5, 0], "count": 2, "angle": 180}, {"op": "array", "kind": "path", "target": {"id": "DEMO-001/heading"}, "path": {"id": "DEMO-001/border"}, "count": 3, "align": false}]},
     "transform.json": {"operations": [{"op": "mirror", "target": {"id": "DEMO-002/heading"}, "first_point": [8.5, 0, 0], "second_point": [8.5, 1, 0]}, {"op": "ro", "target": {"id": "DEMO-001/heading"}, "base_point": [1, 10, 0], "angle": 90}, {"op": "scale", "target": {"id": "DEMO-001/heading"}, "base_point": {"snap": {"id": "DEMO-001/heading", "snap": "insertion"}}, "factor": 2}]},
     "guide.json": {"title": "Draw a line from the border's corner", "sheet": "DEMO-002", "steps": [{"say": "Make notes the current layer.", "setting": {"current_layer": "notes"}}, {"say": "Draw a line from the border's corner to the middle of its right side.", "title": "Draw the line", "tool": "line", "points": [{"at": {"snap": {"id": "DEMO-002/border", "snap": "endpoint", "which": "points[0]"}}, "label": "the corner"}, {"at": {"snap": {"id": "DEMO-002/border", "snap": "midpoint", "which": "segments[1]"}}, "label": "the side's middle"}], "completes": {"op": "add_line", "sheet": "DEMO-002", "layer": "notes", "from": {"snap": {"id": "DEMO-002/border", "snap": "endpoint", "which": "points[0]"}}, "to": {"snap": {"id": "DEMO-002/border", "snap": "midpoint", "which": "segments[1]"}}}}, {"say": "Move the line 0.5 up.", "tool": "move", "points": [{"object": {"made_by": 2}, "label": "the line"}], "completes": {"op": "move", "target": {"made_by": 2}, "by": [0, 0.5, 0]}}]},
-    "guided.json": {"guide": {"guide": 1, "step": 2}, "operations": [{"op": "add_line", "sheet": "DEMO-002", "layer": "notes", "from": {"snap": {"id": "DEMO-002/border", "snap": "midpoint", "which": "segments[1]"}}, "to": {"snap": {"id": "DEMO-002/border", "snap": "endpoint", "which": "points[0]"}}}]}
+    "guided.json": {"guide": {"guide": 1, "step": 2}, "operations": [{"op": "add_line", "sheet": "DEMO-002", "layer": "notes", "from": {"snap": {"id": "DEMO-002/border", "snap": "midpoint", "which": "segments[1]"}}, "to": {"snap": {"id": "DEMO-002/border", "snap": "endpoint", "which": "points[0]"}}}]},
+    "revise.json": {"operations": [{"op": "add_line", "from": [1, 1, 0], "to": [4, 1, 0]}]}
   },
   "calls": {
     "build": {
@@ -176,6 +177,12 @@
       "after": "read",
       "args": ["check", "demo-set/dwg/DEMO-003.dwg"],
       "input": {"source": "demo-set/dwg/DEMO-003.dwg"}
+    },
+    {
+      "command": "change",
+      "after": "read",
+      "args": ["change", "demo-set/dwg/DEMO-003.dwg", "revise.json", "--output", "DEMO-003.rev1.dwg"],
+      "input": {"set": "demo-set/dwg/DEMO-003.dwg", "change_set": {"operations": [{"op": "add_line", "from": [1, 1, 0], "to": [4, 1, 0]}]}, "output": "DEMO-003.rev1.dwg"}
     },
     {
       "command": "query",

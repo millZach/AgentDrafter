@@ -542,7 +542,7 @@ pub fn operations() -> OperationList {
                     .map(|a| (*a).to_owned())
                     .collect(),
                 does: does(spec),
-                schema: with_definitions(operation_schema(spec, &defs), &defs),
+                schema: with_definitions(operation_schema(spec, &defs, false), &defs),
             })
             .collect(),
     }
@@ -945,10 +945,22 @@ fn grid_does(op: GridOp) -> String {
 /// The change set's schema: a JSON Schema (draft 2020-12) of every key a
 /// change set may hold, with what each means.
 pub fn change_set_schema() -> Value {
+    build_change_set_schema(false)
+}
+
+/// JSON Schema of a change set targeting an original `.dwg` file, where
+/// `add_*`, `add_layer`, and `change_layer` may omit `sheet` to default to
+/// that drawing's sheet (while still forbidding `sheet` and `template`
+/// together). Drawing-set commands keep [`change_set_schema`] strict.
+pub(crate) fn original_change_set_schema() -> Value {
+    build_change_set_schema(true)
+}
+
+fn build_change_set_schema(allow_omitted_sheet: bool) -> Value {
     let defs = definitions();
     let choices: Vec<Value> = SPECS
         .iter()
-        .map(|spec| operation_schema(spec, &defs))
+        .map(|spec| operation_schema(spec, &defs, allow_omitted_sheet))
         .collect();
     let [operations_key, fixes_key, guide_key] = CHANGE_SET_KEYS;
     let schema = json!({
@@ -1302,7 +1314,7 @@ fn add_block_definitions(defs: &mut Map<String, Value>) {
 }
 
 /// The schema of one operation, referring to `defs`.
-fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
+fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet: bool) -> Value {
     let op = if spec.alias.is_empty() {
         json!({
             "description": format!("The operation: {}.", spec.name),
@@ -1374,8 +1386,13 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
             properties.insert(
                 "sheet".into(),
                 json!({
-                    "description": "The sheet to add it to, in its row: it is on this sheet \
-                                    alone. Give sheet or template.",
+                    "description": if allow_omitted_sheet {
+                        "The sheet to add it to; on an original `.dwg`, omit sheet to target that \
+                         drawing."
+                    } else {
+                        "The sheet to add it to, in its row: it is on this sheet alone. Give \
+                         sheet or template, not both."
+                    },
                     "$ref": "#/$defs/sheet_name",
                 }),
             );
@@ -1383,12 +1400,15 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
                 "template".into(),
                 json!({
                     "description": "The template to add it to: it is on every sheet built \
-                                    from it. Give sheet or template.",
+                                    from it. Give sheet or template, not both.",
                     "$ref": "#/$defs/template_path",
                 }),
             );
-            let place =
-                json!({ "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }] });
+            let place = if allow_omitted_sheet {
+                json!({ "not": { "required": ["sheet", "template"] } })
+            } else {
+                json!({ "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }] })
+            };
             let own = schema.as_object_mut().expect("an object's definition");
             let mut all_of = vec![place];
             if let Some(one_of) = own.remove("oneOf") {
@@ -1565,7 +1585,7 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>) -> Value {
         }
         Kind::Array => array_schema(),
         Kind::Rotate | Kind::Scale | Kind::Mirror => transform_schema(spec.kind),
-        Kind::Table(op, table) => table_schema(op, table, defs),
+        Kind::Table(op, table) => table_schema(op, table, defs, allow_omitted_sheet),
         Kind::Block(op) => block_schema(op, defs),
         Kind::Grid(op) => grid_schema(op, defs),
         Kind::LeaderLine(LeaderLineOp::Add) => json!({
@@ -2033,7 +2053,12 @@ fn row_value_key() -> Value {
 }
 
 /// The schema of a table operation, before its `op`.
-fn table_schema(op: TableOp, table: Table, defs: &Map<String, Value>) -> Value {
+fn table_schema(
+    op: TableOp,
+    table: Table,
+    defs: &Map<String, Value>,
+    allow_omitted_sheet: bool,
+) -> Value {
     let word = table.word();
     let mut properties = Map::new();
     properties.insert(
@@ -2101,13 +2126,19 @@ fn table_schema(op: TableOp, table: Table, defs: &Map<String, Value>) -> Value {
         }
         TableOp::Delete => {}
     }
-    json!({
+    let mut schema = json!({
         "type": "object",
         "required": required,
         "additionalProperties": false,
         "properties": properties,
-        "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }],
-    })
+    });
+    if allow_omitted_sheet && matches!((op, table), (TableOp::Add | TableOp::Change, Table::Layer))
+    {
+        schema["not"] = json!({ "required": ["sheet", "template"] });
+    } else {
+        schema["oneOf"] = json!([{ "required": ["sheet"] }, { "required": ["template"] }]);
+    }
+    schema
 }
 
 /// The schema of an operation on a table's grid, before its `op`.
@@ -2662,6 +2693,25 @@ pub(crate) struct ChangeSet {
 /// not exist, is refused whole: the error names the operation and lists the
 /// valid choices.
 pub(crate) fn read_change_set(value: &Value, units: Unit) -> Result<ChangeSet, Error> {
+    read_change_set_inner(value, units, None)
+}
+
+/// Reads a change set sent against an original DWG whose sheet name is
+/// `default_sheet`: operations that take a `sheet` (`add_*`, `add_layer`,
+/// `change_layer`, etc.) may omit `sheet`, defaulting to `default_sheet`.
+pub(crate) fn read_change_set_for_original(
+    value: &Value,
+    units: Unit,
+    default_sheet: &str,
+) -> Result<ChangeSet, Error> {
+    read_change_set_inner(value, units, Some(default_sheet))
+}
+
+fn read_change_set_inner(
+    value: &Value,
+    units: Unit,
+    default_sheet: Option<&str>,
+) -> Result<ChangeSet, Error> {
     let Value::Object(map) = value else {
         return Err(Error::new(
             ErrorCode::WrongType,
@@ -2698,7 +2748,7 @@ pub(crate) fn read_change_set(value: &Value, units: Unit) -> Result<ChangeSet, E
     let operations = items
         .iter()
         .enumerate()
-        .map(|(index, item)| operation(index, item, units, &objects, &defs))
+        .map(|(index, item)| operation(index, item, units, &objects, &defs, default_sheet))
         .collect::<Result<_, _>>()?;
     let fixes = match map.get("fixes") {
         None => Vec::new(),
@@ -2948,6 +2998,7 @@ fn operation(
     units: Unit,
     objects: &Value,
     defs: &Map<String, Value>,
+    default_sheet: Option<&str>,
 ) -> Result<Operation, Error> {
     let Value::Object(map) = value else {
         return Err(Error::new(
@@ -3063,41 +3114,45 @@ fn operation(
                     &missing.first,
                 ));
             }
-            let to =
-                match (map.get("sheet"), map.get("template")) {
-                    (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
-                    (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
-                    (Some(_), Some(_)) => {
-                        return Err(fail(
-                            ErrorCode::Usage,
-                            "give sheet or template, not both: an object added to a sheet goes in \
+            let to = match (map.get("sheet"), map.get("template")) {
+                (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
+                (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
+                (Some(_), Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::Usage,
+                        "give sheet or template, not both: an object added to a sheet goes in \
                          its row, and one added to a template is on every sheet built from it"
-                                .to_owned(),
-                            "",
-                        ))
-                    }
-                    (None, None) => return Err(fail(
-                        ErrorCode::MissingKey,
-                        "missing key `sheet`: name the sheet to add it to, in its row, or give \
-                         template to add it to a template"
                             .to_owned(),
-                        "sheet",
-                    )),
-                    (Some(_), None) => {
+                        "",
+                    ))
+                }
+                (None, None) => match default_sheet {
+                    Some(sheet) => AddTo::Sheet(sheet.to_owned()),
+                    None => {
                         return Err(fail(
-                            ErrorCode::WrongType,
-                            "expected a sheet's name".to_owned(),
+                            ErrorCode::MissingKey,
+                            "missing key `sheet`: name the sheet to add it to, in its row, or \
+                                 give template to add it to a template"
+                                .to_owned(),
                             "sheet",
                         ))
                     }
-                    (None, Some(_)) => {
-                        return Err(fail(
-                            ErrorCode::WrongType,
-                            "expected a template's path".to_owned(),
-                            "template",
-                        ))
-                    }
-                };
+                },
+                (Some(_), None) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a sheet's name".to_owned(),
+                        "sheet",
+                    ))
+                }
+                (None, Some(_)) => {
+                    return Err(fail(
+                        ErrorCode::WrongType,
+                        "expected a template's path".to_owned(),
+                        "template",
+                    ))
+                }
+            };
             // A key sent as `null` is kept: the record writes it as a bare
             // null, and the sheet's reader reads it as it reads one in any
             // file (rule 8 of the YAML subset), so it leaves an optional text
@@ -3642,41 +3697,43 @@ fn operation(
                 TableOp::Delete => {}
             }
             keys(&allowed)?;
-            let to = match (map.get("sheet"), map.get("template")) {
-                (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
-                (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
-                (Some(_), Some(_)) => {
-                    return Err(fail(
-                        ErrorCode::Usage,
-                        "give sheet or template, not both: either names the template to edit"
-                            .to_owned(),
-                        "",
-                    ))
-                }
-                (None, None) => {
-                    return Err(fail(
-                        ErrorCode::MissingKey,
-                        "missing key `template`: name the template to edit, or a sheet built \
-                         from it with sheet"
-                            .to_owned(),
-                        "template",
-                    ))
-                }
-                (Some(_), None) => {
-                    return Err(fail(
-                        ErrorCode::WrongType,
-                        "expected a sheet's name".to_owned(),
-                        "sheet",
-                    ))
-                }
-                (None, Some(_)) => {
-                    return Err(fail(
-                        ErrorCode::WrongType,
-                        "expected a template's path".to_owned(),
-                        "template",
-                    ))
-                }
-            };
+            let to =
+                match (map.get("sheet"), map.get("template")) {
+                    (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
+                    (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
+                    (Some(_), Some(_)) => {
+                        return Err(fail(
+                            ErrorCode::Usage,
+                            "give sheet or template, not both: either names the template to edit"
+                                .to_owned(),
+                            "",
+                        ))
+                    }
+                    (None, None) => match default_sheet {
+                        Some(sheet) => AddTo::Sheet(sheet.to_owned()),
+                        None => return Err(fail(
+                            ErrorCode::MissingKey,
+                            "missing key `template`: name the template to edit, or a sheet built \
+                             from it with sheet"
+                                .to_owned(),
+                            "template",
+                        )),
+                    },
+                    (Some(_), None) => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected a sheet's name".to_owned(),
+                            "sheet",
+                        ))
+                    }
+                    (None, Some(_)) => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected a template's path".to_owned(),
+                            "template",
+                        ))
+                    }
+                };
             let text = |key: &str, what: &str| -> Result<String, Error> {
                 match map.get(key) {
                     Some(Value::String(text)) if !text.is_empty() => Ok(text.clone()),

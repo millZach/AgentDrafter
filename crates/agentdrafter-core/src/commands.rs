@@ -35,7 +35,10 @@ use serde_json::{json, Map, Value};
 
 use crate::build::{build_with, BuildRequest};
 use crate::change::{accept_with, recover, AcceptRequest, JournalRequest, UndoRequest};
-use crate::change::{change_set_schema, change_with, journal, operations, undo, ChangeRequest};
+use crate::change::{
+    change_set_schema, change_with, journal, operations, original_change_set_schema, undo,
+    ChangeRequest,
+};
 use crate::change::{
     discard, keep_with, proposals, propose_with, DiscardRequest, KeepRequest, ProposalsRequest,
     ProposeRequest, BY_LONGEST, BY_PATTERN, DRAFTER, PROPOSALS_FOLDER,
@@ -146,7 +149,13 @@ impl Command {
                 .get("source")
                 .and_then(Value::as_str)
                 .is_some_and(|s| crate::original::is_dwg_file(Path::new(s)));
-        let beside = matches!(self.name, "look-at" | "looking-at" | "read") || dwg_source;
+        let dwg_change = self.name == "change"
+            && input
+                .get("set")
+                .and_then(Value::as_str)
+                .is_some_and(|s| crate::original::is_dwg_file(Path::new(s)));
+        let beside =
+            matches!(self.name, "look-at" | "looking-at" | "read") || dwg_source || dwg_change;
         let rolled_back = if previews || beside {
             None
         } else {
@@ -1112,39 +1121,82 @@ fn change_does() -> String {
     "Applies a change set, `change_set`, such as {\"operations\": [{\"op\": \"move\", \
      \"target\": {\"id\": \"DEMO-001/border\"}, \"by\": [0.1, 0, 0]}]}, to the drawing set in \
      the folder `set`, to its own files at once, and builds again the DWGs of the sheets it \
-     touched. Objects are named by ID or name, never by coordinates. An edit to a template's \
-     object edits the template, so every sheet built from it follows; an object added to a \
-     sheet goes in its row. Each sheet takes its part fully or not at all, a template edit \
-     lands only if every sheet of its template does, and a change set that lands on some \
-     sheets and fails on others marks the set inconsistent until a later change set names \
-     them under fixes. With `dry_run` it reports what it would do and writes nothing. The \
-     reply is not ok when a sheet failed. Once it has landed, the reply's checks are the \
-     checker's reply on the sheets it landed on, read back from their saved files; a failed \
-     check does not stop it."
-        .to_owned()
+     touched; or, when `set` is an original `.dwg` file, revises it directly in memory and saves \
+     a new revision DWG beside it in its exact original DWG version (never overwriting the \
+     original), with its `.changes.json` change list and diff report and (unless `no_pdf` or \
+     `dry_run`) a revision PDF. Objects are named by ID or name, never by coordinates. On a \
+     drawing set, an edit to a template's object edits the template, so every sheet built from \
+     it follows; an object added to a sheet goes in its row; each sheet takes its part fully or \
+     not at all, a template edit lands only if every sheet of its template does, and a change \
+     set that lands on some sheets and fails on others marks the set inconsistent until a later \
+     change set names them under fixes. On an original DWG, an original the DWG library could \
+     not decode whole is refused unless `allow_loss` is true (recording accepted losses in the \
+     report), and any failed operation refuses the entire change set with nothing written. With \
+     `dry_run` it reports what it would do and writes nothing. The reply is not ok when a sheet \
+     failed or an original was refused. Once landed, the reply's checks are the checker's reply \
+     read back from the saved files (or serialized revision bytes); a failed check does not stop \
+     it."
+    .to_owned()
 }
 
 fn change_input() -> Value {
-    // The change set's own schema, its definitions moved up beside the
-    // input's, where its references point.
-    let mut change_set = change_set_schema();
-    let defs = change_set
+    // Both drawing-set and original-DWG change-set schemas share identical
+    // `$defs`; move `$defs` up beside the input's where references point, and
+    // apply strict drawing-set rules unless `set` names a `.dwg` file.
+    let mut set_change_set = change_set_schema();
+    let defs = set_change_set
         .as_object_mut()
         .and_then(|schema| {
             schema.remove("$schema");
             schema.remove("$defs")
         })
         .unwrap_or_else(|| json!({}));
+    let mut orig_change_set = original_change_set_schema();
+    if let Some(schema) = orig_change_set.as_object_mut() {
+        schema.remove("$schema");
+        schema.remove("$defs");
+    }
+    let change_set_desc = set_change_set
+        .get("description")
+        .cloned()
+        .unwrap_or_else(|| json!("The change set to apply."));
     let mut schema = input(
         json!({
-            "set": text("The drawing set's folder."),
-            "change_set": change_set,
+            "set": text("The drawing set's folder, or an original `.dwg` file to revise."),
+            "change_set": {
+                "description": change_set_desc,
+                "type": "object",
+            },
             "dry_run": flag("Report what the change set would do, and write nothing."),
+            "output": {
+                "description": "Original DWG only: where to write the revision `.dwg` (never overwriting the original or any existing file). `null` acts as if it were left out. Without it, `<stem>.rev1.dwg`, `<stem>.rev2.dwg`, ... beside the original.",
+                "type": ["string", "null"],
+            },
+            "allow_loss": flag("Original DWG only: allow revising an original the DWG library could not decode whole, recording accepted losses in the reply and report."),
+            "plot_style": plot_style_name("Original DWG only: CTB plot style file name (such as `monochrome.ctb`) for the revision PDF. `null` acts as if it were left out."),
+            "plot_styles": plot_styles(),
+            "no_pdf": flag("Original DWG only: skip plotting the revision PDF beside the revision."),
             "fonts": fonts(),
             "no_system_fonts": no_system_fonts(),
         }),
         &["set", "change_set"],
     );
+    schema["if"] = json!({
+        "properties": {
+            "set": { "type": "string", "pattern": "\\.[dD][wW][gG]$" }
+        },
+        "required": ["set"]
+    });
+    schema["then"] = json!({
+        "properties": {
+            "change_set": orig_change_set
+        }
+    });
+    schema["else"] = json!({
+        "properties": {
+            "change_set": set_change_set
+        }
+    });
     schema["$defs"] = defs;
     schema
 }
@@ -1154,9 +1206,34 @@ fn run_change(
     base: &Settings,
     _: Interface,
 ) -> Result<JsonReply, Error> {
-    let settings = take_settings(&mut input, base, false)?;
-    let request: ChangeRequest = parse("change", input)?;
-    Ok(sent_warned(change_with(&request, &settings)))
+    let is_dwg = input
+        .get("set")
+        .and_then(Value::as_str)
+        .is_some_and(|s| crate::original::is_dwg_file(Path::new(s)));
+    if is_dwg {
+        let settings = take_settings(&mut input, base, true)?;
+        let request: crate::revise::ReviseRequest = parse("change", input)?;
+        Ok(sent_warned(crate::revise::revise_with(&request, &settings)))
+    } else {
+        for option in [
+            "output",
+            "allow_loss",
+            "plot_style",
+            "plot_styles",
+            "no_pdf",
+        ] {
+            if input.contains_key(option) {
+                return Err(Error::usage(format!(
+                    "`{option}` applies only when revising an original `.dwg` file, not a \
+                     drawing set folder"
+                ))
+                .at_field(option));
+            }
+        }
+        let settings = take_settings(&mut input, base, false)?;
+        let request: ChangeRequest = parse("change", input)?;
+        Ok(sent_warned(change_with(&request, &settings)))
+    }
 }
 
 // journal
@@ -1275,12 +1352,25 @@ fn propose_does() -> String {
 }
 
 fn propose_input() -> Value {
-    let mut schema = change_input();
-    let properties = schema["properties"]
+    let mut change_set = change_set_schema();
+    let defs = change_set
         .as_object_mut()
-        .expect("change's input has properties");
-    properties.remove("dry_run");
-    properties.insert("by".to_owned(), by("proposes it", "Assistant"));
+        .and_then(|schema| {
+            schema.remove("$schema");
+            schema.remove("$defs")
+        })
+        .unwrap_or_else(|| json!({}));
+    let mut schema = input(
+        json!({
+            "set": text("The drawing set's folder."),
+            "change_set": change_set,
+            "by": by("proposes it", "Assistant"),
+            "fonts": fonts(),
+            "no_system_fonts": no_system_fonts(),
+        }),
+        &["set", "change_set"],
+    );
+    schema["$defs"] = defs;
     schema
 }
 

@@ -47,11 +47,24 @@ mod ids;
 mod import;
 mod layout;
 mod leader;
+mod revise;
 mod table;
 mod text;
 
 pub(crate) use import::read_blocks;
 pub(crate) use layout::{PageSetup, PLOTTER, PLOT_STYLE};
+#[cfg(test)]
+pub(crate) use revise::{
+    arc_world_center_and_normal, as_original_of_version, block_definition_entity_handle,
+    carried_id_and_name_of, layer_details_of, minsert_grid_positions_of, polyline3d_details_of,
+    raw_record_bytes_of, with_asymmetric_minsert_original, with_constant_and_locked_attrs,
+    with_custom_header, with_neg_z_arc_original, with_polyline3d_original,
+    with_true_color_locked_layer,
+};
+pub(crate) use revise::{
+    LockedLayerHit, MutationHandles, RevisionSession, RevisionVerification, TargetSpace,
+};
+pub use revise::{UnexpectedChange, UnexpectedChangeKind};
 
 /// The DWG version a new sheet is written in: the 2018 format, AC1032 (ADR-0006).
 const NEW_SHEET_VERSION: DxfVersion = DxfVersion::AC1032;
