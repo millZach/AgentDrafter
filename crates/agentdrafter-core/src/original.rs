@@ -736,6 +736,399 @@ const O_NOFOLLOW: i32 = {
     }
 };
 
+/// Outcome of safely inspecting/reading a file without following symlinks or
+/// touching an original DWG.
+pub(crate) enum NoFollowRead {
+    /// File does not exist.
+    Missing,
+    /// Regular non-symlink file distinct from the original, with its bytes.
+    File(Vec<u8>),
+    /// Path is a symbolic link or Windows reparse point.
+    Symlink,
+    /// Path is a directory or non-regular file.
+    NotRegular,
+    /// Path resolves to the original DWG itself.
+    SameAsOriginal,
+}
+
+/// Like [`NoFollowRead`], also carrying the opened file's platform [`FileId`]
+/// so callers (`undo`, `recover`) can re-verify file identity before unlinking
+/// or replacing.
+pub(crate) enum NoFollowReadWithId {
+    /// File does not exist.
+    Missing,
+    /// Regular non-symlink file distinct from the original, with its bytes and
+    /// opened handle identity.
+    File(Vec<u8>, Option<FileId>),
+    /// Path is a symbolic link or Windows reparse point.
+    Symlink,
+    /// Path is a directory or non-regular file.
+    NotRegular,
+    /// Path resolves to the original DWG itself.
+    SameAsOriginal,
+}
+
+/// Reads `path` without following a trailing symlink or Windows reparse point,
+/// refusing directories, symlinks, and any file with the same identity as
+/// `source_id` (or `source` on non-unix/non-windows targets).
+pub(crate) fn read_regular_no_follow(
+    source: &Path,
+    source_id: Option<FileId>,
+    path: &Path,
+) -> io::Result<NoFollowRead> {
+    match read_regular_no_follow_with_id(source, source_id, path)? {
+        NoFollowReadWithId::Missing => Ok(NoFollowRead::Missing),
+        NoFollowReadWithId::File(bytes, _) => Ok(NoFollowRead::File(bytes)),
+        NoFollowReadWithId::Symlink => Ok(NoFollowRead::Symlink),
+        NoFollowReadWithId::NotRegular => Ok(NoFollowRead::NotRegular),
+        NoFollowReadWithId::SameAsOriginal => Ok(NoFollowRead::SameAsOriginal),
+    }
+}
+
+/// Like [`read_regular_no_follow`], returning the opened handle's [`FileId`].
+pub(crate) fn read_regular_no_follow_with_id(
+    source: &Path,
+    source_id: Option<FileId>,
+    path: &Path,
+) -> io::Result<NoFollowReadWithId> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(NoFollowReadWithId::Missing),
+        Err(e) => return Err(e),
+    };
+    if meta.file_type().is_symlink() {
+        return Ok(NoFollowReadWithId::Symlink);
+    }
+    if !meta.file_type().is_file() {
+        return Ok(NoFollowReadWithId::NotRegular);
+    }
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if O_NOFOLLOW != 0 {
+            opts.custom_flags(O_NOFOLLOW);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(crate::build::win_file::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = match opts.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(NoFollowReadWithId::Missing),
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(40) || e.raw_os_error() == Some(62) => {
+            // ELOOP on Linux (40) or macOS/BSD (62) from O_NOFOLLOW on a symlink.
+            return Ok(NoFollowReadWithId::Symlink);
+        }
+        Err(e) => return Err(e),
+    };
+    let opened = file.metadata()?;
+    if !opened.file_type().is_file() {
+        return Ok(NoFollowReadWithId::NotRegular);
+    }
+    #[cfg(unix)]
+    let opened_id = {
+        let _ = source;
+        let opened_id = file_id_of_file(&file);
+        if source_id.is_some() && opened_id == source_id {
+            return Ok(NoFollowReadWithId::SameAsOriginal);
+        }
+        opened_id
+    };
+    #[cfg(windows)]
+    let opened_id = {
+        let _ = source;
+        let Some(info) = crate::build::win_file::file_info(&file) else {
+            return Ok(NoFollowReadWithId::NotRegular);
+        };
+        let bad = crate::build::win_file::FILE_ATTRIBUTE_DIRECTORY
+            | crate::build::win_file::FILE_ATTRIBUTE_REPARSE_POINT;
+        if (info.file_attributes & bad) != 0 {
+            return Ok(NoFollowReadWithId::Symlink);
+        }
+        let opened_id = file_id_of_file(&file);
+        if source_id.is_some() && opened_id == source_id {
+            return Ok(NoFollowReadWithId::SameAsOriginal);
+        }
+        opened_id
+    };
+    #[cfg(not(any(unix, windows)))]
+    let opened_id: Option<FileId> = {
+        let _ = source_id;
+        if is_same_file(source, path) {
+            return Ok(NoFollowReadWithId::SameAsOriginal);
+        }
+        None
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(NoFollowReadWithId::File(bytes, opened_id))
+}
+
+/// Opens `path` for read+write (without truncating) without following a
+/// trailing symlink or Windows reparse point, refusing directories, symlinks,
+/// and any file whose identity matches `source_id`.
+pub(crate) fn open_no_follow_write(
+    path: &Path,
+    create: bool,
+    source_id: Option<FileId>,
+) -> io::Result<File> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("refusing to follow symbolic link `{}`", path.display()),
+                ));
+            }
+            if !meta.file_type().is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("`{}` is not a regular file", path.display()),
+                ));
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if !create {
+                return Err(e);
+            }
+        }
+        Err(e) => return Err(e),
+    }
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(create).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if O_NOFOLLOW != 0 {
+            opts.custom_flags(O_NOFOLLOW);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(crate::build::win_file::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = match opts.open(path) {
+        Ok(f) => f,
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(40) || e.raw_os_error() == Some(62) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("refusing to follow symbolic link `{}`", path.display()),
+            ));
+        }
+        Err(e) => return Err(e),
+    };
+    let opened = file.metadata()?;
+    if !opened.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("`{}` is not a regular file", path.display()),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        let Some(info) = crate::build::win_file::file_info(&file) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("could not inspect `{}`", path.display()),
+            ));
+        };
+        let bad = crate::build::win_file::FILE_ATTRIBUTE_DIRECTORY
+            | crate::build::win_file::FILE_ATTRIBUTE_REPARSE_POINT;
+        if (info.file_attributes & bad) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("refusing to follow symbolic link `{}`", path.display()),
+            ));
+        }
+    }
+    #[cfg(any(unix, windows))]
+    {
+        let opened_id = file_id_of_file(&file);
+        if source_id.is_some() && opened_id == source_id {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "`{}` is the original DWG itself, which is never modified (ADR-0004)",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = source_id;
+    Ok(file)
+}
+
+/// Checks each segment in `segments` under `base` using `symlink_metadata`,
+/// refusing symlinks or non-directory entries. Returns `Ok(true)` if every
+/// segment exists as a real directory, `Ok(false)` if any segment does not
+/// exist yet, and `Err(InvalidInput)` if any segment is a symlink or non-dir.
+pub(crate) fn verify_real_dir_chain(base: &Path, segments: &[&str]) -> io::Result<bool> {
+    let mut cur = base.to_path_buf();
+    for seg in segments {
+        cur.push(seg);
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("refusing to traverse symbolic link `{}`", cur.display()),
+                    ));
+                }
+                if !meta.file_type().is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("`{}` is not a directory", cur.display()),
+                    ));
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// Ensures every segment in `segments` under `base` exists as a real
+/// non-symlink directory, creating missing directories one component at a time
+/// and refusing if any existing component is a symlink or non-directory.
+pub(crate) fn ensure_real_dir_chain(base: &Path, segments: &[&str]) -> io::Result<PathBuf> {
+    let mut cur = base.to_path_buf();
+    for seg in segments {
+        cur.push(seg);
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("refusing to traverse symbolic link `{}`", cur.display()),
+                    ));
+                }
+                if !meta.file_type().is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("`{}` is not a directory", cur.display()),
+                    ));
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                match fs::create_dir(&cur) {
+                    Ok(()) => {}
+                    Err(ce) if ce.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(ce) => return Err(ce),
+                }
+                let meta = fs::symlink_metadata(&cur)?;
+                if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("refusing to traverse symbolic link `{}`", cur.display()),
+                    ));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(cur)
+}
+
+/// Whether `name` is a valid 64-character lowercase hexadecimal SHA-256 digest.
+pub(crate) fn is_sha256_hex(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Checks every existing directory component of an already-canonicalized
+/// absolute directory path `dir` from its root/prefix down via
+/// `symlink_metadata`, refusing any symlink or non-directory ancestor.
+pub(crate) fn verify_no_symlink_ancestors(dir: &Path) -> io::Result<()> {
+    let mut cur = PathBuf::new();
+    for comp in dir.components() {
+        match comp {
+            std::path::Component::Prefix(p) => cur.push(p.as_os_str()),
+            std::path::Component::RootDir => cur.push(comp.as_os_str()),
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected `..` in canonical path `{}`", dir.display()),
+                ));
+            }
+            std::path::Component::Normal(seg) => {
+                cur.push(seg);
+                match fs::symlink_metadata(&cur) {
+                    Ok(meta) => {
+                        if meta.file_type().is_symlink() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("refusing to traverse symbolic link `{}`", cur.display()),
+                            ));
+                        }
+                        if !meta.file_type().is_dir() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("`{}` is not a directory", cur.display()),
+                            ));
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks every intermediate directory component of `relative` under `root`
+/// (excluding the final file name) via `symlink_metadata`, refusing symlinks
+/// or non-directory entries. Returns `Ok(())` if every existing intermediate
+/// component is a real directory.
+pub(crate) fn verify_no_symlink_intermediate_dirs(root: &Path, relative: &Path) -> io::Result<()> {
+    let Some(parent) = relative.parent() else {
+        return Ok(());
+    };
+    let mut cur = root.to_path_buf();
+    for comp in parent.components() {
+        match comp {
+            std::path::Component::CurDir => continue,
+            std::path::Component::Normal(seg) => {
+                cur.push(seg);
+                match fs::symlink_metadata(&cur) {
+                    Ok(meta) => {
+                        if meta.file_type().is_symlink() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("refusing to traverse symbolic link `{}`", cur.display()),
+                            ));
+                        }
+                        if !meta.file_type().is_dir() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("`{}` is not a directory", cur.display()),
+                            ));
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected path component in `{}`", relative.display()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Opens `mirror` without following a trailing symlink or reparse point,
 /// verifies on the opened handle that it is a regular non-symlink file that
 /// matches `expected` and is not `source_id`, and reads at most the first
@@ -811,12 +1204,23 @@ fn create_temp_beside(path: &Path) -> io::Result<(PathBuf, File)> {
 /// Same as [`create_temp_beside`], tagging the temporary file with `kind`
 /// (such as `"mirror"`, `"rev"`, `"changes"`, or `"pdf"`).
 pub(crate) fn create_temp_beside_kind(path: &Path, kind: &str) -> io::Result<(PathBuf, File)> {
+    create_scoped_temp_beside(path, ".agentdrafter", &format!("{kind}.tmp"))
+}
+
+/// Creates a brand-new temporary file beside `path` named
+/// `{prefix}-{rand32hex}.{suffix}` with `create_new(true)` so an existing
+/// path or symlink is never opened or followed.
+pub(crate) fn create_scoped_temp_beside(
+    path: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> io::Result<(PathBuf, File)> {
     static WRITES: AtomicU64 = AtomicU64::new(0);
     for _ in 0..64 {
         let count = WRITES.fetch_add(1, Ordering::Relaxed);
         let hi = random_u64(path, count);
         let lo = random_u64(path, count ^ 0x9e37_79b9_7f4a_7c15);
-        let candidate = path.with_file_name(format!(".agentdrafter-{hi:016x}{lo:016x}.{kind}.tmp"));
+        let candidate = path.with_file_name(format!("{prefix}-{hi:016x}{lo:016x}.{suffix}"));
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -829,7 +1233,7 @@ pub(crate) fn create_temp_beside_kind(path: &Path, kind: &str) -> io::Result<(Pa
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
-        format!("could not allocate a unique temporary {kind} file"),
+        format!("could not allocate a unique temporary {suffix} file"),
     ))
 }
 
@@ -846,6 +1250,75 @@ fn random_u64(path: &Path, salt: u64) -> u64 {
 /// never streaming partially into `path`. Always cleans up `temporary`.
 fn place_new(temporary: &Path, path: &Path) -> Result<(), Error> {
     place_new_file(temporary, path, "text mirror", ErrorCode::NotAnOutput)
+}
+
+/// Atomically moves `src` to `dst` ONLY when `dst` does not already exist,
+/// never overwriting an existing file or symlink and NEVER deleting `src` on
+/// error.
+pub(crate) fn rename_no_replace_keep_src(src: &Path, dst: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        match rename_no_replace_windows(src, dst) {
+            Ok(()) => Ok(()),
+            Err(e) if e.raw_os_error() == Some(183) => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("`{}` already exists", dst.display()),
+            )),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        match rename_no_replace_unix(src, dst) {
+            Ok(()) => Ok(()),
+            Err(e) if is_rename_noreplace_unsupported(&e) => {
+                fs::hard_link(src, dst)?;
+                if let Err(rm) = fs::remove_file(src) {
+                    if rm.kind() != io::ErrorKind::NotFound {
+                        return Err(rm);
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        fs::hard_link(src, dst)?;
+        if let Err(rm) = fs::remove_file(src) {
+            if rm.kind() != io::ErrorKind::NotFound {
+                return Err(rm);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Atomically moves `src` beside itself to an unpredictable randomized backup
+/// path `{prefix}-{rand32hex}.{suffix}` without ever clobbering an existing
+/// file or symlink and without deleting `src` on error.
+pub(crate) fn move_to_unique_backup_beside(
+    src: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> io::Result<PathBuf> {
+    static BACKUPS: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..64 {
+        let count = BACKUPS.fetch_add(1, Ordering::Relaxed);
+        let hi = random_u64(src, count ^ 0xa5a5_5a5a_f0f0_0f0f);
+        let lo = random_u64(src, count ^ 0x9e37_79b9_7f4a_7c15);
+        let candidate = src.with_file_name(format!("{prefix}-{hi:016x}{lo:016x}.{suffix}"));
+        match rename_no_replace_keep_src(src, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("could not allocate a unique backup {suffix} file"),
+    ))
 }
 
 /// Atomically moves `temporary` into place at `path` only when `path` does

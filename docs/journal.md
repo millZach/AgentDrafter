@@ -2,7 +2,7 @@
 
 The journal is the record, in a drawing set's own folder, of every change set and every failed attempt (see [`CONTEXT.md`](../CONTEXT.md)). A later session, in a new process, reads it to see what was done, and undoes a change set from it as one, across every sheet it touched. It travels with the set's folder and needs no git: the folder need not be a repository.
 
-`agentdrafter journal <drawing-set-folder>` prints the journal, `agentdrafter undo <drawing-set-folder> <change-set> [--dry-run]` undoes a change set, and `agentdrafter accept <drawing-set-folder>` issues the working revision ([below](#accept)), each as one line of JSON. They are thin layers over the core's `journal`, `undo` and `accept_with`, which take and return plain data (ADR-0007).
+`agentdrafter journal <drawing-set-folder | original.dwg>` prints the journal, `agentdrafter undo <drawing-set-folder | original.dwg> <change-set> [--dry-run]` undoes a change set, and `agentdrafter accept <drawing-set-folder | original.dwg>` issues the working revision ([below](#accept)), each as one line of JSON. They are thin layers over the core's `journal`, `undo` and `accept_with`, which take and return plain data (ADR-0007). For revisions of an original DWG, each original keeps its own write-ahead journal beside it under `.agentdrafter/originals/<safe-stem>/` (`docs/revisions.md#journal-undo-accept-and-issued-stamps`).
 
 ## Where it is
 
@@ -162,7 +162,7 @@ agentdrafter accept <drawing-set-folder> [--despite-failed-checks] [--newest-see
 - **The journal records it, with the interface it came through**, `viewer`, `cli`, `http`, `mcp` or `python`, so the reviewer can tell an agent's accept from their own. The interface is the one the command reached the core through; the input does not say it. The viewer's page reaches the core through the HTTP API, and a request it sends is the viewer's ([servers.md](servers.md#the-http-api)).
 - **It records each file of the set as it issues it**, under `revision`: the settings, each rows file, in the order the set builds them, each template the rows name and the block library each names, and each sheet's DWG in the output folder. A PNG or a PDF made from those files, byte for byte, says in its stamp that it came from an issued revision, and which accept issued it ([the stamp](render.md#the-stamp)).
 - **`newest_seen`** (`--newest-seen`) is the journal's newest entry the caller has looked at: the accept is refused with the error `moved_on` if the journal holds a newer one, so a change set that landed while the reviewer was deciding is not issued unseen. The viewer always sends it.
-- **There is nothing to accept** when no change set has landed since the last accept and every file of the set is as it issued it: the error `nothing_to_accept`. A set no change set has touched can still be accepted once: that issues the set as it was built.
+- **There is nothing to accept** when no change set has landed since the last accept and every file of the set is as it issued it: the error `nothing_to_accept`. A drawing set no change set has touched can still be accepted once: that issues the set as it was built. An unrevised original DWG has no revision to issue yet and returns `nothing_to_accept`.
 - **A dry run**, `--dry-run`, checks and reports everything an accept would do, and records nothing.
 
 ```json

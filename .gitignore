@@ -8,6 +8,9 @@
 *.rev*.pdf
 *.rev.tmp
 .agentdrafter-*.tmp
+.agentdrafter-*.old
+*.agentdrafter-undo.old
+**/.agentdrafter/originals/
 *.bak
 *.dwl
 *.dwl2

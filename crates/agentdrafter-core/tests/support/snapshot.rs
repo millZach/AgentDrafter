@@ -33,6 +33,7 @@ pub fn snapshot(set: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
                 || path == looking_at
                 || path.starts_with(&states)
                 || path.starts_with(&proposals)
+                || is_original_journal_noise(&path)
             {
                 continue;
             }
@@ -41,6 +42,20 @@ pub fn snapshot(set: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
                     found.insert(path.clone(), None);
                 }
                 stack.push(path);
+            } else if is_original_journal_file(&path) {
+                let text = fs::read_to_string(&path).unwrap();
+                let normalized: Vec<String> = text
+                    .lines()
+                    .map(|line| {
+                        let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.remove("at");
+                            obj.remove("via");
+                        }
+                        v.to_string()
+                    })
+                    .collect();
+                found.insert(path.clone(), Some(normalized.join("\n").into_bytes()));
             } else if path.starts_with(&guides) && path.extension().is_some_and(|e| e == "json") {
                 // A guide's record, without the time it was given, its
                 // top-level `at`: the one thing two interfaces may record
@@ -55,4 +70,26 @@ pub fn snapshot(set: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
         }
     }
     found
+}
+
+fn in_originals_journal(path: &Path) -> bool {
+    let parts: Vec<_> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect();
+    parts
+        .windows(2)
+        .any(|w| w[0] == ".agentdrafter" && w[1] == "originals")
+}
+
+fn is_original_journal_noise(path: &Path) -> bool {
+    if !in_originals_journal(path) {
+        return false;
+    }
+    let name = path.file_name().and_then(|n| n.to_str());
+    name == Some("journal.lock") || path.components().any(|c| c.as_os_str() == "undo-states")
+}
+
+fn is_original_journal_file(path: &Path) -> bool {
+    in_originals_journal(path) && path.file_name().and_then(|n| n.to_str()) == Some("journal.jsonl")
 }

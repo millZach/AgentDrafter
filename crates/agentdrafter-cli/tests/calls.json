@@ -181,8 +181,32 @@
     {
       "command": "change",
       "after": "read",
-      "args": ["change", "demo-set/dwg/DEMO-003.dwg", "revise.json", "--output", "DEMO-003.rev1.dwg"],
-      "input": {"set": "demo-set/dwg/DEMO-003.dwg", "change_set": {"operations": [{"op": "add_line", "from": [1, 1, 0], "to": [4, 1, 0]}]}, "output": "DEMO-003.rev1.dwg"}
+      "args": ["change", "demo-set/dwg/DEMO-003.dwg", "revise.json", "--output", "demo-set/dwg/DEMO-003.rev1.dwg"],
+      "input": {"set": "demo-set/dwg/DEMO-003.dwg", "change_set": {"operations": [{"op": "add_line", "from": [1, 1, 0], "to": [4, 1, 0]}]}, "output": "demo-set/dwg/DEMO-003.rev1.dwg"}
+    },
+    {
+      "command": "journal",
+      "after": "read",
+      "args": ["journal", "demo-set/dwg/DEMO-003.dwg"],
+      "input": {"set": "demo-set/dwg/DEMO-003.dwg"}
+    },
+    {
+      "command": "undo",
+      "after": "read",
+      "args": ["undo", "demo-set/dwg/DEMO-003.dwg", "1"],
+      "input": {"set": "demo-set/dwg/DEMO-003.dwg", "change_set": 1}
+    },
+    {
+      "command": "change",
+      "after": "read",
+      "args": ["change", "demo-set/dwg/DEMO-003.dwg", "revise.json", "--output", "demo-set/dwg/DEMO-003.rev2.dwg"],
+      "input": {"set": "demo-set/dwg/DEMO-003.dwg", "change_set": {"operations": [{"op": "add_line", "from": [1, 1, 0], "to": [4, 1, 0]}]}, "output": "demo-set/dwg/DEMO-003.rev2.dwg"}
+    },
+    {
+      "command": "accept",
+      "after": "read",
+      "args": ["accept", "demo-set/dwg/DEMO-003.dwg", "--newest-seen", "3"],
+      "input": {"set": "demo-set/dwg/DEMO-003.dwg", "newest_seen": 3}
     },
     {
       "command": "query",

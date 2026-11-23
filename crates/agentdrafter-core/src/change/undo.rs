@@ -108,6 +108,9 @@ pub enum UndoAction {
 /// entry a commit that never finished left pending is rolled back first,
 /// and the reply says so under `rolled_back`.
 pub fn undo(request: &UndoRequest) -> Reply<UndoReport> {
+    if crate::original::is_dwg_file(&request.set) {
+        return super::original_journal::undo_original(request);
+    }
     match recover(&request.set) {
         Ok(rolled_back) => Reply::from(undo_set(request)).after(rolled_back),
         Err(error) => Reply::from(Err(error)),
@@ -418,7 +421,7 @@ fn undo_set(request: &UndoRequest) -> Result<UndoReport, Error> {
 }
 
 /// The change sets an undo can take, in words.
-fn can_undo(entries: &[Entry], fates: &BTreeMap<u64, Fate>) -> String {
+pub(super) fn can_undo(entries: &[Entry], fates: &BTreeMap<u64, Fate>) -> String {
     let can = undoable(entries, fates);
     if can.is_empty() {
         "no change set of the set can be undone".to_owned()
@@ -436,7 +439,7 @@ fn shown(folder: &Path, path: &str) -> String {
 }
 
 /// What an undo did, or would do, in words.
-fn message(dry_run: bool, undid: &[u64], files: usize) -> String {
+pub(super) fn message(dry_run: bool, undid: &[u64], files: usize) -> String {
     let oldest = undid.last().copied().unwrap_or_default();
     let what = match undid {
         [one] => format!("change set {one}"),

@@ -149,13 +149,13 @@ impl Command {
                 .get("source")
                 .and_then(Value::as_str)
                 .is_some_and(|s| crate::original::is_dwg_file(Path::new(s)));
-        let dwg_change = self.name == "change"
+        let dwg_original = matches!(self.name, "change" | "journal" | "undo" | "accept")
             && input
                 .get("set")
                 .and_then(Value::as_str)
                 .is_some_and(|s| crate::original::is_dwg_file(Path::new(s)));
         let beside =
-            matches!(self.name, "look-at" | "looking-at" | "read") || dwg_source || dwg_change;
+            matches!(self.name, "look-at" | "looking-at" | "read") || dwg_source || dwg_original;
         let rolled_back = if previews || beside {
             None
         } else {
@@ -1240,18 +1240,19 @@ fn run_change(
 
 fn journal_does() -> String {
     format!(
-        "Lists the journal of the drawing set in the folder `set`, kept in its folder \
-         ({JOURNAL_FILE}) whether or not it is a git repository: every change set, with its \
-         operations, the sheets it landed and failed on and the files it wrote; every failed \
-         attempt, which changed nothing; and every undo. It says which change sets can still be \
-         undone: the undo states of the {KEPT_UNDO_STATES} newest change sets are kept, and an \
-         older one's are pruned."
+        "Lists the journal of the drawing set in the folder `set` ({JOURNAL_FILE}), or of an \
+         original `.dwg` file's revisions (stored beside it under `.agentdrafter/originals/`), \
+         whether or not it is a git repository: every change set, with its operations, the sheets \
+         it landed and failed on and the files it wrote; every failed attempt, which changed \
+         nothing; every undo; and every accept. It says which change sets can still be undone: \
+         the undo states of the {KEPT_UNDO_STATES} newest change sets are kept, and an older \
+         one's are pruned."
     )
 }
 
 fn journal_input() -> Value {
     input(
-        json!({ "set": text("The drawing set's folder.") }),
+        json!({ "set": text("The drawing set's folder, or an original `.dwg` file.") }),
         &["set"],
     )
 }
@@ -1264,19 +1265,22 @@ fn run_journal(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<
 // undo
 
 fn undo_does() -> String {
-    "Undoes a change set of the drawing set in the folder `set`, named by its entry's number in \
-     the journal, `change_set`, and every later change set with it, the newest first: every \
-     file they wrote, records, DWGs and the inconsistent mark, goes back byte for byte as it \
-     was before, and a file they made is taken away. It refuses, changing nothing and naming \
-     the files, when a file was changed since by hand, and when a change set's undo state was \
-     pruned. With `dry_run` it reports what it would do and writes nothing."
+    "Undoes a change set of the drawing set in the folder `set`, or a revision of an original \
+     `.dwg` file, named by its entry's number in the journal, `change_set`, and every later \
+     change set with it, the newest first: on a drawing set, every file they wrote, records, \
+     DWGs and the inconsistent mark, goes back byte for byte as it was before, and a file they \
+     made is taken away; on an original `.dwg`, the revision files they created are removed \
+     while the original itself is never modified or removed. It refuses, changing nothing and \
+     naming the files, when a file was changed since by hand, when a change set was issued by \
+     `accept`, and when a change set's undo state was pruned. With `dry_run` it reports what it \
+     would do and writes nothing."
         .to_owned()
 }
 
 fn undo_input() -> Value {
     input(
         json!({
-            "set": text("The drawing set's folder."),
+            "set": text("The drawing set's folder, or an original `.dwg` file."),
             "change_set": {
                 "description": "The change set to undo, by its entry's number in the journal, such as 3.",
                 "type": "integer",
@@ -1296,14 +1300,15 @@ fn run_undo(input: Map<String, Value>, _: &Settings, _: Interface) -> Result<Jso
 // accept
 
 fn accept_does() -> String {
-    "Accepts the working revision of the drawing set in the folder `set`, as the reviewer does \
-     in the viewer: every change set still in place is marked issued, and an issued change set \
-     cannot be undone; the journal records the accept, the interface it came through, the \
-     change sets it issued and the fingerprint of each file of the set, so a PNG or a PDF made \
-     from those files says it came from an issued revision. It is refused while the set is \
-     inconsistent. It checks every sheet first, and when checks fail it lists them and issues \
-     nothing unless `despite_failed_checks` says to accept anyway. `newest_seen` refuses it \
-     when the journal has moved on past the entry the caller last looked at. With `dry_run` \
+    "Accepts the working revision of the drawing set in the folder `set`, or the active \
+     revisions of an original `.dwg` file, as the reviewer does in the viewer: every change set \
+     still in place is marked issued, and an issued change set cannot be undone; the journal \
+     records the accept, the interface it came through, the change sets it issued and the \
+     fingerprint of each issued file, so a PNG or a PDF made from those files says it came from \
+     an issued revision. On a drawing set it is refused while the set is inconsistent. It checks \
+     every sheet (or the latest revision DWG) first, and when checks fail it lists them and \
+     issues nothing unless `despite_failed_checks` says to accept anyway. `newest_seen` refuses \
+     it when the journal has moved on past the entry the caller last looked at. With `dry_run` \
      it reports what it would do and writes nothing."
         .to_owned()
 }
@@ -1311,7 +1316,7 @@ fn accept_does() -> String {
 fn accept_input() -> Value {
     input(
         json!({
-            "set": text("The drawing set's folder."),
+            "set": text("The drawing set's folder, or an original `.dwg` file."),
             "despite_failed_checks": flag("Accept even when checks fail, once the caller has seen them: without it, an accept that finds failed checks lists them and issues nothing."),
             "newest_seen": {
                 "description": "The journal's newest entry the caller has looked at, by its number, such as 7, or 0 for an empty journal: the accept is refused if the journal holds a newer one, so a change set that landed meanwhile is not issued unseen.",

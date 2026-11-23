@@ -38,7 +38,7 @@ A revision is always written back in the exact DWG version the original arrived 
 ## Client drawings stay outside the repository (ADR-0008)
 
 > [!CAUTION]
-> Never commit a revision DWG, its `.changes.json` change list (which carries file names, text, attribute values, and handles), or its revision PDF for a real plant drawing into a public repository. Keep plant originals and their revisions in a private folder outside the repository. `.gitignore` ignores `*.dwg`, `*.changes.json`, `*.rev[0-9]*.pdf`, and AgentDrafter's temporary files as a backstop, not a substitute for keeping client material outside the checkout.
+> Never commit a revision DWG, its `.changes.json` change list (which carries file names, text, attribute values, and handles), its revision PDF, or its per-original journal under `.agentdrafter/originals/` (at any folder depth) for a real plant drawing into a public repository. Keep plant originals and their revisions in a private folder outside the repository. `.gitignore` ignores `*.dwg`, `*.changes.json`, `*.rev*.pdf`, `**/.agentdrafter/originals/`, and AgentDrafter's temporary and `.old` backup files as a backstop, not a substitute for keeping client material outside the checkout.
 
 ## Operations on an original DWG
 
@@ -64,6 +64,19 @@ Unless `--dry-run` is set, every revision writes up to three brand-new files ato
 2. `<rev-stem>.changes.json` — the **change list** and revision report (`format: 1`): `original` and `revision` filenames, SHA-256 fingerprints and `dwg_version`, `decode_report` and `allowed_loss`, the recorded `change_set`, per-operation outcomes (`id`, `handle`, touched/added/deleted handles, `copies`, `snapped`), `unexpected_changes` (a structural self-check re-reading the written DWG bytes against the pre-edit snapshot to confirm nothing changed outside the requested operations), `checks` (checker findings on the revision), and `pdf` / `pdf_error`.
 3. `<rev-stem>.pdf` — unless `--no-pdf`, a 1:1 plot of the revision DWG stamped with the revision DWG. If the revision cannot be plotted (for example, an empty drawing), the revision DWG and `.changes.json` are still written and `pdf_error` explains why the PDF was skipped.
 
-## Not yet (Part 2)
+## Journal, undo, accept and issued stamps
 
-- `journal`, `undo` and `accept` on original-DWG revisions (`#71` Part 2).
+Every original DWG keeps its own write-ahead [journal](journal.md) beside it under `<dir>/.agentdrafter/originals/<safe-stem>/` (`journal.jsonl`, `journal.lock`, `undo-states/`), keyed deterministically from the original's canonical on-disk filename so multiple originals in the same folder (`P-101.dwg` and `P-102.dwg`) never collide while case aliases of the same file on a case-insensitive volume share one journal.
+
+```sh
+agentdrafter journal P-101.dwg
+agentdrafter undo P-101.dwg 1 [--dry-run]
+agentdrafter accept P-101.dwg [--despite-failed-checks] [--newest-seen <entry>] [--dry-run] [--fonts <folder>]... [--no-system-fonts]
+```
+
+- **Write-ahead commit & crash recovery:** `change` holds the original's `journal.lock` across recovery, revision generation, atomic non-clobbering placement, and marking the entry `done`, returning `journal_entry` in its reply. Refused or failed non-dry-run revisions record a `failed_attempt` entry without changing any drawing file. `--dry-run` on `change`, `undo`, and `accept` acquires no write lock, creates no `.agentdrafter/originals/` folder, writes no journal entry, and refuses if an unfinished `pending` commit or torn last line exists without mutating disk. If a process stops mid-commit or mid-undo, the next non-dry-run `journal`, `change`, `undo`, or `accept` rolls back the pending entry (removing partially placed revision files or restoring removed revision files from `undo-states/`), marks it `rolled_back`, and reports `rolled_back` in its reply without ever touching the original DWG.
+- **`journal <original.dwg>`:** Recovers any unfinished pending commit and returns the original's `JournalReport` (`entries`, `can_undo`, `kept_undo_states`, `undo_state`, `undone_by`, `issued_by`). When an original has no journal yet, returns an empty `JournalReport` without creating any folder or file.
+- **`undo <original.dwg> <change-set> [--dry-run]`:** Uses the same stack-undo rules as a drawing set: undoing entry `N` also undoes every later active revision entry, newest first, removing the revision files (`.dwg`, `.changes.json`, `.pdf`) they created while never modifying or removing the original DWG or following symlinks. Refuses cleanly (changing nothing) if any revision in the range has been issued by `accept`, if any revision file was modified or removed outside AgentDrafter since it was written, or if a target path is a symlink or the original itself.
+- **`accept <original.dwg>`:** Enforces `--newest-seen`, verifies every active un-issued revision DWG still matches its recorded SHA-256, and runs `check` on the latest active revision DWG. Unlike a drawing set (which can issue its unchanged baseline once), an original with no active un-issued revision returns `nothing_to_accept`. If checks fail without `--despite-failed-checks`, reports the findings with `checks_failed` and issues nothing; otherwise records a write-ahead `accept` entry with `via`, `issued`, `failed_checks`, and `revision` (the issued revision DWGs' paths and SHA-256s). Once issued, those revisions cannot be undone.
+- **Issued stamps:** `render <rev.dwg>` and `plot <rev.dwg>` perform a strictly read-only check of `<parent>/.agentdrafter/originals/*/journal.jsonl` (and, when `--output` placed the revision outside the original's folder, the original journal named by `<rev>.changes.json`); when `<rev.dwg>` matches a finished `accept` entry by path/identity and SHA-256, the PNG or PDF stamp marks `revision.issued: true` with the accept entry number, timestamp and interface (just like an issued drawing-set output).
+- **Drawing-set folders named `*.DWG`:** Folders whose name happens to end `.dwg`/`.DWG` continue routing to drawing-set `change`, `journal`, `undo`, and `accept`.

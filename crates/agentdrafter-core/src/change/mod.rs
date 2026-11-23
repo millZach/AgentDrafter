@@ -39,6 +39,7 @@ mod guides;
 mod history;
 mod journal;
 pub(crate) mod operations;
+pub(crate) mod original_journal;
 mod proposals;
 mod recover;
 mod undo;
@@ -65,6 +66,8 @@ pub use operations::{change_set_schema, operation_name, operations, OperationInf
 pub use accept::{accept_with, AcceptReport, AcceptRequest, StampRevision};
 pub(crate) use accept::{relative_to, stamp_revision};
 pub(crate) use apply::fit_library_inserts;
+#[cfg(test)]
+pub(crate) use commit::{rollback_placed_new_files, STOP_AT};
 pub use guides::{
     guide_with, guides_with, GuideChecked, GuideGiven, GuideListed, GuideMark, GuidePoint,
     GuideReport, GuideRequest, GuidesReport, GuidesRequest, PointListed, Setting, SnapNamed,
@@ -75,9 +78,11 @@ pub(crate) use history::FilesAsOf;
 pub(crate) use journal::now;
 pub use journal::{
     journal, CheckFailed, CommitState, Entry, EntryKind, FileIssued, FileState, HowChanged,
-    JournalEntry, JournalReport, JournalRequest, ObjectChanged, Refusal, RollBack, SheetFailed,
-    UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, LOCK_FILE, UNDO_STATES_FOLDER,
+    JournalEntry, JournalReport, JournalRequest, ObjectChanged, OriginalRevisionMeta, Refusal,
+    RollBack, SheetFailed, UndoState, JOURNAL_FILE, KEPT_UNDO_STATES, LOCK_FILE,
+    UNDO_STATES_FOLDER,
 };
+pub use original_journal::ORIGINALS_JOURNAL_FOLDER;
 pub use proposals::{
     discard, keep_with, proposals, propose_with, DiscardReport, DiscardRequest, KeepReport,
     KeepRequest, ProposalListed, ProposalsReport, ProposalsRequest, ProposeReport, ProposeRequest,

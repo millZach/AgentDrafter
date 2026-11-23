@@ -101,7 +101,7 @@ objects:
 
 ## Revising an original
 
-`agentdrafter change <original.dwg> <change-set.json | ->` revises an original DWG directly in memory without modifying the original, saving a new revision DWG beside it in its exact original DWG version with its `.changes.json` change list & diff report and revision PDF. See [revisions.md](revisions.md).
+`agentdrafter change <original.dwg> <change-set.json | ->` revises an original DWG directly in memory without modifying the original, saving a new revision DWG beside it in its exact original DWG version with its `.changes.json` change list & diff report and revision PDF, recorded write-ahead in the original's own journal under `.agentdrafter/originals/<safe-stem>/`. `journal`, `undo`, and `accept` work on `<original.dwg>` through every interface, and `render` / `plot` stamp accepted revision DWGs as issued. See [revisions.md](revisions.md).
 
 ## Not yet
 
