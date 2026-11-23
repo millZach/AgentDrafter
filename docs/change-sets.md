@@ -83,6 +83,7 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `add_donut` | `DONUT` | Adds a donut. |
 | `add_solid` | `SOLID` | Adds a 2D solid. |
 | `add_revision_cloud` | `REVCLOUD` | Adds a revision cloud around a rectangle, a polygon or existing objects' extents (`around` + optional `margin`), in `normal` or `calligraphy` style. See [Revision clouds](revision-clouds.md). |
+| `add_wipeout` | `WIPEOUT` | Adds a polygonal wipeout mask hiding what is drawn beneath it. See [Wipeouts and draw order](wipeouts.md). |
 | `insert_block` | `INSERT` | Adds an insert of a block from the block library. |
 | `add_table` | `TABLE` | Adds a table. |
 | `add_mleader` | `MLEADER` | Adds a multileader: leader lines from their arrows to a landing, and its text or block. |
@@ -108,6 +109,8 @@ The operation's reply lists each snapped point under `snapped`: its key in the o
 | `rotate` | `ROTATE`, `RO` | Turns objects about a base point. |
 | `scale` | `SCALE`, `SC` | Scales objects about a base point. |
 | `mirror` | `MIRROR`, `MI` | Mirrors objects across a line, as mirrored copies or in place. |
+| `draw_order` | `DRAWORDER`, `DR` | Moves one or more objects in draw order: `front`, `back`, `above`, or `under` another object. See [Wipeouts and draw order](wipeouts.md). |
+| `text_to_front` | `TEXTTOFRONT` | Brings `text`, `dimensions`, `leaders`, or `all` (default) to the front of draw order. See [Wipeouts and draw order](wipeouts.md). |
 | `set_attribute` | `ATTEDIT` | Sets one attribute value of an insert, naming one occurrence of a tag its block defines more than once. |
 | `set_cell` | `TABLEDIT` | Sets keys of a table's cell: its text, style, height, justification or merge. |
 | `add_row` | none | Adds a row to a table. |
@@ -513,7 +516,6 @@ Only what an operation touched is rewritten. Each record is read into the strict
 - Journal, `undo` and `accept` on original-DWG revisions (Part 2 of #71; revising an original `.dwg` into a new revision DWG with `.changes.json` and PDF is built in [revisions.md](revisions.md)).
 - Change sets on a sheet description outside a drawing set.
 - Operations on the set's other parts: hatch patterns, the block library's own layers, linetypes and text styles, renaming or deleting a block, rows and their values directly, and a sheet's template.
-- Choosing where in its list an added object goes; it is drawn after the others.
 - A column added after the last joining a merge that ends at the last, such as a title's: the merge stays as it was, and `set_cell` widens it. A merge grows only when the row or column goes in between its first and last.
 - Moving an object from a template to a row, or the reverse.
 - AutoCAD's associative array, which stays one object to edit; an array lands as plain copies (Zach, 2026-11-21). Nor an array's levels along Z, ARRAYPATH's measure along a path's Z or its tangent direction other than the path's own, or numbering a copied insert's attributes: set them with `set_attribute`.

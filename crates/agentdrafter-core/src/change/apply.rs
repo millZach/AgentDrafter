@@ -27,8 +27,9 @@ use super::commit::Replacement;
 use super::from_dimension::dimension_from;
 use super::journal::{commit_change_set, HowChanged, Keeping, Landing, ObjectChanged, SheetFailed};
 use super::operations::{
-    op_error, read_change_set, AddTo, BlockOp, Body, FromOp, Import, Kind, Motion, OpPoint,
-    Operation, Pattern, PointSnap, Table, TableOp, Target, TransformBy, ROW_VALUE_KEY,
+    op_error, read_change_set, AddTo, BlockOp, Body, DrawOrderPlace, FromOp, Import, Kind, Motion,
+    OpPoint, Operation, Pattern, PointSnap, Table, TableOp, Target, TextToFrontWhich, TransformBy,
+    ROW_VALUE_KEY,
 };
 use super::MARK_FILE;
 use super::{
@@ -963,7 +964,13 @@ pub(super) fn apply(
 /// hold: there is no sheet to fail, so the change set itself is wrong.
 fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
     for op in ops {
-        if let Body::AddRevisionCloud { to, around, .. } = &op.body {
+        if let Body::AddRevisionCloud {
+            to,
+            around,
+            draw_order,
+            ..
+        } = &op.body
+        {
             if let Some(AddTo::Template(written)) = to {
                 if files.template(written).is_none() {
                     let templates: Vec<&str> =
@@ -995,7 +1002,12 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                     ));
                 }
             }
-            for (target, key) in around {
+            let extra = draw_order_ref_target(draw_order.as_ref(), "draw_order");
+            for (target, key) in around
+                .iter()
+                .map(|(t, k)| (t, k.as_str()))
+                .chain(extra.iter().map(|(t, k)| (*t, k.as_str())))
+            {
                 let (sheet, field) = match target {
                     Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
                     Target::Name {
@@ -1017,6 +1029,64 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 }
             }
             continue;
+        }
+        if let Body::DrawOrder { targets, order } = &op.body {
+            let extra = draw_order_ref_target(Some(order), "order");
+            for (target, key) in targets
+                .iter()
+                .map(|(t, k)| (t, k.as_str()))
+                .chain(extra.iter().map(|(t, k)| (*t, k.as_str())))
+            {
+                let (sheet, field) = match target {
+                    Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
+                    Target::Name {
+                        sheet: Some(sheet), ..
+                    } => (sheet, format!("{key}.sheet")),
+                    Target::Name { sheet: None, .. } => continue,
+                };
+                if files.sheet(sheet).is_none() {
+                    return Err(op_error(
+                        op.index,
+                        op.spec.name,
+                        ErrorCode::UnknownName,
+                        format!(
+                            "the set holds no sheet `{sheet}`; its sheets: {}",
+                            files.sheet_names()
+                        ),
+                        &field,
+                    ));
+                }
+            }
+            continue;
+        }
+        if let Body::Add {
+            draw_order: Some(place),
+            ..
+        } = &op.body
+        {
+            if let Some((target, key)) = draw_order_ref_target(Some(place), "draw_order") {
+                let check = match target {
+                    Target::Id { sheet, .. } => Some((sheet, format!("{key}.id"))),
+                    Target::Name {
+                        sheet: Some(sheet), ..
+                    } => Some((sheet, format!("{key}.sheet"))),
+                    Target::Name { sheet: None, .. } => None,
+                };
+                if let Some((sheet, field)) = check {
+                    if files.sheet(sheet).is_none() {
+                        return Err(op_error(
+                            op.index,
+                            op.spec.name,
+                            ErrorCode::UnknownName,
+                            format!(
+                                "the set holds no sheet `{sheet}`; its sheets: {}",
+                                files.sheet_names()
+                            ),
+                            &field,
+                        ));
+                    }
+                }
+            }
         }
         if let Body::Copy { targets, .. } | Body::Transform { targets, .. } = &op.body {
             let path = match &op.body {
@@ -1054,6 +1124,10 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
             Body::Add {
                 to: AddTo::Template(written),
                 ..
+            }
+            | Body::TextToFront {
+                to: AddTo::Template(written),
+                ..
             } => {
                 if files.template(written).is_none() {
                     let templates: Vec<&str> =
@@ -1073,6 +1147,10 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 continue;
             }
             Body::Add {
+                to: AddTo::Sheet(sheet),
+                ..
+            }
+            | Body::TextToFront {
                 to: AddTo::Sheet(sheet),
                 ..
             }
@@ -1120,7 +1198,10 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 } => (sheet, "target.sheet"),
                 Target::Name { sheet: None, .. } => continue,
             },
-            Body::Copy { .. } | Body::Transform { .. } | Body::AddRevisionCloud { .. } => continue,
+            Body::Copy { .. }
+            | Body::Transform { .. }
+            | Body::AddRevisionCloud { .. }
+            | Body::DrawOrder { .. } => continue,
         };
         if files.sheet(sheet).is_none() {
             return Err(op_error(
@@ -1201,7 +1282,13 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         op_err(e.code, message, if own { &field } else { "" })
     };
 
-    if let Body::Add { to, keys, snaps } = &op.body {
+    if let Body::Add {
+        to,
+        keys,
+        snaps,
+        draw_order,
+    } = &op.body
+    {
         let Kind::Add(object, _) = op.spec.kind else {
             unreachable!("an add is an add")
         };
@@ -1221,6 +1308,11 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         if let Some(refusal) = many_paths(files, file, op, "template") {
             return refusal;
         }
+        let insert_at =
+            match resolve_add_insert_at(at, op, file, list, &sheets, draw_order.as_ref()) {
+                Ok(pos) => pos,
+                Err(applied) => return *applied,
+            };
         let mut keys = keys.clone();
         // An `id` sent as `null` is a bare null, which leaves the id out
         // (rule 8 of the YAML subset), so the object is given one, as an
@@ -1262,14 +1354,22 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
             Ok(record) => record,
             Err(e) => return fail(sheets, e),
         };
-        let index = match record.add(list, object, &keys, op.index) {
-            Ok(index) => index,
+        let (index, kept) = match record.add_at(list, object, &keys, insert_at, op.index) {
+            Ok(res) => res,
             Err(e) => return fail(sheets, from_record(e)),
         };
         let listed = &record.objects(list)[index];
         let id = format!("{}/{}", files.name(first), listed.id);
         let after = record.object_text(list, index);
         let path = record.path.clone();
+        let ids_written: Vec<String> = kept
+            .iter()
+            .flat_map(|place| {
+                sheets
+                    .iter()
+                    .map(move |&s| format!("{}/{place}", files.name(s)))
+            })
+            .collect();
         let place = match file {
             FileRef::Rows(_) => format!("to sheet `{}`, in its row", files.name(first)),
             FileRef::Template(t) => format!(
@@ -1286,7 +1386,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
                 after: Some(after),
                 row_value: None,
                 row_values: Vec::new(),
-                ids_written: Vec::new(),
+                ids_written,
                 inserts: Vec::new(),
                 attributes_removed: Vec::new(),
                 imported: None,
@@ -1311,6 +1411,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         around,
         margin,
         keys,
+        draw_order,
     } = &op.body
     {
         return apply_revision_cloud_around(
@@ -1320,8 +1421,17 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
             around,
             margin.as_ref(),
             keys,
+            draw_order.as_ref(),
             settings,
         );
+    }
+
+    if let Body::DrawOrder { targets, order } = &op.body {
+        return apply_draw_order(at, op, targets, order);
+    }
+
+    if let Body::TextToFront { to, which } = &op.body {
+        return apply_text_to_front(at, op, to, *which);
     }
 
     if let Body::Table {
@@ -1401,6 +1511,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::LeaderLine { target, .. } => target,
         Body::Add { .. }
         | Body::AddRevisionCloud { .. }
+        | Body::DrawOrder { .. }
+        | Body::TextToFront { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -1785,6 +1897,8 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         }
         Body::Add { .. }
         | Body::AddRevisionCloud { .. }
+        | Body::DrawOrder { .. }
+        | Body::TextToFront { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -4652,6 +4766,366 @@ fn model_index(record: &SheetRecord, found: &Found) -> Option<usize> {
 
 /// Adds a revision cloud framing the combined drawn extents of the objects
 /// `around` names, expanded on every side by `margin` (or half of `arc_length`
+fn draw_order_ref_target<'a>(
+    place: Option<&'a DrawOrderPlace>,
+    prefix: &str,
+) -> Option<(&'a Target, String)> {
+    match place {
+        Some(DrawOrderPlace::Above(t)) => Some((t, format!("{prefix}.above"))),
+        Some(DrawOrderPlace::Under(t)) => Some((t, format!("{prefix}.under"))),
+        _ => None,
+    }
+}
+
+/// Resolves an `add_*` operation's optional `draw_order` into an insertion
+/// index in `(file, list)` (or `None` to append at the end).
+fn resolve_add_insert_at(
+    at: &mut Attempt,
+    op: &Operation,
+    file: FileRef,
+    list: ObjectList,
+    sheets: &[usize],
+    place: Option<&DrawOrderPlace>,
+) -> Result<Option<usize>, Box<Applied>> {
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |e: Error| {
+        Box::new(Applied {
+            sheets: sheets.to_vec(),
+            outcome: Err(e),
+            refuse: false,
+        })
+    };
+    match place {
+        None | Some(DrawOrderPlace::Front) => Ok(None),
+        Some(DrawOrderPlace::Back) => Ok(Some(0)),
+        Some(DrawOrderPlace::Above(target)) | Some(DrawOrderPlace::Under(target)) => {
+            let is_above = matches!(place, Some(DrawOrderPlace::Above(_)));
+            let field = if is_above {
+                "draw_order.above"
+            } else {
+                "draw_order.under"
+            };
+            let found = match resolve(at, target, op) {
+                Ok(found) => found,
+                Err(applied) => return Err(Box::new(keyed(*applied, op, field))),
+            };
+            if (found.file, found.list) != (file, list) {
+                return Err(fail(op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`{}` is not in the same record/list where this object is being added; \
+                         template objects always draw before a sheet's row objects, so `above` \
+                         and `under` must name an object in the same template or row",
+                        found.id
+                    ),
+                    field,
+                )));
+            }
+            Ok(Some(if is_above {
+                found.index + 1
+            } else {
+                found.index
+            }))
+        }
+    }
+}
+
+fn apply_draw_order(
+    at: &mut Attempt,
+    op: &Operation,
+    targets: &[(Target, String)],
+    order: &DrawOrderPlace,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let mut found: Vec<(Found, &str)> = Vec::with_capacity(targets.len());
+    let mut lookup: Option<Applied> = None;
+    for (target, key) in targets {
+        match resolve(at, target, op) {
+            Ok(object) => found.push((object, key)),
+            Err(applied) if applied.refuse => return keyed(*applied, op, key),
+            Err(applied) => {
+                lookup.get_or_insert_with(|| keyed(*applied, op, key));
+            }
+        }
+    }
+    let mut reach_set: BTreeSet<usize> = BTreeSet::new();
+    for (f, _) in &found {
+        reach_set.extend(at.reach(f.file, f.row));
+    }
+    if let Some(mut failed) = lookup {
+        reach_set.extend(failed.sheets.iter().copied());
+        failed.sheets = reach_set.into_iter().collect();
+        return failed;
+    }
+    let reach: Vec<usize> = reach_set.into_iter().collect();
+    let (file, list) = (found[0].0.file, found[0].0.list);
+    for (i, (f, key)) in found.iter().enumerate() {
+        if (f.file, f.list) != (file, list) {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`{}` and `{}` are not in the same record/list; template objects always \
+                         draw before a sheet's row objects, so `draw_order` reorders objects in \
+                         one template or one sheet's row",
+                        found[0].0.id, f.id
+                    ),
+                    key,
+                ),
+            );
+        }
+        if let Some((_, first)) = found[..i]
+            .iter()
+            .find(|(g, _)| (g.file, g.list, g.index) == (f.file, f.list, f.index))
+        {
+            return fail(
+                reach,
+                op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`{}` is named twice, at {first} and here; name it once",
+                        f.id
+                    ),
+                    key,
+                ),
+            );
+        }
+    }
+    if let Some(refusal) = many_paths(files, file, op, "target") {
+        return refusal;
+    }
+    let moving_set: BTreeSet<usize> = found.iter().map(|(f, _)| f.index).collect();
+    let ref_index = match order {
+        DrawOrderPlace::Front | DrawOrderPlace::Back => None,
+        DrawOrderPlace::Above(t) | DrawOrderPlace::Under(t) => {
+            let field = if matches!(order, DrawOrderPlace::Above(_)) {
+                "order.above"
+            } else {
+                "order.under"
+            };
+            let rf = match resolve(at, t, op) {
+                Ok(rf) => rf,
+                Err(applied) => {
+                    let mut failed = keyed(*applied, op, field);
+                    let mut all: BTreeSet<usize> = reach.iter().copied().collect();
+                    all.extend(failed.sheets.iter().copied());
+                    failed.sheets = all.into_iter().collect();
+                    return failed;
+                }
+            };
+            if (rf.file, rf.list) != (file, list) {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "reference object `{}` is not in the same record/list as `{}`; \
+                             template objects always draw before a sheet's row objects",
+                            rf.id, found[0].0.id
+                        ),
+                        field,
+                    ),
+                );
+            }
+            if moving_set.contains(&rf.index) {
+                return fail(
+                    reach,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "reference object `{}` cannot also be one of the objects being \
+                             reordered",
+                            rf.id
+                        ),
+                        field,
+                    ),
+                );
+            }
+            Some(rf.index)
+        }
+    };
+    let record = match at.file(file) {
+        Ok(record) => record,
+        Err(e) => return fail(reach, e),
+    };
+    let count = record.objects(list).len();
+    let stay: Vec<usize> = (0..count).filter(|i| !moving_set.contains(i)).collect();
+    let moved: Vec<usize> = (0..count).filter(|i| moving_set.contains(i)).collect();
+    let insert_pos = match (order, ref_index) {
+        (DrawOrderPlace::Front, _) => stay.len(),
+        (DrawOrderPlace::Back, _) => 0,
+        (DrawOrderPlace::Above(_), Some(r)) => stay
+            .iter()
+            .position(|&i| i == r)
+            .map_or(stay.len(), |p| p + 1),
+        (DrawOrderPlace::Under(_), Some(r)) => stay.iter().position(|&i| i == r).unwrap_or(0),
+        _ => stay.len(),
+    };
+    let mut new_order = Vec::with_capacity(count);
+    new_order.extend_from_slice(&stay[..insert_pos]);
+    new_order.extend_from_slice(&moved);
+    new_order.extend_from_slice(&stay[insert_pos..]);
+    let kept = match record.reorder(list, &new_order, op.index) {
+        Ok(kept) => kept,
+        Err(e) => return fail(reach, op_err(e.code, e.message, "")),
+    };
+    let path = record.path.clone();
+    let ids_written: Vec<String> = kept
+        .iter()
+        .flat_map(|place| {
+            reach
+                .iter()
+                .map(move |&s| format!("{}/{place}", files.name(s)))
+        })
+        .collect();
+    let transformed: Vec<(String, Vec<usize>)> = found
+        .iter()
+        .map(|(f, _)| (f.id.clone(), reach.clone()))
+        .collect();
+    let first_id = found[0].0.id.clone();
+    let names: Vec<&str> = found.iter().map(|(f, _)| f.id.as_str()).collect();
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: Some(first_id),
+            before: None,
+            after: None,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written,
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed,
+            created_row_values: Vec::new(),
+            snapped: Vec::new(),
+            message: format!(
+                "moves {} {} in draw order",
+                quoted_list(&names),
+                order.words()
+            ),
+        }),
+        sheets: reach,
+        refuse: false,
+    }
+}
+
+fn apply_text_to_front(
+    at: &mut Attempt,
+    op: &Operation,
+    to: &AddTo,
+    which: TextToFrontWhich,
+) -> Applied {
+    let files = at.files;
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let (file, list, sheets, first) = match to {
+        AddTo::Sheet(name) => {
+            let k = files.sheet(name).expect("checked before");
+            let (file, list) = files.row_list(k);
+            (file, list, vec![k], k)
+        }
+        AddTo::Template(written) => {
+            let t = files.template(written).expect("checked before");
+            let sheets = files.templates[t].sheets.clone();
+            let first = sheets[0];
+            (FileRef::Template(t), ObjectList::Template, sheets, first)
+        }
+    };
+    if let Some(refusal) = many_paths(files, file, op, "template") {
+        return refusal;
+    }
+    let record = match at.file(file) {
+        Ok(record) => record,
+        Err(e) => return fail(sheets, e),
+    };
+    let objects = record.objects(list);
+    let mut stay = Vec::with_capacity(objects.len());
+    let mut moved = Vec::with_capacity(objects.len());
+    let mut moved_ids = Vec::new();
+    for (i, listed) in objects.iter().enumerate() {
+        if which.matches_kind(&listed.kind) {
+            moved.push(i);
+            moved_ids.push(format!("{}/{}", files.name(first), listed.id));
+        } else {
+            stay.push(i);
+        }
+    }
+    let moved_count = moved.len();
+    let mut new_order = stay;
+    new_order.extend(moved);
+    let kept = match record.reorder(list, &new_order, op.index) {
+        Ok(kept) => kept,
+        Err(e) => return fail(sheets, op_err(e.code, e.message, "")),
+    };
+    let path = record.path.clone();
+    let ids_written: Vec<String> = kept
+        .iter()
+        .flat_map(|place| {
+            sheets
+                .iter()
+                .map(move |&s| format!("{}/{place}", files.name(s)))
+        })
+        .collect();
+    let transformed: Vec<(String, Vec<usize>)> = moved_ids
+        .into_iter()
+        .map(|id| (id, sheets.clone()))
+        .collect();
+    let place = match file {
+        FileRef::Rows(_) => format!("on sheet `{}`", files.name(first)),
+        FileRef::Template(t) => format!(
+            "in template `{}` ({})",
+            files.templates[t].written,
+            every_sheet(&files.names(&sheets))
+        ),
+    };
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: None,
+            before: None,
+            after: None,
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written,
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed,
+            created_row_values: Vec::new(),
+            snapped: Vec::new(),
+            message: format!(
+                "brings {moved_count} {} object{} to the front {place}",
+                which.name(),
+                if moved_count == 1 { "" } else { "s" }
+            ),
+        }),
+        sheets,
+        refuse: false,
+    }
+}
+
 /// when `margin` is omitted), and written as a rectangular `revision_cloud`
 /// object in the sheet's row or template.
 #[allow(clippy::too_many_arguments)]
@@ -4662,6 +5136,7 @@ fn apply_revision_cloud_around(
     around: &[(Target, String)],
     margin_value: Option<&serde_json::Value>,
     keys: &serde_json::Map<String, serde_json::Value>,
+    draw_order: Option<&DrawOrderPlace>,
     settings: &Settings,
 ) -> Applied {
     let files = at.files;
@@ -4899,18 +5374,31 @@ fn apply_revision_cloud_around(
         resolved_keys.insert("arc_length".into(), serde_json::json!(arc_length));
     }
 
+    let insert_at = match resolve_add_insert_at(at, op, file, list, &sheets, draw_order) {
+        Ok(pos) => pos,
+        Err(applied) => return *applied,
+    };
     let record = match at.file(file) {
         Ok(record) => record,
         Err(e) => return fail(sheets, e),
     };
-    let index = match record.add(list, "revision_cloud", &resolved_keys, op.index) {
-        Ok(index) => index,
-        Err(e) => return fail(sheets, from_record(e)),
-    };
+    let (index, kept) =
+        match record.add_at(list, "revision_cloud", &resolved_keys, insert_at, op.index) {
+            Ok(res) => res,
+            Err(e) => return fail(sheets, from_record(e)),
+        };
     let listed = &record.objects(list)[index];
     let id = format!("{}/{}", files.name(first), listed.id);
     let after = record.object_text(list, index);
     let path = record.path.clone();
+    let ids_written: Vec<String> = kept
+        .iter()
+        .flat_map(|place| {
+            sheets
+                .iter()
+                .map(move |&s| format!("{}/{place}", files.name(s)))
+        })
+        .collect();
     let place = match file {
         FileRef::Rows(_) => format!("to sheet `{}`, in its row", files.name(first)),
         FileRef::Template(t) => format!(
@@ -4928,7 +5416,7 @@ fn apply_revision_cloud_around(
             after: Some(after),
             row_value: None,
             row_values: Vec::new(),
-            ids_written: Vec::new(),
+            ids_written,
             inserts: Vec::new(),
             attributes_removed: Vec::new(),
             imported: None,
@@ -5776,11 +6264,19 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
             to: AddTo::Sheet(sheet),
             ..
         }
+        | Body::TextToFront {
+            to: AddTo::Sheet(sheet),
+            ..
+        }
         | Body::AddRevisionCloud {
             to: Some(AddTo::Sheet(sheet)),
             ..
         } => files.sheet(sheet) == Some(k),
         Body::Add {
+            to: AddTo::Template(written),
+            ..
+        }
+        | Body::TextToFront {
             to: AddTo::Template(written),
             ..
         }
@@ -5808,9 +6304,9 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => reaches(target),
-        Body::Copy { targets, .. } | Body::Transform { targets, .. } => {
-            targets.iter().any(|(t, _)| reaches(t))
-        }
+        Body::Copy { targets, .. }
+        | Body::Transform { targets, .. }
+        | Body::DrawOrder { targets, .. } => targets.iter().any(|(t, _)| reaches(t)),
         Body::Block { library, .. } => {
             files.library(library.as_deref()).ok() == files.library_of[files.template_of[k]]
         }
@@ -5926,6 +6422,8 @@ fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matche
         Body::DimensionFrom { .. } => "point".to_owned(),
         // What is wrong with a copy comes of the operation as a whole.
         Body::Copy { .. } | Body::Transform { .. } => String::new(),
+        Body::DrawOrder { .. } => "order".to_owned(),
+        Body::TextToFront { .. } => "which".to_owned(),
         // A place within the block it wrote, such as `objects[0].line.layer`,
         // is that place in the operation.
         Body::Block { .. } => rest.to_owned(),
@@ -6108,7 +6606,9 @@ fn target_words(op: &Operation) -> String {
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. }
         | Body::DimensionFrom { target, .. } => target.words(),
-        Body::Copy { targets, .. } | Body::Transform { targets, .. } => match targets.as_slice() {
+        Body::Copy { targets, .. }
+        | Body::Transform { targets, .. }
+        | Body::DrawOrder { targets, .. } => match targets.as_slice() {
             [(one, _)] => one.words(),
             [(first, _), rest @ ..] => format!("{} and {} more", first.words(), rest.len()),
             [] => String::new(),
@@ -6117,11 +6617,19 @@ fn target_words(op: &Operation) -> String {
             to: AddTo::Sheet(s),
             ..
         }
+        | Body::TextToFront {
+            to: AddTo::Sheet(s),
+            ..
+        }
         | Body::AddRevisionCloud {
             to: Some(AddTo::Sheet(s)),
             ..
         } => format!("to sheet `{s}`"),
         Body::Add {
+            to: AddTo::Template(t),
+            ..
+        }
+        | Body::TextToFront {
             to: AddTo::Template(t),
             ..
         }

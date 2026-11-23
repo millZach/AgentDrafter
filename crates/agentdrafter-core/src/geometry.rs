@@ -278,6 +278,10 @@ impl<'a> Reader<'a> {
             },
             Object::Donut(donut) => polyline_segments(&donut.polyline()),
             Object::RevisionCloud(cloud) => polyline_segments(&cloud.polyline()),
+            Object::Wipeout(wipeout) => {
+                let corners: Vec<P3> = wipeout.points.iter().map(|&p| p3(p)).collect();
+                outline(&corners)
+            }
             Object::Solid(solid) => {
                 let corners: Vec<P3> = solid.corners.iter().map(|&p| p3(p)).collect();
                 outline(&corners)
@@ -547,6 +551,15 @@ impl<'a> Reader<'a> {
                 for (place, curve) in polyline_segments(&polyline) {
                     out.push((Midpoint, place.clone(), curve.point(curve.middle())));
                     round(&mut out, &place, &curve);
+                }
+            }
+            Object::Wipeout(wipeout) => {
+                for (name, p) in named("points", &wipeout.points) {
+                    out.push((Endpoint, name, p));
+                }
+                let corners: Vec<P3> = wipeout.points.iter().map(|&p| p3(p)).collect();
+                for (place, curve) in outline(&corners) {
+                    out.push((Midpoint, place, curve.point(curve.middle())));
                 }
             }
             Object::Arc(_) => {

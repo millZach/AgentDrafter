@@ -337,6 +337,11 @@ impl Reader<'_> {
                 m.extents = band_extents(&polyline).or_else(|| polyline_extents(&polyline));
                 m.area = Some(enclosed(&curves));
             }
+            Object::Wipeout(_) => {
+                m.length = length();
+                m.extents = extents();
+                m.area = Some(enclosed(&curves));
+            }
             Object::Arc(arc) => {
                 m.length = length();
                 m.extents = extents();

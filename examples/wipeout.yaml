@@ -1,0 +1,99 @@
+# Made-up example sheet demonstrating wipeouts, wipeout_frame, and draw order.
+units: in
+paper: ANSI B landscape
+wipeout_frame: display
+layers:
+  trim:
+    color: 8
+    plot: false
+  border:
+    color: white
+    lineweight: 0.35
+  wiring:
+    color: blue
+    lineweight: 0.25
+  labels:
+    color: white
+    lineweight: 0.18
+  masking:
+    color: 8
+    lineweight: 0.13
+objects:
+  - polyline:
+      id: trim
+      layer: trim
+      closed: true
+      points:
+        - [0.0, 0.0, 0]
+        - [17.0, 0.0, 0]
+        - [17.0, 11.0, 0]
+        - [0.0, 11.0, 0]
+  - polyline:
+      id: border
+      layer: border
+      closed: true
+      points:
+        - [0.5, 0.5, 0]
+        - [16.5, 0.5, 0]
+        - [16.5, 10.5, 0]
+        - [0.5, 10.5, 0]
+  # A continuous horizontal wire behind a masked tag callout.
+  - line:
+      id: bus-wire
+      layer: wiring
+      from: [2.0, 6.0, 0]
+      to: [14.0, 6.0, 0]
+  # Wipeout drawn after the wire and before the text hides the wire segment
+  # passing through the tag box.
+  - wipeout:
+      id: tag-mask
+      layer: masking
+      points:
+        - [6.6, 5.65, 0]
+        - [9.4, 5.65, 0]
+        - [9.4, 6.35, 0]
+        - [6.6, 6.35, 0]
+  - polyline:
+      id: tag-box
+      layer: labels
+      closed: true
+      points:
+        - [6.6, 5.65, 0]
+        - [9.4, 5.65, 0]
+        - [9.4, 6.35, 0]
+        - [6.6, 6.35, 0]
+  - text:
+      id: tag-label
+      layer: labels
+      contents: "SIG-204"
+      position: [8.0, 6.0, 0]
+      height: 0.25
+      justify: middle_center
+  # A hexagonal wipeout masking a crossing diagonal line.
+  - line:
+      id: cross-wire-a
+      layer: wiring
+      from: [3.0, 2.0, 0]
+      to: [7.0, 4.5, 0]
+  - line:
+      id: cross-wire-b
+      layer: wiring
+      from: [3.0, 4.5, 0]
+      to: [7.0, 2.0, 0]
+  - wipeout:
+      id: hex-mask
+      layer: masking
+      points:
+        - [4.4, 2.75, 0]
+        - [5.6, 2.75, 0]
+        - [6.0, 3.25, 0]
+        - [5.6, 3.75, 0]
+        - [4.4, 3.75, 0]
+        - [4.0, 3.25, 0]
+  - text:
+      id: hex-label
+      layer: labels
+      contents: "J-12"
+      position: [5.0, 3.25, 0]
+      height: 0.25
+      justify: middle_center

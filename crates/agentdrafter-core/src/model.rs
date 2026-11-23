@@ -23,6 +23,7 @@ pub(crate) mod leader;
 pub(crate) mod leader_block;
 pub(crate) mod revision_cloud;
 pub(crate) mod table;
+pub(crate) mod wipeout;
 pub use block::{
     attribute_text, Attribute, AttributeDefinition, Block, BlockLibrary, Cell, Insert,
 };
@@ -47,6 +48,7 @@ pub use table::{
     LaidCell, RowKind, RowStyle, Table, TableCell, TableStyle, LINE_BOX, LINE_STEP,
     STANDARD_TABLE_STYLE,
 };
+pub use wipeout::{Wipeout, WipeoutFrame};
 
 /// The layer every drawing has, and the one an object sits on unless it names another.
 pub const LAYER_ZERO: &str = "0";
@@ -322,6 +324,7 @@ pub enum Object {
     Donut(Donut),
     Solid(Solid),
     RevisionCloud(RevisionCloud),
+    Wipeout(Wipeout),
     Text(Text),
     #[serde(rename = "mtext")]
     MText(MText),
@@ -357,6 +360,7 @@ impl Object {
             Object::Donut(_) => "donut",
             Object::Solid(_) => "solid",
             Object::RevisionCloud(_) => "revision_cloud",
+            Object::Wipeout(_) => "wipeout",
             Object::Text(_) => "text",
             Object::MText(_) => "mtext",
             Object::AttributeDefinition(_) => "attdef",
@@ -382,6 +386,7 @@ impl Object {
             Object::Donut(o) => &o.layer,
             Object::Solid(o) => &o.layer,
             Object::RevisionCloud(o) => &o.layer,
+            Object::Wipeout(o) => &o.layer,
             Object::Text(o) => &o.layer,
             Object::MText(o) => &o.layer,
             Object::AttributeDefinition(o) => &o.layer,
@@ -407,6 +412,7 @@ impl Object {
             Object::Donut(o) => &o.properties,
             Object::Solid(o) => &o.properties,
             Object::RevisionCloud(o) => &o.properties,
+            Object::Wipeout(o) => &o.properties,
             Object::Text(o) => &o.properties,
             Object::MText(o) => &o.properties,
             Object::AttributeDefinition(o) => &o.properties,
@@ -431,6 +437,7 @@ impl Object {
             Object::Donut(o) => &mut o.properties,
             Object::Solid(o) => &mut o.properties,
             Object::RevisionCloud(o) => &mut o.properties,
+            Object::Wipeout(o) => &mut o.properties,
             Object::Text(o) => &mut o.properties,
             Object::MText(o) => &mut o.properties,
             Object::AttributeDefinition(o) => &mut o.properties,
@@ -873,6 +880,10 @@ pub struct Sheet {
     /// each has its own paper, paper-space objects and viewports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_layouts: Vec<Layout>,
+    /// How wipeout frames are shown and plotted (`off`, `on` or `display`),
+    /// matching AutoCAD's `WIPEOUTFRAME` (`WIPEOUTVARIABLES.display_frame`).
+    #[serde(default, skip_serializing_if = "WipeoutFrame::is_off")]
+    pub wipeout_frame: WipeoutFrame,
 }
 
 impl Sheet {
@@ -1129,6 +1140,9 @@ pub struct DrawingContents {
     /// What every linetype in the drawing is enlarged by: its LTSCALE.
     #[serde(default = "one")]
     pub ltscale: f64,
+    /// How wipeout frames are shown and plotted, read from `ACAD_WIPEOUT_VARS`.
+    #[serde(default, skip_serializing_if = "WipeoutFrame::is_off")]
+    pub wipeout_frame: WipeoutFrame,
     /// The drawing's first layout the core reads, in the order of their
     /// tabs, whatever tab the drawing was saved on: `objects` then holds
     /// its paper space's objects and viewports beside model space's, and

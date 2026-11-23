@@ -246,6 +246,32 @@ pub(crate) fn rasterize(
                     pixmap.fill_path(&path, &paint, rule, Transform::identity(), mask);
                 }
             }
+            Shape::Mask { contours } => {
+                let mut area = PathBuilder::new();
+                for contour in contours {
+                    let mut points = contour.iter().map(|&p| view.pixel(p));
+                    let Some(first) = points.next() else {
+                        continue;
+                    };
+                    area.move_to(first.0, first.1);
+                    for (x, y) in points {
+                        area.line_to(x, y);
+                    }
+                    area.close();
+                }
+                if let Some(path) = area.finish() {
+                    let mut bg = Paint::default();
+                    bg.set_color(tiny_skia::Color::WHITE);
+                    bg.anti_alias = true;
+                    pixmap.fill_path(
+                        &path,
+                        &bg,
+                        SkiaFillRule::EvenOdd,
+                        Transform::identity(),
+                        mask,
+                    );
+                }
+            }
         }
     }
     Some(pixmap)

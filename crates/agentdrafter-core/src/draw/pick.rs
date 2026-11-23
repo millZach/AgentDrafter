@@ -49,6 +49,16 @@ pub fn pick(
                 ),
                 _ => to_fill(at, *rule, contours),
             },
+            Shape::Mask { contours } => match item.clip_boundary {
+                Some(b) if b < list.clip_boundaries.len() => to_visible_fill(
+                    at,
+                    FillRule::EvenOdd,
+                    contours,
+                    &list.clip_boundaries[b],
+                    millimetres_per_unit,
+                ),
+                _ => to_fill(at, FillRule::EvenOdd, contours),
+            },
         };
         let distance = distance.max(outside_cut(list, item, at));
         // Later items lie on top, so they win a tie.
@@ -183,7 +193,7 @@ pub fn object_bounds(list: &DisplayList, object: usize) -> Option<Bounds> {
             .filter(|item| item.object == object)
             .flat_map(|item| match &item.shape {
                 Shape::Stroke { runs, .. } => runs.iter().flatten().copied().collect::<Vec<_>>(),
-                Shape::Fill { contours, .. } => {
+                Shape::Fill { contours, .. } | Shape::Mask { contours } => {
                     contours.iter().flatten().copied().collect::<Vec<_>>()
                 }
             }),
@@ -236,6 +246,10 @@ pub fn outlines(list: &DisplayList, edges: &[usize]) -> Vec<Outline> {
             Shape::Fill { rule, contours } => Some(Outline {
                 item,
                 pieces: fill_outline(*rule, contours),
+            }),
+            Shape::Mask { contours } => Some(Outline {
+                item,
+                pieces: fill_outline(FillRule::EvenOdd, contours),
             }),
             Shape::Stroke { .. } => None,
         })
@@ -340,10 +354,12 @@ pub fn nearest(
                     points => points.windows(2).map(|w| (w[0], w[1])).collect(),
                 })
                 .collect(),
-            Shape::Fill { .. } => match outlines.binary_search_by_key(&k, |o| o.item) {
-                Ok(o) => outlines[o].pieces.clone(),
-                Err(_) => Vec::new(),
-            },
+            Shape::Fill { .. } | Shape::Mask { .. } => {
+                match outlines.binary_search_by_key(&k, |o| o.item) {
+                    Ok(o) => outlines[o].pieces.clone(),
+                    Err(_) => Vec::new(),
+                }
+            }
         };
         for (a, b) in pieces {
             let p = foot(at, a, b);

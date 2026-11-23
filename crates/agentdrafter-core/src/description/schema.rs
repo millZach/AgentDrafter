@@ -96,7 +96,7 @@ pub(super) fn optional_text(mut schema: Value) -> Value {
 
 /// The sheet description's schema.
 pub fn sheet_description_schema() -> Value {
-    let [units_key, block_library_key, ltscale_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key, layout_key, layouts_key] =
+    let [units_key, block_library_key, ltscale_key, wipeout_frame_key, linetypes_key, layers_key, hatch_patterns_key, text_styles_key, table_styles_key, mleader_styles_key, dimension_styles_key, objects_key, paper_key, layout_key, layouts_key] =
         SHEET_KEYS;
     let (linetypes, layers, hatch_patterns, text_styles) = table_properties("sheet");
     json!({
@@ -117,6 +117,12 @@ pub fn sheet_description_schema() -> Value {
                 "description": "What every linetype on the sheet is enlarged by: AutoCAD's \
                                 LTSCALE, a number more than 0, with no unit. An object's own \
                                 `linetype_scale` multiplies it. Without it, 1.",
+            },
+            wipeout_frame_key: {
+                "description": "How wipeout frames are shown and plotted, matching AutoCAD's \
+                                WIPEOUTFRAME: `off` (0, hidden everywhere, the default), `on` (1, \
+                                shown and plotted) or `display` (2, shown on screen, not plotted).",
+                "enum": super::wipeout::WIPEOUT_FRAME_NAMES,
             },
             linetypes_key: linetypes,
             layers_key: layers,
@@ -856,6 +862,24 @@ fn defs() -> Map<String, Value> {
         ]);
         cloud
     });
+    defs.insert(
+        "wipeout".into(),
+        object_def(
+            "A wipeout, AutoCAD's WIPEOUT: a closed polygon of at least 3 coplanar points that \
+             hides everything drawn before it. Its border draws when the sheet's `wipeout_frame` \
+             is `on` (or `display` on screen).",
+            &["points"],
+            json!({
+                "points": {
+                    "type": "array",
+                    "description": "At least 3 coplanar points round the wipeout boundary, \
+                                    enclosing a non-zero area with no two consecutive points equal.",
+                    "items": { "$ref": "#/$defs/point" },
+                    "minItems": 3,
+                },
+            }),
+        ),
+    );
     defs.insert(
         "arc".into(),
         object_def(

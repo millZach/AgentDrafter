@@ -1454,6 +1454,10 @@ fn object_value(object: &Object, names: &Names) -> Value {
             let corners: Vec<Value> = solid.corners.iter().map(|&p| point_value(p)).collect();
             put("corners", Value::Array(corners));
         }
+        Object::Wipeout(wipeout) => {
+            let points: Vec<Value> = wipeout.points.iter().map(|&p| point_value(p)).collect();
+            put("points", Value::Array(points));
+        }
         Object::RevisionCloud(cloud) => {
             match &cloud.boundary {
                 crate::model::RevisionCloudBoundary::Rectangle { from, to } => {

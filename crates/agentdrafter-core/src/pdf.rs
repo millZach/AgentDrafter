@@ -337,6 +337,31 @@ fn drawing(list: &DisplayList, page: &Page, style: &PlotStyle, codes: &Codes) ->
                     };
                 }
             }
+            Shape::Mask { contours } => {
+                let mut drawn = false;
+                let bg = [255, 255, 255];
+                for contour in contours {
+                    let mut points = contour.iter().map(|&p| page.at(p));
+                    let Some(first) = points.next() else {
+                        continue;
+                    };
+                    if !drawn {
+                        if fill != Some(bg) {
+                            content.set_fill_rgb(1.0, 1.0, 1.0);
+                            fill = Some(bg);
+                        }
+                        drawn = true;
+                    }
+                    content.move_to(first.0, first.1);
+                    for (x, y) in points {
+                        content.line_to(x, y);
+                    }
+                    content.close_path();
+                }
+                if drawn {
+                    content.fill_even_odd();
+                }
+            }
         }
     }
     if clipped.is_some() {
