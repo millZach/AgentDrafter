@@ -272,7 +272,7 @@ const ARRAY_KEYS: [&[&str]; 3] = [
 pub(crate) const MOST_COPIES: usize = 10_000;
 
 /// Every operation, in the order they are listed.
-pub(crate) const SPECS: [Spec; 64] = [
+pub(crate) const SPECS: [Spec; 65] = [
     add("add_line", "LINE", "line"),
     add("add_polyline", "PLINE", "polyline"),
     add("add_arc", "ARC", "arc"),
@@ -284,6 +284,7 @@ pub(crate) const SPECS: [Spec; 64] = [
     add("add_mtext", "MTEXT", "mtext"),
     add("add_donut", "DONUT", "donut"),
     add("add_solid", "SOLID", "solid"),
+    add("add_revision_cloud", "REVCLOUD", "revision_cloud"),
     add("insert_block", "INSERT", "insert"),
     add("add_table", "TABLE", "table"),
     add("add_mleader", "MLEADER", "mleader"),
@@ -573,6 +574,18 @@ const HOW: &str = "A change set is {\"operations\": [...]}: a list of operations
 /// What `spec` does, in words.
 fn does(spec: &Spec) -> String {
     match spec.kind {
+        Kind::Add("revision_cloud", None) => {
+            "Adds a revision cloud round a rectangle, a polygon, or an existing object's (or \
+             several objects') extents with `around` and an optional `margin`, with an \
+             `arc_length` and a `style` (`normal` or `calligraphy`), written as a closed \
+             lightweight polyline with AutoCAD's RevcloudProps extended data so AutoCAD's \
+             REVCLOUD can modify it. With `rectangle` or `polygon`, give `sheet` or `template`; \
+             with `around`, `sheet` and `template` may be omitted to place the cloud on the \
+             target's sheet or template, and `arc_length` defaults to a size proportional to the \
+             framed extents. Without an id it is given one, revision_cloud-1 or the next number \
+             free. AutoCAD's REVCLOUD."
+                .to_owned()
+        }
         Kind::Add(object, kind) => {
             let what = match kind {
                 Some(kind) => format!("{} {kind} {object}", article(kind)),
@@ -1380,6 +1393,54 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
                 }
                 own.remove("oneOf");
             }
+            if object == "revision_cloud" {
+                let properties = schema["properties"]
+                    .as_object_mut()
+                    .expect("an object's definition has properties");
+                properties.insert(
+                    "around".into(),
+                    json!({
+                        "description": "One object, or a non-empty list of objects, whose drawn \
+                                        extents the cloud frames as a rectangle. Give rectangle, \
+                                        polygon or around, not more than one.",
+                        "oneOf": [
+                            { "$ref": "#/$defs/target" },
+                            {
+                                "type": "array",
+                                "items": { "$ref": "#/$defs/target" },
+                                "minItems": 1,
+                            },
+                        ],
+                    }),
+                );
+                properties.insert(
+                    "margin".into(),
+                    json!({
+                        "$ref": "#/$defs/length_not_negative",
+                        "description": "Clearance added on every side of the `around` extents, 0 \
+                                        or more. Only given with `around`; defaults to half of \
+                                        `arc_length`.",
+                    }),
+                );
+                let own = schema.as_object_mut().expect("an object's definition");
+                if let Some(required) = own.get_mut("required").and_then(Value::as_array_mut) {
+                    required.retain(|k| k != "arc_length");
+                }
+                own["oneOf"] = json!([
+                    {
+                        "required": ["rectangle", "arc_length"],
+                        "not": { "anyOf": [{ "required": ["polygon"] }, { "required": ["around"] }, { "required": ["margin"] }] },
+                    },
+                    {
+                        "required": ["polygon", "arc_length"],
+                        "not": { "anyOf": [{ "required": ["rectangle"] }, { "required": ["around"] }, { "required": ["margin"] }] },
+                    },
+                    {
+                        "required": ["around"],
+                        "not": { "anyOf": [{ "required": ["rectangle"] }, { "required": ["polygon"] }] },
+                    },
+                ]);
+            }
             let properties = schema["properties"]
                 .as_object_mut()
                 .expect("an object's definition has properties");
@@ -1406,6 +1467,19 @@ fn operation_schema(spec: &Spec, defs: &Map<String, Value>, allow_omitted_sheet:
             );
             let place = if allow_omitted_sheet {
                 json!({ "not": { "required": ["sheet", "template"] } })
+            } else if object == "revision_cloud" {
+                json!({
+                    "allOf": [
+                        { "not": { "required": ["sheet", "template"] } },
+                        {
+                            "anyOf": [
+                                { "required": ["sheet"] },
+                                { "required": ["template"] },
+                                { "required": ["around"] },
+                            ]
+                        },
+                    ]
+                })
             } else {
                 json!({ "oneOf": [{ "required": ["sheet"] }, { "required": ["template"] }] })
             };
@@ -2505,6 +2579,13 @@ pub(crate) enum Body {
         target: Target,
         edit: TableEdit,
     },
+    /// A revision cloud added round one or more existing objects' extents.
+    AddRevisionCloud {
+        to: Option<AddTo>,
+        around: Vec<(Target, String)>,
+        margin: Option<Value>,
+        keys: Map<String, Value>,
+    },
     /// A dimension added from another, `target`, to `point`, with the id
     /// and the name it is given.
     DimensionFrom {
@@ -3082,99 +3163,212 @@ fn operation(
                 .collect();
             let mut allowed = vec!["sheet", "template"];
             allowed.extend(&own);
-            keys(&allowed)?;
-            let mut with_kind = map.clone();
-            if let Some(kind) = kind {
-                with_kind.insert(DIMENSION_KIND_KEY.into(), Value::String(kind.to_owned()));
+            if object == "revision_cloud" {
+                allowed.push("around");
+                allowed.push("margin");
             }
-            // A dimension's kind requires its own keys.
-            if let Some(kind) = kind {
-                let (needs, _, _) = kind_keys(dimension_kind(kind));
-                if let Some(missing) = needs.iter().find(|k| !map.contains_key(**k)) {
+            keys(&allowed)?;
+            if object == "revision_cloud" && map.contains_key("around") {
+                if map.contains_key("rectangle") {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "give `rectangle`, `polygon` or `around`, not both `around` and \
+                         `rectangle`"
+                            .to_owned(),
+                        "rectangle",
+                    ));
+                }
+                if map.contains_key("polygon") {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "give `rectangle`, `polygon` or `around`, not both `around` and `polygon`"
+                            .to_owned(),
+                        "polygon",
+                    ));
+                }
+                let around_val = map.get("around").expect("checked above");
+                let around = match around_val {
+                    Value::Array(items) if !items.is_empty() => items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, item)| {
+                            let at = format!("around[{i}]");
+                            read_target(item).map(|t| (t, at.clone())).map_err(
+                                |(code, msg, field)| {
+                                    let path = if field.is_empty() {
+                                        at
+                                    } else {
+                                        format!("{at}.{field}")
+                                    };
+                                    fail(code, msg, &path)
+                                },
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    Value::Array(_) => {
+                        return Err(fail(
+                            ErrorCode::BadValue,
+                            "`around` must name at least one object".to_owned(),
+                            "around",
+                        ));
+                    }
+                    other => {
+                        let t = read_target(other).map_err(|(code, msg, field)| {
+                            let path = if field.is_empty() {
+                                "around".to_owned()
+                            } else {
+                                format!("around.{field}")
+                            };
+                            fail(code, msg, &path)
+                        })?;
+                        vec![(t, "around".to_owned())]
+                    }
+                };
+                let to = match (map.get("sheet"), map.get("template")) {
+                    (Some(Value::String(sheet)), None) => Some(AddTo::Sheet(sheet.clone())),
+                    (None, Some(Value::String(template))) => {
+                        Some(AddTo::Template(template.clone()))
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(fail(
+                            ErrorCode::Usage,
+                            "give sheet or template, not both: an object added to a sheet goes in \
+                             its row, and one added to a template is on every sheet built from it"
+                                .to_owned(),
+                            "",
+                        ));
+                    }
+                    (None, None) => default_sheet.map(|s| AddTo::Sheet(s.to_owned())),
+                    (Some(_), None) => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected a sheet's name".to_owned(),
+                            "sheet",
+                        ));
+                    }
+                    (None, Some(_)) => {
+                        return Err(fail(
+                            ErrorCode::WrongType,
+                            "expected a template's path".to_owned(),
+                            "template",
+                        ));
+                    }
+                };
+                let margin = map.get("margin").cloned().filter(|v| !v.is_null());
+                let keys: Map<String, Value> = map
+                    .iter()
+                    .filter(|(k, _)| {
+                        !matches!(
+                            k.as_str(),
+                            OP_KEY | "sheet" | "template" | "around" | "margin"
+                        )
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                Body::AddRevisionCloud {
+                    to,
+                    around,
+                    margin,
+                    keys,
+                }
+            } else {
+                if object == "revision_cloud" && map.contains_key("margin") {
+                    return Err(fail(
+                        ErrorCode::BadValue,
+                        "`margin` is only used with `around`".to_owned(),
+                        "margin",
+                    ));
+                }
+                let mut with_kind = map.clone();
+                if let Some(kind) = kind {
+                    with_kind.insert(DIMENSION_KIND_KEY.into(), Value::String(kind.to_owned()));
+                }
+                // A dimension's kind requires its own keys.
+                if let Some(kind) = kind {
+                    let (needs, _, _) = kind_keys(dimension_kind(kind));
+                    if let Some(missing) = needs.iter().find(|k| !map.contains_key(**k)) {
+                        return Err(fail(
+                            ErrorCode::MissingKey,
+                            format!(
+                                "missing key `{missing}`; {} {kind} dimension needs {}",
+                                article(kind),
+                                needs.join(" and ")
+                            ),
+                            missing,
+                        ));
+                    }
+                }
+                if let Some(missing) = missing_required(&objects[object], &with_kind) {
                     return Err(fail(
                         ErrorCode::MissingKey,
                         format!(
-                            "missing key `{missing}`; {} {kind} dimension needs {}",
-                            article(kind),
-                            needs.join(" and ")
+                            "missing key `{}`; {} {object} needs {}",
+                            missing.first,
+                            article(object),
+                            missing.needs
                         ),
-                        missing,
+                        &missing.first,
                     ));
                 }
-            }
-            if let Some(missing) = missing_required(&objects[object], &with_kind) {
-                return Err(fail(
-                    ErrorCode::MissingKey,
-                    format!(
-                        "missing key `{}`; {} {object} needs {}",
-                        missing.first,
-                        article(object),
-                        missing.needs
-                    ),
-                    &missing.first,
-                ));
-            }
-            let to = match (map.get("sheet"), map.get("template")) {
-                (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
-                (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
-                (Some(_), Some(_)) => {
-                    return Err(fail(
-                        ErrorCode::Usage,
-                        "give sheet or template, not both: an object added to a sheet goes in \
+                let to =
+                    match (map.get("sheet"), map.get("template")) {
+                        (Some(Value::String(sheet)), None) => AddTo::Sheet(sheet.clone()),
+                        (None, Some(Value::String(template))) => AddTo::Template(template.clone()),
+                        (Some(_), Some(_)) => return Err(fail(
+                            ErrorCode::Usage,
+                            "give sheet or template, not both: an object added to a sheet goes in \
                          its row, and one added to a template is on every sheet built from it"
-                            .to_owned(),
-                        "",
-                    ))
-                }
-                (None, None) => match default_sheet {
-                    Some(sheet) => AddTo::Sheet(sheet.to_owned()),
-                    None => {
-                        return Err(fail(
-                            ErrorCode::MissingKey,
-                            "missing key `sheet`: name the sheet to add it to, in its row, or \
-                                 give template to add it to a template"
                                 .to_owned(),
-                            "sheet",
-                        ))
-                    }
-                },
-                (Some(_), None) => {
-                    return Err(fail(
-                        ErrorCode::WrongType,
-                        "expected a sheet's name".to_owned(),
-                        "sheet",
-                    ))
+                            "",
+                        )),
+                        (None, None) => match default_sheet {
+                            Some(sheet) => AddTo::Sheet(sheet.to_owned()),
+                            None => return Err(fail(
+                                ErrorCode::MissingKey,
+                                "missing key `sheet`: name the sheet to add it to, in its row, or \
+                                 give template to add it to a template"
+                                    .to_owned(),
+                                "sheet",
+                            )),
+                        },
+                        (Some(_), None) => {
+                            return Err(fail(
+                                ErrorCode::WrongType,
+                                "expected a sheet's name".to_owned(),
+                                "sheet",
+                            ))
+                        }
+                        (None, Some(_)) => {
+                            return Err(fail(
+                                ErrorCode::WrongType,
+                                "expected a template's path".to_owned(),
+                                "template",
+                            ))
+                        }
+                    };
+                // A key sent as `null` is kept: the record writes it as a bare
+                // null, and the sheet's reader reads it as it reads one in any
+                // file (rule 8 of the YAML subset), so it leaves an optional text
+                // or path field out and is an error anywhere else.
+                let mut keys: Map<String, Value> = Map::new();
+                // A dimension's kind comes first, as a sheet description writes it.
+                if let Some(kind) = kind {
+                    keys.insert(DIMENSION_KIND_KEY.into(), Value::String(kind.to_owned()));
                 }
-                (None, Some(_)) => {
-                    return Err(fail(
-                        ErrorCode::WrongType,
-                        "expected a template's path".to_owned(),
-                        "template",
-                    ))
+                keys.extend(
+                    map.iter()
+                        .filter(|(k, _)| !matches!(k.as_str(), OP_KEY | "sheet" | "template"))
+                        .map(|(k, v)| (k.clone(), v.clone())),
+                );
+                let schema = defs.get(&format!("op_{object}")).unwrap_or(&defs[object]);
+                let mut snaps = Vec::new();
+                for (key, value) in &keys {
+                    let slots: Vec<&Value> = schema["properties"].get(key).into_iter().collect();
+                    snaps_in(value, &slots, defs, &format!("/{key}"), key, &mut snaps)
+                        .map_err(|(code, message, field)| fail(code, message, &field))?;
                 }
-            };
-            // A key sent as `null` is kept: the record writes it as a bare
-            // null, and the sheet's reader reads it as it reads one in any
-            // file (rule 8 of the YAML subset), so it leaves an optional text
-            // or path field out and is an error anywhere else.
-            let mut keys: Map<String, Value> = Map::new();
-            // A dimension's kind comes first, as a sheet description writes it.
-            if let Some(kind) = kind {
-                keys.insert(DIMENSION_KIND_KEY.into(), Value::String(kind.to_owned()));
+                Body::Add { to, keys, snaps }
             }
-            keys.extend(
-                map.iter()
-                    .filter(|(k, _)| !matches!(k.as_str(), OP_KEY | "sheet" | "template"))
-                    .map(|(k, v)| (k.clone(), v.clone())),
-            );
-            let schema = defs.get(&format!("op_{object}")).unwrap_or(&defs[object]);
-            let mut snaps = Vec::new();
-            for (key, value) in &keys {
-                let slots: Vec<&Value> = schema["properties"].get(key).into_iter().collect();
-                snaps_in(value, &slots, defs, &format!("/{key}"), key, &mut snaps)
-                    .map_err(|(code, message, field)| fail(code, message, &field))?;
-            }
-            Body::Add { to, keys, snaps }
         }
         Kind::Change => {
             keys(&["target", "set", ROW_VALUE_KEY])?;

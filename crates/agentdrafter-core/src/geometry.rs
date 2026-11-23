@@ -277,6 +277,7 @@ impl<'a> Reader<'a> {
                 None => Vec::new(),
             },
             Object::Donut(donut) => polyline_segments(&donut.polyline()),
+            Object::RevisionCloud(cloud) => polyline_segments(&cloud.polyline()),
             Object::Solid(solid) => {
                 let corners: Vec<P3> = solid.corners.iter().map(|&p| p3(p)).collect();
                 outline(&corners)
@@ -536,6 +537,16 @@ impl<'a> Reader<'a> {
                         degrees.to_string(),
                         [c[0] + r * cos, c[1] + r * sin, c[2]],
                     ));
+                }
+            }
+            Object::RevisionCloud(cloud) => {
+                let polyline = cloud.polyline();
+                for (name, p) in named("points", &polyline.points) {
+                    out.push((Endpoint, name, p));
+                }
+                for (place, curve) in polyline_segments(&polyline) {
+                    out.push((Midpoint, place.clone(), curve.point(curve.middle())));
+                    round(&mut out, &place, &curve);
                 }
             }
             Object::Arc(_) => {

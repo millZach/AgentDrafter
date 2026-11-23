@@ -700,6 +700,7 @@ impl Sheet<'_> {
             | Object::Circle(_)
             | Object::Ellipse(_)
             | Object::Spline(_)
+            | Object::RevisionCloud(_)
             | Object::Viewport(_) => Drawn::Line,
             Object::Hatch(_) | Object::Solid(_) | Object::Donut(_) | Object::Insert(_) => {
                 Drawn::Fill

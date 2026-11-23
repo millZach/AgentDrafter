@@ -227,7 +227,7 @@ pub(crate) struct Resolved {
 
 /// The object types a transform takes: every type a sheet holds but a
 /// viewport, which is a window on the paper.
-const TRANSFORMED_TYPES: [&str; 16] = [
+const TRANSFORMED_TYPES: [&str; 17] = [
     "line",
     "polyline",
     "arc",
@@ -239,6 +239,7 @@ const TRANSFORMED_TYPES: [&str; 16] = [
     "mtext",
     "donut",
     "solid",
+    "revision_cloud",
     "insert",
     "table",
     "mleader",
@@ -399,7 +400,61 @@ impl At<'_> {
                 ("polyline", "points") => self.vertices(&mut entry.value, &field)?,
                 ("spline", "fit_points" | "control_points")
                 | ("solid", "corners")
+                | ("revision_cloud", "polygon")
                 | ("leader" | "dimension", "points") => self.points(&mut entry.value, &field)?,
+                ("revision_cloud", "rectangle") => {
+                    let axis_aligned = match t.how {
+                        How::Scale(_) => true,
+                        How::Rotate(deg) => {
+                            (deg.rem_euclid(90.0)).abs() < 1e-9
+                                || (90.0 - deg.rem_euclid(90.0)).abs() < 1e-9
+                        }
+                        How::Mirror(axis) => axis == 0.0 || axis == 90.0,
+                    };
+                    if axis_aligned {
+                        let Kind::Mapping(parts) = &mut entry.value.kind else {
+                            return Err(self.not_a_point(&field));
+                        };
+                        let mut any = false;
+                        for part in parts.iter_mut() {
+                            if matches!(part.key.as_str(), "from" | "to") {
+                                let at = key_path(&field, &part.key);
+                                any |= self.point(&mut part.value, &at)?;
+                            }
+                        }
+                        any
+                    } else {
+                        let Kind::Mapping(parts) = &entry.value.kind else {
+                            return Err(self.not_a_point(&field));
+                        };
+                        let from_node = parts
+                            .iter()
+                            .find(|p| p.key == "from")
+                            .ok_or_else(|| self.not_a_point(&key_path(&field, "from")))?;
+                        let to_node = parts
+                            .iter()
+                            .find(|p| p.key == "to")
+                            .ok_or_else(|| self.not_a_point(&key_path(&field, "to")))?;
+                        let a = self.read_point(&from_node.value, &key_path(&field, "from"))?;
+                        let b = self.read_point(&to_node.value, &key_path(&field, "to"))?;
+                        let corners = [
+                            [a[0], a[1], a[2]],
+                            [b[0], a[1], a[2]],
+                            [b[0], b[1], a[2]],
+                            [a[0], b[1], a[2]],
+                        ]
+                        .map(|c| {
+                            let moved = t.point(c);
+                            Node::new(Kind::Sequence(
+                                moved.map(|v| Node::scalar(number_text(v))).to_vec(),
+                            ))
+                        });
+                        entry.key = "polygon".to_owned();
+                        entry.value = Node::new(Kind::Sequence(corners.to_vec()));
+                        changed.push("rectangle".to_owned());
+                        true
+                    }
+                }
                 ("mleader", "leaders") | ("dimension", "lines") => {
                     let Kind::Sequence(lines) = &mut entry.value.kind else {
                         return Err(self.not_a_point(&field));
@@ -414,6 +469,7 @@ impl At<'_> {
                 ("polyline", "width")
                 | ("arc" | "circle", "radius")
                 | ("donut", "outside_diameter" | "inside_diameter")
+                | ("revision_cloud", "arc_length")
                 | ("text" | "mtext", "height")
                 | ("mtext", "width")
                 | ("mleader" | "leader", "arrow_size" | "gap")

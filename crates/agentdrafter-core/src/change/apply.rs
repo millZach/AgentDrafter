@@ -963,6 +963,61 @@ pub(super) fn apply(
 /// hold: there is no sheet to fail, so the change set itself is wrong.
 fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
     for op in ops {
+        if let Body::AddRevisionCloud { to, around, .. } = &op.body {
+            if let Some(AddTo::Template(written)) = to {
+                if files.template(written).is_none() {
+                    let templates: Vec<&str> =
+                        files.templates.iter().map(|t| t.written.as_str()).collect();
+                    return Err(op_error(
+                        op.index,
+                        op.spec.name,
+                        ErrorCode::UnknownName,
+                        format!(
+                            "no sheet of the set is built from the template `{written}`; its \
+                             templates: {}",
+                            templates.join(", ")
+                        ),
+                        "template",
+                    ));
+                }
+            }
+            if let Some(AddTo::Sheet(sheet)) = to {
+                if files.sheet(sheet).is_none() {
+                    return Err(op_error(
+                        op.index,
+                        op.spec.name,
+                        ErrorCode::UnknownName,
+                        format!(
+                            "the set holds no sheet `{sheet}`; its sheets: {}",
+                            files.sheet_names()
+                        ),
+                        "sheet",
+                    ));
+                }
+            }
+            for (target, key) in around {
+                let (sheet, field) = match target {
+                    Target::Id { sheet, .. } => (sheet, format!("{key}.id")),
+                    Target::Name {
+                        sheet: Some(sheet), ..
+                    } => (sheet, format!("{key}.sheet")),
+                    Target::Name { sheet: None, .. } => continue,
+                };
+                if files.sheet(sheet).is_none() {
+                    return Err(op_error(
+                        op.index,
+                        op.spec.name,
+                        ErrorCode::UnknownName,
+                        format!(
+                            "the set holds no sheet `{sheet}`; its sheets: {}",
+                            files.sheet_names()
+                        ),
+                        &field,
+                    ));
+                }
+            }
+            continue;
+        }
         if let Body::Copy { targets, .. } | Body::Transform { targets, .. } = &op.body {
             let path = match &op.body {
                 Body::Copy {
@@ -1065,7 +1120,7 @@ fn precheck(files: &SetFiles, ops: &[Operation]) -> Result<(), Error> {
                 } => (sheet, "target.sheet"),
                 Target::Name { sheet: None, .. } => continue,
             },
-            Body::Copy { .. } | Body::Transform { .. } => continue,
+            Body::Copy { .. } | Body::Transform { .. } | Body::AddRevisionCloud { .. } => continue,
         };
         if files.sheet(sheet).is_none() {
             return Err(op_error(
@@ -1251,6 +1306,24 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         };
     }
 
+    if let Body::AddRevisionCloud {
+        to,
+        around,
+        margin,
+        keys,
+    } = &op.body
+    {
+        return apply_revision_cloud_around(
+            at,
+            op,
+            to.as_ref(),
+            around,
+            margin.as_ref(),
+            keys,
+            settings,
+        );
+    }
+
     if let Body::Table {
         op: table_op,
         table,
@@ -1327,6 +1400,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
         | Body::TableEdit { target, .. }
         | Body::LeaderLine { target, .. } => target,
         Body::Add { .. }
+        | Body::AddRevisionCloud { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -1710,6 +1784,7 @@ fn apply_op(at: &mut Attempt, op: &Operation, settings: &Settings) -> Applied {
             }
         }
         Body::Add { .. }
+        | Body::AddRevisionCloud { .. }
         | Body::Table { .. }
         | Body::Block { .. }
         | Body::DimensionFrom { .. }
@@ -4575,6 +4650,303 @@ fn model_index(record: &SheetRecord, found: &Found) -> Option<usize> {
         .position(|o| o.in_row == in_row && o.id.eq_ignore_ascii_case(local))
 }
 
+/// Adds a revision cloud framing the combined drawn extents of the objects
+/// `around` names, expanded on every side by `margin` (or half of `arc_length`
+/// when `margin` is omitted), and written as a rectangular `revision_cloud`
+/// object in the sheet's row or template.
+#[allow(clippy::too_many_arguments)]
+fn apply_revision_cloud_around(
+    at: &mut Attempt,
+    op: &Operation,
+    to: Option<&AddTo>,
+    around: &[(Target, String)],
+    margin_value: Option<&serde_json::Value>,
+    keys: &serde_json::Map<String, serde_json::Value>,
+    settings: &Settings,
+) -> Applied {
+    let files = at.files;
+    let fail = |sheets: Vec<usize>, e: Error| Applied {
+        sheets,
+        outcome: Err(e),
+        refuse: false,
+    };
+    let op_err = |code: ErrorCode, message: String, field: &str| {
+        op_error(op.index, op.spec.name, code, message, field)
+    };
+    let from_record = |e: Error| -> Error {
+        let field = e.field.clone().unwrap_or_default();
+        let own = field.starts_with("set") || field.starts_with("target");
+        let message = match (&e.file, own || field.is_empty()) {
+            (_, true) => e.message.clone(),
+            (Some(file), false) => format!("{} (at `{field}` in {file})", e.message),
+            (None, false) => format!("{} (at `{field}`)", e.message),
+        };
+        op_err(e.code, message, if own { &field } else { "" })
+    };
+
+    let (found, _reach, k) = match found_objects(at, op, around) {
+        Ok(found) => found,
+        Err(applied) => return *applied,
+    };
+
+    let (file, list, sheets, first) = match to {
+        Some(AddTo::Sheet(name)) => {
+            let target_k = files.sheet(name).expect("checked before");
+            if target_k != k {
+                return fail(
+                    vec![target_k],
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`around` objects are on sheet `{}`, not `{name}`; omit `sheet` or \
+                             name the same sheet",
+                            files.name(k)
+                        ),
+                        "sheet",
+                    ),
+                );
+            }
+            let (file, list) = files.row_list(target_k);
+            (file, list, vec![target_k], target_k)
+        }
+        Some(AddTo::Template(written)) => {
+            let t = files.template(written).expect("checked before");
+            let sheets = files.templates[t].sheets.clone();
+            if !sheets.contains(&k) {
+                return fail(
+                    sheets,
+                    op_err(
+                        ErrorCode::BadValue,
+                        format!(
+                            "`around` objects are on sheet `{}`, which is not built from template \
+                             `{written}`",
+                            files.name(k)
+                        ),
+                        "template",
+                    ),
+                );
+            }
+            (FileRef::Template(t), ObjectList::Template, sheets, k)
+        }
+        None => {
+            let first_template = match found.first().map(|(f, _)| f.file) {
+                Some(FileRef::Template(t))
+                    if found.iter().all(|(f, _)| f.file == FileRef::Template(t)) =>
+                {
+                    Some(t)
+                }
+                _ => None,
+            };
+            if let Some(t) = first_template {
+                let sheets = files.templates[t].sheets.clone();
+                (FileRef::Template(t), ObjectList::Template, sheets, k)
+            } else {
+                let (file, list) = files.row_list(k);
+                (file, list, vec![k], k)
+            }
+        }
+    };
+
+    if let Some(refusal) = many_paths(files, file, op, "template") {
+        return refusal;
+    }
+
+    let (record, fonts) = match sheet_geometry(at, op, k, settings) {
+        Ok(pair) => pair,
+        Err(e) => return fail(sheets, e),
+    };
+    let units = record.sheet.units;
+    let drawn = crate::query::measuring_objects(&record.sheet, &fonts);
+    let mut points: Vec<[f64; 2]> = Vec::new();
+    for (f, key) in &found {
+        let Some(place) = model_index(&record, f) else {
+            continue;
+        };
+        let before = points.len();
+        points.extend(
+            drawn
+                .items
+                .iter()
+                .filter(|item| item.object == place)
+                .flat_map(|item| item.points()),
+        );
+        points.extend(
+            drawn
+                .boundaries
+                .iter()
+                .filter(|(object, _)| *object == place)
+                .flat_map(|(_, b)| [b.min, b.max]),
+        );
+        if points.len() == before {
+            return fail(
+                sheets,
+                op_err(
+                    ErrorCode::BadValue,
+                    format!(
+                        "`{}` draws nothing, so it has no extents to frame with `around`",
+                        f.id
+                    ),
+                    key,
+                ),
+            );
+        }
+    }
+    if points.is_empty() {
+        return fail(
+            sheets,
+            op_err(
+                ErrorCode::BadValue,
+                "the `around` objects have no drawn extents to frame".to_owned(),
+                "around",
+            ),
+        );
+    }
+    let (min, max) = points.iter().fold(
+        ([f64::MAX, f64::MAX], [f64::MIN, f64::MIN]),
+        |(min, max), p| {
+            (
+                [min[0].min(p[0]), min[1].min(p[1])],
+                [max[0].max(p[0]), max[1].max(p[1])],
+            )
+        },
+    );
+    let raw_w = (max[0] - min[0]).max(0.0);
+    let raw_h = (max[1] - min[1]).max(0.0);
+
+    let (arc_length, write_arc_length) = match keys.get("arc_length").filter(|v| !v.is_null()) {
+        Some(value) => match crate::description::parse_length_json(value, units, "arc_length") {
+            Ok(len) if len.is_finite() && len > 0.0 => (len, false),
+            Ok(_) => {
+                return fail(
+                    sheets,
+                    op_err(
+                        ErrorCode::BadValue,
+                        "a revision cloud's arc_length is more than 0".to_owned(),
+                        "arc_length",
+                    ),
+                );
+            }
+            Err(e) => return fail(sheets, op_err(e.code, e.message, "arc_length")),
+        },
+        None => (
+            crate::model::RevisionCloud::default_arc_length(raw_w, raw_h),
+            true,
+        ),
+    };
+
+    let margin = match margin_value {
+        Some(value) => match crate::description::parse_length_json(value, units, "margin") {
+            Ok(m) if m.is_finite() && m >= 0.0 => m,
+            Ok(_) => {
+                return fail(
+                    sheets,
+                    op_err(
+                        ErrorCode::BadValue,
+                        "a revision cloud's margin cannot be negative".to_owned(),
+                        "margin",
+                    ),
+                );
+            }
+            Err(e) => return fail(sheets, op_err(e.code, e.message, "margin")),
+        },
+        None => crate::model::RevisionCloud::default_margin(arc_length),
+    };
+
+    let x0 = min[0] - margin;
+    let y0 = min[1] - margin;
+    let x1 = max[0] + margin;
+    let y1 = max[1] + margin;
+    if !(x1 > x0 && y1 > y0) {
+        return fail(
+            sheets,
+            op_err(
+                ErrorCode::BadValue,
+                "the framed extents have zero width or height; give a margin more than 0"
+                    .to_owned(),
+                "margin",
+            ),
+        );
+    }
+
+    let mut resolved_keys = keys.clone();
+    if resolved_keys
+        .get("id")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        let mut taken: BTreeSet<String> = BTreeSet::new();
+        for &s in &sheets {
+            match at.objects(s) {
+                Ok(objects) => {
+                    taken.extend(objects.into_iter().map(|o| o.3.id.to_lowercase()));
+                }
+                Err(e) => return fail(sheets.clone(), e),
+            }
+        }
+        let id = (1..)
+            .map(|n| format!("revision_cloud-{n}"))
+            .find(|id| !taken.contains(id))
+            .expect("a free number");
+        resolved_keys.insert("id".into(), serde_json::Value::String(id));
+    }
+    resolved_keys.insert(
+        "rectangle".into(),
+        serde_json::json!({
+            "from": [x0, y0, 0.0],
+            "to": [x1, y1, 0.0],
+        }),
+    );
+    if write_arc_length {
+        resolved_keys.insert("arc_length".into(), serde_json::json!(arc_length));
+    }
+
+    let record = match at.file(file) {
+        Ok(record) => record,
+        Err(e) => return fail(sheets, e),
+    };
+    let index = match record.add(list, "revision_cloud", &resolved_keys, op.index) {
+        Ok(index) => index,
+        Err(e) => return fail(sheets, from_record(e)),
+    };
+    let listed = &record.objects(list)[index];
+    let id = format!("{}/{}", files.name(first), listed.id);
+    let after = record.object_text(list, index);
+    let path = record.path.clone();
+    let place = match file {
+        FileRef::Rows(_) => format!("to sheet `{}`, in its row", files.name(first)),
+        FileRef::Template(t) => format!(
+            "to the template `{}`, so it is on {}",
+            files.templates[t].written,
+            every_sheet(&files.names(&sheets))
+        ),
+    };
+    let around_ids: Vec<&str> = found.iter().map(|(f, _)| f.id.as_str()).collect();
+    Applied {
+        outcome: Ok(Done {
+            record: path,
+            id: Some(id.clone()),
+            before: None,
+            after: Some(after),
+            row_value: None,
+            row_values: Vec::new(),
+            ids_written: Vec::new(),
+            inserts: Vec::new(),
+            attributes_removed: Vec::new(),
+            imported: None,
+            copies: Vec::new(),
+            copy_sheets: Vec::new(),
+            transformed: Vec::new(),
+            created_row_values: Vec::new(),
+            message: format!(
+                "adds a revision_cloud, `{id}`, around {}, {place}",
+                quoted_list(&around_ids)
+            ),
+            snapped: Vec::new(),
+        }),
+        sheets,
+        refuse: false,
+    }
+}
+
 /// The centre of the box round the objects `found` names, on sheet `k`:
 /// the base point of a polar array's copies that are not turned, when the
 /// operation gives none.
@@ -5403,15 +5775,26 @@ fn at_reaches(op: &Operation, k: usize, at: &Attempt) -> bool {
         Body::Add {
             to: AddTo::Sheet(sheet),
             ..
+        }
+        | Body::AddRevisionCloud {
+            to: Some(AddTo::Sheet(sheet)),
+            ..
         } => files.sheet(sheet) == Some(k),
         Body::Add {
             to: AddTo::Template(written),
+            ..
+        }
+        | Body::AddRevisionCloud {
+            to: Some(AddTo::Template(written)),
             ..
         }
         | Body::Table {
             to: AddTo::Template(written),
             ..
         } => files.template(written) == Some(files.template_of[k]),
+        Body::AddRevisionCloud {
+            to: None, around, ..
+        } => around.iter().any(|(t, _)| reaches(t)),
         Body::Table {
             to: AddTo::Sheet(sheet),
             ..
@@ -5488,7 +5871,7 @@ fn split_place(field: &str) -> Option<(ObjectList, usize, &str)> {
 fn op_field(op: &Operation, rest: &str, code: ErrorCode, matched: Option<&Matched>) -> String {
     let within = rest.split_once('.').map_or("", |(_, within)| within);
     match &op.body {
-        Body::Add { .. } => within.to_owned(),
+        Body::Add { .. } | Body::AddRevisionCloud { .. } => within.to_owned(),
         Body::Table {
             op: TableOp::Change,
             keys,
@@ -5733,11 +6116,28 @@ fn target_words(op: &Operation) -> String {
         Body::Add {
             to: AddTo::Sheet(s),
             ..
+        }
+        | Body::AddRevisionCloud {
+            to: Some(AddTo::Sheet(s)),
+            ..
         } => format!("to sheet `{s}`"),
         Body::Add {
             to: AddTo::Template(t),
             ..
+        }
+        | Body::AddRevisionCloud {
+            to: Some(AddTo::Template(t)),
+            ..
         } => format!("to the template `{t}`"),
+        Body::AddRevisionCloud {
+            to: None, around, ..
+        } => match around.as_slice() {
+            [(one, _)] => format!("around {}", one.words()),
+            [(first, _), rest @ ..] => {
+                format!("around {} and {} more", first.words(), rest.len())
+            }
+            [] => String::new(),
+        },
         Body::Table {
             table,
             name,

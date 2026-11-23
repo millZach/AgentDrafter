@@ -981,6 +981,7 @@ impl<'a> Drawer<'a> {
             )),
             Object::Polyline(polyline) if polyline.is_flat() => flat_polyline(polyline),
             Object::Donut(donut) => flat_polyline(&donut.polyline()),
+            Object::RevisionCloud(cloud) => flat_polyline(&cloud.polyline()),
             // A viewport's frame, on the paper: its rectangle, or the
             // boundary it is clipped to.
             Object::Viewport(viewport) => match &viewport.clip {

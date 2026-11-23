@@ -331,6 +331,12 @@ impl Reader<'_> {
                 m.extents = band_extents(&donut.polyline());
                 m.area = Some(enclosed(&curves));
             }
+            Object::RevisionCloud(cloud) => {
+                let polyline = cloud.polyline();
+                m.length = length();
+                m.extents = band_extents(&polyline).or_else(|| polyline_extents(&polyline));
+                m.area = Some(enclosed(&curves));
+            }
             Object::Arc(arc) => {
                 m.length = length();
                 m.extents = extents();

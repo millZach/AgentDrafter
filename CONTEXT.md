@@ -120,6 +120,10 @@ _Avoid_: dot, ring, filled circle
 A filled triangle or quadrilateral, AutoCAD's SOLID object. A sheet description lists its corners round the outline.
 _Avoid_: solid (alone it is a hatch's `SOLID` fill, or AutoCAD's 3D solid), filled polygon
 
+**Revision cloud**:
+A closed lightweight polyline of outward-bowing (or reversed, inward-bowing) arcs drawn round a rectangle, a polygon or an existing object's extents to call out a revised region, as AutoCAD's REVCLOUD draws it, in `normal` or tapered `calligraphy` style and carrying AutoCAD's `RevcloudProps` extended data so AutoCAD's REVCLOUD can modify it.
+_Avoid_: revcloud (alone it is AutoCAD's command name), markup bubble
+
 **Table**:
 A grid of cells with text, AutoCAD's TABLE object, hung from its top left corner: rows of given heights running down, columns of given widths across, each cell's text laid out in its margins, and cells merged across rows and columns. Its first row may be a title row and the next a header row; the rest are data rows.
 _Avoid_: grid, schedule (a schedule is one use of a table), spreadsheet
