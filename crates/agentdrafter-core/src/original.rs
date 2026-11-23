@@ -1043,6 +1043,50 @@ pub(crate) fn is_sha256_hex(name: &str) -> bool {
     name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// Checks every intermediate directory component of `relative` under `root`
+/// (excluding the final file name) via `symlink_metadata`, refusing symlinks
+/// or non-directory entries. Returns `Ok(())` if every existing intermediate
+/// component is a real directory.
+pub(crate) fn verify_no_symlink_intermediate_dirs(root: &Path, relative: &Path) -> io::Result<()> {
+    let Some(parent) = relative.parent() else {
+        return Ok(());
+    };
+    let mut cur = root.to_path_buf();
+    for comp in parent.components() {
+        match comp {
+            std::path::Component::CurDir => continue,
+            std::path::Component::Normal(seg) => {
+                cur.push(seg);
+                match fs::symlink_metadata(&cur) {
+                    Ok(meta) => {
+                        if meta.file_type().is_symlink() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("refusing to traverse symbolic link `{}`", cur.display()),
+                            ));
+                        }
+                        if !meta.file_type().is_dir() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("`{}` is not a directory", cur.display()),
+                            ));
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected path component in `{}`", relative.display()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Opens `mirror` without following a trailing symlink or reparse point,
 /// verifies on the opened handle that it is a regular non-symlink file that
 /// matches `expected` and is not `source_id`, and reads at most the first
@@ -1164,6 +1208,75 @@ fn random_u64(path: &Path, salt: u64) -> u64 {
 /// never streaming partially into `path`. Always cleans up `temporary`.
 fn place_new(temporary: &Path, path: &Path) -> Result<(), Error> {
     place_new_file(temporary, path, "text mirror", ErrorCode::NotAnOutput)
+}
+
+/// Atomically moves `src` to `dst` ONLY when `dst` does not already exist,
+/// never overwriting an existing file or symlink and NEVER deleting `src` on
+/// error.
+pub(crate) fn rename_no_replace_keep_src(src: &Path, dst: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        match rename_no_replace_windows(src, dst) {
+            Ok(()) => Ok(()),
+            Err(e) if e.raw_os_error() == Some(183) => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("`{}` already exists", dst.display()),
+            )),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        match rename_no_replace_unix(src, dst) {
+            Ok(()) => Ok(()),
+            Err(e) if is_rename_noreplace_unsupported(&e) => {
+                fs::hard_link(src, dst)?;
+                if let Err(rm) = fs::remove_file(src) {
+                    if rm.kind() != io::ErrorKind::NotFound {
+                        return Err(rm);
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        fs::hard_link(src, dst)?;
+        if let Err(rm) = fs::remove_file(src) {
+            if rm.kind() != io::ErrorKind::NotFound {
+                return Err(rm);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Atomically moves `src` beside itself to an unpredictable randomized backup
+/// path `{prefix}-{rand32hex}.{suffix}` without ever clobbering an existing
+/// file or symlink and without deleting `src` on error.
+pub(crate) fn move_to_unique_backup_beside(
+    src: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> io::Result<PathBuf> {
+    static BACKUPS: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..64 {
+        let count = BACKUPS.fetch_add(1, Ordering::Relaxed);
+        let hi = random_u64(src, count ^ 0xa5a5_5a5a_f0f0_0f0f);
+        let lo = random_u64(src, count ^ 0x9e37_79b9_7f4a_7c15);
+        let candidate = src.with_file_name(format!("{prefix}-{hi:016x}{lo:016x}.{suffix}"));
+        match rename_no_replace_keep_src(src, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("could not allocate a unique backup {suffix} file"),
+    ))
 }
 
 /// Atomically moves `temporary` into place at `path` only when `path` does

@@ -47,20 +47,42 @@ use std::path::{Path, PathBuf};
 use crate::build::FileId;
 use crate::error::{Error, ErrorCode};
 use crate::original::{
-    create_scoped_temp_beside, ensure_real_dir_chain, open_no_follow_write, place_new_file,
-    read_regular_no_follow, read_regular_no_follow_with_id, NoFollowRead, NoFollowReadWithId,
+    create_scoped_temp_beside, ensure_real_dir_chain, move_to_unique_backup_beside,
+    open_no_follow_write, place_new_file, read_regular_no_follow, rename_no_replace_keep_src,
+    verify_no_symlink_intermediate_dirs, verify_real_dir_chain, NoFollowRead,
 };
 use crate::stamp::fingerprint;
 
 /// Safety context for original-DWG revision commits, undos, and crash recovery:
-/// scopes temp/backup files to this original's `<safe-stem>` key and enforces
-/// non-symlink, non-original file-identity checks throughout.
+/// scopes temp/backup files to this original's full canonical path token and
+/// enforces non-symlink, non-original file-identity checks throughout.
 #[derive(Clone, Copy)]
 pub(super) struct OriginalGuard<'a> {
+    /// Per-folder journal key (`<readable>-<namehash12>`).
     pub key: &'a str,
+    /// Full-path-scoped temp/backup prefix key (`<key>-<fullpathhash16>`),
+    /// unique even when two originals in different folders share a filename
+    /// and write into the same output directory.
+    pub temp_scope: &'a str,
+    /// Directory containing `.agentdrafter/originals/<key>/`.
     pub base_dir: &'a Path,
+    /// Canonical parent directory of the original DWG.
+    pub orig_dir_real: &'a Path,
     pub source: &'a Path,
     pub source_id: Option<FileId>,
+}
+
+/// One file of a pending original-DWG entry already inspected in a single
+/// non-following read, carrying both its SHA-256 fingerprint and opened
+/// [`FileId`] so crash recovery performs zero second reads.
+pub(super) struct InspectedBefore {
+    pub path: PathBuf,
+    /// Recorded SHA-256 before the pending entry (`None` if newly created).
+    pub print: Option<String>,
+    /// Observed SHA-256 from the single inspection read (`None` if absent).
+    pub found: Option<String>,
+    /// Verified target identity captured in that same read.
+    pub target: ExpectedTarget,
 }
 
 /// Verified pre-mutation state of a target path during original-DWG undo or
@@ -133,9 +155,11 @@ impl From<io::Error> for AddFailed {
     }
 }
 
-/// Where one replacement got to: the file that was there, moved aside.
+/// Where one replacement got to: the file that was there, moved aside, and the
+/// platform `FileId` of any new file this commit placed at `path`.
 struct Placed {
     aside: Option<PathBuf>,
+    placed_id: Option<FileId>,
 }
 
 /// Why files could not all be put in place: the error, and the files that
@@ -211,17 +235,24 @@ fn commit_impl(
             },
         )
         .collect();
-    let names = Names::new(ahead.entry, guard.map(|g| g.key), keys);
+    let names = Names::new(ahead.entry, guard.map(|g| g.temp_scope), keys);
     let placed = match put_in_place(replacements, expected, guard, &names, &mut seam) {
         Ok(placed) => placed,
         Err(unplaced) => {
+            if let Some(g) = guard {
+                // `put_in_place` already rolled back ONLY the files THIS commit
+                // actually moved/modified before failing. Never re-read or
+                // overwrite any untouched/rejected file (such as one rejected
+                // for a changed `FileId`).
+                return Err(cut_back_original_unplaced(ahead, length, *unplaced, g));
+            }
             return Err(not_finished(
                 ahead,
                 length,
                 *unplaced,
                 guard,
                 remove_empty_parents,
-            ))
+            ));
         }
     };
     finish(replacements, &placed, guard, remove_empty_parents);
@@ -242,16 +273,48 @@ fn commit_impl(
         // back: every file is in place, so the entry is done.
         Marked::Done => Ok(()),
         // Taken back: the entry is pending, so the files can be put back.
-        Marked::Pending => Err(not_finished(
-            ahead,
-            length,
-            Unplaced {
-                error: Error::new(ErrorCode::WriteFailed, base).in_file(ahead.journal),
-                not_back: Vec::new(),
-            },
-            guard,
-            remove_empty_parents,
-        )),
+        Marked::Pending => {
+            if let Some(g) = guard {
+                let inspected: Vec<InspectedBefore> = ahead
+                    .before
+                    .iter()
+                    .map(|b| {
+                        let (found, target) = replacements
+                            .iter()
+                            .zip(&placed)
+                            .find(|(r, _)| r.path == b.path)
+                            .map(|(r, p)| match &r.bytes {
+                                Some(bytes) => (
+                                    Some(fingerprint(bytes)),
+                                    ExpectedTarget::Existing(p.placed_id),
+                                ),
+                                None => (None, ExpectedTarget::Absent),
+                            })
+                            .unwrap_or((b.print.clone(), ExpectedTarget::Absent));
+                        InspectedBefore {
+                            path: b.path.clone(),
+                            print: b.print.clone(),
+                            found,
+                            target,
+                        }
+                    })
+                    .collect();
+                let err = Error::new(ErrorCode::WriteFailed, base).in_file(ahead.journal);
+                return Err(not_finished_original_done_failed(
+                    ahead, length, err, &inspected, g,
+                ));
+            }
+            Err(not_finished(
+                ahead,
+                length,
+                Unplaced {
+                    error: Error::new(ErrorCode::WriteFailed, base).in_file(ahead.journal),
+                    not_back: Vec::new(),
+                },
+                guard,
+                remove_empty_parents,
+            ))
+        }
         // It may stand in part: putting the files back now could leave a
         // journal that says done beside them, so they are left in place.
         Marked::Unknown => Err(Error::new(
@@ -299,7 +362,7 @@ pub(super) fn commit_new_files(
     seam.passed(|| "its entry was written, pending".to_owned());
 
     let keys: Vec<String> = (0..new_files.len()).map(|j| format!("f{j}")).collect();
-    let names = Names::new(ahead.entry, Some(guard.key), keys);
+    let names = Names::new(ahead.entry, Some(guard.temp_scope), keys);
 
     let mut staged: Vec<(PathBuf, Option<FileId>)> = Vec::with_capacity(new_files.len());
     for (j, file) in new_files.iter().enumerate() {
@@ -582,6 +645,81 @@ fn not_added(ahead: &Ahead, failed: AddFailed) -> Error {
     Error::new(ErrorCode::WriteFailed, message).in_file(ahead.journal)
 }
 
+/// Finalizes an original-DWG commit failure after `put_in_place` already
+/// rolled back only the files THIS commit touched: cuts back the journal if
+/// every touched file was restored, otherwise leaves the entry pending. Never
+/// re-reads or overwrites an untouched/rejected file.
+fn cut_back_original_unplaced(
+    ahead: &Ahead,
+    length: u64,
+    unplaced: Unplaced,
+    guard: OriginalGuard<'_>,
+) -> Error {
+    let Unplaced {
+        mut error,
+        not_back,
+    } = unplaced;
+    if !not_back.is_empty() {
+        error.message.push_str(&format!(
+            ", and could not put back {} at once: the journal holds entry {} pending so the next \
+             command can finish rolling it back",
+            not_back.join(", "),
+            ahead.entry
+        ));
+        return error;
+    }
+    match cut_back_checked(ahead.journal, length, guard.source_id) {
+        Ok(()) => {
+            error
+                .message
+                .push_str("; every file this operation touched was put back as it was, so nothing was changed");
+        }
+        Err(e) => {
+            error.message.push_str(&format!(
+                "; every file this operation touched was put back as it was, but the journal \
+                 could not be cut back ({e}), so it holds entry {} pending, and the next command \
+                 marks it rolled back",
+                ahead.entry
+            ));
+        }
+    }
+    error
+}
+
+/// Restores only files whose post-placement identity still matches what this
+/// commit just left when marking `done` failed with `Marked::Pending`.
+fn not_finished_original_done_failed(
+    ahead: &Ahead,
+    length: u64,
+    error: Error,
+    inspected: &[InspectedBefore],
+    guard: OriginalGuard<'_>,
+) -> Error {
+    let base = error.message.clone();
+    let message = match restore_original_inspected(
+        ahead.entry,
+        inspected,
+        ahead.states,
+        ahead.folders_made,
+        guard,
+    ) {
+        Err(failed) => format!(
+            "{base}, and could not put every file back as it was ({}): the journal holds entry {} \
+             pending, so the next command puts every file back from its undo state",
+            failed.message, ahead.entry
+        ),
+        Ok(_) => match cut_back_checked(ahead.journal, length, guard.source_id) {
+            Ok(()) => format!("{base}; every file was put back as it was, so nothing was changed"),
+            Err(e) => format!(
+                "{base}; every file was put back as it was, but the journal could not be cut back \
+                 ({e}), so it holds entry {} pending, and the next command marks it rolled back",
+                ahead.entry
+            ),
+        },
+    };
+    Error { message, ..error }
+}
+
 /// Puts every file back as it was before the commit, through the same
 /// [`restore`] a rollback uses, and cuts the journal back to `length`, its
 /// length before the entry, so that nothing was changed. When either cannot
@@ -649,17 +787,88 @@ pub(super) fn restore(
     restore_impl(entry, before, states, folders_made, None, true)
 }
 
-/// Like [`restore`], for original-DWG crash recovery: enforces non-symlink
-/// reads, original-DWG protection, pre-mutation `FileId` verification, and
-/// `<safe-stem>`-scoped temp/backup cleanup.
-pub(super) fn restore_original(
+/// Restores original-DWG files from a single-read [`InspectedBefore`] list
+/// without re-reading the files on disk, verifying real directory chains,
+/// pre-mutation `FileId`, and `temp_scope`-isolated cleanup.
+pub(super) fn restore_original_inspected(
     entry: u64,
-    before: &[Before],
+    inspected: &[InspectedBefore],
     states: &Path,
     folders_made: &[PathBuf],
     guard: OriginalGuard<'_>,
 ) -> Result<Vec<Restored>, Error> {
-    restore_impl(entry, before, states, folders_made, Some(guard), false)
+    let mut replacements: Vec<Replacement> = Vec::new();
+    let mut expected: Vec<ExpectedTarget> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
+    let mut restored: Vec<Restored> = Vec::new();
+    for (j, file) in inspected.iter().enumerate() {
+        if file.found == file.print || replacements.iter().any(|r| r.path == file.path) {
+            continue;
+        }
+        let bytes = match &file.print {
+            None => None,
+            Some(print) => {
+                let state = states.join(print);
+                let bytes = super::journal::undo_state_original_at(
+                    guard.base_dir,
+                    guard.key,
+                    guard.source,
+                    guard.source_id,
+                    print,
+                );
+                Some(bytes.ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::ReadFailed,
+                        format!(
+                            "the undo state of {}, which holds it as it was before, is missing or \
+                             damaged",
+                            file.path.display()
+                        ),
+                    )
+                    .in_file(&state)
+                })?)
+            }
+        };
+        restored.push(Restored {
+            path: file.path.clone(),
+            found: file.found.clone(),
+            back: file.print.clone(),
+        });
+        replacements.push(Replacement {
+            path: file.path.clone(),
+            bytes,
+            what: "a file the rollback puts back",
+        });
+        expected.push(file.target);
+        keys.push(format!("back-f{j}"));
+    }
+    let names = Names::new(entry, Some(guard.temp_scope), keys);
+    let placed = put_in_place(
+        &replacements,
+        Some(expected.as_slice()),
+        Some(guard),
+        &names,
+        &mut Seam::restore(),
+    )
+    .map_err(|unplaced| {
+        let Unplaced { error, not_back } = *unplaced;
+        if not_back.is_empty() {
+            error
+        } else {
+            Error {
+                message: format!(
+                    "{}, and could not put back {} as the rollback found it",
+                    error.message,
+                    not_back.join(", ")
+                ),
+                ..error
+            }
+        }
+    })?;
+    finish(&replacements, &placed, Some(guard), false);
+    let paths: Vec<&Path> = inspected.iter().map(|f| f.path.as_path()).collect();
+    cleanup_after_restore(&paths, states, folders_made, &names, Some(guard))?;
+    Ok(restored)
 }
 
 fn restore_impl(
@@ -671,64 +880,19 @@ fn restore_impl(
     remove_empty_parents: bool,
 ) -> Result<Vec<Restored>, Error> {
     let mut replacements: Vec<Replacement> = Vec::new();
-    let mut expected: Vec<ExpectedTarget> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
     let mut restored: Vec<Restored> = Vec::new();
     for (j, file) in before.iter().enumerate() {
-        let (found, target_id) = match guard {
-            Some(g) => match read_regular_no_follow_with_id(g.source, g.source_id, &file.path) {
-                Ok(NoFollowReadWithId::File(bytes, id)) => {
-                    (Some(fingerprint(&bytes)), ExpectedTarget::Existing(id))
-                }
-                Ok(NoFollowReadWithId::Missing) => (None, ExpectedTarget::Absent),
-                Ok(NoFollowReadWithId::SameAsOriginal) => {
-                    return Err(Error::new(
-                        ErrorCode::BadValue,
-                        format!(
-                            "`{}` is the original DWG itself, which is never modified or removed \
-                             (ADR-0004)",
-                            file.path.display()
-                        ),
-                    )
-                    .in_file(&file.path));
-                }
-                Ok(NoFollowReadWithId::Symlink) => {
-                    return Err(Error::new(
-                        ErrorCode::ChangedByHand,
-                        format!(
-                            "`{}` is a symbolic link; AgentDrafter never follows, modifies or \
-                             removes a symbolic link",
-                            file.path.display()
-                        ),
-                    )
-                    .in_file(&file.path));
-                }
-                Ok(NoFollowReadWithId::NotRegular) => {
-                    return Err(Error::new(
-                        ErrorCode::ChangedByHand,
-                        format!("`{}` is not a regular file", file.path.display()),
-                    )
-                    .in_file(&file.path));
-                }
-                Err(e) => {
-                    return Err(Error::new(
-                        ErrorCode::ReadFailed,
-                        format!("could not read the file to put it back: {e}"),
-                    )
-                    .in_file(&file.path));
-                }
-            },
-            None => match fs::read(&file.path) {
-                Ok(bytes) => (Some(fingerprint(&bytes)), ExpectedTarget::Existing(None)),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => (None, ExpectedTarget::Absent),
-                Err(e) => {
-                    return Err(Error::new(
-                        ErrorCode::ReadFailed,
-                        format!("could not read the file to put it back: {e}"),
-                    )
-                    .in_file(&file.path))
-                }
-            },
+        let found = match fs::read(&file.path) {
+            Ok(bytes) => Some(fingerprint(&bytes)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(Error::new(
+                    ErrorCode::ReadFailed,
+                    format!("could not read the file to put it back: {e}"),
+                )
+                .in_file(&file.path))
+            }
         };
         if found == file.print || replacements.iter().any(|r| r.path == file.path) {
             continue;
@@ -737,18 +901,9 @@ fn restore_impl(
             None => None,
             Some(print) => {
                 let state = states.join(print);
-                let bytes = match guard {
-                    Some(g) => super::journal::undo_state_original_at(
-                        g.base_dir,
-                        g.key,
-                        g.source,
-                        g.source_id,
-                        print,
-                    ),
-                    None => fs::read(&state)
-                        .ok()
-                        .filter(|bytes| fingerprint(bytes) == *print),
-                };
+                let bytes = fs::read(&state)
+                    .ok()
+                    .filter(|bytes| fingerprint(bytes) == *print);
                 Some(bytes.ok_or_else(|| {
                     Error::new(
                         ErrorCode::ReadFailed,
@@ -772,41 +927,62 @@ fn restore_impl(
             bytes,
             what: "a file the rollback puts back",
         });
-        expected.push(target_id);
         keys.push(format!("back-f{j}"));
     }
-    let names = Names::new(entry, guard.map(|g| g.key), keys);
-    let placed = put_in_place(
-        &replacements,
-        guard.map(|_| expected.as_slice()),
-        guard,
-        &names,
-        &mut Seam::restore(),
-    )
-    .map_err(|unplaced| {
-        let Unplaced { error, not_back } = *unplaced;
-        if not_back.is_empty() {
-            error
-        } else {
-            Error {
-                message: format!(
-                    "{}, and could not put back {} as the rollback found it",
-                    error.message,
-                    not_back.join(", ")
-                ),
-                ..error
+    let names = Names::new(entry, guard.map(|g| g.temp_scope), keys);
+    let placed = put_in_place(&replacements, None, guard, &names, &mut Seam::restore()).map_err(
+        |unplaced| {
+            let Unplaced { error, not_back } = *unplaced;
+            if not_back.is_empty() {
+                error
+            } else {
+                Error {
+                    message: format!(
+                        "{}, and could not put back {} as the rollback found it",
+                        error.message,
+                        not_back.join(", ")
+                    ),
+                    ..error
+                }
             }
-        }
-    })?;
+        },
+    )?;
     finish(&replacements, &placed, guard, remove_empty_parents);
+    let paths: Vec<&Path> = before.iter().map(|f| f.path.as_path()).collect();
+    cleanup_after_restore(&paths, states, folders_made, &names, guard)?;
+    Ok(restored)
+}
+
+fn cleanup_after_restore(
+    before_paths: &[&Path],
+    states: &Path,
+    folders_made: &[PathBuf],
+    names: &Names,
+    guard: Option<OriginalGuard<'_>>,
+) -> Result<(), Error> {
     let mut folders = folders_made.to_vec();
     folders.sort_by_key(|f| Reverse(f.components().count()));
-    // What the commit left beside its files goes, wherever it is — strictly
-    // scoped to this entry (and for originals, this original's `<safe-stem>`
-    // key) AND matching only our temp/backup suffixes, never a `.dwg` or the
-    // original itself.
-    let mut beside: Vec<&Path> = before.iter().filter_map(|f| f.path.parent()).collect();
-    beside.push(states);
+    let mut beside: Vec<&Path> = before_paths.iter().filter_map(|f| f.parent()).collect();
+    if let Some(g) = guard {
+        // Verify `.agentdrafter/originals/<key>/undo-states` is a real
+        // non-symlink directory chain before scanning it for leftover temps.
+        let states_ok = verify_real_dir_chain(
+            g.base_dir,
+            &[".agentdrafter", "originals", g.key, "undo-states"],
+        )
+        .map_err(|e| {
+            Error::new(
+                ErrorCode::ReadFailed,
+                format!("cannot inspect the original's undo-states folder: {e}"),
+            )
+            .in_file(states)
+        })?;
+        if states_ok {
+            beside.push(states);
+        }
+    } else {
+        beside.push(states);
+    }
     beside.extend(folders.iter().map(PathBuf::as_path));
     let tmp_end = format!(".{}", names.tmp_suffix);
     let old_end = format!(".{}", names.old_suffix);
@@ -816,6 +992,21 @@ fn restore_impl(
         } else {
             folder
         };
+        if let Some(g) = guard {
+            let Ok(meta) = fs::symlink_metadata(folder_path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                continue;
+            }
+            if let Ok(rel) = folder_path.strip_prefix(g.orig_dir_real) {
+                if !rel.as_os_str().is_empty()
+                    && verify_no_symlink_intermediate_dirs(g.orig_dir_real, &rel.join("x")).is_err()
+                {
+                    continue;
+                }
+            }
+        }
         let Ok(listed) = fs::read_dir(folder_path) else {
             continue;
         };
@@ -841,7 +1032,7 @@ fn restore_impl(
     for folder in folders {
         let _ = fs::remove_dir(folder);
     }
-    Ok(restored)
+    Ok(())
 }
 
 /// Whether `path` is an existing regular non-symlink file distinct from the
@@ -878,7 +1069,9 @@ pub(super) fn moved_aside(entry: u64, path: &Path, j: usize, prints: &[&str]) ->
     })
 }
 
-/// Scoped, non-following [`moved_aside`] for original-DWG crash recovery.
+/// Scoped, non-following [`moved_aside`] for original-DWG crash recovery,
+/// matching randomized backup filenames produced by
+/// [`move_to_unique_backup_beside`].
 pub(super) fn moved_aside_original(
     entry: u64,
     guard: OriginalGuard<'_>,
@@ -886,16 +1079,46 @@ pub(super) fn moved_aside_original(
     j: usize,
     prints: &[&str],
 ) -> bool {
-    [format!("f{j}"), format!("back-f{j}")].iter().any(|key| {
-        let aside = path.with_file_name(format!(
-            "{}{key}.agentdrafter-undo.old",
-            prefix(entry, Some(guard.key))
-        ));
-        matches!(
-            read_regular_no_follow(guard.source, guard.source_id, &aside),
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let Ok(meta) = fs::symlink_metadata(parent) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(parent) else {
+        return false;
+    };
+    let base = prefix(entry, Some(guard.temp_scope));
+    let key_prefixes = [format!("{base}f{j}-"), format!("{base}back-f{j}-")];
+    let exact_legacy = [
+        format!("{base}f{j}.agentdrafter-undo.old"),
+        format!("{base}back-f{j}.agentdrafter-undo.old"),
+    ];
+    for item in entries.flatten() {
+        let name = item.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if !name_str.ends_with(".agentdrafter-undo.old") {
+            continue;
+        }
+        let matches_key = key_prefixes.iter().any(|p| name_str.starts_with(p))
+            || exact_legacy.iter().any(|e| name_str == e);
+        if !matches_key {
+            continue;
+        }
+        if matches!(
+            read_regular_no_follow(guard.source, guard.source_id, &item.path()),
             Ok(NoFollowRead::File(bytes)) if prints.contains(&fingerprint(&bytes).as_str())
-        )
-    })
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Adds `line` to the end of the journal at `path`, making it if it is not
@@ -1027,7 +1250,7 @@ fn put_in_place(
     seam: &mut Seam,
 ) -> Result<Vec<Placed>, Box<Unplaced>> {
     let mut made: Vec<PathBuf> = Vec::new();
-    let mut staged: Vec<Option<PathBuf>> = Vec::new();
+    let mut staged: Vec<Option<(PathBuf, Option<FileId>)>> = Vec::new();
     if let Err(error) = stage(replacements, names, &mut made, &mut staged, seam) {
         clean(&staged, &made);
         return Err(Box::new(Unplaced {
@@ -1038,15 +1261,8 @@ fn put_in_place(
     let mut placed: Vec<Placed> = Vec::with_capacity(replacements.len());
     for (i, (replacement, temporary)) in replacements.iter().zip(&staged).enumerate() {
         let target = expected.map(|list| list[i]);
-        match place(
-            i,
-            replacement,
-            target,
-            guard,
-            temporary.as_deref(),
-            names,
-            seam,
-        ) {
+        let temp_ref = temporary.as_ref().map(|(p, id)| (p.as_path(), *id));
+        match place(i, replacement, target, guard, temp_ref, names, seam) {
             Ok(done) => placed.push(done),
             Err(e) => {
                 let not_back = roll_back(&replacements[..placed.len()], &placed, guard);
@@ -1093,7 +1309,7 @@ fn stage(
     replacements: &[Replacement],
     names: &Names,
     made: &mut Vec<PathBuf>,
-    staged: &mut Vec<Option<PathBuf>>,
+    staged: &mut Vec<Option<(PathBuf, Option<FileId>)>>,
     seam: &mut Seam,
 ) -> Result<(), Error> {
     for (i, replacement) in replacements.iter().enumerate() {
@@ -1116,6 +1332,10 @@ fn stage(
                     .in_file(path)
                 },
             )?;
+        #[cfg(any(unix, windows))]
+        let tmp_id = crate::build::file_id_of_file(&file);
+        #[cfg(not(any(unix, windows)))]
+        let tmp_id: Option<FileId> = None;
         let written = file.write_all(bytes).and_then(|()| file.sync_all());
         drop(file);
         if let Err(e) = written {
@@ -1126,7 +1346,7 @@ fn stage(
             )
             .in_file(path));
         }
-        staged.push(Some(temporary));
+        staged.push(Some((temporary, tmp_id)));
         seam.passed(|| format!("{} was written beside its place", path.display()));
     }
     Ok(())
@@ -1229,13 +1449,28 @@ fn place(
     replacement: &Replacement,
     expected: Option<ExpectedTarget>,
     guard: Option<OriginalGuard<'_>>,
-    temporary: Option<&Path>,
+    temporary: Option<(&Path, Option<FileId>)>,
     names: &Names,
     seam: &mut Seam,
 ) -> io::Result<Placed> {
     seam.fail(index)?;
     let path = &replacement.path;
     if let (Some(g), Some(target)) = (guard, expected) {
+        if let Ok(rel) = path.strip_prefix(g.orig_dir_real) {
+            verify_no_symlink_intermediate_dirs(g.orig_dir_real, rel)?;
+        } else if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let pmeta = fs::symlink_metadata(parent)?;
+            if pmeta.file_type().is_symlink() || !pmeta.file_type().is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "`{}` parent `{}` is a symbolic link or not a directory",
+                        path.display(),
+                        parent.display()
+                    ),
+                ));
+            }
+        }
         let aside = match target {
             ExpectedTarget::Absent => match fs::symlink_metadata(path) {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => None,
@@ -1298,38 +1533,29 @@ fn place(
                         ));
                     }
                 }
-                let aside = names.aside(path, index);
-                if let Ok(aside_meta) = fs::symlink_metadata(&aside) {
-                    if aside_meta.file_type().is_symlink()
-                        || !aside_meta.file_type().is_file()
-                        || !is_safe_regular_non_original(&aside, g.source, g.source_id)
-                    {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!(
-                                "cannot use backup path `{}`: unsafe existing file",
-                                aside.display()
-                            ),
-                        ));
-                    }
-                }
-                fs::rename(path, &aside)?;
+                // Move aside atomically to an unpredictable randomized backup
+                // name without ever clobbering an existing file or symlink.
+                let aside =
+                    move_to_unique_backup_beside(path, &names.key_prefix(index), names.old_suffix)?;
                 seam.passed(|| format!("{} was moved aside", path.display()));
                 Some(aside)
             }
         };
-        if let Some(temporary) = temporary {
+        let placed_id = if let Some((temporary, tmp_id)) = temporary {
             if let Err(err) =
                 place_new_file(temporary, path, replacement.what, ErrorCode::WriteFailed)
             {
                 if let Some(aside) = &aside {
-                    let _ = fs::rename(aside, path);
+                    let _ = rename_no_replace_keep_src(aside, path);
                 }
                 return Err(io::Error::other(err.message));
             }
             seam.passed(|| format!("{} was put in its place", path.display()));
-        }
-        return Ok(Placed { aside });
+            tmp_id
+        } else {
+            None
+        };
+        return Ok(Placed { aside, placed_id });
     }
 
     let aside = if fs::symlink_metadata(path).is_ok() {
@@ -1340,7 +1566,7 @@ fn place(
     } else {
         None
     };
-    if let Some(temporary) = temporary {
+    let placed_id = if let Some((temporary, tmp_id)) = temporary {
         if let Err(e) = fs::rename(temporary, path) {
             if let Some(aside) = &aside {
                 let _ = fs::rename(aside, path);
@@ -1348,8 +1574,11 @@ fn place(
             return Err(e);
         }
         seam.passed(|| format!("{} was put in its place", path.display()));
-    }
-    Ok(Placed { aside })
+        tmp_id
+    } else {
+        None
+    };
+    Ok(Placed { aside, placed_id })
 }
 
 /// Puts back, last first, every file `placed` moved, and gives the files it
@@ -1362,21 +1591,39 @@ fn roll_back(
     let mut not_back = Vec::new();
     for (replacement, done) in replacements.iter().zip(placed).rev() {
         let path = &replacement.path;
-        let back = match (&done.aside, &replacement.bytes) {
-            (Some(aside), _) => fs::rename(aside, path),
-            (None, Some(_)) => {
-                let safe =
-                    guard.is_none_or(|g| is_safe_regular_non_original(path, g.source, g.source_id));
-                if safe {
+        let back = match (guard, &done.aside, &replacement.bytes) {
+            (Some(_), Some(aside), None) => {
+                // `path` was moved aside and should be absent: restore without
+                // ever clobbering an unrelated file that appeared meanwhile.
+                rename_no_replace_keep_src(aside, path)
+            }
+            (Some(g), Some(aside), Some(_)) => {
+                // `path` holds the file THIS commit placed (`done.placed_id`):
+                // verify identity before removing it, then move `aside` back
+                // non-clobberingly.
+                if matches_placed_non_original(path, done.placed_id, g) {
+                    fs::remove_file(path).and_then(|()| rename_no_replace_keep_src(aside, path))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "refusing to overwrite file whose identity changed during rollback",
+                    ))
+                }
+            }
+            (Some(g), None, Some(_)) => {
+                if matches_placed_non_original(path, done.placed_id, g) {
                     fs::remove_file(path)
                 } else {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "refusing to remove non-regular or original file during rollback",
+                        "refusing to remove file whose identity changed during rollback",
                     ))
                 }
             }
-            (None, None) => Ok(()),
+            (Some(_), None, None) => Ok(()),
+            (None, Some(aside), _) => fs::rename(aside, path),
+            (None, None, Some(_)) => fs::remove_file(path),
+            (None, None, None) => Ok(()),
         };
         if back.is_err() {
             not_back.push(path.display().to_string());
@@ -1385,10 +1632,29 @@ fn roll_back(
     not_back
 }
 
+fn matches_placed_non_original(
+    path: &Path,
+    placed_id: Option<FileId>,
+    guard: OriginalGuard<'_>,
+) -> bool {
+    if !is_safe_regular_non_original(path, guard.source, guard.source_id) {
+        return false;
+    }
+    #[cfg(any(unix, windows))]
+    {
+        placed_id.is_some() && crate::original::regular_file_id_no_follow(path) == placed_id
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = placed_id;
+        true
+    }
+}
+
 /// Takes away the new files not moved into place and the folders made for
 /// them, deepest first, each only when it is empty.
-fn clean(staged: &[Option<PathBuf>], made: &[PathBuf]) {
-    for temporary in staged.iter().flatten() {
+fn clean(staged: &[Option<(PathBuf, Option<FileId>)>], made: &[PathBuf]) {
+    for (temporary, _) in staged.iter().flatten() {
         let _ = fs::remove_file(temporary);
     }
     let mut folders = made.to_vec();
@@ -1530,4 +1796,122 @@ fn fail_cut_back(line: Sync) -> io::Result<()> {
     }
     let _ = line;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::original::regular_file_id_no_follow;
+
+    #[test]
+    fn original_commit_failure_restores_touched_file_and_never_overwrites_replaced_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdrafter-commit-orig-rollback-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+
+        let source = dir.join("ORIG.dwg");
+        fs::write(&source, b"original-dwg").unwrap();
+        let source_id = regular_file_id_no_follow(&source);
+
+        let file1 = dir.join("ORIG.rev1.dwg");
+        let file2 = dir.join("ORIG.rev1.changes.json");
+        fs::write(&file1, b"rev1-dwg-bytes").unwrap();
+        fs::write(&file2, b"rev1-changes-bytes").unwrap();
+        let id1 = regular_file_id_no_follow(&file1);
+        let stale_id2 = regular_file_id_no_follow(&file2);
+
+        // Save undo states for both files before committing (just as `undo` does).
+        let key = "orig-000000000000";
+        let scope = "orig-000000000000-1111111111111111";
+        let jdir = dir.join(".agentdrafter").join("originals").join(key);
+        let states_dir = jdir.join("undo-states");
+        fs::create_dir_all(&states_dir).unwrap();
+        let p1 = fingerprint(b"rev1-dwg-bytes");
+        let p2 = fingerprint(b"rev1-changes-bytes");
+        fs::write(states_dir.join(&p1), b"rev1-dwg-bytes").unwrap();
+        fs::write(states_dir.join(&p2), b"rev1-changes-bytes").unwrap();
+        let journal = jdir.join("journal.jsonl");
+        fs::write(&journal, b"{\"entry\":1,\"kind\":\"change_set\"}\n").unwrap();
+
+        // Externally replace file2 with a brand-new file (new FileId & content)
+        // BEFORE `commit_original_replacements` runs!
+        let replacement_tmp = dir.join("external-new.json");
+        fs::write(&replacement_tmp, b"external-brand-new-content").unwrap();
+        fs::rename(&replacement_tmp, &file2).unwrap();
+        let new_id2 = regular_file_id_no_follow(&file2);
+        #[cfg(any(unix, windows))]
+        assert_ne!(
+            new_id2, stale_id2,
+            "replacement must have a distinct FileId"
+        );
+
+        let before = vec![
+            Before {
+                path: file1.clone(),
+                print: Some(p1),
+            },
+            Before {
+                path: file2.clone(),
+                print: Some(p2),
+            },
+        ];
+        let replacements = vec![
+            Replacement {
+                path: file1.clone(),
+                bytes: None,
+                what: "rev1 DWG",
+            },
+            Replacement {
+                path: file2.clone(),
+                bytes: None,
+                what: "rev1 changes",
+            },
+        ];
+        let expected = vec![
+            ExpectedTarget::Existing(id1),
+            ExpectedTarget::Existing(stale_id2),
+        ];
+        let guard = OriginalGuard {
+            key,
+            temp_scope: scope,
+            base_dir: &dir,
+            orig_dir_real: &dir,
+            source: &source,
+            source_id,
+        };
+        let ahead = Ahead {
+            journal: &journal,
+            entry: 2,
+            pending: b"{\"entry\":2,\"kind\":\"undo\",\"state\":\"pending\"}\n",
+            done: b"{\"entry\":2,\"state\":\"done\"}\n",
+            before: &before,
+            states: &states_dir,
+            folders_made: &[],
+        };
+
+        let err = commit_original_replacements(&ahead, &replacements, &expected, guard)
+            .expect_err("must refuse file2 whose FileId changed");
+        assert_eq!(err.code, ErrorCode::WriteFailed);
+
+        // File 1 (moved aside by this commit before failing on file 2) MUST be
+        // restored byte-for-byte!
+        assert_eq!(fs::read(&file1).unwrap(), b"rev1-dwg-bytes");
+        // File 2 (externally replaced, rejected by `place`) MUST NOT be
+        // overwritten with saved undo-state bytes — its new bytes & FileId
+        // must remain completely intact!
+        assert_eq!(fs::read(&file2).unwrap(), b"external-brand-new-content");
+        #[cfg(any(unix, windows))]
+        assert_eq!(regular_file_id_no_follow(&file2), new_id2);
+        // Journal was cleanly cut back to entry 1.
+        assert_eq!(
+            fs::read(&journal).unwrap(),
+            b"{\"entry\":1,\"kind\":\"change_set\"}\n"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

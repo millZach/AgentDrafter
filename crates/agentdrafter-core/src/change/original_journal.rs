@@ -30,14 +30,16 @@ use serde_json::Value;
 
 #[cfg(any(unix, windows))]
 use crate::build::file_id_of_file;
-use crate::build::{is_same_file, FileId};
+#[cfg(not(any(unix, windows)))]
+use crate::build::is_same_file;
+use crate::build::FileId;
 use crate::check::check_dwg_bytes;
 use crate::error::{Error, ErrorCode};
 use crate::interface::Interface;
 use crate::original::{
     ensure_real_dir_chain, is_dwg, on_disk_path, read_regular_no_follow,
-    read_regular_no_follow_with_id, stem_of, verify_real_dir_chain, NoFollowRead,
-    NoFollowReadWithId,
+    read_regular_no_follow_with_id, stem_of, verify_no_symlink_intermediate_dirs,
+    verify_real_dir_chain, NoFollowRead, NoFollowReadWithId,
 };
 use crate::reply::Reply;
 use crate::revise::REVISION_CHANGES_EXTENSION;
@@ -49,8 +51,8 @@ use super::accept::{
 };
 use super::commit::{
     add_line_original, commit_new_files, commit_original_replacements, cut_back_checked,
-    moved_aside_original, restore_original, Ahead, Before, ExpectedTarget, NewFile, OriginalGuard,
-    Replacement,
+    moved_aside_original, restore_original_inspected, Ahead, Before, ExpectedTarget,
+    InspectedBefore, NewFile, OriginalGuard, Replacement,
 };
 use super::journal::{
     build_journal_report, code_text, fates, in_place, keeps_state, left_pending, line_of, listed,
@@ -79,10 +81,18 @@ pub(crate) struct OriginalJournal {
     pub orig_dir_real: PathBuf,
     /// Canonical sheet name of the original (its on-disk stem).
     pub sheet: String,
-    /// Collision-free folder key (`<readable>-<hash12>`).
+    /// Collision-free per-folder journal key (`<readable>-<namehash12>`).
     pub key: String,
-    /// Parent folder of `source` as requested by the caller (for display).
+    /// Globally unique temp/backup scope (`<key>-<fullpathhash16>`), distinct
+    /// even when two originals in different folders share a filename and write
+    /// to the same output folder.
+    pub temp_scope: String,
+    /// Parent folder used for caller-relative display when `source` lives
+    /// directly in `orig_dir_real`, or `orig_dir_real` when `source` is a
+    /// symlink pointing into another directory.
     pub base_dir: PathBuf,
+    /// Whether `source`'s parent folder canonicalizes to `orig_dir_real`.
+    base_dir_matches_real: bool,
     /// `<dir>/journal.jsonl`
     pub journal_file: PathBuf,
     /// `<dir>/journal.lock`
@@ -91,6 +101,14 @@ pub(crate) struct OriginalJournal {
     pub undo_states_dir: PathBuf,
     /// File identity of the original DWG, captured without modifying it.
     pub source_id: Option<FileId>,
+}
+
+/// Globally unique temp/backup scope derived from the full canonical original
+/// path (`orig_dir_real` + on-disk filename), so `east/A.dwg` and `west/A.dwg`
+/// writing to a shared output folder at entry 1 never collide.
+pub(crate) fn original_temp_scope(resolved: &Path) -> String {
+    let full_hash = &fingerprint(resolved.as_os_str().as_encoded_bytes())[..16];
+    format!("{}-{full_hash}", original_key(resolved))
 }
 
 /// Deterministic, filesystem-safe, collision-free folder key for an original
@@ -187,7 +205,8 @@ impl OriginalJournal {
     pub(crate) fn from_opened(source: &Path, resolved: &Path, source_id: Option<FileId>) -> Self {
         let sheet = stem_of(resolved);
         let key = original_key(resolved);
-        let base_dir = source
+        let temp_scope = original_temp_scope(resolved);
+        let source_parent = source
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .map(Path::to_path_buf)
@@ -201,6 +220,23 @@ impl OriginalJournal {
                     .and_then(fs::canonicalize)
                     .unwrap_or_else(|_| PathBuf::from("."))
             });
+        let source_parent_fs = if source_parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            &source_parent
+        };
+        let base_dir_matches_real = fs::canonicalize(source_parent_fs)
+            .ok()
+            .is_some_and(|p| p == orig_dir_real);
+        // When `source` is a symlink pointing into another directory (e.g.
+        // `aliases/A.dwg -> drawings/A.dwg`), anchor the journal in
+        // `orig_dir_real` (`drawings/`) so both the symlink and the real path
+        // share one journal and resolve outputs identically.
+        let base_dir = if base_dir_matches_real {
+            source_parent
+        } else {
+            orig_dir_real.clone()
+        };
         let dir = base_dir.join(ORIGINALS_JOURNAL_FOLDER).join(&key);
         let journal_file = dir.join("journal.jsonl");
         let lock_file = dir.join("journal.lock");
@@ -211,7 +247,9 @@ impl OriginalJournal {
             orig_dir_real,
             sheet,
             key,
+            temp_scope,
             base_dir,
+            base_dir_matches_real,
             journal_file,
             lock_file,
             undo_states_dir,
@@ -249,7 +287,9 @@ impl OriginalJournal {
     fn guard(&self) -> OriginalGuard<'_> {
         OriginalGuard {
             key: &self.key,
+            temp_scope: &self.temp_scope,
             base_dir: self.base_dir_for_fs(),
+            orig_dir_real: &self.orig_dir_real,
             source: &self.source,
             source_id: self.source_id,
         }
@@ -267,12 +307,12 @@ impl OriginalJournal {
         )
     }
 
-    /// Whether `path`, resolved against its real canonical parent directory,
-    /// lies inside the original DWG's canonical folder.
-    pub(crate) fn is_inside_orig_dir(&self, path: &Path) -> bool {
-        resolve_output_real(path)
-            .strip_prefix(&self.orig_dir_real)
-            .is_ok()
+    /// Whether `path`'s canonical parent directory is `self.orig_dir_real`
+    /// itself (directly beside the original DWG, NOT in a child, sibling, or
+    /// external folder).
+    pub(crate) fn is_directly_in_orig_dir(&self, path: &Path) -> bool {
+        let resolved = resolve_output_real(path);
+        resolved.parent() == Some(self.orig_dir_real.as_path())
     }
 
     /// Computes the path to record in `journal.jsonl` for an output file:
@@ -300,15 +340,95 @@ impl OriginalJournal {
         resolved.to_string_lossy().into_owned()
     }
 
-    /// Resolves a path recorded in `journal.jsonl`: absolute paths are returned
-    /// verbatim; relative paths are joined onto `self.base_dir`.
+    /// Resolves a path recorded in `journal.jsonl` against `self.orig_dir_real`
+    /// (the exact same canonical base used by [`Self::rel_path`]), so symlinked
+    /// originals such as `aliases/A.dwg -> drawings/A.dwg` resolve to the exact
+    /// same file as `drawings/A.dwg`.
     pub(crate) fn resolve_file(&self, rel: &str) -> PathBuf {
         let p = Path::new(rel);
-        if p.is_absolute() || self.base_dir.as_os_str().is_empty() {
+        if p.is_absolute() {
             p.to_path_buf()
         } else {
-            self.base_dir.join(p)
+            self.orig_dir_real.join(p)
         }
+    }
+
+    /// Caller-facing display string for a recorded output path: preserves
+    /// caller-relative display when `source` is directly in `orig_dir_real`
+    /// (for deterministic cross-interface replies), otherwise shows the
+    /// resolved path.
+    fn display_file(&self, rel: &str) -> String {
+        let p = Path::new(rel);
+        if p.is_absolute() {
+            rel.to_owned()
+        } else if self.base_dir_matches_real {
+            if self.base_dir.as_os_str().is_empty() {
+                p.display().to_string()
+            } else {
+                self.base_dir.join(p).display().to_string()
+            }
+        } else {
+            self.orig_dir_real.join(p).display().to_string()
+        }
+    }
+
+    /// Verifies that every intermediate directory component between
+    /// `orig_dir_real` and a recorded output file (or the file's immediate
+    /// parent when absolute) is a real non-symlink directory.
+    fn verify_output_parent_real(&self, rel: &str, full: &Path) -> Result<(), Error> {
+        let p = Path::new(rel);
+        if !p.is_absolute() {
+            verify_no_symlink_intermediate_dirs(&self.orig_dir_real, p).map_err(|e| {
+                Error::new(
+                    ErrorCode::ChangedByHand,
+                    format!(
+                        "`{}` cannot be accessed safely: {e}; AgentDrafter never follows a \
+                         symbolic link; nothing was changed",
+                        full.display()
+                    ),
+                )
+                .in_file(full)
+            })?;
+        } else if let Some(parent) = full.parent().filter(|d| !d.as_os_str().is_empty()) {
+            match fs::symlink_metadata(parent) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(Error::new(
+                        ErrorCode::ChangedByHand,
+                        format!(
+                            "`{}` parent `{}` is a symbolic link; AgentDrafter never follows a \
+                             symbolic link; nothing was changed",
+                            full.display(),
+                            parent.display()
+                        ),
+                    )
+                    .in_file(full));
+                }
+                Ok(meta) if !meta.file_type().is_dir() => {
+                    return Err(Error::new(
+                        ErrorCode::ChangedByHand,
+                        format!(
+                            "`{}` parent `{}` is not a directory; nothing was changed",
+                            full.display(),
+                            parent.display()
+                        ),
+                    )
+                    .in_file(full));
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(Error::new(
+                        ErrorCode::ReadFailed,
+                        format!(
+                            "could not inspect parent folder `{}`: {e}; nothing was changed",
+                            parent.display()
+                        ),
+                    )
+                    .in_file(full));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Verifies the directory chain `.agentdrafter/originals/<key>` contains no
@@ -551,9 +671,11 @@ impl OriginalJournal {
             ));
         }
 
-        // Verify every file in the pending entry is safe (not the original DWG,
-        // not a symlink) and has not been modified by hand since the commit stopped.
-        let changed = self.changed_since(entry)?;
+        // Single-read inspection of every file in the pending entry: verifies
+        // intermediate directories, checks non-symlink/non-original safety, and
+        // captures BOTH SHA-256 and `FileId` in one `read_regular_no_follow_with_id`
+        // call with zero second reads.
+        let (inspected, changed) = self.inspect_pending_files(entry)?;
         if !changed.is_empty() {
             return Err(Error::new(
                 ErrorCode::ChangedByHand,
@@ -573,22 +695,14 @@ impl OriginalJournal {
             .in_file(&self.journal_file));
         }
 
-        let before: Vec<Before> = entry
-            .files
-            .iter()
-            .map(|f| Before {
-                path: self.resolve_file(&f.path),
-                print: f.before.clone(),
-            })
-            .collect();
         let made: Vec<PathBuf> = entry
             .folders_made
             .iter()
             .map(|f| self.resolve_file(f))
             .collect();
-        let restored = restore_original(
+        let restored = restore_original_inspected(
             entry.entry,
-            &before,
+            &inspected,
             &self.undo_states_dir,
             &made,
             self.guard(),
@@ -644,13 +758,16 @@ impl OriginalJournal {
 
         let files: Vec<FileUndone> = restored
             .iter()
-            .map(|r| FileUndone {
-                file: r.path.display().to_string(),
-                action: if r.back.is_some() {
-                    UndoAction::Restored
-                } else {
-                    UndoAction::Removed
-                },
+            .map(|r| {
+                let rel = self.rel_path(&r.path);
+                FileUndone {
+                    file: self.display_file(&rel),
+                    action: if r.back.is_some() {
+                        UndoAction::Restored
+                    } else {
+                        UndoAction::Removed
+                    },
+                }
             })
             .collect();
         let put_back = match files.len() {
@@ -813,53 +930,68 @@ impl OriginalJournal {
             .map(|()| number)
     }
 
-    fn changed_since(&self, entry: &Entry) -> Result<Vec<String>, Error> {
+    fn inspect_pending_files(
+        &self,
+        entry: &Entry,
+    ) -> Result<(Vec<InspectedBefore>, Vec<String>), Error> {
+        let mut inspected = Vec::with_capacity(entry.files.len());
         let mut changed = Vec::new();
         for (j, file) in entry.files.iter().enumerate() {
             let path = self.resolve_file(&file.path);
-            let found = match read_regular_no_follow(&self.source, self.source_id, &path) {
-                Ok(NoFollowRead::File(bytes)) => Some(fingerprint(&bytes)),
-                Ok(NoFollowRead::Missing) => None,
-                Ok(NoFollowRead::SameAsOriginal) => {
-                    return Err(self.cannot(
-                        Some(entry),
-                        &format!(
-                            "`{}` is the original DWG itself, which is never modified or removed \
-                             (ADR-0004); nothing was changed",
-                            path.display()
-                        ),
-                    ));
-                }
-                Ok(NoFollowRead::Symlink) => {
-                    return Err(self.cannot(
-                        Some(entry),
-                        &format!(
-                            "`{}` is a symbolic link; AgentDrafter never follows, modifies or \
-                             removes a symbolic link; nothing was changed",
-                            path.display()
-                        ),
-                    ));
-                }
-                Ok(NoFollowRead::NotRegular) => {
-                    return Err(self.cannot(
-                        Some(entry),
-                        &format!(
-                            "`{}` is not a regular file; nothing was changed",
-                            path.display()
-                        ),
-                    ));
-                }
-                Err(e) => {
-                    return Err(self.cannot(
-                        Some(entry),
-                        &format!(
-                            "could not read {} to see whether it changed since: {e}; nothing was \
-                             changed",
-                            path.display()
-                        ),
-                    ));
-                }
-            };
+            self.verify_output_parent_real(&file.path, &path)
+                .map_err(|e| self.cannot(Some(entry), &e.message))?;
+            let (found, target) =
+                match read_regular_no_follow_with_id(&self.source, self.source_id, &path) {
+                    Ok(NoFollowReadWithId::File(bytes, id)) => {
+                        (Some(fingerprint(&bytes)), ExpectedTarget::Existing(id))
+                    }
+                    Ok(NoFollowReadWithId::Missing) => (None, ExpectedTarget::Absent),
+                    Ok(NoFollowReadWithId::SameAsOriginal) => {
+                        return Err(self.cannot(
+                            Some(entry),
+                            &format!(
+                                "`{}` is the original DWG itself, which is never modified or \
+                                 removed (ADR-0004); nothing was changed",
+                                path.display()
+                            ),
+                        ));
+                    }
+                    Ok(NoFollowReadWithId::Symlink) => {
+                        return Err(self.cannot(
+                            Some(entry),
+                            &format!(
+                                "`{}` is a symbolic link; AgentDrafter never follows, modifies or \
+                                 removes a symbolic link; nothing was changed",
+                                path.display()
+                            ),
+                        ));
+                    }
+                    Ok(NoFollowReadWithId::NotRegular) => {
+                        return Err(self.cannot(
+                            Some(entry),
+                            &format!(
+                                "`{}` is not a regular file; nothing was changed",
+                                path.display()
+                            ),
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(self.cannot(
+                            Some(entry),
+                            &format!(
+                                "could not read {} to see whether it changed since: {e}; nothing \
+                                 was changed",
+                                path.display()
+                            ),
+                        ));
+                    }
+                };
+            inspected.push(InspectedBefore {
+                path: path.clone(),
+                print: file.before.clone(),
+                found: found.clone(),
+                target,
+            });
             if found == file.before || found == file.after {
                 continue;
             }
@@ -883,7 +1015,7 @@ impl OriginalJournal {
                 entry.entry
             ));
         }
-        Ok(changed)
+        Ok((inspected, changed))
     }
 
     fn cannot(&self, entry: Option<&Entry>, why: &str) -> Error {
@@ -1145,6 +1277,8 @@ fn undo_original_inner(
     let mut now_targets: Vec<ExpectedTarget> = Vec::with_capacity(plans.len());
     for plan in &plans {
         let full = oj.resolve_file(&plan.path);
+        oj.verify_output_parent_real(&plan.path, &full)
+            .map_err(|e| e.at_field("change_set"))?;
         match read_regular_no_follow_with_id(&oj.source, oj.source_id, &full) {
             Ok(NoFollowReadWithId::SameAsOriginal) => {
                 return Err(Error::new(
@@ -1282,7 +1416,7 @@ fn undo_original_inner(
         }
         let full = oj.resolve_file(&plan.path);
         files.push(FileUndone {
-            file: full.display().to_string(),
+            file: oj.display_file(&plan.path),
             action: if target_bytes.is_some() {
                 UndoAction::Restored
             } else {
@@ -1576,6 +1710,8 @@ fn accept_original_inner(
             .in_file(&oj.journal_file));
         };
         let full = oj.resolve_file(&rev_rel);
+        let display_path = PathBuf::from(oj.display_file(&rev_rel));
+        oj.verify_output_parent_real(&rev_rel, &full)?;
         let bytes = match read_regular_no_follow(&oj.source, oj.source_id, &full) {
             Ok(NoFollowRead::File(bytes)) => {
                 if fingerprint(&bytes) != expected_sha {
@@ -1652,7 +1788,7 @@ fn accept_original_inner(
                 sha256: expected_sha,
             });
         }
-        latest_dwg = Some((full, bytes));
+        latest_dwg = Some((display_path, bytes));
     }
 
     let (latest_path, latest_bytes) = latest_dwg.expect("active_unissued is non-empty");
@@ -1795,6 +1931,18 @@ fn original_issues_words(report: &AcceptReport) -> String {
 /// Never acquires a lock, never traverses symlinks, and never modifies or
 /// creates any file or directory.
 pub(super) fn issued_of_revision_dwg(dwg: &Path, bytes: &[u8]) -> Option<StampRevision> {
+    // Refuse symlinks/reparse points on the queried DWG itself: a symlink
+    // pointing at an accepted revision (or vice versa) never stamps as issued.
+    #[cfg(any(unix, windows))]
+    let dwg_id = crate::original::regular_file_id_no_follow(dwg)?;
+    #[cfg(not(any(unix, windows)))]
+    {
+        let meta = fs::symlink_metadata(dwg).ok()?;
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return None;
+        }
+    }
+
     let parent = dwg
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1821,8 +1969,8 @@ pub(super) fn issued_of_revision_dwg(dwg: &Path, bytes: &[u8]) -> Option<StampRe
         }
     }
 
-    // 2. Cross-folder revision: inspect sibling `<rev>.changes.json` (read-only,
-    //    non-symlink) for `original_path`.
+    // 2. Child, sibling, or external folder revision: inspect sibling
+    //    `<rev>.changes.json` (read-only, non-symlink) for `original_path`.
     if let Some(stem) = dwg.file_stem().map(|s| s.to_string_lossy().into_owned()) {
         let changes_path = dwg.with_file_name(format!("{stem}.{REVISION_CHANGES_EXTENSION}"));
         if let Ok(NoFollowRead::File(changes_bytes)) =
@@ -1858,7 +2006,6 @@ pub(super) fn issued_of_revision_dwg(dwg: &Path, bytes: &[u8]) -> Option<StampRe
     }
 
     let print = fingerprint(bytes);
-    let file_name = dwg.file_name().map(|n| n.to_string_lossy().into_owned());
     let mut best: Option<Entry> = None;
 
     for (orig_dir, journal_path) in candidates {
@@ -1880,10 +2027,21 @@ pub(super) fn issued_of_revision_dwg(dwg: &Path, bytes: &[u8]) -> Option<StampRe
                     let resolved = if recorded_path.is_absolute() {
                         recorded_path.to_path_buf()
                     } else {
+                        if verify_no_symlink_intermediate_dirs(&orig_dir, recorded_path).is_err() {
+                            return false;
+                        }
                         orig_dir.join(recorded_path)
                     };
-                    is_same_file(&resolved, dwg)
-                        || (orig_dir == parent && file_name.as_deref() == Some(f.path.as_str()))
+                    #[cfg(any(unix, windows))]
+                    {
+                        crate::original::regular_file_id_no_follow(&resolved) == Some(dwg_id)
+                    }
+                    #[cfg(not(any(unix, windows)))]
+                    {
+                        fs::symlink_metadata(&resolved)
+                            .is_ok_and(|m| m.file_type().is_file() && !m.file_type().is_symlink())
+                            && is_same_file(&resolved, dwg)
+                    }
                 })
         });
         if let Some(entry) = found {
@@ -1910,4 +2068,10 @@ pub(crate) fn test_pending_journal_path(source: &Path) -> Result<PathBuf, Error>
 #[allow(dead_code)]
 pub(crate) fn test_original_key(resolved: &Path) -> String {
     original_key(resolved)
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn test_original_temp_scope(resolved: &Path) -> String {
+    original_temp_scope(resolved)
 }

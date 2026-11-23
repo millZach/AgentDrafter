@@ -589,7 +589,7 @@ fn prepare_revision(
         }
     }
 
-    let original_path = if oj.is_inside_orig_dir(&paths.dwg) {
+    let original_path = if oj.is_directly_in_orig_dir(&paths.dwg) {
         None
     } else {
         Some(oj.resolved_source.to_string_lossy().into_owned())

@@ -2321,9 +2321,10 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
     let rev1_pdf_bytes = fs::read(&rev1_pdf).unwrap();
 
     // Undo has 3 undo states (stage: 1,2,3; place: 4,5,6) + 3 file removals
-    // (move aside: 7,8,9). Stop at step 7 (after undo states are placed and
-    // rev1.dwg is moved aside).
-    STOP_AT.with(|s| s.set(Some(7)));
+    // (move aside: 7=dwg, 8=changes, 9=pdf). Stop at step 9 right after ALL
+    // THREE files are moved aside, before `done`, so crash recovery restores
+    // all three outputs byte-for-byte from `undo-states/`!
+    STOP_AT.with(|s| s.set(Some(9)));
     let undo_panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         undo(&UndoRequest {
             set: orig.clone(),
@@ -2333,6 +2334,10 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
     }));
     STOP_AT.with(|s| s.set(None));
     assert!(undo_panicked.is_err(), "STOP_AT should unwind mid-undo");
+    assert!(
+        !rev1_dwg.exists() && !rev1_chg.exists() && !rev1_pdf.exists(),
+        "all three outputs must have been moved aside before crash recovery"
+    );
 
     // Next `journal` rolls back the pending undo and restores ALL THREE outputs
     // (rev1.dwg, rev1.changes.json, rev1.pdf) byte-for-byte from undo-states/!
@@ -2341,6 +2346,7 @@ fn original_crash_recovery_rolls_back_pending_change_undo_accept_and_torn_line()
     let rb2 = j2.rolled_back.expect("pending undo must be rolled back");
     assert_eq!(rb2.entry, Some(3));
     assert_eq!(rb2.kind, Some(EntryKind::Undo));
+    assert_eq!(rb2.files.len(), 3, "must restore all 3 files: {rb2:?}");
     assert_eq!(fs::read(&rev1_dwg).unwrap(), rev1_bytes);
     assert_eq!(fs::read(&rev1_chg).unwrap(), rev1_chg_bytes);
     assert_eq!(fs::read(&rev1_pdf).unwrap(), rev1_pdf_bytes);
@@ -2845,7 +2851,7 @@ fn original_dry_run_undo_and_accept_refuse_pending_and_never_write() {
 
 #[test]
 fn original_recovery_cleanup_is_scoped_and_never_touches_bystanders() {
-    use crate::change::original_journal::test_original_key;
+    use crate::change::original_journal::test_original_temp_scope;
     use crate::change::{journal, JournalRequest, STOP_AT};
 
     let dir = scratch("orig_scoped_cleanup");
@@ -2857,11 +2863,61 @@ fn original_recovery_cleanup_is_scoped_and_never_touches_bystanders() {
     // `.agentdrafter-entry-1-` prefix AND another original's entry-1 temp!
     let master_bystander = dir.join(".agentdrafter-entry-1-master.dwg");
     fs::write(&master_bystander, b"important-master-dwg").unwrap();
-    let key_b = test_original_key(&fs::canonicalize(&orig_b).unwrap());
+    let scope_b = test_original_temp_scope(&fs::canonicalize(&orig_b).unwrap());
     let orig_b_tmp = dir.join(format!(
-        ".agentdrafter-orig-{key_b}-entry-1-f0-deadbeef.rev.tmp"
+        ".agentdrafter-orig-{scope_b}-entry-1-f0-deadbeef.rev.tmp"
     ));
     fs::write(&orig_b_tmp, b"other-original-in-flight").unwrap();
+
+    // Two originals in DIFFERENT folders with the SAME filename (`east/A.dwg`
+    // and `west/A.dwg`) sharing an output folder must get distinct temp scopes
+    // so recovering `east/A.dwg` entry 1 never deletes `west/A.dwg`'s temp!
+    let east = dir.join("east");
+    let west = dir.join("west");
+    let shared_out = dir.join("shared-out");
+    fs::create_dir_all(&east).unwrap();
+    fs::create_dir_all(&west).unwrap();
+    fs::create_dir_all(&shared_out).unwrap();
+    let east_a = build_made_up_original(&east, "SAME");
+    let west_a = build_made_up_original(&west, "SAME");
+    let scope_east = test_original_temp_scope(&fs::canonicalize(&east_a).unwrap());
+    let scope_west = test_original_temp_scope(&fs::canonicalize(&west_a).unwrap());
+    assert_ne!(
+        scope_east, scope_west,
+        "east/SAME.dwg and west/SAME.dwg must have distinct temp scopes"
+    );
+    let west_shared_tmp = shared_out.join(format!(
+        ".agentdrafter-orig-{scope_west}-entry-1-f0-cafebabe.rev.tmp"
+    ));
+    fs::write(&west_shared_tmp, b"west-in-flight").unwrap();
+
+    STOP_AT.with(|s| s.set(Some(3)));
+    let east_panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        revise_with(
+            &ReviseRequest {
+                set: east_a.clone(),
+                change_set: json!({
+                    "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+                }),
+                dry_run: false,
+                output: Some(shared_out.join("east-r1.dwg")),
+                allow_loss: false,
+                plot_style: None,
+                no_pdf: true,
+            },
+            &settings,
+        )
+    }));
+    STOP_AT.with(|s| s.set(None));
+    assert!(east_panicked.is_err());
+    let j_east = journal(&JournalRequest { set: east_a });
+    assert!(j_east.ok, "{j_east:?}");
+    assert!(j_east.rolled_back.is_some());
+    assert_eq!(
+        fs::read(&west_shared_tmp).unwrap(),
+        b"west-in-flight",
+        "recovering east/SAME.dwg in shared output folder must never touch west/SAME.dwg's temp"
+    );
 
     // Kill revision entry 1 on SCOPE-A mid-commit.
     STOP_AT.with(|s| s.set(Some(3)));
@@ -3111,6 +3167,333 @@ fn original_cross_folder_output_stamps_issued_on_render_and_plot() {
         })
         .unwrap()
         .issued
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn original_child_folder_output_stamps_issued_on_render_and_plot() {
+    use crate::change::{accept_with, AcceptRequest};
+    use crate::plot::{plot_with, PlotRequest};
+    use crate::render::{render_with, RenderRequest};
+    use crate::stamp::{check_stale, StaleRequest};
+
+    let dir = scratch("orig_child_folder_stamp");
+    let drawings_dir = dir.join("drawings");
+    let child_out = drawings_dir.join("out");
+    fs::create_dir_all(&child_out).unwrap();
+    let orig = build_made_up_original(&drawings_dir, "CHILD-100");
+    let rev_dwg = child_out.join("R.dwg");
+    let settings = Settings::default().without_system_fonts();
+
+    let r = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [2, 2, 0], "to": [12, 2, 0]}]
+            }),
+            dry_run: false,
+            output: Some(rev_dwg.clone()),
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r.ok, "{r:?}");
+
+    let acc = accept_with(
+        &AcceptRequest {
+            set: orig,
+            despite_failed_checks: true,
+            newest_seen: Some(1),
+            dry_run: false,
+        },
+        &settings,
+        Interface::Cli,
+    );
+    assert!(acc.ok, "{acc:?}");
+
+    // Render and plot of `<drawings>/out/R.dwg` (child folder of original!)
+    // both carry `issued: true`!
+    let png_after = child_out.join("after.png");
+    let ren_after = render_with(
+        &RenderRequest {
+            output: Some(png_after.clone()),
+            ..RenderRequest::new(rev_dwg.clone())
+        },
+        &settings,
+    )
+    .unwrap();
+    let png_rev = ren_after.stamp.revision.as_ref().unwrap();
+    assert!(
+        png_rev.issued,
+        "child-folder PNG must be issued: {png_rev:?}"
+    );
+    assert_eq!(png_rev.accept, Some(2));
+    assert!(
+        check_stale(&StaleRequest {
+            output: png_after,
+            source: None,
+        })
+        .unwrap()
+        .issued
+    );
+
+    let pdf_after = child_out.join("after.pdf");
+    let plt_after = plot_with(
+        &PlotRequest {
+            source: rev_dwg,
+            output: Some(pdf_after.clone()),
+            overwrite: true,
+            plot_style: None,
+        },
+        &settings,
+    )
+    .unwrap();
+    let pdf_rev = plt_after.stamp.revision.as_ref().unwrap();
+    assert!(
+        pdf_rev.issued,
+        "child-folder PDF must be issued: {pdf_rev:?}"
+    );
+    assert_eq!(pdf_rev.accept, Some(2));
+    assert!(
+        check_stale(&StaleRequest {
+            output: pdf_after,
+            source: None,
+        })
+        .unwrap()
+        .issued
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn original_symlink_source_resolves_consistently_and_stamps_refuse_symlinks() {
+    use crate::change::{
+        accept_with, journal, undo, AcceptRequest, JournalRequest, UndoRequest, STOP_AT,
+    };
+    use crate::render::{render_with, RenderRequest};
+
+    let dir = scratch("orig_symlink_source_and_stamps");
+    let drawings = dir.join("drawings");
+    let aliases = dir.join("aliases");
+    fs::create_dir_all(&drawings).unwrap();
+    fs::create_dir_all(&aliases).unwrap();
+    let real_orig = build_made_up_original(&drawings, "ALIAS-1");
+    let orig_bytes = fs::read(&real_orig).unwrap();
+    let sym_orig = aliases.join("ALIAS-1.dwg");
+    std::os::unix::fs::symlink(&real_orig, &sym_orig).unwrap();
+    let settings = Settings::default().without_system_fonts();
+    let cs = json!({"operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]});
+
+    // 1. Revise via symlink `aliases/ALIAS-1.dwg` with `--output drawings/R1.dwg`:
+    //    `journal`, `undo`, `accept`, and crash recovery MUST all resolve
+    //    `drawings/R1.dwg` (NEVER `aliases/R1.dwg`)!
+    let r1_dwg = drawings.join("R1.dwg");
+    let r1 = revise_with(
+        &ReviseRequest {
+            set: sym_orig.clone(),
+            change_set: cs.clone(),
+            dry_run: false,
+            output: Some(r1_dwg.clone()),
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r1.ok, "{r1:?}");
+    assert!(r1_dwg.is_file());
+
+    let j = journal(&JournalRequest {
+        set: sym_orig.clone(),
+    });
+    assert!(j.ok, "{j:?}");
+    assert_eq!(j.result.unwrap().can_undo, vec![1]);
+
+    let u = undo(&UndoRequest {
+        set: sym_orig.clone(),
+        change_set: 1,
+        dry_run: false,
+    });
+    assert!(u.ok, "{u:?}");
+    assert!(
+        !r1_dwg.exists(),
+        "undo via symlinked source must remove drawings/R1.dwg"
+    );
+
+    // 2. Killed commit via symlinked source recovers `drawings/R2.dwg`.
+    let r2_dwg = drawings.join("R2.dwg");
+    STOP_AT.with(|s| s.set(Some(3)));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        revise_with(
+            &ReviseRequest {
+                set: sym_orig.clone(),
+                change_set: cs.clone(),
+                dry_run: false,
+                output: Some(r2_dwg.clone()),
+                allow_loss: false,
+                plot_style: None,
+                no_pdf: true,
+            },
+            &settings,
+        )
+    }));
+    STOP_AT.with(|s| s.set(None));
+    assert!(panicked.is_err());
+    assert!(r2_dwg.is_file());
+    let j_rec = journal(&JournalRequest {
+        set: sym_orig.clone(),
+    });
+    assert!(j_rec.ok, "{j_rec:?}");
+    assert!(j_rec.rolled_back.is_some());
+    assert!(
+        !r2_dwg.exists(),
+        "recovery via symlinked source must remove drawings/R2.dwg"
+    );
+
+    // 3. Revise & accept `drawings/R3.dwg` via symlinked source, then verify
+    //    `issued_of_revision_dwg` refuses symlinks on BOTH sides!
+    let r3_dwg = drawings.join("R3.dwg");
+    let r3 = revise_with(
+        &ReviseRequest {
+            set: sym_orig.clone(),
+            change_set: cs,
+            dry_run: false,
+            output: Some(r3_dwg.clone()),
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r3.ok, "{r3:?}");
+    let acc = accept_with(
+        &AcceptRequest {
+            set: sym_orig,
+            despite_failed_checks: true,
+            newest_seen: None,
+            dry_run: false,
+        },
+        &settings,
+        Interface::Cli,
+    );
+    assert!(acc.ok, "{acc:?}");
+
+    // Real accepted R3.dwg renders with `issued: true`.
+    let ren_real = render_with(
+        &RenderRequest {
+            output: Some(dir.join("real.png")),
+            ..RenderRequest::new(r3_dwg.clone())
+        },
+        &settings,
+    )
+    .unwrap();
+    assert!(ren_real.stamp.revision.as_ref().unwrap().issued);
+
+    // Symlink pointing at accepted R3.dwg must NOT stamp as issued.
+    let link_to_r3 = drawings.join("link-to-r3.dwg");
+    std::os::unix::fs::symlink(&r3_dwg, &link_to_r3).unwrap();
+    let ren_link = render_with(
+        &RenderRequest {
+            output: Some(dir.join("link.png")),
+            ..RenderRequest::new(link_to_r3)
+        },
+        &settings,
+    )
+    .unwrap();
+    assert!(
+        !ren_link.stamp.revision.as_ref().unwrap().issued,
+        "symlink to accepted revision must not stamp issued"
+    );
+
+    // Copy R3.dwg to `unissued-copy.dwg` and replace R3.dwg with a symlink to
+    // `unissued-copy.dwg` -> neither must stamp as issued!
+    let unissued_copy = drawings.join("unissued-copy.dwg");
+    fs::copy(&r3_dwg, &unissued_copy).unwrap();
+    fs::remove_file(&r3_dwg).unwrap();
+    std::os::unix::fs::symlink(&unissued_copy, &r3_dwg).unwrap();
+    let ren_copy = render_with(
+        &RenderRequest {
+            output: Some(dir.join("copy.png")),
+            ..RenderRequest::new(unissued_copy)
+        },
+        &settings,
+    )
+    .unwrap();
+    assert!(
+        !ren_copy.stamp.revision.as_ref().unwrap().issued,
+        "unissued copy targeted by symlink at accepted path must not stamp issued"
+    );
+    let ren_replaced = render_with(
+        &RenderRequest {
+            output: Some(dir.join("replaced.png")),
+            ..RenderRequest::new(r3_dwg)
+        },
+        &settings,
+    )
+    .unwrap();
+    assert!(
+        !ren_replaced.stamp.revision.as_ref().unwrap().issued,
+        "symlink replacing accepted revision must not stamp issued"
+    );
+    assert_eq!(fs::read(&real_orig).unwrap(), orig_bytes);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn original_undo_refuses_symlinked_output_subdirectory() {
+    use crate::change::{undo, UndoRequest};
+
+    let dir = scratch("orig_undo_symlink_subdir");
+    let drawings = dir.join("drawings");
+    let sub = drawings.join("sub");
+    let moved_sub = dir.join("moved-sub");
+    fs::create_dir_all(&sub).unwrap();
+    let orig = build_made_up_original(&drawings, "SUB-1");
+    let rev_dwg = sub.join("R.dwg");
+    let settings = Settings::default().without_system_fonts();
+
+    let r = revise_with(
+        &ReviseRequest {
+            set: orig.clone(),
+            change_set: json!({
+                "operations": [{"op": "add_line", "from": [1, 1, 0], "to": [10, 1, 0]}]
+            }),
+            dry_run: false,
+            output: Some(rev_dwg.clone()),
+            allow_loss: false,
+            plot_style: None,
+            no_pdf: true,
+        },
+        &settings,
+    );
+    assert!(r.ok, "{r:?}");
+
+    // Move `drawings/sub` out and replace it with a symlink -> `undo` must
+    // refuse without deleting anything inside `moved-sub`!
+    fs::rename(&sub, &moved_sub).unwrap();
+    std::os::unix::fs::symlink(&moved_sub, &sub).unwrap();
+
+    let u = undo(&UndoRequest {
+        set: orig,
+        change_set: 1,
+        dry_run: false,
+    });
+    assert!(
+        !u.ok,
+        "undo through symlinked output subdir must be refused"
+    );
+    assert_eq!(u.error.unwrap().code, ErrorCode::ChangedByHand);
+    assert!(
+        moved_sub.join("R.dwg").is_file(),
+        "file inside symlinked target dir must never be deleted"
     );
 
     let _ = fs::remove_dir_all(&dir);
